@@ -702,7 +702,7 @@ Initial ADRs to write:
 
 - CLI-first memory substrate (no daemon/MCP/web-first regressions)
 - FrankenSQLite + SQLModel as source of truth
-- Native Asupersync runtime (no Tokio, `&Cx` first, `Outcome` preserved)
+- Native Asupersync runtime (no Tokio, `&Cx` first, `Outcome` preserved; universal storage retry cancellation remains tracked by `bd-37r5a`)
 - Frankensearch for retrieval (no custom RRF/BM25/vector stack)
 - CASS as the raw session source (no duplicate stores)
 - Procedural memory requires evidence (no promotion without provenance)

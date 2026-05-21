@@ -71,7 +71,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
-| **Cancellation correct** | Built on Asupersync, so every long operation respects `&Cx`, budgets, and `Outcome` |
+| **Cancellation-aware core** | Runtime-facing async APIs use Asupersync `&Cx` and `Outcome`; cancellable storage retry loops remain tracked by `bd-37r5a` |
 | **CLI first, daemon optional** | Every essential workflow runs as a one-shot. No background process required |
 | **Auditable curation** | Promotions, consolidations, and tombstones produce audit entries; no silent rewrites |
 | **Crowded-agent posture** | Swarm brief, workspace hygiene, verification broker, QoS lanes, and flight recorder help agents coordinate without taking over the loop |
@@ -1247,7 +1247,7 @@ tracked owner and status of each flag.
 
 **Strict dependency direction.** `cli → core → { db, search, cass, graph, pack, curate, policy, output } → models`. No upward edges. Repositories never render output. Command handlers never write SQL.
 
-**Native Asupersync.** Every async path takes `&Cx`, returns `Outcome<T>`, respects budgets, and supports cancellation. Tests run on `LabRuntime` for deterministic time and scheduling.
+**Native Asupersync.** Runtime-facing async APIs take `&Cx`, return `Outcome<T>`, and preserve budget/cancellation semantics where wired. Contended storage retry sleeps are not yet universally cancellable; `bd-37r5a` tracks the implementation and LabRuntime/e2e proof needed before restoring that broader claim.
 
 Additional runtime-adjacent modules:
 
