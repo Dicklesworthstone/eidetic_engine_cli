@@ -277,6 +277,38 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
         args_builder: build_context_tool_args,
     },
     McpToolEntry {
+        name: "ee_insights",
+        description: "Run ee insights --json for graph-derived insight bundles",
+        input_schema: insights_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_insights_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_proximity",
+        description: "Run ee proximity --json for pairwise memory graph proximity",
+        input_schema: proximity_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_proximity_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_pack_dna_explain",
+        description: "Run ee context --explain --json and return only data.pack.packDna",
+        input_schema: pack_dna_explain_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_pack_dna_explain_tool_args,
+    },
+    McpToolEntry {
+        name: "ee_revision_impact",
+        description: "Run a dry-run memory revision probe and return only data.impactAnalysis",
+        input_schema: revision_impact_tool_schema,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
+        effect: None,
+        args_builder: build_revision_impact_tool_args,
+    },
+    McpToolEntry {
         name: "ee_memory_show",
         description: "Run ee memory show --json for a single memory",
         input_schema: memory_show_tool_schema,
@@ -742,6 +774,134 @@ fn context_tool_schema() -> Value {
             }
         },
         "required": ["query"]
+    })
+}
+
+fn insights_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "section": {
+                "type": "string",
+                "description": "Optional insight section name"
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum section items to return"
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Section item offset"
+            },
+            "explain": {
+                "type": "string",
+                "description": "Optional memory ID to frame the insights bundle around"
+            }
+        }
+    })
+}
+
+fn proximity_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "memoryIdA": {
+                "type": "string",
+                "description": "First memory ID"
+            },
+            "memoryIdB": {
+                "type": "string",
+                "description": "Second memory ID"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "minWeight": {
+                "type": "number",
+                "description": "Minimum link weight to include"
+            },
+            "minConfidence": {
+                "type": "number",
+                "description": "Minimum link confidence to include"
+            },
+            "linkLimit": {
+                "type": "integer",
+                "description": "Maximum memory links to process"
+            },
+            "includeTombstoned": {
+                "type": "boolean",
+                "description": "Include tombstoned memory nodes"
+            }
+        },
+        "required": ["memoryIdA", "memoryIdB"]
+    })
+}
+
+fn pack_dna_explain_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Task description"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "max_tokens": {
+                "type": "integer",
+                "description": "Token budget"
+            },
+            "candidatePool": {
+                "type": "integer",
+                "description": "Maximum candidate memories before packing"
+            },
+            "profile": {
+                "type": "string",
+                "description": "Context profile",
+                "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            },
+            "indexDir": {
+                "type": "string",
+                "description": "Index directory override"
+            }
+        },
+        "required": ["query"]
+    })
+}
+
+fn revision_impact_tool_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "memoryId": {
+                "type": "string",
+                "description": "Memory ID to analyze"
+            },
+            "workspace": {
+                "type": "string",
+                "description": "Workspace path"
+            },
+            "database": {
+                "type": "string",
+                "description": "Database path override"
+            }
+        },
+        "required": ["memoryId"]
     })
 }
 
@@ -1228,6 +1388,96 @@ fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Resul
     Ok(())
 }
 
+fn build_insights_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "insights");
+    let section = optional_string(arguments, &["section"])?;
+    let explain = optional_string(arguments, &["explain"])?;
+    if section.is_some() && explain.is_some() {
+        return Err("Tool ee_insights accepts either section or explain, not both".to_string());
+    }
+    if let Some(section) = section {
+        push_arg(args, "--section");
+        push_arg(args, section);
+    }
+    if let Some(limit) = optional_u32(arguments, &["limit"])? {
+        push_arg(args, "--limit");
+        push_arg(args, limit.to_string());
+    }
+    if let Some(offset) = optional_u32(arguments, &["offset"])? {
+        push_arg(args, "--offset");
+        push_arg(args, offset.to_string());
+    }
+    if let Some(explain) = explain {
+        push_arg(args, "--explain");
+        push_arg(args, explain);
+    }
+    Ok(())
+}
+
+fn build_proximity_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
+    push_arg(args, "proximity");
+    push_arg(
+        args,
+        required_string(arguments, &["memoryIdA", "memory_id_a"])?,
+    );
+    push_arg(
+        args,
+        required_string(arguments, &["memoryIdB", "memory_id_b"])?,
+    );
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    append_optional_number_flag(
+        args,
+        arguments,
+        &["minWeight", "min_weight"],
+        "--min-weight",
+    )?;
+    append_optional_number_flag(
+        args,
+        arguments,
+        &["minConfidence", "min_confidence"],
+        "--min-confidence",
+    )?;
+    if let Some(limit) = optional_u32(arguments, &["linkLimit", "link_limit"])? {
+        push_arg(args, "--link-limit");
+        push_arg(args, limit.to_string());
+    }
+    if optional_bool(arguments, &["includeTombstoned", "include_tombstoned"])? {
+        push_arg(args, "--include-tombstoned");
+    }
+    Ok(())
+}
+
+fn build_pack_dna_explain_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    build_context_tool_args(args, arguments)?;
+    push_arg(args, "--explain");
+    Ok(())
+}
+
+fn build_revision_impact_tool_args(
+    args: &mut Vec<OsString>,
+    arguments: &Value,
+) -> Result<(), String> {
+    push_arg(args, "memory");
+    push_arg(args, "revise");
+    push_arg(
+        args,
+        required_string(arguments, &["memoryId", "memory_id"])?,
+    );
+    append_optional_path_flag(args, arguments, &["database"], "--database")?;
+    push_arg(args, "--content");
+    push_arg(
+        args,
+        "ee-mcp-revision-impact-probe-00000000000000000000000000000000",
+    );
+    push_arg(args, "--reason");
+    push_arg(args, "mcp revision impact read-only probe");
+    push_arg(args, "--dry-run");
+    Ok(())
+}
+
 fn build_memory_show_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
     push_arg(args, "memory");
     push_arg(args, "show");
@@ -1708,6 +1958,23 @@ fn cli_tool_result(id: Value, exit: ProcessExitCode, stdout: String, stderr: Str
     )
 }
 
+fn extract_mcp_tool_payload(tool_name: &str, stdout: &str) -> Result<Option<String>, String> {
+    let pointer = match tool_name {
+        "ee_pack_dna_explain" => "/data/pack/packDna",
+        "ee_revision_impact" => "/data/impactAnalysis",
+        _ => return Ok(None),
+    };
+    let value: Value = serde_json::from_str(stdout).map_err(|error| {
+        format!("Tool {tool_name} produced invalid JSON while extracting {pointer}: {error}")
+    })?;
+    let payload = value
+        .pointer(pointer)
+        .ok_or_else(|| format!("Tool {tool_name} response missing {pointer}"))?;
+    serde_json::to_string(payload)
+        .map(|json| Some(format!("{json}\n")))
+        .map_err(|error| format!("Tool {tool_name} failed to serialize {pointer}: {error}"))
+}
+
 fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
     let Some(params) = params else {
         return json_rpc_error(Some(id), -32602, "Missing params");
@@ -1734,6 +2001,13 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
         Err(message) => return json_rpc_error(Some(id), -32602, &message),
     };
     let (exit, stdout, stderr) = run_cli_tool(cli_args);
+    if exit == ProcessExitCode::Success {
+        match extract_mcp_tool_payload(tool.name, &stdout) {
+            Ok(Some(payload)) => return cli_tool_result(id, exit, payload, stderr),
+            Ok(None) => {}
+            Err(message) => return json_rpc_error(Some(id), -32603, &message),
+        }
+    }
     cli_tool_result(id, exit, stdout, stderr)
 }
 
@@ -2439,6 +2713,10 @@ mod tests {
         assert!(tool_names.contains(&"ee_health"));
         assert!(tool_names.contains(&"ee_doctor"));
         assert!(tool_names.contains(&"ee_capabilities"));
+        assert!(tool_names.contains(&"ee_insights"));
+        assert!(tool_names.contains(&"ee_proximity"));
+        assert!(tool_names.contains(&"ee_pack_dna_explain"));
+        assert!(tool_names.contains(&"ee_revision_impact"));
         assert!(tool_names.contains(&"ee_memory_show"));
         assert!(tool_names.contains(&"ee_why"));
         assert!(tool_names.contains(&"ee_remember"));
@@ -2457,6 +2735,10 @@ mod tests {
             "ee_capabilities",
             "ee_search",
             "ee_context",
+            "ee_insights",
+            "ee_proximity",
+            "ee_pack_dna_explain",
+            "ee_revision_impact",
             "ee_memory_show",
             "ee_why",
         ] {
@@ -2667,6 +2949,158 @@ mod tests {
         assert!(args.contains(&"remember".to_string()));
         assert!(!args.contains(&"--dry-run".to_string()));
         assert!(!args.contains(&"--allow-write".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn build_cli_args_graph_tools_route_to_read_only_commands() -> Result<(), String> {
+        let insights = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_insights")?,
+            &json!({
+                "workspace": ".",
+                "section": "topMemories",
+                "limit": 3
+            }),
+        )?)?;
+        assert_eq!(
+            insights,
+            vec![
+                "ee",
+                "--json",
+                "--workspace",
+                ".",
+                "insights",
+                "--section",
+                "topMemories",
+                "--limit",
+                "3",
+            ]
+        );
+
+        let proximity = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_proximity")?,
+            &json!({
+                "memoryIdA": "mem_a",
+                "memoryIdB": "mem_b",
+                "minWeight": 0.5,
+                "minConfidence": 0.75,
+                "linkLimit": 100,
+                "includeTombstoned": true
+            }),
+        )?)?;
+        assert_eq!(
+            proximity,
+            vec![
+                "ee",
+                "--json",
+                "proximity",
+                "mem_a",
+                "mem_b",
+                "--min-weight",
+                "0.5",
+                "--min-confidence",
+                "0.75",
+                "--link-limit",
+                "100",
+                "--include-tombstoned",
+            ]
+        );
+
+        let pack_dna = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_pack_dna_explain")?,
+            &json!({
+                "query": "prepare release",
+                "maxTokens": 1200,
+                "profile": "balanced"
+            }),
+        )?)?;
+        assert_eq!(
+            pack_dna,
+            vec![
+                "ee",
+                "--json",
+                "context",
+                "prepare release",
+                "--max-tokens",
+                "1200",
+                "--profile",
+                "balanced",
+                "--explain",
+            ]
+        );
+
+        let revision_impact = os_args_to_strings(build_cli_args_for_tool(
+            registry_tool("ee_revision_impact")?,
+            &json!({
+                "memoryId": "mem_00000000000000000000000001",
+                "database": "/tmp/ee.db"
+            }),
+        )?)?;
+        assert_eq!(
+            revision_impact,
+            vec![
+                "ee",
+                "--json",
+                "memory",
+                "revise",
+                "mem_00000000000000000000000001",
+                "--database",
+                "/tmp/ee.db",
+                "--content",
+                "ee-mcp-revision-impact-probe-00000000000000000000000000000000",
+                "--reason",
+                "mcp revision impact read-only probe",
+                "--dry-run",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn extract_mcp_tool_payload_returns_pack_dna_and_revision_impact() -> Result<(), String> {
+        let context_stdout = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "pack": {
+                    "packDna": {
+                        "schema": "ee.context.pack_dna.v1",
+                        "query": "prepare release"
+                    }
+                }
+            }
+        })
+        .to_string();
+        let pack_dna = extract_mcp_tool_payload("ee_pack_dna_explain", &context_stdout)?
+            .ok_or_else(|| "pack DNA extraction returned None".to_string())?;
+        let parsed_pack_dna: Value =
+            serde_json::from_str(&pack_dna).map_err(|error| error.to_string())?;
+        assert_eq!(
+            parsed_pack_dna.get("schema").and_then(Value::as_str),
+            Some("ee.context.pack_dna.v1")
+        );
+
+        let impact_stdout = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "impactAnalysis": {
+                    "schema": "ee.memory.impact_analysis.v1",
+                    "memoryId": "mem_00000000000000000000000001"
+                }
+            }
+        })
+        .to_string();
+        let impact = extract_mcp_tool_payload("ee_revision_impact", &impact_stdout)?
+            .ok_or_else(|| "revision impact extraction returned None".to_string())?;
+        let parsed_impact: Value =
+            serde_json::from_str(&impact).map_err(|error| error.to_string())?;
+        assert_eq!(
+            parsed_impact.get("schema").and_then(Value::as_str),
+            Some("ee.memory.impact_analysis.v1")
+        );
+
+        assert!(extract_mcp_tool_payload("ee_context", &context_stdout)?.is_none());
         Ok(())
     }
 

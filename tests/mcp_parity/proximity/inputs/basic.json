@@ -1,0 +1,18 @@
+{
+  "surface": "proximity",
+  "mcpTool": "ee_proximity",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "proximity",
+    "mem_mcp_parity_a",
+    "mem_mcp_parity_b"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "memoryIdA": "mem_mcp_parity_a",
+    "memoryIdB": "mem_mcp_parity_b"
+  }
+}

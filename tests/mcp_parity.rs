@@ -29,6 +29,10 @@ const PARITY_TESTED_TOOLS: &[&str] = &[
     "ee_capabilities",
     "ee_search",
     "ee_context",
+    "ee_insights",
+    "ee_proximity",
+    "ee_pack_dna_explain",
+    "ee_revision_impact",
     "ee_memory_show",
     "ee_why",
     "ee_remember",
@@ -394,6 +398,20 @@ fn assert_json_equal_modulo_timestamps(
     Ok(())
 }
 
+fn extract_json_pointer_text(
+    json_text: &str,
+    pointer: &str,
+    context: &str,
+) -> Result<String, String> {
+    let value: JsonValue =
+        serde_json::from_str(json_text).map_err(|e| format!("{context}: JSON parse error: {e}"))?;
+    let extracted = value
+        .pointer(pointer)
+        .ok_or_else(|| format!("{context}: missing JSON pointer {pointer}"))?;
+    serde_json::to_string(extracted)
+        .map_err(|e| format!("{context}: extracted JSON serialize error: {e}"))
+}
+
 /// Parity test: `ee status --json` vs `ee_status` MCP tool
 #[test]
 fn mcp_parity_status_command() -> TestResult {
@@ -538,6 +556,112 @@ fn mcp_parity_context_command() -> TestResult {
     let mcp_text = extract_mcp_tool_text(&mcp_response)?;
 
     assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "context")
+}
+
+/// Parity test: `ee insights --json` vs `ee_insights` MCP tool
+#[test]
+fn mcp_parity_insights_command() -> TestResult {
+    let fixture = load_parity_fixture("insights", "basic")?;
+    let dir = scenario_dir("insights")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI insights failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "insights")
+}
+
+/// Parity test: `ee proximity --json` vs `ee_proximity` MCP tool
+#[test]
+fn mcp_parity_proximity_command() -> TestResult {
+    let fixture = load_parity_fixture("proximity", "basic")?;
+    let dir = scenario_dir("proximity")?;
+    init_workspace(&dir)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI proximity failed",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_stdout, &mcp_text, "proximity")
+}
+
+/// Parity test: `ee context --explain --json` packDna vs `ee_pack_dna_explain` MCP tool
+#[test]
+fn mcp_parity_pack_dna_explain_command() -> TestResult {
+    let fixture = load_parity_fixture("pack_dna_explain", "basic")?;
+    let dir = scenario_dir("pack_dna_explain")?;
+    init_workspace(&dir)?;
+
+    if let Some(seed_content) = optional_fixture_str(&fixture, "seedMemoryContent")? {
+        remember_test_memory(&dir, seed_content)?;
+    }
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, None, None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI context --explain failed",
+    )?;
+    let cli_pack_dna = extract_json_pointer_text(
+        &cli_stdout,
+        "/data/pack/packDna",
+        "context --explain packDna",
+    )?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, None, None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_pack_dna, &mcp_text, "packDna")
+}
+
+/// Parity test: `ee memory revise --dry-run --json` impactAnalysis vs `ee_revision_impact`
+#[test]
+fn mcp_parity_revision_impact_command() -> TestResult {
+    let fixture = load_parity_fixture("revision_impact", "basic")?;
+    let dir = scenario_dir("revision_impact")?;
+    init_workspace(&dir)?;
+    let seed_content = optional_fixture_str(&fixture, "seedMemoryContent")?
+        .ok_or_else(|| "revision_impact parity fixture missing seedMemoryContent".to_string())?;
+    let memory_id = remember_test_memory(&dir, seed_content)?;
+
+    let (cli_exit, cli_stdout, _cli_stderr) =
+        run_cli(fixture_cli_args(&fixture, &dir, Some(&memory_id), None)?);
+    ensure(
+        cli_exit == ee::models::ProcessExitCode::Success,
+        "CLI memory revise --dry-run failed",
+    )?;
+    let cli_impact =
+        extract_json_pointer_text(&cli_stdout, "/data/impactAnalysis", "revision impact")?;
+
+    let mcp_response = run_mcp_tool_call(
+        fixture_mcp_tool(&fixture)?,
+        fixture_mcp_arguments(&fixture, &dir, Some(&memory_id), None)?,
+    )?;
+    let mcp_text = extract_mcp_tool_text(&mcp_response)?;
+
+    assert_json_equal_modulo_timestamps(&cli_impact, &mcp_text, "revision impact")
 }
 
 /// Parity test: `ee why <memory-id> --json` vs `ee_why` MCP tool

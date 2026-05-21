@@ -1,0 +1,21 @@
+{
+  "surface": "pack_dna_explain",
+  "mcpTool": "ee_pack_dna_explain",
+  "seedMemoryContent": "Graph-aware pack DNA should explain release context selection.",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "context",
+    "release graph context",
+    "--max-tokens",
+    "1200",
+    "--explain"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "query": "release graph context",
+    "maxTokens": 1200
+  }
+}

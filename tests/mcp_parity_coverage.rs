@@ -37,39 +37,34 @@ fn quoted_values(line: &str) -> Vec<String> {
     values
 }
 
-fn mcp_tool_parse_block() -> Result<&'static str, String> {
-    let impl_start = MCP_SOURCE
-        .find("impl McpTool")
-        .ok_or_else(|| "src/mcp.rs missing impl McpTool block".to_string())?;
-    let parse_start = MCP_SOURCE[impl_start..]
-        .find("fn parse")
-        .map(|offset| impl_start + offset)
-        .ok_or_else(|| "src/mcp.rs missing McpTool::parse".to_string())?;
-    let parse_end = MCP_SOURCE[parse_start..]
-        .find("\n    }\n}\n\nfn json_rpc_error")
-        .map(|offset| parse_start + offset)
-        .ok_or_else(|| "src/mcp.rs McpTool::parse end marker changed".to_string())?;
-    Ok(&MCP_SOURCE[parse_start..parse_end])
+fn mcp_tool_registry_block() -> Result<&'static str, String> {
+    let registry_start = MCP_SOURCE
+        .find("const TOOL_REGISTRY")
+        .ok_or_else(|| "src/mcp.rs missing TOOL_REGISTRY".to_string())?;
+    let registry_end = MCP_SOURCE[registry_start..]
+        .find("\n];\n\nfn mcp_tool_entry")
+        .map(|offset| registry_start + offset)
+        .ok_or_else(|| "src/mcp.rs TOOL_REGISTRY end marker changed".to_string())?;
+    Ok(&MCP_SOURCE[registry_start..registry_end])
 }
 
 fn registered_mcp_tools() -> Result<BTreeMap<String, String>, String> {
     let mut tools = BTreeMap::new();
-    for line in mcp_tool_parse_block()?.lines() {
-        if !line.contains("=> Some(Self::") {
+    for line in mcp_tool_registry_block()?.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("name: ") {
             continue;
         }
-        let Some(tool_name) = quoted_value(line) else {
+        let Some(tool_name) = quoted_value(trimmed) else {
             continue;
         };
-        let variant = line
-            .split("Some(Self::")
-            .nth(1)
-            .and_then(|tail| tail.split(')').next())
-            .ok_or_else(|| format!("could not parse McpTool variant from line: {line}"))?;
-        tools.insert(tool_name.to_string(), variant.to_string());
+        tools.insert(
+            tool_name.to_string(),
+            tool_name.trim_start_matches("ee_").to_string(),
+        );
     }
     if tools.is_empty() {
-        return Err("McpTool::parse has no registered tools".to_string());
+        return Err("TOOL_REGISTRY has no registered tools".to_string());
     }
     Ok(tools)
 }
@@ -245,7 +240,7 @@ fn every_registered_mcp_tool_has_a_parity_invocation() -> TestResult {
         let missing_from_declared: Vec<_> = registered.difference(&declared).collect();
         let stale_declared: Vec<_> = declared.difference(&registered).collect();
         return Err(format!(
-            "PARITY_TESTED_TOOLS drifted from McpTool::parse; missing={missing_from_declared:?}; stale={stale_declared:?}"
+            "PARITY_TESTED_TOOLS drifted from TOOL_REGISTRY; missing={missing_from_declared:?}; stale={stale_declared:?}"
         ));
     }
 
@@ -253,7 +248,7 @@ fn every_registered_mcp_tool_has_a_parity_invocation() -> TestResult {
         let missing_invocations: Vec<_> = registered.difference(&invoked).collect();
         let stale_invocations: Vec<_> = invoked.difference(&registered).collect();
         return Err(format!(
-            "MCP parity invocations drifted from McpTool::parse; missing={missing_invocations:?}; stale={stale_invocations:?}"
+            "MCP parity invocations drifted from TOOL_REGISTRY; missing={missing_invocations:?}; stale={stale_invocations:?}"
         ));
     }
 

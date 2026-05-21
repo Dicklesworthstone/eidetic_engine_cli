@@ -1,0 +1,20 @@
+{
+  "surface": "insights",
+  "mcpTool": "ee_insights",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "insights",
+    "--section",
+    "topMemories",
+    "--limit",
+    "3"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "section": "topMemories",
+    "limit": 3
+  }
+}

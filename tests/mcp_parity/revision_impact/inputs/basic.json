@@ -1,0 +1,23 @@
+{
+  "surface": "revision_impact",
+  "mcpTool": "ee_revision_impact",
+  "seedMemoryContent": "Revision impact parity seed memory.",
+  "cliArgs": [
+    "ee",
+    "--json",
+    "--workspace",
+    "__WORKSPACE__",
+    "memory",
+    "revise",
+    "__MEMORY_ID__",
+    "--content",
+    "ee-mcp-revision-impact-probe-00000000000000000000000000000000",
+    "--reason",
+    "mcp revision impact read-only probe",
+    "--dry-run"
+  ],
+  "mcpArguments": {
+    "workspace": "__WORKSPACE__",
+    "memoryId": "__MEMORY_ID__"
+  }
+}
