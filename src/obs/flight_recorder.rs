@@ -616,7 +616,7 @@ fn validate_inputs(inputs: &FlightRecorderInputs<'_>) -> Result<(), FlightRecord
             });
         }
     }
-    if inputs.recorded_at_rfc3339.is_empty() {
+    if !is_rfc3339_timestamp(inputs.recorded_at_rfc3339) {
         return Err(FlightRecorderError::InvalidRecordedAt {
             value: inputs.recorded_at_rfc3339.to_string(),
         });
@@ -661,6 +661,10 @@ fn is_degraded_code(value: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+fn is_rfc3339_timestamp(value: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(value).is_ok()
 }
 
 fn command_key(verbs: &[String]) -> String {
@@ -973,6 +977,14 @@ mod tests {
             err,
             FlightRecorderError::InvalidDegradedCode { .. }
         ));
+    }
+
+    #[test]
+    fn invalid_recorded_at_timestamp_rejected() {
+        let mut inputs = baseline_inputs();
+        inputs.recorded_at_rfc3339 = "2026-05-20 07:10:00";
+        let err = record_workload(&inputs).expect_err("non-RFC3339 timestamp rejected");
+        assert!(matches!(err, FlightRecorderError::InvalidRecordedAt { .. }));
     }
 
     #[test]
