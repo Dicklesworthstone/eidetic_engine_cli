@@ -383,6 +383,8 @@ ee profile config apply --workspace . --profile portable \
 | `ee curate disposition` | `--apply` | boolean | false | Applies deterministic TTL transitions. Omit for dry-run planning. |
 | `ee curate disposition` | `--no-structural-decay` | boolean | false | Uses legacy uniform TTL disposition without graph structural adjustments. |
 | `ee curate disposition` | `--now <RFC3339>` | timestamp | current time | Overrides the current time for deterministic replay. |
+| `ee curate apply <CANDIDATE_ID>` | `--allow-tombstone-load-bearing` | boolean | false | Permits applying a tombstone or retraction candidate after reviewing load-bearing graph evidence. |
+| `ee curate tombstone <MEMORY_ID>` | `--allow-tombstone-load-bearing` | boolean | false | Permits an explicit tombstone after reviewing the memory's load-bearing why graph badge. |
 | `ee maintenance run` | `--job <JOB>` | steward job kind | `decay_sweep` | Selects the maintenance job. |
 | `ee maintenance run` | `--database <PATH>` | filesystem path | `<workspace>/.ee/ee.db` | Reads and writes maintenance state. |
 | `ee maintenance run` | `--dry-run` | boolean | false | Reports planned work without mutating memory scores. |
@@ -419,6 +421,10 @@ ee maintenance run --workspace . --job decay_sweep \
   --no-structural-decay --dry-run --json
 ee curate disposition --workspace . --no-structural-decay \
   --now 2026-05-19T00:00:00Z --json
+ee curate tombstone mem_load_bearing_rule --workspace . \
+  --allow-tombstone-load-bearing --dry-run --json
+ee curate apply cand_retract_stale_rule --workspace . \
+  --allow-tombstone-load-bearing --dry-run --json
 ee job run centrality_refresh --workspace . --dry-run \
   --time-limit-ms 500 --item-limit 25 --json
 ee maintenance graph-snapshot-prune --workspace . --dry-run \
@@ -439,4 +445,4 @@ surface in this checkout does not yet expose them as top-level flags:
 
 | Planned flag | Tracked surface | Current status |
 | --- | --- | --- |
-| `--allow-tombstone-load-bearing` | load-bearing curation policy | Not present in the current Clap structs. Use `--no-structural-decay` for the implemented opt-out surface. |
+| `--causal-explain` on non-`why` commands | causal graph expansion | Only `ee why <MEMORY_ID> --causal-explain` exposes the current causal explanation flag. |

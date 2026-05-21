@@ -15,7 +15,7 @@ parser exposes them.
 | Profiles and weights | `--profile` selects pack or retrieval policy; explicit numeric weights such as `--ppr-weight` compose with the profile instead of replacing it. |
 | Graph freshness | `--require-fresh` changes stale persisted graph centrality from usable-with-metadata to an exit-6 requirement failure. |
 | Maintenance mutation | `--dry-run` keeps maintenance and curation planning read-only; `--apply` or a mutating maintenance command is required for durable changes. |
-| Tombstone lifecycle | Explicit tombstone commands are audited lifecycle mutations; graph/search include flags only change read visibility. |
+| Tombstone lifecycle | Explicit tombstone commands are audited lifecycle mutations; load-bearing overrides apply only when `--allow-tombstone-load-bearing` is explicitly present. |
 
 ## Renderer And Envelope
 
@@ -129,6 +129,13 @@ ee maintenance run --workspace . --job decay_sweep \
 
 ee curate tombstone mem_old_rule --workspace . \
   --reason "superseded by validated release rule" --dry-run --json
+
+ee curate tombstone mem_load_bearing_rule --workspace . \
+  --allow-tombstone-load-bearing \
+  --reason "operator reviewed load-bearing graph evidence" --dry-run --json
+
+ee curate apply cand_retract_stale_rule --workspace . \
+  --allow-tombstone-load-bearing --dry-run --json
 ```
 
 Precedence:
@@ -138,26 +145,16 @@ Precedence:
   non-structural lifecycle rules.
 - `--dry-run` keeps supported curation and maintenance commands in planning
   mode. Omit it only when the command is intentionally allowed to write.
-- `ee curate tombstone <id>` is an explicit audited lifecycle command. It is
-  not overridden by read-side protections such as articulation or load-bearing
-  graph views; those views should inform the operator before the mutation.
-
-## Not Current In This Checkout
-
-`--allow-tombstone-load-bearing` appears in GraphAccretion planning notes, but
-the current Clap structs do not expose it. Until it lands, use the implemented
-surfaces above:
-
-- `ee curate tombstone <id> --dry-run --json` to preview an audited lifecycle
-  mutation;
-- `ee insights --section loadBearingMemories --json` to inspect load-bearing
-  candidates;
-- `ee curate disposition --no-structural-decay --json` to disable structural
-  decay adjustments for that disposition plan.
-
-Do not document `--allow-tombstone-load-bearing` as accepted help text or a
-working example until `src/cli/mod.rs` exposes it and contract coverage pins the
-intended precedence.
+- Load-bearing protection is the strongest read-side curation guard. If a
+  candidate is also articulation-sensitive or onion-layer-protected, the
+  operator should resolve the load-bearing review first.
+- `--allow-tombstone-load-bearing` is the explicit override for applying a
+  tombstone or retraction to load-bearing memories. It does not disable
+  articulation or onion-layer reporting; it records that the operator reviewed
+  the highest-precedence guard before continuing.
+- `ee curate tombstone <id>` remains the explicit audited lifecycle mutation.
+  Graph/search include flags such as `--include-tombstoned` only change read
+  visibility and never untombstone or authorize a tombstone.
 
 ## Contract Hooks
 
@@ -168,4 +165,5 @@ Future contract coverage should pin these examples:
 - renderer coverage shows `--json` overriding Mermaid-oriented output to JSON;
 - graph centrality coverage treats `--require-fresh` as stricter than stale
   metadata rendering;
-- docs coverage keeps planned-only flags out of runnable examples.
+- docs coverage keeps load-bearing override examples limited to the two
+  commands that currently expose `--allow-tombstone-load-bearing`.

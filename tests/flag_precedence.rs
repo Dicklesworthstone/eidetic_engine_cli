@@ -257,12 +257,41 @@ fn maintenance_dry_run_and_no_structural_decay_parse_as_independent_controls() -
 }
 
 #[test]
-fn curate_tombstone_dry_run_stays_explicit_lifecycle_preview() -> TestResult {
+fn curate_apply_load_bearing_override_is_explicit_and_dry_run_independent() -> TestResult {
+    let cli = parse([
+        "ee",
+        "curate",
+        "apply",
+        "cand_retract_stale_rule",
+        "--allow-tombstone-load-bearing",
+        "--dry-run",
+    ])?;
+
+    match cli.command {
+        Some(Command::Curate(CurateCommand::Apply(args))) => {
+            ensure_equal(
+                &args.candidate_id,
+                &"cand_retract_stale_rule".to_owned(),
+                "candidate id",
+            )?;
+            ensure(
+                args.allow_tombstone_load_bearing,
+                "load-bearing override parsed",
+            )?;
+            ensure(args.dry_run, "apply dry-run parsed")
+        }
+        other => Err(format!("expected curate apply command, got {other:?}")),
+    }
+}
+
+#[test]
+fn curate_tombstone_load_bearing_override_stays_explicit_lifecycle_preview() -> TestResult {
     let cli = parse([
         "ee",
         "curate",
         "tombstone",
         "mem_old_rule",
+        "--allow-tombstone-load-bearing",
         "--reason",
         "superseded by validated release rule",
         "--dry-run",
@@ -272,6 +301,10 @@ fn curate_tombstone_dry_run_stays_explicit_lifecycle_preview() -> TestResult {
         Some(Command::Curate(CurateCommand::Tombstone(args))) => {
             ensure_equal(&args.memory_id, &"mem_old_rule".to_owned(), "memory id")?;
             ensure(args.dry_run, "tombstone dry-run parsed")?;
+            ensure(
+                args.allow_tombstone_load_bearing,
+                "load-bearing tombstone override parsed",
+            )?;
             ensure_equal(
                 &args.reason,
                 &Some("superseded by validated release rule".to_owned()),

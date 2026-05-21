@@ -384,21 +384,33 @@ fn graph_cli_reference_documents_hits_centrality_examples() -> TestResult {
 }
 
 #[test]
-fn planned_only_graph_flags_stay_out_of_current_help() -> TestResult {
+fn load_bearing_override_is_documented_only_on_supported_curate_commands() -> TestResult {
     let reference = read_graph_cli_reference()?;
-    let planned_only_flags = ["--allow-tombstone-load-bearing"];
+    let load_bearing_override = ["--allow-tombstone-load-bearing"];
     assert_contains_all(
         &reference,
         &[
-            "## Tracked But Not Yet In Current CLI",
             "--allow-tombstone-load-bearing",
-            "Not present in the current Clap structs",
+            "ee curate tombstone mem_load_bearing_rule",
+            "ee curate apply cand_retract_stale_rule",
         ],
-        "docs/cli-reference/graph-flags.md planned-only section",
+        "docs/cli-reference/graph-flags.md load-bearing override section",
     )?;
 
     for (context, help) in [
-        ("ee --help", help_for(&["ee", "--help"])?),
+        (
+            "ee curate apply --help",
+            help_for(&["ee", "curate", "apply", "--help"])?,
+        ),
+        (
+            "ee curate tombstone --help",
+            help_for(&["ee", "curate", "tombstone", "--help"])?,
+        ),
+    ] {
+        assert_contains_all(&help, &load_bearing_override, context)?;
+    }
+
+    for (context, help) in [
         (
             "ee curate disposition --help",
             help_for(&["ee", "curate", "disposition", "--help"])?,
@@ -412,8 +424,20 @@ fn planned_only_graph_flags_stay_out_of_current_help() -> TestResult {
             help_for(&["ee", "rule", "provenance", "--help"])?,
         ),
     ] {
-        assert_contains_none(&help, &planned_only_flags, context)?;
+        assert_contains_none(&help, &load_bearing_override, context)?;
     }
+
+    let precedence = std::fs::read_to_string("docs/cli-reference/flag-precedence.md")
+        .map_err(|error| format!("read docs/cli-reference/flag-precedence.md: {error}"))?;
+    assert_contains_all(
+        &precedence,
+        &[
+            "Load-bearing protection is the strongest read-side curation guard",
+            "`--allow-tombstone-load-bearing` is the explicit override",
+            "Graph/search include flags such as `--include-tombstoned` only change read",
+        ],
+        "docs/cli-reference/flag-precedence.md load-bearing precedence",
+    )?;
 
     Ok(())
 }
