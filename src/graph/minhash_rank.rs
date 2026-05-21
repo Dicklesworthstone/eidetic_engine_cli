@@ -251,6 +251,7 @@ fn compute_minhash_rank_unbudgeted(
             }
         })
         .collect();
+    let queue_peak = rows.len();
     sort_by_ulid_payload_or_lexical(&mut rows, |score| score.node.as_str());
     rows.sort_by(|left, right| {
         right
@@ -273,7 +274,7 @@ fn compute_minhash_rank_unbudgeted(
                 .to_owned(),
             nodes_touched: node_count,
             edges_scanned: edge_count.saturating_add(signature_edges_scanned),
-            queue_peak: rows.len(),
+            queue_peak,
         },
         scores: rows,
     }
@@ -470,6 +471,45 @@ mod tests {
             result.scores[1..]
                 .iter()
                 .all(|score| score.incoming_edge_count == 0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn minhash_rank_reports_nonzero_marginal_queue_peak_before_truncation() -> TestResult {
+        let mut graph = graph();
+        for target in 0..6 {
+            add_edge(
+                &mut graph,
+                &format!("source_{target}_a"),
+                &format!("target_{target}"),
+            )?;
+            add_edge(
+                &mut graph,
+                &format!("source_{target}_b"),
+                &format!("target_{target}"),
+            )?;
+        }
+
+        let result = graph_result(compute_minhash_rank_with_policy(
+            &graph,
+            MinHashRankPolicy {
+                signature_count: 8,
+                top_k: 3,
+            },
+        ))?;
+
+        assert_eq!(result.scores.len(), 3);
+        assert!(
+            result.witness.queue_peak > result.scores.len(),
+            "queue_peak should report rows materialized before top-k truncation"
+        );
+        assert!(result.witness.queue_peak >= 6);
+        assert!(
+            result
+                .scores
+                .iter()
+                .all(|score| score.incoming_edge_count == 2)
         );
         Ok(())
     }
