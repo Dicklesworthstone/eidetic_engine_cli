@@ -10,6 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 const CLI_SOURCE: &str = include_str!("../src/cli/mod.rs");
+const EFFECT_SOURCE: &str = include_str!("../src/core/effect.rs");
 const NORMALIZED_CLI_COMMAND_COUNT: usize = 205;
 const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
@@ -587,6 +588,9 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
         "preflight show",
         "tripwire list",
         "playbook list",
+        "causal trace",
+        "causal compare",
+        "causal estimate",
     ] {
         let effect = manifest
             .get(command)
@@ -607,6 +611,57 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
             &format!("{command} has no unavailable sentinel"),
         )?;
     }
+
+    for command in ["causal trace", "causal compare", "causal estimate"] {
+        let effect = manifest
+            .get(command)
+            .ok_or_else(|| format!("{command} not in manifest"))?;
+        ensure(
+            effect.requires_read_snapshot,
+            true,
+            &format!("{command} reads through a DB snapshot"),
+        )?;
+    }
+
+    let causal_promote = manifest
+        .get("causal promote-plan")
+        .ok_or_else(|| "causal promote-plan not in manifest".to_string())?;
+    ensure(
+        causal_promote.default_effect,
+        EffectClass::DurableMemoryWrite,
+        "causal promote-plan can persist promotion candidates",
+    )?;
+    ensure(
+        causal_promote.dry_run_effect,
+        Some(EffectClass::ReadOnly),
+        "causal promote-plan dry-run stays read-only",
+    )?;
+    ensure(
+        causal_promote.mutation_contract.side_effect_class,
+        SideEffectClass::AuditedMutation,
+        "causal promote-plan has audited mutation contract",
+    )?;
+    ensure(
+        causal_promote
+            .write_surfaces
+            .db_tables
+            .contains(&"curation_candidates"),
+        true,
+        "causal promote-plan names curation_candidates",
+    )?;
+    ensure(
+        causal_promote
+            .write_surfaces
+            .db_tables
+            .contains(&"audit_log"),
+        true,
+        "causal promote-plan names audit_log",
+    )?;
+    ensure(
+        causal_promote.mutation_contract.degraded_code,
+        None,
+        "causal promote-plan has no unavailable sentinel",
+    )?;
 
     let support = manifest
         .get("support bundle")
@@ -697,6 +752,15 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
     }
 
     Ok(())
+}
+
+#[test]
+fn effect_manifest_retires_causal_evidence_unavailable_sentinel() -> TestResult {
+    ensure(
+        EFFECT_SOURCE.contains("causal_evidence_unavailable"),
+        false,
+        "effect manifest must not advertise implemented causal commands as unavailable",
+    )
 }
 
 #[test]

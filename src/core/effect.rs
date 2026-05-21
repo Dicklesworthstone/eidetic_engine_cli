@@ -1029,6 +1029,15 @@ impl EffectManifest {
                 "certificate sign",
                 "Compute a certificate signature from local key material without persisting it",
             ),
+            CommandEffect::read_only_db("causal trace", "Trace persisted causal evidence chains"),
+            CommandEffect::read_only_db(
+                "causal compare",
+                "Compare persisted causal evidence chains and scoped causal evidence",
+            ),
+            CommandEffect::read_only_db(
+                "causal estimate",
+                "Estimate causal uplift from persisted or scoped causal evidence",
+            ),
             CommandEffect::read_only("check", "Quick posture summary"),
             CommandEffect::read_only("claim list", "List executable claims from claims.yaml"),
             CommandEffect::read_only("claim show", "Inspect one executable claim"),
@@ -1250,26 +1259,6 @@ impl EffectManifest {
     fn degraded_unavailable_commands() -> Vec<CommandEffect> {
         vec![
             CommandEffect::degraded_unavailable(
-                "causal trace",
-                "causal_evidence_unavailable",
-                "Causal tracing abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "causal compare",
-                "causal_evidence_unavailable",
-                "Causal comparison abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "causal estimate",
-                "causal_evidence_unavailable",
-                "Causal estimation abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "causal promote-plan",
-                "causal_evidence_unavailable",
-                "Causal promotion planning abstains until real evidence ledgers exist",
-            ),
-            CommandEffect::degraded_unavailable(
                 "daemon",
                 "daemon_jobs_unavailable",
                 "Daemon background and non-decay foreground jobs abstain; foreground decay_sweep has a separate supervised-job entry",
@@ -1464,6 +1453,11 @@ impl EffectManifest {
 
     fn durable_write_commands() -> Vec<CommandEffect> {
         vec![
+            CommandEffect::durable_write(
+                "causal promote-plan",
+                vec!["curation_candidates", "audit_log"],
+                "Plan causal promotion and persist reviewed curation candidates when evidence clears thresholds",
+            ),
             CommandEffect::durable_write(
                 "curate accept",
                 vec!["curation_candidates", "procedural_rules", "audit_log"],
