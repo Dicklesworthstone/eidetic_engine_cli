@@ -25,6 +25,13 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
+fn reject_field(value: &Value, field: &str, context: &str) -> TestResult {
+    ensure(
+        value.get(field).is_none(),
+        format!("{context} must not emit legacy snake_case field `{field}`"),
+    )
+}
+
 fn test_runtime_profile() -> RuntimeProfileReport {
     RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
 }
@@ -313,6 +320,51 @@ fn field_naming_contract_is_stable() -> TestResult {
         "excludedMemoryIds",
     ];
 
+    let forbidden_search_fields = [
+        "result_count",
+        "elapsed_ms",
+        "scope_stats",
+        "profile_runtime",
+    ];
+    let forbidden_request_fields = [
+        "source_mode",
+        "strict_source_mode",
+        "memory_scope",
+        "strict_scope",
+    ];
+    let forbidden_hit_fields = [
+        "doc_id",
+        "fast_score",
+        "quality_score",
+        "lexical_score",
+        "rerank_score",
+    ];
+    let forbidden_metrics_fields = [
+        "requested_limit",
+        "returned_count",
+        "error_count",
+        "source_counts",
+        "score_distribution",
+        "field_coverage",
+        "source_mode_requested",
+        "source_mode_applied",
+        "fallback_applied",
+        "strict_source_mode",
+        "memory_scope",
+        "strict_scope",
+    ];
+    let forbidden_scope_stats_fields = [
+        "scope_applied",
+        "strict_scope",
+        "current_agent",
+        "team_size",
+        "candidates_total",
+        "candidates_in_scope",
+        "candidates_excluded_by_scope",
+        "strict_violations",
+        "excluded_memory_ids",
+    ];
+
     // Build a report that exercises all fields
     let report = SearchReport {
         status: SearchStatus::Success,
@@ -356,6 +408,14 @@ fn field_naming_contract_is_stable() -> TestResult {
             format!("search missing expected field: {field}"),
         )?;
     }
+    for field in forbidden_search_fields {
+        reject_field(&json, field, "search")?;
+    }
+
+    let request = &json["request"];
+    for field in forbidden_request_fields {
+        reject_field(request, field, "search.request")?;
+    }
 
     // Verify required hit fields are present
     // Bug: eidetic_engine_cli-9nw7 - old code was tautological (is_some || is_none always true)
@@ -380,6 +440,9 @@ fn field_naming_contract_is_stable() -> TestResult {
             format!("hit missing fixture-provided field: {field}"),
         )?;
     }
+    for field in forbidden_hit_fields {
+        reject_field(hit, field, "search.results[]")?;
+    }
 
     // Optional fields that are set in fixture - metadata and explanation
     ensure(
@@ -399,6 +462,9 @@ fn field_naming_contract_is_stable() -> TestResult {
             format!("metrics missing expected field: {field}"),
         )?;
     }
+    for field in forbidden_metrics_fields {
+        reject_field(metrics, field, "search.metrics")?;
+    }
 
     let scope_stats = &json["scopeStats"];
     for field in expected_scope_stats_fields {
@@ -406,6 +472,9 @@ fn field_naming_contract_is_stable() -> TestResult {
             scope_stats.get(field).is_some(),
             format!("scopeStats missing expected field: {field}"),
         )?;
+    }
+    for field in forbidden_scope_stats_fields {
+        reject_field(scope_stats, field, "search.scopeStats")?;
     }
 
     Ok(())
