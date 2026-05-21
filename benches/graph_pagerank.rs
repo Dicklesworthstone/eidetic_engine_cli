@@ -155,6 +155,8 @@ fn run_pagerank_once(connection: &DbConnection) -> f64 {
         min_weight: None,
         min_confidence: None,
         link_limit: None,
+        memory_budget_policy: ee::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+        cooperative: false,
     };
     if let Err(error) = refresh_centrality(connection, &options) {
         panic!("graph pagerank benchmark refresh failed: {error}");

@@ -3474,6 +3474,10 @@ pub struct GraphCentralityRefreshArgs {
     /// Maximum number of links to process.
     #[arg(long, value_name = "COUNT")]
     pub link_limit: Option<u32>,
+
+    /// Run independent centrality algorithms through the cooperative refresh path.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub cooperative: bool,
 }
 
 /// Arguments for `ee graph centrality`.
@@ -24600,6 +24604,7 @@ where
         memory_budget_policy: crate::core::graph_memory_budget::workspace_memory_budget_policy(
             &workspace,
         ),
+        cooperative: args.cooperative,
     };
 
     match crate::graph::refresh_graph_snapshot(&conn, &workspace_id, &options) {
@@ -24692,6 +24697,7 @@ where
         memory_budget_policy: crate::core::graph_memory_budget::workspace_memory_budget_policy(
             &workspace,
         ),
+        cooperative: false,
     };
     let mut reports = Vec::with_capacity(graph_types.len());
     for graph_type in graph_types {

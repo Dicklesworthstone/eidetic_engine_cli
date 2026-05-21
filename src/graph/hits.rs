@@ -102,6 +102,10 @@ pub fn compute_hits(graph: &DiGraph) -> GraphResult<HitsScores> {
     compute_hits_result(graph).map(hits_scores_from_result)
 }
 
+pub(crate) fn compute_hits_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<HitsScores> {
+    compute_hits_result_with_cx(cx, graph).map(hits_scores_from_result)
+}
+
 pub fn compute_hits_report(graph: &DiGraph) -> GraphResult<HitsReport> {
     let result = compute_hits_result(graph)?;
     let degraded = hits_convergence_degradations(graph.nodes_ordered().len(), &result);

@@ -44,6 +44,7 @@ use sqlmodel_core::{Row, Value};
 pub mod algorithms;
 pub mod bipartite_provenance;
 pub mod causal;
+pub mod cooperative_refresh;
 pub mod decay;
 pub mod dominance;
 pub mod gomory_hu;
@@ -2291,6 +2292,8 @@ pub struct CentralityRefreshOptions {
     pub link_limit: Option<u32>,
     /// Admission policy for graph snapshot and algorithm memory use.
     pub memory_budget_policy: MemoryBudgetPolicy,
+    /// Run independent centrality algorithms through the cooperative refresh path.
+    pub cooperative: bool,
 }
 
 /// Individual memory centrality scores.
@@ -3294,8 +3297,12 @@ fn refresh_centrality_with_source_links(
         min_confidence: options.min_confidence,
     };
     let links = graph_projection_links(conn, &projection_opts)?;
-    let centrality =
-        refresh_centrality_from_links(&links, options.dry_run, &options.memory_budget_policy)?;
+    let centrality = refresh_centrality_from_links(
+        &links,
+        options.dry_run,
+        &options.memory_budget_policy,
+        options.cooperative,
+    )?;
     Ok((centrality, links))
 }
 
@@ -3303,6 +3310,7 @@ fn refresh_centrality_from_links(
     links: &[StoredMemoryLink],
     dry_run: bool,
     memory_budget_policy: &MemoryBudgetPolicy,
+    cooperative: bool,
 ) -> GraphResult<CentralityRefreshReport> {
     use std::time::Instant;
 
@@ -3357,6 +3365,15 @@ fn refresh_centrality_from_links(
             top_hubs: vec![],
             top_authorities: vec![],
         });
+    }
+
+    if cooperative {
+        return cooperative_refresh::refresh_centrality_cooperative(
+            &algorithms::current_or_testing_cx(),
+            &projection,
+            total_start,
+            algorithms::DEFAULT_BACKGROUND_BUDGET,
+        );
     }
 
     let pagerank_start = Instant::now();
@@ -3492,7 +3509,7 @@ fn memory_budget_refused_centrality_report(
     }
 }
 
-fn sort_scores_by_metric_desc_then_memory_id(
+pub(crate) fn sort_scores_by_metric_desc_then_memory_id(
     scores: &mut Vec<MemoryCentralityScore>,
     metric: impl Fn(&MemoryCentralityScore) -> f64,
 ) {
@@ -3517,7 +3534,7 @@ fn sort_scores_by_metrics_desc_then_memory_id(
     });
 }
 
-fn merge_centrality_scores(
+pub(crate) fn merge_centrality_scores(
     pagerank_scores: &[fnx_algorithms::CentralityScore],
     betweenness_scores: &[fnx_algorithms::CentralityScore],
     hits: &crate::graph::hits::HitsScores,
@@ -8189,6 +8206,7 @@ mod tests {
             &links,
             false,
             &crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+            false,
         ))?;
 
         assert_eq!(report.status, super::CentralityRefreshStatus::Refreshed);
@@ -8250,6 +8268,7 @@ mod tests {
             &[],
             true,
             &crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+            false,
         ))?;
         assert_eq!(report.status, super::CentralityRefreshStatus::DryRun);
         assert_eq!(report.hits_ms, 0.0);

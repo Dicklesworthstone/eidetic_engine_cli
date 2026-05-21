@@ -3873,6 +3873,7 @@ impl ManualRunner {
             min_confidence: None,
             link_limit,
             memory_budget_policy: crate::core::graph_memory_budget::MemoryBudgetPolicy::defaults(),
+            cooperative: false,
         };
         let preflight = match crate::graph::refresh_graph_snapshot(
             &connection,
