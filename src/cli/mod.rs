@@ -602,6 +602,9 @@ pub enum Command {
     Backup(BackupCommand),
     /// Report feature availability, commands, and subsystem status.
     Capabilities,
+    /// Derived cache inspection and explicit prewarm planning.
+    #[command(subcommand)]
+    Cache(CacheCommand),
     /// Quick posture summary: ready, degraded, or needs attention.
     Check,
     /// List, show, and verify certificate records.
@@ -830,6 +833,62 @@ pub enum Command {
     Workflow(WorkflowCommand),
     /// Explain why a memory was stored, retrieved, or selected.
     Why(WhyArgs),
+}
+
+/// Subcommands for `ee cache`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum CacheCommand {
+    /// Build an explicit cache prewarm report from a redaction-safe hotset manifest.
+    Prewarm(CachePrewarmArgs),
+}
+
+/// Arguments for `ee cache prewarm`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct CachePrewarmArgs {
+    /// Hotset manifest path, or `latest` once a manifest registry is available.
+    #[arg(long = "from-hotset", value_name = "PATH|latest")]
+    pub from_hotset: String,
+
+    /// Profile budget for admission planning.
+    #[arg(long, value_enum, default_value_t = CachePrewarmProfileArg::Standard)]
+    pub profile: CachePrewarmProfileArg,
+
+    /// Current generation to require unless stale hotsets are explicitly allowed.
+    #[arg(long = "current-generation", value_name = "GENERATION")]
+    pub current_generation: Option<u64>,
+
+    /// Admit a stale hotset intentionally and surface the stale-use degradation.
+    #[arg(long = "allow-stale-hotset", action = ArgAction::SetTrue)]
+    pub allow_stale_hotset: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum CachePrewarmProfileArg {
+    Lean,
+    #[default]
+    Standard,
+    #[value(name = "swarm_heavy", alias = "swarm-heavy")]
+    SwarmHeavy,
+}
+
+impl CachePrewarmProfileArg {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lean => "lean",
+            Self::Standard => "standard",
+            Self::SwarmHeavy => "swarm_heavy",
+        }
+    }
+
+    #[must_use]
+    pub fn budget(self) -> crate::cache::CacheBudget {
+        match self {
+            Self::Lean => crate::cache::CacheBudget::new(64, 4 * 1024 * 1024),
+            Self::Standard => crate::cache::CacheBudget::new(256, 16 * 1024 * 1024),
+            Self::SwarmHeavy => crate::cache::CacheBudget::new(1024, 64 * 1024 * 1024),
+        }
+    }
 }
 
 /// Subcommands for `ee agent`.
@@ -9156,6 +9215,9 @@ where
                 ),
             }
         }
+        Some(Command::Cache(CacheCommand::Prewarm(ref args))) => {
+            handle_cache_prewarm(&cli, args, stdout, stderr)
+        }
         Some(Command::Check) => {
             let report = cli
                 .workspace
@@ -13517,6 +13579,100 @@ where
             lines.push(format!("Previous binary backed up to: {backup}"));
         }
         write_stdout(stdout, &(lines.join("\n") + "\n"))
+    }
+}
+
+fn handle_cache_prewarm<W, E>(
+    cli: &Cli,
+    args: &CachePrewarmArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    match build_cache_prewarm_report(args) {
+        Ok(data) => render_cache_prewarm(cli, &data, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn build_cache_prewarm_report(args: &CachePrewarmArgs) -> Result<serde_json::Value, DomainError> {
+    if args.from_hotset == "latest" {
+        return Err(DomainError::Usage {
+            message: "`--from-hotset latest` requires a hotset manifest registry, which is not implemented yet.".to_string(),
+            repair: Some("Pass `--from-hotset <path>` to an ee.cache.hotset.v1 manifest.".to_string()),
+        });
+    }
+
+    let path = PathBuf::from(&args.from_hotset);
+    let manifest_text = fs::read_to_string(&path).map_err(|error| DomainError::Storage {
+        message: format!("failed to read hotset manifest {}: {error}", path.display()),
+        repair: Some(
+            "Pass `--from-hotset <path>` to a readable ee.cache.hotset.v1 manifest.".to_string(),
+        ),
+    })?;
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "failed to parse hotset manifest JSON {}: {error}",
+                path.display()
+            ),
+            repair: Some("Regenerate the hotset manifest and retry cache prewarm.".to_string()),
+        })?;
+
+    let options = crate::cache::hotset::CachePrewarmOptions::new(
+        args.profile.as_str(),
+        args.profile.budget(),
+    )
+    .with_current_generation(args.current_generation)
+    .with_allow_stale_hotset(args.allow_stale_hotset);
+
+    crate::cache::hotset::cache_prewarm_report_from_manifest_json(&manifest, &options).map_err(
+        |message| DomainError::Usage {
+            message: format!("invalid hotset manifest {}: {message}", path.display()),
+            repair: Some(
+                "Pass an ee.cache.hotset.v1 manifest with content_not_stored entries.".to_string(),
+            ),
+        },
+    )
+}
+
+fn render_cache_prewarm<W>(cli: &Cli, data: &serde_json::Value, stdout: &mut W) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            let requested = data["requested"]["totalEntries"].as_u64().unwrap_or(0);
+            let admitted = data["admitted"]["totalEntries"].as_u64().unwrap_or(0);
+            let rejected = data["rejected"]["totalEntries"].as_u64().unwrap_or(0);
+            let degraded = data["degraded"].as_array().map_or(0, Vec::len);
+            write_stdout(
+                stdout,
+                &format!(
+                    "Cache prewarm\n  Profile: {}\n  Requested: {requested}\n  Admitted: {admitted}\n  Rejected: {rejected}\n  Memory pressure: {}\n  Degraded: {degraded}\n",
+                    data["profile"].as_str().unwrap_or("unknown"),
+                    data["memoryPressure"].as_str().unwrap_or("unknown"),
+                ),
+            )
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&data.to_string()) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let response = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": data,
+            });
+            write_stdout(stdout, &(response.to_string() + "\n"))
+        }
     }
 }
 
@@ -42161,6 +42317,7 @@ const COMMAND_NAMES: &[&str] = &[
     "audit",
     "backup",
     "capabilities",
+    "cache",
     "causal",
     "certificate",
     "check",
@@ -42231,6 +42388,7 @@ const ANALYZE_SUBCOMMANDS: &[&str] = &["science-status"];
 const ARTIFACT_SUBCOMMANDS: &[&str] = &["register", "inspect", "list"];
 const AUDIT_SUBCOMMANDS: &[&str] = &["timeline", "show", "diff", "verify"];
 const BACKUP_SUBCOMMANDS: &[&str] = &["create", "list", "inspect", "restore", "verify"];
+const CACHE_SUBCOMMANDS: &[&str] = &["prewarm"];
 const CAUSAL_SUBCOMMANDS: &[&str] = &["trace", "compare", "estimate", "promote-plan"];
 const CERTIFICATE_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
 const CLAIM_SUBCOMMANDS: &[&str] = &["list", "show", "verify"];
@@ -42435,6 +42593,9 @@ impl NormalizedInvocation {
                     BackupCommand::Verify(_) => "backup verify".to_string(),
                 },
                 Command::Capabilities => "capabilities".to_string(),
+                Command::Cache(cache) => match cache {
+                    CacheCommand::Prewarm(_) => "cache prewarm".to_string(),
+                },
                 Command::Check => "check".to_string(),
                 Command::Certificate(cert) => match cert {
                     CertificateCommand::List(_) => "certificate list".to_string(),
@@ -42961,6 +43122,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "artifact" => Some(ARTIFACT_SUBCOMMANDS),
         "audit" => Some(AUDIT_SUBCOMMANDS),
         "backup" => Some(BACKUP_SUBCOMMANDS),
+        "cache" => Some(CACHE_SUBCOMMANDS),
         "causal" => Some(CAUSAL_SUBCOMMANDS),
         "certificate" => Some(CERTIFICATE_SUBCOMMANDS),
         "claim" => Some(CLAIM_SUBCOMMANDS),

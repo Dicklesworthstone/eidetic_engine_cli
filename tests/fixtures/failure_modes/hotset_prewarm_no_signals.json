@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "hotset_prewarm_no_signals",
+  "introduced_by": {"bead": "bd-1zb7k.10.3", "epic_letter": "O"},
+  "surfaces": ["cache prewarm"],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee cache prewarm was invoked with an ee.cache.hotset.v1 manifest that contained no usable search or pack cache entries. The command emits an explicit degraded code instead of pretending any cache warming occurred.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee cache prewarm --workspace . --from-hotset empty-hotset.json --json"
+  },
+  "expected_emission": {
+    "code": "hotset_prewarm_no_signals",
+    "severity": "low",
+    "message_contains": [
+      "Hotset manifest contains no usable",
+      "entries to prewarm"
+    ],
+    "repair_contains": "Capture a current hotset manifest",
+    "repair_string": "Capture a current hotset manifest before running cache prewarm."
+  }
+}

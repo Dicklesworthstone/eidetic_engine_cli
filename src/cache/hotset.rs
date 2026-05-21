@@ -28,8 +28,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
-use crate::pack::{PackHotsetEntry, PackHotsetEntryKind};
-use crate::search::{SearchHotsetEntry, SearchHotsetEntryKind};
+use crate::cache::{CacheBudget, MemoryPressure};
+use crate::pack::{
+    PackCacheGovernor, PackHotset, PackHotsetEntry, PackHotsetEntryKind, PackSection,
+    prewarm_pack_hotset,
+};
+use crate::search::{
+    SearchCacheGovernor, SearchHotset, SearchHotsetEntry, SearchHotsetEntryKind,
+    prewarm_search_hotset,
+};
 
 /// JSON Schema id pinned by every emitted manifest.
 pub const SCHEMA: &str = "ee.cache.hotset.v1";
@@ -50,6 +57,9 @@ pub const REDACTION_STATUS: &str = "content_not_stored";
 /// JSON Schema id for the advisory dry-run plan that predicts context
 /// hotsets from swarm coordination signals.
 pub const PREWARM_PLAN_SCHEMA: &str = "ee.cache.hotset_prewarm_plan.v1";
+
+/// JSON Schema id for the explicit `ee cache prewarm` report.
+pub const CACHE_PREWARM_SCHEMA: &str = "ee.cache.prewarm.v1";
 
 /// Degraded code emitted when the prewarm planner receives no usable signal.
 pub const PREWARM_NO_SIGNAL_CODE: &str = "hotset_prewarm_no_signals";
@@ -510,6 +520,397 @@ pub fn plan_context_hotset_prewarm(
         skipped_signal_count,
         max_candidates,
         candidates,
+    }
+}
+
+/// Options for the explicit, side-effect-free `ee cache prewarm` report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CachePrewarmOptions {
+    pub profile: String,
+    pub budget: CacheBudget,
+    pub current_generation: Option<u64>,
+    pub allow_stale_hotset: bool,
+}
+
+impl CachePrewarmOptions {
+    #[must_use]
+    pub fn new(profile: impl Into<String>, budget: CacheBudget) -> Self {
+        Self {
+            profile: profile.into(),
+            budget,
+            current_generation: None,
+            allow_stale_hotset: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn with_current_generation(mut self, current_generation: Option<u64>) -> Self {
+        self.current_generation = current_generation;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_allow_stale_hotset(mut self, allow_stale_hotset: bool) -> Self {
+        self.allow_stale_hotset = allow_stale_hotset;
+        self
+    }
+}
+
+/// Build the canonical `ee.cache.prewarm.v1` report from a redaction-safe
+/// `ee.cache.hotset.v1` manifest. The function only reads the supplied JSON and
+/// returns an admission report; cache mutation is left to a future derived-asset
+/// writer once that writer can provide its own audit trail.
+pub fn cache_prewarm_report_from_manifest_json(
+    manifest: &Value,
+    options: &CachePrewarmOptions,
+) -> Result<Value, String> {
+    ensure_manifest_header(manifest)?;
+
+    let workspace_id = string_field(manifest, "workspaceId")?.to_owned();
+    let workspace_generation = u64_field(manifest, "workspaceGeneration")?;
+    let index_generation = u64_field(manifest, "indexGeneration")?;
+    let admission_threshold = u64_field(manifest, "admissionThreshold")?;
+    let manifest_profile = manifest
+        .get("profileTier")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+
+    let search_entries = parse_search_entries(manifest.get("searchEntries"))?;
+    let pack_entries = parse_pack_entries(manifest.get("packEntries"))?;
+    let requested_search_entries = search_entries.len();
+    let requested_pack_entries = pack_entries.len();
+    let requested_total = requested_search_entries.saturating_add(requested_pack_entries);
+
+    let requested_generation = options.current_generation.unwrap_or(admission_threshold);
+    let search_generation = effective_generation(
+        &search_entries,
+        requested_generation,
+        options.allow_stale_hotset,
+        |entry| entry.generation,
+    );
+    let pack_generation = effective_generation(
+        &pack_entries,
+        requested_generation,
+        options.allow_stale_hotset,
+        |entry| entry.generation,
+    );
+
+    let search_report = prewarm_search_hotset(
+        &SearchHotset::new(search_entries),
+        SearchCacheGovernor::new(search_generation, options.budget).with_current_usage(0, 0),
+    )
+    .data_json();
+    let pack_report = prewarm_pack_hotset(
+        &PackHotset::new(pack_entries),
+        PackCacheGovernor::new(pack_generation, options.budget).with_current_usage(0, 0),
+    )
+    .data_json();
+
+    let admitted_search_entries = usize_json_field(&search_report, "admittedEntries");
+    let admitted_pack_entries = usize_json_field(&pack_report, "admittedEntries");
+    let admitted_total = admitted_search_entries.saturating_add(admitted_pack_entries);
+    let rejected_search_entries = usize_json_field(&search_report, "rejectedEntries");
+    let rejected_pack_entries = usize_json_field(&pack_report, "rejectedEntries");
+    let rejected_total = rejected_search_entries.saturating_add(rejected_pack_entries);
+
+    let degraded = cache_prewarm_degraded(
+        requested_total,
+        &search_report,
+        &pack_report,
+        options.allow_stale_hotset,
+        requested_generation,
+        admission_threshold,
+    );
+    let latency = cache_prewarm_latency_estimate(&search_report, &pack_report);
+    let memory_pressure = max_report_pressure(&search_report, &pack_report).as_str();
+
+    Ok(json!({
+        "schema": CACHE_PREWARM_SCHEMA,
+        "sourceSchema": SCHEMA,
+        "profile": options.profile.as_str(),
+        "allowStaleHotset": options.allow_stale_hotset,
+        "fromHotset": {
+            "workspaceId": workspace_id,
+            "workspaceGeneration": workspace_generation,
+            "indexGeneration": index_generation,
+            "admissionThreshold": admission_threshold,
+            "profileTier": manifest_profile,
+            "redactionStatus": REDACTION_STATUS,
+        },
+        "requested": {
+            "searchEntries": requested_search_entries,
+            "packEntries": requested_pack_entries,
+            "totalEntries": requested_total,
+        },
+        "admitted": {
+            "searchEntries": admitted_search_entries,
+            "packEntries": admitted_pack_entries,
+            "totalEntries": admitted_total,
+        },
+        "rejected": {
+            "searchEntries": rejected_search_entries,
+            "packEntries": rejected_pack_entries,
+            "totalEntries": rejected_total,
+        },
+        "budgetSource": format!("profile:{}", options.profile),
+        "memoryPressure": memory_pressure,
+        "latencyEstimate": latency,
+        "redactionSafety": {
+            "status": "safe",
+            "summary": "query_hashes_and_cache_keys_only",
+            "rawContentStored": false,
+        },
+        "reports": {
+            "search": search_report,
+            "pack": pack_report,
+        },
+        "degraded": degraded,
+    }))
+}
+
+fn ensure_manifest_header(manifest: &Value) -> Result<(), String> {
+    if manifest.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
+        return Err(format!("expected {SCHEMA} manifest"));
+    }
+    if manifest.get("redactionStatus").and_then(Value::as_str) != Some(REDACTION_STATUS) {
+        return Err(format!(
+            "hotset manifest must use {REDACTION_STATUS} redaction status"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_search_entries(value: Option<&Value>) -> Result<Vec<SearchHotsetEntry>, String> {
+    let Some(Value::Array(entries)) = value else {
+        return Ok(Vec::new());
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| parse_search_entry(entry, index))
+        .collect()
+}
+
+fn parse_search_entry(value: &Value, index: usize) -> Result<SearchHotsetEntry, String> {
+    if string_field(value, "redactionStatus")? != REDACTION_STATUS {
+        return Err(format!(
+            "searchEntries[{index}] must use {REDACTION_STATUS} redaction status"
+        ));
+    }
+    Ok(SearchHotsetEntry {
+        key: string_field(value, "key")?.to_owned(),
+        kind: parse_search_kind(string_field(value, "kind")?)
+            .ok_or_else(|| format!("searchEntries[{index}] has unknown kind"))?,
+        generation: u64_field(value, "generation")?,
+        estimated_bytes: usize_field(value, "estimatedBytes")?,
+        hit_count: u64_field(value, "hitCount")?,
+        redaction_status: REDACTION_STATUS,
+    })
+}
+
+fn parse_pack_entries(value: Option<&Value>) -> Result<Vec<PackHotsetEntry>, String> {
+    let Some(Value::Array(entries)) = value else {
+        return Ok(Vec::new());
+    };
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| parse_pack_entry(entry, index))
+        .collect()
+}
+
+fn parse_pack_entry(value: &Value, index: usize) -> Result<PackHotsetEntry, String> {
+    if string_field(value, "redactionStatus")? != REDACTION_STATUS {
+        return Err(format!(
+            "packEntries[{index}] must use {REDACTION_STATUS} redaction status"
+        ));
+    }
+    let kind = parse_pack_kind(string_field(value, "kind")?)
+        .ok_or_else(|| format!("packEntries[{index}] has unknown kind"))?;
+    let section = match value.get("section").and_then(Value::as_str) {
+        Some(raw) => Some(
+            parse_pack_section(raw)
+                .ok_or_else(|| format!("packEntries[{index}] has unknown section"))?,
+        ),
+        None => None,
+    };
+    if kind == PackHotsetEntryKind::PackSection && section.is_none() {
+        return Err(format!(
+            "packEntries[{index}] pack_section requires section"
+        ));
+    }
+    Ok(PackHotsetEntry {
+        key: string_field(value, "key")?.to_owned(),
+        kind,
+        section,
+        generation: u64_field(value, "generation")?,
+        estimated_bytes: usize_field(value, "estimatedBytes")?,
+        hit_count: u64_field(value, "hitCount")?,
+        redaction_status: REDACTION_STATUS,
+    })
+}
+
+fn parse_search_kind(raw: &str) -> Option<SearchHotsetEntryKind> {
+    match raw {
+        "memory" => Some(SearchHotsetEntryKind::Memory),
+        "query_shape" => Some(SearchHotsetEntryKind::QueryShape),
+        "search_document" => Some(SearchHotsetEntryKind::SearchDocument),
+        "graph_neighborhood" => Some(SearchHotsetEntryKind::GraphNeighborhood),
+        _ => None,
+    }
+}
+
+fn parse_pack_kind(raw: &str) -> Option<PackHotsetEntryKind> {
+    match raw {
+        "pack_section" => Some(PackHotsetEntryKind::PackSection),
+        "selection_audit" => Some(PackHotsetEntryKind::SelectionAudit),
+        _ => None,
+    }
+}
+
+fn parse_pack_section(raw: &str) -> Option<PackSection> {
+    match raw {
+        "procedural_rules" => Some(PackSection::ProceduralRules),
+        "decisions" => Some(PackSection::Decisions),
+        "failures" => Some(PackSection::Failures),
+        "evidence" => Some(PackSection::Evidence),
+        "artifacts" => Some(PackSection::Artifacts),
+        _ => None,
+    }
+}
+
+fn string_field<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing string field {field}"))
+}
+
+fn u64_field(value: &Value, field: &str) -> Result<u64, String> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing integer field {field}"))
+}
+
+fn usize_field(value: &Value, field: &str) -> Result<usize, String> {
+    let raw = u64_field(value, field)?;
+    usize::try_from(raw).map_err(|_| format!("field {field} exceeds usize"))
+}
+
+fn usize_json_field(value: &Value, field: &str) -> usize {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .and_then(|raw| usize::try_from(raw).ok())
+        .unwrap_or(0)
+}
+
+fn effective_generation<T>(
+    entries: &[T],
+    requested_generation: u64,
+    allow_stale_hotset: bool,
+    generation: impl Fn(&T) -> u64,
+) -> u64 {
+    if allow_stale_hotset {
+        entries.first().map_or(requested_generation, generation)
+    } else {
+        requested_generation
+    }
+}
+
+fn cache_prewarm_degraded(
+    requested_total: usize,
+    search_report: &Value,
+    pack_report: &Value,
+    allow_stale_hotset: bool,
+    requested_generation: u64,
+    admission_threshold: u64,
+) -> Vec<Value> {
+    let mut degraded = Vec::new();
+    if requested_total == 0 {
+        degraded.push(json!({
+            "code": PREWARM_NO_SIGNAL_CODE,
+            "severity": "low",
+            "message": "Hotset manifest contains no usable search or pack entries to prewarm.",
+            "repair": "Capture a current hotset manifest before running cache prewarm.",
+            "details": {
+                "requestedEntries": 0,
+            }
+        }));
+    }
+    let stale_rejected = report_status(search_report) == Some("stale_generation")
+        || report_status(pack_report) == Some("stale_generation");
+    if stale_rejected {
+        degraded.push(json!({
+            "code": STALE_HOTSET_CODE,
+            "severity": "medium",
+            "message": "Cache prewarm rejected the hotset because its generation does not match the current generation.",
+            "repair": "Recapture the hotset or rerun with --allow-stale-hotset when stale warming is intentional.",
+            "details": {
+                "requestedGeneration": requested_generation,
+                "admissionThreshold": admission_threshold,
+            }
+        }));
+    } else if allow_stale_hotset && requested_generation != admission_threshold {
+        degraded.push(json!({
+            "code": STALE_HOTSET_CODE,
+            "severity": "medium",
+            "message": "Cache prewarm admitted a stale hotset because --allow-stale-hotset was supplied.",
+            "repair": "Recapture the hotset against the current workspace and index generation when precision matters.",
+            "details": {
+                "requestedGeneration": requested_generation,
+                "admissionThreshold": admission_threshold,
+                "allowStaleHotset": true,
+            }
+        }));
+    }
+    degraded
+}
+
+fn report_status(report: &Value) -> Option<&str> {
+    report.get("status").and_then(Value::as_str)
+}
+
+fn cache_prewarm_latency_estimate(search_report: &Value, pack_report: &Value) -> Value {
+    let search_cold = latency_field(search_report, "coldLatencyUs");
+    let search_warm = latency_field(search_report, "warmLatencyUs");
+    let pack_cold = latency_field(pack_report, "coldLatencyUs");
+    let pack_warm = latency_field(pack_report, "warmLatencyUs");
+    let cold = search_cold.saturating_add(pack_cold);
+    let warm = search_warm.saturating_add(pack_warm);
+    let win = cold.saturating_sub(warm);
+    let ratio = if cold == 0 {
+        0.0
+    } else {
+        ((win as f64 / cold as f64) * 10_000.0).round() / 10_000.0
+    };
+    json!({
+        "coldLatencyUs": cold,
+        "warmLatencyUs": warm,
+        "expectedWinUs": win,
+        "expectedWinMs": win / 1_000,
+        "latencyWinRatio": ratio,
+    })
+}
+
+fn latency_field(report: &Value, field: &str) -> u64 {
+    report
+        .get("benchmarkEvidence")
+        .and_then(|benchmark| benchmark.get(field))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn max_report_pressure(search_report: &Value, pack_report: &Value) -> MemoryPressure {
+    pressure_from_report(search_report).max(pressure_from_report(pack_report))
+}
+
+fn pressure_from_report(report: &Value) -> MemoryPressure {
+    match report.get("memoryPressure").and_then(Value::as_str) {
+        Some("critical") => MemoryPressure::Critical,
+        Some("high") => MemoryPressure::High,
+        _ => MemoryPressure::Normal,
     }
 }
 

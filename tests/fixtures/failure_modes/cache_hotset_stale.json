@@ -2,7 +2,7 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "cache_hotset_stale",
   "introduced_by": {"bead": "bd-1zb7k.10.2", "epic_letter": "O"},
-  "surfaces": ["cache hotset"],
+  "surfaces": ["cache hotset", "cache prewarm"],
   "severity": "medium",
   "repair_present": true,
   "trigger": {

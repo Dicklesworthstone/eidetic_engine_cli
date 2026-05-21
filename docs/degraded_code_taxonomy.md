@@ -321,6 +321,7 @@ memory bodies in `sources[]`.
 | `snapshot_release_failed` | medium | bd-2caru.6 |
 | `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
 | `cache_hotset_stale` | medium | (TBD) |
+| `hotset_prewarm_no_signals` | low | bd-1zb7k.10.3 (O3) |
 | `cross_shard_skew_detected` | warning | (TBD) |
 | `flight_recorder_directory_unwritable` | medium | (TBD) |
 | `shard_attach_failed` | warning | (TBD) |

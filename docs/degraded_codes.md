@@ -990,7 +990,7 @@ ee preflight check --cmd 'rm -rf build-output' --override-token <revoked-token> 
 
 **Severity:** medium
 
-**Surfaces:** cache hotset
+**Surfaces:** cache hotset, cache prewarm
 
 **Introduced by:** bd-1zb7k.10.2 (epic O)
 
@@ -1015,6 +1015,36 @@ Build a HotsetManifest via HotsetManifestBuilder against a GenerationGate whose 
 **Repair hint.** `Recapture the hotset against the current`
 
 **Fixture.** [`tests/fixtures/failure_modes/cache_hotset_stale.json`](../tests/fixtures/failure_modes/cache_hotset_stale.json)
+
+---
+
+## `hotset_prewarm_no_signals`
+
+**Severity:** low
+
+**Surfaces:** cache prewarm
+
+**Introduced by:** bd-1zb7k.10.3 (epic O)
+
+**Trigger.** `ee cache prewarm` was invoked with an `ee.cache.hotset.v1` manifest that contained no usable search or pack cache entries. The command emits an explicit degraded code instead of pretending any cache warming occurred.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+```
+
+**Invocation.**
+
+```bash
+ee cache prewarm --workspace . --from-hotset empty-hotset.json --json
+```
+
+**Expected emission.** Message contains: `Hotset manifest contains no usable ... entries to prewarm`
+
+**Repair hint.** `Capture a current hotset manifest`
+
+**Fixture.** [`tests/fixtures/failure_modes/hotset_prewarm_no_signals.json`](../tests/fixtures/failure_modes/hotset_prewarm_no_signals.json)
 
 ---
 

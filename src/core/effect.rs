@@ -1016,6 +1016,10 @@ impl EffectManifest {
             CommandEffect::read_only_db("backup list", "List backup manifests"),
             CommandEffect::read_only_db("backup verify", "Verify backup manifest and contents"),
             CommandEffect::read_only("capabilities", "Report feature availability"),
+            CommandEffect::read_only(
+                "cache prewarm",
+                "Plan explicit cache prewarm admission from a hotset manifest",
+            ),
             CommandEffect::read_only_db("certificate list", "List persisted certificate records"),
             CommandEffect::read_only_db(
                 "certificate show",
