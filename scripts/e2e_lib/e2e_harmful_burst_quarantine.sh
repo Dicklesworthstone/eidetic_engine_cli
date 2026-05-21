@@ -16,13 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 if [ -z "${WORKSPACE:-}" ]; then
-    if [ -n "${EE_AGENT_TMPDIR:-}" ]; then
-        workspace_root="$EE_AGENT_TMPDIR"
-    elif [ -d /Volumes/USBNVME16TB/temp_agent_space/tmp ]; then
-        workspace_root="/Volumes/USBNVME16TB/temp_agent_space/tmp"
-    else
-        workspace_root="$REPO_ROOT/tests/logs/agent_ergonomics_workspaces"
-    fi
+    workspace_root="$REPO_ROOT/tests/logs/agent_ergonomics_workspaces"
     mkdir -p "$workspace_root"
     WORKSPACE="$(mktemp -d "$workspace_root/ee-e2e-f3-XXXX")"
 fi
@@ -196,7 +190,7 @@ assert_jq "$window_second" "$has_harmful_burst" "false" \
 # ---------------------------------------------------------------------------
 log_step "Tracing target fires on a quarantined burst"
 trace_log="$LOG_DIR/trace.log"
-EE_LOG_JSON=1 "$EE_BIN" --workspace "$WORKSPACE" outcome "$mem_id" \
+RUST_LOG=ee::outcome::harmful_burst=info EE_LOG_JSON=1 "$EE_BIN" --workspace "$WORKSPACE" outcome "$mem_id" \
     --signal harmful \
     --source-id trace-target \
     --reason "trace first event" \
@@ -204,7 +198,7 @@ EE_LOG_JSON=1 "$EE_BIN" --workspace "$WORKSPACE" outcome "$mem_id" \
     --harmful-per-source-per-hour 1 \
     --harmful-burst-window-seconds "$EE_HARMFUL_BURST_WINDOW_SECONDS" \
     --json >"$LOG_DIR/trace_first.json" 2>"$trace_log"
-EE_LOG_JSON=1 "$EE_BIN" --workspace "$WORKSPACE" outcome "$mem_id" \
+RUST_LOG=ee::outcome::harmful_burst=info EE_LOG_JSON=1 "$EE_BIN" --workspace "$WORKSPACE" outcome "$mem_id" \
     --signal harmful \
     --source-id trace-target \
     --reason "trace second event" \
