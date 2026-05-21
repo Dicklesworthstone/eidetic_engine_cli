@@ -69,6 +69,7 @@ use super::tailscale_probe::{
     TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
+use super::verify::{VerificationPostureReport, gather_verification_posture};
 use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
@@ -1709,6 +1710,7 @@ pub struct StatusReport {
     pub pack_budget_buckets: PackBudgetBucketReport,
     pub qos_posture: super::qos::QosLaneSummary,
     pub rch_worker_pressure: RchWorkerPressureReport,
+    pub verification_posture: VerificationPostureReport,
     pub host_calibration: Option<HostCalibrationPostureReport>,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
@@ -1789,6 +1791,7 @@ impl StatusReport {
         let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
+        let verification_posture = gather_verification_posture(options.workspace_path.as_deref());
         let host_calibration = gather_host_calibration_status(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) =
             gather_memory_health(options.workspace_path.as_deref());
@@ -1876,6 +1879,7 @@ impl StatusReport {
             pack_budget_buckets,
             qos_posture,
             rch_worker_pressure,
+            verification_posture,
             host_calibration,
             memory_health,
             curation_health,

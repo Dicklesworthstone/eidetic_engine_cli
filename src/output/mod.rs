@@ -3393,6 +3393,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+        render_verification_posture_json(d, &report.verification_posture);
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
@@ -3601,6 +3602,17 @@ fn render_rch_worker_pressure_json(parent: &mut JsonBuilder, report: &RchWorkerP
         );
         pressure.field_array_of_objects("workers", &report.workers, render_rch_worker_json);
     });
+}
+
+fn render_verification_posture_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::verify::VerificationPostureReport,
+) {
+    let rendered = serde_json::to_string(report).unwrap_or_else(|_| {
+        r#"{"schema":"ee.verification.posture.v1","status":"serialization_failed","windowHours":24,"recordCount":0,"recentRunCount":0,"staleRunCount":0,"unknownAgeCount":0,"recentReusableRunCount":0,"inFlightEquivalentCommandCount":0,"advisoryCounts":{"remoteSuccess":0,"remoteFailed":0,"remoteInFlight":0,"localDisallowed":0,"topologyBlocked":0,"missingArtifactManifest":0},"evidenceHealth":{"ledgerAvailable":false,"status":"unavailable","malformedTimestampCount":0,"missingArtifactManifestCount":0,"localDisallowedCount":0,"topologyBlockedCount":0,"issueCount":1,"reason":"serialization_failed"},"recoveryActions":[]}"#
+            .to_owned()
+    });
+    parent.field_raw("verificationPosture", &rendered);
 }
 
 fn render_host_calibration_posture_json(
@@ -4401,6 +4413,7 @@ pub fn render_status_json_with_meta(
         render_pack_budget_buckets_json(d, &report.pack_budget_buckets);
         render_memory_health_json(d, &report.memory_health);
         render_flight_recorder_status_json(d, &report.flight_recorder);
+        render_verification_posture_json(d, &report.verification_posture);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_search_status_json(d, &report.lexical_ram_tier);
@@ -4447,7 +4460,7 @@ pub fn render_status_human(report: &StatusReport) -> String {
             )
         });
     format!(
-        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nverification posture: {} (recent reusable: {}, stale: {}, in flight: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
         report.shard_fanout.posture.as_str(),
@@ -4457,6 +4470,12 @@ pub fn render_status_human(report: &StatusReport) -> String {
         report.rch_worker_pressure.status,
         report.rch_worker_pressure.usable_worker_count,
         report.rch_worker_pressure.blocked_worker_count,
+        report.verification_posture.status,
+        report.verification_posture.recent_reusable_run_count,
+        report.verification_posture.stale_run_count,
+        report
+            .verification_posture
+            .in_flight_equivalent_command_count,
         report.capabilities.runtime.as_str(),
         report.runtime.engine,
         report.runtime.profile
@@ -4633,6 +4652,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_flight_recorder_status_json(d, &report.flight_recorder);
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+        render_verification_posture_json(d, &report.verification_posture);
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
@@ -4703,6 +4723,15 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         report.rch_worker_pressure.blocked_worker_count,
         report.rch_worker_pressure.stale_worker_count,
         report.rch_worker_pressure.unknown_worker_count
+    ));
+    output.push_str(&format!(
+        "verification posture: {} (recent reusable: {}, stale: {}, in flight: {})\n",
+        report.verification_posture.status,
+        report.verification_posture.recent_reusable_run_count,
+        report.verification_posture.stale_run_count,
+        report
+            .verification_posture
+            .in_flight_equivalent_command_count
     ));
     output.push_str(&format!(
         "mesh auto-enrollment: {} (ok: {}, warning: {}, fail: {}, skipped: {}, actions: {})\n",
@@ -11910,6 +11939,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+            render_verification_posture_json(d, &report.verification_posture);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
@@ -12073,6 +12103,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
             render_flight_recorder_status_json(d, &report.flight_recorder);
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
+            render_verification_posture_json(d, &report.verification_posture);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             if let Some(mesh_auto_enrollment) = mesh_auto_enrollment.as_deref() {
                 d.field_raw("meshAutoEnrollment", mesh_auto_enrollment);
@@ -15652,6 +15683,25 @@ mod tests {
         }
     }
 
+    fn verification_posture_fixture() -> crate::core::verify::VerificationPostureReport {
+        let mut report = crate::core::verify::VerificationPostureReport::not_inspected();
+        report.status = "degraded_recoverable".to_owned();
+        report.evidence_health.ledger_available = true;
+        report.evidence_health.status = "degraded".to_owned();
+        report.evidence_health.reason = Some("remote_required_gate_used_local_fallback".to_owned());
+        report.record_count = 4;
+        report.recent_run_count = 3;
+        report.stale_run_count = 1;
+        report.recent_reusable_run_count = 1;
+        report.in_flight_equivalent_command_count = 1;
+        report.advisory_counts.remote_success = 1;
+        report.advisory_counts.remote_in_flight = 1;
+        report.advisory_counts.local_disallowed = 1;
+        report.evidence_health.local_disallowed_count = 1;
+        report.evidence_health.issue_count = 1;
+        report
+    }
+
     struct FailingSerialize;
 
     impl serde::Serialize for FailingSerialize {
@@ -16845,6 +16895,33 @@ mod tests {
             &pressure["workers"][0]["admissionImpact"],
             &serde_json::json!("blocked"),
             "admission impact",
+        )
+    }
+
+    #[test]
+    fn status_json_exposes_verification_posture() -> TestResult {
+        let mut report = StatusReport::gather();
+        report.verification_posture = verification_posture_fixture();
+        let value = serde_json::from_str::<serde_json::Value>(&render_status_json(&report))
+            .map_err(|error| format!("status JSON should parse: {error}"))?;
+        let posture = value
+            .pointer("/data/verificationPosture")
+            .ok_or_else(|| "status JSON has data.verificationPosture object".to_string())?;
+
+        ensure_equal(
+            &posture["schema"],
+            &serde_json::json!("ee.verification.posture.v1"),
+            "verification posture schema",
+        )?;
+        ensure_equal(
+            &posture["recentReusableRunCount"],
+            &serde_json::json!(1),
+            "recent reusable run count",
+        )?;
+        ensure_equal(
+            &posture["advisoryCounts"]["localDisallowed"],
+            &serde_json::json!(1),
+            "local disallowed count",
         )
     }
 
@@ -19071,6 +19148,34 @@ mod tests {
             &pressure["workers"][0]["reasonCode"],
             &serde_json::json!("disk_pressure_critical"),
             "rch worker pressure reason code",
+        )
+    }
+
+    #[test]
+    fn render_doctor_json_exposes_verification_posture() -> TestResult {
+        let mut report = DoctorReport::gather();
+        report.verification_posture = verification_posture_fixture();
+        let json = render_doctor_json_filtered(&report, FieldProfile::Standard);
+        let value = serde_json::from_str::<serde_json::Value>(&json)
+            .map_err(|error| format!("doctor JSON should parse: {error}"))?;
+        let posture = value
+            .pointer("/data/verificationPosture")
+            .ok_or_else(|| "doctor JSON has data.verificationPosture object".to_string())?;
+
+        ensure_equal(
+            &posture["schema"],
+            &serde_json::json!("ee.verification.posture.v1"),
+            "verification posture schema",
+        )?;
+        ensure_equal(
+            &posture["inFlightEquivalentCommandCount"],
+            &serde_json::json!(1),
+            "in-flight equivalent count",
+        )?;
+        ensure_equal(
+            &posture["evidenceHealth"]["reason"],
+            &serde_json::json!("remote_required_gate_used_local_fallback"),
+            "evidence health reason",
         )
     }
 

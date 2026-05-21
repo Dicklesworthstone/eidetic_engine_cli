@@ -16,6 +16,7 @@ use ee::core::qos::{QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1, QosLaneSummary};
 use ee::core::singleflight::singleflight_posture_report;
 use ee::core::status::FlightRecorderStatusReport;
 use ee::core::swarm_brief::RchWorkerPressureReport;
+use ee::core::verify::VerificationPostureReport;
 use ee::core::why::{
     MemoryLinkSummary, PackSelectionExplanation, RationaleTraceSummary, RetrievalExplanation,
     SelectionExplanation, StorageExplanation, WhyDegradation, WhyReport,
@@ -206,6 +207,7 @@ fn doctor_fixture() -> DoctorReport {
             degraded: Vec::new(),
         },
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         checks: vec![
             CheckResult {

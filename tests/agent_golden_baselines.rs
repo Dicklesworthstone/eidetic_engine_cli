@@ -24,6 +24,7 @@ use ee::core::status::{
     WalStatusReport, WorkspaceDiagnosticReport, WorkspaceStatusReport,
 };
 use ee::core::swarm_brief::RchWorkerPressureReport;
+use ee::core::verify::VerificationPostureReport;
 use ee::db::shard::{
     ShardFanoutResolverInput, ShardFanoutStatusReport, resolve_shard_fanout_status,
 };
@@ -1348,6 +1349,7 @@ fn status_missing_db_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
@@ -1416,6 +1418,7 @@ fn status_pending_migration_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         memory_health: unavailable_memory_health(),
         curation_health: CurationHealthReport::unavailable(),
@@ -1484,6 +1487,7 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
@@ -1541,6 +1545,7 @@ fn status_search_unimplemented_report() -> StatusReport {
         pack_budget_buckets: PackBudgetBucketReport::default(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         memory_health: healthy_memory_health(),
         curation_health: CurationHealthReport::not_inspected(),
@@ -1644,6 +1649,7 @@ fn doctor_missing_db_report() -> DoctorReport {
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),
@@ -1680,6 +1686,7 @@ fn doctor_pending_migration_report() -> DoctorReport {
         flight_recorder: fixture_flight_recorder(),
         qos_posture: fixture_qos_posture(),
         rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+        verification_posture: VerificationPostureReport::not_inspected(),
         host_calibration: None,
         checks: vec![
             CheckResult::ok("runtime", "Asupersync runtime initialized successfully."),

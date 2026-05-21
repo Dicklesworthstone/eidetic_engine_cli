@@ -25,6 +25,7 @@
         "packBudgetBuckets",
         "qos",
         "rchWorkerPressure",
+        "verificationPosture",
         "hostCalibration",
         "memoryHealth",
         "curationHealth",
@@ -50,6 +51,7 @@
         "packBudgetBuckets": {"$ref": "#/$defs/packBudgetBuckets"},
         "qos": {"$ref": "#/$defs/qosStatus"},
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
+        "verificationPosture": {"$ref": "#/$defs/verificationPosture"},
         "hostCalibration": {"$ref": "ee.host_calibration.posture.v1.json"},
         "memoryHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
         "curationHealth": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},
@@ -65,8 +67,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "rchWorkerPressure", "hostCalibration", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "rchWorkerPressure", "hostCalibration", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "qos", "rchWorkerPressure", "verificationPosture", "hostCalibration", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "qos", "rchWorkerPressure", "verificationPosture", "hostCalibration", "memoryHealth", "curationHealth", "feedbackHealth", "singleFlight", "graphCompute", "graphSnapshotArtifact", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {
@@ -331,6 +333,65 @@
         "workspaceGeneration": {"type": "integer", "minimum": 0},
         "indexGeneration": {"type": ["integer", "null"], "minimum": 0},
         "graphGeneration": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "verificationPosture": {
+      "type": "object",
+      "required": ["schema", "status", "windowHours", "recordCount", "recentRunCount", "staleRunCount", "unknownAgeCount", "recentReusableRunCount", "inFlightEquivalentCommandCount", "advisoryCounts", "evidenceHealth", "recoveryActions"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.verification.posture.v1"},
+        "status": {"type": "string"},
+        "windowHours": {"type": "integer", "minimum": 0},
+        "recordCount": {"type": "integer", "minimum": 0},
+        "recentRunCount": {"type": "integer", "minimum": 0},
+        "staleRunCount": {"type": "integer", "minimum": 0},
+        "unknownAgeCount": {"type": "integer", "minimum": 0},
+        "recentReusableRunCount": {"type": "integer", "minimum": 0},
+        "inFlightEquivalentCommandCount": {"type": "integer", "minimum": 0},
+        "advisoryCounts": {
+          "type": "object",
+          "required": ["remoteSuccess", "remoteFailed", "remoteInFlight", "localDisallowed", "topologyBlocked", "missingArtifactManifest"],
+          "additionalProperties": false,
+          "properties": {
+            "remoteSuccess": {"type": "integer", "minimum": 0},
+            "remoteFailed": {"type": "integer", "minimum": 0},
+            "remoteInFlight": {"type": "integer", "minimum": 0},
+            "localDisallowed": {"type": "integer", "minimum": 0},
+            "topologyBlocked": {"type": "integer", "minimum": 0},
+            "missingArtifactManifest": {"type": "integer", "minimum": 0}
+          }
+        },
+        "evidenceHealth": {
+          "type": "object",
+          "required": ["ledgerAvailable", "status", "malformedTimestampCount", "missingArtifactManifestCount", "localDisallowedCount", "topologyBlockedCount", "issueCount", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "ledgerAvailable": {"type": "boolean"},
+            "status": {"type": "string"},
+            "malformedTimestampCount": {"type": "integer", "minimum": 0},
+            "missingArtifactManifestCount": {"type": "integer", "minimum": 0},
+            "localDisallowedCount": {"type": "integer", "minimum": 0},
+            "topologyBlockedCount": {"type": "integer", "minimum": 0},
+            "issueCount": {"type": "integer", "minimum": 0},
+            "reason": {"type": ["string", "null"]}
+          }
+        },
+        "recoveryActions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["priority", "kind", "command", "message", "relatedBeadId"],
+            "additionalProperties": false,
+            "properties": {
+              "priority": {"type": "integer", "minimum": 0},
+              "kind": {"type": "string"},
+              "command": {"type": ["string", "null"]},
+              "message": {"type": "string"},
+              "relatedBeadId": {"type": ["string", "null"]}
+            }
+          }
+        }
       }
     },
     "rchWorkerPressure": {

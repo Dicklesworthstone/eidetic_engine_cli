@@ -48,6 +48,7 @@ use super::tailscale_probe::{
     TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
+use super::verify::{VerificationPostureReport, gather_verification_posture};
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
@@ -234,6 +235,8 @@ pub struct DoctorReport {
     pub qos_posture: QosLaneSummary,
     /// Redaction-safe remote compilation worker pressure posture.
     pub rch_worker_pressure: RchWorkerPressureReport,
+    /// Redaction-safe verification evidence reuse posture.
+    pub verification_posture: VerificationPostureReport,
     /// Redaction-safe host calibration posture and budget-delta guidance.
     pub host_calibration: Option<HostCalibrationPostureReport>,
     /// Redaction-safe command flight-recorder posture.
@@ -259,6 +262,7 @@ impl DoctorReport {
         let singleflight_posture = singleflight_posture_report();
         let qos_posture = gather_qos_posture(workspace_path);
         let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
+        let verification_posture = gather_verification_posture(workspace_path);
         let host_calibration = gather_host_calibration_status(workspace_path);
         let flight_recorder = gather_flight_recorder_status(workspace_path);
         let checks = vec![
@@ -287,6 +291,7 @@ impl DoctorReport {
             singleflight_posture,
             qos_posture,
             rch_worker_pressure,
+            verification_posture,
             host_calibration,
             flight_recorder,
             checks,
@@ -3521,6 +3526,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            verification_posture: VerificationPostureReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -3546,6 +3552,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            verification_posture: VerificationPostureReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -3586,6 +3593,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            verification_posture: VerificationPostureReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -4167,6 +4175,7 @@ mod tests {
             singleflight_posture: singleflight_posture_report(),
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
+            verification_posture: VerificationPostureReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",

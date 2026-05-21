@@ -26,6 +26,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::build_info;
@@ -49,12 +50,201 @@ pub const VERIFY_REPORT_SCHEMA_V1: &str = "ee.verify.report.v1";
 pub const VERIFY_RECORD_REPORT_SCHEMA_V1: &str = "ee.verify.record_report.v1";
 pub const VERIFY_CLOSURE_GUIDANCE_REPORT_SCHEMA_V1: &str = "ee.verify.closure_guidance_report.v1";
 pub const VERIFICATION_LEDGER_ENTRY_SCHEMA_V1: &str = "ee.verification.ledger_entry.v1";
+pub const VERIFICATION_POSTURE_SCHEMA_V1: &str = "ee.verification.posture.v1";
 const LEGACY_VERIFICATION_RECORD_ACTION: &str = "verification.record";
+const VERIFICATION_POSTURE_WINDOW_HOURS: u32 = 24;
 const VERIFY_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const VERIFY_STEP_OUTPUT_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
 /// Schema for artifact policy.
 pub const ARTIFACT_POLICY_SCHEMA_V1: &str = "ee.artifact_policy.v1";
+
+/// Redaction-safe verification evidence posture for status/doctor/support.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPostureReport {
+    pub schema: String,
+    pub status: String,
+    pub window_hours: u32,
+    pub record_count: u32,
+    pub recent_run_count: u32,
+    pub stale_run_count: u32,
+    pub unknown_age_count: u32,
+    pub recent_reusable_run_count: u32,
+    pub in_flight_equivalent_command_count: u32,
+    pub advisory_counts: VerificationPostureAdvisoryCounts,
+    pub evidence_health: VerificationPostureEvidenceHealth,
+    pub recovery_actions: Vec<VerificationPostureRecoveryAction>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPostureAdvisoryCounts {
+    pub remote_success: u32,
+    pub remote_failed: u32,
+    pub remote_in_flight: u32,
+    pub local_disallowed: u32,
+    pub topology_blocked: u32,
+    pub missing_artifact_manifest: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPostureEvidenceHealth {
+    pub ledger_available: bool,
+    pub status: String,
+    pub malformed_timestamp_count: u32,
+    pub missing_artifact_manifest_count: u32,
+    pub local_disallowed_count: u32,
+    pub topology_blocked_count: u32,
+    pub issue_count: u32,
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerificationPostureRecoveryAction {
+    pub priority: u8,
+    pub kind: String,
+    pub command: Option<String>,
+    pub message: String,
+    pub related_bead_id: Option<String>,
+}
+
+impl VerificationPostureReport {
+    #[must_use]
+    pub fn not_inspected() -> Self {
+        Self::unavailable(
+            "not_inspected",
+            "workspace_not_selected",
+            "Run `ee status --workspace . --json` from an initialized workspace.",
+        )
+    }
+
+    #[must_use]
+    pub fn unavailable(status: &str, reason: &str, repair_command: &str) -> Self {
+        Self {
+            schema: VERIFICATION_POSTURE_SCHEMA_V1.to_owned(),
+            status: status.to_owned(),
+            window_hours: VERIFICATION_POSTURE_WINDOW_HOURS,
+            record_count: 0,
+            recent_run_count: 0,
+            stale_run_count: 0,
+            unknown_age_count: 0,
+            recent_reusable_run_count: 0,
+            in_flight_equivalent_command_count: 0,
+            advisory_counts: VerificationPostureAdvisoryCounts::default(),
+            evidence_health: VerificationPostureEvidenceHealth {
+                ledger_available: false,
+                status: "unavailable".to_owned(),
+                malformed_timestamp_count: 0,
+                missing_artifact_manifest_count: 0,
+                local_disallowed_count: 0,
+                topology_blocked_count: 0,
+                issue_count: 1,
+                reason: Some(reason.to_owned()),
+            },
+            recovery_actions: vec![VerificationPostureRecoveryAction {
+                priority: 1,
+                kind: "initialize_or_inspect_ledger".to_owned(),
+                command: Some(repair_command.to_owned()),
+                message: "Verification evidence posture could not inspect the workspace ledger."
+                    .to_owned(),
+                related_bead_id: None,
+            }],
+        }
+    }
+
+    #[must_use]
+    pub fn from_records(now: DateTime<Utc>, records: &[VerificationEvidenceRecord]) -> Self {
+        let mut report = Self {
+            schema: VERIFICATION_POSTURE_SCHEMA_V1.to_owned(),
+            status: String::new(),
+            window_hours: VERIFICATION_POSTURE_WINDOW_HOURS,
+            record_count: saturating_len_u32(records.len()),
+            recent_run_count: 0,
+            stale_run_count: 0,
+            unknown_age_count: 0,
+            recent_reusable_run_count: 0,
+            in_flight_equivalent_command_count: 0,
+            advisory_counts: VerificationPostureAdvisoryCounts::default(),
+            evidence_health: VerificationPostureEvidenceHealth {
+                ledger_available: true,
+                status: String::new(),
+                malformed_timestamp_count: 0,
+                missing_artifact_manifest_count: 0,
+                local_disallowed_count: 0,
+                topology_blocked_count: 0,
+                issue_count: 0,
+                reason: None,
+            },
+            recovery_actions: Vec::new(),
+        };
+
+        for record in records {
+            match verification_record_age_bucket(now, record) {
+                VerificationAgeBucket::Recent => report.recent_run_count += 1,
+                VerificationAgeBucket::Stale => report.stale_run_count += 1,
+                VerificationAgeBucket::Unknown => report.unknown_age_count += 1,
+                VerificationAgeBucket::Malformed => {
+                    report.unknown_age_count += 1;
+                    report.evidence_health.malformed_timestamp_count += 1;
+                }
+            }
+
+            let remote_required = verification_remote_required(record);
+            let local_disallowed = remote_required
+                && (record.offload.fallback_detected
+                    || record.status == VerificationStatus::FallbackDetected);
+            let missing_manifest =
+                remote_required && !verification_record_has_artifact_manifest(record);
+            let topology_blocked = remote_required
+                && record.status == VerificationStatus::Blocked
+                && verification_record_mentions_rch_topology(record);
+            let in_flight = remote_required
+                && (record.status == VerificationStatus::Interrupted
+                    || record.finished_at.as_deref().is_none());
+
+            if local_disallowed {
+                report.advisory_counts.local_disallowed += 1;
+                report.evidence_health.local_disallowed_count += 1;
+            } else if topology_blocked {
+                report.advisory_counts.topology_blocked += 1;
+                report.evidence_health.topology_blocked_count += 1;
+            } else if in_flight {
+                report.advisory_counts.remote_in_flight += 1;
+                report.in_flight_equivalent_command_count += 1;
+            } else if remote_required && record.status == VerificationStatus::Passed {
+                report.advisory_counts.remote_success += 1;
+                if matches!(
+                    verification_record_age_bucket(now, record),
+                    VerificationAgeBucket::Recent
+                ) && !missing_manifest
+                {
+                    report.recent_reusable_run_count += 1;
+                }
+            } else if remote_required && record.status == VerificationStatus::Failed {
+                report.advisory_counts.remote_failed += 1;
+            }
+
+            if missing_manifest {
+                report.advisory_counts.missing_artifact_manifest += 1;
+                report.evidence_health.missing_artifact_manifest_count += 1;
+            }
+        }
+
+        report.evidence_health.issue_count = report.evidence_health.malformed_timestamp_count
+            + report.evidence_health.missing_artifact_manifest_count
+            + report.evidence_health.local_disallowed_count
+            + report.evidence_health.topology_blocked_count;
+        report.evidence_health.status = verification_evidence_health_status(&report).to_owned();
+        report.evidence_health.reason =
+            verification_evidence_health_reason(&report).map(str::to_owned);
+        report.status = verification_posture_status(&report).to_owned();
+        report.recovery_actions = verification_posture_recovery_actions(&report);
+        report
+    }
+}
 
 // ============================================================================
 // Verification Steps
@@ -969,6 +1159,234 @@ fn parse_verification_audit_entries_with_metadata(
 }
 
 #[must_use]
+pub fn gather_verification_posture(workspace_path: Option<&Path>) -> VerificationPostureReport {
+    let Some(workspace_path) = workspace_path else {
+        return VerificationPostureReport::not_inspected();
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return VerificationPostureReport::unavailable(
+            "not_initialized",
+            "verification_ledger_missing",
+            "ee init --workspace .",
+        );
+    }
+
+    let connection = match DbConnection::open_file(&database_path) {
+        Ok(connection) => connection,
+        Err(_) => {
+            return VerificationPostureReport::unavailable(
+                "unavailable",
+                "verification_ledger_unreadable",
+                "ee doctor --workspace . --json",
+            );
+        }
+    };
+    match list_verification_records(&connection, None) {
+        Ok(records) => VerificationPostureReport::from_records(Utc::now(), records.as_slice()),
+        Err(_) => VerificationPostureReport::unavailable(
+            "unavailable",
+            "verification_ledger_query_failed",
+            "ee audit timeline --surface verification --json",
+        ),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VerificationAgeBucket {
+    Recent,
+    Stale,
+    Unknown,
+    Malformed,
+}
+
+fn verification_record_age_bucket(
+    now: DateTime<Utc>,
+    record: &VerificationEvidenceRecord,
+) -> VerificationAgeBucket {
+    let timestamp = record.finished_at.as_ref().or(record.started_at.as_ref());
+    let Some(timestamp) = timestamp else {
+        return VerificationAgeBucket::Unknown;
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(timestamp) else {
+        return VerificationAgeBucket::Malformed;
+    };
+    let age = now.signed_duration_since(parsed.with_timezone(&Utc));
+    if age <= ChronoDuration::hours(i64::from(VERIFICATION_POSTURE_WINDOW_HOURS)) {
+        VerificationAgeBucket::Recent
+    } else {
+        VerificationAgeBucket::Stale
+    }
+}
+
+fn verification_remote_required(record: &VerificationEvidenceRecord) -> bool {
+    record.offload.required_remote
+        || record.offload.offload_tool.as_deref() == Some("rch")
+        || record.command.contains("RCH_REQUIRE_REMOTE=1")
+        || record.command.contains("rch exec")
+}
+
+fn verification_record_has_artifact_manifest(record: &VerificationEvidenceRecord) -> bool {
+    record
+        .artifacts
+        .iter()
+        .any(|artifact| artifact.kind.contains("manifest") || artifact.path.contains("manifest"))
+}
+
+fn verification_record_mentions_rch_topology(record: &VerificationEvidenceRecord) -> bool {
+    let mut haystack = String::with_capacity(
+        record.command.len()
+            + record
+                .offload
+                .fallback_reason
+                .as_ref()
+                .map_or(0, String::len)
+            + record
+                .output_summary
+                .stdout_tail
+                .as_ref()
+                .map_or(0, String::len)
+            + record
+                .output_summary
+                .stderr_tail
+                .as_ref()
+                .map_or(0, String::len),
+    );
+    haystack.push_str(&record.command);
+    if let Some(reason) = record.offload.fallback_reason.as_ref() {
+        haystack.push(' ');
+        haystack.push_str(reason);
+    }
+    if let Some(stdout) = record.output_summary.stdout_tail.as_ref() {
+        haystack.push(' ');
+        haystack.push_str(stdout);
+    }
+    if let Some(stderr) = record.output_summary.stderr_tail.as_ref() {
+        haystack.push(' ');
+        haystack.push_str(stderr);
+    }
+    let haystack = haystack.to_ascii_lowercase();
+    [
+        "rch-e104",
+        "rch-e327",
+        "all_workers",
+        "all workers",
+        "preflight",
+        "topology",
+        "worker unavailable",
+        "worker pressure",
+        "path-dep",
+        "path dep",
+        "canonical remote root",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
+fn verification_posture_status(report: &VerificationPostureReport) -> &'static str {
+    if report.record_count == 0 {
+        "no_evidence"
+    } else if report.advisory_counts.topology_blocked > 0 {
+        "blocked"
+    } else if report.advisory_counts.local_disallowed > 0
+        || report.advisory_counts.remote_failed > 0
+        || report.advisory_counts.missing_artifact_manifest > 0
+        || report.evidence_health.malformed_timestamp_count > 0
+    {
+        "degraded_recoverable"
+    } else if report.advisory_counts.remote_in_flight > 0 {
+        "initializing"
+    } else if report.recent_reusable_run_count > 0 {
+        "ok"
+    } else {
+        "stale"
+    }
+}
+
+fn verification_evidence_health_status(report: &VerificationPostureReport) -> &'static str {
+    if report.record_count == 0 {
+        "empty"
+    } else if report.evidence_health.issue_count == 0 {
+        "healthy"
+    } else if report.evidence_health.topology_blocked_count > 0 {
+        "blocked"
+    } else {
+        "degraded"
+    }
+}
+
+fn verification_evidence_health_reason(report: &VerificationPostureReport) -> Option<&'static str> {
+    if report.record_count == 0 {
+        Some("no_verification_evidence_recorded")
+    } else if report.evidence_health.topology_blocked_count > 0 {
+        Some("rch_topology_or_worker_preflight_blocked")
+    } else if report.evidence_health.local_disallowed_count > 0 {
+        Some("remote_required_gate_used_local_fallback")
+    } else if report.evidence_health.missing_artifact_manifest_count > 0 {
+        Some("artifact_manifest_missing")
+    } else if report.evidence_health.malformed_timestamp_count > 0 {
+        Some("malformed_verification_timestamp")
+    } else {
+        None
+    }
+}
+
+fn verification_posture_recovery_actions(
+    report: &VerificationPostureReport,
+) -> Vec<VerificationPostureRecoveryAction> {
+    let mut actions = Vec::new();
+    if report.record_count == 0 || report.advisory_counts.missing_artifact_manifest > 0 {
+        actions.push(VerificationPostureRecoveryAction {
+            priority: 1,
+            kind: "import_j1_log".to_owned(),
+            command: Some(
+                "ee verify broker lookup --runs-jsonl <j1.jsonl> --command-hash <hash> --json"
+                    .to_owned(),
+            ),
+            message: "Inspect retained J1 test-event logs so artifact manifests can back verification reuse.".to_owned(),
+            related_bead_id: None,
+        });
+    }
+    if report.advisory_counts.topology_blocked > 0 {
+        actions.push(VerificationPostureRecoveryAction {
+            priority: 2,
+            kind: "inspect_topology_diagnostic".to_owned(),
+            command: Some("ee status --workspace . --json | jq '.data.rchWorkerPressure'".to_owned()),
+            message: "Use bd-1zb7k.13 worker-pressure topology diagnostics before launching another remote Cargo gate.".to_owned(),
+            related_bead_id: Some("bd-1zb7k.13".to_owned()),
+        });
+    }
+    if report.advisory_counts.remote_in_flight > 0 {
+        actions.push(VerificationPostureRecoveryAction {
+            priority: 3,
+            kind: "wait_for_active_agent".to_owned(),
+            command: Some("br list --status in_progress --json".to_owned()),
+            message: "An equivalent remote-required verification appears in flight; wait or coordinate before duplicating it.".to_owned(),
+            related_bead_id: None,
+        });
+    }
+    if report.advisory_counts.local_disallowed > 0
+        || report.advisory_counts.remote_failed > 0
+        || report.stale_run_count > 0
+    {
+        actions.push(VerificationPostureRecoveryAction {
+            priority: 4,
+            kind: "rerun_through_rch".to_owned(),
+            command: Some("scripts/rch_verify.sh -- <cargo command>".to_owned()),
+            message:
+                "Rerun stale, failed, or local-fallback Cargo evidence through required-remote RCH."
+                    .to_owned(),
+            related_bead_id: None,
+        });
+    }
+    actions
+}
+
+fn saturating_len_u32(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
+}
+
+#[must_use]
 pub fn default_rch_cargo_closure_requirements() -> Vec<VerificationGateRequirement> {
     rch_cargo_closure_requirements()
 }
@@ -1370,6 +1788,68 @@ mod tests {
         ensure(json.get("command").is_some(), "has command")?;
         ensure(json.get("allPassed").is_some(), "has allPassed")?;
         ensure(json.get("steps").is_some(), "has steps")
+    }
+
+    #[test]
+    fn verification_posture_counts_rch_advisories_and_recovery_actions() -> TestResult {
+        let now = DateTime::parse_from_rfc3339("2026-05-13T01:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&Utc);
+        let mut records = crate::models::sample_verification_evidence_records();
+        let mut reusable = records
+            .iter()
+            .find(|record| record.offload.required_remote)
+            .ok_or("sample remote record exists")?
+            .clone();
+        reusable.verification_id = "ver_reusable_remote_0000001".to_owned();
+        reusable.status = VerificationStatus::Passed;
+        reusable.exit_code = Some(0);
+        reusable.started_at = Some("2026-05-13T00:10:00Z".to_owned());
+        reusable.finished_at = Some("2026-05-13T00:10:42Z".to_owned());
+        reusable.output_summary = crate::models::VerificationOutputSummary::empty();
+        reusable.artifacts = vec![crate::models::VerificationArtifactRef::new(
+            "target/verify/artifact_manifest.json",
+            "artifact_manifest",
+            Some("blake3:manifest"),
+        )];
+        records.push(reusable);
+
+        let report = VerificationPostureReport::from_records(now, records.as_slice());
+
+        ensure_equal(&report.status.as_str(), &"blocked", "aggregate status")?;
+        ensure_equal(&report.record_count, &6, "record count")?;
+        ensure_equal(
+            &report.advisory_counts.remote_success,
+            &1,
+            "remote success count",
+        )?;
+        ensure_equal(
+            &report.recent_reusable_run_count,
+            &1,
+            "recent reusable run count",
+        )?;
+        ensure_equal(
+            &report.advisory_counts.remote_failed,
+            &1,
+            "remote failed count",
+        )?;
+        ensure_equal(
+            &report.advisory_counts.local_disallowed,
+            &1,
+            "local disallowed count",
+        )?;
+        ensure_equal(
+            &report.advisory_counts.topology_blocked,
+            &1,
+            "topology blocked count",
+        )?;
+        ensure(
+            report.recovery_actions.iter().any(|action| {
+                action.kind == "inspect_topology_diagnostic"
+                    && action.related_bead_id.as_deref() == Some("bd-1zb7k.13")
+            }),
+            "topology recovery action links bd-1zb7k.13",
+        )
     }
 
     #[test]
