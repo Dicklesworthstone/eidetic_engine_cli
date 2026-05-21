@@ -119,6 +119,7 @@ in the same commit, keeping the catalog complete by construction.
 | `mesh_peer_policy_denied` | mesh import, mesh export, status, doctor, support bundle | high | bd-3i5q7 (SRR6.19) |
 | `mesh_body_fetch_denied_by_policy` | mesh cache, context, mesh status, doctor | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | mesh cache, context, mesh status, doctor | medium | bd-nw0v3.2 (SRR6.16) |
+| `mesh_cached_body_hash_mismatch` | mesh cache, context, mesh status, doctor | high | bd-nw0v3.3 (SRR6.16) |
 | `mesh_secret_export_denied` | mesh export | high | bd-38dqk (SRR6.43) |
 | `mesh_sync_supervisor_backpressure` | mesh sync | info | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_budget_exhausted` | mesh sync | warning | bd-1ylr3 (SRR6.10) |

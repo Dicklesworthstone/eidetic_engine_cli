@@ -492,7 +492,7 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `unsupported_protocol_version` | medium | bd-97rgf.5 (SRR6.27) |
 
-#### Mesh discovery, policy, and body fetch (6)
+#### Mesh discovery, policy, and body fetch (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
@@ -500,6 +500,7 @@ memory bodies in `sources[]`.
 | `mesh_peer_policy_denied` | high | (TBD) |
 | `mesh_body_fetch_denied_by_policy` | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | medium | bd-nw0v3.2 (SRR6.16) |
+| `mesh_cached_body_hash_mismatch` | high | bd-nw0v3.3 (SRR6.16) |
 | `mesh_secret_export_denied` | high | (TBD) |
 
 #### Mesh foreground sync (3)
