@@ -4,7 +4,7 @@
 //! decay sweeps, curation reviews, and health checks. It operates in
 //! CLI-first mode without requiring a daemon.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -69,6 +69,10 @@ const GRAPH_SNAPSHOT_PRUNE_DEFAULT_LIMIT: u32 = 10_000;
 const GRAPH_SNAPSHOT_PRUNE_RETENTION_DAYS: i64 = 7;
 const GRAPH_SNAPSHOT_PRUNE_LOCK_TTL_SECS: u64 = 300;
 const GRAPH_SNAPSHOT_PRUNE_LOCK_REASON: &str = "graph snapshot prune";
+const CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES: usize = 64;
+const CONSOLIDATION_SIEVE_ALGORITHM: &str = "sieve_streaming_greedy_v1";
+const CONSOLIDATION_SIEVE_GROUP_BONUS: f64 = 1.0;
+const CONSOLIDATION_SIEVE_LEVEL_KIND_BONUS: f64 = 0.25;
 
 static MAINTENANCE_JOB_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 
@@ -4012,7 +4016,8 @@ impl ManualRunner {
             }
         };
 
-        let plan = plan_consolidation_candidates(&opened.workspace_id, &memories);
+        let selection =
+            plan_consolidation_candidates(&opened.workspace_id, &memories, self.options.item_limit);
         budget.record(ResourceType::Items, usize_to_u64(memories.len()));
         budget.record(ResourceType::TimeMs, 0);
 
@@ -4023,7 +4028,7 @@ impl ManualRunner {
                 Some("Budget exceeded before durable consolidation candidates".to_owned()),
                 Some(consolidation_pass_details(
                     &opened,
-                    &plan,
+                    &selection,
                     0,
                     0,
                     self.options.dry_run,
@@ -4035,17 +4040,17 @@ impl ManualRunner {
         if self.options.dry_run {
             return (
                 RunOutcome::Success,
-                Some(usize_to_u64(plan.len())),
+                Some(usize_to_u64(selection.candidates.len())),
                 None,
                 Some(consolidation_pass_details(
-                    &opened, &plan, 0, 0, true, false,
+                    &opened, &selection, 0, 0, true, false,
                 )),
             );
         }
 
         let mut inserted = 0_u64;
         let mut already_pending = 0_u64;
-        for candidate in &plan {
+        for candidate in &selection.candidates {
             let existing = match opened.connection.list_curation_candidates(
                 &opened.workspace_id,
                 Some("consolidation"),
@@ -4108,11 +4113,11 @@ impl ManualRunner {
 
         (
             RunOutcome::Success,
-            Some(usize_to_u64(plan.len())),
+            Some(usize_to_u64(selection.candidates.len())),
             None,
             Some(consolidation_pass_details(
                 &opened,
-                &plan,
+                &selection,
                 inserted,
                 already_pending,
                 false,
@@ -5176,9 +5181,21 @@ struct ConsolidationCandidatePlan {
     candidate_id: String,
     source_memory_id: String,
     target_memory_id: String,
+    level: String,
+    kind: String,
+    normalized_content: String,
+    objective_score: f64,
     proposed_content: String,
     proposed_confidence: f32,
     reason: String,
+}
+
+#[derive(Clone, Debug)]
+struct ConsolidationCandidateSelection {
+    candidates: Vec<ConsolidationCandidatePlan>,
+    considered_candidates: usize,
+    max_candidates: usize,
+    objective_value: f64,
 }
 
 fn steward_job_failure(
@@ -5251,7 +5268,8 @@ fn normalize_memory_content_for_consolidation(content: &str) -> String {
 fn plan_consolidation_candidates(
     workspace_id: &str,
     memories: &[StoredMemory],
-) -> Vec<ConsolidationCandidatePlan> {
+    item_limit: Option<u64>,
+) -> ConsolidationCandidateSelection {
     let mut grouped = BTreeMap::<(String, String, String), Vec<&StoredMemory>>::new();
     for memory in memories {
         let normalized = normalize_memory_content_for_consolidation(&memory.content);
@@ -5264,31 +5282,160 @@ fn plan_consolidation_candidates(
             .push(memory);
     }
 
-    let mut plans = Vec::new();
-    for ((level, kind, normalized), group) in grouped {
+    let mut candidates = Vec::new();
+    for ((level, kind, normalized), mut group) in grouped {
         if group.len() < 2 {
             continue;
         }
+        group.sort_by(|left, right| compare_consolidation_memory_preference(*left, *right));
         let Some(source) = group.first().copied() else {
             continue;
         };
         for target in group.iter().skip(1) {
             let candidate_id =
                 stable_consolidation_candidate_id(workspace_id, &source.id, &target.id);
-            plans.push(ConsolidationCandidatePlan {
+            let objective_score = consolidation_candidate_objective(source, target, group.len());
+            candidates.push(ConsolidationCandidatePlan {
                 candidate_id,
                 source_memory_id: source.id.clone(),
                 target_memory_id: target.id.clone(),
+                level: level.clone(),
+                kind: kind.clone(),
+                normalized_content: normalized.clone(),
+                objective_score,
                 proposed_content: source.content.clone(),
                 proposed_confidence: source.confidence.max(target.confidence),
                 reason: format!(
-                    "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {}.",
+                    "Duplicate {level}/{kind} memory content normalized to {:?}; consolidate {} into {} via {CONSOLIDATION_SIEVE_ALGORITHM}.",
                     normalized, target.id, source.id
                 ),
             });
         }
     }
-    plans
+    candidates.sort_by(compare_consolidation_candidate_plan);
+    sieve_stream_consolidation_candidates(
+        candidates,
+        consolidation_sieve_candidate_limit(item_limit),
+    )
+}
+
+fn consolidation_sieve_candidate_limit(item_limit: Option<u64>) -> usize {
+    item_limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .filter(|limit| *limit > 0)
+        .unwrap_or(CONSOLIDATION_SIEVE_DEFAULT_MAX_CANDIDATES)
+}
+
+fn compare_consolidation_memory_preference(left: &StoredMemory, right: &StoredMemory) -> Ordering {
+    right
+        .confidence
+        .total_cmp(&left.confidence)
+        .then_with(|| right.utility.total_cmp(&left.utility))
+        .then_with(|| right.importance.total_cmp(&left.importance))
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn consolidation_candidate_objective(
+    source: &StoredMemory,
+    target: &StoredMemory,
+    duplicate_group_size: usize,
+) -> f64 {
+    let confidence_gain = f64::from((source.confidence - target.confidence).max(0.0));
+    let utility_gain = f64::from((source.utility - target.utility).max(0.0));
+    let importance_gain = f64::from((source.importance - target.importance).max(0.0));
+    let group_pressure = (duplicate_group_size.saturating_sub(1) as f64).ln_1p();
+
+    1.0 + group_pressure + confidence_gain + (utility_gain * 0.25) + (importance_gain * 0.25)
+}
+
+fn compare_consolidation_candidate_plan(
+    left: &ConsolidationCandidatePlan,
+    right: &ConsolidationCandidatePlan,
+) -> Ordering {
+    right
+        .objective_score
+        .total_cmp(&left.objective_score)
+        .then_with(|| left.level.cmp(&right.level))
+        .then_with(|| left.kind.cmp(&right.kind))
+        .then_with(|| left.normalized_content.cmp(&right.normalized_content))
+        .then_with(|| left.source_memory_id.cmp(&right.source_memory_id))
+        .then_with(|| left.target_memory_id.cmp(&right.target_memory_id))
+}
+
+fn sieve_stream_consolidation_candidates(
+    candidates: Vec<ConsolidationCandidatePlan>,
+    max_candidates: usize,
+) -> ConsolidationCandidateSelection {
+    let considered_candidates = candidates.len();
+    if max_candidates == 0 || candidates.is_empty() {
+        return ConsolidationCandidateSelection {
+            candidates: Vec::new(),
+            considered_candidates,
+            max_candidates,
+            objective_value: 0.0,
+        };
+    }
+
+    let mut selected = Vec::<ConsolidationCandidatePlan>::new();
+    for candidate in candidates {
+        if selected.len() < max_candidates {
+            selected.push(candidate);
+            continue;
+        }
+
+        let current_objective = consolidation_selection_objective(&selected);
+        let mut best_replacement = None;
+        let mut best_objective = current_objective;
+        for index in 0..selected.len() {
+            let mut replacement = selected.clone();
+            replacement[index] = candidate.clone();
+            let replacement_objective = consolidation_selection_objective(&replacement);
+            if replacement_objective > best_objective {
+                best_objective = replacement_objective;
+                best_replacement = Some(index);
+            }
+        }
+
+        if let Some(index) = best_replacement {
+            selected[index] = candidate;
+        }
+    }
+
+    selected.sort_by(compare_consolidation_candidate_plan);
+    let objective_value = consolidation_selection_objective(&selected);
+    ConsolidationCandidateSelection {
+        candidates: selected,
+        considered_candidates,
+        max_candidates,
+        objective_value,
+    }
+}
+
+fn consolidation_selection_objective(candidates: &[ConsolidationCandidatePlan]) -> f64 {
+    let base_score = candidates
+        .iter()
+        .map(|candidate| candidate.objective_score)
+        .sum::<f64>();
+    let distinct_groups = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.level.as_str(),
+                candidate.kind.as_str(),
+                candidate.normalized_content.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>()
+        .len() as f64;
+    let distinct_level_kinds = candidates
+        .iter()
+        .map(|candidate| (candidate.level.as_str(), candidate.kind.as_str()))
+        .collect::<BTreeSet<_>>()
+        .len() as f64;
+
+    base_score
+        + (distinct_groups * CONSOLIDATION_SIEVE_GROUP_BONUS)
+        + (distinct_level_kinds * CONSOLIDATION_SIEVE_LEVEL_KIND_BONUS)
 }
 
 fn stable_consolidation_candidate_id(
@@ -5314,7 +5461,7 @@ fn stable_consolidation_candidate_id(
 
 fn consolidation_pass_details(
     opened: &OpenedWorkspaceDatabase,
-    plan: &[ConsolidationCandidatePlan],
+    selection: &ConsolidationCandidateSelection,
     inserted: u64,
     already_pending: u64,
     dry_run: bool,
@@ -5325,10 +5472,17 @@ fn consolidation_pass_details(
         "jobType": JobType::ConsolidationPass.as_str(),
         "workspaceId": opened.workspace_id,
         "databasePath": opened.database_path.display().to_string(),
-        "plannedCandidates": plan.len(),
+        "plannedCandidates": selection.candidates.len(),
+        "selector": {
+            "algorithm": CONSOLIDATION_SIEVE_ALGORITHM,
+            "consideredCandidates": selection.considered_candidates,
+            "selectedCandidates": selection.candidates.len(),
+            "maxCandidates": selection.max_candidates,
+            "objectiveValue": selection.objective_value,
+        },
         "insertedCandidates": inserted,
         "alreadyPendingCandidates": already_pending,
-        "candidateIds": plan
+        "candidateIds": selection.candidates
             .iter()
             .map(|candidate| candidate.candidate_id.as_str())
             .collect::<Vec<_>>(),
@@ -6137,7 +6291,7 @@ mod tests {
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex as StdMutex};
     use tracing::subscriber::with_default;
     use tracing_subscriber::Layer;
@@ -6156,6 +6310,211 @@ mod tests {
         } else {
             Err(format!("{ctx}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    fn stored_memory_for_consolidation(
+        id: &str,
+        level: &str,
+        kind: &str,
+        content: &str,
+        confidence: f32,
+        utility: f32,
+        importance: f32,
+    ) -> StoredMemory {
+        StoredMemory {
+            id: id.to_owned(),
+            workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+            level: level.to_owned(),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence,
+            utility,
+            importance,
+            provenance_uri: None,
+            trust_class: "cass_evidence".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "none".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-21T00:00:00Z".to_owned(),
+            updated_at: "2026-05-21T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    #[test]
+    fn consolidation_planner_uses_best_duplicate_as_source() -> TestResult {
+        let memories = vec![
+            stored_memory_for_consolidation(
+                "mem_low",
+                "procedural",
+                "rule",
+                "Run cargo fmt",
+                0.45,
+                0.30,
+                0.20,
+            ),
+            stored_memory_for_consolidation(
+                "mem_high",
+                "procedural",
+                "rule",
+                " run   cargo   fmt ",
+                0.91,
+                0.80,
+                0.70,
+            ),
+            stored_memory_for_consolidation(
+                "mem_other",
+                "procedural",
+                "rule",
+                "Run cargo clippy",
+                0.88,
+                0.80,
+                0.70,
+            ),
+        ];
+
+        let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, None);
+
+        ensure(
+            selection.considered_candidates,
+            1,
+            "considered duplicate pair",
+        )?;
+        ensure(selection.candidates.len(), 1, "selected duplicate pair")?;
+        let candidate = selection
+            .candidates
+            .first()
+            .ok_or_else(|| "missing consolidation candidate".to_owned())?;
+        ensure(
+            candidate.source_memory_id.as_str(),
+            "mem_high",
+            "highest-quality duplicate source",
+        )?;
+        ensure(
+            candidate.target_memory_id.as_str(),
+            "mem_low",
+            "lower-quality duplicate target",
+        )?;
+        ensure(
+            candidate.normalized_content.as_str(),
+            "run cargo fmt",
+            "normalized content key",
+        )?;
+        ensure(
+            candidate.reason.contains(CONSOLIDATION_SIEVE_ALGORITHM),
+            true,
+            "reason mentions selector",
+        )
+    }
+
+    #[test]
+    fn consolidation_sieve_limits_candidates_with_diversity_bonus() -> TestResult {
+        let memories = vec![
+            stored_memory_for_consolidation(
+                "mem_rule_a",
+                "procedural",
+                "rule",
+                "Repeatable build rule",
+                0.95,
+                0.95,
+                0.95,
+            ),
+            stored_memory_for_consolidation(
+                "mem_rule_b",
+                "procedural",
+                "rule",
+                "repeatable   build rule",
+                0.20,
+                0.10,
+                0.10,
+            ),
+            stored_memory_for_consolidation(
+                "mem_rule_c",
+                "procedural",
+                "rule",
+                "Repeatable build rule",
+                0.19,
+                0.10,
+                0.10,
+            ),
+            stored_memory_for_consolidation(
+                "mem_fact_a",
+                "evidence",
+                "fact",
+                "Worker preflight failed",
+                0.80,
+                0.60,
+                0.60,
+            ),
+            stored_memory_for_consolidation(
+                "mem_fact_b",
+                "evidence",
+                "fact",
+                "worker preflight failed",
+                0.30,
+                0.20,
+                0.20,
+            ),
+            stored_memory_for_consolidation(
+                "mem_note_a",
+                "decision",
+                "note",
+                "Keep static proof",
+                0.60,
+                0.40,
+                0.30,
+            ),
+            stored_memory_for_consolidation(
+                "mem_note_b",
+                "decision",
+                "note",
+                "keep static proof",
+                0.58,
+                0.39,
+                0.29,
+            ),
+        ];
+
+        let selection = plan_consolidation_candidates(SCORE_WORKSPACE_ID, &memories, Some(2));
+
+        ensure(
+            selection.considered_candidates,
+            4,
+            "all duplicate candidates considered",
+        )?;
+        ensure(
+            selection.max_candidates,
+            2,
+            "item limit becomes selector bound",
+        )?;
+        ensure(selection.candidates.len(), 2, "selector applies bound")?;
+        ensure(
+            selection.objective_value > 0.0,
+            true,
+            "selector objective is recorded",
+        )?;
+
+        let selected_targets = selection
+            .candidates
+            .iter()
+            .map(|candidate| candidate.target_memory_id.as_str())
+            .collect::<BTreeSet<_>>();
+        ensure(
+            selected_targets.contains("mem_rule_b") || selected_targets.contains("mem_rule_c"),
+            true,
+            "highest-pressure duplicate group selected",
+        )?;
+        ensure(
+            selected_targets.contains("mem_fact_b"),
+            true,
+            "diverse evidence group selected",
+        )
     }
 
     fn cusum_observed_at(offset_seconds: i64) -> Result<DateTime<Utc>, String> {
