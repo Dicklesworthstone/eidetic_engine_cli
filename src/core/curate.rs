@@ -73,6 +73,10 @@ const PEER_PROMOTION_BLOCK_BELOW_TRUST_CAP: &str = "peer_evidence_only_below_tru
 const PEER_PROMOTION_BLOCK_CONTRADICTING: &str = "contradicting_peer_evidence";
 const PEER_PROMOTION_BLOCK_OUTCOME_PENDING: &str = "peer_outcome_feedback_pending";
 const PEER_PROMOTION_BLOCK_HUMAN_REVIEW_RULE: &str = "human_review_required_for_rule_kind";
+const MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
+const MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
+const MI_DEDUP_MAX_MEMORIES: usize = 400;
+const MI_DEDUP_CANDIDATE_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
 /// Options for listing curation candidates through `ee curate candidates`.
 #[derive(Clone, Debug)]
@@ -1523,6 +1527,15 @@ pub fn list_curation_candidates(
             message: format!("Failed to list curation candidates: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
+    let mut stored = stored;
+    if should_synthesize_mi_dedup_candidates(candidate_type.as_deref(), status.as_deref()) {
+        append_mi_dedup_candidates(
+            &connection,
+            &prepared.workspace_id,
+            target_memory_id.as_deref(),
+            &mut stored,
+        )?;
+    }
     let now = Utc::now().to_rfc3339();
     let sort_mode = parse_curate_candidate_sort_mode(options.sort)?;
     let mut stored = if status.as_deref() == Some(CandidateStatus::Pending.as_str()) {
@@ -2211,6 +2224,341 @@ fn deterministic_curate_id(parts: &[&str]) -> String {
     bytes.copy_from_slice(&hash.as_bytes()[..16]);
     let candidate = CandidateId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string();
     format!("curate_{}", candidate.trim_start_matches("cand_"))
+}
+
+fn should_synthesize_mi_dedup_candidates(
+    candidate_type: Option<&str>,
+    status: Option<&str>,
+) -> bool {
+    candidate_type == Some(CandidateType::ParaphraseDedupProposal.as_str())
+        && status.is_none_or(|status| status == CandidateStatus::Pending.as_str())
+}
+
+fn append_mi_dedup_candidates(
+    connection: &DbConnection,
+    workspace_id: &str,
+    target_memory_id: Option<&str>,
+    stored: &mut Vec<StoredCurationCandidate>,
+) -> Result<(), DomainError> {
+    let memories = connection
+        .list_memories(workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load memories for mutual-information dedup: {error}"),
+            repair: Some("ee memory list --json".to_owned()),
+        })?;
+    let memories = memories
+        .into_iter()
+        .take(MI_DEDUP_MAX_MEMORIES)
+        .collect::<Vec<_>>();
+    let existing_ids = stored
+        .iter()
+        .map(|candidate| candidate.id.clone())
+        .collect::<BTreeSet<_>>();
+    for proposal in mi_dedup_proposals_from_memories(workspace_id, &memories) {
+        if existing_ids.contains(&proposal.id) {
+            continue;
+        }
+        if target_memory_id.is_some_and(|target| {
+            proposal.target_memory_id != target
+                && !proposal
+                    .source_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(',')
+                    .any(|id| id == target)
+        }) {
+            continue;
+        }
+        stored.push(proposal);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MiDedupPair {
+    left_memory_id: String,
+    right_memory_id: String,
+    cosine_similarity: f64,
+    mutual_information: f64,
+    normalized_mi: f64,
+}
+
+fn mi_dedup_proposals_from_memories(
+    workspace_id: &str,
+    memories: &[StoredMemory],
+) -> Vec<StoredCurationCandidate> {
+    let mut adjacency: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut pair_by_key: BTreeMap<(String, String), MiDedupPair> = BTreeMap::new();
+    let mut memory_by_id: BTreeMap<String, &StoredMemory> = BTreeMap::new();
+    for memory in memories {
+        memory_by_id.insert(memory.id.clone(), memory);
+    }
+
+    for (left_index, left) in memories.iter().enumerate() {
+        for right in memories.iter().skip(left_index + 1) {
+            let Some(pair) = mi_dedup_pair(left, right) else {
+                continue;
+            };
+            adjacency
+                .entry(pair.left_memory_id.clone())
+                .or_default()
+                .insert(pair.right_memory_id.clone());
+            adjacency
+                .entry(pair.right_memory_id.clone())
+                .or_default()
+                .insert(pair.left_memory_id.clone());
+            let key = (
+                pair.left_memory_id
+                    .clone()
+                    .min(pair.right_memory_id.clone()),
+                pair.left_memory_id
+                    .clone()
+                    .max(pair.right_memory_id.clone()),
+            );
+            pair_by_key.insert(key, pair);
+        }
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut proposals = Vec::new();
+    for seed in adjacency.keys() {
+        if visited.contains(seed) {
+            continue;
+        }
+        let mut stack = vec![seed.clone()];
+        let mut member_ids = BTreeSet::new();
+        while let Some(memory_id) = stack.pop() {
+            if !visited.insert(memory_id.clone()) {
+                continue;
+            }
+            member_ids.insert(memory_id.clone());
+            if let Some(neighbors) = adjacency.get(&memory_id) {
+                for neighbor in neighbors.iter().rev() {
+                    if !visited.contains(neighbor) {
+                        stack.push(neighbor.clone());
+                    }
+                }
+            }
+        }
+        if member_ids.len() < 2 {
+            continue;
+        }
+        if let Some(candidate) =
+            mi_dedup_candidate_from_cluster(workspace_id, &member_ids, &memory_by_id, &pair_by_key)
+        {
+            proposals.push(candidate);
+        }
+    }
+    proposals.sort_by(|left, right| {
+        right
+            .confidence
+            .partial_cmp(&left.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    proposals
+}
+
+fn mi_dedup_candidate_from_cluster(
+    workspace_id: &str,
+    member_ids: &BTreeSet<String>,
+    memory_by_id: &BTreeMap<String, &StoredMemory>,
+    pair_by_key: &BTreeMap<(String, String), MiDedupPair>,
+) -> Option<StoredCurationCandidate> {
+    let ids = member_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let target_memory_id = ids.first()?.to_string();
+    let canonical_memory = memory_by_id.get(&target_memory_id)?;
+    let mut best_pair: Option<&MiDedupPair> = None;
+    for (left_index, left) in ids.iter().enumerate() {
+        for right in ids.iter().skip(left_index + 1) {
+            let key = ((*left).to_owned(), (*right).to_owned());
+            let Some(pair) = pair_by_key.get(&key) else {
+                continue;
+            };
+            if best_pair.is_none_or(|best| pair.normalized_mi > best.normalized_mi) {
+                best_pair = Some(pair);
+            }
+        }
+    }
+    let best_pair = best_pair?;
+    let member_csv = ids.join(",");
+    let id = deterministic_curate_id(&[
+        "mi_dedup",
+        workspace_id,
+        CandidateType::ParaphraseDedupProposal.as_str(),
+        &member_csv,
+    ]);
+    let recommendation = mi_dedup_recommendation(best_pair.normalized_mi, ids.len());
+    let proposed_content = Some(canonical_memory.content.clone());
+    let reason = format!(
+        "Paraphrase dedup proposal: mutual_information={:.3}, normalized_mi={:.3}, cosine_similarity={:.3}, recommendation={recommendation}; members={}.",
+        best_pair.mutual_information,
+        best_pair.normalized_mi,
+        best_pair.cosine_similarity,
+        ids.len()
+    );
+
+    Some(StoredCurationCandidate {
+        id,
+        workspace_id: workspace_id.to_owned(),
+        candidate_type: CandidateType::ParaphraseDedupProposal.as_str().to_owned(),
+        target_memory_id,
+        proposed_content,
+        proposed_confidence: Some(best_pair.normalized_mi as f32),
+        proposed_trust_class: Some("derived".to_owned()),
+        source_type: CandidateSource::RuleEngine.as_str().to_owned(),
+        source_id: Some(member_csv),
+        reason,
+        confidence: best_pair.normalized_mi as f32,
+        status: CandidateStatus::Pending.as_str().to_owned(),
+        created_at: MI_DEDUP_CANDIDATE_CREATED_AT.to_owned(),
+        reviewed_at: None,
+        reviewed_by: None,
+        applied_at: None,
+        ttl_expires_at: None,
+        review_state: ReviewQueueState::New.as_str().to_owned(),
+        snoozed_until: None,
+        merged_into_candidate_id: None,
+        state_entered_at: Some(MI_DEDUP_CANDIDATE_CREATED_AT.to_owned()),
+        last_action_at: Some(MI_DEDUP_CANDIDATE_CREATED_AT.to_owned()),
+        ttl_policy_id: Some(
+            default_curation_ttl_policy_id_for_review_state(ReviewQueueState::New.as_str())
+                .to_owned(),
+        ),
+    })
+}
+
+fn mi_dedup_recommendation(normalized_mi: f64, member_count: usize) -> &'static str {
+    if normalized_mi >= 0.98 {
+        "suppress_duplicates"
+    } else if member_count > 2 || normalized_mi >= 0.85 {
+        "merge"
+    } else {
+        "keep_canonical"
+    }
+}
+
+fn mi_dedup_pair(left: &StoredMemory, right: &StoredMemory) -> Option<MiDedupPair> {
+    let metrics = mi_dedup_metrics_for_contents(&left.content, &right.content)?;
+    if metrics.cosine_similarity < MI_DEDUP_MIN_COSINE_SIMILARITY
+        || metrics.normalized_mi < MI_DEDUP_MIN_NORMALIZED_MI
+    {
+        return None;
+    }
+    Some(MiDedupPair {
+        left_memory_id: left.id.clone(),
+        right_memory_id: right.id.clone(),
+        cosine_similarity: metrics.cosine_similarity,
+        mutual_information: metrics.mutual_information,
+        normalized_mi: metrics.normalized_mi,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MiDedupMetrics {
+    cosine_similarity: f64,
+    mutual_information: f64,
+    normalized_mi: f64,
+}
+
+fn mi_dedup_metrics_for_contents(left: &str, right: &str) -> Option<MiDedupMetrics> {
+    let left_counts = mi_token_counts(left);
+    let right_counts = mi_token_counts(right);
+    if left_counts.is_empty() || right_counts.is_empty() {
+        return None;
+    }
+    let cosine_similarity = token_cosine_similarity(&left_counts, &right_counts);
+    let mutual_information = token_mutual_information(&left_counts, &right_counts);
+    let min_entropy = token_entropy(&left_counts).min(token_entropy(&right_counts));
+    let normalized_mi = if min_entropy > f64::EPSILON {
+        (mutual_information / min_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Some(MiDedupMetrics {
+        cosine_similarity,
+        mutual_information,
+        normalized_mi,
+    })
+}
+
+fn mi_token_counts(content: &str) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::new();
+    let mut token = String::new();
+    for ch in content.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else if !token.is_empty() {
+            *counts.entry(std::mem::take(&mut token)).or_insert(0) += 1;
+        }
+    }
+    if !token.is_empty() {
+        *counts.entry(token).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn token_cosine_similarity(
+    left_counts: &BTreeMap<String, u32>,
+    right_counts: &BTreeMap<String, u32>,
+) -> f64 {
+    let dot = kahan_sum(left_counts.iter().filter_map(|(token, left_count)| {
+        right_counts
+            .get(token)
+            .map(|right_count| f64::from(*left_count) * f64::from(*right_count))
+    }));
+    let left_norm = kahan_sum(
+        left_counts
+            .values()
+            .map(|count| f64::from(*count) * f64::from(*count)),
+    )
+    .sqrt();
+    let right_norm = kahan_sum(
+        right_counts
+            .values()
+            .map(|count| f64::from(*count) * f64::from(*count)),
+    )
+    .sqrt();
+    if left_norm <= f64::EPSILON || right_norm <= f64::EPSILON {
+        0.0
+    } else {
+        (dot / (left_norm * right_norm)).clamp(0.0, 1.0)
+    }
+}
+
+fn token_mutual_information(
+    left_counts: &BTreeMap<String, u32>,
+    right_counts: &BTreeMap<String, u32>,
+) -> f64 {
+    let left_total = f64::from(left_counts.values().copied().sum::<u32>());
+    let right_total = f64::from(right_counts.values().copied().sum::<u32>());
+    kahan_sum(left_counts.iter().filter_map(|(token, left_count)| {
+        let right_count = right_counts.get(token)?;
+        let px = f64::from(*left_count) / left_total;
+        let py = f64::from(*right_count) / right_total;
+        let pxy = px.min(py);
+        (pxy > 0.0 && px > 0.0 && py > 0.0).then(|| pxy * (pxy / (px * py)).ln())
+    }))
+}
+
+fn token_entropy(counts: &BTreeMap<String, u32>) -> f64 {
+    let total = f64::from(counts.values().copied().sum::<u32>());
+    kahan_sum(counts.values().map(|count| {
+        let probability = f64::from(*count) / total;
+        -probability * probability.ln()
+    }))
+}
+
+fn kahan_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for value in values {
+        let adjusted = value - compensation;
+        let next = sum + adjusted;
+        compensation = (next - sum) - adjusted;
+        sum = next;
+    }
+    sum
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3902,6 +4250,7 @@ fn evaluate_candidate_for_apply(
         CandidateType::Consolidate
         | CandidateType::Supersede
         | CandidateType::Merge
+        | CandidateType::ParaphraseDedupProposal
         | CandidateType::Split => {
             let proposed_content = stored.proposed_content.as_deref().map(str::trim);
             match proposed_content.filter(|value| !value.is_empty()) {
@@ -6476,6 +6825,7 @@ impl CandidateEvidenceFacts {
 fn kind_for_candidate_type(candidate_type: &str) -> String {
     match candidate_type {
         "anti_pattern_proposal" => "anti_pattern_proposal".to_owned(),
+        "paraphrase_dedup_proposal" => "paraphrase_dedup_proposal".to_owned(),
         "rule" => "procedural_rule_proposal".to_owned(),
         "procedure" => "procedure_proposal".to_owned(),
         other => format!("{other}_proposal"),
@@ -6509,6 +6859,10 @@ fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
         && stored.source_type == CandidateSource::FeedbackEvent.as_str()
     {
         "auto_propose_from_cluster".to_owned()
+    } else if stored.candidate_type == CandidateType::ParaphraseDedupProposal.as_str()
+        && stored.source_type == CandidateSource::RuleEngine.as_str()
+    {
+        "mutual_information_dedup".to_owned()
     } else if stored.source_type == CandidateSource::RuleEngine.as_str() {
         "playbook_rule_extraction".to_owned()
     } else if stored.source_type == CandidateSource::AgentInference.as_str()
@@ -6527,6 +6881,7 @@ fn proposed_by_for_candidate(proposal_source: &str) -> String {
     match proposal_source {
         "auto_propose_from_cluster" => "auto_proposer:v1".to_owned(),
         "playbook_rule_extraction" => "rule_engine:v1".to_owned(),
+        "mutual_information_dedup" => "mi_dedup:v1".to_owned(),
         "session_review_proposal" => "review_session:v1".to_owned(),
         "peer_evidence" => "peer_evidence:v1".to_owned(),
         "human_request" => "human".to_owned(),
@@ -6541,7 +6896,9 @@ fn effective_candidate_trust_class(
     if peer_only_candidate(stored) {
         let entries = peer_evidence_entries_from_source(stored.source_id.as_deref());
         Some(peer_evidence_trust_cap(&entries).to_owned())
-    } else if proposal_source == "auto_propose_from_cluster" {
+    } else if proposal_source == "auto_propose_from_cluster"
+        || proposal_source == "mutual_information_dedup"
+    {
         Some("derived".to_owned())
     } else {
         stored.proposed_trust_class.clone()
@@ -6763,6 +7120,10 @@ fn proposed_tags_for_candidate(
     } else if stored.candidate_type == CandidateType::Procedure.as_str() {
         tags.insert("procedural".to_owned());
         tags.insert("procedure".to_owned());
+    } else if stored.candidate_type == CandidateType::ParaphraseDedupProposal.as_str() {
+        tags.insert("dedup".to_owned());
+        tags.insert("paraphrase".to_owned());
+        tags.insert("mutual-information".to_owned());
     }
     if !member_memory_ids.is_empty() {
         tags.insert("cluster".to_owned());
@@ -8322,6 +8683,277 @@ mod tests {
         assert_eq!(report.candidates[0].id, dup_newer);
         assert_eq!(report.candidates[1].id, dup_older);
         assert_eq!(report.candidates[2].id, other_group);
+        Ok(())
+    }
+
+    #[test]
+    fn mi_dedup_scores_identical_content_at_entropy_limit() -> TestResult {
+        let content = "run cargo fmt before release cargo fmt";
+        let metrics = super::mi_dedup_metrics_for_contents(content, content)
+            .ok_or_else(|| "identical non-empty content must score".to_owned())?;
+        let entropy = super::token_entropy(&super::mi_token_counts(content));
+
+        assert!((metrics.cosine_similarity - 1.0).abs() < f64::EPSILON);
+        assert!((metrics.mutual_information - entropy).abs() < 1.0e-9);
+        assert!((metrics.normalized_mi - 1.0).abs() < f64::EPSILON);
+        Ok(())
+    }
+
+    #[test]
+    fn mi_dedup_rejects_empty_and_unrelated_inputs() -> TestResult {
+        assert!(super::mi_dedup_metrics_for_contents("", "cargo fmt").is_none());
+
+        let metrics = super::mi_dedup_metrics_for_contents(
+            "cargo fmt release",
+            "frankensqlite graph pagerank",
+        )
+        .ok_or_else(|| "non-empty unrelated content still has token metrics".to_owned())?;
+        assert!(metrics.cosine_similarity < super::MI_DEDUP_MIN_COSINE_SIMILARITY);
+        assert!(metrics.normalized_mi < super::MI_DEDUP_MIN_NORMALIZED_MI);
+        Ok(())
+    }
+
+    #[test]
+    fn mi_dedup_detects_reordered_paraphrase_pair() -> TestResult {
+        let metrics = super::mi_dedup_metrics_for_contents(
+            "run cargo fmt before release cargo fmt",
+            "before release run cargo fmt cargo fmt",
+        )
+        .ok_or_else(|| "reordered paraphrase content must score".to_owned())?;
+
+        assert!(metrics.cosine_similarity >= super::MI_DEDUP_MIN_COSINE_SIMILARITY);
+        assert!(metrics.normalized_mi >= super::MI_DEDUP_MIN_NORMALIZED_MI);
+        assert_eq!(
+            super::mi_dedup_recommendation(metrics.normalized_mi, 2),
+            "suppress_duplicates"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_synthesizes_mi_dedup_clusters() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_ids = [
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_001)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_002)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_003)).to_string(),
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_004)).to_string(),
+        ];
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("mi-dedup-clusters".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for (memory_id, content) in [
+            (&memory_ids[0], "run cargo fmt before release cargo fmt"),
+            (&memory_ids[1], "before release run cargo fmt cargo fmt"),
+            (&memory_ids[2], "sqlmodel storage migration check schema"),
+            (&memory_ids[3], "schema migration check sqlmodel storage"),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        let second = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("paraphrase_dedup_proposal"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "confidence",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(
+            report.filter.candidate_type.as_deref(),
+            Some("paraphrase_dedup_proposal")
+        );
+        assert_eq!(report.total_count, 2);
+        assert_eq!(report.returned_count, 2);
+        assert_eq!(
+            report
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>(),
+            second
+                .candidates
+                .iter()
+                .map(|candidate| &candidate.id)
+                .collect::<Vec<_>>()
+        );
+        for candidate in &report.candidates {
+            assert_eq!(candidate.candidate_type, "paraphrase_dedup_proposal");
+            assert_eq!(candidate.kind, "paraphrase_dedup_proposal");
+            assert_eq!(candidate.proposal_source, "mutual_information_dedup");
+            assert_eq!(candidate.source.source_type, "rule_engine");
+            assert_eq!(candidate.member_memory_ids.len(), 2);
+            assert_eq!(candidate.evidence_summary.support_count, 2);
+            assert!(candidate.reason.contains("mutual_information="));
+            assert!(
+                candidate
+                    .reason
+                    .contains("recommendation=suppress_duplicates")
+            );
+            assert!(candidate.proposed_tags.contains(&"dedup".to_owned()));
+            assert!(
+                candidate
+                    .proposed_tags
+                    .contains(&"mutual-information".to_owned())
+            );
+        }
+        let member_sets = report
+            .candidates
+            .iter()
+            .map(|candidate| candidate.member_memory_ids.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(member_sets.contains(&vec![memory_ids[0].clone(), memory_ids[1].clone()]));
+        assert!(member_sets.contains(&vec![memory_ids[2].clone(), memory_ids[3].clone()]));
+        Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_mi_dedup_respects_target_filter_and_empty_workspace() -> TestResult
+    {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_one = MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_101)).to_string();
+        let memory_two = MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_102)).to_string();
+        let absent_memory = MemoryId::from_uuid(uuid::Uuid::from_u128(0x8_103)).to_string();
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("mi-dedup-target-filter".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let empty_report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(empty_report.returned_count, 0);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        for memory_id in [&memory_one, &memory_two] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: "run cargo fmt before release cargo fmt".to_owned(),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        connection.close().map_err(|error| error.to_string())?;
+
+        let included = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: Some(&memory_two),
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        let excluded = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: Some("dedup"),
+            status: Some("pending"),
+            target_memory_id: Some(&absent_memory),
+            limit: 10,
+            offset: 0,
+            sort: "review_state",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(included.returned_count, 1);
+        assert_eq!(
+            included.candidates[0].member_memory_ids,
+            vec![memory_one, memory_two]
+        );
+        assert_eq!(excluded.returned_count, 0);
         Ok(())
     }
 

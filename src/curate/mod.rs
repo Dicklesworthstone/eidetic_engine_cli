@@ -373,6 +373,8 @@ pub enum CandidateType {
     Tombstone,
     /// Combine two memories into one.
     Merge,
+    /// Propose a paraphrase/near-duplicate consolidation from mutual information.
+    ParaphraseDedupProposal,
     /// Split a memory into multiple more specific ones.
     Split,
     /// Withdraw a previous assertion due to contradiction.
@@ -395,6 +397,7 @@ impl CandidateType {
             Self::Supersede => "supersede",
             Self::Tombstone => "tombstone",
             Self::Merge => "merge",
+            Self::ParaphraseDedupProposal => "paraphrase_dedup_proposal",
             Self::Split => "split",
             Self::Retract => "retract",
             Self::Rule => "rule",
@@ -404,7 +407,7 @@ impl CandidateType {
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 11] {
+    pub const fn all() -> [Self; 12] {
         [
             Self::Consolidate,
             Self::Promote,
@@ -412,6 +415,7 @@ impl CandidateType {
             Self::Supersede,
             Self::Tombstone,
             Self::Merge,
+            Self::ParaphraseDedupProposal,
             Self::Split,
             Self::Retract,
             Self::Rule,
@@ -443,7 +447,7 @@ impl fmt::Display for ParseCandidateTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, split, retract, rule, anti_pattern_proposal, procedure",
+            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, paraphrase_dedup_proposal, split, retract, rule, anti_pattern_proposal, procedure",
             self.input
         )
     }
@@ -462,6 +466,13 @@ impl FromStr for CandidateType {
             "supersede" => Ok(Self::Supersede),
             "tombstone" => Ok(Self::Tombstone),
             "merge" => Ok(Self::Merge),
+            "paraphrase_dedup_proposal"
+            | "paraphrase-dedup-proposal"
+            | "paraphrase_dedup"
+            | "paraphrase-dedup"
+            | "mi_dedup"
+            | "mi-dedup"
+            | "dedup" => Ok(Self::ParaphraseDedupProposal),
             "split" => Ok(Self::Split),
             "retract" => Ok(Self::Retract),
             "rule" => Ok(Self::Rule),
@@ -881,6 +892,7 @@ impl CandidateType {
             Self::Consolidate
                 | Self::Supersede
                 | Self::Merge
+                | Self::ParaphraseDedupProposal
                 | Self::Split
                 | Self::Rule
                 | Self::AntiPatternProposal
@@ -3029,7 +3041,7 @@ impl CandidateType {
     pub const fn irreversibility_score(self) -> f32 {
         match self {
             Self::Promote | Self::Deprecate => 0.2,
-            Self::Consolidate | Self::Merge => 0.4,
+            Self::Consolidate | Self::Merge | Self::ParaphraseDedupProposal => 0.4,
             Self::Rule | Self::Procedure => 0.45,
             Self::AntiPatternProposal => 0.55,
             Self::Supersede | Self::Split => 0.5,
@@ -5341,6 +5353,7 @@ Then update src/policy/mod.rs on main."
         assert!(CandidateType::Consolidate.requires_content());
         assert!(CandidateType::Supersede.requires_content());
         assert!(CandidateType::Merge.requires_content());
+        assert!(CandidateType::ParaphraseDedupProposal.requires_content());
         assert!(CandidateType::Split.requires_content());
         assert!(CandidateType::Rule.requires_content());
         assert!(CandidateType::AntiPatternProposal.requires_content());
