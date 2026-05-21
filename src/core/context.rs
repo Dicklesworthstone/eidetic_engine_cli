@@ -563,6 +563,7 @@ pub struct ContextPackOptions {
     pub include_expired: bool,
     pub include_future: bool,
     pub include_stale: bool,
+    pub relevance_floor: Option<f32>,
     pub redaction_level: crate::models::RedactionLevel,
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
@@ -1208,9 +1209,10 @@ fn run_context_pack_with_performance_inner(
             include_future: context_include_future(options, &effective_filters),
             include_stale: context_include_stale(options, &effective_filters),
             // Context packing owns relevance and budget filtering after retrieval.
-            // Keep the candidate pool broad so an exact single-memory match is not
-            // dropped by the interactive search command's presentation floor.
-            relevance_floor: Some(0.0),
+            // Keep the default candidate pool broad so an exact single-memory match
+            // is not dropped by the interactive search command's presentation floor.
+            // An explicit caller floor still applies for diagnostic/e2e paths.
+            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: options.memory_scope,
@@ -1290,7 +1292,11 @@ fn run_context_pack_with_performance_inner(
             );
         }
     }
-    if search_report.status == SearchStatus::NoResults {
+    if search_report.status == SearchStatus::NoResults
+        && !degraded
+            .iter()
+            .any(|entry| entry.code == "no_relevant_results")
+    {
         push_degradation(
             &mut degraded,
             "context_no_results",
@@ -7692,6 +7698,7 @@ mod tests {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -9891,6 +9898,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -10051,6 +10059,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -10160,6 +10169,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -10264,6 +10274,7 @@ pub fn unrelated_context() -> u64 {
                     include_expired: false,
                     include_future: false,
                     include_stale: false,
+                    relevance_floor: None,
                     redaction_level: crate::models::RedactionLevel::Minimal,
                     memory_scope: MemoryScope::Swarm,
                     strict_scope: false,
@@ -10370,6 +10381,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -10956,6 +10968,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -11119,6 +11132,7 @@ pub fn unrelated_context() -> u64 {
             include_expired: false,
             include_future: false,
             include_stale: false,
+            relevance_floor: None,
             redaction_level: crate::models::RedactionLevel::Minimal,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,

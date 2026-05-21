@@ -97,16 +97,12 @@ assert_jq "$wide_out" '((.data.pack.items // []) | length) > 0' "true" \
     "wide budget selects at least one item"
 
 # ---------------------------------------------------------------------------
-log_step "Empty retrieval pool remains no_relevant_results only"
-empty_workspace="$WORKSPACE-empty"
-mkdir -p "$empty_workspace"
-empty_init=$("$EE_BIN" --workspace "$empty_workspace" init --json)
-assert_jq "$empty_init" '.success' "true" "empty workspace init succeeds"
-empty_out=$("$EE_BIN" --workspace "$empty_workspace" context "release ritual" --max-tokens 1 --json)
-assert_jq "$empty_out" "$has_no_relevant_results" "true" \
-    "no_relevant_results fires for empty pool"
-assert_jq "$empty_out" "$has_pack_budget_too_small" "false" \
-    "pack_budget_too_small absent for empty pool"
+log_step "Below-floor retrieval remains no_relevant_results only"
+below_floor_out=$(ee_workspace context "release ritual" --max-tokens 1 --relevance-floor 1.0 --json)
+assert_jq "$below_floor_out" "$has_no_relevant_results" "true" \
+    "no_relevant_results fires when all candidates are below floor"
+assert_jq "$below_floor_out" "$has_pack_budget_too_small" "false" \
+    "pack_budget_too_small absent when retrieval has no relevant candidates"
 
 # ---------------------------------------------------------------------------
 log_step "Recovery advice to raise --max-tokens fixes the pack"

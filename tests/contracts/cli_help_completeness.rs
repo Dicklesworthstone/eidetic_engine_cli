@@ -179,6 +179,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--no-skipped",
             "--no-meta",
             "--include-tombstoned",
+            "--relevance-floor",
         ],
         "ee context --help",
     )?;

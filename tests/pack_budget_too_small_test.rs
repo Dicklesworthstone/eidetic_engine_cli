@@ -90,6 +90,20 @@ fn context_json_with_extra_args(
     stdout_json(&output)
 }
 
+fn context_json_with_relevance_floor(
+    workspace: &str,
+    query: &str,
+    max_tokens: &str,
+    relevance_floor: &str,
+) -> Result<serde_json::Value, String> {
+    context_json_with_extra_args(
+        workspace,
+        query,
+        max_tokens,
+        &["--relevance-floor", relevance_floor],
+    )
+}
+
 fn degraded_entries(value: &serde_json::Value) -> Result<&[serde_json::Value], String> {
     value
         .pointer("/data/degraded")
@@ -271,15 +285,15 @@ fn recovery_actions_machine_readable() -> TestResult {
 fn no_relevant_results_and_pack_budget_too_small_are_mutually_exclusive() -> TestResult {
     let (_tempdir, workspace) = setup_release_workspace()?;
 
-    let value = context_json(&workspace, "xyz nonexistent term abc123", "1")?;
+    let value = context_json_with_relevance_floor(&workspace, "release ritual", "1", "1.0")?;
     let codes = degraded_codes(&value)?;
 
     ensure(
         codes.contains(&NO_RELEVANT_RESULTS),
-        format!("empty pool should emit {NO_RELEVANT_RESULTS}: {codes:?}"),
+        format!("below-floor candidates should emit {NO_RELEVANT_RESULTS}: {codes:?}"),
     )?;
     ensure(
         !codes.contains(&PACK_BUDGET_TOO_SMALL),
-        format!("empty pool should not emit {PACK_BUDGET_TOO_SMALL}: {codes:?}"),
+        format!("below-floor candidates should not emit {PACK_BUDGET_TOO_SMALL}: {codes:?}"),
     )
 }

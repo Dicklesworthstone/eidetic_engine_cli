@@ -2154,6 +2154,11 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub include_stale: bool,
 
+    /// Minimum score (0.0..=1.0) for a search hit before context packing.
+    /// Defaults to 0.0 so context can inspect the full candidate pool.
+    #[arg(long, value_name = "FLOAT")]
+    pub relevance_floor: Option<f32>,
+
     /// Trust lane to apply before packing memories: self, team, workspace, verified, or swarm.
     #[arg(long, value_parser = parse_memory_scope_arg, default_value = "swarm")]
     pub memory_scope: MemoryScope,
@@ -27389,6 +27394,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        relevance_floor: args.relevance_floor,
         redaction_level: redaction.level,
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
@@ -29867,6 +29873,7 @@ where
             include_expired: args.include_expired,
             include_future: args.include_future,
             include_stale: args.include_stale,
+            relevance_floor: None,
             mesh_mode: args.mesh_mode,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -29998,6 +30005,7 @@ where
         include_expired: args.include_expired,
         include_future: args.include_future,
         include_stale: args.include_stale,
+        relevance_floor: None,
         redaction_level: BackupRedaction::Minimal.to_model(),
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,
@@ -52017,6 +52025,8 @@ mod tests {
             "--include-expired",
             "--include-future",
             "--include-stale",
+            "--relevance-floor",
+            "1.0",
         ])
         .map_err(|e| format!("failed to parse context validity flags: {:?}", e.kind()))?;
 
@@ -52028,7 +52038,8 @@ mod tests {
                 ensure_equal(&args.as_of, &Some(expected_as_of), "context as_of")?;
                 ensure_equal(&args.include_expired, &true, "context include expired")?;
                 ensure_equal(&args.include_future, &true, "context include future")?;
-                ensure_equal(&args.include_stale, &true, "context include stale")
+                ensure_equal(&args.include_stale, &true, "context include stale")?;
+                ensure_equal(&args.relevance_floor, &Some(1.0), "context relevance floor")
             }
             _ => Err("expected Context command".to_string()),
         }
