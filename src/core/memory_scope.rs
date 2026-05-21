@@ -12,6 +12,35 @@ use crate::config::{
 use crate::db::StoredMemory;
 use crate::models::{MemoryScope, MemoryScopeStats, TrustClass};
 
+fn normalized_mesh_token(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in input.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemoryScopeContext {
     pub scope: MemoryScope,
@@ -78,11 +107,11 @@ impl FromStr for MeshTrustLane {
     type Err = ParseMeshTrustLaneError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
-            "localHuman" => Ok(Self::LocalHuman),
-            "peerHumanViaPeer" => Ok(Self::PeerHumanViaPeer),
-            "peerAgent" => Ok(Self::PeerAgent),
-            "peerDerived" => Ok(Self::PeerDerived),
+        match normalized_mesh_token(input).as_str() {
+            "local_human" => Ok(Self::LocalHuman),
+            "peer_human_via_peer" => Ok(Self::PeerHumanViaPeer),
+            "peer_agent" => Ok(Self::PeerAgent),
+            "peer_derived" => Ok(Self::PeerDerived),
             "untrusted" => Ok(Self::Untrusted),
             _ => Err(ParseMeshTrustLaneError {
                 input: input.to_owned(),
@@ -1599,6 +1628,22 @@ mod tests {
 
         assert!(message.contains("peerAgnt"));
         assert!(message.contains("expected one of"));
+    }
+
+    #[test]
+    fn mesh_trust_lane_parse_accepts_operator_spelling_variants() {
+        assert_eq!(
+            MeshTrustLane::from_str(" peer-agent "),
+            Ok(MeshTrustLane::PeerAgent)
+        );
+        assert_eq!(
+            MeshTrustLane::from_str("peer_human_via_peer"),
+            Ok(MeshTrustLane::PeerHumanViaPeer)
+        );
+        assert_eq!(
+            MeshTrustLane::from_str("LOCAL_HUMAN"),
+            Ok(MeshTrustLane::LocalHuman)
+        );
     }
 
     #[test]

@@ -1,6 +1,35 @@
 use crate::config::EnvVar;
 use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V1};
 
+fn normalized_agent_docs_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in value.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentDocsTopic {
     Guide,
@@ -55,14 +84,14 @@ impl AgentDocsTopic {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
+        match normalized_agent_docs_token(s).as_str() {
             "guide" => Some(Self::Guide),
             "commands" => Some(Self::Commands),
             "contracts" => Some(Self::Contracts),
             "schemas" => Some(Self::Schemas),
             "paths" => Some(Self::Paths),
             "env" => Some(Self::Env),
-            "exit-codes" => Some(Self::ExitCodes),
+            "exit_codes" => Some(Self::ExitCodes),
             "fields" => Some(Self::Fields),
             "errors" => Some(Self::Errors),
             "formats" => Some(Self::Formats),
@@ -1213,6 +1242,16 @@ mod tests {
             &AgentDocsTopic::parse(" Exit-Codes "),
             &Some(AgentDocsTopic::ExitCodes),
             "hyphenated topic",
+        )?;
+        ensure_equal(
+            &AgentDocsTopic::parse("exit_codes"),
+            &Some(AgentDocsTopic::ExitCodes),
+            "underscored topic",
+        )?;
+        ensure_equal(
+            &AgentDocsTopic::parse("ExitCodes"),
+            &Some(AgentDocsTopic::ExitCodes),
+            "camel-case topic",
         )?;
         ensure_equal(
             &AgentDocsTopic::parse("RECIPES"),

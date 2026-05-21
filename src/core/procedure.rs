@@ -50,6 +50,35 @@ pub const PROCEDURE_PROMOTION_CURATION_SCHEMA_V1: &str = "ee.procedure.promotion
 /// Schema for planned procedure promotion audit records.
 pub const PROCEDURE_PROMOTION_AUDIT_SCHEMA_V1: &str = "ee.procedure.promotion_audit.v1";
 
+fn normalized_procedure_token(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in input.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 // ============================================================================
 // Propose Operation
 // ============================================================================
@@ -1816,7 +1845,7 @@ impl FromStr for VerificationSourceKind {
     type Err = DomainError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().replace('-', "_").as_str() {
+        match normalized_procedure_token(value).as_str() {
             "eval_fixture" => Ok(Self::EvalFixture),
             "repro_pack" => Ok(Self::ReproPack),
             "claim_evidence" => Ok(Self::ClaimEvidence),
@@ -2563,7 +2592,7 @@ fn json_step_results(value: &Value) -> Vec<StepVerificationResult> {
 }
 
 fn normalize_verification_result(value: &str) -> Option<&'static str> {
-    match value.trim().replace('-', "_").as_str() {
+    match normalized_procedure_token(value).as_str() {
         "passed" | "pass" | "success" | "succeeded" | "ok" => Some("passed"),
         "failed" | "fail" | "failure" | "error" | "blocked" | "invalid" => Some("failed"),
         "skipped" | "skip" | "missing" | "stale" | "pending" | "not_run" => Some("skipped"),
@@ -4739,6 +4768,23 @@ mod tests {
         let summary = report.human_summary();
         assert!(summary.contains("Procedure Verification"));
         assert!(summary.contains("proc_test"));
+        Ok(())
+    }
+
+    #[test]
+    fn procedure_verification_parsers_accept_operator_spelling_variants() -> TestResult {
+        assert_eq!(
+            VerificationSourceKind::from_str(" eval-fixture ").map_err(|error| error.message())?,
+            VerificationSourceKind::EvalFixture
+        );
+        assert_eq!(
+            VerificationSourceKind::from_str("RecorderRun").map_err(|error| error.message())?,
+            VerificationSourceKind::RecorderRun
+        );
+        assert_eq!(normalize_verification_result(" NOT-RUN "), Some("skipped"));
+        assert_eq!(normalize_verification_result("Succeeded"), Some("passed"));
+        assert_eq!(normalize_verification_result("BLOCKED"), Some("failed"));
+        assert_eq!(normalize_verification_result("unknown"), None);
         Ok(())
     }
 

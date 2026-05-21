@@ -44,6 +44,35 @@ fn default_prompt_budget_report_schema() -> &'static str {
     PROMPT_BUDGET_REPORT_SCHEMA_V1
 }
 
+fn normalized_perf_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in value.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 /// User-facing surfaces supported by the latency explanation report.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,7 +92,7 @@ impl PerfLatencySurface {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_perf_token(value).as_str() {
             "search" => Some(Self::Search),
             "context" => Some(Self::Context),
             _ => None,
@@ -100,7 +129,7 @@ impl ArtifactKind {
 
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
+        match normalized_perf_token(s).as_str() {
             "benchmark_report" => Some(Self::BenchmarkReport),
             "support_bundle_manifest" => Some(Self::SupportBundleManifest),
             "explain_performance_report" => Some(Self::ExplainPerformanceReport),
@@ -2770,6 +2799,19 @@ mod tests {
             let parsed = ArtifactKind::parse(s).expect("should parse");
             assert_eq!(kind, parsed);
         }
+        assert_eq!(
+            ArtifactKind::parse(" support-bundle-manifest "),
+            Some(ArtifactKind::SupportBundleManifest)
+        );
+        assert_eq!(
+            ArtifactKind::parse("ExplainPerformanceReport"),
+            Some(ArtifactKind::ExplainPerformanceReport)
+        );
+        assert_eq!(
+            ArtifactKind::parse("WRITE_QUEUE_REPORT"),
+            Some(ArtifactKind::WriteQueueReport)
+        );
+        assert_eq!(ArtifactKind::parse("unknown"), None);
     }
 
     #[test]

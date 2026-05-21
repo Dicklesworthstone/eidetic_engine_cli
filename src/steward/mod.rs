@@ -72,6 +72,41 @@ const GRAPH_SNAPSHOT_PRUNE_LOCK_REASON: &str = "graph snapshot prune";
 
 static MAINTENANCE_JOB_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
 
+fn normalized_job_type_token(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase_or_digit = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '.' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase_or_digit =
+                    character.is_ascii_lowercase() || character.is_ascii_digit();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 struct GraphSnapshotPruneLockOwner<'a> {
     conn: &'a DbConnection,
     lock_ids: Vec<AdvisoryLockId>,
@@ -577,7 +612,7 @@ impl FromStr for JobType {
     type Err = ParseJobTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let normalized = s.trim().to_ascii_lowercase().replace(['-', '.'], "_");
+        let normalized = normalized_job_type_token(s);
         match normalized.as_str() {
             "index_rebuild" => Ok(Self::IndexRebuild),
             "index_coalesce" => Ok(Self::IndexCoalesce),
@@ -6626,6 +6661,13 @@ mod tests {
                 .map_err(|e: ParseJobTypeError| e.to_string())?,
             JobType::CentralityRefresh,
             "dotted job type alias",
+        )?;
+        ensure(
+            "GraphSnapshotPrune"
+                .parse::<JobType>()
+                .map_err(|e: ParseJobTypeError| e.to_string())?,
+            JobType::GraphSnapshotPrune,
+            "camel case job type",
         )?;
         Ok(())
     }

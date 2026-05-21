@@ -19,7 +19,37 @@ pub const EMBEDDING_METADATA_SCHEMA_V1: &str = "ee.embedding.metadata.v1";
 pub const SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1: &str = "ee.semantic_model_admissibility.v1";
 
 fn normalized_model_registry_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Provider or embedding implementation family for a registered model.
@@ -76,8 +106,8 @@ impl FromStr for ModelProvider {
     fn from_str(input: &str) -> Result<Self, Self::Err> {
         match normalized_model_registry_token(input).as_str() {
             "hash" => Ok(Self::Hash),
-            "model2vec" => Ok(Self::Model2Vec),
-            "fastembed" => Ok(Self::FastEmbed),
+            "model2vec" | "model2_vec" => Ok(Self::Model2Vec),
+            "fastembed" | "fast_embed" => Ok(Self::FastEmbed),
             "external" => Ok(Self::External),
             "custom" => Ok(Self::Custom),
             _ => Err(ParseModelRegistryValueError::new(
@@ -1470,6 +1500,14 @@ mod tests {
             ModelProvider::from_str(" FastEmbed ")?,
             ModelProvider::FastEmbed
         );
+        assert_eq!(
+            ModelProvider::from_str("fast-embed")?,
+            ModelProvider::FastEmbed
+        );
+        assert_eq!(
+            ModelProvider::from_str("model2-vec")?,
+            ModelProvider::Model2Vec
+        );
 
         Ok(())
     }
@@ -1595,6 +1633,10 @@ mod tests {
         }
         assert_eq!(
             EmbeddingPooling::from_str(" Model-Default ")?,
+            EmbeddingPooling::ModelDefault
+        );
+        assert_eq!(
+            EmbeddingPooling::from_str("modelDefault")?,
             EmbeddingPooling::ModelDefault
         );
 

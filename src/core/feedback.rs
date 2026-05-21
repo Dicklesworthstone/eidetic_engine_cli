@@ -800,7 +800,32 @@ fn require_identifier(label: &str, value: &str) -> Result<(), DomainError> {
 }
 
 fn normalize_label(raw: &str) -> String {
-    raw.trim().to_ascii_lowercase().replace('-', "_")
+    let mut normalized = String::with_capacity(raw.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in raw.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
 }
 
 fn round_delta(value: f64) -> f64 {
@@ -872,6 +897,31 @@ mod tests {
                 .map_err(|error| error.to_string())?,
             PreflightFeedbackKind::StaleWarning,
             "stale alias",
+        )
+    }
+
+    #[test]
+    fn feedback_parsers_accept_operator_case_variants() -> TestResult {
+        ensure(
+            "FalseAlarm"
+                .parse::<PreflightFeedbackKind>()
+                .map_err(|error| error.to_string())?,
+            PreflightFeedbackKind::FalseAlarm,
+            "camel-case feedback kind",
+        )?;
+        ensure(
+            "STALE_WARNING"
+                .parse::<PreflightFeedbackKind>()
+                .map_err(|error| error.to_string())?,
+            PreflightFeedbackKind::StaleWarning,
+            "uppercase feedback kind",
+        )?;
+        ensure(
+            "Succeeded"
+                .parse::<TaskOutcome>()
+                .map_err(|error| error.to_string())?,
+            TaskOutcome::Success,
+            "camel-case task outcome",
         )
     }
 

@@ -72,6 +72,41 @@ const FILE_PREFIXES: &[&str] = &[
     "/", "./", "../", ".beads/", ".github/", "crates/", "docs/", "src/", "target/", "tests/",
 ];
 
+fn normalized_curate_token(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase_or_digit = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase_or_digit =
+                    character.is_ascii_lowercase() || character.is_ascii_digit();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 fn serialize_curate_json_or_error<T>(
     value: &T,
     type_name: &str,
@@ -416,7 +451,7 @@ impl FromStr for CandidateType {
     type Err = ParseCandidateTypeError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_curate_token(input).as_str() {
             "consolidate" => Ok(Self::Consolidate),
             "promote" => Ok(Self::Promote),
             "deprecate" => Ok(Self::Deprecate),
@@ -515,7 +550,7 @@ impl FromStr for CandidateSource {
     type Err = ParseCandidateSourceError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_curate_token(input).as_str() {
             "agent_inference" => Ok(Self::AgentInference),
             "rule_engine" => Ok(Self::RuleEngine),
             "human_request" => Ok(Self::HumanRequest),
@@ -608,7 +643,7 @@ impl FromStr for CandidateStatus {
     type Err = ParseCandidateStatusError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_curate_token(input).as_str() {
             "pending" => Ok(Self::Pending),
             "approved" => Ok(Self::Approved),
             "rejected" => Ok(Self::Rejected),
@@ -1090,7 +1125,7 @@ impl FromStr for ReviewQueueState {
     type Err = ParseReviewQueueStateError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_curate_token(input).as_str() {
             "new" => Ok(Self::New),
             "needs_evidence" => Ok(Self::NeedsEvidence),
             "needs_scope" => Ok(Self::NeedsScope),
@@ -2448,7 +2483,7 @@ impl FromStr for RiskLevel {
     type Err = ParseRiskLevelError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_curate_token(input).as_str() {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
@@ -4467,6 +4502,39 @@ Then update src/policy/mod.rs on main."
     }
 
     #[test]
+    fn candidate_parsers_accept_operator_spelling_variants() -> TestResult {
+        assert_eq!(
+            CandidateType::from_str(" Promote "),
+            Ok(CandidateType::Promote)
+        );
+        assert_eq!(
+            CandidateType::from_str("Tombstone"),
+            Ok(CandidateType::Tombstone)
+        );
+        assert_eq!(
+            CandidateSource::from_str("agent-inference"),
+            Ok(CandidateSource::AgentInference)
+        );
+        assert_eq!(
+            CandidateSource::from_str("RuleEngine"),
+            Ok(CandidateSource::RuleEngine)
+        );
+        assert_eq!(
+            CandidateSource::from_str("COUNTERFACTUAL_REPLAY"),
+            Ok(CandidateSource::CounterfactualReplay)
+        );
+        assert_eq!(
+            CandidateStatus::from_str(" APPROVED "),
+            Ok(CandidateStatus::Approved)
+        );
+        assert_eq!(
+            CandidateStatus::from_str("applied"),
+            Ok(CandidateStatus::Applied)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn candidate_type_rejects_unknown_input() {
         let err = CandidateType::from_str("unknown_type");
         assert!(matches!(err, Err(ParseCandidateTypeError { .. })));
@@ -4534,6 +4602,22 @@ Then update src/policy/mod.rs on main."
             assert_eq!(parsed, state);
         }
         Ok(())
+    }
+
+    #[test]
+    fn review_queue_state_accepts_operator_spelling_variants() {
+        assert_eq!(
+            ReviewQueueState::from_str("needs-evidence"),
+            Ok(ReviewQueueState::NeedsEvidence)
+        );
+        assert_eq!(
+            ReviewQueueState::from_str("NeedsScope"),
+            Ok(ReviewQueueState::NeedsScope)
+        );
+        assert_eq!(
+            ReviewQueueState::from_str(" ACCEPTED "),
+            Ok(ReviewQueueState::Accepted)
+        );
     }
 
     #[test]
@@ -5290,6 +5374,20 @@ Then update src/policy/mod.rs on main."
             ensure(parsed, level, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn risk_level_accepts_operator_spelling_variants() -> TestResult {
+        ensure(
+            RiskLevel::from_str(" MEDIUM ").map_err(|e| e.to_string())?,
+            RiskLevel::Medium,
+            "uppercase medium",
+        )?;
+        ensure(
+            RiskLevel::from_str("Critical").map_err(|e| e.to_string())?,
+            RiskLevel::Critical,
+            "camel critical",
+        )
     }
 
     #[test]

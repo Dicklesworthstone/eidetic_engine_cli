@@ -16,6 +16,35 @@ use crate::models::{RedactionLevel, TrustClass};
 
 use super::path::{PathExpander, PathExpansionError};
 
+fn normalized_config_enum_token(input: &str) -> String {
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in input.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 /// Parsed `.ee/config.toml` or user config file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ConfigFile {
@@ -217,8 +246,7 @@ impl FromStr for SearchSpeed {
     type Err = ConfigParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim().to_ascii_lowercase();
-        match normalized.as_str() {
+        match normalized_config_enum_token(input).as_str() {
             "fast" => Ok(Self::Fast),
             "balanced" => Ok(Self::Balanced),
             "thorough" => Ok(Self::Thorough),
@@ -375,8 +403,7 @@ impl FromStr for MeshCommandMode {
     type Err = ConfigParseError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim().to_ascii_lowercase();
-        match normalized.as_str() {
+        match normalized_config_enum_token(input).as_str() {
             "off" => Ok(Self::Off),
             "cache" => Ok(Self::Cache),
             "revisable" => Ok(Self::Revisable),
@@ -454,15 +481,15 @@ impl MeshTrustLane {
     }
 
     fn parse_for_key(input: &str, key: String) -> Result<Self, ConfigParseError> {
-        match input {
-            "localHuman" => Ok(Self::LocalHuman),
-            "peerHumanViaPeer" => Ok(Self::PeerHumanViaPeer),
-            "peerAgent" => Ok(Self::PeerAgent),
-            "peerDerived" => Ok(Self::PeerDerived),
+        match normalized_config_enum_token(input).as_str() {
+            "local_human" => Ok(Self::LocalHuman),
+            "peer_human_via_peer" => Ok(Self::PeerHumanViaPeer),
+            "peer_agent" => Ok(Self::PeerAgent),
+            "peer_derived" => Ok(Self::PeerDerived),
             "untrusted" => Ok(Self::Untrusted),
-            other => Err(ConfigParseError::InvalidValue {
+            _ => Err(ConfigParseError::InvalidValue {
                 key,
-                value: other.to_string(),
+                value: input.to_string(),
                 message: "expected one of `localHuman`, `peerHumanViaPeer`, `peerAgent`, `peerDerived`, or `untrusted`".to_string(),
             }),
         }
@@ -487,13 +514,13 @@ impl MeshRedactionDecision {
     }
 
     fn parse_for_key(input: &str, key: String) -> Result<Self, ConfigParseError> {
-        match input {
+        match normalized_config_enum_token(input).as_str() {
             "share" => Ok(Self::Share),
             "redact" => Ok(Self::Redact),
             "deny" => Ok(Self::Deny),
-            other => Err(ConfigParseError::InvalidValue {
+            _ => Err(ConfigParseError::InvalidValue {
                 key,
-                value: other.to_string(),
+                value: input.to_string(),
                 message: "expected one of `share`, `redact`, or `deny`".to_string(),
             }),
         }
@@ -560,13 +587,13 @@ impl MeshLaneDecision {
     }
 
     fn parse_for_key(input: &str, key: String) -> Result<Self, ConfigParseError> {
-        match input {
+        match normalized_config_enum_token(input).as_str() {
             "allow" => Ok(Self::Allow),
             "quarantine" => Ok(Self::Quarantine),
             "deny" => Ok(Self::Deny),
-            other => Err(ConfigParseError::InvalidValue {
+            _ => Err(ConfigParseError::InvalidValue {
                 key,
-                value: other.to_string(),
+                value: input.to_string(),
                 message: "expected one of `allow`, `quarantine`, or `deny`".to_string(),
             }),
         }
@@ -1926,11 +1953,11 @@ fn required_table_default_action(
 ) -> Result<MeshLaneDecision, ConfigParseError> {
     let key = "default_action";
     let value = required_table_string(table, prefix, key)?;
-    match value.as_str() {
+    match normalized_config_enum_token(&value).as_str() {
         "deny" => Ok(MeshLaneDecision::Deny),
-        other => Err(ConfigParseError::InvalidValue {
+        _ => Err(ConfigParseError::InvalidValue {
             key: format!("{prefix}.{key}"),
-            value: other.to_string(),
+            value,
             message: "expected `deny`; mesh peer policies are default-deny".to_string(),
         }),
     }
@@ -1944,11 +1971,11 @@ fn optional_table_default_action(
     let Some(value) = optional_table_string(table, prefix, key)? else {
         return Ok(None);
     };
-    match value.as_str() {
+    match normalized_config_enum_token(&value).as_str() {
         "deny" => Ok(Some(MeshLaneDecision::Deny)),
-        other => Err(ConfigParseError::InvalidValue {
+        _ => Err(ConfigParseError::InvalidValue {
             key: format!("{prefix}.{key}"),
-            value: other.to_string(),
+            value,
             message: "expected `deny`; mesh peer-group bindings are default-deny".to_string(),
         }),
     }
@@ -3028,6 +3055,91 @@ max_bytes = 0
             "preview redaction",
         )?;
         ensure_equal(&policy.body_fetch.max_bytes, &Some(0), "body max bytes")
+    }
+
+    #[test]
+    fn mesh_policy_values_accept_operator_spelling_variants() -> TestResult {
+        let config = ConfigFile::parse(
+            r#"
+[[mesh.peer_group_bindings]]
+workspace_id = "wsp_workspace_a_001"
+peer_ids = ["peer_agent_001"]
+origin_workspace_ids = ["wsp_origin_001"]
+default_action = " DENY "
+
+[mesh.peer_group_bindings.lanes]
+metadata = " ALLOW "
+body = "deny"
+
+[[mesh.peer_policies]]
+policy_id = "pol_variants_001"
+workspace_id = "wsp_workspace_a_001"
+peer_id = "peer_agent_001"
+origin_workspace_ids = ["wsp_origin_001"]
+trust_lane = " peer-agent "
+import_trust_class = "agent-validated"
+default_action = " DENY "
+
+[mesh.peer_policies.allowed_lanes]
+metadata = "ALLOW"
+body = "deny"
+embedding = " Deny "
+graph_link = "allow"
+revision_notice = "allow"
+curation_signal = "QUARANTINE"
+
+[mesh.peer_policies.redaction]
+metadata = "SHARE"
+preview = " redact "
+body = "deny"
+embedding = "deny"
+
+[mesh.peer_policies.body_fetch]
+allowed = false
+requires_consent = true
+"#,
+        )
+        .map_err(|error| format!("config should parse spelling variants: {error}"))?;
+
+        let binding = config
+            .mesh
+            .peer_group_bindings
+            .as_ref()
+            .and_then(|bindings| bindings.first())
+            .ok_or_else(|| "expected peer-group binding".to_string())?;
+        ensure_equal(
+            &binding.decision_for(
+                "wsp_workspace_a_001",
+                "peer_agent_001",
+                "wsp_origin_001",
+                MeshLane::Metadata,
+            ),
+            &MeshLaneDecision::Allow,
+            "peer-group lane decision",
+        )?;
+
+        let policy = config
+            .mesh
+            .peer_policies
+            .as_ref()
+            .and_then(|policies| policies.first())
+            .ok_or_else(|| "expected peer policy".to_string())?;
+        ensure_equal(&policy.trust_lane, &MeshTrustLane::PeerAgent, "trust lane")?;
+        ensure_equal(
+            &policy.import_trust_class,
+            &TrustClass::AgentValidated,
+            "import trust class",
+        )?;
+        ensure_equal(
+            &policy.allowed_lanes.decision(MeshLane::CurationSignal),
+            &MeshLaneDecision::Quarantine,
+            "curation signal lane",
+        )?;
+        ensure_equal(
+            &policy.redaction.preview,
+            &MeshRedactionDecision::Redact,
+            "preview redaction",
+        )
     }
 
     #[test]
