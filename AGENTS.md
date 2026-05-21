@@ -133,7 +133,7 @@ Run `cargo tree -e features` and grep for these crates. CI must fail if any appe
 | `blake3`, `sha2` | Content hashing, pack hashes, source hashes |
 | `tiktoken-rs` | Token budgeting for context packs |
 | `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
-| `rust-mcp-sdk` (optional, behind `mcp` feature) | Optional MCP adapter — must not duplicate CLI logic |
+| `mcp` feature (in-tree stdio adapter) | Optional hand-rolled MCP JSON-RPC adapter; no `rust-mcp-sdk` dependency because that crate currently requires Tokio |
 
 ### Feature Flags
 
@@ -145,7 +145,7 @@ json = ["fsqlite-ext-json"]
 embed-fast = ["frankensearch/model2vec"]
 embed-quality = ["frankensearch/fastembed"]
 lexical-bm25 = ["frankensearch/lexical"]
-mcp = ["dep:rust-mcp-sdk"]
+mcp = []  # gates the in-tree stdio MCP adapter; intentionally no rust-mcp-sdk/Tokio dependency
 serve = []
 ```
 

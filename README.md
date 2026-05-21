@@ -1481,6 +1481,9 @@ ee mcp validate --json
 When the `mcp` feature is not enabled, the manifest succeeds and reports
 `capabilityGap.code=mcp_feature_disabled` for the stdio adapter. Build with
 `cargo build --release --features mcp` from source when you need the adapter.
+The feature gates the in-tree synchronous JSON-RPC stdio adapter; it does not
+link `rust-mcp-sdk` because that SDK currently requires Tokio, which is outside
+this crate's allowed runtime stack.
 The manifest mirrors the CLI contracts for tools such as `ee_context`, `ee_search`,
 `ee_remember`, `ee_outcome`, `ee_curate_candidates`, and `ee_memory_show`.
 Default builds keep `ee mcp serve-stdio --json` discoverable and return the

@@ -301,10 +301,11 @@ need to answer before pinning Cargo.toml:
    1.95. EE's `rust-toolchain.toml` per AGENTS.md requires nightly Rust 2024;
    the highest declared MSRV (1.95) governs effective compatibility but
    nightly clears it.
-3. **Optional `mcp` feature.** AGENTS.md lists `mcp = ["dep:rust-mcp-sdk"]`.
-   `rust-mcp-sdk` is not in the franken-stack inventory; the EE-001 author
-   should verify the crate name and version against the upstream MCP project
-   and record the decision either in EE-001 or in a follow-up ADR.
+3. **Optional `mcp` feature.** The active project decision is `mcp = []`:
+   the feature gates ee's in-tree synchronous JSON-RPC stdio adapter in
+   `src/mcp.rs`. Do not add `rust-mcp-sdk` to this feature unless a future
+   adapter bead proves its dependency tree is forbidden-dep clean and does not
+   pull Tokio into the core runtime.
 
 ## Verification Hooks This Document Did Not Add
 
