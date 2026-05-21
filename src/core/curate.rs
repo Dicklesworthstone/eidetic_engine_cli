@@ -8779,7 +8779,8 @@ mod tests {
             snoozed_until: None,
             reason: Some("validated by humans"),
             merge_into_candidate_id: None,
-        })?;
+        })
+        .map_err(|error| error.to_string())?;
         assert_eq!(accept.schema, super::CURATE_REVIEW_SCHEMA_V1);
         assert_eq!(accept.review.action, "accept");
         assert_eq!(accept.mutation.to_status, "approved");
@@ -8810,7 +8811,8 @@ mod tests {
             snoozed_until: None,
             reason: Some("duplicate"),
             merge_into_candidate_id: None,
-        })?;
+        })
+        .map_err(|error| error.to_string())?;
         assert_eq!(reject.review.action, "reject");
         assert_eq!(reject.mutation.to_status, "rejected");
         assert_eq!(reject.mutation.to_review_state, "rejected");
@@ -8889,7 +8891,8 @@ mod tests {
             snoozed_until: Some("2030-01-01T00:00:00Z"),
             reason: None,
             merge_into_candidate_id: None,
-        })?;
+        })
+        .map_err(|error| error.to_string())?;
         assert_eq!(snooze.mutation.to_status, "pending");
         assert_eq!(snooze.mutation.to_review_state, "snoozed");
         assert_eq!(
@@ -8916,7 +8919,8 @@ mod tests {
             snoozed_until: None,
             reason: None,
             merge_into_candidate_id: Some(&target_id),
-        })?;
+        })
+        .map_err(|error| error.to_string())?;
         assert_eq!(merge.mutation.to_status, "rejected");
         assert_eq!(merge.mutation.to_review_state, "merged");
         assert_eq!(
@@ -8975,7 +8979,8 @@ mod tests {
             snoozed_until: None,
             reason: Some("dry-run preview"),
             merge_into_candidate_id: None,
-        })?;
+        })
+        .map_err(|error| error.to_string())?;
 
         assert_eq!(report.mutation.to_status, "approved");
         assert_eq!(report.mutation.to_review_state, "accepted");
