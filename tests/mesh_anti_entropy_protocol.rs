@@ -144,6 +144,43 @@ fn range_digest_is_order_independent_and_rejects_holes() -> TestResult {
 }
 
 #[test]
+fn range_digest_and_origin_alias_distinguish_field_boundaries() -> TestResult {
+    let split_origin = MeshOriginKey::with_workspace("origin-a", "workspace-a");
+    let joined_origin = MeshOriginKey::new("origin-a|workspace-a");
+
+    assert_ne!(
+        split_origin.redacted_alias(),
+        joined_origin.redacted_alias(),
+        "origin aliases must distinguish node/workspace boundaries"
+    );
+
+    let split_digest = summarize_event_range([MeshReplayEvent::new(split_origin, 1, "event-hash")])
+        .map_err(|error| format!("split origin digest: {error:?}"))?;
+    let joined_digest =
+        summarize_event_range([MeshReplayEvent::new(joined_origin, 1, "event-hash")])
+            .map_err(|error| format!("joined origin digest: {error:?}"))?;
+    assert_ne!(
+        split_digest.range_digest, joined_digest.range_digest,
+        "range digests must not collapse workspace and origin delimiter boundaries"
+    );
+
+    let origin = MeshOriginKey::new("origin-a");
+    let no_audit_digest =
+        summarize_event_range([MeshReplayEvent::new(origin.clone(), 1, "event:audit")])
+            .map_err(|error| format!("no audit digest: {error:?}"))?;
+    let mut split_hash_event = MeshReplayEvent::new(origin, 1, "event");
+    split_hash_event.audit_hash = Some("audit".to_owned());
+    let with_audit_digest = summarize_event_range([split_hash_event])
+        .map_err(|error| format!("with audit digest: {error:?}"))?;
+    assert_ne!(
+        no_audit_digest.range_digest, with_audit_digest.range_digest,
+        "range digests must distinguish event-hash text from audit-hash boundaries"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn bounded_retry_blocks_after_max_attempts() -> TestResult {
     let peer_id = "peer-retry";
     let origin = MeshOriginKey::new("origin-retry");

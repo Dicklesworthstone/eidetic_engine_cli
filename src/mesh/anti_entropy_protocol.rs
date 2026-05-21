@@ -109,12 +109,7 @@ impl MeshOriginKey {
 
     #[must_use]
     pub fn redacted_alias(&self) -> String {
-        match &self.origin_workspace_id {
-            Some(workspace_id) => {
-                origin_alias(&format!("{}|{}", self.origin_node_id, workspace_id))
-            }
-            None => origin_alias(&self.origin_node_id),
-        }
+        origin_alias(&origin_identity_hash_input(self))
     }
 }
 
@@ -514,20 +509,13 @@ pub fn summarize_event_range(
         }
     }
 
-    let mut digest_input = String::new();
-    digest_input.push_str(&origin.origin_node_id);
-    digest_input.push('|');
-    if let Some(workspace_id) = &origin.origin_workspace_id {
-        digest_input.push_str(workspace_id);
-    }
+    let mut digest_input = origin_identity_hash_input(&origin);
     for event in &events {
-        digest_input.push('|');
-        digest_input.push_str(&event.seq.to_string());
-        digest_input.push(':');
-        digest_input.push_str(&event.event_hash);
-        if let Some(audit_hash) = &event.audit_hash {
-            digest_input.push(':');
-            digest_input.push_str(audit_hash);
+        push_hash_field(&mut digest_input, "seq", &event.seq.to_string());
+        push_hash_field(&mut digest_input, "event", &event.event_hash);
+        match &event.audit_hash {
+            Some(audit_hash) => push_hash_field(&mut digest_input, "audit", audit_hash),
+            None => push_hash_marker(&mut digest_input, "audit_none"),
         }
     }
 
@@ -1210,6 +1198,30 @@ pub fn peer_alias(peer_id: &str) -> String {
 #[must_use]
 pub fn origin_alias(origin_node_id: &str) -> String {
     format!("origin_{}", stable_hash_hex(origin_node_id, 12))
+}
+
+fn origin_identity_hash_input(origin: &MeshOriginKey) -> String {
+    let mut input = String::new();
+    push_hash_field(&mut input, "origin_node", &origin.origin_node_id);
+    match &origin.origin_workspace_id {
+        Some(workspace_id) => push_hash_field(&mut input, "origin_workspace", workspace_id),
+        None => push_hash_marker(&mut input, "origin_workspace_none"),
+    }
+    input
+}
+
+fn push_hash_field(input: &mut String, label: &str, value: &str) {
+    input.push_str(label);
+    input.push('#');
+    input.push_str(&value.len().to_string());
+    input.push(':');
+    input.push_str(value);
+    input.push(';');
+}
+
+fn push_hash_marker(input: &mut String, label: &str) {
+    input.push_str(label);
+    input.push_str("#0:;");
 }
 
 fn cursor_map_for_peer(
