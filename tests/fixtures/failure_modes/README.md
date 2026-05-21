@@ -44,6 +44,7 @@ in the same commit, keeping the catalog complete by construction.
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |
 | `context_stream_partial_emission` | context --stream | warning | bd-17c65.10.18 |
 | `context_evidence_freshness_changed_source` | context | low | bd-17c65.1.2 (A2) |
+| `context_delta_prior_unknown` | context | low | bd-muovx.5 (M) |
 | `context_delta_larger_than_full` | context | info | bd-muovx |
 | `memory_drift_source_changed` | search, context | medium | bd-1z1fd.3 |
 | `memory_drift_source_missing` | search, context | high | bd-1z1fd.3 |

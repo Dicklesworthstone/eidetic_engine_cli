@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub const CONTEXT_DELTA_SCHEMA_V1: &str = "ee.context.delta.v1";
+pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown";
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
