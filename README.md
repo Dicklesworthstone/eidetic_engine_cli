@@ -1640,6 +1640,11 @@ TMPDIR=/tmp RCH_REQUIRE_REMOTE=1 rch exec -- \
 
 # J9 broad regression wrapper pinned to benches/baselines/perf_v0_2.json
 ./scripts/bench_perf_regression.sh --profile nightly --check-regression
+
+# SRR6.46 auto-enroll performance baseline contract
+EE_BENCH_BASELINE_FILE=benches/baselines/auto_enroll_perf_v0.json \
+  ./scripts/bench.sh --profile auto_enroll --json --check-regression
+./scripts/e2e_overhaul/auto_enroll_perf_gate.sh
 ```
 
 Budgets are currently advisory while deterministic scale fixtures stabilize.

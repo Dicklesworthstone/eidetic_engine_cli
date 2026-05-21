@@ -1,0 +1,320 @@
+{
+  "schema": "ee.perf.baseline.v1",
+  "version": "auto_enroll_perf_v0",
+  "sourceBead": "bd-36bbk.1.15",
+  "description": "SRR6.46 auto-enrollment performance baseline for active mesh workloads, idle daemon resource posture, and 500-peer scale checks.",
+  "hardware_class": "mac-m3-pro",
+  "regression_margin": {
+    "active_p99_pct": 15,
+    "idle_p99_pct": 20,
+    "idle_rss_slope_mb_per_hour_max": 0.7
+  },
+  "active_workload_rows": [
+    {
+      "operation": "ee_status_cold_5_peers",
+      "command": "ee status --json",
+      "peers": 5,
+      "cache_state": "cold",
+      "p50_ms": 250.0,
+      "p99_ms": 600.0
+    },
+    {
+      "operation": "ee_status_cold_50_peers",
+      "command": "ee status --json",
+      "peers": 50,
+      "cache_state": "cold",
+      "p50_ms": 2500.0,
+      "p99_ms": 5500.0
+    },
+    {
+      "operation": "ee_status_warm_5_peers",
+      "command": "ee status --json",
+      "peers": 5,
+      "cache_state": "warm_hit",
+      "p50_ms": 25.0,
+      "p99_ms": 80.0
+    },
+    {
+      "operation": "ee_status_warm_50_peers",
+      "command": "ee status --json",
+      "peers": 50,
+      "cache_state": "warm_hit",
+      "p50_ms": 25.0,
+      "p99_ms": 80.0
+    },
+    {
+      "operation": "ee_mesh_status_cold_5_peers",
+      "command": "ee mesh status --json",
+      "peers": 5,
+      "cache_state": "cold",
+      "p50_ms": 300.0,
+      "p99_ms": 700.0
+    },
+    {
+      "operation": "ee_mesh_status_cold_50_peers",
+      "command": "ee mesh status --json",
+      "peers": 50,
+      "cache_state": "cold",
+      "p50_ms": 2800.0,
+      "p99_ms": 6000.0
+    },
+    {
+      "operation": "ee_mesh_status_warm_50_peers",
+      "command": "ee mesh status --json",
+      "peers": 50,
+      "cache_state": "warm_hit",
+      "p50_ms": 35.0,
+      "p99_ms": 100.0
+    },
+    {
+      "operation": "ee_mesh_auto_enroll_dry_run_5_peers",
+      "command": "ee mesh auto-enroll --dry-run",
+      "peers": 5,
+      "cache_state": "cold",
+      "p50_ms": 350.0,
+      "p99_ms": 800.0
+    },
+    {
+      "operation": "ee_mesh_auto_enroll_dry_run_50_peers",
+      "command": "ee mesh auto-enroll --dry-run",
+      "peers": 50,
+      "cache_state": "cold",
+      "p50_ms": 3000.0,
+      "p99_ms": 6500.0
+    },
+    {
+      "operation": "ee_mesh_auto_enroll_5_peers",
+      "command": "ee mesh auto-enroll",
+      "peers": 5,
+      "cache_state": "cold",
+      "p50_ms": 500.0,
+      "p99_ms": 1200.0
+    },
+    {
+      "operation": "ee_mesh_auto_enroll_50_peers",
+      "command": "ee mesh auto-enroll",
+      "peers": 50,
+      "cache_state": "cold",
+      "p50_ms": 4000.0,
+      "p99_ms": 8000.0
+    },
+    {
+      "operation": "ee_mesh_status_warm_drift_50_peers",
+      "command": "ee mesh status --json",
+      "peers": 50,
+      "cache_state": "warm_hit_with_drift",
+      "p50_ms": 40.0,
+      "p99_ms": 150.0
+    },
+    {
+      "operation": "ee_mesh_hello_roundtrip_cold_1_peer",
+      "command": "hello roundtrip",
+      "peers": 1,
+      "cache_state": "cold",
+      "p50_ms": 80.0,
+      "p99_ms": 250.0
+    },
+    {
+      "operation": "ee_steward_reconciliation_no_drift_50_peers",
+      "command": "steward reconciliation",
+      "peers": 50,
+      "cache_state": "no_drift",
+      "p50_ms": 35.0,
+      "p99_ms": 100.0
+    },
+    {
+      "operation": "ee_steward_reconciliation_drift_5_of_50_peers",
+      "command": "steward reconciliation",
+      "peers": 50,
+      "cache_state": "five_peer_drift",
+      "p50_ms": 4500.0,
+      "p99_ms": 9000.0
+    }
+  ],
+  "idle_workload_rows": [
+    {
+      "operation": "ee_daemon_idle_rss_1h",
+      "measurement": "rss_memory_mb",
+      "duration": "1h",
+      "configuration": "0 peers connected, responder bound, no traffic",
+      "p50_mb": 35.0,
+      "p99_mb": 50.0
+    },
+    {
+      "operation": "ee_daemon_idle_rss_24h",
+      "measurement": "rss_memory_mb",
+      "duration": "24h",
+      "configuration": "0 peers connected, responder bound, no traffic",
+      "p50_mb": 40.0,
+      "p99_mb": 65.0,
+      "rss_slope_mb_per_hour_max": 0.7
+    },
+    {
+      "operation": "ee_daemon_idle_cpu_1h",
+      "measurement": "cpu_pct",
+      "duration": "1h",
+      "configuration": "0 peers connected, responder bound, no traffic",
+      "p50_pct": 0.05,
+      "p99_pct": 0.5
+    },
+    {
+      "operation": "ee_daemon_idle_fd_count_1h",
+      "measurement": "fd_count",
+      "duration": "1h",
+      "configuration": "0 peers connected, responder bound, no traffic",
+      "p50_count": 12,
+      "p99_count": 20
+    }
+  ],
+  "scale_workload_rows": [
+    {
+      "operation": "ee_mesh_status_refresh_500_peers",
+      "command": "ee mesh status --refresh --json",
+      "peers": 500,
+      "cache_state": "cold_no_concurrent_ops",
+      "p50_ms": 28000.0,
+      "p99_ms": 65000.0
+    },
+    {
+      "operation": "ee_mesh_status_cache_hit_500_peers",
+      "command": "ee mesh status --json",
+      "peers": 500,
+      "cache_state": "cache_hit",
+      "p50_ms": 30.0,
+      "p99_ms": 90.0
+    }
+  ],
+  "operations": {
+    "ee_status_cold_5_peers": {
+      "class": "active",
+      "p50_ms": 250.0,
+      "p99_ms": 600.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_status_cold_50_peers": {
+      "class": "active",
+      "p50_ms": 2500.0,
+      "p99_ms": 5500.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_status_warm_5_peers": {
+      "class": "active",
+      "p50_ms": 25.0,
+      "p99_ms": 80.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_status_warm_50_peers": {
+      "class": "active",
+      "p50_ms": 25.0,
+      "p99_ms": 80.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_status_cold_5_peers": {
+      "class": "active",
+      "p50_ms": 300.0,
+      "p99_ms": 700.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_status_cold_50_peers": {
+      "class": "active",
+      "p50_ms": 2800.0,
+      "p99_ms": 6000.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_status_warm_50_peers": {
+      "class": "active",
+      "p50_ms": 35.0,
+      "p99_ms": 100.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_auto_enroll_dry_run_5_peers": {
+      "class": "active",
+      "p50_ms": 350.0,
+      "p99_ms": 800.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_auto_enroll_dry_run_50_peers": {
+      "class": "active",
+      "p50_ms": 3000.0,
+      "p99_ms": 6500.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_auto_enroll_5_peers": {
+      "class": "active",
+      "p50_ms": 500.0,
+      "p99_ms": 1200.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_auto_enroll_50_peers": {
+      "class": "active",
+      "p50_ms": 4000.0,
+      "p99_ms": 8000.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_status_warm_drift_50_peers": {
+      "class": "active",
+      "p50_ms": 40.0,
+      "p99_ms": 150.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_hello_roundtrip_cold_1_peer": {
+      "class": "active",
+      "p50_ms": 80.0,
+      "p99_ms": 250.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_steward_reconciliation_no_drift_50_peers": {
+      "class": "active",
+      "p50_ms": 35.0,
+      "p99_ms": 100.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_steward_reconciliation_drift_5_of_50_peers": {
+      "class": "active",
+      "p50_ms": 4500.0,
+      "p99_ms": 9000.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_daemon_idle_rss_1h": {
+      "class": "idle",
+      "p50_ms": 35.0,
+      "p99_ms": 50.0,
+      "unit": "mb",
+      "tolerance_pct_p99": 20
+    },
+    "ee_daemon_idle_rss_24h": {
+      "class": "idle",
+      "p50_ms": 40.0,
+      "p99_ms": 65.0,
+      "unit": "mb",
+      "tolerance_pct_p99": 20,
+      "rss_slope_mb_per_hour_max": 0.7
+    },
+    "ee_daemon_idle_cpu_1h": {
+      "class": "idle",
+      "p50_ms": 0.05,
+      "p99_ms": 0.5,
+      "unit": "pct",
+      "tolerance_pct_p99": 20
+    },
+    "ee_daemon_idle_fd_count_1h": {
+      "class": "idle",
+      "p50_ms": 12.0,
+      "p99_ms": 20.0,
+      "unit": "count",
+      "tolerance_pct_p99": 20
+    },
+    "ee_mesh_status_refresh_500_peers": {
+      "class": "scale",
+      "p50_ms": 28000.0,
+      "p99_ms": 65000.0,
+      "tolerance_pct_p99": 15
+    },
+    "ee_mesh_status_cache_hit_500_peers": {
+      "class": "scale",
+      "p50_ms": 30.0,
+      "p99_ms": 90.0,
+      "tolerance_pct_p99": 15
+    }
+  }
+}

@@ -10,6 +10,8 @@ set -eu
 #   ./scripts/bench.sh --profile ci-smoke --json
 #   ./scripts/bench.sh --profile nightly
 #   ./scripts/bench.sh --profile stress --check-regression
+#   ./scripts/bench.sh --profile auto_enroll --json
+#   ./scripts/bench.sh --profile auto_enroll_idle_24h --json
 #   ./scripts/bench_pack_regression.sh
 #   ./scripts/bench.sh --quick            # Alias for --profile ci-smoke
 #
@@ -23,6 +25,7 @@ PROFILE="nightly"
 JSON_OUTPUT=false
 CHECK_REGRESSION=false
 LIST_PROFILES=false
+AUTO_ENROLL_BASELINE_ONLY=false
 
 usage() {
     sed -n '3,18p' "$0" | sed 's/^# //' | sed 's/^#//'
@@ -85,7 +88,7 @@ if [ ! -f "$BUDGETS_FILE" ]; then
 fi
 
 if [ "$LIST_PROFILES" = "true" ]; then
-    printf '%s\n' "ci-smoke" "nightly" "stress"
+    printf '%s\n' "ci-smoke" "nightly" "stress" "auto_enroll" "auto_enroll_idle_24h"
     exit 0
 fi
 
@@ -111,9 +114,27 @@ case "$PROFILE" in
         WORKLOAD_TIER="stress"
         RELEASE_BLOCKING=false
         ;;
+    auto_enroll)
+        BENCHMARKS=""
+        BENCH_ARGS=""
+        PROFILE_CLASS="mac-m3-pro"
+        WORKLOAD_TIER="auto_enroll"
+        RELEASE_BLOCKING=false
+        AUTO_ENROLL_BASELINE_ONLY=true
+        BASELINE_FILE="${EE_BENCH_BASELINE_FILE:-$PROJECT_ROOT/benches/baselines/auto_enroll_perf_v0.json}"
+        ;;
+    auto_enroll_idle_24h)
+        BENCHMARKS=""
+        BENCH_ARGS=""
+        PROFILE_CLASS="mac-m3-pro"
+        WORKLOAD_TIER="auto_enroll_idle_24h"
+        RELEASE_BLOCKING=false
+        AUTO_ENROLL_BASELINE_ONLY=true
+        BASELINE_FILE="${EE_BENCH_BASELINE_FILE:-$PROJECT_ROOT/benches/baselines/auto_enroll_perf_v0.json}"
+        ;;
     *)
         echo "Unknown benchmark profile: $PROFILE" >&2
-        echo "Known profiles: ci-smoke, nightly, stress" >&2
+        echo "Known profiles: ci-smoke, nightly, stress, auto_enroll, auto_enroll_idle_24h" >&2
         exit 1
         ;;
 esac
@@ -126,18 +147,24 @@ echo "target: $TARGET_ROOT" >&2
 echo "artifacts: $ARTIFACT_DIR" >&2
 echo "workload tier: $WORKLOAD_TIER" >&2
 
-# Build benchmarks first
-echo "[*] Building benchmarks..." >&2
-if [ "$PROFILE" = "ci-smoke" ]; then
-    cargo build --release --bench status >&2
+# Build benchmarks first. The auto-enroll profiles are contract profiles:
+# they emit the checked baseline rows and leave real measurement to the
+# RCH-run e2e harness that produces a candidate report.
+if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
+    echo "[*] Loading auto-enroll performance baseline contract..." >&2
 else
-    cargo build --release --benches >&2
-fi
+    echo "[*] Building benchmarks..." >&2
+    if [ "$PROFILE" = "ci-smoke" ]; then
+        cargo build --release --bench status >&2
+    else
+        cargo build --release --benches >&2
+    fi
 
-if [ "$PROFILE" = "ci-smoke" ]; then
-    echo "[*] Running ci-smoke benchmark profile..." >&2
-else
-    echo "[*] Running $PROFILE benchmark profile..." >&2
+    if [ "$PROFILE" = "ci-smoke" ]; then
+        echo "[*] Running ci-smoke benchmark profile..." >&2
+    else
+        echo "[*] Running $PROFILE benchmark profile..." >&2
+    fi
 fi
 
 # Collect results
@@ -346,6 +373,10 @@ json_timing_ms() {
 }
 
 workload_json() {
+    if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
+        printf '{"schema":"ee.perf.workload_ref.v1","manifest":"benches/baselines/auto_enroll_perf_v0.json","tier":"%s","ci_suitability":"contract","memory_count":null,"agent_count":null}' "$WORKLOAD_TIER"
+        return
+    fi
     if command -v jq >/dev/null 2>&1 && [ -f "$WORKLOAD_FILE" ]; then
         jq -c --arg tier "$WORKLOAD_TIER" '
             .tiers[]
@@ -691,17 +722,59 @@ EOF
     echo "[+] pack replay/freshness smoke artifacts: $smoke_root" >&2
 }
 
-for bench in $BENCHMARKS; do
-    echo "" >&2
-    echo "[*] Benchmark: $bench" >&2
-    if [ "$PROFILE" = "ci-smoke" ] && [ "$bench" = "status" ]; then
-        run_status_smoke
-    else
-        run_criterion_bench "$bench"
+append_auto_enroll_baseline_rows() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[-] jq is required for auto-enroll baseline profile" >&2
+        FAILED=true
+        return
     fi
-done
+    if [ ! -f "$BASELINE_FILE" ]; then
+        echo "[-] auto-enroll baseline missing at $BASELINE_FILE" >&2
+        FAILED=true
+        return
+    fi
 
-if [ "$PROFILE" != "ci-smoke" ]; then
+    rows_file="$ARTIFACT_DIR/auto_enroll_baseline_rows.tsv"
+    case "$PROFILE" in
+        auto_enroll_idle_24h)
+            jq -r '
+                .operations
+                | to_entries[]
+                | select(.value.class == "idle")
+                | [.key, .value.p50_ms, .value.p99_ms] | @tsv
+            ' "$BASELINE_FILE" >"$rows_file"
+            ;;
+        *)
+            jq -r '
+                .operations
+                | to_entries[]
+                | [.key, .value.p50_ms, .value.p99_ms] | @tsv
+            ' "$BASELINE_FILE" >"$rows_file"
+            ;;
+    esac
+
+    while IFS="$(printf '\t')" read -r key p50_ms p99_ms; do
+        [ -n "$key" ] || continue
+        append_result "$key" "baseline_contract" "$p50_ms" null "$p99_ms" "$p99_ms" null "not_checked"
+        echo "[+] $key: baseline p50=${p50_ms} p99=${p99_ms}" >&2
+    done <"$rows_file"
+}
+
+if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
+    append_auto_enroll_baseline_rows
+else
+    for bench in $BENCHMARKS; do
+        echo "" >&2
+        echo "[*] Benchmark: $bench" >&2
+        if [ "$PROFILE" = "ci-smoke" ] && [ "$bench" = "status" ]; then
+            run_status_smoke
+        else
+            run_criterion_bench "$bench"
+        fi
+    done
+fi
+
+if [ "$PROFILE" != "ci-smoke" ] && [ "$AUTO_ENROLL_BASELINE_ONLY" != "true" ]; then
     run_context_l2_warm_bench
 fi
 
@@ -753,7 +826,10 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
     echo "" >&2
     echo "[*] Checking for regressions against baseline..." >&2
 
-    if [ -f "$BASELINE_FILE" ] && command -v jq >/dev/null 2>&1; then
+    if [ "$AUTO_ENROLL_BASELINE_ONLY" = "true" ]; then
+        echo "[+] Auto-enroll baseline contract loaded from: $BASELINE_FILE" >&2
+        echo "[+] Candidate comparison belongs to scripts/e2e_overhaul/auto_enroll_perf_gate.sh" >&2
+    elif [ -f "$BASELINE_FILE" ] && command -v jq >/dev/null 2>&1; then
         echo "[+] Baseline file found: $BASELINE_FILE" >&2
 
         # Read thresholds from budgets.toml (defaults: 20% p50, 50% p99).
@@ -797,19 +873,21 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
         echo "[!] jq not available - skipping regression check" >&2
     fi
 
-    PACK_SIZE_GATE="$PROJECT_ROOT/scripts/bench_pack_regression.sh"
-    if [ -x "$PACK_SIZE_GATE" ]; then
-        echo "" >&2
-        echo "[*] Checking pack-size regression gate..." >&2
-        if "$PACK_SIZE_GATE" --skip-run --summary "$CRITERION_DIR/pack_size/summary.json"; then
-            echo "[+] pack-size regression gate passed" >&2
+    if [ "$AUTO_ENROLL_BASELINE_ONLY" != "true" ]; then
+        PACK_SIZE_GATE="$PROJECT_ROOT/scripts/bench_pack_regression.sh"
+        if [ -x "$PACK_SIZE_GATE" ]; then
+            echo "" >&2
+            echo "[*] Checking pack-size regression gate..." >&2
+            if "$PACK_SIZE_GATE" --skip-run --summary "$CRITERION_DIR/pack_size/summary.json"; then
+                echo "[+] pack-size regression gate passed" >&2
+            else
+                echo "[-] pack-size regression gate failed" >&2
+                FAILED=true
+            fi
         else
-            echo "[-] pack-size regression gate failed" >&2
+            echo "[!] Pack-size regression gate missing or not executable: $PACK_SIZE_GATE" >&2
             FAILED=true
         fi
-    else
-        echo "[!] Pack-size regression gate missing or not executable: $PACK_SIZE_GATE" >&2
-        FAILED=true
     fi
 fi
 

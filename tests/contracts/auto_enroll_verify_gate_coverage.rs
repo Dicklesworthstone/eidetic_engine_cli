@@ -67,6 +67,8 @@ const WIRED_SRR6_46_STAGES: &[WiredStage] = &[
 const PENDING_SRR6_46_SCRIPTS: &[&str] = &[
     "scripts/e2e_overhaul/auto_enrollment_safety_snapshot.sh",
     "scripts/e2e_overhaul/auto_enroll_documentation_set.sh",
+    "scripts/e2e_overhaul/auto_enroll_perf_gate.sh",
+    "scripts/e2e_overhaul/auto_enroll_idle_24h.sh",
     "scripts/e2e_overhaul/peer_discovery_policy.sh",
 ];
 
