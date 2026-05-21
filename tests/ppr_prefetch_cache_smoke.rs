@@ -15,8 +15,8 @@
 use std::sync::{Arc, RwLock};
 use std::thread;
 
-use ee::graph::CentralityScore;
 use ee::graph::ppr_prefetch_cache::{PprPrefetchCache, PprPrefetchCacheKey};
+use fnx_algorithms::CentralityScore;
 
 fn key(seed: &str, generation: u64) -> PprPrefetchCacheKey {
     PprPrefetchCacheKey::new(format!("blake3:{seed}"), generation)

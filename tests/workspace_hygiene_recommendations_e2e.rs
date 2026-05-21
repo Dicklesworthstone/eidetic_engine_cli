@@ -390,12 +390,12 @@ fn coordination_blocked_projection(value: &Value) -> Result<Value, String> {
         .ok_or_else(|| format!("missing blockedByCoordination: {value}"))?
         .iter()
         .map(|row| {
-            serde_json::json!({
+            Ok(serde_json::json!({
                 "path": clone_at(row, "/path")?,
                 "holderAgent": clone_at(row, "/holderAgent")?,
                 "exclusive": clone_at(row, "/exclusive")?,
                 "reasons": clone_at(row, "/reasons")?,
-            })
+            }))
         })
         .collect::<Result<Vec<_>, String>>()?;
 
@@ -431,13 +431,13 @@ fn scratch_only_projection(value: &Value) -> Result<Value, String> {
         .ok_or_else(|| format!("missing pathClassifications: {value}"))?
         .iter()
         .map(|row| {
-            serde_json::json!({
+            Ok(serde_json::json!({
                 "path": clone_at(row, "/path")?,
                 "bucket": clone_at(row, "/bucket")?,
                 "kind": clone_at(row, "/kind")?,
                 "reasons": clone_at(row, "/reasons")?,
                 "suggestedGroup": clone_at(row, "/suggestedGroup")?,
-            })
+            }))
         })
         .collect::<Result<Vec<_>, String>>()?;
 

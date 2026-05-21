@@ -492,7 +492,7 @@ fn audit_lane_sixty_four_producers_commit_and_verify_real_db() -> TestResult {
     );
     trace.teardown(
         "audit_lane_real_workload",
-        format!("retained audit lane event log at {}", event_log.display()),
+        &format!("retained audit lane event log at {}", event_log.display()),
     );
     Ok(())
 }

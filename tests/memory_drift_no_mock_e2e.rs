@@ -62,9 +62,9 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
+fn ensure_equal<T>(actual: T, expected: T, context: &str) -> TestResult
 where
-    T: std::fmt::Debug + PartialEq + ?Sized,
+    T: std::fmt::Debug + PartialEq,
 {
     if actual == expected {
         Ok(())
