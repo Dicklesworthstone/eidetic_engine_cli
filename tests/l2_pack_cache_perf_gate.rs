@@ -5,6 +5,7 @@ type TestResult<T = ()> = Result<T, String>;
 
 const CONTEXT_BENCH: &str = include_str!("../benches/context.rs");
 const BENCH_SCRIPT: &str = include_str!("../scripts/bench.sh");
+const E2E_SCRIPT: &str = include_str!("../scripts/e2e_overhaul/pack_cache_l2.sh");
 const BUDGETS_TOML: &str = include_str!("../benches/budgets.toml");
 const PERF_BASELINE: &str = include_str!("../benches/baselines/perf_v0_2.json");
 
@@ -52,6 +53,29 @@ fn l2_warm_context_cache_benchmark_is_registered() -> TestResult {
     ] {
         if !BENCH_SCRIPT.contains(expected) {
             return Err(format!("scripts/bench.sh missing `{expected}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn l2_pack_cache_e2e_harness_covers_runtime_contract() -> TestResult {
+    for expected in [
+        "pack_cache_l2",
+        "EE_L2_PACK_CACHE_DIR",
+        "EE_L2_PACK_CACHE_BYTES",
+        "SEED_JSON_PATH",
+        "for index in 1 2 3",
+        "cmp -s \"$SEED_JSON_PATH\" \"$HIT_PATH\"",
+        "l2_pack_cache_corruption",
+        "l2_pack_cache_unavailable",
+        "pack_cache_l2_summary",
+    ] {
+        if !E2E_SCRIPT.contains(expected) {
+            return Err(format!(
+                "scripts/e2e_overhaul/pack_cache_l2.sh missing `{expected}`"
+            ));
         }
     }
 
