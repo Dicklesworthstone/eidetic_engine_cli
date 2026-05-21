@@ -31,6 +31,11 @@ agent ergonomics.
 
 ### Added
 
+- Added agent-ergonomics surfaces from `bd-3qs2i`: `ee curate accept/reject
+  --reason <TEXT>` preserves reviewer rationale, `pack_budget_too_small`,
+  `harmful_burst_quarantine`, and `embed_model_unavailable` are documented
+  degraded codes, and `ee rule mark` tracks validation passes and
+  contradictions separately from outcome counters.
 - Added optional mesh and Tailscale-oriented coordination surfaces:
   peer autodiscovery, auto-enrollment flow, auto-status views, discovery policy,
   explicit revision tokens, foreground mesh CLI mode, emergency-disable paths,
