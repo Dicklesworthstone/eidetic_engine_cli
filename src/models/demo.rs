@@ -35,7 +35,7 @@
 //!       - context
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path};
 use std::str::FromStr;
@@ -234,7 +234,7 @@ struct RawDemoEntry {
     #[serde(default)]
     commands: Vec<RawDemoCommand>,
     #[serde(default, alias = "envOverrides")]
-    env_overrides: HashMap<String, String>,
+    env_overrides: BTreeMap<String, String>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -671,7 +671,7 @@ pub struct DemoEntry {
     /// Sequence of commands to execute.
     pub commands: Vec<DemoCommand>,
     /// Environment variable overrides for all commands.
-    pub env_overrides: HashMap<String, String>,
+    pub env_overrides: BTreeMap<String, String>,
     /// Tags for filtering/categorization.
     pub tags: Vec<String>,
     /// Platform restrictions (e.g., "linux", "macos").
@@ -693,7 +693,7 @@ impl DemoEntry {
             title: title.into(),
             description: description.into(),
             commands: Vec::new(),
-            env_overrides: HashMap::new(),
+            env_overrides: BTreeMap::new(),
             tags: Vec::new(),
             platforms: Vec::new(),
             min_ee_version: None,

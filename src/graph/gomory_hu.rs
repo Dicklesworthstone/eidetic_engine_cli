@@ -12,7 +12,7 @@ use crate::graph::GraphResult;
 use crate::graph::algorithms::{current_or_testing_cx, run_with_budget};
 use crate::models::degradation::GRAPH_PROXIMITY_UNREACHABLE_CODE;
 
-pub const PROXIMITY_SCHEMA_V1: &str = "ee.proximity.v1";
+pub use crate::models::PROXIMITY_SCHEMA_V1;
 pub const GOMORY_HU_WEIGHT_ATTR: &str = "weight";
 const GOMORY_HU_BUILD_BUDGET: Duration = Duration::from_millis(10_000);
 

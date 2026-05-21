@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::{OnceLock, RwLock};
 
@@ -88,7 +88,7 @@ pub fn personalized_pagerank_cache_seed_signature(
 
 pub fn compute_personalized_pagerank(
     graph: &DiGraph,
-    seed_map: &HashMap<MemoryId, f64>,
+    seed_map: &BTreeMap<MemoryId, f64>,
 ) -> GraphResult<HashMap<MemoryId, f64>> {
     let cx = current_or_testing_cx();
     compute_personalized_pagerank_with_cx(
@@ -101,7 +101,7 @@ pub fn compute_personalized_pagerank(
 
 pub fn compute_personalized_pagerank_with_policy(
     graph: &DiGraph,
-    seed_map: &HashMap<MemoryId, f64>,
+    seed_map: &BTreeMap<MemoryId, f64>,
     policy: PersonalizedPageRankPolicy,
 ) -> GraphResult<HashMap<MemoryId, f64>> {
     let cx = current_or_testing_cx();
@@ -111,9 +111,9 @@ pub fn compute_personalized_pagerank_with_policy(
 pub fn compute_personalized_pagerank_with_cx(
     cx: &Cx,
     graph: &DiGraph,
-    seed_map: &HashMap<MemoryId, f64>,
+    seed_map: &BTreeMap<MemoryId, f64>,
     policy: PersonalizedPageRankPolicy,
-) -> GraphResult<HashMap<MemoryId, f64>> {
+) -> GraphResult<BTreeMap<MemoryId, f64>> {
     let seed_weights = seed_map
         .iter()
         .map(|(memory_id, weight)| (memory_id.to_string(), *weight))

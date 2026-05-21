@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use asupersync::Cx;
 use fnx_classes::{Graph, digraph::DiGraph};
@@ -10,11 +10,11 @@ use crate::core::degraded_aggregation::{
 use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
-use crate::models::MemoryId;
+use crate::models::{MemoryId, TrustClass};
 use crate::models::degradation::GRAPH_PACK_DNA_NO_DOMINATOR_CODE;
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
-pub const PACK_DNA_SCHEMA_V1: &str = "ee.context.pack_dna.v1";
+pub use crate::models::PACK_DNA_SCHEMA_V1;
 pub const DEFAULT_PACK_DNA_EGO_RADIUS: usize = 2;
 pub const DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT: usize = 10;
 
@@ -239,7 +239,7 @@ fn valid_memory_ids(memory_ids: &[MemoryId], graph: &DiGraph) -> Vec<MemoryId> {
 fn valid_seed_weights(
     query_seed_weights: &BTreeMap<MemoryId, f64>,
     graph: &DiGraph,
-) -> HashMap<MemoryId, f64> {
+) -> BTreeMap<MemoryId, f64> {
     query_seed_weights
         .iter()
         .filter_map(|(memory_id, weight)| {
@@ -384,7 +384,7 @@ fn pack_dna_ego_subgraph(
 fn pack_dna_ppr_neighbors(
     cx: &Cx,
     graph: &DiGraph,
-    query_seed_weights: &HashMap<MemoryId, f64>,
+    query_seed_weights: &BTreeMap<MemoryId, f64>,
     limit: usize,
 ) -> GraphResult<Vec<PackDnaPprNeighbor>> {
     if query_seed_weights.is_empty() || limit == 0 {
