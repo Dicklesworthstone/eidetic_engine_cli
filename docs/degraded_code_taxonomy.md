@@ -406,9 +406,11 @@ memory bodies in `sources[]`.
 | `duplicate_rule_insufficient_signal` | low | bd-17c65.7.4 (G4) |
 | `review_queue_invalid_transition` | medium | bd-17c65.7.4 (G4) |
 
-#### Maintenance + steward (14)
+#### Maintenance + steward (16)
 | Code | Severity | Bead |
 |------|----------|------|
+| `cusum_baseline_underpowered` | info | bd-17c65.14.13 (N13) |
+| `cusum_regime_change_detected` | warning | bd-17c65.14.13 (N13) |
 | `decay_sweep_database_missing` | high | bd-17c65.12.4 (L3) |
 | `decay_sweep_database_open_failed` | high | bd-17c65.12.4 (L3) |
 | `decay_sweep_database_unresolved` | medium | bd-17c65.12.4 (L3) |

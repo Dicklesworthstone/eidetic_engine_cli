@@ -646,6 +646,18 @@ pub const CUSUM_DEFAULT_SLACK_K: f64 = 0.5;
 /// Default variance for a workspace before a learned baseline is available.
 pub const CUSUM_DEFAULT_BASELINE_VARIANCE: f64 = 1.0;
 
+/// Minimum observation count before CUSUM baseline estimates are considered calibrated.
+pub const CUSUM_BASELINE_MIN_OBSERVATIONS: u64 = 30;
+
+/// Degraded code emitted when a CUSUM baseline has too little evidence.
+pub const CUSUM_BASELINE_UNDERPOWERED_CODE: &str = "cusum_baseline_underpowered";
+
+/// Degraded code emitted when CUSUM schedules maintenance after a regime change.
+pub const CUSUM_REGIME_CHANGE_DETECTED_CODE: &str = "cusum_regime_change_detected";
+
+/// Maintenance context marker used for event-driven CUSUM scheduling.
+pub const CUSUM_REGIME_CHANGE_MAINTENANCE_REASON: &str = "cusum_regime_change";
+
 /// Derived state of a workspace activity regime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RegimeState {
@@ -794,6 +806,29 @@ pub struct RegimeObservationResult {
     pub regime_change_emitted: bool,
 }
 
+impl RegimeObservationResult {
+    #[must_use]
+    pub fn test_event_json(
+        &self,
+        workspace_id: &str,
+        observation: f64,
+        threshold_h: f64,
+    ) -> JsonValue {
+        json!({
+            "schema": "ee.test_event.v1",
+            "kind": "cusum",
+            "workspace_id": workspace_id,
+            "cusum_positive": self.cusum_positive,
+            "cusum_negative": self.cusum_negative,
+            "observation": observation,
+            "z_score": self.z_score,
+            "threshold_h": threshold_h,
+            "regime_change_emitted": self.regime_change_emitted,
+            "direction": self.direction.as_str(),
+        })
+    }
+}
+
 /// Apply one observed activity value to a two-sided CUSUM detector.
 ///
 /// The returned scores describe the observation that was just processed. When
@@ -879,6 +914,51 @@ fn derive_regime_state(cusum_positive: f64, cusum_negative: f64) -> RegimeState 
     } else {
         RegimeState::Dropping
     }
+}
+
+#[must_use]
+pub const fn cusum_baseline_is_underpowered(observation_count: u64) -> bool {
+    observation_count < CUSUM_BASELINE_MIN_OBSERVATIONS
+}
+
+/// Steward jobs scheduled in response to a CUSUM regime-change event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CusumMaintenanceSchedule {
+    pub workspace_id: String,
+    pub reason: &'static str,
+    pub direction: RegimeDirection,
+    pub job_ids: Vec<String>,
+}
+
+/// Schedule maintenance work after a CUSUM threshold crossing.
+///
+/// The CUSUM detector is intentionally pure; this adapter is the boundary
+/// where a regime-change event enters the steward job ledger.
+pub fn schedule_cusum_regime_change_maintenance(
+    runner: &mut ManualRunner,
+    workspace_id: &str,
+    result: &RegimeObservationResult,
+) -> Option<CusumMaintenanceSchedule> {
+    if !result.regime_change_emitted {
+        return None;
+    }
+
+    let direction = result.direction.as_str();
+    let context = format!(
+        "{CUSUM_REGIME_CHANGE_MAINTENANCE_REASON}: workspace={workspace_id} direction={direction} magnitude={:.3}",
+        result.magnitude
+    );
+    let job_ids = [JobType::DecaySweep, JobType::CurationReview]
+        .into_iter()
+        .map(|job_type| runner.schedule(job_type, JobPriority::High, Some(context.clone())))
+        .collect();
+
+    Some(CusumMaintenanceSchedule {
+        workspace_id: workspace_id.to_owned(),
+        reason: CUSUM_REGIME_CHANGE_MAINTENANCE_REASON,
+        direction: result.direction,
+        job_ids,
+    })
 }
 
 /// Status of a maintenance job.
@@ -6253,6 +6333,153 @@ mod tests {
             false,
             "conservative threshold does not detect within window",
         )
+    }
+
+    #[test]
+    fn cusum_gradual_drift_respects_slack_threshold() -> TestResult {
+        let mut sensitive = WorkspaceRegimeState::new().with_thresholds(2.0, 0.1);
+        let mut slack_filtered = WorkspaceRegimeState::new().with_thresholds(2.0, 0.8);
+
+        let mut sensitive_detected = false;
+        let mut filtered_detected = false;
+        for offset in 1_i64..=6 {
+            sensitive_detected |=
+                apply_cusum_observation(&mut sensitive, cusum_observed_at(offset)?, 0.75)?
+                    .regime_change_emitted;
+            filtered_detected |=
+                apply_cusum_observation(&mut slack_filtered, cusum_observed_at(offset)?, 0.75)?
+                    .regime_change_emitted;
+        }
+
+        ensure(sensitive_detected, true, "low slack detects gradual drift")?;
+        ensure(filtered_detected, false, "high slack filters gradual drift")
+    }
+
+    #[test]
+    fn cusum_test_event_matches_logging_contract() -> TestResult {
+        let mut state = WorkspaceRegimeState::new();
+        let mut event_result = None;
+        for offset in 1_i64..=3 {
+            let result = apply_cusum_observation(&mut state, cusum_observed_at(offset)?, 3.0)?;
+            if result.regime_change_emitted {
+                event_result = Some(result);
+                break;
+            }
+        }
+        let result = event_result.ok_or_else(|| "CUSUM event should be emitted".to_owned())?;
+        let event = result.test_event_json("wsp_cusum_test", 3.0, CUSUM_DEFAULT_THRESHOLD_H);
+
+        ensure(
+            event["schema"].as_str(),
+            Some("ee.test_event.v1"),
+            "event schema",
+        )?;
+        ensure(event["kind"].as_str(), Some("cusum"), "event kind")?;
+        ensure(
+            event["workspace_id"].as_str(),
+            Some("wsp_cusum_test"),
+            "event workspace",
+        )?;
+        ensure(
+            event["regime_change_emitted"].as_bool(),
+            Some(true),
+            "event emitted",
+        )?;
+        ensure(
+            event["direction"].as_str(),
+            Some("increase"),
+            "event direction",
+        )?;
+        ensure(
+            event["threshold_h"].as_f64(),
+            Some(CUSUM_DEFAULT_THRESHOLD_H),
+            "event threshold",
+        )
+    }
+
+    #[test]
+    fn cusum_baseline_underpowered_threshold_is_documented() -> TestResult {
+        ensure(
+            cusum_baseline_is_underpowered(0),
+            true,
+            "empty baseline is underpowered",
+        )?;
+        ensure(
+            cusum_baseline_is_underpowered(CUSUM_BASELINE_MIN_OBSERVATIONS - 1),
+            true,
+            "baseline just below minimum is underpowered",
+        )?;
+        ensure(
+            cusum_baseline_is_underpowered(CUSUM_BASELINE_MIN_OBSERVATIONS),
+            false,
+            "baseline at minimum is calibrated",
+        )
+    }
+
+    #[test]
+    fn cusum_regime_change_schedules_steward_jobs() -> TestResult {
+        let mut runner = ManualRunner::new(RunnerOptions::new().with_dry_run(true));
+        let mut steady = WorkspaceRegimeState::new();
+        let steady_result = apply_cusum_observation(&mut steady, cusum_observed_at(0)?, 0.0)?;
+        ensure(
+            schedule_cusum_regime_change_maintenance(
+                &mut runner,
+                "wsp_cusum_schedule",
+                &steady_result,
+            )
+            .is_none(),
+            true,
+            "steady observation does not schedule jobs",
+        )?;
+
+        let mut shifting = WorkspaceRegimeState::new();
+        let mut event_result = None;
+        for offset in 1_i64..=3 {
+            let result = apply_cusum_observation(&mut shifting, cusum_observed_at(offset)?, 3.0)?;
+            if result.regime_change_emitted {
+                event_result = Some(result);
+                break;
+            }
+        }
+        let result = event_result.ok_or_else(|| "CUSUM event should be emitted".to_owned())?;
+        let schedule =
+            schedule_cusum_regime_change_maintenance(&mut runner, "wsp_cusum_schedule", &result)
+                .ok_or_else(|| "CUSUM event should schedule steward jobs".to_owned())?;
+
+        ensure(
+            schedule.reason,
+            CUSUM_REGIME_CHANGE_MAINTENANCE_REASON,
+            "schedule reason",
+        )?;
+        ensure(
+            schedule.direction,
+            RegimeDirection::Increase,
+            "schedule direction",
+        )?;
+        ensure(schedule.job_ids.len(), 2, "scheduled job count")?;
+        ensure(runner.ledger().len(), 2, "ledger job count")?;
+        ensure(
+            runner.ledger().list_by_type(JobType::DecaySweep).len(),
+            1,
+            "decay sweep scheduled",
+        )?;
+        ensure(
+            runner.ledger().list_by_type(JobType::CurationReview).len(),
+            1,
+            "curation review scheduled",
+        )?;
+        for job in runner.ledger().list_jobs() {
+            ensure(job.priority, JobPriority::High, "job priority")?;
+            let context = job
+                .context
+                .as_deref()
+                .ok_or_else(|| "scheduled CUSUM job missing context".to_owned())?;
+            if !context.contains(CUSUM_REGIME_CHANGE_MAINTENANCE_REASON) {
+                return Err(format!("CUSUM job context missing reason: {context}"));
+            }
+        }
+
+        Ok(())
     }
 
     #[derive(Clone, Debug)]

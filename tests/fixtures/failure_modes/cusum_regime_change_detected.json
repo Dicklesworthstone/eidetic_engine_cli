@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cusum_regime_change_detected",
+  "introduced_by": {
+    "bead": "bd-17c65.14.13",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "daemon",
+    "maintenance run"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A workspace activity signal crosses the configured CUSUM threshold and schedules event-driven steward work.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# replay a steady baseline followed by a step-shift activity sequence"
+    ],
+    "invocation": "scripts/e2e_overhaul/cusum_maintenance.sh"
+  },
+  "expected_emission": {
+    "code": "cusum_regime_change_detected",
+    "severity": "warning",
+    "message_contains": [
+      "CUSUM regime change",
+      "maintenance scheduled"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cusum_baseline_underpowered",
+  "introduced_by": {
+    "bead": "bd-17c65.14.13",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "daemon",
+    "maintenance run"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace has fewer than 30 activity observations, so the CUSUM baseline is still underpowered and regime-change scheduling should stay conservative.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "# seed fewer than 30 workspace activity observations in the CUSUM harness"
+    ],
+    "invocation": "scripts/e2e_overhaul/cusum_maintenance.sh"
+  },
+  "expected_emission": {
+    "code": "cusum_baseline_underpowered",
+    "severity": "info",
+    "message_contains": [
+      "CUSUM baseline",
+      "underpowered"
+    ],
+    "repair_contains": "Collect at least 30 observations"
+  }
+}
