@@ -18897,7 +18897,34 @@ mod tests {
         ensure(
             singleflight.contains_key("surfaces"),
             "singleFlight includes surface summaries",
-        )
+        )?;
+
+        let rendered = serde_json::to_string(singleflight)
+            .map_err(|error| format!("render doctor singleFlight JSON: {error}"))?;
+        for forbidden in [
+            "rawQuery",
+            "queryText",
+            "workspacePath",
+            "workspaceIdentity",
+            "memoryContent",
+            "memoryBody",
+            "mailBody",
+            "sourcePath",
+            "optionPairs",
+            "optionHashInput",
+            "release token secret",
+            "BEGIN PRIVATE KEY",
+            "sk-",
+            "ghp_",
+            "/private/",
+        ] {
+            ensure(
+                !rendered.contains(forbidden),
+                format!("doctor singleFlight leaked forbidden text {forbidden:?}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]
