@@ -816,6 +816,9 @@ mod self_tests {
         assert!(source.contains("#[proc_macro_attribute]"));
         assert!(source.contains("pub fn required"));
         assert!(source.contains("Deterministic<Seed>"));
+        assert!(source.contains("fn has_deterministic_seed_parameter"));
+        assert!(source.contains("group.delimiter() == Delimiter::Parenthesis"));
+        assert!(!source.contains("if !compact.contains(\"Deterministic<Seed>\")"));
         assert!(source.contains("thread_rng("));
         assert!(source.contains("SystemTime::now("));
         assert!(source.contains("std::fs::read_dir("));

@@ -14,7 +14,7 @@ pub fn required(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let compact = compact_non_literal_tokens(item.clone());
     let mut errors = Vec::new();
 
-    if !compact.contains("Deterministic<Seed>") {
+    if !has_deterministic_seed_parameter(item.clone()) {
         errors.push("#[determinism::required] requires a Deterministic<Seed> parameter");
     }
 
@@ -202,6 +202,26 @@ fn compact_non_literal_tokens(tokens: TokenStream) -> String {
     let mut output = String::new();
     append_non_literal_tokens(tokens, &mut output);
     output
+}
+
+fn has_deterministic_seed_parameter(tokens: TokenStream) -> bool {
+    let mut saw_function_keyword = false;
+
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) if ident.to_string() == "fn" => {
+                saw_function_keyword = true;
+            }
+            TokenTree::Group(group)
+                if saw_function_keyword && group.delimiter() == Delimiter::Parenthesis =>
+            {
+                return compact_non_literal_tokens(group.stream()).contains("Deterministic<Seed>");
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 fn append_non_literal_tokens(tokens: TokenStream, output: &mut String) {
