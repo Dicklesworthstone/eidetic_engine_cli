@@ -999,14 +999,11 @@ pub fn replay_undo(run_dir: &Path) -> Result<UndoSummary, DoctorRuntimeError> {
     let run_dir = run_dir_buf.as_path();
 
     // Acquire the workspace lock for the duration of this call. The state
-    // file at <run_dir>/state.json holds the workspace path; if it's
-    // missing or unparseable we can't take a lock and fall through to the
-    // best-effort undo (legacy behavior, preserved for forensic inspection
-    // of orphaned runs).
-    let _lock_guard = read_state(run_dir)
-        .ok()
-        .map(|state| acquire_undo_lock(&state.workspace))
-        .transpose()?;
+    // file at <run_dir>/state.json is the verified binding from a run dir to
+    // its workspace; if it is missing or corrupt, undo cannot know which
+    // workspace lock protects the replay and must fail closed.
+    let state = read_state(run_dir)?;
+    let _lock_guard = acquire_undo_lock(&state.workspace)?;
 
     let actions_path = run_dir.join("actions.jsonl");
     let raw = fs::read_to_string(&actions_path).map_err(|source| DoctorRuntimeError::Io {
@@ -2106,6 +2103,51 @@ mod tests {
         let s2 = replay_undo(&run_dir).unwrap();
         assert_eq!(s2.actions_undone, 0);
         assert_eq!(s2.actions_skipped, 1);
+    }
+
+    #[test]
+    fn undo_fails_closed_when_state_json_is_missing() {
+        let runs = fresh_workspace();
+        let run_dir = runs.path().join("run_without_state");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("actions.jsonl"), "").unwrap();
+
+        let result = replay_undo(&run_dir);
+
+        match result {
+            Err(DoctorRuntimeError::Io { context, source }) => {
+                assert!(context.contains("read state.json"), "{context}");
+                assert_eq!(source.kind(), io::ErrorKind::NotFound);
+            }
+            other => panic!("expected missing state.json to fail closed, got {other:?}"),
+        }
+        assert!(
+            !run_dir.join("undo_log.jsonl").exists(),
+            "undo must stop before replay artifacts are written"
+        );
+    }
+
+    #[test]
+    fn undo_fails_closed_when_state_json_is_corrupt() {
+        let runs = fresh_workspace();
+        let run_dir = runs.path().join("run_with_corrupt_state");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("state.json"), b"{not valid json").unwrap();
+        fs::write(run_dir.join("actions.jsonl"), "").unwrap();
+
+        let result = replay_undo(&run_dir);
+
+        match result {
+            Err(DoctorRuntimeError::Io { context, source }) => {
+                assert!(context.contains("parse state.json"), "{context}");
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected corrupt state.json to fail closed, got {other:?}"),
+        }
+        assert!(
+            !run_dir.join("undo_log.jsonl").exists(),
+            "undo must stop before replay artifacts are written"
+        );
     }
 
     #[test]
