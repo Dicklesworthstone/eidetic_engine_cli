@@ -61,7 +61,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 
 | Capability | What you get |
 |---|---|
-| **Hybrid retrieval** | BM25 + vector search via Frankensearch's `TwoTierSearcher`, with deterministic ranking and fusion |
+| **Hybrid retrieval** | BM25 + vector search via Frankensearch's `TwoTierSearcher`, with deterministic ranking and fusion; local RRF-shaped data is diagnostic-only and never owns final ordering |
 | **Explainable scores** | Every returned memory shows component scores, freshness, confidence, and which sources support it |
 | **Procedural rules with decay** | Confidence ages out, harmful feedback demotes faster than helpful feedback promotes |
 | **Anti-patterns first-class** | Trauma-guard surfaces high-severity risk memories before destructive actions |

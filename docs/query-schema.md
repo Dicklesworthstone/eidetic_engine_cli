@@ -13,7 +13,7 @@ The `ee.query.v1` schema defines how agents and tools submit structured queries 
 - **Search**: Frankensearch for text/hybrid retrieval
 - **Graph projections**: FrankenNetworkX for neighborhood and link traversal
 
-This schema does **not** introduce custom RRF, BM25, or vector fusion algorithms. Execution must map to the existing module interfaces.
+This schema does **not** introduce custom RRF, BM25, or vector fusion algorithms. Execution must map to the existing module interfaces. The `ee diag search` fusion block is a diagnostic-only pre-fusion contribution table; final result ordering remains owned by Frankensearch's `TwoTierSearcher`.
 
 ---
 
