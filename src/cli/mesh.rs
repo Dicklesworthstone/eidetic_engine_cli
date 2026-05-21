@@ -16,7 +16,8 @@ use crate::core::tailscale_probe::{
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
 use crate::db::{
-    CreateAuditInput, DbConnection, InsertMeshImportLedgerEventInput, UpsertMeshPeerCursorInput,
+    CreateAuditInput, CreateSearchIndexJobInput, DbConnection, InsertMeshImportLedgerEventInput,
+    SearchIndexJobType, StoredMeshPeer, StoredMeshPeerCursor, UpsertMeshPeerCursorInput,
     UpsertMeshPeerInput, audit_actions, generate_audit_id,
 };
 use crate::mesh::audit::{
@@ -2744,10 +2745,25 @@ fn import_mesh_artifact(
     }
     let connection = open_mesh_connection(&database_path)?;
     let workspace_id = resolve_mesh_workspace_id(&connection, &workspace_path)?;
+    import_mesh_artifact_into_connection(&connection, &workspace_id, artifact)
+}
+
+fn import_mesh_artifact_into_connection(
+    connection: &DbConnection,
+    workspace_id: &str,
+    artifact: &MeshExportArtifact,
+) -> Result<(usize, usize, usize), DomainError> {
+    let mut imported_peer_count = 0;
     for peer in &artifact.peers {
+        let existing = connection
+            .get_mesh_peer(workspace_id, &peer.peer_id)
+            .map_err(|error| storage_error("Failed to inspect existing mesh peer", error))?;
+        let changed = existing
+            .as_ref()
+            .is_none_or(|stored| !mesh_peer_matches_row(stored, workspace_id, peer));
         connection
             .upsert_mesh_peer(&UpsertMeshPeerInput {
-                workspace_id: workspace_id.clone(),
+                workspace_id: workspace_id.to_owned(),
                 peer_id: peer.peer_id.clone(),
                 origin_node_id: peer.origin_node_id.clone(),
                 display_name: peer.display_name.clone(),
@@ -2756,11 +2772,22 @@ fn import_mesh_artifact(
                 last_seen_at: Some(peer.last_seen_at.clone()),
             })
             .map_err(|error| storage_error("Failed to import mesh peer", error))?;
+        if changed {
+            imported_peer_count += 1;
+        }
     }
+
+    let mut imported_cursor_count = 0;
     for cursor in &artifact.cursors {
+        let existing = connection
+            .get_mesh_peer_cursor(workspace_id, &cursor.peer_id, &cursor.origin_workspace_id)
+            .map_err(|error| storage_error("Failed to inspect existing mesh peer cursor", error))?;
+        let changed = existing
+            .as_ref()
+            .is_none_or(|stored| !mesh_cursor_matches_row(stored, workspace_id, cursor));
         connection
             .upsert_mesh_peer_cursor(&UpsertMeshPeerCursorInput {
-                workspace_id: workspace_id.clone(),
+                workspace_id: workspace_id.to_owned(),
                 peer_id: cursor.peer_id.clone(),
                 origin_node_id: cursor.origin_node_id.clone(),
                 origin_workspace_id: cursor.origin_workspace_id.clone(),
@@ -2771,11 +2798,25 @@ fn import_mesh_artifact(
                 updated_at: Some(cursor.updated_at.clone()),
             })
             .map_err(|error| storage_error("Failed to import mesh peer cursor", error))?;
+        if changed {
+            imported_cursor_count += 1;
+        }
     }
+
+    let mut imported_event_count = 0;
     for event in &artifact.events {
+        let existing = connection
+            .get_mesh_import_ledger_event(
+                workspace_id,
+                &event.origin_node_id,
+                &event.origin_workspace_id,
+                event.seq,
+            )
+            .map_err(|error| storage_error("Failed to inspect existing mesh event", error))?;
+        let changed = existing.is_none();
         connection
             .insert_mesh_import_ledger_event(&InsertMeshImportLedgerEventInput {
-                workspace_id: workspace_id.clone(),
+                workspace_id: workspace_id.to_owned(),
                 event_id: event.event_id.clone(),
                 origin_node_id: event.origin_node_id.clone(),
                 origin_workspace_id: event.origin_workspace_id.clone(),
@@ -2798,12 +2839,89 @@ fn import_mesh_artifact(
                 imported_at: Some(event.imported_at.clone()),
             })
             .map_err(|error| storage_error("Failed to import mesh event", error))?;
+        if changed {
+            enqueue_mesh_import_index_job(connection, workspace_id, event)?;
+            imported_event_count += 1;
+        }
     }
     Ok((
-        artifact.peers.len(),
-        artifact.cursors.len(),
-        artifact.events.len(),
+        imported_peer_count,
+        imported_cursor_count,
+        imported_event_count,
     ))
+}
+
+fn enqueue_mesh_import_index_job(
+    connection: &DbConnection,
+    workspace_id: &str,
+    event: &crate::mesh::foreground_cli::MeshEventRow,
+) -> Result<(), DomainError> {
+    let index_job_id = stable_mesh_import_index_job_id(workspace_id, event);
+    if connection
+        .get_search_index_job(&index_job_id)
+        .map_err(|error| storage_error("Failed to inspect mesh import index job", error))?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    connection
+        .insert_search_index_job(
+            &index_job_id,
+            &CreateSearchIndexJobInput {
+                workspace_id: workspace_id.to_owned(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("import".to_owned()),
+                document_id: Some(event.event_id.clone()),
+                documents_total: 1,
+            },
+        )
+        .map_err(|error| storage_error("Failed to enqueue mesh import index job", error))
+}
+
+fn stable_mesh_import_index_job_id(
+    workspace_id: &str,
+    event: &crate::mesh::foreground_cli::MeshEventRow,
+) -> String {
+    let hash = blake3::hash(
+        format!(
+            "mesh-import-index-job:{workspace_id}:{}:{}:{}:{}",
+            event.origin_node_id, event.origin_workspace_id, event.seq, event.event_hash
+        )
+        .as_bytes(),
+    )
+    .to_hex();
+    format!("sidx_{}", &hash[..26])
+}
+
+fn mesh_peer_matches_row(
+    stored: &StoredMeshPeer,
+    workspace_id: &str,
+    row: &crate::mesh::foreground_cli::MeshPeerRow,
+) -> bool {
+    stored.workspace_id == workspace_id
+        && stored.peer_id == row.peer_id
+        && stored.origin_node_id == row.origin_node_id
+        && stored.display_name == row.display_name
+        && stored.policy_summary_json == row.policy_summary_json
+        && stored.enabled == row.enabled
+        && stored.last_seen_at == row.last_seen_at
+}
+
+fn mesh_cursor_matches_row(
+    stored: &StoredMeshPeerCursor,
+    workspace_id: &str,
+    row: &crate::mesh::foreground_cli::MeshCursorRow,
+) -> bool {
+    stored.workspace_id == workspace_id
+        && stored.peer_id == row.peer_id
+        && stored.origin_node_id == row.origin_node_id
+        && stored.origin_workspace_id == row.origin_workspace_id
+        && stored.last_seq == row.last_seq
+        && stored.tip_event_hash == row.tip_event_hash
+        && stored.tip_audit_hash == row.tip_audit_hash
+        && stored.status == row.status
+        && stored.updated_at == row.updated_at
 }
 
 fn open_mesh_connection(path: &Path) -> Result<DbConnection, DomainError> {
@@ -3335,6 +3453,117 @@ mod tests {
             Some("{\"schema\":\"other\"}".to_owned())
         );
         assert!(!revocations[0].enabled);
+    }
+
+    #[test]
+    fn mesh_import_counts_only_effective_replay_changes() {
+        let connection = DbConnection::open_memory().expect("open memory db");
+        connection.migrate().expect("migrate db");
+        let workspace_id = "wsp_meshreplay0000000000000001";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &crate::db::CreateWorkspaceInput {
+                    path: "/tmp/ee-mesh-replay-counts".to_string(),
+                    name: Some("mesh replay counts".to_string()),
+                },
+            )
+            .expect("insert workspace");
+
+        let artifact = mesh_export_artifact_for_import_counts();
+        let first = import_mesh_artifact_into_connection(&connection, workspace_id, &artifact)
+            .expect("first import");
+        assert_eq!(first, (1, 1, 1));
+
+        let duplicate = import_mesh_artifact_into_connection(&connection, workspace_id, &artifact)
+            .expect("duplicate import");
+        assert_eq!(
+            duplicate,
+            (0, 0, 0),
+            "duplicate replay should be idempotent and report no effective changes"
+        );
+
+        let events = connection
+            .list_mesh_import_ledger_events_for_workspace(workspace_id)
+            .expect("list imported events");
+        assert_eq!(events.len(), 1);
+
+        let index_jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .expect("list index jobs");
+        assert_eq!(
+            index_jobs.len(),
+            1,
+            "duplicate replay should not enqueue duplicate import index jobs"
+        );
+        assert_eq!(index_jobs[0].document_source.as_deref(), Some("import"));
+        assert_eq!(
+            index_jobs[0].document_id.as_deref(),
+            Some(artifact.events[0].event_id.as_str())
+        );
+    }
+
+    fn mesh_export_artifact_for_import_counts() -> MeshExportArtifact {
+        MeshExportArtifact {
+            schema: MESH_EXPORT_ARTIFACT_SCHEMA_V1.to_string(),
+            workspace_id: "wsp_remote00000000000000000001".to_string(),
+            source: "ee mesh export".to_string(),
+            policy_attestation: None,
+            storage: MeshStorageCounts {
+                peer_count: 1,
+                cursor_count: 1,
+                imported_event_count: 1,
+                policy_decision_event_count: 0,
+                policy_failure_event_count: 0,
+                mapped_memory_count: 0,
+                cached_body_count: 0,
+            },
+            peers: vec![crate::mesh::foreground_cli::MeshPeerRow {
+                peer_id: "peer_mesh_replay_counts".to_string(),
+                origin_node_id: "node_mesh_replay_counts".to_string(),
+                display_name: Some("replay-counts".to_string()),
+                enabled: true,
+                last_seen_at: "2026-05-21T19:50:00Z".to_string(),
+                policy_summary_json: Some(r#"{"schema":"ee.mesh.peer_policy.v1"}"#.to_string()),
+            }],
+            cursors: vec![crate::mesh::foreground_cli::MeshCursorRow {
+                peer_id: "peer_mesh_replay_counts".to_string(),
+                origin_node_id: "node_mesh_replay_counts".to_string(),
+                origin_workspace_id: "wsp_remote00000000000000000001".to_string(),
+                last_seq: 1,
+                tip_event_hash: Some(hash_for_test('a')),
+                tip_audit_hash: Some(hash_for_test('b')),
+                status: "current".to_string(),
+                updated_at: "2026-05-21T19:50:01Z".to_string(),
+            }],
+            events: vec![crate::mesh::foreground_cli::MeshEventRow {
+                event_id: "mesh_evt_replay_counts_0000000000000001".to_string(),
+                origin_node_id: "node_mesh_replay_counts".to_string(),
+                origin_workspace_id: "wsp_remote00000000000000000001".to_string(),
+                producer_peer_id: Some("peer_mesh_replay_counts".to_string()),
+                seq: 1,
+                prev_event_hash: None,
+                event_hash: hash_for_test('c'),
+                event_kind: "create".to_string(),
+                logical_memory_id: "mesh_mem_replay_counts".to_string(),
+                content_hash: hash_for_test('d'),
+                material_lane: "metadata".to_string(),
+                redaction_class: "share".to_string(),
+                trust_lane: "peerAgent".to_string(),
+                import_decision: "accepted".to_string(),
+                local_memory_id: None,
+                body_cache_key: None,
+                policy_failure_surface_json: None,
+                policy_decision_json: None,
+                event_json: r#"{"schema":"ee.mesh.event.v1","eventKind":"create"}"#.to_string(),
+                policy_attestation: None,
+                imported_at: "2026-05-21T19:50:02Z".to_string(),
+            }],
+        }
+    }
+
+    fn hash_for_test(character: char) -> String {
+        format!("blake3:{}", character.to_string().repeat(64))
     }
 
     fn mesh_snapshot_with_peers(
