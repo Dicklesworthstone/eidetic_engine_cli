@@ -1079,9 +1079,16 @@ fn peer_reports(status: &Value) -> Vec<TailscalePeerReport> {
 
 fn peer_ee_capability(peer: &Value) -> Option<TailscalePeerEeCapability> {
     let capabilities = peer.get("Capabilities")?;
+    let ee_version = string_value(capabilities, "eeVersion");
+    let ee_protocol_version = string_value(capabilities, "eeProtocol");
+    let workspace_ids_key_present = capabilities.get("workspaceIds").is_some();
+    if ee_version.is_none() && ee_protocol_version.is_none() && !workspace_ids_key_present {
+        return None;
+    }
+
     Some(TailscalePeerEeCapability {
-        ee_version: string_value(capabilities, "eeVersion").unwrap_or_default(),
-        ee_protocol_version: string_value(capabilities, "eeProtocol").unwrap_or_default(),
+        ee_version: ee_version.unwrap_or_default(),
+        ee_protocol_version: ee_protocol_version.unwrap_or_default(),
         workspace_ids: string_array_value(capabilities, "workspaceIds"),
         respond: bool_value(capabilities, "respond").unwrap_or(true),
         latency_ms: capabilities
@@ -1255,6 +1262,34 @@ mod tests {
         assert_eq!(capability.workspace_ids, vec!["workspace-alpha".to_owned()]);
         assert!(capability.respond);
         assert_eq!(capability.latency_ms, 17);
+    }
+
+    #[test]
+    fn generic_tailscale_capabilities_do_not_create_empty_ee_capability() {
+        let report = classify(
+            r#"{
+              "BackendState": "Running",
+              "Self": {
+                "ID":"nodekey:self",
+                "Authenticated":true,
+                "TailscaleIPs":["100.64.0.10"],
+                "Platform":"linux"
+              },
+              "Peer": {
+                "nodekey:alpha": {
+                  "ID": "nodekey:alpha",
+                  "Capabilities": ["https://tailscale.com/cap/file-sharing"]
+                },
+                "nodekey:bravo": {
+                  "ID": "nodekey:bravo",
+                  "Capabilities": {"unrelated": true}
+                }
+              }
+            }"#,
+        );
+
+        assert_eq!(report.peers.len(), 2);
+        assert!(report.peers.iter().all(|peer| peer.ee_capability.is_none()));
     }
 
     #[test]
