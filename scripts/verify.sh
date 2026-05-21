@@ -516,6 +516,11 @@ run_stage "Agent Ergonomics E2E (F1-F5)" "./scripts/e2e_lib/run_agent_ergonomics
 # exits 0 without running, so this stage stays fast in default CI.
 run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
+# Gate 6.5.1: Lightweight swarm next-action recommendation-card contract.
+# This keeps SWA6's golden next-action overlap proof in the default gate
+# without requiring the heavier no-mock multi-agent harness.
+run_stage "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "./scripts/e2e_overhaul/swarm_next_action_recommendation_cards.sh"
+
 # Gate 6.6: Graph determinism harness (F4.a). This is separate from the J4
 # epic registry because it tracks the GraphAccretion surfaces while they are
 # landing incrementally.
