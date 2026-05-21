@@ -406,6 +406,7 @@ impl QuarantineReport {
     pub fn filter_active_only(&mut self) {
         self.at_risk_sources.clear();
         self.summary.at_risk_count = 0;
+        self.summary.healthy_count = 0;
         #[allow(clippy::cast_possible_truncation)]
         {
             self.summary.total_sources =
@@ -701,6 +702,41 @@ mod tests {
         let report = QuarantineReport::gather_with_sources(&[state1, state2]);
 
         ensure(report.issue_count() >= 2, true, "at least 2 issues")
+    }
+
+    #[test]
+    fn active_only_filter_clears_non_active_summary_counts() -> TestResult {
+        let healthy =
+            SourceTrustState::new("clean_source").with_trust_class(TrustClass::HumanExplicit);
+        let mut blocked = SourceTrustState::new("blocked_source");
+        for _ in 0..10 {
+            blocked.record_harmful();
+        }
+
+        let mut report = QuarantineReport::gather_with_sources(&[healthy, blocked]);
+        ensure(
+            report.summary.total_sources,
+            2,
+            "total sources before filter",
+        )?;
+        ensure(
+            report.summary.healthy_count,
+            1,
+            "healthy count before filter",
+        )?;
+        ensure(
+            report.summary.blocked_count,
+            1,
+            "blocked count before filter",
+        )?;
+
+        report.filter_active_only();
+
+        ensure(report.summary.at_risk_count, 0, "at-risk count cleared")?;
+        ensure(report.at_risk_sources.len(), 0, "at-risk list cleared")?;
+        ensure(report.summary.healthy_count, 0, "healthy count cleared")?;
+        ensure(report.summary.total_sources, 1, "active total sources")?;
+        ensure(report.summary.blocked_count, 1, "blocked count retained")
     }
 
     #[test]
