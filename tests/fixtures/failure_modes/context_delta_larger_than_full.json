@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "context_delta_larger_than_full",
+  "introduced_by": {
+    "bead": "bd-muovx",
+    "epic_letter": "M"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee context --since computes a valid delta, but the serialized delta envelope is larger than the full freshly assembled pack, so ee returns the full pack and reports that the delta optimization was not useful for this response.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Delta fallback fixture base memory.' --workspace . --level procedural --kind fact --json",
+      "ee context 'delta fallback fixture' --workspace . --json"
+    ],
+    "invocation": "ee context 'delta fallback fixture after reshuffle' --workspace . --since <prior-pack-hash> --max-delta-bytes 1 --json"
+  },
+  "expected_emission": {
+    "code": "context_delta_larger_than_full",
+    "severity": "info",
+    "message_contains": [
+      "Delta envelope",
+      "emit the full pack"
+    ],
+    "repair_contains": ""
+  }
+}
