@@ -28,17 +28,45 @@ PLAN_MANIFEST="$MANIFEST_DIR/plan.json"
 APPLY_MANIFEST="$MANIFEST_DIR/apply.json"
 RESTORE_MANIFEST="$MANIFEST_DIR/restore.json"
 FAKE_HOME="$WORKSPACE/home"
+FAKE_CODEX_LOG_DIR="$FAKE_HOME/.codex/log"
+FAKE_BIN="$WORKSPACE/bin"
+ACTIVE_HARNESS_LOG="$FAKE_CODEX_LOG_DIR/active-open.log"
+CLOSED_HARNESS_LOG="$FAKE_CODEX_LOG_DIR/closed-rotate.log"
+EXTERNAL_HARNESS_LOG_ROOT="$DESTINATION/external-volume-log-case"
+EXTERNAL_HARNESS_LOG="$EXTERNAL_HARNESS_LOG_ROOT/closed-external.log"
+HARNESS_LOG_BYTES=1073741824
+HARNESS_LOG_SENTINEL="EE_HARNESS_LOG_CONTENT_SHOULD_NOT_LEAK"
 
 _e2e_emit_event "disk_pressure_e2e_start" \
     "workspace" "$WORKSPACE" \
     "scratch_root" "$SCRATCH_ROOT"
+
+file_size_bytes() {
+    stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1"
+}
+
+make_sparse_harness_log() {
+    local path="${1:?path required}"
+    local label="${2:?label required}"
+    printf '%s:%s\n' "$HARNESS_LOG_SENTINEL" "$label" > "$path"
+    truncate -s "$HARNESS_LOG_BYTES" "$path"
+}
+
+harness_log_metadata_snapshot() {
+    {
+        printf '%s %s\n' "$(file_size_bytes "$ACTIVE_HARNESS_LOG")" "$ACTIVE_HARNESS_LOG"
+        printf '%s %s\n' "$(file_size_bytes "$CLOSED_HARNESS_LOG")" "$CLOSED_HARNESS_LOG"
+        printf '%s %s\n' "$(file_size_bytes "$EXTERNAL_HARNESS_LOG")" "$EXTERNAL_HARNESS_LOG"
+    } | sort | shasum -a 256 | awk '{print $1}'
+}
 
 mkdir -p "$WORKSPACE/.ee" "$WORKSPACE/tests/audit_artifacts" "$WORKSPACE/target/debug" \
     "$WORKSPACE/target/ee-e2e/run-a" "$WORKSPACE/target/ee-golden-artifacts" \
     "$WORKSPACE/target/ee-bench" "$WORKSPACE/.ee/support-bundles" "$WORKSPACE/tmp" \
     "$WORKSPACE/target/restored" "$DESTINATION" "$MANIFEST_DIR" \
     "$DESTINATION/ee-relocated-artifacts/target/restored" \
-    "$FAKE_HOME/.local/share/mcp_agent_mail/messages/2026/05"
+    "$FAKE_HOME/.local/share/mcp_agent_mail/messages/2026/05" \
+    "$FAKE_CODEX_LOG_DIR" "$FAKE_BIN" "$EXTERNAL_HARNESS_LOG_ROOT"
 printf 'workspace-state\n' > "$WORKSPACE/.ee/ee.db.placeholder"
 printf 'audit-artifact\n' > "$WORKSPACE/tests/audit_artifacts/sample.json"
 printf 'build-artifact\n' > "$WORKSPACE/target/debug/sample.o"
@@ -54,14 +82,47 @@ printf 'agent-mail-archive-message\n' \
     > "$FAKE_HOME/.local/share/mcp_agent_mail/messages/2026/05/message.md"
 printf 'restored artifact bytes\n' \
     > "$DESTINATION/ee-relocated-artifacts/target/restored/missing.o"
+make_sparse_harness_log "$ACTIVE_HARNESS_LOG" "active-open"
+make_sparse_harness_log "$CLOSED_HARNESS_LOG" "closed-rotate"
+make_sparse_harness_log "$EXTERNAL_HARNESS_LOG" "external-volume"
+
+cat > "$FAKE_BIN/lsof" <<'EOF'
+#!/usr/bin/env bash
+target="${!#}"
+case "$target" in
+    *active-open.log)
+        printf 'p4242\ncCodex\n'
+        exit 0
+        ;;
+    *closed-rotate.log|*closed-external.log)
+        exit 1
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$FAKE_BIN/lsof"
 
 _e2e_emit_event "synthetic_tree_created" \
     "workspace" "$WORKSPACE" \
     "destination" "$DESTINATION" \
     "fake_home" "$FAKE_HOME"
+_e2e_emit_event "harness_log_fixture_created" \
+    "active_log" "$ACTIVE_HARNESS_LOG" \
+    "closed_log" "$CLOSED_HARNESS_LOG" \
+    "external_volume_log" "$EXTERNAL_HARNESS_LOG" \
+    "fake_lsof" "$FAKE_BIN/lsof" \
+    "bytes_per_log" "$HARNESS_LOG_BYTES"
 
 snapshot() {
     find "$WORKSPACE" "$DESTINATION" -type f -print0 |
+        while IFS= read -r -d '' path; do
+            case "$path" in
+                "$FAKE_CODEX_LOG_DIR"/*|"$EXTERNAL_HARNESS_LOG_ROOT"/*) continue ;;
+            esac
+            printf '%s\0' "$path"
+        done |
         sort -z |
         xargs -0 shasum -a 256
 }
@@ -86,6 +147,7 @@ assert_snapshot_preserved() {
 }
 
 before_snapshot="$(snapshot)"
+harness_logs_before="$(harness_log_metadata_snapshot)"
 source_hash_before="$(shasum -a 256 "$WORKSPACE/target/debug/sample.o")"
 
 if [ -n "${EE_BIN:-}" ]; then
@@ -98,7 +160,7 @@ if [ ! -x "$EE_BINARY" ]; then
 fi
 
 IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
-report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \
+report="$(PATH="$FAKE_BIN:$PATH" HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \
     --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
 artifacts_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
     TMPDIR="$WORKSPACE/tmp" \
@@ -167,10 +229,13 @@ restore_report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" artifa
     --json)"
 
 assert_snapshot_preserved "$before_snapshot"
+harness_logs_after="$(harness_log_metadata_snapshot)"
 source_hash_after="$(shasum -a 256 "$WORKSPACE/target/debug/sample.o")"
 
 e2e_log_assert_eq "$source_hash_after" "$source_hash_before" \
     "disk_pressure_relocation_preserves_original"
+e2e_log_assert_eq "$harness_logs_after" "$harness_logs_before" \
+    "agent_harness_log_metadata_preserved_no_delete"
 
 assert_jq "$report" '.schema' "ee.response.v1" "disk_pressure_response_schema"
 assert_jq "$report" '.success' "true" "disk_pressure_response_success"
@@ -190,8 +255,56 @@ assert_jq "$report" '(.data.roots | any(.label == "agent_mail_archive"
     "true" "disk_pressure_fake_agent_mail_archive_root"
 # shellcheck disable=SC2016
 assert_jq "$report" '(.data.recoveryActions | all(.kind as $kind |
-    ["move_preserve", "compress_preserve", "rotate_with_manifest", "ask_human", "noop"]
+    ["move_preserve", "compress_preserve", "preserve_tail_copy", "rotate_with_manifest", "ask_human", "noop"]
     | index($kind) != null))' "true" "disk_pressure_recovery_actions_preserve_only"
+assert_jq "$report" '(.data.agentHarnessLogs | length >= 2)' \
+    "true" "agent_harness_logs_detected"
+assert_jq "$report" \
+    '(.data.agentHarnessLogs | any(.entry.path | endswith("active-open.log")))' \
+    "true" "agent_harness_active_log_detected"
+assert_jq "$report" \
+    '(.data.agentHarnessLogs | any(.entry.path | endswith("closed-rotate.log")))' \
+    "true" "agent_harness_closed_log_detected"
+assert_jq "$report" \
+    '(.data.agentHarnessLogs | any((.entry.path | endswith("active-open.log"))
+        and .entry.activity == "active_open"
+        and .entry.owningProcessSummary == "pid=4242 command=Codex"
+        and .repairKind == "preserve_tail_copy"
+        and .mutationPolicy == "preservation_only"
+        and .sideEffectFree == true))' \
+    "true" "active_log_plan_checked"
+assert_jq "$report" \
+    '(.data.agentHarnessLogs | any((.entry.path | endswith("closed-rotate.log"))
+        and .entry.activity == "closed"
+        and .repairKind == "rotate_with_manifest"
+        and .mutationPolicy == "preservation_only"
+        and .sideEffectFree == true))' \
+    "true" "closed_log_rotation_plan_checked"
+assert_jq "$report" \
+    '(.data.agentHarnessLogs | all((.reason + " " + .suggestion) |
+        contains("EE_HARNESS_LOG_CONTENT_SHOULD_NOT_LEAK") | not))' \
+    "true" "agent_harness_log_contents_not_leaked"
+assert_jq "$report" \
+    '(.data.recoveryActions | any(.target == "agent_harness_log"
+        and .kind == "preserve_tail_copy"))' \
+    "true" "agent_harness_preserve_tail_copy_recovery"
+assert_jq "$report" \
+    '(.data.recoveryActions | any(.target == "agent_harness_log"
+        and .kind == "rotate_with_manifest"))' \
+    "true" "agent_harness_rotate_with_manifest_recovery"
+assert_jq "$report" \
+    '(.data.guidance | any(.code == "agent_harness_log_pressure"))' \
+    "true" "agent_harness_pressure_guidance"
+
+_e2e_emit_event "active_log_plan_checked" \
+    "active_log" "$ACTIVE_HARNESS_LOG" \
+    "metadata_hash" "$harness_logs_after" \
+    "repair_kind" "preserve_tail_copy"
+_e2e_emit_event "no_delete_policy_checked" \
+    "active_log" "$ACTIVE_HARNESS_LOG" \
+    "closed_log" "$CLOSED_HARNESS_LOG" \
+    "external_volume_log" "$EXTERNAL_HARNESS_LOG" \
+    "policy" "metadata_preserved_no_delete"
 
 _e2e_emit_event "repair_plan_checked" \
     "workspace" "$WORKSPACE" \
