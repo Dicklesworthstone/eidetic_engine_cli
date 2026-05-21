@@ -25,7 +25,7 @@ pub const PEER_KEY_ROTATION_UNCHANGED_CODE: &str = "mesh_peer_key_rotation_uncha
 pub const PEER_KEY_ROTATION_REVOKED_CODE: &str = "mesh_peer_key_rotation_revoked";
 pub const PEER_UNKNOWN_ATTEMPT_DENIED_CODE: &str = "mesh_peer_unknown_attempt_denied";
 pub const MESH_PEER_E2E_SURFACE: &str = "mesh_peer_enrollment";
-pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
+pub use crate::models::TEST_EVENT_SCHEMA_V1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]

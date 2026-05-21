@@ -376,6 +376,12 @@ impl SelectiveSyncConfig {
                 .cloned()
                 .unwrap_or_else(|| STARTER_PROFILE_METADATA_ONLY.to_owned())
         };
+        let body_lanes_default_allowed = self.profile(&default_profile_id).map_or(false, |p| {
+            p.shape.material_lanes.contains(&SyncMaterialLane::Body)
+        });
+        let embedding_lanes_allowed = self.profiles.iter().any(|p| {
+            p.shape.material_lanes.contains(&SyncMaterialLane::Embedding)
+        });
         SelectiveSyncStatusSummary {
             schema: SELECTIVE_SYNC_STATUS_SCHEMA_V1.to_owned(),
             default_profile_id,
@@ -383,8 +389,8 @@ impl SelectiveSyncConfig {
             subscription_count: self.subscriptions.len(),
             starter_profile_ids,
             subscription_profile_ids,
-            body_lanes_default_allowed: false,
-            embedding_lanes_allowed: false,
+            body_lanes_default_allowed,
+            embedding_lanes_allowed,
         }
     }
 

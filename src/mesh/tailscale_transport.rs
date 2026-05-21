@@ -522,10 +522,10 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         return false;
     }
     let mut diff = 0_u8;
-    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
-        diff |= left_byte ^ right_byte;
+    for (l_byte, r_byte) in left.iter().zip(right.iter()) {
+        diff |= l_byte ^ r_byte;
     }
-    diff == 0
+    std::hint::black_box(diff) == 0
 }
 
 fn json_error(error: serde_json::Error) -> TailscaleTransportError {

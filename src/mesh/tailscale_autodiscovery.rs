@@ -407,7 +407,7 @@ pub fn autodiscover_tailscale_peers<P: TailscaleHelloProbe>(
         }
 
         if elapsed_budget_ms >= config.total_budget_ms
-            && peer.node_key != peers.last().unwrap().node_key
+            && Some(peer.node_key.as_str()) != peers.last().map(|p| p.node_key.as_str())
         {
             budget_exhausted = true;
         }

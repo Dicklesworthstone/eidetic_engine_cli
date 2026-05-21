@@ -14,7 +14,7 @@ pub const MESH_ADMISSION_SCHEMA_V1: &str = "ee.mesh.admission.v1";
 pub const MESH_ADMISSION_STATUS_SCHEMA_V1: &str = "ee.mesh.admission_status.v1";
 pub const MESH_ADMISSION_DOCTOR_SCHEMA_V1: &str = "ee.mesh.admission_doctor.v1";
 pub const MESH_ADMISSION_E2E_SURFACE: &str = "mesh_admission_control";
-pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
+pub use crate::models::TEST_EVENT_SCHEMA_V1;
 
 pub mod degraded_codes {
     pub const PEER_THROTTLED: &str = "mesh_peer_throttled";
