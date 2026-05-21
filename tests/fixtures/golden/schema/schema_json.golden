@@ -1,1 +1,1 @@
-{"schema":"ee.response.v1","success":true,"data":{"command":"schema","schemas":{"response":"ee.response.v1","error":"ee.error.v2"}}}
+{"schema":"ee.response.v2","success":true,"data":{"command":"schema","schemas":{"response":"ee.response.v2","error":"ee.error.v2"}}}

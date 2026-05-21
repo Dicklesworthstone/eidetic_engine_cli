@@ -3,7 +3,7 @@ source: scripts/e2e_overhaul/decay.sh
 expression: maintenance_run_include_decay_json
 ---
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true,
   "data": {
     "schema": "ee.maintenance.run.v1",

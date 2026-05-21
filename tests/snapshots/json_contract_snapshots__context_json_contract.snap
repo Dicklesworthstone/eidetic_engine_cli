@@ -250,6 +250,6 @@ expression: context
       "teamSize": 0
     }
   },
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true
 }

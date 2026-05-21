@@ -1,5 +1,5 @@
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "data": {
     "workspace": {
       "id": "wsp_test0000000000000000000000",

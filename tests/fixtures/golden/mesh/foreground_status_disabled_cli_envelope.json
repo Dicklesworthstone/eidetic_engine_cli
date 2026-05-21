@@ -130,6 +130,6 @@
     "workspaceId": "wsp_meshforeground0000000001",
     "workspacePath": "/tmp/ee-mesh"
   },
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true
 }

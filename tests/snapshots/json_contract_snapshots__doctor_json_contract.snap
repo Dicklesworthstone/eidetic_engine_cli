@@ -37,6 +37,6 @@ expression: doctor
     "version": "0.1.0"
   },
   "fields": "standard",
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true
 }

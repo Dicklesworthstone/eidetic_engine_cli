@@ -3,7 +3,7 @@ source: tests/pack_quality_contracts.rs
 expression: value
 ---
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true,
   "data": {
     "command": "eval run",

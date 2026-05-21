@@ -12,7 +12,7 @@
           "command": "ee context \"prepare release\" --workspace . --json",
           "timeoutMs": 30000,
           "expectedExitCode": 0,
-          "expectedStdoutSchema": "ee.response.v1",
+          "expectedStdoutSchema": "ee.response.v2",
           "expectedStdoutContains": [
             "\"command\":\"context\""
           ],

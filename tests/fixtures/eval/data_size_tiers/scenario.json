@@ -99,7 +99,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/01-init.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/01-init.stderr.txt"
@@ -126,7 +126,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/02-remember-seed-rule.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/02-remember-seed-rule.stderr.txt"
@@ -145,7 +145,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "tier": "small",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/03-context-small.stdout.json",
@@ -165,7 +165,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "tier": "medium",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/04-context-medium.stdout.json",
@@ -185,7 +185,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "tier": "large",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/05-context-large.stdout.json",
@@ -206,7 +206,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "query_surface": "query_file",
       "stdout_artifact_path": "target/ee-e2e/data_size_tiers/<run-id>/06-pack-query-file.stdout.json",
@@ -216,7 +216,7 @@
   "expected_outputs": [
     {
       "step": 1,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.workspace"
@@ -228,7 +228,7 @@
     },
     {
       "step": 2,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.memory.id",
@@ -241,7 +241,7 @@
     },
     {
       "step": 3,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",
@@ -256,7 +256,7 @@
     },
     {
       "step": 4,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",
@@ -271,7 +271,7 @@
     },
     {
       "step": 5,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",
@@ -286,7 +286,7 @@
     },
     {
       "step": 6,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",

@@ -55,7 +55,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/01-init.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/01-init.stderr.txt"
@@ -82,7 +82,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/02-remember-safe.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/02-remember-safe.stderr.txt"
@@ -128,7 +128,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/04-context.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/usr_import_poisoned_memory_guard/<run-id>/04-context.stderr.txt"
@@ -137,7 +137,7 @@
   "expected_outputs": [
     {
       "step": 1,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.workspace"
@@ -149,7 +149,7 @@
     },
     {
       "step": 2,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.memory.id",
@@ -179,7 +179,7 @@
     },
     {
       "step": 4,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",

@@ -1,6 +1,6 @@
 {
   "tagList": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory tags",
@@ -29,7 +29,7 @@
     }
   },
   "tagDryRun": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory tags",
@@ -64,7 +64,7 @@
     }
   },
   "tagApply": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory tags",
@@ -101,7 +101,7 @@
     }
   },
   "tagDuplicate": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory tags",

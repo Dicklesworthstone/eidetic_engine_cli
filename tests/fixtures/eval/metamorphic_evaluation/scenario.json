@@ -118,7 +118,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/01-init.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/01-init.stderr.txt"
@@ -136,7 +136,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/02-eval-run.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/02-eval-run.stderr.txt"
@@ -155,7 +155,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/03-context-full.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/03-context-full.stderr.txt"
@@ -174,7 +174,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/04-context-tight.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/04-context-tight.stderr.txt"
@@ -191,7 +191,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/05-search-semantic.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/05-search-semantic.stderr.txt"
@@ -208,7 +208,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/06-search-lexical-fallback.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/metamorphic_evaluation/<run-id>/06-search-lexical-fallback.stderr.txt"
@@ -217,7 +217,7 @@
   "expected_outputs": [
     {
       "step": 1,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.workspace"
@@ -229,7 +229,7 @@
     },
     {
       "step": 2,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.status",
@@ -242,7 +242,7 @@
     },
     {
       "step": 3,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",
@@ -255,7 +255,7 @@
     },
     {
       "step": 4,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",
@@ -268,7 +268,7 @@
     },
     {
       "step": 5,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.results",
@@ -281,7 +281,7 @@
     },
     {
       "step": 6,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.results",

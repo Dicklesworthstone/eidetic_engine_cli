@@ -374,7 +374,7 @@ expression: profile_config_apply
         "severity": "info"
       }
     ],
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "existingConfigDryRun": {
@@ -748,7 +748,7 @@ expression: profile_config_apply
         "severity": "info"
       }
     ],
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   }
 }

@@ -1,6 +1,6 @@
 {
   "expireDryRun": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory expire",
@@ -23,7 +23,7 @@
     }
   },
   "expireApply": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory expire",
@@ -46,7 +46,7 @@
     }
   },
   "expireDuplicate": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory expire",
@@ -69,7 +69,7 @@
     }
   },
   "expiredTagList": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "data": {
       "command": "memory tags",

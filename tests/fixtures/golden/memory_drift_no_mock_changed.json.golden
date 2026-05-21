@@ -49,7 +49,7 @@
     ]
   },
   "search": {
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true,
     "command": "search",
     "status": "success",

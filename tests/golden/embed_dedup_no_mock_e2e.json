@@ -7,7 +7,7 @@
     },
     "rememberResults": [
       {
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
@@ -18,7 +18,7 @@
         ]
       },
       {
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
@@ -40,7 +40,7 @@
     },
     "rememberResults": [
       {
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
@@ -51,7 +51,7 @@
         ]
       },
       {
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "command": "remember",
         "memoryId": "<MEMORY_ID>",
@@ -91,7 +91,7 @@
       "cosineFloor": 1.0
     },
     "rememberResult": {
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "success": true,
       "command": "remember",
       "memoryId": "<MEMORY_ID>",

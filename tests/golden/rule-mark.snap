@@ -119,7 +119,7 @@
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "markApply": {
@@ -242,7 +242,7 @@
       "workspaceId": "<WORKSPACE_ID>",
       "workspacePath": "<WORKSPACE>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   }
 }

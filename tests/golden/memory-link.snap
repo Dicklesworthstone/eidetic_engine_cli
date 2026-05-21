@@ -41,7 +41,7 @@
       "version": "0.1.0",
       "workspace_id": "<WORKSPACE_ID>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "dryRun": {
@@ -86,7 +86,7 @@
       "version": "0.1.0",
       "workspace_id": "<WORKSPACE_ID>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "duplicate": {
@@ -131,7 +131,7 @@
       "version": "0.1.0",
       "workspace_id": "<WORKSPACE_ID>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "initialList": {
@@ -150,7 +150,7 @@
       "version": "0.1.0",
       "workspace_id": "<WORKSPACE_ID>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   },
   "relationList": {
@@ -183,7 +183,7 @@
       "version": "0.1.0",
       "workspace_id": "<WORKSPACE_ID>"
     },
-    "schema": "ee.response.v1",
+    "schema": "ee.response.v2",
     "success": true
   }
 }

@@ -379,6 +379,6 @@ expression: profile_config_plan
       "severity": "warning"
     }
   ],
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true
 }

@@ -69,7 +69,7 @@
       ],
       "cwd": "<repo>",
       "expected_exit_code": 0,
-      "stdout_schema": "ee.response.v1",
+      "stdout_schema": "ee.response.v2",
       "stderr_policy": "diagnostics_only",
       "stdout_artifact_path": "target/ee-e2e/structural_recall/<run-id>/01-context.stdout.json",
       "stderr_artifact_path": "target/ee-e2e/structural_recall/<run-id>/01-context.stderr.txt"
@@ -78,7 +78,7 @@
   "expected_outputs": [
     {
       "step": 1,
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "required_fields": [
         "data.command",
         "data.pack.items",

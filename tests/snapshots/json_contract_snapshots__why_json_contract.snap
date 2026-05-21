@@ -135,6 +135,6 @@ expression: why
     "verificationEvidence": [],
     "version": "0.1.0"
   },
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true
 }
