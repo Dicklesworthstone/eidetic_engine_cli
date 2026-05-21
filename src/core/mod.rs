@@ -29,6 +29,7 @@ pub mod completion_audit;
 pub mod config_surface;
 pub mod conformal;
 pub mod context;
+pub mod context_delta;
 pub mod curate;
 pub mod degraded_aggregation;
 pub mod degraded_honesty;
