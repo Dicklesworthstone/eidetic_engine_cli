@@ -3630,6 +3630,142 @@ mod tests {
     }
 
     #[test]
+    fn harmful_burst_quarantine_is_source_scoped_and_preserves_target_trust() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-source-scoped-quarantine")?;
+        let first_source_a = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("source-a".to_string()),
+            reason: Some("First source-A harmful event remains live.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000891".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first_source_a.status,
+            &OutcomeRecordStatus::Recorded,
+            "first source-A event records",
+        )?;
+
+        let after_first_memory = {
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "memory missing after first event".to_string())?
+        };
+
+        let second_source_a = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("source-a".to_string()),
+            reason: Some("Second source-A event should be quarantined.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000892".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &second_source_a.status,
+            &OutcomeRecordStatus::Quarantined,
+            "second source-A event quarantines",
+        )?;
+
+        let after_quarantine_memory = {
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            connection
+                .get_memory(OUTCOME_TEST_MEMORY_ID)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "memory missing after quarantine".to_string())?
+        };
+        ensure_equal(
+            &after_quarantine_memory.trust_class,
+            &after_first_memory.trust_class,
+            "quarantine must not alter target trust_class",
+        )?;
+        ensure_equal(
+            &after_quarantine_memory.trust_subclass,
+            &after_first_memory.trust_subclass,
+            "quarantine must not alter target trust_subclass",
+        )?;
+        ensure_equal(
+            &after_quarantine_memory.confidence,
+            &after_first_memory.confidence,
+            "quarantine must not alter target confidence",
+        )?;
+
+        let first_source_b = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("source-b".to_string()),
+            reason: Some("First source-B event should not inherit source-A pressure.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some("fb_00000000000000000000000893".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 1,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &first_source_b.status,
+            &OutcomeRecordStatus::Recorded,
+            "first source-B event records independently",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let live_events = connection
+            .list_feedback_events_for_target("memory", OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &live_events.len(),
+            &2_usize,
+            "source-A quarantine does not absorb source-B feedback",
+        )?;
+        let quarantined = connection
+            .list_feedback_quarantine(OUTCOME_TEST_WORKSPACE_ID, Some("pending"))
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &quarantined.len(),
+            &1_usize,
+            "only the second source-A event is quarantined",
+        )
+    }
+
+    #[test]
     fn releasing_quarantined_feedback_preserves_original_payload() -> TestResult {
         let (dir, database) =
             seed_outcome_database_with_workspace_id("ee-outcome-quarantine-release", None)?;
