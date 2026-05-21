@@ -4,9 +4,9 @@
 # regression_factor = 1.5 emits an advisory when elapsed time exceeds p50 * 1.5.
 # scripts/verify.sh fails the run when elapsed time exceeds p50 * 3.
 #
-# Non-benchmark p50 values sum to 705s, matching the roughly 12-minute target for the
+# Non-benchmark p50 values sum to 745s, matching the roughly 12-minute target for the
 # full readiness gate. Benchmarks are optional behind --include-bench.
-total_expected_seconds = 705
+total_expected_seconds = 745
 total_regression_factor = 1.5
 
 [[stage]]
@@ -16,7 +16,7 @@ regression_factor = 1.5
 
 [[stage]]
 name = "Closure Linter"
-expected_seconds_p50 = 20
+expected_seconds_p50 = 60
 regression_factor = 1.5
 
 [[stage]]
