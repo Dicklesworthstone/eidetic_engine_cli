@@ -1874,6 +1874,7 @@ fn open_certificate_key_temp_file_for_write(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     configure_certificate_key_open_no_follow(&mut options);
+    // Secret key bytes must never exist in a group/world-readable temp file.
     configure_certificate_key_private_create_mode(&mut options);
     let file = options.open(path)?;
     ensure_certificate_key_private_permissions(&file, path)?;
