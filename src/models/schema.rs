@@ -32,20 +32,39 @@ use super::{
     PROCEDURE_STEP_SCHEMA_V1, PROCEDURE_VERIFICATION_SCHEMA_V1, PROGRESS_EVENT_SCHEMA_V1,
     PROMOTION_PLAN_SCHEMA_V1, RECORDER_EVENT_SCHEMA_V1, RECORDER_PAYLOAD_SCHEMA_V1,
     RECORDER_RUN_SCHEMA_V1, RECORDER_SCHEMA_CATALOG_V1, REDACTION_STATUS_SCHEMA_V1,
-    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RISK_RESERVE_SCHEMA_V1, ROUTING_DECISION_SCHEMA_V1,
-    SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1,
-    SINGLEFLIGHT_POSTURE_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1, SITUATION_EXPLAIN_SCHEMA_V1,
-    SITUATION_LINK_SCHEMA_V1, SITUATION_SCHEMA_CATALOG_V1, SITUATION_SCHEMA_V1,
-    SITUATION_SHOW_SCHEMA_V1, SKILL_CAPSULE_SCHEMA_V1, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1,
-    SYMBOL_SNAPSHOT_SCHEMA_V1, TAIL_RISK_RESERVE_RULE_SCHEMA_V1, TASK_SIGNATURE_SCHEMA_V1,
-    UNCERTAINTY_ESTIMATE_SCHEMA_V1, UPLIFT_ESTIMATE_SCHEMA_V1, UTILITY_VALUE_SCHEMA_V1,
+    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2, RISK_RESERVE_SCHEMA_V1,
+    ROUTING_DECISION_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
+    SINGLEFLIGHT_KEY_SCHEMA_V1, SINGLEFLIGHT_POSTURE_SCHEMA_V1, SITUATION_CLASSIFY_SCHEMA_V1,
+    SITUATION_EXPLAIN_SCHEMA_V1, SITUATION_LINK_SCHEMA_V1, SITUATION_SCHEMA_CATALOG_V1,
+    SITUATION_SCHEMA_V1, SITUATION_SHOW_SCHEMA_V1, SKILL_CAPSULE_SCHEMA_V1,
+    SYMBOL_EVIDENCE_LINKS_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1, TAIL_RISK_RESERVE_RULE_SCHEMA_V1,
+    TASK_SIGNATURE_SCHEMA_V1, UNCERTAINTY_ESTIMATE_SCHEMA_V1, UPLIFT_ESTIMATE_SCHEMA_V1,
+    UTILITY_VALUE_SCHEMA_V1, PACK_SCHEMA_V2, PERF_SCHEMA_V1, BEADS_RETRY_SCHEMA_V1,
+    DOCTOR_FIX_SUMMARY_SCHEMA_V1, DOCTOR_RUN_DIFF_SCHEMA_V1, FAILURE_MODE_FIXTURE_SCHEMA_V1,
+    PACK_DNA_SCHEMA_V1, PROXIMITY_SCHEMA_V1, PROOF_CHECK_SCHEMA_V1, PACK_QUALITY_REPORT_SCHEMA_V1,
+    PACK_STREAM_SCHEMA_V1, TEST_EVENT_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2, MODEL_LIST_SCHEMA_V1,
 };
 
 /// All known schema identifiers for validation.
 pub const KNOWN_SCHEMAS: &[&str] = &[
     RESPONSE_SCHEMA_V0,
     RESPONSE_SCHEMA_V1,
+    RESPONSE_SCHEMA_V2,
     ERROR_SCHEMA_V2,
+    PACK_SCHEMA_V2,
+    PERF_SCHEMA_V1,
+    BEADS_RETRY_SCHEMA_V1,
+    DOCTOR_FIX_SUMMARY_SCHEMA_V1,
+    DOCTOR_RUN_DIFF_SCHEMA_V1,
+    FAILURE_MODE_FIXTURE_SCHEMA_V1,
+    PACK_DNA_SCHEMA_V1,
+    PROXIMITY_SCHEMA_V1,
+    PROOF_CHECK_SCHEMA_V1,
+    PACK_QUALITY_REPORT_SCHEMA_V1,
+    PACK_STREAM_SCHEMA_V1,
+    TEST_EVENT_SCHEMA_V1,
+    MODEL_STATUS_SCHEMA_V2,
+    MODEL_LIST_SCHEMA_V1,
     BACKUP_CREATE_SCHEMA_V1,
     BACKUP_RESTORE_SCHEMA_V1,
     BACKUP_MANIFEST_SCHEMA_V1,
@@ -272,9 +291,16 @@ pub fn validate_schema(schema: &str) -> Result<(), SchemaValidationError> {
     } else {
         // Try to provide a better error if it looks like a future version
         if let Some((_, name, version)) = parse_schema_parts(schema) {
-            // Check if we have v1 but they're asking for v2+
+            // Check for the highest known version we support.
+            let v2_schema = format!("ee.{name}.v2");
             let v1_schema = format!("ee.{name}.v1");
-            if is_known_schema(&v1_schema) && version != "1" {
+            
+            if is_known_schema(&v2_schema) && version != "2" {
+                return Err(SchemaValidationError::UnsupportedVersion {
+                    schema: schema.to_owned(),
+                    expected_version: "v2".to_owned(),
+                });
+            } else if is_known_schema(&v1_schema) && version != "1" {
                 return Err(SchemaValidationError::UnsupportedVersion {
                     schema: schema.to_owned(),
                     expected_version: "v1".to_owned(),
@@ -348,13 +374,13 @@ mod tests {
 
     #[test]
     fn future_version_returns_unsupported_version_error() -> TestResult {
-        // ee.response.v2 should fail because we only know v1
-        let result = validate_schema("ee.response.v2");
+        // ee.response.v999 should fail because we only know up to v2
+        let result = validate_schema("ee.response.v999");
         ensure(
             result,
             Err(SchemaValidationError::UnsupportedVersion {
-                schema: "ee.response.v2".to_owned(),
-                expected_version: "v1".to_owned(),
+                schema: "ee.response.v999".to_owned(),
+                expected_version: "v2".to_owned(),
             }),
             "future version should return UnsupportedVersion",
         )
@@ -505,10 +531,10 @@ mod tests {
             ),
             (
                 SchemaValidationError::UnsupportedVersion {
-                    schema: "ee.response.v2".to_owned(),
-                    expected_version: "v1".to_owned(),
+                    schema: "ee.response.v999".to_owned(),
+                    expected_version: "v2".to_owned(),
                 },
-                "unsupported schema version: ee.response.v2",
+                "unsupported schema version: ee.response.v999",
             ),
             (
                 SchemaValidationError::SchemaMismatch {
