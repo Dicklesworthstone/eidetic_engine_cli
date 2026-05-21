@@ -222,7 +222,7 @@ impl From<&Certificate> for CertificateSummary {
             status: cert.status,
             issued_at: cert.issued_at.clone(),
             workspace_id: cert.workspace_id.clone(),
-            is_usable: cert.is_usable(),
+            is_usable: certificate_effective_is_usable(cert),
         }
     }
 }
@@ -664,13 +664,7 @@ impl std::error::Error for CertificateManifestError {}
 impl CertificateShowReport {
     #[must_use]
     pub fn new(certificate: Certificate) -> Self {
-        let verification_status = if certificate.is_usable() {
-            VerificationResult::Valid
-        } else if certificate.is_expired() {
-            VerificationResult::Expired
-        } else {
-            VerificationResult::InvalidStatus
-        };
+        let verification_status = certificate_effective_verification_status(&certificate);
 
         let payload_summary = format!(
             "{} certificate for workspace {}",
@@ -725,13 +719,13 @@ pub fn list_certificates(options: &CertificateListOptions) -> CertificateListRep
     let usable_count = usize_to_u32(
         records
             .iter()
-            .filter(|record| record.certificate.is_usable())
+            .filter(|record| certificate_effective_is_usable(&record.certificate))
             .count(),
     );
     let expired_count = usize_to_u32(
         records
             .iter()
-            .filter(|record| record.certificate.is_expired())
+            .filter(|record| certificate_effective_is_expired(&record.certificate))
             .count(),
     );
 
@@ -755,7 +749,9 @@ pub fn list_certificates(options: &CertificateListOptions) -> CertificateListRep
                 .status
                 .is_none_or(|status| record.certificate.status == status)
         })
-        .filter(|record| options.include_expired || !record.certificate.is_expired())
+        .filter(|record| {
+            options.include_expired || !certificate_effective_is_expired(&record.certificate)
+        })
         .map(|record| CertificateSummary::from(&record.certificate))
         .collect();
     certificates.sort_by(|left, right| left.id.cmp(&right.id));
@@ -860,14 +856,14 @@ fn list_database_certificates(options: &CertificateListOptions) -> CertificateLi
         records
             .iter()
             .map(certificate_from_stored_record)
-            .filter(Certificate::is_usable)
+            .filter(certificate_effective_is_usable)
             .count(),
     );
     let expired_count = usize_to_u32(
         records
             .iter()
             .map(certificate_from_stored_record)
-            .filter(Certificate::is_expired)
+            .filter(certificate_effective_is_expired)
             .count(),
     );
 
@@ -889,7 +885,9 @@ fn list_database_certificates(options: &CertificateListOptions) -> CertificateLi
                 .status
                 .is_none_or(|status| certificate.status == status)
         })
-        .filter(|certificate| options.include_expired || !certificate.is_expired())
+        .filter(|certificate| {
+            options.include_expired || !certificate_effective_is_expired(certificate)
+        })
         .map(|certificate| CertificateSummary::from(&certificate))
         .collect();
     certificates.sort_by(|left, right| left.id.cmp(&right.id));
@@ -984,13 +982,7 @@ fn load_database_certificate(
 
 fn certificate_show_report_from_record(record: &StoredCertificateRecord) -> CertificateShowReport {
     let certificate = certificate_from_stored_record(record);
-    let verification_status = if certificate.is_usable() {
-        VerificationResult::Valid
-    } else if certificate.is_expired() {
-        VerificationResult::Expired
-    } else {
-        VerificationResult::InvalidStatus
-    };
+    let verification_status = certificate_effective_verification_status(&certificate);
     let payload_summary = format!(
         "{} certificate for {} `{}` in workspace {}",
         certificate.kind.as_str(),
@@ -1452,6 +1444,24 @@ fn hex_lower(bytes: &[u8]) -> String {
         output.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     output
+}
+
+fn certificate_effective_is_usable(certificate: &Certificate) -> bool {
+    certificate.status.is_usable() && !certificate_effective_is_expired(certificate)
+}
+
+fn certificate_effective_is_expired(certificate: &Certificate) -> bool {
+    certificate.is_expired() || !expiry_valid(certificate.expires_at.as_deref())
+}
+
+fn certificate_effective_verification_status(certificate: &Certificate) -> VerificationResult {
+    if certificate_effective_is_usable(certificate) {
+        VerificationResult::Valid
+    } else if certificate_effective_is_expired(certificate) {
+        VerificationResult::Expired
+    } else {
+        VerificationResult::InvalidStatus
+    }
 }
 
 fn expiry_valid(expires_at: Option<&str>) -> bool {
@@ -2623,6 +2633,91 @@ mod tests {
             &failed.result,
             &VerificationResult::FailedAssumptions,
             "failed assumptions win before hash mismatch",
+        )
+    }
+
+    #[test]
+    fn manifest_backed_certificate_list_and_show_treat_past_expires_at_as_expired() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_pack_active",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadHash": "active_hash",
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1
+                },
+                {
+                    "id": "cert_pack_past_expiry",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2000-01-01T00:00:00Z",
+                    "payloadHash": "expired_hash",
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let list =
+            list_certificates(&CertificateListOptions::new().with_manifest_path(&manifest_path));
+        ensure_equal(&list.total_count, &2, "total count")?;
+        ensure_equal(
+            &list.usable_count,
+            &1,
+            "usable count excludes past expiresAt",
+        )?;
+        ensure_equal(
+            &list.expired_count,
+            &1,
+            "expired count includes past expiresAt",
+        )?;
+        ensure_equal(
+            &list.certificates.len(),
+            &1,
+            "default list excludes expired",
+        )?;
+        ensure_equal(
+            &list.certificates[0].id,
+            &"cert_pack_active".to_owned(),
+            "active certificate remains visible",
+        )?;
+
+        let include_expired = list_certificates(
+            &CertificateListOptions::new()
+                .with_manifest_path(&manifest_path)
+                .include_expired(),
+        );
+        let expired_summary = include_expired
+            .certificates
+            .iter()
+            .find(|certificate| certificate.id == "cert_pack_past_expiry")
+            .ok_or_else(|| "include_expired should include past-expiry certificate".to_owned())?;
+        ensure(
+            !expired_summary.is_usable,
+            "past-expiry certificate summary is not usable",
+        )?;
+
+        let shown = show_certificate_with_options(
+            &CertificateLookupOptions::new("cert_pack_past_expiry")
+                .with_manifest_path(&manifest_path),
+        );
+        ensure_equal(
+            &shown.verification_status,
+            &VerificationResult::Expired,
+            "show reports past expiresAt as expired",
         )
     }
 
