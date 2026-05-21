@@ -342,6 +342,25 @@ mod tests {
     }
 
     #[test]
+    fn no_op_delta_serializes_empty_arrays_not_special_case_shape() -> TestResult {
+        let prior = snapshot("h1", 1, 1000, vec![item("mem_a", "a", 10)]);
+        let new = snapshot("h2", 2, 1000, vec![item("mem_a", "a", 10)]);
+        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        let serialized =
+            serde_json::to_string(&delta).map_err(|error| format!("serialize delta: {error}"))?;
+
+        assert!(serialized.contains("\"added\":[]"));
+        assert!(serialized.contains("\"removed\":[]"));
+        assert!(serialized.contains("\"modified\":[]"));
+        assert!(
+            !serialized.contains("noChange"),
+            "no-op deltas must keep the normal item-diff shape"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn added_and_removed_items_are_reported_in_stable_order() -> TestResult {
         let prior = snapshot(
             "h1",
@@ -435,6 +454,50 @@ mod tests {
         assert_eq!(
             delta.fallback.as_ref().map(|fallback| fallback.code),
             Some(CONTEXT_DELTA_OVERSIZED_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn max_delta_bytes_equal_to_candidate_size_still_emits_delta() -> TestResult {
+        let prior = snapshot("h1", 1, 1000, Vec::new());
+        let new = snapshot("h2", 2, 1000, vec![item("mem_a", "a", 10)]);
+        let baseline = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        let bounded = compute_context_delta(
+            &prior,
+            &new,
+            ContextDeltaOptions::new(Some(baseline.token_savings.delta_bytes)),
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert!(bounded.emits_delta());
+        assert_eq!(
+            bounded.token_savings.delta_bytes,
+            baseline.token_savings.delta_bytes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn token_savings_reports_new_pack_token_budget() -> TestResult {
+        let prior =
+            ContextDeltaPackSnapshot::new("h1", 1, 1000, 321, vec![item("mem_a", "old", 10)]);
+        let new = ContextDeltaPackSnapshot::new(
+            "h2",
+            2,
+            1200,
+            654,
+            vec![item("mem_a", "new", 12), item("mem_b", "b", 20)],
+        );
+        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(delta.token_savings.full_bytes, 1200);
+        assert_eq!(delta.token_savings.net_pack_tokens, 654);
+        assert!(
+            delta.token_savings.delta_bytes > 0,
+            "delta byte accounting should be finalized after serialization"
         );
         Ok(())
     }
