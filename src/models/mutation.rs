@@ -11,7 +11,37 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 fn normalized_mutation_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Schema identifier for mutation response.
@@ -587,6 +617,16 @@ mod tests {
             IdempotencyClass::from_str("conditionally-idempotent"),
             Ok(IdempotencyClass::ConditionallyIdempotent),
             "idempotency alias",
+        )?;
+        ensure(
+            IdempotencyClass::from_str("conditionallyIdempotent"),
+            Ok(IdempotencyClass::ConditionallyIdempotent),
+            "camel idempotency alias",
+        )?;
+        ensure(
+            IdempotencyClass::from_str("NotIdempotent"),
+            Ok(IdempotencyClass::NotIdempotent),
+            "pascal idempotency alias",
         )
     }
 
