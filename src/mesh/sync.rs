@@ -380,7 +380,9 @@ impl SelectiveSyncConfig {
             p.shape.material_lanes.contains(&SyncMaterialLane::Body)
         });
         let embedding_lanes_allowed = self.profiles.iter().any(|p| {
-            p.shape.material_lanes.contains(&SyncMaterialLane::Embedding)
+            p.shape
+                .material_lanes
+                .contains(&SyncMaterialLane::Embedding)
         });
         SelectiveSyncStatusSummary {
             schema: SELECTIVE_SYNC_STATUS_SCHEMA_V1.to_owned(),
