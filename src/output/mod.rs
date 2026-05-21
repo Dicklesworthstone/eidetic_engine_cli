@@ -8466,6 +8466,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: closeout_audit_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::FAILURE_MODE_FIXTURE_SCHEMA_V1,
+            version: "1",
+            description: "Failure-mode fixture catalog entry documenting one degraded response code.",
+            category: "ops",
+            definition: failure_mode_fixture_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.completion_audit.report.v1",
             version: "1",
             description: "Completion audit response envelope for read-only objective-to-evidence checks.",
@@ -9504,6 +9511,10 @@ fn cache_hotset_schema_definition() -> String {
 
 fn closeout_audit_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.closeout_audit.v1.json").to_string()
+}
+
+fn failure_mode_fixture_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.failure_mode_fixture.v1.json").to_string()
 }
 
 // Round-3 self-review fix: the v1 schema generator was duplicated under the
