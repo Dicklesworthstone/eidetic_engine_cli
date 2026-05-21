@@ -19,6 +19,10 @@ use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather
 use crate::core::budget_delta_recommender::build_host_calibration_posture;
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
 use crate::core::singleflight::singleflight_posture_report;
+use crate::core::verify::{
+    VerificationPostureAdvisoryCounts, VerificationPostureEvidenceHealth,
+    VerificationPostureRecoveryAction, VerificationPostureReport, gather_verification_posture,
+};
 use crate::core::workspace::{
     WorkspaceHygieneOptions, WorkspaceHygieneSwarmBriefSummary,
     build_workspace_hygiene_swarm_brief_summary,
@@ -33,6 +37,8 @@ pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
 pub const SWARM_INCIDENT_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_incident_summary.v1";
 pub const SWARM_INCIDENT_SUMMARY_REDACTION_STATUS: &str =
     "scenario_ids_status_counts_hashes_only_no_raw_logs_no_mail_bodies_no_commands_no_paths";
+pub const SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1: &str =
+    "ee.swarm.verification_broker_summary.v1";
 pub const MAX_SWARM_INCIDENT_SUMMARY_BYTES: usize = 8192;
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
@@ -139,6 +145,8 @@ pub struct SwarmBriefReport {
     pub agent_inventory: Option<SwarmBriefAgentInventorySummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_drift: Option<SwarmBriefMemoryDriftSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_broker: Option<SwarmBriefVerificationBrokerSummary>,
     pub recommendations: Vec<SwarmBriefRecommendation>,
     pub degraded: Vec<SwarmBriefDegradation>,
     /// Compact workspace-hygiene posture (bd-1eq3l.6). `None` when the
@@ -172,6 +180,7 @@ impl SwarmBriefReport {
             host_profile: None,
             agent_inventory: None,
             memory_drift: None,
+            verification_broker: None,
             recommendations: Vec::new(),
             degraded: Vec::new(),
             workspace_hygiene: None,
@@ -692,6 +701,31 @@ pub struct RchLocalCapabilityReport {
     pub remote_only_safe: bool,
     pub degraded: Vec<SwarmBriefDegradation>,
     pub recovery: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefVerificationBrokerSummary {
+    pub schema: &'static str,
+    pub source_schema: String,
+    pub status: String,
+    pub record_count: u32,
+    pub recent_run_count: u32,
+    pub stale_run_count: u32,
+    pub unknown_age_count: u32,
+    pub recent_reusable_run_count: u32,
+    pub in_flight_equivalent_command_count: u32,
+    pub advisory_counts: VerificationPostureAdvisoryCounts,
+    pub evidence_health: VerificationPostureEvidenceHealth,
+    pub recovery_actions: Vec<VerificationPostureRecoveryAction>,
+    pub rch_queue_status: String,
+    pub rch_slots_available: Option<u64>,
+    pub rch_queue_head_slots_needed: Option<u64>,
+    pub rch_worker_pressure_status: String,
+    pub rch_usable_worker_count: u64,
+    pub rch_blocked_worker_count: u64,
+    pub raw_logs_included: bool,
+    pub raw_mail_bodies_included: bool,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -2004,6 +2038,10 @@ pub fn collect_swarm_brief(
     report.workspace_hygiene = Some(build_workspace_hygiene_swarm_brief_summary(
         &hygiene_options,
     ));
+    report.verification_broker = Some(swarm_brief_verification_broker_summary(
+        gather_verification_posture(Some(&options.workspace)),
+        report.rch_local_capability.as_ref(),
+    ));
     apply_swarm_brief_advice(&mut report);
     report.finalize();
     report
@@ -2333,6 +2371,9 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "resourcePressureHintCount": report.resource_pressure.len(),
             "memoryDriftAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.affected_count),
             "memoryDriftTopAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.top_affected_memory_ids.len() as u32),
+            "verificationBrokerRecentReusableRunCount": report.verification_broker.as_ref().map_or(0, |summary| summary.recent_reusable_run_count),
+            "verificationBrokerKnownBlockerCount": report.verification_broker.as_ref().map_or(0, verification_broker_known_blocker_count),
+            "verificationBrokerInFlightCount": report.verification_broker.as_ref().map_or(0, |summary| summary.in_flight_equivalent_command_count),
             "degradedCount": report.degraded.len(),
             "recommendationCount": report.recommendations.len(),
             "symbolRiskPathCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.summarized_path_count),
@@ -2348,6 +2389,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             }).unwrap_or_default(),
         },
         "memoryDrift": swarm_brief_memory_drift_summary(report),
+        "verificationBroker": swarm_brief_verification_broker_summary_value(report),
         "sourceStatusCounts": source_status_counts,
         "sourceStatuses": swarm_brief_source_status_summaries(report),
         "resourcePressurePosture": swarm_brief_resource_pressure_posture(report),
@@ -2485,6 +2527,31 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
         .get("recentAgentActivityCount")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let verification_broker = summary.get("verificationBroker").unwrap_or(&Value::Null);
+    let verification_broker_status = verification_broker
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let verification_reusable = verification_broker
+        .get("recentReusableRunCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let verification_known_blockers = verification_broker
+        .get("knownBlockerCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let verification_in_flight = verification_broker
+        .get("inFlightEquivalentCommandCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let verification_rch_queue = verification_broker
+        .get("rchQueueStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let verification_rch_worker_pressure = verification_broker
+        .get("rchWorkerPressureStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
 
     let mut lines = vec![
         format!(
@@ -2518,6 +2585,16 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
             "Symbol-risk posture: status={symbol_risk_status}, dirty_paths={symbol_risk_dirty_paths}, high_risk_symbols={symbol_risk_high_risk}, linked_evidence={symbol_risk_linked_evidence}, recent_agent_activity={symbol_risk_agent_activity}, raw_symbol_names_included=false."
         ));
     }
+    if verification_broker_status != "unknown"
+        && verification_broker_status != "not_collected"
+        && (verification_reusable > 0
+            || verification_known_blockers > 0
+            || verification_in_flight > 0)
+    {
+        lines.push(format!(
+            "Verification broker posture: status={verification_broker_status}, reusable={verification_reusable}, known_blockers={verification_known_blockers}, in_flight={verification_in_flight}, rch_queue={verification_rch_queue}, worker_pressure={verification_rch_worker_pressure}, raw_logs_included=false."
+        ));
+    }
     lines.join("\n")
 }
 
@@ -2530,6 +2607,42 @@ pub fn swarm_brief_summary_evidence_id(summary: &Value) -> String {
         .trim_start_matches("blake3:");
     let short_hash = hash.get(..12).unwrap_or(hash);
     format!("swarm_brief_summary:{short_hash}")
+}
+
+fn swarm_brief_verification_broker_summary(
+    posture: VerificationPostureReport,
+    capability: Option<&RchLocalCapabilityReport>,
+) -> SwarmBriefVerificationBrokerSummary {
+    let queue_health = capability.and_then(|report| report.queue_health.as_ref());
+    let worker_pressure = capability.map(|report| &report.worker_pressure);
+
+    SwarmBriefVerificationBrokerSummary {
+        schema: SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1,
+        source_schema: posture.schema,
+        status: posture.status,
+        record_count: posture.record_count,
+        recent_run_count: posture.recent_run_count,
+        stale_run_count: posture.stale_run_count,
+        unknown_age_count: posture.unknown_age_count,
+        recent_reusable_run_count: posture.recent_reusable_run_count,
+        in_flight_equivalent_command_count: posture.in_flight_equivalent_command_count,
+        advisory_counts: posture.advisory_counts,
+        evidence_health: posture.evidence_health,
+        recovery_actions: posture.recovery_actions,
+        rch_queue_status: queue_health
+            .map(|queue| queue.status.clone())
+            .unwrap_or_else(|| "not_collected".to_string()),
+        rch_slots_available: queue_health.and_then(|queue| queue.slots_available),
+        rch_queue_head_slots_needed: queue_health.and_then(|queue| queue.queue_head_slots_needed),
+        rch_worker_pressure_status: worker_pressure
+            .map(|pressure| pressure.status.clone())
+            .unwrap_or_else(|| "not_collected".to_string()),
+        rch_usable_worker_count: worker_pressure.map_or(0, |pressure| pressure.usable_worker_count),
+        rch_blocked_worker_count: worker_pressure
+            .map_or(0, |pressure| pressure.blocked_worker_count),
+        raw_logs_included: false,
+        raw_mail_bodies_included: false,
+    }
 }
 
 /// Collect redaction-safe incident replay summaries from committed synthetic fixtures.
@@ -3108,6 +3221,56 @@ fn swarm_brief_memory_drift_summary(report: &SwarmBriefReport) -> Value {
     })
 }
 
+fn swarm_brief_verification_broker_summary_value(report: &SwarmBriefReport) -> Value {
+    let Some(summary) = &report.verification_broker else {
+        return json!({
+            "schema": SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1,
+            "status": "not_collected",
+            "available": false,
+            "recentReusableRunCount": 0,
+            "knownBlockerCount": 0,
+            "inFlightEquivalentCommandCount": 0,
+            "rchQueueStatus": "not_collected",
+            "rchWorkerPressureStatus": "not_collected",
+            "rawLogsIncluded": false,
+            "rawMailBodiesIncluded": false,
+        });
+    };
+
+    json!({
+        "schema": summary.schema,
+        "sourceSchema": summary.source_schema,
+        "status": summary.status,
+        "available": true,
+        "recordCount": summary.record_count,
+        "recentRunCount": summary.recent_run_count,
+        "staleRunCount": summary.stale_run_count,
+        "unknownAgeCount": summary.unknown_age_count,
+        "recentReusableRunCount": summary.recent_reusable_run_count,
+        "knownBlockerCount": verification_broker_known_blocker_count(summary),
+        "inFlightEquivalentCommandCount": summary.in_flight_equivalent_command_count,
+        "advisoryCounts": summary.advisory_counts,
+        "evidenceHealth": summary.evidence_health,
+        "recoveryActionKinds": summary.recovery_actions.iter().map(|action| {
+            json!({
+                "priority": action.priority,
+                "kind": &action.kind,
+                "commandHash": action.command.as_ref().map(|command| blake3_summary_hash(command)),
+                "relatedBeadId": &action.related_bead_id,
+            })
+        }).collect::<Vec<_>>(),
+        "rchQueueStatus": summary.rch_queue_status,
+        "rchSlotsAvailable": summary.rch_slots_available,
+        "rchQueueHeadSlotsNeeded": summary.rch_queue_head_slots_needed,
+        "rchWorkerPressureStatus": summary.rch_worker_pressure_status,
+        "rchUsableWorkerCount": summary.rch_usable_worker_count,
+        "rchBlockedWorkerCount": summary.rch_blocked_worker_count,
+        "rawLogsIncluded": false,
+        "rawMailBodiesIncluded": false,
+        "rawCommandsIncluded": false,
+    })
+}
+
 fn swarm_brief_resource_pressure_posture(report: &SwarmBriefReport) -> &'static str {
     if report
         .resource_pressure
@@ -3623,6 +3786,7 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.extend(git_operation_state_recommendations(report));
     recommendations.extend(surface_conflict_recommendations(report));
     recommendations.extend(memory_drift_recommendations(report));
+    recommendations.extend(verification_broker_recommendations(report));
 
     if matches!(
         source_status(report, SwarmBriefSourceKind::Beads),
@@ -3708,6 +3872,193 @@ fn memory_drift_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefReco
                 .to_string(),
         ],
     }]
+}
+
+fn verification_broker_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
+    let Some(summary) = &report.verification_broker else {
+        return Vec::new();
+    };
+
+    let mut recommendations = Vec::new();
+    if summary.recent_reusable_run_count > 0 {
+        let mut reason_codes = verification_broker_base_reason_codes(summary);
+        reason_codes.insert("verification_recent_reusable_run".to_string());
+        reason_codes.extend(verification_broker_rch_pressure_reason_codes(summary));
+
+        let severity = if verification_broker_rch_pressure_present(summary) {
+            "medium"
+        } else {
+            "low"
+        };
+
+        recommendations.push(SwarmBriefRecommendation {
+            id: "rec.verification_broker.reuse_recent_evidence".to_string(),
+            kind: "verification_reuse".to_string(),
+            confidence: coordination_confidence(report),
+            severity: severity.to_string(),
+            reason_codes: reason_codes.into_iter().collect(),
+            evidence: verification_broker_evidence(summary),
+            suggested_commands: vec![
+                "ee verify broker lookup --runs-jsonl <j1.jsonl> --command-hash <hash> --source-hash <hash> --execution-substrate rch --json".to_string(),
+                "ee verify closeout capsule --runs-jsonl <j1.jsonl> --run-id <run-id> --json".to_string(),
+            ],
+            must_not_do: vec![
+                "Do not spend a fresh RCH slot before checking reusable verification evidence."
+                    .to_string(),
+                "Do not paste raw stdout/stderr or mail bodies into swarm brief evidence."
+                    .to_string(),
+            ],
+        });
+    }
+
+    let known_blockers = verification_broker_known_blocker_count(summary);
+    if known_blockers > 0 {
+        let mut reason_codes = verification_broker_base_reason_codes(summary);
+        reason_codes.insert("verification_known_blocker_present".to_string());
+        if summary.advisory_counts.remote_failed > 0 {
+            reason_codes.insert("verification_remote_failed".to_string());
+        }
+        if summary.advisory_counts.topology_blocked > 0 {
+            reason_codes.insert("verification_topology_blocked".to_string());
+        }
+        if summary.advisory_counts.local_disallowed > 0 {
+            reason_codes.insert("verification_local_disallowed".to_string());
+        }
+        reason_codes.extend(verification_broker_rch_pressure_reason_codes(summary));
+
+        let mut evidence = verification_broker_evidence(summary);
+        evidence.push(format!("verification_known_blockers:{known_blockers}"));
+        evidence.sort();
+        evidence.dedup();
+
+        recommendations.push(SwarmBriefRecommendation {
+            id: "rec.verification_broker.inspect_known_blocker".to_string(),
+            kind: "verification_known_blocker".to_string(),
+            confidence: coordination_confidence(report),
+            severity: "high".to_string(),
+            reason_codes: reason_codes.into_iter().collect(),
+            evidence,
+            suggested_commands: vec![
+                "ee verify broker lookup --runs-jsonl <j1.jsonl> --command-hash <hash> --source-hash <hash> --execution-substrate rch --json".to_string(),
+                "ee swarm brief --include-rch --json".to_string(),
+            ],
+            must_not_do: vec![
+                "Do not launch broad RCH verification until the known blocker is inspected or coordinated.".to_string(),
+                "Do not count local Cargo fallback as remote proof.".to_string(),
+            ],
+        });
+    }
+
+    if summary.in_flight_equivalent_command_count > 0 {
+        let mut reason_codes = verification_broker_base_reason_codes(summary);
+        reason_codes.insert("verification_in_flight_equivalent_command".to_string());
+
+        recommendations.push(SwarmBriefRecommendation {
+            id: "rec.verification_broker.wait_for_in_flight_run".to_string(),
+            kind: "verification_in_flight".to_string(),
+            confidence: coordination_confidence(report),
+            severity: "medium".to_string(),
+            reason_codes: reason_codes.into_iter().collect(),
+            evidence: verification_broker_evidence(summary),
+            suggested_commands: vec![
+                "br list --status in_progress --json".to_string(),
+                "Search Agent Mail for the active verification owner before duplicating the run."
+                    .to_string(),
+            ],
+            must_not_do: vec![
+                "Do not start a duplicate remote-required Cargo gate while equivalent verification is in flight.".to_string(),
+            ],
+        });
+    }
+
+    recommendations
+}
+
+fn verification_broker_known_blocker_count(summary: &SwarmBriefVerificationBrokerSummary) -> u32 {
+    summary
+        .advisory_counts
+        .remote_failed
+        .saturating_add(summary.advisory_counts.local_disallowed)
+        .saturating_add(summary.advisory_counts.topology_blocked)
+}
+
+fn verification_broker_base_reason_codes(
+    summary: &SwarmBriefVerificationBrokerSummary,
+) -> BTreeSet<String> {
+    BTreeSet::from([
+        "verification_broker_posture_available".to_string(),
+        format!("verification_broker_status:{}", summary.status),
+    ])
+}
+
+fn verification_broker_rch_pressure_reason_codes(
+    summary: &SwarmBriefVerificationBrokerSummary,
+) -> BTreeSet<String> {
+    let mut reason_codes = BTreeSet::new();
+    match summary.rch_queue_status.as_str() {
+        "capacity_blocked" => {
+            reason_codes.insert("rch_queue_capacity_blocked".to_string());
+        }
+        "start_stalled" => {
+            reason_codes.insert("rch_queue_start_stalled".to_string());
+        }
+        "queued" => {
+            reason_codes.insert("rch_queue_non_empty".to_string());
+        }
+        _ => {}
+    }
+    if summary.rch_worker_pressure_status != "not_collected"
+        && summary.rch_worker_pressure_status != "clear"
+        && summary.rch_worker_pressure_status != "healthy"
+    {
+        reason_codes.insert(format!(
+            "rch_worker_pressure:{}",
+            summary.rch_worker_pressure_status
+        ));
+    }
+    reason_codes
+}
+
+fn verification_broker_rch_pressure_present(summary: &SwarmBriefVerificationBrokerSummary) -> bool {
+    !verification_broker_rch_pressure_reason_codes(summary).is_empty()
+}
+
+fn verification_broker_evidence(summary: &SwarmBriefVerificationBrokerSummary) -> Vec<String> {
+    let mut evidence = BTreeSet::from([
+        format!("verification_records:{}", summary.record_count),
+        format!(
+            "verification_recent_reusable_runs:{}",
+            summary.recent_reusable_run_count
+        ),
+        format!(
+            "verification_in_flight:{}",
+            summary.in_flight_equivalent_command_count
+        ),
+        format!(
+            "verification_remote_failed:{}",
+            summary.advisory_counts.remote_failed
+        ),
+        format!(
+            "verification_topology_blocked:{}",
+            summary.advisory_counts.topology_blocked
+        ),
+        format!(
+            "verification_local_disallowed:{}",
+            summary.advisory_counts.local_disallowed
+        ),
+        format!("rch_queue_status:{}", summary.rch_queue_status),
+        format!(
+            "rch_worker_pressure_status:{}",
+            summary.rch_worker_pressure_status
+        ),
+    ]);
+    if let Some(slots_available) = summary.rch_slots_available {
+        evidence.insert(format!("rch_slots_available:{slots_available}"));
+    }
+    if let Some(slots_needed) = summary.rch_queue_head_slots_needed {
+        evidence.insert(format!("rch_queue_head_slots_needed:{slots_needed}"));
+    }
+    evidence.into_iter().collect()
 }
 
 fn git_operation_state_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
@@ -6473,6 +6824,40 @@ mod tests {
         report
     }
 
+    fn verification_broker_summary_fixture() -> SwarmBriefVerificationBrokerSummary {
+        SwarmBriefVerificationBrokerSummary {
+            schema: SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1,
+            source_schema: "ee.verification.posture.v1".to_string(),
+            status: "ok".to_string(),
+            record_count: 3,
+            recent_run_count: 2,
+            stale_run_count: 1,
+            unknown_age_count: 0,
+            recent_reusable_run_count: 0,
+            in_flight_equivalent_command_count: 0,
+            advisory_counts: VerificationPostureAdvisoryCounts::default(),
+            evidence_health: VerificationPostureEvidenceHealth {
+                ledger_available: true,
+                status: "healthy".to_string(),
+                malformed_timestamp_count: 0,
+                missing_artifact_manifest_count: 0,
+                local_disallowed_count: 0,
+                topology_blocked_count: 0,
+                issue_count: 0,
+                reason: None,
+            },
+            recovery_actions: Vec::new(),
+            rch_queue_status: "clear".to_string(),
+            rch_slots_available: Some(4),
+            rch_queue_head_slots_needed: None,
+            rch_worker_pressure_status: "healthy".to_string(),
+            rch_usable_worker_count: 2,
+            rch_blocked_worker_count: 0,
+            raw_logs_included: false,
+            raw_mail_bodies_included: false,
+        }
+    }
+
     fn recommendation<'a>(report: &'a SwarmBriefReport, id: &str) -> &'a SwarmBriefRecommendation {
         require_some(
             report
@@ -6588,6 +6973,171 @@ mod tests {
                 && !rendered.contains("queryShapeHash")
                 && !rendered.contains("workspaceHash"),
             "handoff text should stay compact and omit raw key-shape field names"
+        );
+    }
+
+    #[test]
+    fn verification_broker_recommendation_reuses_recent_evidence_under_rch_pressure() {
+        let mut report = report_with_ready_sources();
+        let mut broker = verification_broker_summary_fixture();
+        broker.recent_reusable_run_count = 2;
+        broker.rch_queue_status = "capacity_blocked".to_string();
+        broker.rch_slots_available = Some(1);
+        broker.rch_queue_head_slots_needed = Some(4);
+        broker.rch_worker_pressure_status = "pressure_degraded".to_string();
+        report.verification_broker = Some(broker);
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let rec = recommendation(&report, "rec.verification_broker.reuse_recent_evidence");
+        assert_eq!(rec.kind, "verification_reuse");
+        assert_eq!(rec.severity, "medium");
+        assert!(
+            rec.reason_codes
+                .contains(&"verification_recent_reusable_run".to_string())
+        );
+        assert!(
+            rec.reason_codes
+                .contains(&"rch_queue_capacity_blocked".to_string())
+        );
+        assert!(
+            rec.suggested_commands
+                .iter()
+                .any(|command| command.contains("ee verify broker lookup"))
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|warning| warning.contains("fresh RCH slot"))
+        );
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/verificationBroker/recentReusableRunCount"),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            summary.pointer("/verificationBroker/rawLogsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/counts/verificationBrokerRecentReusableRunCount"),
+            Some(&json!(2))
+        );
+
+        let rendered = render_swarm_brief_summary_for_handoff(&summary);
+        assert!(rendered.contains("Verification broker posture:"));
+        assert!(
+            !rendered.contains("stdout") && !rendered.contains("stderr"),
+            "handoff text must stay redaction-safe"
+        );
+    }
+
+    #[test]
+    fn verification_broker_recommendation_surfaces_known_blockers() {
+        let mut report = report_with_ready_sources();
+        let mut broker = verification_broker_summary_fixture();
+        broker.status = "blocked".to_string();
+        broker.advisory_counts.remote_failed = 1;
+        broker.advisory_counts.local_disallowed = 1;
+        broker.advisory_counts.topology_blocked = 1;
+        broker.evidence_health.topology_blocked_count = 1;
+        broker.evidence_health.issue_count = 2;
+        broker.evidence_health.status = "blocked".to_string();
+        broker.rch_worker_pressure_status = "topology_blocked".to_string();
+        report.verification_broker = Some(broker);
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let rec = recommendation(&report, "rec.verification_broker.inspect_known_blocker");
+        assert_eq!(rec.kind, "verification_known_blocker");
+        assert_eq!(rec.severity, "high");
+        assert!(
+            rec.reason_codes
+                .contains(&"verification_known_blocker_present".to_string())
+        );
+        assert!(
+            rec.reason_codes
+                .contains(&"verification_topology_blocked".to_string())
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|warning| warning.contains("local Cargo fallback"))
+        );
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/verificationBroker/knownBlockerCount"),
+            Some(&json!(3))
+        );
+        assert_eq!(
+            summary.pointer("/counts/verificationBrokerKnownBlockerCount"),
+            Some(&json!(3))
+        );
+    }
+
+    #[test]
+    fn verification_broker_recommendation_waits_for_in_flight_equivalent_run() {
+        let mut report = report_with_ready_sources();
+        let mut broker = verification_broker_summary_fixture();
+        broker.status = "initializing".to_string();
+        broker.in_flight_equivalent_command_count = 1;
+        broker.advisory_counts.remote_in_flight = 1;
+        report.verification_broker = Some(broker);
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        let rec = recommendation(&report, "rec.verification_broker.wait_for_in_flight_run");
+        assert_eq!(rec.kind, "verification_in_flight");
+        assert!(
+            rec.reason_codes
+                .contains(&"verification_in_flight_equivalent_command".to_string())
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|warning| warning.contains("duplicate remote-required Cargo gate"))
+        );
+    }
+
+    #[test]
+    fn verification_broker_summary_handles_no_evidence_and_missing_rch_without_raw_payloads() {
+        let mut report = report_with_ready_sources();
+        report.verification_broker = Some(swarm_brief_verification_broker_summary(
+            VerificationPostureReport::from_records(chrono::Utc::now(), &[]),
+            None,
+        ));
+
+        apply_swarm_brief_advice(&mut report);
+        report.finalize();
+
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .all(|recommendation| !recommendation.id.starts_with("rec.verification_broker."))
+        );
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/verificationBroker/status"),
+            Some(&json!("no_evidence"))
+        );
+        assert_eq!(
+            summary.pointer("/verificationBroker/rchQueueStatus"),
+            Some(&json!("not_collected"))
+        );
+        assert_eq!(
+            summary.pointer("/verificationBroker/rawLogsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/verificationBroker/rawMailBodiesIncluded"),
+            Some(&json!(false))
         );
     }
 

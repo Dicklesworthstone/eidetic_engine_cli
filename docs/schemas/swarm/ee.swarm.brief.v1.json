@@ -79,6 +79,7 @@
         {"type": "object"}
       ]
     },
+    "verificationBroker": {"$ref": "#/definitions/verificationBroker"},
     "recommendations": {
       "type": "array",
       "items": {"$ref": "#/definitions/recommendation"}
@@ -158,6 +159,65 @@
         "suggestedCommands": {"$ref": "#/definitions/stringArray"}
       }
     },
+    "verificationBroker": {
+      "type": "object",
+      "required": [
+        "schema",
+        "sourceSchema",
+        "status",
+        "recordCount",
+        "recentRunCount",
+        "staleRunCount",
+        "unknownAgeCount",
+        "recentReusableRunCount",
+        "inFlightEquivalentCommandCount",
+        "advisoryCounts",
+        "evidenceHealth",
+        "recoveryActions",
+        "rchQueueStatus",
+        "rchWorkerPressureStatus",
+        "rchUsableWorkerCount",
+        "rchBlockedWorkerCount",
+        "rawLogsIncluded",
+        "rawMailBodiesIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.swarm.verification_broker_summary.v1"},
+        "sourceSchema": {"type": "string"},
+        "status": {"type": "string"},
+        "recordCount": {"type": "integer", "minimum": 0},
+        "recentRunCount": {"type": "integer", "minimum": 0},
+        "staleRunCount": {"type": "integer", "minimum": 0},
+        "unknownAgeCount": {"type": "integer", "minimum": 0},
+        "recentReusableRunCount": {"type": "integer", "minimum": 0},
+        "inFlightEquivalentCommandCount": {"type": "integer", "minimum": 0},
+        "advisoryCounts": {"type": "object"},
+        "evidenceHealth": {"type": "object"},
+        "recoveryActions": {
+          "type": "array",
+          "items": {"type": "object"}
+        },
+        "rchQueueStatus": {"type": "string"},
+        "rchSlotsAvailable": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 0}
+          ]
+        },
+        "rchQueueHeadSlotsNeeded": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 0}
+          ]
+        },
+        "rchWorkerPressureStatus": {"type": "string"},
+        "rchUsableWorkerCount": {"type": "integer", "minimum": 0},
+        "rchBlockedWorkerCount": {"type": "integer", "minimum": 0},
+        "rawLogsIncluded": {"type": "boolean"},
+        "rawMailBodiesIncluded": {"type": "boolean"}
+      }
+    },
     "recommendation": {
       "type": "object",
       "required": ["id", "kind", "severity", "confidence", "reasonCodes", "evidence", "suggestedCommands", "mustNotDo"],
@@ -220,6 +280,28 @@
       "resourcePressure": [],
       "hostProfile": null,
       "agentInventory": null,
+      "verificationBroker": {
+        "schema": "ee.swarm.verification_broker_summary.v1",
+        "sourceSchema": "ee.verification.posture.v1",
+        "status": "ok",
+        "recordCount": 2,
+        "recentRunCount": 2,
+        "staleRunCount": 0,
+        "unknownAgeCount": 0,
+        "recentReusableRunCount": 1,
+        "inFlightEquivalentCommandCount": 0,
+        "advisoryCounts": {"remoteSuccess": 1},
+        "evidenceHealth": {"status": "healthy"},
+        "recoveryActions": [],
+        "rchQueueStatus": "clear",
+        "rchSlotsAvailable": 4,
+        "rchQueueHeadSlotsNeeded": null,
+        "rchWorkerPressureStatus": "healthy",
+        "rchUsableWorkerCount": 2,
+        "rchBlockedWorkerCount": 0,
+        "rawLogsIncluded": false,
+        "rawMailBodiesIncluded": false
+      },
       "recommendations": [],
       "degraded": []
     }
