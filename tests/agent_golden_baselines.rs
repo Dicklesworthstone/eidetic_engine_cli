@@ -727,8 +727,8 @@ fn ensure_singleflight_posture_redaction_safe(value: &Value, fixture_name: &str)
         .pointer("/data/singleFlight")
         .ok_or_else(|| format!("{fixture_name}: missing /data/singleFlight"))?;
     ensure_equal(
-        singleflight.get("schema").and_then(Value::as_str),
-        Some("ee.singleflight.posture.v1"),
+        &singleflight.get("schema").and_then(Value::as_str),
+        &Some("ee.singleflight.posture.v1"),
         &format!("{fixture_name} singleFlight schema"),
     )?;
 
@@ -1242,6 +1242,44 @@ fn graph_snapshot_empty_asset() -> DerivedAssetReport {
     DerivedAssetReport::from_graph_snapshot_artifact(&report)
 }
 
+fn fixture_search_index_freshness(
+    status: DerivedAssetStatus,
+    source_high_watermark: Option<u64>,
+    asset_high_watermark: Option<u64>,
+    repair: Option<&'static str>,
+) -> ee::core::derived_asset_freshness::DerivedAssetFreshnessReport {
+    use ee::core::derived_asset_freshness::{
+        DerivedAssetFreshnessInput, FreshnessDependency, plan_derived_asset_freshness,
+    };
+
+    plan_derived_asset_freshness(DerivedAssetFreshnessInput {
+        asset_id: "search_index",
+        asset_kind: "persisted_index",
+        inspected: status != DerivedAssetStatus::NotInspected,
+        available: !matches!(
+            status,
+            DerivedAssetStatus::Unavailable | DerivedAssetStatus::Unimplemented
+        ),
+        artifact_present: !matches!(
+            status,
+            DerivedAssetStatus::Empty | DerivedAssetStatus::Missing
+        ),
+        artifact_compatible: status != DerivedAssetStatus::Corrupt,
+        source_high_watermark,
+        asset_high_watermark,
+        source_dependencies: vec![FreshnessDependency::new(
+            "source",
+            "fixture",
+            "agent_golden_baselines",
+        )],
+        config_dependencies: vec![FreshnessDependency::new("config", "path", ".ee/index")],
+        feature_dependencies: Vec::new(),
+        input_manifest_hash: None,
+        previous_dependency_hash: None,
+        repair_action: repair.unwrap_or("Inspect derived asset status."),
+    })
+}
+
 fn fixture_status_posture(
     storage: SubsystemPostureStatus,
     search: SubsystemPostureStatus,
@@ -1363,6 +1401,12 @@ fn status_missing_db_report() -> StatusReport {
                 name: "search_index",
                 kind: "persisted_index",
                 status: DerivedAssetStatus::Missing,
+                freshness: fixture_search_index_freshness(
+                    DerivedAssetStatus::Missing,
+                    None,
+                    None,
+                    None,
+                ),
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
@@ -1432,6 +1476,12 @@ fn status_pending_migration_report() -> StatusReport {
                 name: "search_index",
                 kind: "persisted_index",
                 status: DerivedAssetStatus::Unavailable,
+                freshness: fixture_search_index_freshness(
+                    DerivedAssetStatus::Unavailable,
+                    None,
+                    None,
+                    Some("Run `ee doctor --json` to inspect storage and filesystem access."),
+                ),
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
@@ -1501,6 +1551,12 @@ fn status_stale_index_lexical_only_report() -> StatusReport {
                 name: "search_index",
                 kind: "persisted_index",
                 status: DerivedAssetStatus::Stale,
+                freshness: fixture_search_index_freshness(
+                    DerivedAssetStatus::Stale,
+                    Some(5),
+                    Some(3),
+                    Some("ee index rebuild --workspace ."),
+                ),
                 source_high_watermark: Some(5),
                 asset_high_watermark: Some(3),
                 high_watermark_lag: Some(2),
@@ -1559,6 +1615,12 @@ fn status_search_unimplemented_report() -> StatusReport {
                 name: "search_index",
                 kind: "persisted_index",
                 status: DerivedAssetStatus::Unavailable,
+                freshness: fixture_search_index_freshness(
+                    DerivedAssetStatus::Unavailable,
+                    None,
+                    None,
+                    Some("Use a binary built with search support enabled."),
+                ),
                 source_high_watermark: None,
                 asset_high_watermark: None,
                 high_watermark_lag: None,
