@@ -268,6 +268,45 @@ fn destructive_pattern_fixture_tracks_required_contract_categories() {
 }
 
 #[test]
+fn destructive_infrastructure_builtins_match_shell_wrappers_and_paths() {
+    let registry = PreflightGuardRegistry::with_builtins();
+    for (command, expected_rule_id) in [
+        (
+            "bash -lc 'kubectl delete pods --all -A'",
+            "builtin:kubectl_mass_delete",
+        ),
+        (
+            "/usr/local/bin/kubectl delete pods --all --all-namespaces",
+            "builtin:kubectl_mass_delete",
+        ),
+        (
+            "zsh -c 'terraform destroy -auto-approve'",
+            "builtin:terraform_destroy",
+        ),
+        (
+            "bash -lc 'dd if=/dev/zero of=/dev/sda bs=1M'",
+            "builtin:raw_block_device_write",
+        ),
+        ("/sbin/mkfs.ext4 /dev/sdb", "builtin:filesystem_create"),
+        ("bash -lc 'mkfs.ext4 /dev/sdb'", "builtin:filesystem_create"),
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "command `{command}` should be halted by {expected_rule_id}",
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == expected_rule_id),
+            "command `{command}` did not cite {expected_rule_id}: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
 fn no_match_yields_exit_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
     let report = run_preflight_guard(&registry, &opts("ls -la"));

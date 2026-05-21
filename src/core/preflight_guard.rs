@@ -1224,9 +1224,12 @@ fn matches_kubectl_mass_delete(command: &str) -> bool {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
         };
+        if let Some(shell_body) = shell_c_argument(segment, command_index) {
+            return matches_kubectl_mass_delete(shell_body);
+        }
         if segment
             .get(command_index)
-            .is_none_or(|word| word != "kubectl")
+            .is_none_or(|word| command_basename(word) != "kubectl")
         {
             return false;
         }
@@ -1248,9 +1251,12 @@ fn matches_terraform_destroy(command: &str) -> bool {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
         };
+        if let Some(shell_body) = shell_c_argument(segment, command_index) {
+            return matches_terraform_destroy(shell_body);
+        }
         segment
             .get(command_index)
-            .is_some_and(|word| word == "terraform")
+            .is_some_and(|word| command_basename(word) == "terraform")
             && segment
                 .iter()
                 .skip(command_index + 1)
@@ -1263,7 +1269,12 @@ fn matches_raw_block_device_write(command: &str) -> bool {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
         };
-        segment.get(command_index).is_some_and(|word| word == "dd")
+        if let Some(shell_body) = shell_c_argument(segment, command_index) {
+            return matches_raw_block_device_write(shell_body);
+        }
+        segment
+            .get(command_index)
+            .is_some_and(|word| command_basename(word) == "dd")
             && segment
                 .iter()
                 .skip(command_index + 1)
@@ -1277,12 +1288,16 @@ fn matches_filesystem_create(command: &str) -> bool {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
         };
+        if let Some(shell_body) = shell_c_argument(segment, command_index) {
+            return matches_filesystem_create(shell_body);
+        }
         let Some(command_name) = segment.get(command_index) else {
             return false;
         };
+        let command_name = command_basename(command_name);
         let mkfs_command = command_name == "mkfs"
             || command_name.starts_with("mkfs.")
-            || matches!(command_name.as_str(), "mke2fs" | "mkfs_ext4");
+            || matches!(command_name, "mke2fs" | "mkfs_ext4");
         mkfs_command
             && segment
                 .iter()
