@@ -455,7 +455,8 @@ fn file_deletion_segment_matches(segment: &[String]) -> bool {
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_file_deletion(shell_body);
     }
-    if inline_interpreter_body(segment, command_index).is_some_and(script_body_mentions_file_deletion)
+    if inline_interpreter_body(segment, command_index)
+        .is_some_and(script_body_mentions_file_deletion)
     {
         return true;
     }
@@ -557,7 +558,10 @@ fn matches_rust_verifier_command_substitution(command: &str) -> bool {
 }
 
 fn command_contains_active_rust_verifier_command_substitution(command: &str) -> bool {
-    command_contains_active_command_substitution(command, command_substitution_mentions_rust_verifier)
+    command_contains_active_command_substitution(
+        command,
+        command_substitution_mentions_rust_verifier,
+    )
 }
 
 fn command_contains_active_command_substitution(
@@ -828,7 +832,16 @@ fn shell_c_argument(segment: &[String], command_index: usize) -> Option<&str> {
 fn is_shell_command(word: &str) -> bool {
     matches!(
         command_basename(word),
-        "bash" | "csh" | "dash" | "elvish" | "fish" | "ksh" | "nu" | "sh" | "tcsh" | "xonsh"
+        "bash"
+            | "csh"
+            | "dash"
+            | "elvish"
+            | "fish"
+            | "ksh"
+            | "nu"
+            | "sh"
+            | "tcsh"
+            | "xonsh"
             | "zsh"
     )
 }
@@ -1029,16 +1042,7 @@ fn inline_interpreter_body(segment: &[String], command_index: usize) -> Option<&
 fn is_inline_interpreter_command(command_name: &str) -> bool {
     matches!(
         command_name,
-        "bun"
-            | "deno"
-            | "lua"
-            | "node"
-            | "perl"
-            | "php"
-            | "python"
-            | "python3"
-            | "ruby"
-            | "tcl"
+        "bun" | "deno" | "lua" | "node" | "perl" | "php" | "python" | "python3" | "ruby" | "tcl"
     )
 }
 
