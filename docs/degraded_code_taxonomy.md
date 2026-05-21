@@ -351,12 +351,13 @@ memory bodies in `sources[]`.
 | `remember_auto_link_failed` | low | bd-17c65.7.3 (G3) |
 | `remember_link_suggestion_failed` | low | bd-17c65.7.3 (G3) |
 
-#### Feedback (3)
+#### Feedback (4)
 | Code | Severity | Bead |
 |------|----------|------|
 | `feedback_health_unavailable` | low | bd-17c65.10.6 (J6) |
 | `feedback_protected_rules_unavailable` | medium | bd-17c65.10.6 (J6) |
 | `feedback_quarantine_unavailable` | medium | bd-17c65.10.6 (J6) |
+| `harmful_burst_quarantine` | warning | bd-3qs2i.3.1 (F3) |
 
 #### Why / pack inspection and proof verification (6)
 | Code | Severity | Bead |

@@ -1,0 +1,45 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "harmful_burst_quarantine",
+  "introduced_by": {
+    "bead": "bd-3qs2i.3.1",
+    "epic_letter": "F"
+  },
+  "surfaces": [
+    "outcome"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "A harmful outcome event from a source whose rolling burst window is already at the configured per-source cap is absorbed into feedback quarantine instead of live scoring.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Victim memory' --workspace . --level procedural --kind rule --json",
+      "ee outcome <memory-id> --signal harmful --source-id stress --reason 'preload 1' --harmful-per-source-per-hour 3 --workspace . --json",
+      "ee outcome <memory-id> --signal harmful --source-id stress --reason 'preload 2' --harmful-per-source-per-hour 3 --workspace . --json",
+      "ee outcome <memory-id> --signal harmful --source-id stress --reason 'preload 3' --harmful-per-source-per-hour 3 --workspace . --json"
+    ],
+    "invocation": "ee outcome <memory-id> --signal harmful --source-id stress --reason 'trip burst quarantine' --harmful-per-source-per-hour 3 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "harmful_burst_quarantine",
+    "severity": "warning",
+    "message_contains": [
+      "Harmful outcome feedback rate exceeded",
+      "event was quarantined",
+      "did NOT update live scoring"
+    ],
+    "details_contains": [
+      "observedRate",
+      "configuredCap",
+      "windowSeconds",
+      "quarantinedCandidateIds",
+      "recovery"
+    ],
+    "recovery_kinds": [
+      "narrow",
+      "config",
+      "flag"
+    ]
+  }
+}

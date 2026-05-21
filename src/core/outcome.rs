@@ -38,7 +38,7 @@ use crate::db::{
     feedback_scoring, generate_audit_id, generate_audit_id_seeded,
 };
 use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
-use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode};
+use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind};
 use crate::runtime::determinism::{Deterministic, Seed};
 
 /// Exit code for cancelled operations (SIGINT convention).
@@ -1031,6 +1031,20 @@ fn record_outcome_inner(
             ..quarantine
         };
         let quarantined_candidate_ids = vec![quarantine_id];
+        let safe_trace_source_id = final_quarantine
+            .source_id
+            .as_deref()
+            .map(redact_outcome_public_source_ref)
+            .unwrap_or_else(|| "unknown".to_owned());
+        tracing::info!(
+            target: "ee::outcome::harmful_burst",
+            source_id = %safe_trace_source_id,
+            observed_rate = final_quarantine.observed_count,
+            configured_cap = final_quarantine.limit,
+            window_seconds = final_quarantine.window_seconds,
+            quarantined_candidate_id = final_quarantine.id.as_deref(),
+            "harmful burst quarantined"
+        );
         let degraded = vec![harmful_burst_quarantine_degradation(
             &final_quarantine,
             &quarantined_candidate_ids,
@@ -1224,6 +1238,7 @@ fn harmful_burst_quarantine_degradation(
         "configuredCap": configured_cap,
         "windowSeconds": window_seconds,
         "quarantinedCandidateIds": quarantined_candidate_ids,
+        "recovery": harmful_burst_quarantine_recovery_actions(),
     });
     OutcomeDegradation {
         code: HARMFUL_BURST_QUARANTINE_CODE.to_string(),
@@ -1233,6 +1248,31 @@ fn harmful_burst_quarantine_degradation(
         ),
         details: Some(details),
     }
+}
+
+fn harmful_burst_quarantine_recovery_actions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "priority": 1,
+            "kind": RecoveryKind::Narrow.as_str(),
+            "rationale": "Re-issue with a more specific source-id to spread out the rate across multiple sources.",
+        }),
+        serde_json::json!({
+            "priority": 2,
+            "kind": RecoveryKind::Config.as_str(),
+            "configPath": ".ee/config.toml",
+            "configKey": "outcome.harmful_per_source_per_hour",
+            "valueHint": "<higher integer if a burst is expected>",
+            "rationale": "Raise the cap persistently if your domain legitimately produces high-rate harmful signals.",
+        }),
+        serde_json::json!({
+            "priority": 3,
+            "kind": RecoveryKind::Flag.as_str(),
+            "flagName": "--harmful-per-source-per-hour",
+            "valueHint": "<N>",
+            "rationale": "Per-call override of the cap.",
+        }),
+    ]
 }
 
 /// List quarantined feedback events for a workspace.
@@ -1670,7 +1710,8 @@ fn resolve_target_workspace(
                 repair: Some("ee memory list".to_string()),
             })?;
         if prompt_injection_guard {
-            let instruction_report = crate::policy::detect_instruction_like_content(&memory.content);
+            let instruction_report =
+                crate::policy::detect_instruction_like_content(&memory.content);
             if instruction_report.is_instruction_like {
                 return Err(outcome_instruction_policy_denied_error(
                     target_id,
@@ -2295,12 +2336,13 @@ mod tests {
     use super::{
         CliCancelReason, CliOutcomeClass, CliOutcomeSummary, DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
         DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR, EXIT_CANCELLED, EXIT_PANICKED,
-        OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary, OutcomeQuarantineListReport,
-        OutcomeQuarantineRecord, OutcomeQuarantineSummary, OutcomeRecordOptions,
-        OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
+        HARMFUL_BURST_QUARANTINE_CODE, OUTCOME_QUARANTINE_LIST_SCHEMA_V1, OutcomeFeedbackSummary,
+        OutcomeQuarantineListReport, OutcomeQuarantineRecord, OutcomeQuarantineSummary,
+        OutcomeRecordOptions, OutcomeRecordReport, OutcomeRecordStatus, default_feedback_weight,
         feedback_quarantine_audit_details, feedback_quarantine_review_audit_details,
-        generate_feedback_event_id, outcome_audit_details, outcome_class, outcome_exit_code,
-        record_outcome, record_outcome_seeded, validate_feedback_event_id,
+        generate_feedback_event_id, harmful_burst_quarantine_degradation, outcome_audit_details,
+        outcome_class, outcome_exit_code, record_outcome, record_outcome_seeded,
+        validate_feedback_event_id,
     };
     use crate::models::{DomainError, ProcessExitCode};
     use crate::runtime::determinism::Deterministic;
@@ -2755,6 +2797,59 @@ mod tests {
             &details["quarantinedCandidateIds"],
             &serde_json::json!(["fq_00000000000000000000000099"]),
             "quarantinedCandidateIds enumerates the rolled-up rows",
+        )?;
+        let recovery = details["recovery"]
+            .as_array()
+            .ok_or_else(|| "recovery must be an array".to_string())?;
+        ensure_equal(
+            &recovery.len(),
+            &3usize,
+            "harmful_burst_quarantine has three recovery actions",
+        )?;
+        ensure_equal(
+            &recovery[0]["priority"],
+            &serde_json::json!(1),
+            "first recovery action is highest priority",
+        )?;
+        ensure_equal(
+            &recovery[0]["kind"],
+            &serde_json::json!("narrow"),
+            "first recovery action narrows the source id",
+        )?;
+        ensure_equal(
+            &recovery[1]["priority"],
+            &serde_json::json!(2),
+            "second recovery action is priority 2",
+        )?;
+        ensure_equal(
+            &recovery[1]["kind"],
+            &serde_json::json!("config"),
+            "second recovery action is persistent config",
+        )?;
+        ensure_equal(
+            &recovery[1]["configPath"],
+            &serde_json::json!(".ee/config.toml"),
+            "config recovery identifies the local ee config path",
+        )?;
+        ensure_equal(
+            &recovery[1]["configKey"],
+            &serde_json::json!("outcome.harmful_per_source_per_hour"),
+            "config recovery identifies the harmful cap key",
+        )?;
+        ensure_equal(
+            &recovery[2]["priority"],
+            &serde_json::json!(3),
+            "third recovery action is priority 3",
+        )?;
+        ensure_equal(
+            &recovery[2]["kind"],
+            &serde_json::json!("flag"),
+            "third recovery action is a one-call flag override",
+        )?;
+        ensure_equal(
+            &recovery[2]["flagName"],
+            &serde_json::json!("--harmful-per-source-per-hour"),
+            "flag recovery identifies the harmful cap override",
         )?;
         ensure(
             !details.to_string().contains("/Users/alice"),
