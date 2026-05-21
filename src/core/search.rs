@@ -62,6 +62,7 @@ pub const DIAG_SEARCH_SCHEMA_V1: &str = "ee.diag.search.v1";
 pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
 pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
+pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
 const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
@@ -1875,8 +1876,13 @@ impl SearchScoreCalibration {
     }
 
     fn data_json(&self) -> serde_json::Value {
+        // bd-vca4u: this object is the workspace-level calibration metadata
+        // emitted under `metadata.scoreCalibration`. The per-result
+        // two-number bound array uses ee.search.score_interval.v1; this
+        // object has its own schema id so consumers can validate it and
+        // evolve it independently.
         serde_json::json!({
-            "schema": SEARCH_SCORE_INTERVAL_SCHEMA_V1,
+            "schema": SEARCH_SCORE_CALIBRATION_SCHEMA_V1,
             "method": "scaled_split_conformal",
             "status": self.status.as_str(),
             "coverage": round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE),

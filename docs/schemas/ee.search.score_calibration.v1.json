@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.search.score_calibration.v1.json",
+  "title": "ee.search.score_calibration.v1",
+  "description": "Workspace-level scaled split-conformal calibration metadata emitted under metadata.scoreCalibration on ee search responses. Pair with ee.search.score_interval.v1, which is the per-result two-number relevance interval that this calibration produces.",
+  "type": "object",
+  "required": [
+    "schema",
+    "method",
+    "status",
+    "coverage",
+    "sampleCount",
+    "minimumSamples",
+    "sourceBreakdown",
+    "corruptRowCount",
+    "corruptLineNumbers",
+    "residualQuantile",
+    "unreadableReason"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "ee.search.score_calibration.v1"
+    },
+    "method": {
+      "type": "string",
+      "description": "Calibration method identifier; today only scaled_split_conformal is emitted.",
+      "enum": ["scaled_split_conformal"]
+    },
+    "status": {
+      "type": "string",
+      "description": "Calibration readiness; controls whether per-result scoreInterval bounds are real or fall back to a heuristic.",
+      "enum": [
+        "absent",
+        "unreadable",
+        "insufficient",
+        "corrupt",
+        "file_too_large",
+        "calibrated"
+      ]
+    },
+    "coverage": {
+      "type": "number",
+      "description": "Target coverage probability (e.g. 0.95). Constant across emissions; surfaced so consumers do not need a separate config read.",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "sampleCount": {
+      "type": "integer",
+      "description": "Number of residual samples (across jsonl + feedback events) used in this calibration.",
+      "minimum": 0
+    },
+    "minimumSamples": {
+      "type": "integer",
+      "description": "Threshold below which status transitions to insufficient.",
+      "minimum": 0
+    },
+    "sourceBreakdown": {
+      "type": "object",
+      "description": "Per-source counts that sum to sampleCount.",
+      "required": ["jsonl", "feedbackEvents"],
+      "additionalProperties": false,
+      "properties": {
+        "jsonl": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Residual samples loaded from .ee/search/calibration.jsonl."
+        },
+        "feedbackEvents": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Residual samples derived from stored feedback events."
+        }
+      }
+    },
+    "corruptRowCount": {
+      "type": "integer",
+      "description": "Total residual rows discarded as malformed across the JSONL source.",
+      "minimum": 0
+    },
+    "corruptLineNumbers": {
+      "type": "array",
+      "description": "1-indexed line numbers of malformed JSONL rows, truncated at the registry cap; empty when corruptRowCount is 0.",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "residualQuantile": {
+      "type": ["number", "null"],
+      "description": "Empirical residual quantile used to scale per-result interval radii. Null when status != calibrated.",
+      "minimum": 0.0,
+      "maximum": 1.0
+    },
+    "unreadableReason": {
+      "type": ["string", "null"],
+      "description": "snake_case label of the io::ErrorKind that prevented JSONL parsing. Null for every status other than unreadable. See bd-25z97."
+    }
+  }
+}

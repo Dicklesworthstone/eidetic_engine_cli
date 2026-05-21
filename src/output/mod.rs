@@ -8594,6 +8594,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: search_score_interval_schema_definition,
         },
         SchemaEntry {
+            id: "ee.search.score_calibration.v1",
+            version: "1",
+            description: "Workspace-level scaled split-conformal calibration metadata emitted under metadata.scoreCalibration on ee search responses.",
+            category: "search",
+            definition: search_score_calibration_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.singleflight.key.v1",
             version: "1",
             description: "Redaction-safe canonical key for coalescing duplicate in-process read-heavy ee commands.",
@@ -9470,6 +9477,10 @@ fn search_revision_token_schema_definition() -> String {
 
 fn search_score_interval_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.search.score_interval.v1.json").to_string()
+}
+
+fn search_score_calibration_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.search.score_calibration.v1.json").to_string()
 }
 
 fn singleflight_key_schema_definition() -> String {
