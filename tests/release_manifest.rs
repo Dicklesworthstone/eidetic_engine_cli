@@ -269,8 +269,18 @@ fn artifact_naming_and_package_exclusions_are_public_contract() -> TestResult {
         "target cache path denied",
     )?;
     ensure(
+        !is_allowed_package_member_path("target"),
+        "target root denied",
+    )?;
+    ensure(
         !is_allowed_package_member_path(".ee/config.toml"),
         "local config denied",
+    )?;
+    ensure(!is_allowed_package_member_path(".ee"), "ee root denied")?;
+    ensure(!is_allowed_package_member_path(".git"), "git root denied")?;
+    ensure(
+        is_allowed_package_member_path("templates/README.md"),
+        "non-root temp prefix allowed",
     )?;
     ensure(
         !is_allowed_package_member_path("..\\escape"),

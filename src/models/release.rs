@@ -823,12 +823,9 @@ pub fn is_allowed_package_member_path(path: &str) -> bool {
         return false;
     }
     let normalized = path.replace('\\', "/").to_ascii_lowercase();
-    if normalized.starts_with(".git/")
-        || normalized.starts_with(".ee/")
-        || normalized.starts_with("target/")
-        || normalized.starts_with("tests/")
-        || normalized.starts_with("tmp/")
-        || normalized.starts_with("temp/")
+    if [".git", ".ee", "target", "tests", "tmp", "temp"]
+        .iter()
+        .any(|root| is_forbidden_package_root(&normalized, root))
     {
         return false;
     }
@@ -847,6 +844,13 @@ pub fn is_allowed_package_member_path(path: &str) -> bool {
         return false;
     }
     true
+}
+
+fn is_forbidden_package_root(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[must_use]
@@ -1231,13 +1235,29 @@ mod tests {
             !is_allowed_package_member_path(".ee/config.toml"),
             "ee config denied",
         )?;
+        ensure(!is_allowed_package_member_path(".ee"), "ee root denied")?;
+        ensure(!is_allowed_package_member_path(".git"), "git root denied")?;
         ensure(
             !is_allowed_package_member_path("target/release/ee"),
             "target denied",
         )?;
         ensure(
+            !is_allowed_package_member_path("target"),
+            "target root denied",
+        )?;
+        ensure(
             !is_allowed_package_member_path("tests/output.json"),
             "test artifact denied",
+        )?;
+        ensure(
+            !is_allowed_package_member_path("tests"),
+            "tests root denied",
+        )?;
+        ensure(!is_allowed_package_member_path("tmp"), "tmp root denied")?;
+        ensure(!is_allowed_package_member_path("temp"), "temp root denied")?;
+        ensure(
+            is_allowed_package_member_path("templates/readme.md"),
+            "non-root prefix lookalike allowed",
         )?;
         ensure(
             !is_allowed_package_member_path("../escape"),
