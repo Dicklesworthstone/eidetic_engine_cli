@@ -15,7 +15,8 @@
     "corruptRowCount",
     "corruptLineNumbers",
     "residualQuantile",
-    "unreadableReason"
+    "unreadableReason",
+    "provenance"
   ],
   "additionalProperties": false,
   "properties": {
@@ -95,6 +96,39 @@
     "unreadableReason": {
       "type": ["string", "null"],
       "description": "snake_case label of the io::ErrorKind that prevented JSONL parsing. Null for every status other than unreadable. See bd-25z97."
+    },
+    "provenance": {
+      "type": "object",
+      "description": "bd-1cdea: deterministic provenance summary for the calibration evidence so consumers can audit which exact sources shaped the score intervals.",
+      "required": [
+        "jsonlHash",
+        "jsonlPath",
+        "feedbackEventIds",
+        "feedbackEventIdsTruncated"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "jsonlHash": {
+          "type": ["string", "null"],
+          "description": "BLAKE3 hex digest of the JSONL bytes that produced residuals, prefixed `blake3:`. Null when the JSONL did not contribute residuals (status absent, unreadable, or file_too_large).",
+          "pattern": "^blake3:[0-9a-f]{64}$"
+        },
+        "jsonlPath": {
+          "type": "string",
+          "description": "Workspace-relative path of the calibration JSONL so consumers do not need to infer the layout.",
+          "const": ".ee/search/calibration.jsonl"
+        },
+        "feedbackEventIds": {
+          "type": "array",
+          "description": "Bounded list of feedback-event row ids whose residuals fed this calibration. Length is capped; see feedbackEventIdsTruncated.",
+          "items": { "type": "string" },
+          "maxItems": 64
+        },
+        "feedbackEventIdsTruncated": {
+          "type": "boolean",
+          "description": "True when more feedback events contributed residuals than feedbackEventIds was allowed to list."
+        }
+      }
     }
   }
 }

@@ -68,6 +68,11 @@ const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
 const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
 const MAX_SEARCH_SCORE_CALIBRATION_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS: usize = 1_000;
+/// bd-1cdea: bound the per-response `metadata.scoreCalibration.provenance.feedbackEventIds`
+/// list so a calibration with many feedback-event contributors does not bloat
+/// every search payload. The empirical residual quantile is computed from all
+/// samples regardless; this cap only affects the provenance summary.
+const MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS: usize = 64;
 const SEARCH_ANALYSIS_CONTENT_KEY: &str = "_ee_analysis_content";
 const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
 const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
@@ -1524,6 +1529,9 @@ impl FusionDiagnostics {
     pub fn data_json(&self) -> serde_json::Value {
         serde_json::json!({
             "algorithm": self.algorithm,
+            "diagnosticOnly": true,
+            "affectsFinalRanking": false,
+            "rankingOwner": "frankensearch_two_tier_searcher",
             "k": round_metric_f64(self.rrf_k),
             "elapsedMs": round_metric_f64(self.elapsed_ms),
             "perDocContribution": self.per_doc_contribution.iter().map(FusionContribution::data_json).collect::<Vec<_>>(),
@@ -1633,6 +1641,13 @@ struct SearchScoreCalibrationJsonlLoad {
     /// instead of folding the failure into `status: absent`.
     unreadable_reason: Option<String>,
     file_size_bytes: Option<u64>,
+    /// bd-1cdea: BLAKE3 hex digest (prefixed `blake3:`) of the JSONL bytes
+    /// that produced these residuals. Lets `metadata.scoreCalibration`
+    /// expose deterministic provenance for the calibration evidence so
+    /// search consumers can audit which exact JSONL artifact shaped the
+    /// score intervals. `None` whenever no residuals were parsed (status
+    /// `absent`, `unreadable`, or `file_too_large`).
+    jsonl_hash: Option<String>,
     residuals: Vec<f32>,
     sample_count: usize,
     corrupt_row_count: usize,
@@ -1646,6 +1661,7 @@ impl SearchScoreCalibrationJsonlLoad {
             too_large: false,
             unreadable_reason: None,
             file_size_bytes: None,
+            jsonl_hash: None,
             residuals: Vec::new(),
             sample_count: 0,
             corrupt_row_count: 0,
@@ -1661,6 +1677,7 @@ impl SearchScoreCalibrationJsonlLoad {
             too_large: false,
             unreadable_reason: Some(reason.to_owned()),
             file_size_bytes: None,
+            jsonl_hash: None,
             residuals: Vec::new(),
             sample_count: 0,
             corrupt_row_count: 0,
@@ -1706,6 +1723,18 @@ struct SearchScoreCalibration {
     /// calibration JSONL unreadable, when status == `Unreadable`. None for
     /// every other status.
     unreadable_reason: Option<String>,
+    /// bd-1cdea: BLAKE3 hex digest (`blake3:<hex>`) of the JSONL bytes that
+    /// contributed residuals. `None` whenever the JSONL did not feed
+    /// residuals (status `absent`, `unreadable`, or `file_too_large`).
+    jsonl_hash: Option<String>,
+    /// bd-1cdea: bounded list of feedback-event IDs that contributed
+    /// residuals, capped at `MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS`.
+    /// Lets agents audit which exact feedback rows shaped the score
+    /// intervals; their content is recoverable from the workspace DB.
+    feedback_event_ids: Vec<String>,
+    /// bd-1cdea: `true` when more feedback events contributed residuals
+    /// than the cap above could surface in the provenance summary.
+    feedback_event_ids_truncated: bool,
 }
 
 impl SearchScoreCalibration {
@@ -1728,6 +1757,11 @@ impl SearchScoreCalibration {
         let corrupt_row_count = jsonl_load.corrupt_row_count;
         let jsonl_sample_count = jsonl_load.sample_count;
         let mut feedback_event_sample_count = 0usize;
+        // bd-1cdea: capture contributing feedback-event IDs for the
+        // provenance summary, capped so a calibration with many
+        // contributors does not bloat every search payload.
+        let mut feedback_event_ids: Vec<String> = Vec::new();
+        let mut feedback_event_ids_truncated = false;
 
         for event in feedback_events {
             let Some(evidence_json) = &event.evidence_json else {
@@ -1741,6 +1775,11 @@ impl SearchScoreCalibration {
             };
             residuals.push(residual);
             feedback_event_sample_count = feedback_event_sample_count.saturating_add(1);
+            if feedback_event_ids.len() < MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS {
+                feedback_event_ids.push(event.id.clone());
+            } else {
+                feedback_event_ids_truncated = true;
+            }
         }
 
         // bd-25z97: an unreadable JSONL must NOT degrade into the silent
@@ -1768,6 +1807,9 @@ impl SearchScoreCalibration {
                 jsonl_file_size_bytes: None,
                 residual_quantile,
                 unreadable_reason: jsonl_load.unreadable_reason.clone(),
+                jsonl_hash: None,
+                feedback_event_ids,
+                feedback_event_ids_truncated,
             };
         }
 
@@ -1782,6 +1824,9 @@ impl SearchScoreCalibration {
                 jsonl_file_size_bytes: None,
                 residual_quantile: None,
                 unreadable_reason: None,
+                jsonl_hash: None,
+                feedback_event_ids: Vec::new(),
+                feedback_event_ids_truncated: false,
             };
         }
 
@@ -1804,6 +1849,12 @@ impl SearchScoreCalibration {
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile,
                 unreadable_reason: None,
+                // bd-1cdea: too_large drops the JSONL before parsing, so no
+                // JSONL hash provenance; feedback events may still have
+                // contributed and keep their ids.
+                jsonl_hash: None,
+                feedback_event_ids,
+                feedback_event_ids_truncated,
             };
         }
 
@@ -1826,6 +1877,9 @@ impl SearchScoreCalibration {
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile,
                 unreadable_reason: None,
+                jsonl_hash: jsonl_load.jsonl_hash.clone(),
+                feedback_event_ids,
+                feedback_event_ids_truncated,
             };
         }
 
@@ -1840,6 +1894,9 @@ impl SearchScoreCalibration {
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile: None,
                 unreadable_reason: None,
+                jsonl_hash: jsonl_load.jsonl_hash.clone(),
+                feedback_event_ids,
+                feedback_event_ids_truncated,
             };
         }
 
@@ -1856,6 +1913,9 @@ impl SearchScoreCalibration {
                 SEARCH_SCORE_COVERAGE_GUARANTEE,
             )),
             unreadable_reason: None,
+            jsonl_hash: jsonl_load.jsonl_hash.clone(),
+            feedback_event_ids,
+            feedback_event_ids_truncated,
         }
     }
 
@@ -1899,6 +1959,19 @@ impl SearchScoreCalibration {
             // consumers can branch on the kind of I/O failure without
             // re-parsing the human-readable message.
             "unreadableReason": self.unreadable_reason,
+            // bd-1cdea: provenance summary lets agents audit which exact
+            // evidence shaped the score intervals. `jsonlHash` pins the
+            // JSONL bytes (BLAKE3) that produced residuals; `jsonlPath`
+            // is the workspace-relative path (stable across machines);
+            // `feedbackEventIds` is a bounded list of contributing
+            // feedback-event row ids (cap = MAX_SEARCH_SCORE_CALIBRATION_FEEDBACK_EVENT_IDS)
+            // with `feedbackEventIdsTruncated` set when the cap was hit.
+            "provenance": {
+                "jsonlHash": self.jsonl_hash,
+                "jsonlPath": ".ee/search/calibration.jsonl",
+                "feedbackEventIds": &self.feedback_event_ids,
+                "feedbackEventIdsTruncated": self.feedback_event_ids_truncated,
+            },
         })
     }
 }
@@ -1932,7 +2005,11 @@ fn load_search_score_calibration_jsonl(path: &Path) -> SearchScoreCalibrationJso
         SearchScoreCalibrationJsonlLoad {
             exists: true,
             too_large: true,
+            unreadable_reason: None,
             file_size_bytes: Some(metadata.len()),
+            // bd-1cdea: too_large drops the JSONL before parsing, so we
+            // do not compute a hash — the bytes did not feed residuals.
+            jsonl_hash: None,
             residuals: Vec::new(),
             sample_count: 0,
             corrupt_row_count: 0,
@@ -1959,8 +2036,12 @@ fn stream_search_score_calibration_jsonl(
     path: &Path,
     file_size_bytes: u64,
 ) -> SearchScoreCalibrationJsonlLoad {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
+    // bd-1cdea: read the JSONL bytes once so we can compute a BLAKE3
+    // provenance hash AND parse residuals from the same buffer. The
+    // size has already been bounded by MAX_SEARCH_SCORE_CALIBRATION_BYTES,
+    // so this is safe to materialise in memory.
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) => {
             // bd-25z97: metadata said the file is present, so an open
             // failure here is by definition NOT a "the file is absent"
@@ -1971,12 +2052,13 @@ fn stream_search_score_calibration_jsonl(
             return SearchScoreCalibrationJsonlLoad::unreadable(reason);
         }
     };
+    let jsonl_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
 
     let mut residuals = Vec::new();
     let mut corrupt_line_numbers = Vec::new();
     let mut corrupt_row_count = 0usize;
     let mut sample_count = 0usize;
-    for (index, line_result) in BufReader::new(file).lines().enumerate() {
+    for (index, line_result) in BufReader::new(bytes.as_slice()).lines().enumerate() {
         let line_number = index + 1;
         let Ok(line) = line_result else {
             record_corrupt_calibration_line(
@@ -2013,7 +2095,9 @@ fn stream_search_score_calibration_jsonl(
     SearchScoreCalibrationJsonlLoad {
         exists: true,
         too_large: false,
+        unreadable_reason: None,
         file_size_bytes: Some(file_size_bytes),
+        jsonl_hash: Some(jsonl_hash),
         residuals,
         sample_count,
         corrupt_row_count,
@@ -4218,6 +4302,9 @@ fn build_fusion_diagnostics(
     rrf_k: f64,
     limit: usize,
 ) -> FusionDiagnostics {
+    // Diagnostic-only: final result ordering is produced by
+    // Frankensearch's TwoTierSearcher below. This table explains how
+    // the pre-fusion arms overlap without feeding ranking decisions.
     let mut by_doc: BTreeMap<String, FusionContribution> = BTreeMap::new();
 
     for hit in lexical {
@@ -5062,30 +5149,29 @@ fn apply_memory_scope_visibility_with_connection(
     passthrough_scope: bool,
     connection: &DbConnection,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
+    let hit_doc_ids: BTreeSet<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
+    let hit_doc_refs: Vec<&str> = hit_doc_ids.iter().map(String::as_str).collect();
+    let (scope_memories, read_error): (BTreeMap<String, crate::db::StoredMemory>, Option<String>) =
+        match connection.get_memories_batch(&hit_doc_refs) {
+            Ok(memories) => (memories, None),
+            Err(error) => (BTreeMap::new(), Some(error.to_string())),
+        };
+
     let mut scoped_hits = Vec::with_capacity(hits.len());
-    let mut read_error: Option<String> = None;
     for mut hit in hits {
-        match connection.get_memory(&hit.doc_id) {
-            Ok(Some(memory)) => {
-                let in_scope = scope_context.memory_in_scope(&memory);
+        match scope_memories.get(&hit.doc_id) {
+            Some(memory) => {
+                let in_scope = scope_context.memory_in_scope(memory);
                 stats.record_candidate_id(in_scope, Some(&hit.doc_id));
                 if in_scope {
-                    mark_hit_scope(&mut hit, options.memory_scope, &memory);
+                    mark_hit_scope(&mut hit, options.memory_scope, memory);
                     scoped_hits.push(hit);
                 }
             }
-            Ok(None) => {
+            None => {
                 stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
                 if passthrough_scope {
                     scoped_hits.push(hit);
-                }
-            }
-            Err(error) => {
-                stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
-                if passthrough_scope {
-                    scoped_hits.push(hit);
-                } else if read_error.is_none() {
-                    read_error = Some(error.to_string());
                 }
             }
         }
@@ -7888,6 +7974,18 @@ mod tests {
             json["fusion"]["algorithm"], "reciprocal_rank_fusion",
             "fusion algorithm must be explicit"
         );
+        assert_eq!(
+            json["fusion"]["diagnosticOnly"], true,
+            "diagnostic fusion table must not masquerade as retrieval ownership"
+        );
+        assert_eq!(
+            json["fusion"]["affectsFinalRanking"], false,
+            "diagnostic fusion table must not affect final ranking"
+        );
+        assert_eq!(
+            json["fusion"]["rankingOwner"], "frankensearch_two_tier_searcher",
+            "final ordering owner must be explicit"
+        );
         assert!(
             json["fusion"]["perDocContribution"]
                 .as_array()
@@ -7908,6 +8006,51 @@ mod tests {
                     .unwrap_or(0)
                 > 0,
             "final search metrics should retain lexical/hybrid source evidence: {json}"
+        );
+
+        let direct_config = SearchOptions {
+            workspace_path: workspace.clone(),
+            database_path: Some(workspace.join("ee.db")),
+            index_dir: None,
+            query: "forbidden dependencies".to_string(),
+            limit: 5,
+            speed: SpeedMode::Default,
+            explain: true,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: Some(0.0),
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        }
+        .two_tier_config_for_limit(5);
+        let (direct_hits, direct_errors) = search_sync(
+            &workspace.join("index"),
+            "forbidden dependencies",
+            5,
+            direct_config,
+            true,
+            SearchSourceMode::Hybrid,
+            &Deterministic::from_seed(123),
+        )?;
+        assert!(
+            direct_errors.is_empty(),
+            "direct search returned errors: {direct_errors:?}"
+        );
+        let direct_doc_ids: Vec<_> = direct_hits.iter().map(|hit| hit.doc_id.as_str()).collect();
+        let diag_doc_ids: Vec<_> = json["final"]["results"]
+            .as_array()
+            .ok_or_else(|| format!("final results missing from diag report: {json}"))?
+            .iter()
+            .filter_map(|hit| hit["docId"].as_str())
+            .collect();
+        assert_eq!(
+            diag_doc_ids, direct_doc_ids,
+            "diag final order must match the normal TwoTierSearcher-backed search path"
         );
         Ok(())
     }
