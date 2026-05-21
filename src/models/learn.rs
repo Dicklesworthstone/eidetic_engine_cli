@@ -50,7 +50,37 @@ fn rounded_metric(value: f64) -> f64 {
 }
 
 fn normalized_learning_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 // ============================================================================
@@ -1491,6 +1521,11 @@ mod tests {
             "question status alias",
         )?;
         ensure(
+            LearningQuestionStatus::from_str("readyForExperiment"),
+            Ok(LearningQuestionStatus::ReadyForExperiment),
+            "camel question status alias",
+        )?;
+        ensure(
             LearningTargetKind::from_str(" Decision "),
             Ok(LearningTargetKind::Decision),
             "target kind alias",
@@ -1501,9 +1536,19 @@ mod tests {
             "experiment status alias",
         )?;
         ensure(
+            LearningExperimentStatus::from_str("dryRunReady"),
+            Ok(LearningExperimentStatus::DryRunReady),
+            "camel experiment status alias",
+        )?;
+        ensure(
             ExperimentSafetyBoundary::from_str("ask-before-acting"),
             Ok(ExperimentSafetyBoundary::AskBeforeActing),
             "safety boundary alias",
+        )?;
+        ensure(
+            ExperimentSafetyBoundary::from_str("AskBeforeActing"),
+            Ok(ExperimentSafetyBoundary::AskBeforeActing),
+            "pascal safety boundary alias",
         )?;
         ensure(
             LearningObservationSignal::from_str(" Positive "),
