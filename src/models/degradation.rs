@@ -362,6 +362,15 @@ pub const SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE: &str =
 /// Response degraded code for oversized search score calibration JSONL.
 pub const SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE: &str =
     "search_score_calibration_file_too_large";
+/// Response degraded code for I/O failures reading the calibration JSONL.
+///
+/// Distinguishes a genuinely absent file (no calibration evidence yet) from
+/// an existing file that the process could not read (permission denied,
+/// invalid UTF-8, interrupted I/O, etc.). Without this code, operators
+/// cannot tell whether `status: absent` means "no evidence captured" or
+/// "evidence captured but I/O is broken" — bd-25z97.
+pub const SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE: &str =
+    "search_score_calibration_unreadable";
 
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {

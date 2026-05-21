@@ -16,7 +16,7 @@ use crate::db::{
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
-    SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE,
+    SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE,
 };
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
@@ -745,6 +745,25 @@ impl SearchDegradation {
             ),
             repair: Some(
                 "Rotate or truncate .ee/search/calibration.jsonl, then run ee doctor to confirm search calibration health."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// bd-25z97: emit when `.ee/search/calibration.jsonl` is present but
+    /// cannot be read (permission denied, invalid UTF-8, interrupted I/O,
+    /// etc.). Without this code, the failure folds into `status: absent`
+    /// and operators cannot tell evidence-broken from evidence-not-yet.
+    #[must_use]
+    fn search_score_calibration_unreadable(reason: &str) -> Self {
+        Self {
+            code: SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE.to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                ".ee/search/calibration.jsonl exists but is unreadable ({reason}); search score calibration is dropping JSONL evidence and returning conservative [0, 1] intervals unless feedback events provide enough usable samples.",
+            ),
+            repair: Some(
+                "Restore read permissions on .ee/search/calibration.jsonl (or rotate it via ee doctor) so calibration evidence reaches the scorer."
                     .to_string(),
             ),
         }
@@ -1576,6 +1595,7 @@ impl SearchHit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SearchScoreCalibrationStatus {
     Absent,
+    Unreadable,
     Insufficient,
     Corrupt,
     FileTooLarge,
@@ -1586,6 +1606,7 @@ impl SearchScoreCalibrationStatus {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Absent => "absent",
+            Self::Unreadable => "unreadable",
             Self::Insufficient => "insufficient",
             Self::Corrupt => "corrupt",
             Self::FileTooLarge => "file_too_large",
@@ -1604,6 +1625,12 @@ struct SearchScoreCalibrationJsonlFingerprint {
 struct SearchScoreCalibrationJsonlLoad {
     exists: bool,
     too_large: bool,
+    /// bd-25z97: non-None when the JSONL was present-but-unreadable (e.g.,
+    /// permission denied, invalid UTF-8 surfaced as an `io::Error` from a
+    /// metadata or open call). Carries the `io::ErrorKind`'s stable
+    /// snake_case label so the degradation can explain WHY honestly
+    /// instead of folding the failure into `status: absent`.
+    unreadable_reason: Option<String>,
     file_size_bytes: Option<u64>,
     residuals: Vec<f32>,
     sample_count: usize,
@@ -1616,12 +1643,45 @@ impl SearchScoreCalibrationJsonlLoad {
         Self {
             exists: false,
             too_large: false,
+            unreadable_reason: None,
             file_size_bytes: None,
             residuals: Vec::new(),
             sample_count: 0,
             corrupt_row_count: 0,
             corrupt_line_numbers: Vec::new(),
         }
+    }
+
+    /// bd-25z97: existing JSONL we could not read — preserve the error kind
+    /// for the degraded code message instead of pretending the file is absent.
+    fn unreadable(reason: &str) -> Self {
+        Self {
+            exists: true,
+            too_large: false,
+            unreadable_reason: Some(reason.to_owned()),
+            file_size_bytes: None,
+            residuals: Vec::new(),
+            sample_count: 0,
+            corrupt_row_count: 0,
+            corrupt_line_numbers: Vec::new(),
+        }
+    }
+}
+
+/// bd-25z97: classify an `io::Error` from metadata/open/read into a stable
+/// snake_case label suitable for the degraded code message. `NotFound` is
+/// returned separately so the caller can fall back to the absent path.
+fn classify_calibration_io_error(error: &std::io::Error) -> Option<&'static str> {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => None,
+        std::io::ErrorKind::PermissionDenied => Some("permission_denied"),
+        std::io::ErrorKind::InvalidData => Some("invalid_data"),
+        std::io::ErrorKind::Interrupted => Some("interrupted"),
+        std::io::ErrorKind::UnexpectedEof => Some("unexpected_eof"),
+        std::io::ErrorKind::OutOfMemory => Some("out_of_memory"),
+        std::io::ErrorKind::TimedOut => Some("timed_out"),
+        std::io::ErrorKind::Other => Some("io_other"),
+        _ => Some("io_error"),
     }
 }
 
@@ -1641,6 +1701,10 @@ struct SearchScoreCalibration {
     corrupt_line_numbers: Vec<usize>,
     jsonl_file_size_bytes: Option<u64>,
     residual_quantile: Option<f32>,
+    /// bd-25z97: snake_case label of the `io::ErrorKind` that made the
+    /// calibration JSONL unreadable, when status == `Unreadable`. None for
+    /// every other status.
+    unreadable_reason: Option<String>,
 }
 
 impl SearchScoreCalibration {
@@ -1678,6 +1742,34 @@ impl SearchScoreCalibration {
             feedback_event_sample_count = feedback_event_sample_count.saturating_add(1);
         }
 
+        // bd-25z97: an unreadable JSONL must NOT degrade into the silent
+        // `Absent` path even when no feedback events compensate. Surface
+        // the I/O failure so operators can distinguish "no calibration
+        // evidence yet" from "calibration evidence is being dropped on
+        // the floor". Feedback-event samples still feed scoring, but the
+        // status reports the unreadable jsonl honestly.
+        if jsonl_load.unreadable_reason.is_some() {
+            let residual_quantile = if residuals.len() < MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+                None
+            } else {
+                Some(split_conformal_quantile(
+                    residuals.clone(),
+                    SEARCH_SCORE_COVERAGE_GUARANTEE,
+                ))
+            };
+            return Self {
+                status: SearchScoreCalibrationStatus::Unreadable,
+                sample_count: residuals.len(),
+                jsonl_sample_count: 0,
+                feedback_event_sample_count,
+                corrupt_row_count: 0,
+                corrupt_line_numbers: Vec::new(),
+                jsonl_file_size_bytes: None,
+                residual_quantile,
+                unreadable_reason: jsonl_load.unreadable_reason.clone(),
+            };
+        }
+
         if !jsonl_load.exists && feedback_event_sample_count == 0 {
             return Self {
                 status: SearchScoreCalibrationStatus::Absent,
@@ -1688,6 +1780,7 @@ impl SearchScoreCalibration {
                 corrupt_line_numbers: Vec::new(),
                 jsonl_file_size_bytes: None,
                 residual_quantile: None,
+                unreadable_reason: None,
             };
         }
 
@@ -1709,6 +1802,7 @@ impl SearchScoreCalibration {
                 corrupt_line_numbers,
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile,
+                unreadable_reason: None,
             };
         }
 
@@ -1730,6 +1824,7 @@ impl SearchScoreCalibration {
                 corrupt_line_numbers,
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile,
+                unreadable_reason: None,
             };
         }
 
@@ -1743,6 +1838,7 @@ impl SearchScoreCalibration {
                 corrupt_line_numbers: Vec::new(),
                 jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile: None,
+                unreadable_reason: None,
             };
         }
 
@@ -1758,6 +1854,7 @@ impl SearchScoreCalibration {
                 residuals,
                 SEARCH_SCORE_COVERAGE_GUARANTEE,
             )),
+            unreadable_reason: None,
         }
     }
 
@@ -1792,6 +1889,10 @@ impl SearchScoreCalibration {
             "corruptRowCount": self.corrupt_row_count,
             "corruptLineNumbers": &self.corrupt_line_numbers,
             "residualQuantile": self.residual_quantile.map(round_metric_f32),
+            // bd-25z97: include the unreadable reason when present so JSON
+            // consumers can branch on the kind of I/O failure without
+            // re-parsing the human-readable message.
+            "unreadableReason": self.unreadable_reason,
         })
     }
 }
@@ -1799,7 +1900,14 @@ impl SearchScoreCalibration {
 fn load_search_score_calibration_jsonl(path: &Path) -> SearchScoreCalibrationJsonlLoad {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(_) => return SearchScoreCalibrationJsonlLoad::absent(),
+        Err(error) => {
+            // bd-25z97: NotFound = genuinely absent; everything else is an
+            // unreadable file we should surface honestly.
+            return match classify_calibration_io_error(&error) {
+                None => SearchScoreCalibrationJsonlLoad::absent(),
+                Some(reason) => SearchScoreCalibrationJsonlLoad::unreadable(reason),
+            };
+        }
     };
     let fingerprint = SearchScoreCalibrationJsonlFingerprint {
         len: metadata.len(),
@@ -1847,7 +1955,15 @@ fn stream_search_score_calibration_jsonl(
 ) -> SearchScoreCalibrationJsonlLoad {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
-        Err(_) => return SearchScoreCalibrationJsonlLoad::absent(),
+        Err(error) => {
+            // bd-25z97: metadata said the file is present, so an open
+            // failure here is by definition NOT a "the file is absent"
+            // story. Even a NotFound at this point (raced delete) is
+            // honest enough to surface as unreadable so the operator
+            // can investigate the race.
+            let reason = classify_calibration_io_error(&error).unwrap_or("not_found_after_stat");
+            return SearchScoreCalibrationJsonlLoad::unreadable(reason);
+        }
     };
 
     let mut residuals = Vec::new();
@@ -2020,6 +2136,17 @@ fn annotate_hits_with_score_calibration(
             degraded.push(SearchDegradation::search_score_calibration_file_too_large(
                 calibration.jsonl_file_size_bytes.unwrap_or(0),
                 MAX_SEARCH_SCORE_CALIBRATION_BYTES,
+            ));
+        }
+        SearchScoreCalibrationStatus::Unreadable => {
+            // bd-25z97: route I/O failures to a dedicated degraded code
+            // instead of dropping them on the floor as silent `absent`.
+            let reason = calibration
+                .unreadable_reason
+                .as_deref()
+                .unwrap_or("io_error");
+            degraded.push(SearchDegradation::search_score_calibration_unreadable(
+                reason,
             ));
         }
         SearchScoreCalibrationStatus::Absent | SearchScoreCalibrationStatus::Calibrated => {}
@@ -5734,6 +5861,133 @@ mod tests {
             Some("file_too_large")
         );
         Ok(())
+    }
+
+    /// bd-25z97: a present-but-unreadable JSONL (permissions stripped on
+    /// Unix) must surface as `status: unreadable` with the
+    /// search_score_calibration_unreadable degraded code, NOT silently
+    /// collapse into `status: absent` like the pre-bd-25z97 code did.
+    #[cfg(unix)]
+    #[test]
+    fn search_score_calibration_unreadable_jsonl_surfaces_degradation() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Running as root would defeat the permission strip; skip rather
+        // than fail the suite in containerized test environments.
+        if std::env::var("USER").as_deref() == Ok("root") {
+            return Ok(());
+        }
+
+        let workspace = unique_test_dir("score-calibration-unreadable");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        let path = calibration_dir.join("calibration.jsonl");
+        std::fs::write(&path, r#"{"score":0.8,"groundTruthRelevance":0.7}"#)
+            .map_err(|error| error.to_string())?;
+        // Strip ALL permission bits; metadata still succeeds (since the
+        // directory is readable) but open() will fail with
+        // PermissionDenied, which is the I/O failure the bd-25z97 audit
+        // documented as silently folding into `status: absent`.
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&path, perms).map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+
+        assert_eq!(
+            calibration.status,
+            SearchScoreCalibrationStatus::Unreadable,
+            "permission-denied JSONL must surface as Unreadable, not Absent"
+        );
+        assert_eq!(
+            calibration.unreadable_reason.as_deref(),
+            Some("permission_denied"),
+            "unreadable_reason should carry the io::ErrorKind label"
+        );
+        assert_eq!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        assert_eq!(calibration.data_json()["status"], "unreadable");
+        assert_eq!(
+            calibration.data_json()["unreadableReason"],
+            "permission_denied"
+        );
+
+        let mut hits = vec![synthetic_hit("mem_score_calibration_unreadable", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE);
+        assert_eq!(degraded[0].severity, "warning");
+        assert!(
+            degraded[0].message.contains("permission_denied"),
+            "unreadable message should include the io::ErrorKind reason: {}",
+            degraded[0].message
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/scoreCalibration/status"))
+                .and_then(serde_json::Value::as_str),
+            Some("unreadable")
+        );
+
+        // Restore permissions so the tempdir can be cleaned up.
+        let mut perms = std::fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        perms.set_mode(0o600);
+        let _ = std::fs::set_permissions(&path, perms);
+        Ok(())
+    }
+
+    /// bd-25z97: a truly absent JSONL (parent dir doesn't even exist) must
+    /// still report `status: absent` and emit NO degradation. This pins
+    /// the boundary so we never accidentally widen the unreadable path to
+    /// include genuine NotFound.
+    #[test]
+    fn search_score_calibration_absent_jsonl_emits_no_unreadable_degradation() {
+        let workspace = unique_test_dir("score-calibration-absent");
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Absent);
+        assert_eq!(calibration.unreadable_reason, None);
+
+        let mut hits = vec![synthetic_hit("mem_score_calibration_absent", 0.5)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+        assert!(
+            degraded.is_empty(),
+            "absent calibration must not emit any degradation"
+        );
+    }
+
+    /// bd-25z97: pure unit coverage of the io::ErrorKind classifier — pins
+    /// the NotFound vs everything-else split that drives Absent vs
+    /// Unreadable in the loaders.
+    #[test]
+    fn classify_calibration_io_error_splits_not_found_from_everything_else() {
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(classify_calibration_io_error(&not_found), None);
+
+        let permission = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            classify_calibration_io_error(&permission),
+            Some("permission_denied")
+        );
+
+        let invalid = std::io::Error::from(std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            classify_calibration_io_error(&invalid),
+            Some("invalid_data")
+        );
+
+        let interrupted = std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            classify_calibration_io_error(&interrupted),
+            Some("interrupted")
+        );
     }
 
     #[test]
