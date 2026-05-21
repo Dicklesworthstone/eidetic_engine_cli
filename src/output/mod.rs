@@ -1487,15 +1487,22 @@ pub fn field_preset_names_for_command(
 fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&'static str] {
     match command {
         "search" => match preset {
-            FieldProfile::Minimal => &["docId", "score", "source"],
-            FieldProfile::Summary => {
-                &["query", "status", "resultCount", "docId", "score", "source"]
-            }
+            FieldProfile::Minimal => &["memoryId", "docId", "score", "source"],
+            FieldProfile::Summary => &[
+                "query",
+                "status",
+                "resultCount",
+                "memoryId",
+                "docId",
+                "score",
+                "source",
+            ],
             FieldProfile::Standard => &[
                 "query",
                 "status",
                 "resultCount",
                 "results",
+                "memoryId",
                 "docId",
                 "score",
                 "source",

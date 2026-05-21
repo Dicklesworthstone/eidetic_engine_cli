@@ -1371,6 +1371,9 @@ impl SearchReport {
                     "provenance": provenance,
                 });
                 if let Some(obj_map) = obj.as_object_mut() {
+                    if let Some(memory_id) = hit.memory_id() {
+                        obj_map.insert("memoryId".to_string(), serde_json::json!(memory_id));
+                    }
                     if let Some(fast) = hit.fast_score {
                         obj_map.insert("fastScore".to_string(), serde_json::json!(fast));
                     }
@@ -1708,6 +1711,13 @@ impl FusionContribution {
 }
 
 impl SearchHit {
+    #[must_use]
+    fn memory_id(&self) -> Option<&str> {
+        self.doc_id
+            .starts_with("mem_")
+            .then_some(self.doc_id.as_str())
+    }
+
     #[must_use]
     fn why(&self) -> String {
         self.explanation

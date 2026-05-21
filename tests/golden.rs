@@ -2012,6 +2012,11 @@ mod tests {
             "search result memory id",
         )?;
         ensure_equal(
+            &value["data"]["results"][0]["memoryId"],
+            &serde_json::json!("mem_00000000000000000000000001"),
+            "search result canonical memory id",
+        )?;
+        ensure_equal(
             &value["data"]["metrics"]["requestedLimit"],
             &serde_json::json!(10),
             "search metrics requested limit",
