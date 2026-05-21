@@ -12462,7 +12462,7 @@ where
 
 fn focus_response_json(report: &FocusReport) -> String {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
     })
@@ -44789,6 +44789,11 @@ mod tests {
                 .map_err(|error| error.message())?;
         let value: serde_json::Value =
             serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "swarm next-action response schema",
+        )?;
         let degraded = value["data"]["degraded"]
             .as_array()
             .ok_or_else(|| "swarm next-action data degraded should be an array".to_string())?;

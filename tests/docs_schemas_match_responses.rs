@@ -25,7 +25,7 @@ use ee::core::memory::{
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
-use ee::models::{DomainError, IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V1};
+use ee::models::{DomainError, IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2};
 use ee::output::{
     error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
     render_memory_list_json, render_memory_show_json, render_schema_export_json,
@@ -555,7 +555,7 @@ fn domain_error_sample() -> Result<Value, String> {
 
 fn swarm_next_action_sample() -> Value {
     json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": SWARM_NEXT_ACTION_SCHEMA_V1,
