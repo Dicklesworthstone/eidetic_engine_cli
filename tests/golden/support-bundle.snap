@@ -6,10 +6,13 @@ schema:
   manifest: ee.support_bundle.manifest.v1
   inspect: ee.support_bundle.inspect.v1
   pack_replay_summary: ee.support_bundle.pack_replay_summary.v1
+  swarm_incident_summary: ee.support_bundle.swarm_incident_summary.v1
 contracts:
   - bundle creates directory with status, doctor, audit, capabilities, and schema files
   - bundle includes pack_replay_summary.json with pack IDs, pack hashes, ledger hashes, freshness state counts, degradation codes, and redaction classes
   - pack replay support summaries hash query text and omit raw memory content, why text, and full ledger payloads
+  - bundle includes swarm_incident_summary.json with scenario ids, substrate posture counts, degraded codes, output hashes, and redacted recovery-action summaries
+  - swarm incident summaries omit raw logs, mail bodies, commands, command arguments, worker hostnames, and fixture paths
   - bundle applies redaction to collected diagnostic content
   - bundle generates manifest with content hashes for each file
   - inspect reads bundle manifest and verifies file integrity
@@ -43,6 +46,13 @@ evidence:
   - pack_replay_summary.packs[].ledger.freshnessStates
   - pack_replay_summary.packs[].ledger.redactionClasses
   - pack_replay_summary.packs[].ledger.degradationCodes
+  - swarm_incident_summary.summaryHash
+  - swarm_incident_summary.withinSizeBudget
+  - swarm_incident_summary.incidents[].scenarioId
+  - swarm_incident_summary.incidents[].outputHash
+  - swarm_incident_summary.incidents[].substratePosture
+  - swarm_incident_summary.incidents[].recoveryActionSummaries[].commandIncluded
+  - swarm_incident_summary.incidents[].recoveryActionSummaries[].evidenceHashes
   - inspect_report.bundle_path
   - inspect_report.manifest
   - inspect_report.files_found

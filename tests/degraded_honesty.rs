@@ -1157,8 +1157,11 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
                 files
                     .iter()
                     .any(|file| file.as_str() == Some("qos_lane_summary.json"))
+                    && files
+                        .iter()
+                        .any(|file| file.as_str() == Some("swarm_incident_summary.json"))
             }),
-        "support bundle create report must advertise qos_lane_summary.json".to_owned(),
+        "support bundle create report must advertise QoS and incident summary files".to_owned(),
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -1199,6 +1202,10 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         "bundle must contain swarm_brief_summary.json".to_owned(),
     )?;
     ensure(
+        bundle_dir.join("swarm_incident_summary.json").is_file(),
+        "bundle must contain swarm_incident_summary.json".to_owned(),
+    )?;
+    ensure(
         bundle_dir.join("qos_lane_summary.json").is_file(),
         "bundle must contain qos_lane_summary.json".to_owned(),
     )?;
@@ -1213,9 +1220,12 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
             .is_some_and(|files| {
                 files.iter().any(|entry| {
                     entry.pointer("/path").and_then(Value::as_str) == Some("qos_lane_summary.json")
+                }) && files.iter().any(|entry| {
+                    entry.pointer("/path").and_then(Value::as_str)
+                        == Some("swarm_incident_summary.json")
                 })
             }),
-        "support bundle manifest must include qos_lane_summary.json".to_owned(),
+        "support bundle manifest must include QoS and incident summary files".to_owned(),
     )?;
     let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
         .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
@@ -1291,6 +1301,39 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
             .pointer("/counts/activeConflictCount")
             .is_some(),
         "swarm brief summary must include active conflict count".to_owned(),
+    )?;
+    let swarm_incident_summary = fs::read_to_string(bundle_dir.join("swarm_incident_summary.json"))
+        .map_err(|error| format!("failed to read swarm incident support summary: {error}"))?;
+    let swarm_incident_summary_json: Value = serde_json::from_str(&swarm_incident_summary)
+        .map_err(|error| format!("swarm incident support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &swarm_incident_summary_json,
+        "/schema",
+        json!("ee.support_bundle.swarm_incident_summary.v1"),
+        "support bundle swarm incident summary schema",
+    )?;
+    ensure_json_pointer(
+        &swarm_incident_summary_json,
+        "/redaction/commandsIncluded",
+        json!(false),
+        "support bundle swarm incident summary omits raw commands",
+    )?;
+    ensure_json_pointer(
+        &swarm_incident_summary_json,
+        "/redaction/commandArgsIncluded",
+        json!(false),
+        "support bundle swarm incident summary omits raw command args",
+    )?;
+    ensure(
+        swarm_incident_summary_json
+            .pointer("/summaryHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "swarm incident summary must include summary hash".to_owned(),
+    )?;
+    ensure(
+        swarm_incident_summary_json.pointer("/withinSizeBudget") == Some(&json!(true)),
+        "swarm incident summary must stay within the documented size budget".to_owned(),
     )?;
     let qos_lane_summary = fs::read_to_string(bundle_dir.join("qos_lane_summary.json"))
         .map_err(|error| format!("failed to read QoS lane support summary: {error}"))?;
