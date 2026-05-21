@@ -143,7 +143,7 @@ default = ["fts5", "json", "embed-fast", "lexical-bm25"]
 fts5 = ["fsqlite-ext-fts5"]
 json = ["fsqlite-ext-json"]
 embed-fast = ["frankensearch/model2vec"]
-embed-quality = ["frankensearch/fastembed"]
+# embed-quality is intentionally not exposed until frankensearch/fastembed is forbidden-dep clean.
 lexical-bm25 = ["frankensearch/lexical"]
 mcp = []  # gates the in-tree stdio MCP adapter; intentionally no rust-mcp-sdk/Tokio dependency
 serve = []

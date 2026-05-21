@@ -774,9 +774,9 @@ fn search_index_feature_dependencies() -> Vec<FreshnessDependency> {
             cfg!(feature = "embed-fast").to_string(),
         ),
         FreshnessDependency::new(
-            "feature",
+            "feature_reserved",
             "embed-quality",
-            cfg!(feature = "embed-quality").to_string(),
+            "blocked_forbidden_deps",
         ),
         FreshnessDependency::new(
             "feature",
