@@ -257,3 +257,27 @@ tests/audit_artifacts/install_pipeline_*.json
 
 # World-class-doctor-mode workspace (in-repo per user choice 2026-05-20)
 /doctor_workspace/
+
+# Additional repo-root ad-hoc scratch encountered during the 2026-05 review
+# swarm. These follow the same "agents drop a one-off binary or script at the
+# repo root while probing an issue" pattern as the /test_drop, /test_clamp,
+# etc. blocks above. Anchored to depth 1 so real tests under tests/ subtrees
+# (e.g., tests/e2e_lib_smoke.sh) stay visible to Git.
+/test_*.sh
+/test_dos
+/test_dos.rs
+/test_link_overlap
+/test_link_overlap.rs
+/test_link_overlap2
+/test_link_overlap2.rs
+/test_scoring
+/test_scoring.rs
+/test_scoring_2
+/test_scoring_2.rs
+
+# Large `git diff > diff.txt` (or similar) dumps that agents leave at the
+# repo root during cross-pane analysis. The 2026-05 swarm left a 25 MB
+# diff.txt; this pattern keeps any future ones from sneaking in.
+/diff.txt
+/diff_*.txt
+/diff-*.txt
