@@ -31,6 +31,9 @@ use chrono::{Duration, Utc};
 use serde::Serialize;
 
 use crate::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
+use crate::core::sprt::{
+    SPRT_ALPHA, SPRT_BETA, SprtDecision, SprtEvaluation, SprtObservation, evaluate_sprt,
+};
 use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     ApplyProcedureFeedbackInput, AuditedFeedbackEventInput, CreateAuditInput,
@@ -265,6 +268,7 @@ const ALLOWED_SOURCE_TYPES: &[&str] = &[
     "decay_trigger",
 ];
 const HARMFUL_SIGNALS: &[&str] = &["negative", "contradiction", "harmful", "inaccurate"];
+const HELPFUL_SIGNALS: &[&str] = &["positive", "confirmation", "helpful"];
 const ANTI_PATTERN_PROPOSAL_THRESHOLD: usize = 3;
 const ANTI_PATTERN_PROPOSED_CODE: &str = "anti_pattern_proposed";
 
@@ -909,7 +913,13 @@ fn record_outcome_inner(
     if options.dry_run {
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("dependency_check", 0, &[]);
-        let quarantine = harmful_quarantine_preview(
+        let sprt = sprt_quarantine_decision_preview(
+            &connection,
+            &target.workspace_id,
+            &signal,
+            source_id.as_deref(),
+        )?;
+        let burst_quarantine = harmful_quarantine_preview(
             &connection,
             &target.workspace_id,
             &signal,
@@ -917,6 +927,14 @@ fn record_outcome_inner(
             options.harmful_per_source_per_hour,
             options.harmful_burst_window_seconds,
         )?;
+        let sprt_quarantine = sprt.as_ref().and_then(|decision| {
+            sprt_quarantine_summary(
+                decision,
+                options.harmful_per_source_per_hour,
+                options.harmful_burst_window_seconds,
+            )
+        });
+        let quarantine = burst_quarantine.or(sprt_quarantine);
         trace_sprt_quarantine("response", 0, &[]);
         // bd-3qs2i.3.1: dry-run preview also surfaces the harmful_burst_quarantine
         // degraded entry when the live write WOULD absorb the event, so agents
@@ -988,14 +1006,28 @@ fn record_outcome_inner(
     }
 
     trace_sprt_quarantine("dependency_check", 0, &[]);
-    if let Some(quarantine) = harmful_quarantine_preview(
+    let sprt = sprt_quarantine_decision_preview(
+        &connection,
+        &target.workspace_id,
+        &signal,
+        source_id.as_deref(),
+    )?;
+    let burst_quarantine = harmful_quarantine_preview(
         &connection,
         &target.workspace_id,
         &signal,
         source_id.as_deref(),
         options.harmful_per_source_per_hour,
         options.harmful_burst_window_seconds,
-    )? {
+    )?;
+    let sprt_quarantine = sprt.as_ref().and_then(|decision| {
+        sprt_quarantine_summary(
+            decision,
+            options.harmful_per_source_per_hour,
+            options.harmful_burst_window_seconds,
+        )
+    });
+    if let Some(quarantine) = burst_quarantine.or(sprt_quarantine) {
         let quarantine_id = id_source.next_feedback_quarantine_id();
         let raw_event_hash = raw_feedback_event_hash(&event_id, &feedback_input)?;
         let reason = quarantine.reason.clone();
@@ -1022,6 +1054,17 @@ fn record_outcome_inner(
             options.actor.as_deref(),
             id_source.next_audit_id(),
         )?;
+        if let Some(decision) = &sprt {
+            insert_sprt_quarantine_decision_audit(
+                &connection,
+                &target.workspace_id,
+                options.actor.as_deref(),
+                "feedback_quarantine",
+                &quarantine_id,
+                decision,
+                id_source.next_audit_id(),
+            )?;
+        }
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("response", 0, &[]);
         // bd-3qs2i.3.1: surface the harmful_burst_quarantine degraded
@@ -1091,6 +1134,18 @@ fn record_outcome_inner(
         message: format!("Failed to record feedback event: {error}"),
         repair: Some("ee doctor".to_string()),
     })?;
+
+    if let Some(decision) = &sprt {
+        insert_sprt_quarantine_decision_audit(
+            &connection,
+            &target.workspace_id,
+            options.actor.as_deref(),
+            "feedback_event",
+            &event_id,
+            decision,
+            id_source.next_audit_id(),
+        )?;
+    }
 
     if target_type == "procedure" {
         connection
@@ -2257,6 +2312,100 @@ fn harmful_quarantine_preview(
     }))
 }
 
+#[derive(Clone, Debug)]
+struct OutcomeSprtDecision {
+    source_id: String,
+    evaluation: SprtEvaluation,
+}
+
+fn sprt_quarantine_decision_preview(
+    connection: &DbConnection,
+    workspace_id: &str,
+    signal: &str,
+    source_id: Option<&str>,
+) -> Result<Option<OutcomeSprtDecision>, DomainError> {
+    let Some(current_observation) = sprt_observation_for_signal(signal) else {
+        return Ok(None);
+    };
+    let Some(source_id) = source_id else {
+        return Ok(None);
+    };
+
+    let mut stream = Vec::new();
+    for row in connection
+        .list_feedback_events(workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect feedback stream for SPRT quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+    {
+        if row.source_id.as_deref() == Some(source_id)
+            && let Some(observation) = sprt_observation_for_signal(&row.signal)
+        {
+            stream.push((row.created_at, row.id, observation));
+        }
+    }
+    for row in connection
+        .list_feedback_quarantine(workspace_id, Some("pending"))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to inspect quarantine stream for SPRT quarantine: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?
+    {
+        if row.source_id == source_id
+            && let Some(observation) = sprt_observation_for_signal(&row.signal)
+        {
+            stream.push((row.recorded_at, row.id, observation));
+        }
+    }
+    stream.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let observations = stream
+        .into_iter()
+        .map(|(_, _, observation)| observation)
+        .chain(std::iter::once(current_observation));
+
+    Ok(Some(OutcomeSprtDecision {
+        source_id: source_id.to_owned(),
+        evaluation: evaluate_sprt(observations),
+    }))
+}
+
+fn sprt_quarantine_summary(
+    decision: &OutcomeSprtDecision,
+    limit: u32,
+    window_seconds: u32,
+) -> Option<OutcomeQuarantineSummary> {
+    (decision.evaluation.decision == SprtDecision::Quarantine).then(|| OutcomeQuarantineSummary {
+        id: None,
+        status: "pending".to_owned(),
+        source_id: Some(decision.source_id.clone()),
+        limit,
+        window_seconds,
+        observed_count: u32::try_from(decision.evaluation.event_count).unwrap_or(u32::MAX),
+        reason: format!(
+            "SPRT harmful-feedback quarantine threshold exceeded: source {} statistic {:.3} exceeded upper bound {:.3} after {} classified outcome events (alpha={:.2}, beta={:.2})",
+            decision.source_id,
+            decision.evaluation.statistic,
+            decision.evaluation.upper_bound,
+            decision.evaluation.event_count,
+            SPRT_ALPHA,
+            SPRT_BETA
+        ),
+        raw_event_hash: None,
+    })
+}
+
+fn sprt_observation_for_signal(signal: &str) -> Option<SprtObservation> {
+    if is_harmful_signal(signal) {
+        Some(SprtObservation::Harmful)
+    } else if HELPFUL_SIGNALS.contains(&signal) {
+        Some(SprtObservation::Helpful)
+    } else {
+        None
+    }
+}
+
 fn insert_feedback_event_audited_with_id(
     connection: &DbConnection,
     event_id: &str,
@@ -2321,6 +2470,56 @@ fn insert_feedback_quarantine_audited_with_id(
         })
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to quarantine feedback event: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    Ok(audit_id)
+}
+
+fn insert_sprt_quarantine_decision_audit(
+    connection: &DbConnection,
+    workspace_id: &str,
+    actor: Option<&str>,
+    target_type: &str,
+    target_id: &str,
+    decision: &OutcomeSprtDecision,
+    audit_id: String,
+) -> Result<String, DomainError> {
+    let evaluation = decision.evaluation;
+    let threshold_a_or_b = match evaluation.decision {
+        SprtDecision::Release => evaluation.lower_bound,
+        SprtDecision::Continue | SprtDecision::Quarantine => evaluation.upper_bound,
+    };
+    let details = serde_json::json!({
+        "source_id": redact_outcome_public_source_ref(&decision.source_id),
+        "current_stat": rounded_f64_json_value(evaluation.statistic),
+        "threshold_A_or_B": rounded_f64_json_value(threshold_a_or_b),
+        "upper_bound": rounded_f64_json_value(evaluation.upper_bound),
+        "lower_bound": rounded_f64_json_value(evaluation.lower_bound),
+        "num_events_seen": evaluation.event_count,
+        "harmful_count": evaluation.harmful_count,
+        "helpful_count": evaluation.helpful_count,
+        "decision": evaluation.decision.as_str(),
+        "sprt_alpha": rounded_f64_json_value(SPRT_ALPHA),
+        "sprt_beta": rounded_f64_json_value(SPRT_BETA),
+    })
+    .to_string();
+
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: actor
+                    .map(str::to_owned)
+                    .or_else(|| Some("ee outcome".to_owned())),
+                action: "quarantine.sprt.decision".to_owned(),
+                target_type: Some(target_type.to_owned()),
+                target_id: Some(target_id.to_owned()),
+                details: Some(details),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to audit SPRT quarantine decision: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
     Ok(audit_id)
@@ -2574,6 +2773,11 @@ fn stable_short_hash(value: &str) -> String {
 
 fn score_json_value(value: f32) -> serde_json::Value {
     let rounded = (f64::from(value) * 10_000.0).round() / 10_000.0;
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn rounded_f64_json_value(value: f64) -> serde_json::Value {
+    let rounded = (value * 10_000.0).round() / 10_000.0;
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
@@ -3955,6 +4159,36 @@ mod tests {
     fn harmful_feedback_over_source_rate_limit_is_quarantined() -> TestResult {
         let (_dir, database) = seed_outcome_database("ee-outcome-rate-limit")?;
         for index in 0..DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR {
+            for helpful_index in 0..2_u32 {
+                let helpful = record_outcome(&OutcomeRecordOptions {
+                    database_path: &database,
+                    target_type: "memory".to_string(),
+                    target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                    workspace_id: None,
+                    signal: "helpful".to_string(),
+                    weight: None,
+                    source_type: "outcome_observed".to_string(),
+                    source_id: Some("spam-source".to_string()),
+                    reason: Some(
+                        "Helpful observation keeps the SPRT below quarantine.".to_string(),
+                    ),
+                    evidence_json: None,
+                    session_id: None,
+                    event_id: Some(format!("fb_{:026}", 1_300 + index * 10 + helpful_index)),
+                    actor: Some("test".to_string()),
+                    agent_name: None,
+                    dry_run: false,
+                    harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+                    harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                    prompt_injection_guard: true,
+                })
+                .map_err(|error| error.message())?;
+                ensure_equal(
+                    &helpful.status,
+                    &OutcomeRecordStatus::Recorded,
+                    "SPRT balancing helpful event records",
+                )?;
+            }
             let report = record_outcome(&OutcomeRecordOptions {
                 database_path: &database,
                 target_type: "memory".to_string(),
@@ -4012,8 +4246,13 @@ mod tests {
         )?;
         ensure_equal(
             &over_limit.feedback.total_count,
-            &DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            &(DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR * 3),
             "quarantined event does not affect feedback count",
+        )?;
+        ensure_equal(
+            &over_limit.feedback.negative_count,
+            &DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            "live harmful count remains at burst limit",
         )?;
         ensure_equal(
             &over_limit.quarantine.is_some(),
@@ -4027,7 +4266,7 @@ mod tests {
             .map_err(|error| error.to_string())?;
         ensure_equal(
             &events.len(),
-            &(DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR as usize),
+            &((DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR * 3) as usize),
             "only live events are counted",
         )?;
         let quarantined = connection
@@ -4041,6 +4280,123 @@ mod tests {
             &quarantined_row.raw_event_hash.starts_with("blake3:"),
             &true,
             "raw event hash is stored",
+        )
+    }
+
+    #[test]
+    fn sprt_quarantine_triggers_before_burst_limit_and_audits_decision() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-sprt-quarantine")?;
+        for index in 0..3_u32 {
+            let report = record_outcome(&OutcomeRecordOptions {
+                database_path: &database,
+                target_type: "memory".to_string(),
+                target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+                workspace_id: None,
+                signal: "harmful".to_string(),
+                weight: None,
+                source_type: "outcome_observed".to_string(),
+                source_id: Some("sprt-source".to_string()),
+                reason: Some("SPRT warmup harmful event.".to_string()),
+                evidence_json: None,
+                session_id: None,
+                event_id: Some(format!("fb_{:026}", 5_100 + index)),
+                actor: Some("test".to_string()),
+                agent_name: None,
+                dry_run: false,
+                harmful_per_source_per_hour: 100,
+                harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+                prompt_injection_guard: true,
+            })
+            .map_err(|error| error.message())?;
+            ensure_equal(
+                &report.status,
+                &OutcomeRecordStatus::Recorded,
+                "SPRT warmup event records below upper threshold",
+            )?;
+        }
+
+        let quarantined = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "harmful".to_string(),
+            weight: None,
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("sprt-source".to_string()),
+            reason: Some("Fourth harmful event crosses SPRT threshold.".to_string()),
+            evidence_json: None,
+            session_id: None,
+            event_id: Some(format!("fb_{:026}", 5_104)),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: 100,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure_equal(
+            &quarantined.status,
+            &OutcomeRecordStatus::Quarantined,
+            "SPRT threshold quarantines before burst limit",
+        )?;
+        let summary = quarantined
+            .quarantine
+            .as_ref()
+            .ok_or_else(|| "SPRT quarantine summary missing".to_string())?;
+        ensure(
+            summary
+                .reason
+                .contains("SPRT harmful-feedback quarantine threshold exceeded"),
+            "quarantine reason identifies SPRT",
+        )?;
+        ensure_equal(
+            &summary.observed_count,
+            &4_u32,
+            "SPRT summary counts classified events",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let sprt_audit = connection
+            .list_audit_by_action("quarantine.sprt.decision", None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&sprt_audit.len(), &4_usize, "one SPRT audit per decision")?;
+        let quarantine_audit = sprt_audit
+            .iter()
+            .find(|row| row.target_type.as_deref() == Some("feedback_quarantine"))
+            .ok_or_else(|| "SPRT quarantine audit row missing".to_string())?;
+        let details = quarantine_audit
+            .details
+            .as_deref()
+            .ok_or_else(|| "SPRT audit details missing".to_string())?;
+        let details: serde_json::Value = serde_json::from_str(details)
+            .map_err(|error| format!("SPRT audit details must parse: {error}"))?;
+        ensure_equal(
+            &details["source_id"],
+            &serde_json::json!("sprt-source"),
+            "SPRT audit source id",
+        )?;
+        ensure_equal(
+            &details["decision"],
+            &serde_json::json!("quarantine"),
+            "SPRT audit decision",
+        )?;
+        ensure_equal(
+            &details["num_events_seen"],
+            &serde_json::json!(4),
+            "SPRT audit event count",
+        )?;
+        ensure_equal(
+            &details["sprt_alpha"],
+            &serde_json::json!(0.01),
+            "SPRT audit alpha",
+        )?;
+        ensure_equal(
+            &details["sprt_beta"],
+            &serde_json::json!(0.05),
+            "SPRT audit beta",
         )
     }
 

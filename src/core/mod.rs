@@ -84,6 +84,7 @@ pub mod rule;
 pub mod search;
 pub mod singleflight;
 pub mod situation;
+pub mod sprt;
 pub mod status;
 pub mod streams;
 pub mod subscribe;
