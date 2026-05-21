@@ -26893,9 +26893,42 @@ fn parse_mesh_command_mode_arg(value: &str) -> Result<MeshCommandMode, String> {
     })
 }
 
+fn normalized_search_source_mode_token(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String> {
-    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
-    match normalized.as_str() {
+    match normalized_search_source_mode_token(value).as_str() {
         "lexical_only" => Ok(SearchSourceMode::LexicalOnly),
         "semantic_only" => Ok(SearchSourceMode::SemanticOnly),
         "hybrid" => Ok(SearchSourceMode::Hybrid),
@@ -31116,7 +31149,7 @@ fn validate_trust_object(value: &serde_json::Value) -> Result<(), QueryFileError
         "cass_evidence",
         "legacy_import",
     ];
-    let valid_postures = ["authoritative", "provisional", "untrusted"];
+    let valid_postures = ["authoritative", "advisory", "legacy_evidence"];
 
     for key in object.keys() {
         if !["minClass", "excludeClasses", "requirePosture"].contains(&key.as_str()) {
@@ -51408,6 +51441,56 @@ mod tests {
     }
 
     #[test]
+    fn query_file_document_accepts_emitted_trust_postures() -> TestResult {
+        let advisory = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "trust": {"requirePosture": "advisory"}
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+        ensure_equal(
+            &advisory.filters.trust.require_posture.as_deref(),
+            &Some("advisory"),
+            "advisory posture",
+        )?;
+
+        let legacy = super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "trust": {"requirePosture": "legacy_evidence"}
+            }"#,
+        )
+        .map_err(|error| error.message)?;
+        ensure_equal(
+            &legacy.filters.trust.require_posture.as_deref(),
+            &Some("legacy_evidence"),
+            "legacy_evidence posture",
+        )
+    }
+
+    #[test]
+    fn query_file_document_rejects_unknown_trust_postures() -> TestResult {
+        let error = match super::parse_query_document(
+            r#"{
+              "version": "ee.query.v1",
+              "query": {"text": "release"},
+              "trust": {"requirePosture": "provisional"}
+            }"#,
+        ) {
+            Ok(_) => return Err("unknown trust posture should fail".into()),
+            Err(error) => error,
+        };
+        ensure_equal(
+            &error.code,
+            &super::QueryFileErrorCode::MalformedJson,
+            "unknown trust posture error code",
+        )
+    }
+
+    #[test]
     fn query_file_document_reports_unknown_fields_as_degradation() -> TestResult {
         let request = super::parse_query_document(
             r#"{
@@ -51856,6 +51939,16 @@ mod tests {
             &parse_search_source_mode_arg(" Semantic_Only ")?,
             &SearchSourceMode::SemanticOnly,
             "normalized search source mode",
+        )?;
+        ensure_equal(
+            &parse_search_source_mode_arg("lexicalOnly")?,
+            &SearchSourceMode::LexicalOnly,
+            "camelCase search source mode",
+        )?;
+        ensure_equal(
+            &parse_search_source_mode_arg("SemanticOnly")?,
+            &SearchSourceMode::SemanticOnly,
+            "PascalCase search source mode",
         )
     }
 

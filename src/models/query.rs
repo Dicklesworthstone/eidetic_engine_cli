@@ -1309,7 +1309,7 @@ pub struct TrustFilters {
     pub min_class: Option<String>,
     /// Trust classes to exclude entirely.
     pub exclude_classes: Vec<String>,
-    /// Required trust posture (authoritative, provisional, untrusted).
+    /// Required trust posture (authoritative, advisory, legacy_evidence).
     pub require_posture: Option<String>,
 }
 
@@ -1473,7 +1473,7 @@ impl QueryPagination {
     /// Effective page size (default 50, max 200).
     #[must_use]
     pub fn effective_limit(&self) -> u32 {
-        self.limit.unwrap_or(50).min(200)
+        self.limit.filter(|limit| *limit > 0).unwrap_or(50).min(200)
     }
 }
 
@@ -2098,6 +2098,43 @@ mod tests {
     }
 
     #[test]
+    fn trust_filters_match_emitted_posture_values() -> TestResult {
+        let advisory_filter = TrustFilters {
+            min_class: None,
+            exclude_classes: vec![],
+            require_posture: Some("advisory".to_string()),
+        };
+        ensure(
+            advisory_filter.matches(
+                "agent_assertion",
+                posture_for_trust_class("agent_assertion"),
+            ),
+            "advisory posture should match agent assertions",
+        )?;
+        ensure(
+            advisory_filter.matches("cass_evidence", posture_for_trust_class("cass_evidence")),
+            "advisory posture should match CASS evidence",
+        )?;
+
+        let legacy_filter = TrustFilters {
+            min_class: None,
+            exclude_classes: vec![],
+            require_posture: Some("legacy_evidence".to_string()),
+        };
+        ensure(
+            legacy_filter.matches("legacy_import", posture_for_trust_class("legacy_import")),
+            "legacy_evidence posture should match legacy imports",
+        )?;
+        ensure(
+            !legacy_filter.matches(
+                "agent_assertion",
+                posture_for_trust_class("agent_assertion"),
+            ),
+            "legacy_evidence posture should reject advisory classes",
+        )
+    }
+
+    #[test]
     fn parse_trust_from_json() -> TestResult {
         let json = serde_json::json!({
             "minClass": "agent_validated",
@@ -2220,6 +2257,18 @@ mod tests {
         ensure(
             pagination.effective_limit() == 200,
             "limit should be capped at 200",
+        )
+    }
+
+    #[test]
+    fn pagination_zero_limit_uses_default() -> TestResult {
+        let pagination = QueryPagination {
+            limit: Some(0),
+            cursor: None,
+        };
+        ensure(
+            pagination.effective_limit() == 50,
+            "zero limit should fall back to the default page size",
         )
     }
 
