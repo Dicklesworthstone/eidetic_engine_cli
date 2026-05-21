@@ -18,10 +18,11 @@ use crate::db::{
     audit_actions, generate_audit_id,
 };
 
-use super::preflight_guard::{GuardMatch, PreflightMemoryMatch};
+use super::preflight_guard::{GuardMatch, MatchResolution, PreflightMemoryMatch};
 
 pub const PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1: &str = "ee.preflight.bypass_token.v1";
 pub const PREFLIGHT_BYPASS_AUDIT_SCHEMA_V1: &str = "ee.preflight.bypass.v1";
+pub const PREFLIGHT_HALT_AUDIT_SCHEMA_V1: &str = "ee.preflight.halt.v1";
 pub const DEFAULT_TTL_MINUTES: i64 = 10;
 pub const MAX_TTL_MINUTES: i64 = 60;
 pub const DEFAULT_MAX_USES: u32 = 1;
@@ -68,6 +69,17 @@ pub struct RecordPreflightBypassAuditOptions {
     pub matched_memories: Vec<PreflightMemoryMatch>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordPreflightHaltAuditOptions {
+    pub workspace_id: String,
+    pub actor: Option<String>,
+    pub command: String,
+    pub matches: Vec<GuardMatch>,
+    pub matched_memories: Vec<PreflightMemoryMatch>,
+    pub exit_code: u32,
+    pub checked_at: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RevokeBypassTokenOptions {
     pub workspace_id: String,
@@ -102,6 +114,13 @@ pub struct BypassTokenUseReport {
 pub struct PreflightBypassAuditReport {
     pub schema: String,
     pub token_hash_prefix: String,
+    pub audit_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreflightHaltAuditReport {
+    pub schema: String,
+    pub command_hash: String,
     pub audit_id: String,
 }
 
@@ -522,6 +541,71 @@ pub fn record_preflight_bypass_audit(
     })
 }
 
+pub fn record_preflight_halt_audit(
+    connection: &DbConnection,
+    options: &RecordPreflightHaltAuditOptions,
+) -> Result<PreflightHaltAuditReport> {
+    let command = normalize_bypass_command_scope(&options.command);
+    let rule_ids = canonical_guard_rule_ids(&options.matches);
+    let command_hash = bypass_command_scope_hash(&command, &rule_ids);
+    let enforced_halt_rule_ids = options
+        .matches
+        .iter()
+        .filter(|matched| {
+            matched.action.stops_execution() && matched.resolution == MatchResolution::Enforced
+        })
+        .map(|matched| matched.rule_id.clone())
+        .collect::<Vec<_>>();
+    let matched_memory_ids = options
+        .matched_memories
+        .iter()
+        .map(|memory| memory.memory_id.clone())
+        .collect::<Vec<_>>();
+    let audit_id = generate_audit_id();
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(options.workspace_id.clone()),
+                actor: options.actor.clone(),
+                action: audit_actions::PREFLIGHT_HALT.to_owned(),
+                target_type: Some("preflight_guard".to_owned()),
+                target_id: Some(command_hash.clone()),
+                details: Some(
+                    json!({
+                        "schema": PREFLIGHT_HALT_AUDIT_SCHEMA_V1,
+                        "command": command,
+                        "commandHash": command_hash,
+                        "exitCode": options.exit_code,
+                        "checkedAt": options.checked_at,
+                        "ruleIds": rule_ids,
+                        "enforcedHaltRuleIds": enforced_halt_rule_ids,
+                        "matchedMemoryIds": matched_memory_ids,
+                        "matches": options.matches,
+                        "matchedMemories": options.matched_memories,
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .map_err(storage_error)?;
+
+    tracing::info!(
+        action = audit_actions::PREFLIGHT_HALT,
+        workspace_id = %options.workspace_id,
+        command_hash = %command_hash,
+        match_count = options.matches.len(),
+        matched_memory_count = options.matched_memories.len(),
+        "recorded preflight halt provenance"
+    );
+
+    Ok(PreflightHaltAuditReport {
+        schema: PREFLIGHT_HALT_AUDIT_SCHEMA_V1.to_owned(),
+        command_hash,
+        audit_id,
+    })
+}
+
 pub fn revoke_bypass_token(
     connection: &DbConnection,
     options: &RevokeBypassTokenOptions,
@@ -715,6 +799,18 @@ fn audit_reject(
     ) {
         tracing::error!(%error, "failed to insert token audit");
     }
+}
+
+fn canonical_guard_rule_ids(matches: &[GuardMatch]) -> Vec<String> {
+    let mut rule_ids = matches
+        .iter()
+        .map(|matched| matched.rule_id.trim())
+        .filter(|rule_id| !rule_id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    rule_ids.sort();
+    rule_ids.dedup();
+    rule_ids
 }
 
 fn insert_token_audit(

@@ -171,9 +171,10 @@ use crate::core::preflight_guard::{
 };
 use crate::core::preflight_token::{
     BYPASS_TOKEN_INVALID, BYPASS_TOKEN_STORAGE_ERROR, IssueBypassTokenOptions,
-    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RevokeBypassTokenOptions,
-    VerifyBypassTokenOptions, issue_bypass_token as issue_preflight_bypass_token,
-    list_bypass_tokens, record_preflight_bypass_audit, revoke_bypass_token,
+    PreflightBypassTokenError, RecordPreflightBypassAuditOptions, RecordPreflightHaltAuditOptions,
+    RevokeBypassTokenOptions, VerifyBypassTokenOptions,
+    issue_bypass_token as issue_preflight_bypass_token, list_bypass_tokens,
+    record_preflight_bypass_audit, record_preflight_halt_audit, revoke_bypass_token,
     verify_bypass_token as verify_preflight_bypass_token,
 };
 use crate::core::profile::{
@@ -17034,6 +17035,7 @@ where
 
     let mut report = run_preflight_guard(&registry, &options);
     attach_preflight_memory_matches(cli, args.database.as_deref(), &mut report);
+    record_preflight_halt_audit_if_available(cli, args.database.as_deref(), &report);
     write_preflight_guard_report(cli, &report, stdout)
 }
 
@@ -17069,6 +17071,38 @@ fn attach_preflight_memory_matches(
     report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
     if report.matched_memories.is_empty() {
         report.degraded.push(no_risk_memories_degradation());
+    }
+}
+
+fn record_preflight_halt_audit_if_available(
+    cli: &Cli,
+    database: Option<&Path>,
+    report: &PreflightGuardReport,
+) {
+    if report.exit_code != 7 {
+        return;
+    }
+    let (connection, workspace_id, _) = match open_preflight_token_database(cli, database) {
+        Ok(opened) => opened,
+        Err(error) => {
+            tracing::error!(
+                error = %error.message(),
+                "failed to open database for preflight halt audit"
+            );
+            return;
+        }
+    };
+    let options = RecordPreflightHaltAuditOptions {
+        workspace_id,
+        actor: None,
+        command: report.command.clone(),
+        matches: report.matches.clone(),
+        matched_memories: report.matched_memories.clone(),
+        exit_code: report.exit_code,
+        checked_at: report.checked_at.clone(),
+    };
+    if let Err(error) = record_preflight_halt_audit(&connection, &options) {
+        tracing::error!(%error, "failed to record preflight halt audit");
     }
 }
 

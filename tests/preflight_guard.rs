@@ -13,11 +13,14 @@ use std::path::PathBuf;
 
 use ee::core::preflight_guard::{
     BypassTokenInput, GuardAction, MatchResolution, PREFLIGHT_GUARD_SCHEMA_V1,
-    PreflightGuardOptions, PreflightGuardRegistry, RuleSource, issue_bypass_token,
-    match_trauma_guard_memories, no_risk_memories_degradation, run_preflight_guard,
-    verify_bypass_token,
+    PreflightGuardOptions, PreflightGuardRegistry, PreflightMemoryMatch, RuleSource,
+    issue_bypass_token, match_trauma_guard_memories, no_risk_memories_degradation,
+    run_preflight_guard, verify_bypass_token,
 };
-use ee::db::StoredMemory;
+use ee::core::preflight_token::{
+    PREFLIGHT_HALT_AUDIT_SCHEMA_V1, RecordPreflightHaltAuditOptions, record_preflight_halt_audit,
+};
+use ee::db::{CreateWorkspaceInput, DbConnection, StoredMemory, audit_actions};
 
 const DESTRUCTIVE_PATTERN_FIXTURE: &str =
     include_str!("fixtures/destructive_patterns/commands.json");
@@ -594,6 +597,82 @@ fn bypass_token_invalid_keeps_halt_and_audits_invalid() {
         }),
         "git_reset_hard match should audit an invalid bypass token"
     );
+}
+
+#[test]
+fn preflight_halt_audit_persists_hash_chained_guard_context() -> Result<(), String> {
+    let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+    let workspace_id = "wsp_preflight_halt_audit";
+    connection
+        .insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/preflight-halt-audit".to_owned(),
+                name: Some("preflight-halt-audit".to_owned()),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+    let registry = PreflightGuardRegistry::with_builtins();
+    let mut report = run_preflight_guard(&registry, &opts("rm -rf /tmp/guarded"));
+    assert_eq!(report.exit_code, 7);
+    report.matched_memories = vec![PreflightMemoryMatch {
+        memory_id: "mem_preflight_policy".to_owned(),
+        kind: "failure".to_owned(),
+        content: "Never delete files without explicit approval.".to_owned(),
+        provenance_uri: Some("memory://mem_preflight_policy".to_owned()),
+        severity: "critical",
+        severity_source: "risk_memory",
+        score: 1.0,
+        matched_terms: vec!["delete".to_owned()],
+    }];
+
+    let audit = record_preflight_halt_audit(
+        &connection,
+        &RecordPreflightHaltAuditOptions {
+            workspace_id: workspace_id.to_owned(),
+            actor: Some("agent-1".to_owned()),
+            command: report.command.clone(),
+            matches: report.matches.clone(),
+            matched_memories: report.matched_memories.clone(),
+            exit_code: report.exit_code,
+            checked_at: report.checked_at.clone(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let entry = connection
+        .get_audit(&audit.audit_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "preflight halt audit row should be persisted".to_owned())?;
+
+    assert_eq!(entry.workspace_id.as_deref(), Some(workspace_id));
+    assert_eq!(entry.actor.as_deref(), Some("agent-1"));
+    assert_eq!(entry.action, audit_actions::PREFLIGHT_HALT);
+    assert_eq!(entry.target_type.as_deref(), Some("preflight_guard"));
+    assert_eq!(
+        entry.target_id.as_deref(),
+        Some(audit.command_hash.as_str())
+    );
+    assert!(
+        entry.this_row_hash.is_some(),
+        "preflight halt audit must participate in the audit hash chain"
+    );
+
+    let details: serde_json::Value = serde_json::from_str(entry.details.as_deref().unwrap_or("{}"))
+        .map_err(|error| error.to_string())?;
+    assert_eq!(details["schema"], PREFLIGHT_HALT_AUDIT_SCHEMA_V1);
+    assert_eq!(details["exitCode"], 7);
+    assert_eq!(
+        details["matchedMemoryIds"],
+        serde_json::json!(["mem_preflight_policy"])
+    );
+    assert!(
+        details["enforcedHaltRuleIds"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty()),
+        "halt audit must capture enforced rule ids: {details}"
+    );
+    Ok(())
 }
 
 #[test]

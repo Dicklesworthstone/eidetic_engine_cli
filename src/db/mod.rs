@@ -117,6 +117,7 @@ pub mod audit_actions {
     pub const PREFLIGHT_BYPASS_TOKEN_REJECT: &str = "preflight.bypass_token.reject";
     pub const PREFLIGHT_BYPASS_TOKEN_REVOKE: &str = "preflight.bypass_token.revoke";
     pub const PREFLIGHT_BYPASS: &str = "preflight.bypass";
+    pub const PREFLIGHT_HALT: &str = "preflight.halt";
 
     // ----------------------------------------------------------------------
     // Read-surface actions (G8 / bd-17c65.7.7).
