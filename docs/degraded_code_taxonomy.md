@@ -208,7 +208,7 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### Search and pack quality (51)
+#### Search and pack quality (52)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
@@ -219,6 +219,7 @@ memory bodies in `sources[]`.
 | `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `context_evidence_freshness_changed_source` | low | bd-17c65.1.2 (A2) |
 | `context_delta_prior_unknown` | low | bd-muovx.5 (M) |
+| `context_delta_format_unsupported` | info | bd-muovx.6 (M) |
 | `context_delta_larger_than_full` | info | bd-muovx |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |
