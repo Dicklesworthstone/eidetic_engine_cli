@@ -114,23 +114,34 @@ fi
 
 CONTEXT_GROUNDING_JSON=$(ee_workspace context "G10 HITS fixture graph profile" --profile grounding --max-tokens 400 --json 2>/dev/null || true)
 CONTEXT_ORIENTATION_JSON=$(ee_workspace context "G10 HITS fixture graph profile" --profile orientation --max-tokens 400 --json 2>/dev/null || true)
-if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 && printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq . >/dev/null 2>&1; then
+CONTEXT_BALANCED_JSON=$(ee_workspace context "G10 HITS fixture graph profile" --profile balanced --max-tokens 400 --json 2>/dev/null || true)
+if printf '%s' "$CONTEXT_GROUNDING_JSON" | jq . >/dev/null 2>&1 \
+    && printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq . >/dev/null 2>&1 \
+    && printf '%s' "$CONTEXT_BALANCED_JSON" | jq . >/dev/null 2>&1; then
     e2e_log_note "g10_hits_surface=context profile rerank"
     assert_jq "$CONTEXT_GROUNDING_JSON" '.data.pack.profile // .data.profile // empty' "grounding" "g10_hits_context_grounding_profile"
     assert_jq "$CONTEXT_ORIENTATION_JSON" '.data.pack.profile // .data.profile // empty' "orientation" "g10_hits_context_orientation_profile"
+    assert_jq "$CONTEXT_BALANCED_JSON" '.data.pack.profile // .data.profile // empty' "balanced" "g10_hits_context_balanced_profile"
     GROUNDING_FIRST=$(printf '%s' "$CONTEXT_GROUNDING_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
     ORIENTATION_FIRST=$(printf '%s' "$CONTEXT_ORIENTATION_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
+    BALANCED_FIRST=$(printf '%s' "$CONTEXT_BALANCED_JSON" | jq -r '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' 2>/dev/null || true)
     assert_jq_nonempty "$CONTEXT_GROUNDING_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_grounding_first_present"
     assert_jq_nonempty "$CONTEXT_ORIENTATION_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_orientation_first_present"
+    assert_jq_nonempty "$CONTEXT_BALANCED_JSON" '.data.pack.items[0].memoryId // .data.items[0].memoryId // empty' "g10_hits_context_balanced_first_present"
     e2e_log_assert_eq "${GROUNDING_FIRST:-missing}" "$HITS_AUTHORITY_ID" "g10_hits_context_grounding_authority_ranked"
     e2e_log_assert_eq "${ORIENTATION_FIRST:-missing}" "$HITS_HUB_ID" "g10_hits_context_orientation_hub_ranked"
+    if [ "${BALANCED_FIRST:-}" = "$HITS_AUTHORITY_ID" ] || [ "${BALANCED_FIRST:-}" = "$HITS_HUB_ID" ]; then
+        e2e_log_assert_eq "seed" "seed" "g10_hits_context_balanced_seed_ranked"
+    else
+        e2e_log_assert_eq "${BALANCED_FIRST:-missing}" "${HITS_AUTHORITY_ID}-or-${HITS_HUB_ID}" "g10_hits_context_balanced_seed_ranked" || true
+    fi
     if [ "${GROUNDING_FIRST:-}" = "${ORIENTATION_FIRST:-}" ]; then
         e2e_log_assert_eq "$GROUNDING_FIRST" "${ORIENTATION_FIRST}-different" "g10_hits_context_profiles_differ" || true
     else
         e2e_log_assert_eq "different" "different" "g10_hits_context_profiles_differ"
     fi
 else
-    todo_assert "g10_hits_context_profiles_available" "bd-jy4w.4" "ee context --profile grounding/orientation is not fully available for the HITS fixture yet."
+    todo_assert "g10_hits_context_profiles_available" "bd-jy4w.4" "ee context --profile grounding/orientation/balanced is not fully available for the HITS fixture yet."
 fi
 
 if [ "${EE_GRAPH_E2E_INJECT_FAILURE:-0}" = "1" ]; then
