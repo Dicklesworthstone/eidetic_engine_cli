@@ -62,7 +62,7 @@ impl MemoryScope {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
+        match value.trim().to_ascii_lowercase().as_str() {
             "self" => Some(Self::SelfOnly),
             "team" => Some(Self::Team),
             "workspace" => Some(Self::Workspace),
@@ -241,7 +241,7 @@ impl QueryGraphTraversal {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
+        match value.trim().to_ascii_lowercase().as_str() {
             "outbound" => Some(Self::Outbound),
             "inbound" => Some(Self::Inbound),
             "bidirectional" => Some(Self::Bidirectional),
@@ -262,7 +262,7 @@ impl QueryTemporalValidityPosture {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value {
+        match value.trim().to_ascii_lowercase().as_str() {
             "strict" => Some(Self::Strict),
             "relaxed" => Some(Self::Relaxed),
             "ignore" => Some(Self::Ignore),
@@ -1583,6 +1583,42 @@ mod tests {
             Ok(_) => Err("confidence filter should reject invalid input".to_owned()),
             Err(err) => Ok(err),
         }
+    }
+
+    #[test]
+    fn memory_scope_parse_normalizes_cli_values() {
+        assert_eq!(MemoryScope::parse(" Team "), Some(MemoryScope::Team));
+        assert_eq!(
+            MemoryScope::parse("WORKSPACE"),
+            Some(MemoryScope::Workspace)
+        );
+        assert_eq!(MemoryScope::parse("unknown"), None);
+    }
+
+    #[test]
+    fn query_graph_traversal_parse_normalizes_query_file_values() {
+        assert_eq!(
+            QueryGraphTraversal::parse(" Outbound "),
+            Some(QueryGraphTraversal::Outbound)
+        );
+        assert_eq!(
+            QueryGraphTraversal::parse("BIDIRECTIONAL"),
+            Some(QueryGraphTraversal::Bidirectional)
+        );
+        assert_eq!(QueryGraphTraversal::parse("sideways"), None);
+    }
+
+    #[test]
+    fn query_temporal_validity_posture_parse_normalizes_query_file_values() {
+        assert_eq!(
+            QueryTemporalValidityPosture::parse(" Strict "),
+            Some(QueryTemporalValidityPosture::Strict)
+        );
+        assert_eq!(
+            QueryTemporalValidityPosture::parse("IGNORE"),
+            Some(QueryTemporalValidityPosture::Ignore)
+        );
+        assert_eq!(QueryTemporalValidityPosture::parse("strictish"), None);
     }
 
     #[test]

@@ -255,7 +255,7 @@ impl SupersessionReason {
     /// Parse from string.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "user_update" => Self::UserUpdate,
             "curation" => Self::Curation,
             "consolidation" => Self::Consolidation,
@@ -564,6 +564,18 @@ mod tests {
             let parsed = SupersessionReason::parse_lossy(reason.as_str());
             assert_eq!(reason, parsed, "round trip failed for {reason:?}");
         }
+    }
+
+    #[test]
+    fn supersession_reason_parse_lossy_normalizes_external_values() {
+        assert_eq!(
+            SupersessionReason::parse_lossy(" Correction "),
+            SupersessionReason::Correction
+        );
+        assert_eq!(
+            SupersessionReason::parse_lossy(" SYSTEM_GENERATED "),
+            SupersessionReason::SystemGenerated
+        );
     }
 
     #[test]

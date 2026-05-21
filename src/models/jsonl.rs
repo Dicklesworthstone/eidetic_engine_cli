@@ -132,7 +132,7 @@ impl FromStr for ImportSource {
     type Err = ParseImportSourceError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_jsonl_token(s).as_str() {
             "native" => Ok(Self::Native),
             "cass_import" => Ok(Self::CassImport),
             "legacy_scan" => Ok(Self::LegacyScan),
@@ -209,7 +209,7 @@ impl FromStr for TrustLevel {
     type Err = ParseTrustLevelError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_jsonl_token(s).as_str() {
             "untrusted" => Ok(Self::Untrusted),
             "validated" => Ok(Self::Validated),
             "verified" => Ok(Self::Verified),
@@ -310,7 +310,7 @@ impl FromStr for ExportRecordType {
     type Err = ParseExportRecordTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_jsonl_token(s).as_str() {
             "header" => Ok(Self::Header),
             "memory" => Ok(Self::Memory),
             "artifact" => Ok(Self::Artifact),
@@ -450,7 +450,7 @@ impl fmt::Display for ParseRedactionLevelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "invalid redaction level '{}'; expected one of: none, minimal, standard, strict, paranoid",
+            "invalid redaction level '{}'; expected one of: none, minimal, standard, strict, paranoid, full",
             self.invalid
         )
     }
@@ -462,7 +462,7 @@ impl FromStr for RedactionLevel {
     type Err = ParseRedactionLevelError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_jsonl_token(s).as_str() {
             "none" => Ok(Self::None),
             "minimal" => Ok(Self::Minimal),
             "standard" => Ok(Self::Standard),
@@ -569,7 +569,7 @@ impl FromStr for ExportScope {
     type Err = ParseExportScopeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_jsonl_token(s).as_str() {
             "all" => Ok(Self::All),
             "memories" => Ok(Self::Memories),
             "audit" => Ok(Self::Audit),
@@ -580,6 +580,10 @@ impl FromStr for ExportScope {
             }),
         }
     }
+}
+
+fn normalized_jsonl_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
 }
 
 /// Export header record with trust and import metadata (EE-266).
@@ -1988,6 +1992,20 @@ mod tests {
     }
 
     #[test]
+    fn export_record_type_parse_normalizes_external_values() -> TestResult {
+        ensure(
+            " Memory ".parse::<ExportRecordType>(),
+            Ok(ExportRecordType::Memory),
+            "record type trims and lowercases",
+        )?;
+        ensure(
+            "WORKSPACE".parse::<ExportRecordType>(),
+            Ok(ExportRecordType::Workspace),
+            "record type accepts uppercase",
+        )
+    }
+
+    #[test]
     fn export_record_type_display() {
         assert_eq!(ExportRecordType::Header.to_string(), "header");
         assert_eq!(ExportRecordType::Memory.to_string(), "memory");
@@ -2026,6 +2044,20 @@ mod tests {
     }
 
     #[test]
+    fn redaction_level_parse_normalizes_external_values_and_legacy_alias() -> TestResult {
+        ensure(
+            " Strict ".parse::<RedactionLevel>(),
+            Ok(RedactionLevel::Strict),
+            "redaction level trims and lowercases",
+        )?;
+        ensure(
+            "FULL".parse::<RedactionLevel>(),
+            Ok(RedactionLevel::Full),
+            "redaction level accepts legacy full alias",
+        )
+    }
+
+    #[test]
     fn redaction_level_capabilities() {
         assert!(!RedactionLevel::None.redacts_secrets());
         assert!(RedactionLevel::Minimal.redacts_secrets());
@@ -2049,6 +2081,15 @@ mod tests {
             ensure(parsed, *scope, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn export_scope_parse_normalizes_external_values() -> TestResult {
+        ensure(
+            " Metadata-Only ".parse::<ExportScope>(),
+            Ok(ExportScope::MetadataOnly),
+            "export scope trims, lowercases, and accepts hyphen separator",
+        )
     }
 
     #[test]
@@ -2884,6 +2925,15 @@ mod tests {
     }
 
     #[test]
+    fn import_source_parse_normalizes_external_values() -> TestResult {
+        ensure(
+            " CASS-Import ".parse::<ImportSource>(),
+            Ok(ImportSource::CassImport),
+            "import source trims, lowercases, and accepts hyphen separator",
+        )
+    }
+
+    #[test]
     fn import_source_display() {
         assert_eq!(ImportSource::Native.to_string(), "native");
         assert_eq!(ImportSource::CassImport.to_string(), "cass_import");
@@ -2924,6 +2974,15 @@ mod tests {
             ensure(parsed, level, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn trust_level_parse_normalizes_external_values() -> TestResult {
+        ensure(
+            " Quarantined ".parse::<TrustLevel>(),
+            Ok(TrustLevel::Quarantined),
+            "trust level trims and lowercases",
+        )
     }
 
     #[test]

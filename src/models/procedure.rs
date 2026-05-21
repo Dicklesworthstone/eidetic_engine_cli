@@ -31,6 +31,10 @@ pub const PROCEDURE_SCHEMA_CATALOG_V1: &str = "ee.procedure.schemas.v1";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
+fn normalized_procedure_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Stable Wire Enums
 // ============================================================================
@@ -69,7 +73,7 @@ impl FromStr for ProcedureStatus {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_procedure_token(input).as_str() {
             "candidate" => Ok(Self::Candidate),
             "verified" => Ok(Self::Verified),
             "retired" => Ok(Self::Retired),
@@ -138,7 +142,7 @@ impl FromStr for ProcedureMaturity {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        let normalized = normalized_procedure_token(input);
         match normalized.as_str() {
             "provisional" | "candidate" => Ok(Self::Provisional),
             "validated" | "verified" => Ok(Self::Validated),
@@ -189,7 +193,7 @@ impl FromStr for ProcedureVerificationStatus {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_procedure_token(input).as_str() {
             "pending" => Ok(Self::Pending),
             "passed" => Ok(Self::Passed),
             "failed" => Ok(Self::Failed),
@@ -244,7 +248,7 @@ impl FromStr for ProcedureExportFormat {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        let normalized = normalized_procedure_token(input);
         match normalized.as_str() {
             "json" => Ok(Self::Json),
             "md" | "markdown" => Ok(Self::Markdown),
@@ -291,7 +295,7 @@ impl FromStr for SkillCapsuleInstallMode {
     type Err = ParseProcedureValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_procedure_token(input).as_str() {
             "render_only" => Ok(Self::RenderOnly),
             "manual_review" => Ok(Self::ManualReview),
             _ => Err(ParseProcedureValueError::new(
@@ -1100,6 +1104,11 @@ mod tests {
                 "procedure status",
             )?;
         }
+        ensure(
+            ProcedureStatus::from_str(" Verified "),
+            Ok(ProcedureStatus::Verified),
+            "normalized procedure status",
+        )?;
         for status in ProcedureVerificationStatus::all() {
             ensure(
                 ProcedureVerificationStatus::from_str(status.as_str()),
@@ -1107,6 +1116,11 @@ mod tests {
                 "verification status",
             )?;
         }
+        ensure(
+            ProcedureVerificationStatus::from_str(" PASSED "),
+            Ok(ProcedureVerificationStatus::Passed),
+            "normalized verification status",
+        )?;
         for format in ProcedureExportFormat::all() {
             ensure(
                 ProcedureExportFormat::from_str(format.as_str()),
@@ -1114,6 +1128,11 @@ mod tests {
                 "export format",
             )?;
         }
+        ensure(
+            ProcedureExportFormat::from_str(" Skill-Capsule "),
+            Ok(ProcedureExportFormat::SkillCapsule),
+            "normalized export format",
+        )?;
         for mode in SkillCapsuleInstallMode::all() {
             ensure(
                 SkillCapsuleInstallMode::from_str(mode.as_str()),
@@ -1121,6 +1140,11 @@ mod tests {
                 "install mode",
             )?;
         }
+        ensure(
+            SkillCapsuleInstallMode::from_str(" Manual-Review "),
+            Ok(SkillCapsuleInstallMode::ManualReview),
+            "normalized install mode",
+        )?;
         ensure(
             ProcedureStatus::from_str("draft").map_err(|error| error.field()),
             Err("procedure_status"),

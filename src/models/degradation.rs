@@ -46,7 +46,7 @@ impl DegradationSeverity {
     /// Parse from string.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "advisory" => Self::Advisory,
             "warning" => Self::Warning,
             "critical" => Self::Critical,
@@ -525,7 +525,8 @@ pub const ALL_DEGRADATION_CODES: &[DegradationCode] = &[
     // Pack
     TOKEN_BUDGET_EXCEEDED,
     MMR_FALLBACK,
-    // Curate
+    PACK_BUDGET_TOO_SMALL,
+    // Database
     CURATION_QUEUE_FULL,
     AUTO_CURATION_DISABLED,
     // Policy
@@ -737,6 +738,20 @@ mod tests {
             DegradationSeverity::Critical.as_str(),
             "critical",
             "critical",
+        )
+    }
+
+    #[test]
+    fn severity_parse_lossy_normalizes_external_values() -> TestResult {
+        ensure(
+            DegradationSeverity::parse_lossy(" Warning "),
+            DegradationSeverity::Warning,
+            "warning trims and lowercases",
+        )?;
+        ensure(
+            DegradationSeverity::parse_lossy(" CRITICAL "),
+            DegradationSeverity::Critical,
+            "critical trims and lowercases",
         )
     }
 

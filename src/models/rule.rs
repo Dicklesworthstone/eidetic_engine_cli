@@ -7,6 +7,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+fn normalized_rule_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Scope of a procedural rule - where it applies.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RuleScope {
@@ -85,7 +89,7 @@ impl FromStr for RuleScope {
     type Err = ParseRuleScopeError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_rule_token(input).as_str() {
             "global" => Ok(Self::Global),
             "workspace" => Ok(Self::Workspace),
             "project" => Ok(Self::Project),
@@ -181,7 +185,7 @@ impl FromStr for RuleMaturity {
     type Err = ParseRuleMaturityError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_rule_token(input).as_str() {
             "draft" => Ok(Self::Draft),
             "candidate" => Ok(Self::Candidate),
             "validated" => Ok(Self::Validated),
@@ -279,7 +283,7 @@ impl FromStr for RuleLifecycleTrigger {
     type Err = ParseRuleLifecycleTriggerError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_rule_token(input).as_str() {
             "propose_validation" => Ok(Self::ProposeValidation),
             "outcome_helpful" => Ok(Self::OutcomeHelpful),
             "outcome_harmful" => Ok(Self::OutcomeHarmful),
@@ -372,7 +376,7 @@ impl FromStr for RuleLifecycleAction {
     type Err = ParseRuleLifecycleActionError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_rule_token(input).as_str() {
             "retain" => Ok(Self::Retain),
             "promote" => Ok(Self::Promote),
             "demote" => Ok(Self::Demote),
@@ -842,6 +846,10 @@ mod tests {
             let rendered = scope.to_string();
             assert_eq!(RuleScope::from_str(&rendered), Ok(scope));
         }
+        assert_eq!(
+            RuleScope::from_str(" File-Pattern "),
+            Ok(RuleScope::FilePattern)
+        );
     }
 
     #[test]
@@ -865,6 +873,10 @@ mod tests {
             let rendered = maturity.to_string();
             assert_eq!(RuleMaturity::from_str(&rendered), Ok(maturity));
         }
+        assert_eq!(
+            RuleMaturity::from_str(" VALIDATED "),
+            Ok(RuleMaturity::Validated)
+        );
     }
 
     #[test]
@@ -894,6 +906,10 @@ mod tests {
             let rendered = trigger.to_string();
             assert_eq!(RuleLifecycleTrigger::from_str(&rendered), Ok(trigger));
         }
+        assert_eq!(
+            RuleLifecycleTrigger::from_str(" Outcome-Helpful "),
+            Ok(RuleLifecycleTrigger::OutcomeHelpful)
+        );
     }
 
     #[test]
@@ -908,6 +924,10 @@ mod tests {
             let rendered = action.to_string();
             assert_eq!(RuleLifecycleAction::from_str(&rendered), Ok(action));
         }
+        assert_eq!(
+            RuleLifecycleAction::from_str(" DEMOTE "),
+            Ok(RuleLifecycleAction::Demote)
+        );
     }
 
     #[test]

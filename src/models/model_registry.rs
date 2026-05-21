@@ -18,6 +18,10 @@ pub const EMBEDDING_METADATA_SCHEMA_V1: &str = "ee.embedding.metadata.v1";
 /// Schema identifier for semantic model admissibility reports.
 pub const SEMANTIC_MODEL_ADMISSIBILITY_SCHEMA_V1: &str = "ee.semantic_model_admissibility.v1";
 
+fn normalized_model_registry_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Provider or embedding implementation family for a registered model.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,7 +74,7 @@ impl FromStr for ModelProvider {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "hash" => Ok(Self::Hash),
             "model2vec" => Ok(Self::Model2Vec),
             "fastembed" => Ok(Self::FastEmbed),
@@ -131,7 +135,7 @@ impl FromStr for ModelPurpose {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "embedding" => Ok(Self::Embedding),
             "reranker" => Ok(Self::Reranker),
             "classifier" => Ok(Self::Classifier),
@@ -183,7 +187,7 @@ impl FromStr for ModelDistanceMetric {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "cosine" => Ok(Self::Cosine),
             "dot" => Ok(Self::Dot),
             "l2" => Ok(Self::L2),
@@ -235,7 +239,7 @@ impl FromStr for ModelRegistryStatus {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "available" => Ok(Self::Available),
             "unavailable" => Ok(Self::Unavailable),
             "disabled" => Ok(Self::Disabled),
@@ -335,7 +339,7 @@ impl FromStr for EmbeddingVectorDtype {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "float32" => Ok(Self::Float32),
             "float16" => Ok(Self::Float16),
             "int8" => Ok(Self::Int8),
@@ -387,7 +391,7 @@ impl FromStr for EmbeddingPooling {
     type Err = ParseModelRegistryValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_model_registry_token(input).as_str() {
             "mean" => Ok(Self::Mean),
             "cls" => Ok(Self::Cls),
             "model_default" => Ok(Self::ModelDefault),
@@ -1462,6 +1466,10 @@ mod tests {
             let parsed = ModelProvider::from_str(provider.as_str())?;
             assert_eq!(parsed, provider);
         }
+        assert_eq!(
+            ModelProvider::from_str(" FastEmbed ")?,
+            ModelProvider::FastEmbed
+        );
 
         Ok(())
     }
@@ -1481,6 +1489,10 @@ mod tests {
             let parsed = ModelPurpose::from_str(purpose.as_str())?;
             assert_eq!(parsed, purpose);
         }
+        assert_eq!(
+            ModelPurpose::from_str(" Classifier ")?,
+            ModelPurpose::Classifier
+        );
 
         Ok(())
     }
@@ -1497,6 +1509,10 @@ mod tests {
             let parsed = ModelDistanceMetric::from_str(metric.as_str())?;
             assert_eq!(parsed, metric);
         }
+        assert_eq!(
+            ModelDistanceMetric::from_str(" COSINE ")?,
+            ModelDistanceMetric::Cosine
+        );
 
         Ok(())
     }
@@ -1513,6 +1529,10 @@ mod tests {
             let parsed = ModelRegistryStatus::from_str(status.as_str())?;
             assert_eq!(parsed, status);
         }
+        assert_eq!(
+            ModelRegistryStatus::from_str(" UNAVAILABLE ")?,
+            ModelRegistryStatus::Unavailable
+        );
 
         Ok(())
     }
@@ -1553,6 +1573,10 @@ mod tests {
             let parsed = EmbeddingVectorDtype::from_str(dtype.as_str())?;
             assert_eq!(parsed, dtype);
         }
+        assert_eq!(
+            EmbeddingVectorDtype::from_str(" FLOAT16 ")?,
+            EmbeddingVectorDtype::Float16
+        );
 
         Ok(())
     }
@@ -1569,6 +1593,10 @@ mod tests {
             let parsed = EmbeddingPooling::from_str(pooling.as_str())?;
             assert_eq!(parsed, pooling);
         }
+        assert_eq!(
+            EmbeddingPooling::from_str(" Model-Default ")?,
+            EmbeddingPooling::ModelDefault
+        );
 
         Ok(())
     }

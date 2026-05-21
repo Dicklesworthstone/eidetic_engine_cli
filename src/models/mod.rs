@@ -333,8 +333,53 @@ pub const RESPONSE_SCHEMA_V0: &str = "ee.response.v0";
 /// Response envelope schema for successful command output.
 pub const RESPONSE_SCHEMA_V1: &str = "ee.response.v1";
 
+/// Response envelope schema (v2) for successful command output.
+pub const RESPONSE_SCHEMA_V2: &str = "ee.response.v2";
+
 /// Current error envelope schema for failed command output.
 pub const ERROR_SCHEMA_V2: &str = "ee.error.v2";
+
+/// Context pack response schema (v2) for context pack output.
+pub const PACK_SCHEMA_V2: &str = "ee.pack.v2";
+
+/// Schema for performance/bench metrics output.
+pub const PERF_SCHEMA_V1: &str = "ee.perf.v1";
+
+/// Schema for beads retry diagnostic wrapper.
+pub const BEADS_RETRY_SCHEMA_V1: &str = "ee.beads_retry.v1";
+
+/// Schema for doctor fix summary output.
+pub const DOCTOR_FIX_SUMMARY_SCHEMA_V1: &str = "ee.doctor.fix_summary.v1";
+
+/// Schema for doctor run diff output.
+pub const DOCTOR_RUN_DIFF_SCHEMA_V1: &str = "ee.doctor.run_diff.v1";
+
+/// Schema for failure mode fixtures used in tests and evaluations.
+pub const FAILURE_MODE_FIXTURE_SCHEMA_V1: &str = "ee.failure_mode_fixture.v1";
+
+/// Schema for pack DNA context output.
+pub const PACK_DNA_SCHEMA_V1: &str = "ee.context.pack_dna.v1";
+
+/// Schema for Gomory-Hu proximity output.
+pub const PROXIMITY_SCHEMA_V1: &str = "ee.proximity.v1";
+
+/// Schema for proof check tool output.
+pub const PROOF_CHECK_SCHEMA_V1: &str = "ee.proof_check.v1";
+
+/// Schema for evaluation pack quality reports.
+pub const PACK_QUALITY_REPORT_SCHEMA_V1: &str = "ee.eval.pack_quality_report.v1";
+
+/// Schema for context pack streaming.
+pub const PACK_STREAM_SCHEMA_V1: &str = "ee.pack.stream.v1";
+
+/// Schema for test events and assertions.
+pub const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
+
+/// Schema for `ee model status` output.
+pub const MODEL_STATUS_SCHEMA_V2: &str = "ee.model.status.v2";
+
+/// Schema for `ee model list` output.
+pub const MODEL_LIST_SCHEMA_V1: &str = "ee.model.list.v1";
 
 /// Schema for query request documents (`--query-file`).
 pub const QUERY_SCHEMA_V1: &str = "ee.query.v1";
@@ -863,6 +908,15 @@ impl DomainError {
     pub fn recovery_actions(&self) -> Vec<RecoveryAction> {
         let message = self.message().to_lowercase();
         match self {
+            Self::UsageCodeWithDetails {
+                code: "curate_reason_too_large",
+                ..
+            } => vec![RecoveryAction::flag(
+                1,
+                "--reason",
+                "short review reason <= 4096 bytes",
+                "Store long rationale in an external note or memory, then pass a concise pointer.",
+            )],
             // Cass binary not found in trusted locations.
             Self::Import { .. } if message.contains("cass binary not found") => vec![
                 RecoveryAction::env(
