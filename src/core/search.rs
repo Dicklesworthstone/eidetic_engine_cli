@@ -1394,6 +1394,10 @@ impl SearchReport {
                             mesh_query_visibility(Some(meta))
                         {
                             obj_map.insert("meshProvenance".to_string(), provenance.to_json());
+                            if let Some(adjustment) = meta.get("_ee_mesh_trust_adjustment") {
+                                obj_map
+                                    .insert("meshTrustAdjustment".to_string(), adjustment.clone());
+                            }
                         }
                         if !redacted_patterns.is_empty() {
                             obj_map
@@ -5082,18 +5086,33 @@ fn sort_search_hit_score_tie_by_doc_id_within_workspace(hits: &mut [SearchHit]) 
 }
 
 fn search_hit_workspace_id(hit: &SearchHit) -> &str {
-    hit.metadata
-        .as_ref()
-        .and_then(|metadata| metadata_string(metadata, "workspace_id"))
+    let Some(metadata) = hit.metadata.as_ref() else {
+        return "";
+    };
+
+    metadata_string(metadata, "workspace_id")
+        .or_else(|| metadata_string(metadata, "workspaceId"))
+        .or_else(|| metadata_string(metadata, "origin_workspace_id"))
+        .or_else(|| metadata_string(metadata, "originWorkspaceId"))
         .or_else(|| {
-            hit.metadata
-                .as_ref()
-                .and_then(|metadata| metadata_string(metadata, "workspaceId"))
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "workspace_id"))
         })
         .or_else(|| {
-            hit.metadata
-                .as_ref()
-                .and_then(|metadata| metadata_string(metadata, "origin_workspace_id"))
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "workspaceId"))
+        })
+        .or_else(|| {
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "origin_workspace_id"))
+        })
+        .or_else(|| {
+            metadata
+                .get("mesh")
+                .and_then(|mesh| metadata_string(mesh, "originWorkspaceId"))
         })
         .unwrap_or("")
 }
@@ -5842,9 +5861,13 @@ fn apply_mesh_query_visibility(
     let mut visible_hits = Vec::with_capacity(hits.len());
     let mut filtered = 0usize;
 
-    for hit in hits {
+    for mut hit in hits {
         match mesh_query_visibility(hit.metadata.as_ref()) {
-            MeshQueryVisibility::Local | MeshQueryVisibility::Allowed(_) => visible_hits.push(hit),
+            MeshQueryVisibility::Local => visible_hits.push(hit),
+            MeshQueryVisibility::Allowed(provenance) => {
+                apply_mesh_trust_adjustment(&mut hit, &provenance.trust_lane);
+                visible_hits.push(hit);
+            }
             MeshQueryVisibility::Blocked => filtered = filtered.saturating_add(1),
         }
     }
@@ -5853,7 +5876,67 @@ fn apply_mesh_query_visibility(
         degraded.push(SearchDegradation::mesh_workspace_scope_filtered(filtered));
     }
 
+    sort_search_hits_by_score_order(&mut visible_hits);
     visible_hits
+}
+
+fn apply_mesh_trust_adjustment(hit: &mut SearchHit, trust_lane: &str) {
+    let factor = mesh_trust_adjustment_factor(trust_lane);
+    if factor >= 1.0 || !hit.score.is_finite() {
+        return;
+    }
+
+    let original_score = hit.score;
+    hit.score = (hit.score * factor).clamp(0.0, 1.0);
+
+    let adjustment = serde_json::json!({
+        "schema": "ee.mesh.search_trust_adjustment.v1",
+        "reason": "cached_peer_material_trust_lane",
+        "trustLane": trust_lane,
+        "factor": round_metric_f32(factor),
+        "originalScore": round_metric_f32(original_score),
+        "adjustedScore": round_metric_f32(hit.score),
+    });
+    let metadata = hit.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("_ee_mesh_trust_adjustment".to_string(), adjustment);
+    }
+
+    if let Some(explanation) = hit.explanation.as_mut() {
+        let base = explanation.summary.trim_end_matches('.');
+        explanation.summary = format!(
+            "{base}. Mesh trust lane `{trust_lane}` adjusted score from {original_score:.4} to {:.4}.",
+            hit.score
+        );
+        explanation.factors.push(ScoreFactor::new(
+            "mesh_trust_adjustment",
+            factor,
+            "cached peer trust lane multiplier",
+            "_ee_mesh_trust_adjustment.factor",
+            "adjusted_score = original_score * trust_factor",
+        ));
+    }
+}
+
+fn mesh_trust_adjustment_factor(trust_lane: &str) -> f32 {
+    let normalized = normalized_mesh_trust_lane(trust_lane);
+    match normalized.as_str() {
+        "localhuman" | "humanexplicit" => 1.0,
+        "peerhumanviapeer" => 0.97,
+        "peeragent" | "meshagent" => 0.92,
+        "peerderived" | "meshmetadata" => 0.85,
+        "meshcuration" => 0.80,
+        "untrusted" => 0.65,
+        _ => 0.75,
+    }
+}
+
+fn normalized_mesh_trust_lane(trust_lane: &str) -> String {
+    trust_lane
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn mark_hit_scope(hit: &mut SearchHit, scope: MemoryScope, memory: &crate::db::StoredMemory) {
@@ -7293,6 +7376,128 @@ mod tests {
             degraded[0].message.contains("3 mesh-derived search hits"),
             "unexpected degradation message: {}",
             degraded[0].message
+        );
+    }
+
+    #[test]
+    fn search_mesh_trust_adjustment_reranks_cached_peer_hits() {
+        let mut degraded = Vec::new();
+        let hits = vec![
+            SearchHit {
+                doc_id: "local-doc".to_string(),
+                score: 0.89,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.89),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(serde_json::json!({
+                    "content": "Local result remains unadjusted."
+                })),
+                explanation: None,
+            },
+            SearchHit {
+                doc_id: "mesh-peer-agent".to_string(),
+                score: 0.96,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.96),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(mesh_hit_metadata("wsp_remote_beta", "peerAgent")),
+                explanation: None,
+            },
+            SearchHit {
+                doc_id: "mesh-peer-human".to_string(),
+                score: 0.93,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.93),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(mesh_hit_metadata("wsp_remote_alpha", "peerHumanViaPeer")),
+                explanation: Some(ScoreExplanation {
+                    summary: "Selected by semantic_fast retrieval with score 0.9300.".to_string(),
+                    factors: Vec::new(),
+                }),
+            },
+            SearchHit {
+                doc_id: "mesh-metadata-only".to_string(),
+                score: 0.97,
+                source: ScoreSource::SemanticFast,
+                fast_score: Some(0.97),
+                quality_score: None,
+                lexical_score: None,
+                rerank_score: None,
+                metadata: Some(mesh_hit_metadata("wsp_remote_gamma", "mesh_metadata")),
+                explanation: None,
+            },
+        ];
+
+        let visible = apply_mesh_query_visibility(hits, &mut degraded);
+
+        assert!(degraded.is_empty());
+        assert_eq!(
+            visible
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "mesh-peer-human",
+                "local-doc",
+                "mesh-peer-agent",
+                "mesh-metadata-only",
+            ]
+        );
+        assert_eq!(round_metric_f32(visible[0].score), 0.9021);
+        assert_eq!(round_metric_f32(visible[2].score), 0.8832);
+        assert_eq!(round_metric_f32(visible[3].score), 0.8245);
+        let factor = visible[0]
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.pointer("/_ee_mesh_trust_adjustment/factor"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_default();
+        assert!((factor - 0.97).abs() <= 0.000_001);
+        assert!(
+            visible[0]
+                .why()
+                .contains("Mesh trust lane `peerHumanViaPeer` adjusted score")
+        );
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "mesh query".to_string(),
+            requested_limit: 10,
+            results: visible,
+            elapsed_ms: 12.3,
+            errors: Vec::new(),
+            degraded: Vec::new(),
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: MemoryScopeStats::new(MemoryScope::Swarm, false, None, 0),
+        };
+        let json = report.data_json();
+        assert_eq!(
+            json["results"][0]["meshTrustAdjustment"]["schema"],
+            "ee.mesh.search_trust_adjustment.v1"
+        );
+        let rendered_factor = json["results"][0]["meshTrustAdjustment"]["factor"]
+            .as_f64()
+            .unwrap_or_default();
+        assert!((rendered_factor - 0.97).abs() <= 0.000_001);
+        assert!(
+            json["results"][0]["metadata"]
+                .get("_ee_mesh_trust_adjustment")
+                .is_none(),
+            "internal adjustment metadata should stay out of public metadata"
         );
     }
 
@@ -9735,6 +9940,22 @@ mod tests {
         }
     }
 
+    fn mesh_hit_metadata(origin_workspace_id: &str, trust_lane: &str) -> serde_json::Value {
+        serde_json::json!({
+            "mesh": {
+                "workspaceScopeDecision": "allow",
+                "workspaceId": "wsp_local_alpha",
+                "cachedMaterialId": format!("mesh_mat_{origin_workspace_id}"),
+                "originWorkspaceId": origin_workspace_id,
+                "producerPeerId": "peer_builder_one",
+                "materialLane": "metadata",
+                "importDecisionId": "mesh_dec_456",
+                "trustLane": trust_lane,
+                "redactionPosture": "standard"
+            }
+        })
+    }
+
     #[test]
     fn search_hit_sort_uses_radix_tiebreak_for_canonical_memory_ids() {
         let mut hits = vec![
@@ -9803,6 +10024,32 @@ mod tests {
             sorted,
             vec![
                 ("".to_owned(), "mem_01J0000000000000000000000D"),
+                ("wsp_a".to_owned(), "mem_01J0000000000000000000000B"),
+                ("wsp_a".to_owned(), "mem_01J0000000000000000000000C"),
+                ("wsp_b".to_owned(), "mem_01J0000000000000000000000A"),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_hit_sort_orders_mesh_ties_by_nested_origin_workspace() {
+        let mut shard_b = synthetic_hit("mem_01J0000000000000000000000A", 0.20);
+        shard_b.metadata = Some(mesh_hit_metadata("wsp_b", "peerAgent"));
+        let mut shard_a_later = synthetic_hit("mem_01J0000000000000000000000C", 0.20);
+        shard_a_later.metadata = Some(mesh_hit_metadata("wsp_a", "peerAgent"));
+        let mut shard_a_earlier = synthetic_hit("mem_01J0000000000000000000000B", 0.20);
+        shard_a_earlier.metadata = Some(mesh_hit_metadata("wsp_a", "peerAgent"));
+        let mut hits = vec![shard_b, shard_a_later, shard_a_earlier];
+
+        sort_search_hits_by_score_order(&mut hits);
+
+        let sorted = hits
+            .iter()
+            .map(|hit| (search_hit_workspace_id(hit).to_owned(), hit.doc_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sorted,
+            vec![
                 ("wsp_a".to_owned(), "mem_01J0000000000000000000000B"),
                 ("wsp_a".to_owned(), "mem_01J0000000000000000000000C"),
                 ("wsp_b".to_owned(), "mem_01J0000000000000000000000A"),
