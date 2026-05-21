@@ -10,9 +10,10 @@ use chrono::{DateTime, Utc};
 use crate::config::MeshCommandMode;
 use crate::config::env_registry::{EnvVar, read};
 use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
+#[cfg(test)]
+use crate::db::generate_audit_id_seeded;
 use crate::db::{
     CreateAuditInput, DbConnection, StoredFeedbackEvent, audit_actions, generate_audit_id,
-    generate_audit_id_seeded,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -3892,6 +3893,7 @@ fn audit_append_best_effort(
 
 enum SearchAuditIdSource {
     Ambient,
+    #[cfg(test)]
     Seeded(Deterministic<Seed>),
 }
 
@@ -3899,6 +3901,7 @@ impl SearchAuditIdSource {
     fn next_audit_id(&mut self) -> String {
         match self {
             Self::Ambient => generate_audit_id(),
+            #[cfg(test)]
             Self::Seeded(determinism) => generate_audit_id_seeded(determinism),
         }
     }
@@ -3973,7 +3976,9 @@ pub fn run_search_seeded(
     options: &SearchOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    let mut audit_ids = SearchAuditIdSource::Seeded(determinism.shared_child("audit.search"));
+    // Search determinism controls ranking/output replay. Audit rows are durable
+    // side effects, so they must remain unique across repeated seeded calls.
+    let mut audit_ids = SearchAuditIdSource::Ambient;
     run_search_inner(options, None, determinism, &mut audit_ids)
 }
 
@@ -3991,7 +3996,9 @@ pub fn run_search_with_read_connection_seeded(
     read_connection: &DbConnection,
     determinism: &Deterministic<Seed>,
 ) -> Result<SearchReport, SearchError> {
-    let mut audit_ids = SearchAuditIdSource::Seeded(determinism.shared_child("audit.search"));
+    // Search determinism controls ranking/output replay. Audit rows are durable
+    // side effects, so they must remain unique across repeated seeded calls.
+    let mut audit_ids = SearchAuditIdSource::Ambient;
     run_search_inner(options, Some(read_connection), determinism, &mut audit_ids)
 }
 
@@ -6226,7 +6233,7 @@ mod tests {
     fn seeded_search_audit_ids(seed: u64) -> Result<Vec<String>, String> {
         let workspace = tempfile::Builder::new()
             .prefix("ee-search-seeded-audit")
-            .tempdir_in("/tmp")
+            .tempdir()
             .map_err(|error| error.to_string())?;
         let database_path = workspace.path().join("ee.db");
         let connection =
@@ -6296,7 +6303,7 @@ mod tests {
     fn seeded_search_audit_ids_via_batch(seed: u64) -> Result<Vec<String>, String> {
         let workspace = tempfile::Builder::new()
             .prefix("ee-search-seeded-audit-batch")
-            .tempdir_in("/tmp")
+            .tempdir()
             .map_err(|error| error.to_string())?;
         let database_path = workspace.path().join("ee.db");
         let connection =
