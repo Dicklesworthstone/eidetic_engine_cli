@@ -20,6 +20,40 @@ use serde_json::Value as JsonValue;
 
 use super::error::CassError;
 
+fn normalized_cass_token(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 /// Agent type from CASS session metadata.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CassAgent {
@@ -43,7 +77,7 @@ impl CassAgent {
     /// [`Self::Unknown`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
+        match normalized_cass_token(s).as_str() {
             "claude-code" | "claude_code" | "claudecode" => Self::ClaudeCode,
             "codex" => Self::Codex,
             "cursor" => Self::Cursor,
@@ -580,11 +614,11 @@ impl CassSpanKind {
     /// [`Self::Message`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
+        match normalized_cass_token(s).as_str() {
             "message" | "msg" => Self::Message,
-            "tool_call" | "toolcall" | "function_call" => Self::ToolCall,
+            "tool_call" | "toolcall" | "tool_use" | "function_call" => Self::ToolCall,
             "tool_result" | "toolresult" | "function_result" => Self::ToolResult,
-            "file" | "diff" => Self::File,
+            "file" | "diff" | "file_history_snapshot" => Self::File,
             "summary" | "meta" => Self::Summary,
             _ => Self::Message,
         }
@@ -636,7 +670,7 @@ impl CassRole {
     /// [`Self::User`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_lowercase().as_str() {
+        match normalized_cass_token(s).as_str() {
             "user" | "human" => Self::User,
             "assistant" | "model" | "ai" => Self::Assistant,
             "system" => Self::System,
@@ -729,9 +763,13 @@ impl CassViewSpan {
     /// Line count of this span.
     #[must_use]
     pub const fn line_count(&self) -> u32 {
-        self.end_line
-            .saturating_sub(self.start_line)
-            .saturating_add(1)
+        if self.end_line < self.start_line {
+            0
+        } else {
+            self.end_line
+                .saturating_sub(self.start_line)
+                .saturating_add(1)
+        }
     }
 }
 
@@ -881,6 +919,11 @@ mod tests {
             "claude-code",
         )?;
         ensure_equal(
+            &CassAgent::parse_lossy("ClaudeCode"),
+            &CassAgent::ClaudeCode,
+            "PascalCase claude code",
+        )?;
+        ensure_equal(
             &CassAgent::parse_lossy("CODEX"),
             &CassAgent::Codex,
             "CODEX uppercase",
@@ -904,6 +947,11 @@ mod tests {
             &CassAgent::parse_lossy("chatgpt"),
             &CassAgent::ChatGpt,
             "chatgpt",
+        )?;
+        ensure_equal(
+            &CassAgent::parse_lossy("ChatGpt"),
+            &CassAgent::ChatGpt,
+            "PascalCase ChatGpt",
         )?;
         ensure_equal(
             &CassAgent::parse_lossy("unknown-agent"),
@@ -939,19 +987,34 @@ mod tests {
             "tool_call",
         )?;
         ensure_equal(
+            &CassSpanKind::parse_lossy("ToolCall"),
+            &CassSpanKind::ToolCall,
+            "PascalCase tool call",
+        )?;
+        ensure_equal(
+            &CassSpanKind::parse_lossy("tool_use"),
+            &CassSpanKind::ToolCall,
+            "tool_use alias",
+        )?;
+        ensure_equal(
             &CassSpanKind::parse_lossy(" Tool_Result "),
             &CassSpanKind::ToolResult,
             "tool_result whitespace and case",
         )?;
         ensure_equal(
-            &CassSpanKind::parse_lossy("tool_result"),
+            &CassSpanKind::parse_lossy("toolResult"),
             &CassSpanKind::ToolResult,
-            "tool_result",
+            "camelCase tool result",
         )?;
         ensure_equal(
             &CassSpanKind::parse_lossy("file"),
             &CassSpanKind::File,
             "file",
+        )?;
+        ensure_equal(
+            &CassSpanKind::parse_lossy("fileHistorySnapshot"),
+            &CassSpanKind::File,
+            "camelCase file history snapshot",
         )?;
         ensure_equal(
             &CassSpanKind::parse_lossy("summary"),
@@ -1266,6 +1329,20 @@ mod tests {
             "hash",
         );
         ensure_equal(&single.line_count(), &1, "5-5 is 1 line")
+    }
+
+    #[test]
+    fn cass_view_span_line_count_rejects_inverted_ranges() -> TestResult {
+        let span = CassViewSpan::new(
+            "/session.jsonl",
+            "span-inverted",
+            CassSpanKind::Message,
+            15,
+            10,
+            "content",
+            "hash",
+        );
+        ensure_equal(&span.line_count(), &0, "inverted line range has no lines")
     }
 
     #[test]

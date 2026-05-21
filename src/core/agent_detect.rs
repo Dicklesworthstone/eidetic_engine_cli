@@ -302,7 +302,36 @@ pub fn build_agent_sources_report(options: &AgentSourcesOptions) -> AgentSources
 /// Normalize public connector names and common CLI aliases to catalog slugs.
 #[must_use]
 pub fn normalize_connector_slug(slug: &str) -> String {
-    let normalized = slug.trim().to_ascii_lowercase().replace('-', "_");
+    let trimmed = slug.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
     match normalized.as_str() {
         "claude_code" => "claude".to_string(),
         "codex_cli" => "codex".to_string(),

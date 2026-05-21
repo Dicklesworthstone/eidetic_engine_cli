@@ -43,7 +43,37 @@ pub const RECORDER_SCHEMA_CATALOG_V1: &str = "ee.recorder.schemas.v1";
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 fn normalized_recorder_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 // ============================================================================
@@ -2232,6 +2262,22 @@ mod tests {
             "tool-call".parse().map_err(|error| format!("{error}"))?;
         ensure(event_type, RecorderEventType::ToolCall, "event type")?;
 
+        let event_type: RecorderEventType =
+            "ToolResult".parse().map_err(|error| format!("{error}"))?;
+        ensure(
+            event_type,
+            RecorderEventType::ToolResult,
+            "PascalCase event type",
+        )?;
+
+        let event_type: RecorderEventType =
+            "stateChange".parse().map_err(|error| format!("{error}"))?;
+        ensure(
+            event_type,
+            RecorderEventType::StateChange,
+            "camelCase event type",
+        )?;
+
         let content_type: PayloadContentType =
             " JSON ".parse().map_err(|error| format!("{error}"))?;
         ensure(content_type, PayloadContentType::Json, "content type")?;
@@ -2247,6 +2293,15 @@ mod tests {
             trace_kind,
             RationaleTraceKind::RejectedAlternative,
             "trace kind",
+        )?;
+
+        let trace_kind: RationaleTraceKind = "RejectedAlternative"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            trace_kind,
+            RationaleTraceKind::RejectedAlternative,
+            "PascalCase trace kind",
         )?;
 
         let trace_posture: RationaleTracePosture =
@@ -2266,6 +2321,15 @@ mod tests {
             "trace visibility",
         )?;
 
+        let trace_visibility: RationaleTraceVisibility = "privateRejected"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            trace_visibility,
+            RationaleTraceVisibility::PrivateRejected,
+            "camelCase trace visibility",
+        )?;
+
         let import_source_type: ImportSourceType = "eidetic-legacy"
             .parse()
             .map_err(|error| format!("{error}"))?;
@@ -2273,6 +2337,15 @@ mod tests {
             import_source_type,
             ImportSourceType::EideticLegacy,
             "import source type",
+        )?;
+
+        let import_source_type: ImportSourceType = "EideticLegacy"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            import_source_type,
+            ImportSourceType::EideticLegacy,
+            "PascalCase import source type",
         )
     }
 

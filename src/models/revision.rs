@@ -20,6 +20,40 @@
 
 use std::{convert::Infallible, fmt};
 
+fn normalized_supersession_reason_token(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 /// Prefix for revision group IDs.
 pub const REVISION_GROUP_PREFIX: &str = "rev_";
 
@@ -255,7 +289,7 @@ impl SupersessionReason {
     /// Parse from string.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        match normalized_supersession_reason_token(s).as_str() {
             "user_update" | "update" => Self::UserUpdate,
             "curation" => Self::Curation,
             "consolidation" => Self::Consolidation,
@@ -587,6 +621,14 @@ mod tests {
         assert_eq!(
             SupersessionReason::parse_lossy(" SYSTEM_GENERATED "),
             SupersessionReason::SystemGenerated
+        );
+        assert_eq!(
+            SupersessionReason::parse_lossy("systemGenerated"),
+            SupersessionReason::SystemGenerated
+        );
+        assert_eq!(
+            SupersessionReason::parse_lossy("UserUpdate"),
+            SupersessionReason::UserUpdate
         );
     }
 

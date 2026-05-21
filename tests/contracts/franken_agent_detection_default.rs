@@ -321,9 +321,13 @@ fn agent_sources_cli_json_includes_origin_fixtures() -> TestResult {
 fn alias_normalization_is_stable_for_common_cli_names() -> TestResult {
     let aliases = [
         ("codex-cli", "codex"),
+        ("CodexCli", "codex"),
         ("claude-code", "claude"),
+        ("ClaudeCode", "claude"),
         ("gemini-cli", "gemini"),
+        ("geminiCli", "gemini"),
         ("copilot-cli", "copilot_cli"),
+        ("CopilotCli", "copilot_cli"),
     ];
 
     for (alias, canonical) in aliases {

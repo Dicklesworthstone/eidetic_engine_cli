@@ -10,6 +10,40 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+fn normalized_why_tag_token(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 /// Short tag explaining why a result was included.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -150,7 +184,7 @@ impl FromStr for WhyTag {
     type Err = ParseWhyTagError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_why_tag_token(s).as_str() {
             "workspace_scope" => Ok(WhyTag::WorkspaceScope),
             "tag_match" => Ok(WhyTag::TagMatch),
             "proven_rule" => Ok(WhyTag::ProvenRule),
@@ -189,6 +223,27 @@ mod tests {
             })?;
             assert_eq!(parsed, *tag);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn tags_parse_operator_spelling_variants() -> Result<(), String> {
+        let variants = [
+            (" Workspace-Scope ", WhyTag::WorkspaceScope),
+            ("highConfidence", WhyTag::HighConfidence),
+            ("SemanticMatch", WhyTag::SemanticMatch),
+            ("supportsEvidence", WhyTag::SupportsEvidence),
+            ("ProceduralGuidance", WhyTag::ProceduralGuidance),
+            ("fallbackSource", WhyTag::FallbackSource),
+        ];
+
+        for (raw, expected) in variants {
+            let parsed: WhyTag = raw.parse().map_err(|error: ParseWhyTagError| {
+                format!("why tag should parse from {raw:?}: {error}")
+            })?;
+            assert_eq!(parsed, expected);
+        }
+
         Ok(())
     }
 

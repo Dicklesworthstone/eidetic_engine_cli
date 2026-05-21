@@ -1047,13 +1047,7 @@ fn classify_line(content: &str) -> (CassSpanKind, Option<CassRole>) {
         .get("type")
         .and_then(JsonValue::as_str)
         .unwrap_or_default();
-    let span_kind = match line_type {
-        "tool_use" | "tool-call" | "tool_call" => CassSpanKind::ToolCall,
-        "tool_result" | "tool-result" => CassSpanKind::ToolResult,
-        "summary" => CassSpanKind::Summary,
-        "file" | "file-history-snapshot" => CassSpanKind::File,
-        _ => CassSpanKind::Message,
-    };
+    let span_kind = CassSpanKind::parse_lossy(line_type);
     let role = value
         .get("message")
         .and_then(|message| message.get("role"))
@@ -2035,6 +2029,34 @@ mod tests {
             "tool result kind",
         )?;
         ensure_equal(&spans[1].role, &Some(CassRole::Tool), "tool role")
+    }
+
+    #[test]
+    fn parses_view_line_type_spelling_variants() -> TestResult {
+        let input = br#"{
+          "path": "/tmp/session.jsonl",
+          "lines": [
+            {"line": 3, "content": "{\"type\":\"ToolCall\",\"role\":\"assistant\"}"},
+            {"line": 4, "content": "{\"type\":\"toolResult\",\"role\":\"tool\"}"},
+            {"line": 5, "content": "{\"type\":\"fileHistorySnapshot\"}"},
+            {"line": 6, "content": "{\"type\":\"summary\"}"}
+          ]
+        }"#;
+
+        let spans =
+            parse_view_json(input, "/tmp/session.jsonl").map_err(|error| error.to_string())?;
+        ensure_equal(
+            &spans.iter().map(|span| span.span_kind).collect::<Vec<_>>(),
+            &vec![
+                CassSpanKind::ToolCall,
+                CassSpanKind::ToolResult,
+                CassSpanKind::File,
+                CassSpanKind::Summary,
+            ],
+            "line type variants",
+        )?;
+        ensure_equal(&spans[0].role, &Some(CassRole::Assistant), "tool call role")?;
+        ensure_equal(&spans[1].role, &Some(CassRole::Tool), "tool result role")
     }
 
     #[test]
