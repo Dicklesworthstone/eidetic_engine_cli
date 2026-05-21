@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "search_score_calibration_file_too_large",
+  "introduced_by": { "bead": "bd-1nsk4", "epic_letter": "N" },
+  "surfaces": ["search", "diag search"],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace has .ee/search/calibration.jsonl, but the file is larger than the bounded search score calibration loader limit.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "mkdir -p .ee/search",
+      "truncate -s 67108865 .ee/search/calibration.jsonl",
+      "ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule"
+    ],
+    "invocation": "ee search 'format before release' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "search_score_calibration_file_too_large",
+    "severity": "warning",
+    "message_contains": [
+      ".ee/search/calibration.jsonl",
+      "above the",
+      "search score calibration limit"
+    ],
+    "repair_contains": "Rotate or truncate .ee/search/calibration.jsonl"
+  }
+}

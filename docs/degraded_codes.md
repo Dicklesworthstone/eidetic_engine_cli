@@ -1751,6 +1751,39 @@ ee search 'format before release' --workspace . --json
 
 ---
 
+## `search_score_calibration_file_too_large`
+
+**Severity:** warning
+
+**Surfaces:** search, diag search
+
+**Introduced by:** bd-1nsk4
+
+**Trigger.** A workspace has .ee/search/calibration.jsonl, but the file is larger than the bounded search score calibration loader limit.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+mkdir -p .ee/search
+truncate -s 67108865 .ee/search/calibration.jsonl
+ee remember 'Run cargo fmt before release.' --workspace . --level procedural --kind rule
+```
+
+**Invocation.**
+
+```bash
+ee search 'format before release' --workspace . --json
+```
+
+**Expected emission.** Message contains: `.ee/search/calibration.jsonl ... search score calibration limit`
+
+**Repair hint.** `Rotate or truncate .ee/search/calibration.jsonl`
+
+**Fixture.** [`tests/fixtures/failure_modes/search_score_calibration_file_too_large.json`](../tests/fixtures/failure_modes/search_score_calibration_file_too_large.json)
+
+---
+
 ## `search_score_calibration_rows_corrupt`
 
 **Severity:** warning

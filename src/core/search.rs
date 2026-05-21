@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
 
@@ -14,7 +15,8 @@ use crate::db::{
     generate_audit_id_seeded,
 };
 use crate::models::degradation::{
-    CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE,
+    CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
+    SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE,
 };
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
@@ -63,6 +65,8 @@ pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
 const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
+const MAX_SEARCH_SCORE_CALIBRATION_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS: usize = 1_000;
 const SEARCH_ANALYSIS_CONTENT_KEY: &str = "_ee_analysis_content";
 const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
 const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
@@ -71,6 +75,9 @@ const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
+static SEARCH_SCORE_CALIBRATION_JSONL_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, CachedSearchScoreCalibrationJsonl>>,
+> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct IndexStatusCacheKey {
@@ -705,16 +712,39 @@ impl SearchDegradation {
         corrupt_line_numbers: &[usize],
     ) -> Self {
         let line_summary = line_number_summary(corrupt_line_numbers);
+        let capped_note = if corrupt_rows > corrupt_line_numbers.len() {
+            format!(
+                " Stored diagnostics include the first {} corrupt line numbers.",
+                corrupt_line_numbers.len()
+            )
+        } else {
+            String::new()
+        };
         Self {
             code: SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE.to_string(),
             severity: "warning".to_string(),
             message: format!(
-                "Search score calibration ignored {corrupt_rows} corrupt row{plural} in .ee/search/calibration.jsonl at {line_summary}; {usable_samples} usable sample{sample_plural} remain. Returning conservative [0, 1] intervals unless enough valid rows are present.",
+                "Search score calibration ignored {corrupt_rows} corrupt row{plural} in .ee/search/calibration.jsonl at {line_summary}; {usable_samples} usable sample{sample_plural} remain. Returning conservative [0, 1] intervals unless enough valid rows are present.{capped_note}",
                 plural = if corrupt_rows == 1 { "" } else { "s" },
                 sample_plural = if usable_samples == 1 { "" } else { "s" },
             ),
             repair: Some(
                 "Fix or remove malformed calibration rows; each non-empty row must be JSON with finite score and groundTruthRelevance fields."
+                    .to_string(),
+            ),
+        }
+    }
+
+    #[must_use]
+    fn search_score_calibration_file_too_large(file_size_bytes: u64, max_bytes: u64) -> Self {
+        Self {
+            code: SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE.to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                ".ee/search/calibration.jsonl is {file_size_bytes} bytes, above the {max_bytes} byte search score calibration limit. Skipping JSONL calibration rows and returning conservative intervals unless feedback events provide enough usable samples.",
+            ),
+            repair: Some(
+                "Rotate or truncate .ee/search/calibration.jsonl, then run ee doctor to confirm search calibration health."
                     .to_string(),
             ),
         }
@@ -1548,6 +1578,7 @@ enum SearchScoreCalibrationStatus {
     Absent,
     Insufficient,
     Corrupt,
+    FileTooLarge,
     Calibrated,
 }
 
@@ -1557,9 +1588,47 @@ impl SearchScoreCalibrationStatus {
             Self::Absent => "absent",
             Self::Insufficient => "insufficient",
             Self::Corrupt => "corrupt",
+            Self::FileTooLarge => "file_too_large",
             Self::Calibrated => "calibrated",
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SearchScoreCalibrationJsonlFingerprint {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, Debug)]
+struct SearchScoreCalibrationJsonlLoad {
+    exists: bool,
+    too_large: bool,
+    file_size_bytes: Option<u64>,
+    residuals: Vec<f32>,
+    sample_count: usize,
+    corrupt_row_count: usize,
+    corrupt_line_numbers: Vec<usize>,
+}
+
+impl SearchScoreCalibrationJsonlLoad {
+    fn absent() -> Self {
+        Self {
+            exists: false,
+            too_large: false,
+            file_size_bytes: None,
+            residuals: Vec::new(),
+            sample_count: 0,
+            corrupt_row_count: 0,
+            corrupt_line_numbers: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CachedSearchScoreCalibrationJsonl {
+    fingerprint: SearchScoreCalibrationJsonlFingerprint,
+    load: SearchScoreCalibrationJsonlLoad,
 }
 
 #[derive(Clone, Debug)]
@@ -1570,6 +1639,7 @@ struct SearchScoreCalibration {
     feedback_event_sample_count: usize,
     corrupt_row_count: usize,
     corrupt_line_numbers: Vec<usize>,
+    jsonl_file_size_bytes: Option<u64>,
     residual_quantile: Option<f32>,
 }
 
@@ -1586,34 +1656,13 @@ impl SearchScoreCalibration {
             .join(".ee")
             .join("search")
             .join("calibration.jsonl");
+        let jsonl_load = load_search_score_calibration_jsonl(&path);
 
-        let mut residuals = Vec::new();
-        let mut corrupt_line_numbers = Vec::new();
-        let mut jsonl_sample_count = 0usize;
+        let mut residuals = jsonl_load.residuals.clone();
+        let corrupt_line_numbers = jsonl_load.corrupt_line_numbers.clone();
+        let corrupt_row_count = jsonl_load.corrupt_row_count;
+        let jsonl_sample_count = jsonl_load.sample_count;
         let mut feedback_event_sample_count = 0usize;
-        let jsonl_exists = match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                for (line_number, line) in contents
-                    .lines()
-                    .enumerate()
-                    .map(|(index, line)| (index + 1, line.trim()))
-                    .filter(|(_, line)| !line.is_empty())
-                {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                        corrupt_line_numbers.push(line_number);
-                        continue;
-                    };
-                    let Some(residual) = calibration_residual_from_value(&value) else {
-                        corrupt_line_numbers.push(line_number);
-                        continue;
-                    };
-                    residuals.push(residual);
-                    jsonl_sample_count = jsonl_sample_count.saturating_add(1);
-                }
-                true
-            }
-            Err(_) => false,
-        };
 
         for event in feedback_events {
             let Some(evidence_json) = &event.evidence_json else {
@@ -1629,7 +1678,7 @@ impl SearchScoreCalibration {
             feedback_event_sample_count = feedback_event_sample_count.saturating_add(1);
         }
 
-        if !jsonl_exists && feedback_event_sample_count == 0 {
+        if !jsonl_load.exists && feedback_event_sample_count == 0 {
             return Self {
                 status: SearchScoreCalibrationStatus::Absent,
                 sample_count: 0,
@@ -1637,7 +1686,29 @@ impl SearchScoreCalibration {
                 feedback_event_sample_count: 0,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
+                jsonl_file_size_bytes: None,
                 residual_quantile: None,
+            };
+        }
+
+        if jsonl_load.too_large {
+            let residual_quantile = if residuals.len() < MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+                None
+            } else {
+                Some(split_conformal_quantile(
+                    residuals.clone(),
+                    SEARCH_SCORE_COVERAGE_GUARANTEE,
+                ))
+            };
+            return Self {
+                status: SearchScoreCalibrationStatus::FileTooLarge,
+                sample_count: residuals.len(),
+                jsonl_sample_count,
+                feedback_event_sample_count,
+                corrupt_row_count,
+                corrupt_line_numbers,
+                jsonl_file_size_bytes: jsonl_load.file_size_bytes,
+                residual_quantile,
             };
         }
 
@@ -1655,8 +1726,9 @@ impl SearchScoreCalibration {
                 sample_count: residuals.len(),
                 jsonl_sample_count,
                 feedback_event_sample_count,
-                corrupt_row_count: corrupt_line_numbers.len(),
+                corrupt_row_count,
                 corrupt_line_numbers,
+                jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile,
             };
         }
@@ -1669,6 +1741,7 @@ impl SearchScoreCalibration {
                 feedback_event_sample_count,
                 corrupt_row_count: 0,
                 corrupt_line_numbers: Vec::new(),
+                jsonl_file_size_bytes: jsonl_load.file_size_bytes,
                 residual_quantile: None,
             };
         }
@@ -1680,6 +1753,7 @@ impl SearchScoreCalibration {
             feedback_event_sample_count,
             corrupt_row_count: 0,
             corrupt_line_numbers: Vec::new(),
+            jsonl_file_size_bytes: jsonl_load.file_size_bytes,
             residual_quantile: Some(split_conformal_quantile(
                 residuals,
                 SEARCH_SCORE_COVERAGE_GUARANTEE,
@@ -1719,6 +1793,120 @@ impl SearchScoreCalibration {
             "corruptLineNumbers": &self.corrupt_line_numbers,
             "residualQuantile": self.residual_quantile.map(round_metric_f32),
         })
+    }
+}
+
+fn load_search_score_calibration_jsonl(path: &Path) -> SearchScoreCalibrationJsonlLoad {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return SearchScoreCalibrationJsonlLoad::absent(),
+    };
+    let fingerprint = SearchScoreCalibrationJsonlFingerprint {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    };
+
+    let cache = SEARCH_SCORE_CALIBRATION_JSONL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.lock()
+        && let Some(cached) = cache_guard.get(path)
+        && cached.fingerprint == fingerprint
+    {
+        return cached.load.clone();
+    }
+
+    let load = if metadata.len() > MAX_SEARCH_SCORE_CALIBRATION_BYTES {
+        SearchScoreCalibrationJsonlLoad {
+            exists: true,
+            too_large: true,
+            file_size_bytes: Some(metadata.len()),
+            residuals: Vec::new(),
+            sample_count: 0,
+            corrupt_row_count: 0,
+            corrupt_line_numbers: Vec::new(),
+        }
+    } else {
+        stream_search_score_calibration_jsonl(path, metadata.len())
+    };
+
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert(
+            path.to_path_buf(),
+            CachedSearchScoreCalibrationJsonl {
+                fingerprint,
+                load: load.clone(),
+            },
+        );
+    }
+
+    load
+}
+
+fn stream_search_score_calibration_jsonl(
+    path: &Path,
+    file_size_bytes: u64,
+) -> SearchScoreCalibrationJsonlLoad {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return SearchScoreCalibrationJsonlLoad::absent(),
+    };
+
+    let mut residuals = Vec::new();
+    let mut corrupt_line_numbers = Vec::new();
+    let mut corrupt_row_count = 0usize;
+    let mut sample_count = 0usize;
+    for (index, line_result) in BufReader::new(file).lines().enumerate() {
+        let line_number = index + 1;
+        let Ok(line) = line_result else {
+            record_corrupt_calibration_line(
+                &mut corrupt_line_numbers,
+                &mut corrupt_row_count,
+                line_number,
+            );
+            continue;
+        };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            record_corrupt_calibration_line(
+                &mut corrupt_line_numbers,
+                &mut corrupt_row_count,
+                line_number,
+            );
+            continue;
+        };
+        let Some(residual) = calibration_residual_from_value(&value) else {
+            record_corrupt_calibration_line(
+                &mut corrupt_line_numbers,
+                &mut corrupt_row_count,
+                line_number,
+            );
+            continue;
+        };
+        residuals.push(residual);
+        sample_count = sample_count.saturating_add(1);
+    }
+
+    SearchScoreCalibrationJsonlLoad {
+        exists: true,
+        too_large: false,
+        file_size_bytes: Some(file_size_bytes),
+        residuals,
+        sample_count,
+        corrupt_row_count,
+        corrupt_line_numbers,
+    }
+}
+
+fn record_corrupt_calibration_line(
+    corrupt_line_numbers: &mut Vec<usize>,
+    corrupt_row_count: &mut usize,
+    line_number: usize,
+) {
+    *corrupt_row_count = (*corrupt_row_count).saturating_add(1);
+    if corrupt_line_numbers.len() < MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS {
+        corrupt_line_numbers.push(line_number);
     }
 }
 
@@ -1826,6 +2014,12 @@ fn annotate_hits_with_score_calibration(
                 calibration.sample_count,
                 calibration.corrupt_row_count,
                 &calibration.corrupt_line_numbers,
+            ));
+        }
+        SearchScoreCalibrationStatus::FileTooLarge => {
+            degraded.push(SearchDegradation::search_score_calibration_file_too_large(
+                calibration.jsonl_file_size_bytes.unwrap_or(0),
+                MAX_SEARCH_SCORE_CALIBRATION_BYTES,
             ));
         }
         SearchScoreCalibrationStatus::Absent | SearchScoreCalibrationStatus::Calibrated => {}
@@ -5349,6 +5543,88 @@ mod tests {
                 .and_then(|metadata| metadata.pointer("/scoreCalibration/status"))
                 .and_then(serde_json::Value::as_str),
             Some("corrupt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_file_too_large_degrades_without_reading_jsonl() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-too-large");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        let file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(calibration_dir.join("calibration.jsonl"))
+            .map_err(|error| error.to_string())?;
+        file.set_len(MAX_SEARCH_SCORE_CALIBRATION_BYTES + 1)
+            .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+
+        assert_eq!(
+            calibration.status,
+            SearchScoreCalibrationStatus::FileTooLarge
+        );
+        assert_eq!(calibration.sample_count, 0);
+        assert_eq!(calibration.jsonl_sample_count, 0);
+        assert_eq!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        assert_eq!(calibration.data_json()["status"], "file_too_large");
+
+        let mut hits = vec![synthetic_hit("mem_score_calibration_too_large", 0.8)];
+        let mut degraded = Vec::new();
+        annotate_hits_with_score_calibration(&workspace, None, None, &mut hits, &mut degraded);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(
+            degraded[0].code,
+            SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE
+        );
+        assert_eq!(degraded[0].severity, "warning");
+        assert!(
+            degraded[0].message.contains("above the"),
+            "message should describe the calibration size cap: {}",
+            degraded[0].message
+        );
+        assert_eq!(
+            hits[0]
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pointer("/scoreCalibration/status"))
+                .and_then(serde_json::Value::as_str),
+            Some("file_too_large")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_calibration_corrupt_line_numbers_are_capped() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-corrupt-cap");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        let rows = std::iter::repeat_n(
+            "not json",
+            MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS + 3,
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(calibration_dir.join("calibration.jsonl"), rows)
+            .map_err(|error| error.to_string())?;
+
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Corrupt);
+        assert_eq!(
+            calibration.corrupt_row_count,
+            MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS + 3
+        );
+        assert_eq!(
+            calibration.corrupt_line_numbers.len(),
+            MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS
+        );
+        assert_eq!(
+            calibration.corrupt_line_numbers.last().copied(),
+            Some(MAX_SEARCH_SCORE_CALIBRATION_CORRUPT_LINE_NUMBERS)
         );
         Ok(())
     }

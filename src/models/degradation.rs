@@ -359,6 +359,9 @@ pub const CONFORMAL_CALIBRATION_INSUFFICIENT_CODE: &str = "conformal_calibration
 /// Response degraded code for malformed search score calibration rows.
 pub const SEARCH_SCORE_CALIBRATION_ROWS_CORRUPT_CODE: &str =
     "search_score_calibration_rows_corrupt";
+/// Response degraded code for oversized search score calibration JSONL.
+pub const SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE: &str =
+    "search_score_calibration_file_too_large";
 
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
