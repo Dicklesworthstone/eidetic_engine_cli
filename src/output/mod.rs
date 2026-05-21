@@ -8864,6 +8864,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: why_causal_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::conformal::WHY_CONFORMAL_CONFIDENCE_INTERVALS_SCHEMA_V1,
+            version: "1",
+            description: "Split-conformal confidence interval and prediction-set block emitted by ee why.",
+            category: "context",
+            definition: why_conformal_prediction_set_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.why.v1",
             version: "1",
             description: "Augmentation contract for ee why output with graph-derived explanation blocks.",
@@ -9712,6 +9719,10 @@ fn why_not_selected_schema_definition() -> String {
 
 fn why_causal_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.why.causal.v1.json").to_string()
+}
+
+fn why_conformal_prediction_set_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.why.conformal_prediction_set.v1.json").to_string()
 }
 
 fn why_schema_definition() -> String {

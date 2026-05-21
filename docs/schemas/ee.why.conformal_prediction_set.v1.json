@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.why.conformal_prediction_set.v1.json",
+  "title": "ee.why.conformal_prediction_set.v1",
+  "description": "Split-conformal confidence interval and prediction-set block emitted by ee why.",
+  "type": "object",
+  "required": [
+    "schema",
+    "method",
+    "coverageGuarantee",
+    "alpha",
+    "targetMemoryId",
+    "scoreInterval",
+    "nonconformityQuantile",
+    "calibrationSampleCount",
+    "calibrationStatus",
+    "predictionSet"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.why.conformal_prediction_set.v1"
+    },
+    "method": {
+      "type": "string",
+      "const": "split_conformal_nonconformity"
+    },
+    "coverageGuarantee": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "alpha": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "targetMemoryId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "scoreInterval": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+      }
+    },
+    "nonconformityQuantile": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "calibrationSampleCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "calibrationStatus": {
+      "type": "string",
+      "enum": ["calibrated", "conservative_insufficient_calibration"]
+    },
+    "predictionSet": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/predictionSetEntry"
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "coverageGuarantee", "predictionSet"],
+    "summary": ["schema", "coverageGuarantee", "scoreInterval", "predictionSet"],
+    "standard": ["schema", "method", "coverageGuarantee", "scoreInterval", "predictionSet"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "predictionSetEntry": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "rank",
+        "source",
+        "score",
+        "nonconformityScore",
+        "included"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "nonconformityScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "included": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

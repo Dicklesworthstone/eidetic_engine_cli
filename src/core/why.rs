@@ -17,6 +17,9 @@ use std::{
 };
 
 use crate::config::GRAPH_FEATURE_REVISION_DOMINANCE_ENABLED_KEY;
+use crate::core::conformal::{
+    WhyConformalCandidate, WhyConformalConfidenceIntervals, why_conformal_confidence_intervals,
+};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
@@ -559,6 +562,8 @@ pub struct WhyReport {
     /// not exist OR when the schema migration has not been applied
     /// against an older workspace database.
     pub bayes_posterior: Option<BayesPosteriorSummary>,
+    /// Split-conformal prediction-set view for this explanation.
+    pub confidence_intervals: Option<WhyConformalConfidenceIntervals>,
     /// Optional causal explanation block requested by `ee why --causal-explain`.
     pub causal_explanation: Option<serde_json::Value>,
     /// Optional revision lineage block derived from the revision DAG.
@@ -658,6 +663,7 @@ impl WhyReport {
             agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
+            confidence_intervals: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -713,6 +719,7 @@ impl WhyReport {
             agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
+            confidence_intervals: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -743,6 +750,7 @@ impl WhyReport {
             agent_profile: None,
             lifecycle: None,
             bayes_posterior: None,
+            confidence_intervals: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -849,6 +857,16 @@ impl WhyReport {
     #[must_use]
     pub fn with_bayes_posterior(mut self, summary: Option<BayesPosteriorSummary>) -> Self {
         self.bayes_posterior = summary;
+        self
+    }
+
+    /// Attach the split-conformal prediction-set summary for this why report.
+    #[must_use]
+    pub fn with_confidence_intervals(
+        mut self,
+        confidence_intervals: WhyConformalConfidenceIntervals,
+    ) -> Self {
+        self.confidence_intervals = Some(confidence_intervals);
         self
     }
 
@@ -1192,6 +1210,7 @@ fn explain_memory_inner(
     let above_threshold = memory.confidence >= options.confidence_threshold;
     let agent_profile =
         fetch_agent_profile_selection_explanation(&conn, &memory.workspace_id, memory_id);
+    let conformal_candidates = why_conformal_candidates(memory_id, selection_score, &links);
 
     let latest_pack_selection = match latest_pack_selection(&conn, memory_id) {
         Ok(selection) => selection,
@@ -1260,6 +1279,12 @@ fn explain_memory_inner(
         },
     )
     .with_content(memory.content.clone());
+    let report = report.with_confidence_intervals(why_conformal_confidence_intervals(
+        workspace_path.as_deref(),
+        memory_id,
+        selection_score,
+        conformal_candidates,
+    ));
 
     // N7.1 (bd-17c65.14.7.2 / ADR 0032): attach the Bayesian
     // (alpha, beta) posterior summary so an agent reading `ee why`
@@ -1866,6 +1891,25 @@ struct ReportSelectionInputs {
     degraded: Vec<WhyDegradation>,
     agent_profile: Option<AgentProfileSelectionExplanation>,
     dedup_link: Option<DedupLinkEvidence>,
+}
+
+fn why_conformal_candidates(
+    memory_id: &str,
+    selection_score: f32,
+    links: &[MemoryLinkSummary],
+) -> Vec<WhyConformalCandidate> {
+    let mut candidates = Vec::with_capacity(links.len().saturating_add(1));
+    candidates.push(WhyConformalCandidate {
+        memory_id: memory_id.to_owned(),
+        score: selection_score,
+        source: "target".to_owned(),
+    });
+    candidates.extend(links.iter().map(|link| WhyConformalCandidate {
+        memory_id: link.linked_memory_id.clone(),
+        score: link.confidence,
+        source: format!("link:{}", link.relation),
+    }));
+    candidates
 }
 
 fn build_report(

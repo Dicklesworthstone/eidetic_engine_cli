@@ -33956,6 +33956,37 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "credibleInterval50": posterior_interval_json_value(posterior.credible_interval_50, 0.50),
         })
     });
+    let confidence_intervals = report.confidence_intervals.as_ref().map(|intervals| {
+        let prediction_set = intervals
+            .prediction_set
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "memoryId": &entry.memory_id,
+                    "rank": entry.rank,
+                    "source": &entry.source,
+                    "score": score_json_value(entry.score),
+                    "nonconformityScore": score_json_value(entry.nonconformity_score),
+                    "included": entry.included,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": intervals.schema,
+            "method": intervals.method,
+            "coverageGuarantee": score_json_value(intervals.coverage_guarantee),
+            "alpha": score_json_value(intervals.alpha),
+            "targetMemoryId": &intervals.target_memory_id,
+            "scoreInterval": [
+                score_json_value(intervals.score_interval[0]),
+                score_json_value(intervals.score_interval[1]),
+            ],
+            "nonconformityQuantile": score_json_value(intervals.nonconformity_quantile),
+            "calibrationSampleCount": intervals.calibration_sample_count,
+            "calibrationStatus": intervals.calibration_status,
+            "predictionSet": prediction_set,
+        })
+    });
 
     let degraded = aggregate_why_degraded_json("why", &report.degraded);
 
@@ -34116,6 +34147,13 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         {
             data.insert("revisionLineage".to_owned(), revision_lineage.clone());
         }
+    }
+    if let Some(confidence_intervals) = confidence_intervals
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert("confidenceIntervals".to_owned(), confidence_intervals);
     }
 
     json.to_string()

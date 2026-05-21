@@ -27,6 +27,7 @@ pub mod check;
 pub mod claims;
 pub mod completion_audit;
 pub mod config_surface;
+pub mod conformal;
 pub mod context;
 pub mod curate;
 pub mod degraded_aggregation;

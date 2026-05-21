@@ -171,6 +171,7 @@ pub const KNOWN_SCHEMAS: &[&str] = &[
     ARTIFACT_SUMMARY_SCHEMA_V1,
     PERF_METRIC_SCHEMA_V1,
     PERF_SCHEMA_CATALOG_V1,
+    "ee.why.conformal_prediction_set.v1",
 ];
 
 /// Error returned when schema validation fails.
