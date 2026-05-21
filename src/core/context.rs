@@ -58,7 +58,8 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_search_with_read_connection_seeded, search_degraded_data_json,
+    query_observation_json, run_search_with_read_connection_seeded_and_audit_connection,
+    search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -1213,8 +1214,9 @@ fn run_context_pack_with_performance_inner(
     };
 
     let search_start = Instant::now();
+    let mut context_write_connection = DbConnection::open_file(&database_path).ok();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut search_report = match run_search_with_read_connection_seeded(
+    let mut search_report = match run_search_with_read_connection_seeded_and_audit_connection(
         &SearchOptions {
             workspace_path: options.workspace_path.clone(),
             database_path: Some(database_path.clone()),
@@ -1240,6 +1242,7 @@ fn run_context_pack_with_performance_inner(
             strict_scope: options.strict_scope,
         },
         read_connection,
+        context_write_connection.as_ref(),
         determinism,
     ) {
         Ok(report) => report,
@@ -1786,28 +1789,61 @@ fn run_context_pack_with_performance_inner(
 
     let persist_start = Instant::now();
     trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
-    let persist_result = DbConnection::open_file(&database_path)
-        .map_err(|error| error.to_string())
-        .and_then(|connection| match pack_record_persistence {
-            PackRecordPersistence::Ambient => persist_pack_record(
-                &connection,
-                &options.workspace_path,
-                &request,
-                &draft,
-                &degraded,
-            )
-            .map_err(|error| error.to_string()),
-            PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
-                &connection,
-                &options.workspace_path,
-                &request,
-                &draft,
-                &degraded,
-                pack_id_seed,
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string()),
-        });
+    let mut persist_connection = None;
+    let persist_result = match context_write_connection.take() {
+        Some(connection) => {
+            let result = match pack_record_persistence {
+                PackRecordPersistence::Ambient => persist_pack_record(
+                    &connection,
+                    &options.workspace_path,
+                    &request,
+                    &draft,
+                    &degraded,
+                )
+                .map_err(|error| error.to_string()),
+                PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
+                    &connection,
+                    &options.workspace_path,
+                    &request,
+                    &draft,
+                    &degraded,
+                    pack_id_seed,
+                )
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            };
+            persist_connection = Some(connection);
+            result
+        }
+        None => match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                let result = match pack_record_persistence {
+                    PackRecordPersistence::Ambient => persist_pack_record(
+                        &connection,
+                        &options.workspace_path,
+                        &request,
+                        &draft,
+                        &degraded,
+                    )
+                    .map_err(|error| error.to_string()),
+                    PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
+                        &connection,
+                        &options.workspace_path,
+                        &request,
+                        &draft,
+                        &degraded,
+                        pack_id_seed,
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+                };
+                persist_connection = Some(connection);
+                result
+            }
+            Err(error) => Err(error.to_string()),
+        },
+    };
+    let persist_succeeded = persist_result.is_ok();
     if let Err(persist_error) = persist_result {
         push_degradation(
             &mut response_degraded,
@@ -1856,7 +1892,19 @@ fn run_context_pack_with_performance_inner(
     // `pack.included_mem` row per selected item. Privacy: only the
     // BLAKE3 prefix of the query reaches the audit log. Failures are
     // swallowed so an audit append never blocks a successful pack.
-    audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
+    if persist_succeeded {
+        if let Some(connection) = persist_connection.as_ref() {
+            audit_context_pack_assembly_with_connection(
+                &connection,
+                &options.workspace_path,
+                &response,
+            );
+        } else {
+            audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
+        }
+    } else {
+        audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
+    }
 
     Ok(ContextPackPerformanceRun {
         response,
@@ -1872,6 +1920,14 @@ fn audit_context_pack_assembly(
     let Ok(conn) = DbConnection::open_file(database_path) else {
         return;
     };
+    audit_context_pack_assembly_with_connection(&conn, workspace_path, response);
+}
+
+fn audit_context_pack_assembly_with_connection(
+    conn: &DbConnection,
+    workspace_path: &Path,
+    response: &ContextResponse,
+) {
     let canonical_workspace = workspace_path
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
