@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const SCHEMA_DOCS: &[(&str, &str)] = &[
-    ("ee.response.v2", "ee.response.v1.json"),
+    ("ee.response.v2", "ee.response.v2.json"),
     ("ee.error.v2", "ee.error.v2.json"),
     ("ee.pack.v2", "ee.pack.v2.json"),
     ("ee.search.v1", "ee.search.v1.json"),
