@@ -44,6 +44,68 @@ Each section lists the bead ID, the surface affected, a `Before` /
 `ee migrate run` is sufficient to handle the data-side of the
 migration.
 
+### N7.1 — Bayesian memory posterior columns and optional backfill
+
+**Bead.** bd-17c65.14.7.2
+
+**Surfaces.** `ee migrate run`, `ee why --json`, memory export/import.
+
+**Before (v0.1).**
+```json
+{"data":{"confidence":0.8}}
+```
+
+Confidence was a scalar. Existing databases did not have
+`memories.bayes_alpha` or `memories.bayes_beta`, so strict consumers could
+not distinguish high confidence backed by one observation from high
+confidence backed by many observations.
+
+**After (v0.2).**
+```json
+{"data":{"bayesPosterior":{"schema":"ee.bayes.posterior.v1","alpha":1.6,"beta":0.4,"mean":0.8}}}
+```
+
+The schema migration adds `bayes_alpha REAL NOT NULL DEFAULT 0.5` and
+`bayes_beta REAL NOT NULL DEFAULT 0.5`. `ee why --json` reports
+`data.bayesPosterior` when those columns are readable. Export/import keeps
+the fields as additive optional memory-record fields.
+
+**Backfill modes.**
+
+- Default `ee migrate run`: leave existing memories at the Jeffreys prior
+  `(0.5, 0.5)`.
+- `ee migrate run --bayes-backfill-from-utility`: after schema migration,
+  inverse-fit legacy confidence into `(alpha, beta)` with total weight `2.0`
+  (`0.8 -> alpha=1.6, beta=0.4`).
+- `ee migrate run --bayes-backfill-from-feedback-events`: after schema
+  migration, replay stored memory feedback events through the Beta-Bernoulli
+  update rule.
+
+The two explicit backfill flags are mutually exclusive. Each changed memory
+gets a `memory.bayes_posterior_updated` audit row with `backfillSource`
+identifying the selected mode.
+
+**Agent rewrite.**
+```python
+posterior = response["data"].get("bayesPosterior")
+if posterior:
+    confidence = posterior["mean"]
+    evidence = posterior["effectiveSampleSize"]
+else:
+    confidence = response["data"].get("confidence")
+    evidence = None
+```
+
+**Migration tool.** Required for v0.1 databases. Use default mode for a clean
+prior; choose exactly one explicit backfill flag only when preserving legacy
+confidence or replaying feedback events is operationally required.
+
+**Verification.** `tests/bayesian_backfill_unit.rs`,
+`tests/bayesian_posterior_update_unit.rs`, and
+`tests/why_renders_credible_interval_unit.rs` cover the posterior math,
+update rule, and `ee why --json` renderer. CLI parser/help coverage for the
+backfill flags lives in `src/cli/mod.rs`.
+
 ### N8 — model status reranker posture
 
 **Bead.** bd-17c65.14.8

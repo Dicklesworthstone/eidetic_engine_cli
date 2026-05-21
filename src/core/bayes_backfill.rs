@@ -87,6 +87,14 @@ pub fn backfill_workspace(
         ..BackfillReport::default()
     };
 
+    tracing::info!(
+        target: "ee::trust::bayes",
+        mode = mode.audit_source(),
+        n_memories = report.scanned,
+        harmful_weight,
+        "starting Bayes posterior backfill"
+    );
+
     for memory in &memories {
         let derived = match mode {
             BackfillMode::FromUtility { weight_hundredths } => {
@@ -190,6 +198,15 @@ pub fn backfill_workspace(
 
         report.updated += 1;
     }
+
+    tracing::info!(
+        target: "ee::trust::bayes",
+        mode = mode.audit_source(),
+        n_memories = report.scanned,
+        n_migrated = report.updated,
+        n_skipped = report.skipped,
+        "completed Bayes posterior backfill"
+    );
 
     Ok(report)
 }

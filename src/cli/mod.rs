@@ -1624,6 +1624,36 @@ pub struct MigrateRunArgs {
     /// Report what would be applied without mutating the database.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// After schema migration, backfill Bayes posterior columns from legacy confidence.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "bayes_backfill_from_feedback_events"
+    )]
+    pub bayes_backfill_from_utility: bool,
+
+    /// After schema migration, backfill Bayes posterior columns by replaying feedback events.
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        conflicts_with = "bayes_backfill_from_utility"
+    )]
+    pub bayes_backfill_from_feedback_events: bool,
+}
+
+impl MigrateRunArgs {
+    fn bayes_backfill_mode(&self) -> Option<crate::core::bayes_backfill::BackfillMode> {
+        if self.bayes_backfill_from_utility {
+            Some(crate::core::bayes_backfill::BackfillMode::FromUtility {
+                weight_hundredths: 200,
+            })
+        } else if self.bayes_backfill_from_feedback_events {
+            Some(crate::core::bayes_backfill::BackfillMode::FromFeedbackEvents)
+        } else {
+            None
+        }
+    }
 }
 
 /// Arguments for `ee migrate shard-fanout`.
@@ -29261,6 +29291,80 @@ fn migration_index_rebuild_report_json(
     })
 }
 
+fn bayes_backfill_plan_json(
+    mode: Option<crate::core::bayes_backfill::BackfillMode>,
+    dry_run: bool,
+) -> serde_json::Value {
+    match mode {
+        Some(mode) => serde_json::json!({
+            "mode": mode.audit_source(),
+            "dryRun": dry_run,
+            "wouldRunAfterMigrations": true,
+            "harmfulWeight": crate::core::bayes::DEFAULT_HARMFUL_WEIGHT,
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn run_migrate_bayes_backfill(
+    conn: &crate::db::DbConnection,
+    workspace_path: &Path,
+    mode: Option<crate::core::bayes_backfill::BackfillMode>,
+) -> Result<serde_json::Value, DomainError> {
+    let Some(mode) = mode else {
+        return Ok(serde_json::Value::Null);
+    };
+
+    let workspace_id = migration_audit_workspace_id(conn, workspace_path)
+        .unwrap_or_else(|| crate::core::workspace::stable_workspace_id(workspace_path));
+    let report = crate::core::bayes_backfill::backfill_workspace(
+        conn,
+        &workspace_id,
+        mode,
+        crate::core::bayes::DEFAULT_HARMFUL_WEIGHT,
+        Some("ee migrate run"),
+    )?;
+
+    Ok(serde_json::json!({
+        "mode": mode.audit_source(),
+        "dryRun": false,
+        "workspaceId": workspace_id,
+        "scanned": report.scanned,
+        "updated": report.updated,
+        "skipped": report.skipped,
+        "harmfulWeight": crate::core::bayes::DEFAULT_HARMFUL_WEIGHT,
+    }))
+}
+
+fn bayes_backfill_human_summary(value: &serde_json::Value) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    let mode = value.get("mode")?.as_str()?;
+    if value
+        .get("dryRun")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(format!("{mode} planned after schema migrations"));
+    }
+    let scanned = value
+        .get("scanned")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let updated = value
+        .get("updated")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let skipped = value
+        .get("skipped")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some(format!(
+        "{mode} scanned {scanned}, updated {updated}, skipped {skipped}"
+    ))
+}
+
 fn run_post_migration_index_rebuild(
     conn: &crate::db::DbConnection,
     workspace_path: &Path,
@@ -29422,6 +29526,7 @@ where
     // Dry-run: report what would be applied without mutating.
     if args.dry_run {
         let pending_count = pending_summaries.len();
+        let bayes_backfill = bayes_backfill_plan_json(args.bayes_backfill_mode(), true);
         let json = serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
@@ -29432,6 +29537,7 @@ where
                 "wouldApply": pending_summaries,
                 "wouldApplyCount": pending_count,
                 "postMigrationIndexRebuild": migration_index_rebuild_dry_run_json(pending_count),
+                "bayesBackfill": bayes_backfill.clone(),
                 "schemaVersion": conn.schema_version().unwrap_or(None),
             },
             "degraded": []
@@ -29458,6 +29564,9 @@ where
                     .filter(|m| !conn.has_migration(m.version()).unwrap_or(true))
                 {
                     out.push_str(&format!("  v{} {}\n", m.version(), m.name()));
+                }
+                if let Some(summary) = bayes_backfill_human_summary(&bayes_backfill) {
+                    out.push_str(&format!("Bayes backfill: {summary}\n"));
                 }
                 let _ = write_stdout(stdout, &out);
             }
@@ -29494,6 +29603,11 @@ where
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown")
         .to_string();
+    let bayes_backfill =
+        match run_migrate_bayes_backfill(&conn, &workspace_path, args.bayes_backfill_mode()) {
+            Ok(report) => report,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
     let applied_count = applied.len();
     let skipped_count = skipped.len();
     let json = serde_json::json!({
@@ -29509,6 +29623,7 @@ where
             "skippedCount": skipped_count,
             "schemaVersion": post_version,
             "postMigrationIndexRebuild": post_migration_index_rebuild.clone(),
+            "bayesBackfill": bayes_backfill.clone(),
             "upToDate": true,
         },
         "degraded": []
@@ -29545,6 +29660,9 @@ where
             out.push_str(&format!(
                 "Post-migration index rebuild: {post_migration_index_rebuild_status}\n"
             ));
+            if let Some(summary) = bayes_backfill_human_summary(&bayes_backfill) {
+                out.push_str(&format!("Bayes backfill: {summary}\n"));
+            }
             let _ = write_stdout(stdout, &out);
         }
     }
@@ -43592,6 +43710,77 @@ mod tests {
             &after,
             &(true, Some(Command::Status(StatusArgs::default()))),
             "--json after status parse",
+        )
+    }
+
+    #[test]
+    fn migrate_run_bayes_backfill_flags_are_parseable_and_documented() -> TestResult {
+        let utility =
+            Cli::try_parse_from(["ee", "migrate", "run", "--bayes-backfill-from-utility"])
+                .map_err(|error| {
+                    format!("failed to parse utility backfill flag: {:?}", error.kind())
+                })?;
+        match utility.command {
+            Some(Command::Migrate(super::MigrateCommand::Run(args))) => {
+                ensure(
+                    args.bayes_backfill_from_utility,
+                    "utility backfill flag parsed",
+                )?;
+                ensure(
+                    !args.bayes_backfill_from_feedback_events,
+                    "feedback backfill flag defaults false",
+                )?;
+            }
+            other => return Err(format!("expected migrate run command, got {other:?}")),
+        }
+
+        let feedback = Cli::try_parse_from([
+            "ee",
+            "migrate",
+            "run",
+            "--bayes-backfill-from-feedback-events",
+        ])
+        .map_err(|error| format!("failed to parse feedback backfill flag: {:?}", error.kind()))?;
+        match feedback.command {
+            Some(Command::Migrate(super::MigrateCommand::Run(args))) => {
+                ensure(
+                    !args.bayes_backfill_from_utility,
+                    "utility backfill flag defaults false",
+                )?;
+                ensure(
+                    args.bayes_backfill_from_feedback_events,
+                    "feedback backfill flag parsed",
+                )?;
+            }
+            other => return Err(format!("expected migrate run command, got {other:?}")),
+        }
+
+        let conflict = Cli::try_parse_from([
+            "ee",
+            "migrate",
+            "run",
+            "--bayes-backfill-from-utility",
+            "--bayes-backfill-from-feedback-events",
+        ])
+        .expect_err("backfill modes are mutually exclusive");
+        ensure_equal(
+            &conflict.kind(),
+            &ErrorKind::ArgumentConflict,
+            "backfill mode conflict",
+        )?;
+
+        let (exit, stdout, stderr) = invoke(&["ee", "migrate", "run", "--help"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "migrate run help exit")?;
+        ensure(stderr.is_empty(), "migrate run help stderr clean")?;
+        ensure_contains(
+            &stdout,
+            "--bayes-backfill-from-utility",
+            "migrate run help utility backfill flag",
+        )?;
+        ensure_contains(
+            &stdout,
+            "--bayes-backfill-from-feedback-events",
+            "migrate run help feedback backfill flag",
         )
     }
 
