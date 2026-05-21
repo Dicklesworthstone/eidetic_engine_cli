@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.context.delta.v1.json",
+  "title": "ee.context.delta.v1",
+  "description": "Transport-time delta envelope for ee context --since. The server verifies that priorPackHash names a pack record emitted by ee for the same workspace, assembles the new pack normally, then emits an item-scoped delta from that prior record to the new pack. v1 changes are additive only; breaking changes require ee.context.delta.v2. The envelope is intentionally custom rather than RFC 6902 JSON Patch because ee deltas are memory-item scoped, carry tokenSavings metadata, and use field-level redaction safety semantics.",
+  "type": "object",
+  "required": ["schema", "success", "data", "degraded"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.context.delta.v1"},
+    "success": {"type": "boolean", "const": true},
+    "data": {"$ref": "#/$defs/contextDelta"},
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "contextDelta": {
+      "type": "object",
+      "required": [
+        "priorPackHash",
+        "newPackHash",
+        "items",
+        "tokenSavings",
+        "serverDecision"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "priorPackHash": {
+          "type": "string",
+          "description": "Hash supplied through --since. It must name a pack record emitted by ee for this workspace; otherwise ee returns a full pack with context_delta_prior_unknown."
+        },
+        "newPackHash": {
+          "type": "string",
+          "description": "Hash of the freshly assembled full pack. This hash is identical to the hash returned by ee context without --since for the same input state."
+        },
+        "workspaceId": {"type": ["string", "null"]},
+        "baseDbGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "newDbGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "priorFeatureFlagSetHash": {"type": ["string", "null"]},
+        "newFeatureFlagSetHash": {"type": ["string", "null"]},
+        "items": {"$ref": "#/$defs/itemDiff"},
+        "tokenSavings": {"$ref": "#/$defs/tokenSavings"},
+        "serverDecision": {
+          "type": "object",
+          "required": ["computedFromServerVerifiedPackRecord", "deltaChained", "format"],
+          "additionalProperties": false,
+          "properties": {
+            "computedFromServerVerifiedPackRecord": {"type": "boolean", "const": true},
+            "deltaChained": {"type": "boolean", "const": false},
+            "format": {"type": "string", "const": "json"},
+            "fallbackReason": {
+              "type": ["string", "null"],
+              "enum": [
+                null,
+                "prior_unknown",
+                "delta_larger_than_full",
+                "redaction_drift",
+                "compute_budget_exceeded",
+                "envelope_oversized",
+                "prior_corrupted",
+                "format_unsupported",
+                "feature_flag_drift"
+              ]
+            }
+          }
+        },
+        "trace": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+          "description": "Optional tracing summary. Implementations should prefer structured logs for detailed timing."
+        }
+      }
+    },
+    "itemDiff": {
+      "type": "object",
+      "required": ["added", "removed", "modified"],
+      "additionalProperties": false,
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/packItem"},
+          "description": "Full new-pack item objects that were absent from the prior pack."
+        },
+        "removed": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Item ids present in the prior pack and absent from the new pack."
+        },
+        "modified": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/modifiedItem"},
+          "description": "Item ids present in both packs with one or more changed fields."
+        }
+      }
+    },
+    "modifiedItem": {
+      "type": "object",
+      "required": ["id", "fieldChanges"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "fieldChanges": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/fieldChange"}
+        }
+      }
+    },
+    "fieldChange": {
+      "oneOf": [
+        {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"$ref": "#/$defs/jsonValue"},
+            {"$ref": "#/$defs/jsonValue"}
+          ],
+          "description": "Ordinary [old, new] field change."
+        },
+        {
+          "type": "object",
+          "required": ["newValue", "oldValueOmitted", "reason"],
+          "additionalProperties": false,
+          "properties": {
+            "newValue": {"$ref": "#/$defs/jsonValue"},
+            "oldValueOmitted": {"type": "boolean", "const": true},
+            "reason": {
+              "type": "string",
+              "enum": ["redaction_drift", "policy_restricted"]
+            }
+          },
+          "description": "Redaction-safe change where the old value is intentionally omitted."
+        }
+      ]
+    },
+    "tokenSavings": {
+      "type": "object",
+      "required": [
+        "fullBytes",
+        "deltaBytes",
+        "savedBytes",
+        "savedPercent",
+        "netPackTokens"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fullBytes": {"type": "integer", "minimum": 0},
+        "deltaBytes": {"type": "integer", "minimum": 0},
+        "savedBytes": {"type": "integer"},
+        "savedPercent": {"type": "number"},
+        "netPackTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Logical token count of the new full pack after applying the delta. Agents must budget base pack tokens plus the delta payload until they replace their local base."
+        }
+      }
+    },
+    "packItem": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": {"$ref": "#/$defs/jsonValue"},
+      "properties": {
+        "id": {"type": "string"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      }
+    },
+    "jsonValue": {
+      "description": "Any JSON value.",
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      ]
+    }
+  }
+}
