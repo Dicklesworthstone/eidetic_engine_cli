@@ -11,7 +11,37 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 fn normalized_decision_plane_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Schema identifier for decision plane records.
@@ -427,6 +457,14 @@ mod tests {
         );
         assert_eq!(
             DecisionPlane::from_str("CACHE_ADMISSION").expect("uppercase plane parses"),
+            DecisionPlane::CacheAdmission
+        );
+        assert_eq!(
+            DecisionPlane::from_str("repairOrder").expect("camelCase plane parses"),
+            DecisionPlane::RepairOrder
+        );
+        assert_eq!(
+            DecisionPlane::from_str("CacheAdmission").expect("PascalCase plane parses"),
             DecisionPlane::CacheAdmission
         );
     }

@@ -15,7 +15,37 @@ use std::fmt;
 use std::str::FromStr;
 
 fn normalized_preflight_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Schema version for preflight run.
@@ -1387,9 +1417,29 @@ mod tests {
             "risk category alias",
         )?;
         ensure(
+            RiskCategory::from_str("ExternalService"),
+            Ok(RiskCategory::ExternalService),
+            "risk category PascalCase alias",
+        )?;
+        ensure(
+            RiskCategory::from_str("resourceExhaustion"),
+            Ok(RiskCategory::ResourceExhaustion),
+            "risk category camelCase alias",
+        )?;
+        ensure(
             TripwireType::from_str("RESOURCE-THRESHOLD"),
             Ok(TripwireType::ResourceThreshold),
             "tripwire type alias",
+        )?;
+        ensure(
+            TripwireType::from_str("fileChange"),
+            Ok(TripwireType::FileChange),
+            "tripwire type camelCase alias",
+        )?;
+        ensure(
+            TripwireType::from_str("ServiceHealth"),
+            Ok(TripwireType::ServiceHealth),
+            "tripwire type PascalCase alias",
         )?;
         ensure(
             TripwireAction::from_str(" Warn "),

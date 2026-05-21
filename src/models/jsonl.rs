@@ -583,7 +583,37 @@ impl FromStr for ExportScope {
 }
 
 fn normalized_jsonl_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Export header record with trust and import metadata (EE-266).
@@ -2089,6 +2119,11 @@ mod tests {
             " Metadata-Only ".parse::<ExportScope>(),
             Ok(ExportScope::MetadataOnly),
             "export scope trims, lowercases, and accepts hyphen separator",
+        )?;
+        ensure(
+            "metadataOnly".parse::<ExportScope>(),
+            Ok(ExportScope::MetadataOnly),
+            "export scope accepts camelCase",
         )
     }
 
@@ -2930,6 +2965,21 @@ mod tests {
             " CASS-Import ".parse::<ImportSource>(),
             Ok(ImportSource::CassImport),
             "import source trims, lowercases, and accepts hyphen separator",
+        )?;
+        ensure(
+            "cassImport".parse::<ImportSource>(),
+            Ok(ImportSource::CassImport),
+            "import source accepts camelCase",
+        )?;
+        ensure(
+            "LegacyScan".parse::<ImportSource>(),
+            Ok(ImportSource::LegacyScan),
+            "import source accepts PascalCase",
+        )?;
+        ensure(
+            "externalImport".parse::<ImportSource>(),
+            Ok(ImportSource::ExternalImport),
+            "import source accepts camelCase for external imports",
         )
     }
 

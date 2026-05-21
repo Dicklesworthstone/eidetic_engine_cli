@@ -64,7 +64,37 @@ fn rounded_metric(value: f64) -> f64 {
 }
 
 fn normalized_causal_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 // ============================================================================
@@ -1640,6 +1670,13 @@ mod tests {
                 "outcome",
             )?;
         }
+        for method in CausalEvidenceMethod::all() {
+            ensure(
+                CausalEvidenceMethod::from_str(method.as_str()),
+                Ok(method),
+                "method",
+            )?;
+        }
         for strength in CausalEvidenceStrength::all() {
             ensure(
                 CausalEvidenceStrength::from_str(strength.as_str()),
@@ -1690,6 +1727,16 @@ mod tests {
             "channel alias",
         )?;
         ensure(
+            CausalExposureChannel::from_str("contextPack"),
+            Ok(CausalExposureChannel::ContextPack),
+            "channel camelCase alias",
+        )?;
+        ensure(
+            CausalExposureChannel::from_str("ManualReference"),
+            Ok(CausalExposureChannel::ManualReference),
+            "channel PascalCase alias",
+        )?;
+        ensure(
             DecisionTraceOutcome::from_str("USED"),
             Ok(DecisionTraceOutcome::Used),
             "outcome alias",
@@ -1700,9 +1747,19 @@ mod tests {
             "method alias",
         )?;
         ensure(
+            CausalEvidenceMethod::from_str("GraphInferred"),
+            Ok(CausalEvidenceMethod::GraphInferred),
+            "method PascalCase alias",
+        )?;
+        ensure(
             CausalEvidenceStrength::from_str("Replay-Supported"),
             Ok(CausalEvidenceStrength::ReplaySupported),
             "strength alias",
+        )?;
+        ensure(
+            CausalEvidenceStrength::from_str("experimentSupported"),
+            Ok(CausalEvidenceStrength::ExperimentSupported),
+            "strength camelCase alias",
         )?;
         ensure(
             UpliftDirection::from_str(" Positive "),
@@ -1715,6 +1772,11 @@ mod tests {
             "confounder alias",
         )?;
         ensure(
+            ConfounderKind::from_str("ExternalIntervention"),
+            Ok(ConfounderKind::ExternalIntervention),
+            "confounder PascalCase alias",
+        )?;
+        ensure(
             PromotionAction::from_str("QUARANTINE"),
             Ok(PromotionAction::Quarantine),
             "action alias",
@@ -1723,6 +1785,11 @@ mod tests {
             PromotionPlanStatus::from_str("dry-run-ready"),
             Ok(PromotionPlanStatus::DryRunReady),
             "status alias",
+        )?;
+        ensure(
+            PromotionPlanStatus::from_str("dryRunReady"),
+            Ok(PromotionPlanStatus::DryRunReady),
+            "status camelCase alias",
         )
     }
 

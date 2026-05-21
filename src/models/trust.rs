@@ -18,7 +18,37 @@ use crate::models::memory::MemoryLevel;
 use crate::models::rule::RuleMaturity;
 
 fn normalized_trust_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Stable schema marker for local signing-key policy decisions.
@@ -284,6 +314,18 @@ mod tests {
         assert_eq!(
             TrustClass::from_str(" Agent-Validated "),
             Ok(TrustClass::AgentValidated)
+        );
+        assert_eq!(
+            TrustClass::from_str("humanExplicit"),
+            Ok(TrustClass::HumanExplicit)
+        );
+        assert_eq!(
+            TrustClass::from_str("CassEvidence"),
+            Ok(TrustClass::CassEvidence)
+        );
+        assert_eq!(
+            TrustClass::from_str("legacyImport"),
+            Ok(TrustClass::LegacyImport)
         );
     }
 

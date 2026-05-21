@@ -8,7 +8,37 @@ use std::fmt;
 use std::str::FromStr;
 
 fn normalized_rule_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Scope of a procedural rule - where it applies.
@@ -850,6 +880,14 @@ mod tests {
             RuleScope::from_str(" File-Pattern "),
             Ok(RuleScope::FilePattern)
         );
+        assert_eq!(
+            RuleScope::from_str("filePattern"),
+            Ok(RuleScope::FilePattern)
+        );
+        assert_eq!(
+            RuleScope::from_str("FilePattern"),
+            Ok(RuleScope::FilePattern)
+        );
     }
 
     #[test]
@@ -909,6 +947,14 @@ mod tests {
         assert_eq!(
             RuleLifecycleTrigger::from_str(" Outcome-Helpful "),
             Ok(RuleLifecycleTrigger::OutcomeHelpful)
+        );
+        assert_eq!(
+            RuleLifecycleTrigger::from_str("validationContradicted"),
+            Ok(RuleLifecycleTrigger::ValidationContradicted)
+        );
+        assert_eq!(
+            RuleLifecycleTrigger::from_str("ReviewApproved"),
+            Ok(RuleLifecycleTrigger::ReviewApproved)
         );
     }
 

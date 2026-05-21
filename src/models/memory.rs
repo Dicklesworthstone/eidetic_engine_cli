@@ -35,7 +35,37 @@ fn normalized_memory_level_token(input: &str) -> String {
 }
 
 fn normalized_memory_kind_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('_', "-")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('-');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('-');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Maximum number of bytes accepted for a single tag.
@@ -569,9 +599,22 @@ mod tests {
             MemoryKind::from_str("PLAYBOOK_STEP").expect("known underscore alias parses"),
             MemoryKind::PlaybookStep
         );
+        assert_eq!(
+            MemoryKind::from_str("AntiPattern").expect("known PascalCase alias parses"),
+            MemoryKind::AntiPattern
+        );
+        assert_eq!(
+            MemoryKind::from_str("playbookStep").expect("known camelCase alias parses"),
+            MemoryKind::PlaybookStep
+        );
         assert!(MemoryKind::is_known(" Anti_Pattern "));
+        assert!(MemoryKind::is_known("AntiPattern"));
 
         let custom = MemoryKind::from_str(" Project_Rule ").expect("custom identifier normalizes");
+        assert_eq!(custom.as_str(), "project-rule");
+        assert!(matches!(custom, MemoryKind::Custom(_)));
+
+        let custom = MemoryKind::from_str(" ProjectRule ").expect("custom camelCase normalizes");
         assert_eq!(custom.as_str(), "project-rule");
         assert!(matches!(custom, MemoryKind::Custom(_)));
     }
