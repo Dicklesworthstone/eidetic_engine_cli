@@ -196,16 +196,50 @@ impl ClaimEvidenceKind {
     }
 }
 
+fn normalized_claim_evidence_kind_token(value: &str) -> String {
+    let trimmed = value.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
+}
+
 impl std::str::FromStr for ClaimEvidenceKind {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "file-hash" | "file_hash" => Ok(Self::FileHash),
-            "command-exit" | "command_exit" => Ok(Self::CommandExit),
-            "memory-presence" | "memory_presence" => Ok(Self::MemoryPresence),
-            "rule-status" | "rule_status" => Ok(Self::RuleStatus),
-            other => Err(format!("unknown claim evidence kind: {other}")),
+        match normalized_claim_evidence_kind_token(value).as_str() {
+            "file_hash" => Ok(Self::FileHash),
+            "command_exit" => Ok(Self::CommandExit),
+            "memory_presence" => Ok(Self::MemoryPresence),
+            "rule_status" => Ok(Self::RuleStatus),
+            _ => Err(format!("unknown claim evidence kind: {value}")),
         }
     }
 }
@@ -1721,6 +1755,38 @@ claims:
             &CLAIM_VERIFY_SCHEMA_V1,
             &"ee.claim_verify.v1",
             "claim verify schema",
+        )
+    }
+
+    #[test]
+    fn claim_evidence_kind_accepts_operator_spelling_variants() -> TestResult {
+        ensure_equal(
+            &" file-hash "
+                .parse::<ClaimEvidenceKind>()
+                .map_err(|error| error.to_string())?,
+            &ClaimEvidenceKind::FileHash,
+            "trimmed file hash",
+        )?;
+        ensure_equal(
+            &"commandExit"
+                .parse::<ClaimEvidenceKind>()
+                .map_err(|error| error.to_string())?,
+            &ClaimEvidenceKind::CommandExit,
+            "camel command exit",
+        )?;
+        ensure_equal(
+            &"MEMORY_PRESENCE"
+                .parse::<ClaimEvidenceKind>()
+                .map_err(|error| error.to_string())?,
+            &ClaimEvidenceKind::MemoryPresence,
+            "uppercase memory presence",
+        )?;
+        ensure_equal(
+            &"RuleStatus"
+                .parse::<ClaimEvidenceKind>()
+                .map_err(|error| error.to_string())?,
+            &ClaimEvidenceKind::RuleStatus,
+            "pascal rule status",
         )
     }
 
