@@ -613,6 +613,10 @@ impl RuleShowReport {
             "  Feedback: +{} / -{}\n",
             rule.positive_feedback_count, rule.negative_feedback_count
         ));
+        output.push_str(&format!(
+            "  Validation: passes={} contradictions={}\n",
+            rule.validation_passes, rule.validation_contradictions
+        ));
         if !rule.tags.is_empty() {
             output.push_str(&format!("  Tags: {}\n", rule.tags.join(", ")));
         }
@@ -1193,6 +1197,8 @@ pub struct RuleDetails {
     pub lifecycle: RuleLifecycle,
     pub positive_feedback_count: u32,
     pub negative_feedback_count: u32,
+    pub validation_passes: u32,
+    pub validation_contradictions: u32,
     pub last_applied_at: Option<String>,
     pub last_validated_at: Option<String>,
     pub superseded_by: Option<String>,
@@ -1599,6 +1605,8 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         .or_else(|| stored.superseded_by.clone());
     let positive_feedback_delta = positive_feedback_delta(trigger, &evidence);
     let negative_feedback_delta = negative_feedback_delta(trigger, &evidence);
+    let validation_passes_delta = validation_passes_delta(trigger, &evidence);
+    let validation_contradictions_delta = validation_contradictions_delta(trigger, &evidence);
     let last_validated_at = last_validated_marker(trigger, &marked_at);
     let changed = stored.maturity != next_maturity
         || score_changed(stored.confidence, next_confidence)
@@ -1606,6 +1614,8 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         || stored.superseded_by != next_superseded_by
         || positive_feedback_delta > 0
         || negative_feedback_delta > 0
+        || validation_passes_delta > 0
+        || validation_contradictions_delta > 0
         || last_validated_at.is_some();
 
     let dry_rule = apply_mark_to_detail(
@@ -1617,6 +1627,8 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
             superseded_by: next_superseded_by.clone(),
             positive_feedback_delta,
             negative_feedback_delta,
+            validation_passes_delta,
+            validation_contradictions_delta,
             last_validated_at: last_validated_at.clone(),
             updated_at: &marked_at,
         },
@@ -1650,12 +1662,20 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
         utility: next_utility,
         positive_feedback_delta,
         negative_feedback_delta,
+        validation_passes_delta,
+        validation_contradictions_delta,
         last_validated_at: last_validated_at.clone(),
         superseded_by: next_superseded_by,
         updated_at: marked_at,
     };
-    let audit_details =
-        rule_mark_audit_details(&rule_id, &transition, &evidence, changed, &previous_detail);
+    let audit_details = rule_mark_audit_details(
+        &rule_id,
+        &transition,
+        &evidence,
+        changed,
+        &previous_detail,
+        &dry_rule,
+    );
 
     connection
         .with_transaction(|| {
@@ -2993,6 +3013,8 @@ fn load_rule_details(
         lifecycle,
         positive_feedback_count: stored.positive_feedback_count,
         negative_feedback_count: stored.negative_feedback_count,
+        validation_passes: stored.validation_passes,
+        validation_contradictions: stored.validation_contradictions,
         last_applied_at: stored.last_applied_at,
         last_validated_at: stored.last_validated_at,
         superseded_by: stored.superseded_by,
@@ -3162,7 +3184,6 @@ fn build_rule_lifecycle_evidence(
 fn positive_feedback_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecycleEvidence) -> u32 {
     match trigger {
         RuleLifecycleTrigger::OutcomeHelpful => evidence.helpful_outcomes.max(1),
-        RuleLifecycleTrigger::ValidationPassed => evidence.validation_passes.max(1),
         RuleLifecycleTrigger::ReviewApproved => u32::from(evidence.review_approved).max(1),
         _ => 0,
     }
@@ -3171,6 +3192,22 @@ fn positive_feedback_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecyc
 fn negative_feedback_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecycleEvidence) -> u32 {
     match trigger {
         RuleLifecycleTrigger::OutcomeHarmful => evidence.harmful_outcomes.max(1),
+        _ => 0,
+    }
+}
+
+fn validation_passes_delta(trigger: RuleLifecycleTrigger, evidence: &RuleLifecycleEvidence) -> u32 {
+    match trigger {
+        RuleLifecycleTrigger::ValidationPassed => evidence.validation_passes.max(1),
+        _ => 0,
+    }
+}
+
+fn validation_contradictions_delta(
+    trigger: RuleLifecycleTrigger,
+    evidence: &RuleLifecycleEvidence,
+) -> u32 {
+    match trigger {
         RuleLifecycleTrigger::ValidationContradicted => evidence.validation_contradictions.max(1),
         _ => 0,
     }
@@ -3202,6 +3239,8 @@ struct ApplyMarkToDetail<'a> {
     superseded_by: Option<String>,
     positive_feedback_delta: u32,
     negative_feedback_delta: u32,
+    validation_passes_delta: u32,
+    validation_contradictions_delta: u32,
     last_validated_at: Option<String>,
     updated_at: &'a str,
 }
@@ -3218,6 +3257,12 @@ fn apply_mark_to_detail(mut detail: RuleDetails, input: ApplyMarkToDetail<'_>) -
     detail.negative_feedback_count = detail
         .negative_feedback_count
         .saturating_add(input.negative_feedback_delta);
+    detail.validation_passes = detail
+        .validation_passes
+        .saturating_add(input.validation_passes_delta);
+    detail.validation_contradictions = detail
+        .validation_contradictions
+        .saturating_add(input.validation_contradictions_delta);
     if input.last_validated_at.is_some() {
         detail.last_validated_at = input.last_validated_at;
     }
@@ -3936,6 +3981,7 @@ fn rule_mark_audit_details(
     evidence: &RuleLifecycleEvidence,
     changed: bool,
     previous_rule: &RuleDetails,
+    rule: &RuleDetails,
 ) -> String {
     serde_json::json!({
         "schema": "ee.audit.rule_mark.v1",
@@ -3950,6 +3996,10 @@ fn rule_mark_audit_details(
         "reason": &transition.reason,
         "previousConfidence": previous_rule.confidence,
         "previousUtility": previous_rule.utility,
+        "previousValidationPasses": previous_rule.validation_passes,
+        "previousValidationContradictions": previous_rule.validation_contradictions,
+        "validationPasses": rule.validation_passes,
+        "validationContradictions": rule.validation_contradictions,
         "confidenceDelta": transition.confidence_delta,
         "utilityDelta": transition.utility_delta,
         "evidence": lifecycle_evidence_report(evidence),
@@ -4147,6 +4197,58 @@ mod tests {
         } else {
             Err(message.into())
         }
+    }
+
+    #[test]
+    fn validation_triggers_use_validation_counters_not_feedback_counters() -> TestResult {
+        let validation_passed = RuleLifecycleEvidence::new()
+            .with_helpful_outcomes(3)
+            .with_validation_passes(2)
+            .with_review_approved(true);
+        ensure(
+            positive_feedback_delta(RuleLifecycleTrigger::ValidationPassed, &validation_passed)
+                == 0,
+            "validation_passed must not bump positive feedback",
+        )?;
+        ensure(
+            validation_passes_delta(RuleLifecycleTrigger::ValidationPassed, &validation_passed)
+                == 2,
+            "validation_passed must bump validation passes",
+        )?;
+        ensure(
+            validation_contradictions_delta(
+                RuleLifecycleTrigger::ValidationPassed,
+                &validation_passed,
+            ) == 0,
+            "validation_passed must not bump validation contradictions",
+        )?;
+
+        let validation_contradicted =
+            RuleLifecycleEvidence::new().with_validation_contradictions(4);
+        ensure(
+            negative_feedback_delta(
+                RuleLifecycleTrigger::ValidationContradicted,
+                &validation_contradicted,
+            ) == 0,
+            "validation_contradicted must not bump negative feedback",
+        )?;
+        ensure(
+            validation_contradictions_delta(
+                RuleLifecycleTrigger::ValidationContradicted,
+                &validation_contradicted,
+            ) == 4,
+            "validation_contradicted must bump validation contradictions",
+        )?;
+
+        let outcome_helpful = RuleLifecycleEvidence::new().with_helpful_outcomes(3);
+        ensure(
+            positive_feedback_delta(RuleLifecycleTrigger::OutcomeHelpful, &outcome_helpful) == 3,
+            "outcome_helpful still bumps positive feedback",
+        )?;
+        ensure(
+            validation_passes_delta(RuleLifecycleTrigger::OutcomeHelpful, &outcome_helpful) == 0,
+            "outcome_helpful must not bump validation passes",
+        )
     }
 
     #[test]

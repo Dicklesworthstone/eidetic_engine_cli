@@ -5011,6 +5011,19 @@ END;
     "blake3:v039_audit_uuid_v7_ids_2026_05_07",
 );
 
+/// V059: Persist validation counters separately from outcome feedback counters.
+pub const V059_RULE_VALIDATION_COUNTERS: Migration = Migration::new(
+    59,
+    "rule_validation_counters",
+    r#"
+ALTER TABLE procedural_rules ADD COLUMN validation_passes INTEGER NOT NULL DEFAULT 0
+    CHECK (validation_passes >= 0);
+ALTER TABLE procedural_rules ADD COLUMN validation_contradictions INTEGER NOT NULL DEFAULT 0
+    CHECK (validation_contradictions >= 0);
+"#,
+    "blake3:v059_rule_validation_counters_2026_05_20",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5071,6 +5084,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V056_MEMORY_CONTENT_SIMHASH,
     V057_MESH_IMPORT_LEDGER_SHARE_WITHDRAW,
     V058_PREFLIGHT_BYPASS_TOKEN_SCOPE,
+    V059_RULE_VALIDATION_COUNTERS,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -11553,6 +11567,8 @@ pub struct UpdateProceduralRuleLifecycleInput {
     pub utility: f32,
     pub positive_feedback_delta: u32,
     pub negative_feedback_delta: u32,
+    pub validation_passes_delta: u32,
+    pub validation_contradictions_delta: u32,
     pub last_validated_at: Option<String>,
     pub superseded_by: Option<String>,
     pub updated_at: String,
@@ -11574,6 +11590,8 @@ pub struct StoredProceduralRule {
     pub protected: bool,
     pub positive_feedback_count: u32,
     pub negative_feedback_count: u32,
+    pub validation_passes: u32,
+    pub validation_contradictions: u32,
     pub last_applied_at: Option<String>,
     pub last_validated_at: Option<String>,
     pub superseded_by: Option<String>,
@@ -12464,7 +12482,7 @@ impl DbConnection {
     pub fn get_procedural_rule(&self, id: &str) -> Result<Option<StoredProceduralRule>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id = ?1",
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE id = ?1",
             &[Value::Text(id.to_string())],
         )?;
 
@@ -12484,7 +12502,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredProceduralRule>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) AND (?3 IS NULL OR scope = ?3) AND (?4 = 1 OR tombstoned_at IS NULL) ORDER BY updated_at DESC, id ASC",
+            "SELECT id, workspace_id, content, confidence, utility, importance, trust_class, scope, scope_pattern, maturity, protected, positive_feedback_count, negative_feedback_count, validation_passes, validation_contradictions, last_applied_at, last_validated_at, superseded_by, created_at, updated_at, tombstoned_at FROM procedural_rules WHERE workspace_id = ?1 AND (?2 IS NULL OR maturity = ?2) AND (?3 IS NULL OR scope = ?3) AND (?4 = 1 OR tombstoned_at IS NULL) ORDER BY updated_at DESC, id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 maturity.map_or(Value::Null, |value| Value::Text(value.to_string())),
@@ -12525,13 +12543,15 @@ impl DbConnection {
     ) -> Result<bool> {
         let affected = self.execute_for(
             DbOperation::Execute,
-            "UPDATE procedural_rules SET maturity = ?1, confidence = ?2, utility = ?3, positive_feedback_count = positive_feedback_count + ?4, negative_feedback_count = negative_feedback_count + ?5, last_validated_at = COALESCE(?6, last_validated_at), superseded_by = ?7, updated_at = ?8 WHERE id = ?9 AND workspace_id = ?10 AND tombstoned_at IS NULL",
+            "UPDATE procedural_rules SET maturity = ?1, confidence = ?2, utility = ?3, positive_feedback_count = positive_feedback_count + ?4, negative_feedback_count = negative_feedback_count + ?5, validation_passes = validation_passes + ?6, validation_contradictions = validation_contradictions + ?7, last_validated_at = COALESCE(?8, last_validated_at), superseded_by = ?9, updated_at = ?10 WHERE id = ?11 AND workspace_id = ?12 AND tombstoned_at IS NULL",
             &[
                 Value::Text(input.maturity.clone()),
                 Value::Float(input.confidence),
                 Value::Float(input.utility),
                 Value::BigInt(i64::from(input.positive_feedback_delta)),
                 Value::BigInt(i64::from(input.negative_feedback_delta)),
+                Value::BigInt(i64::from(input.validation_passes_delta)),
+                Value::BigInt(i64::from(input.validation_contradictions_delta)),
                 input
                     .last_validated_at
                     .as_ref()
@@ -12678,12 +12698,19 @@ fn stored_procedural_rule_from_row(row: &Row) -> Result<StoredProceduralRule> {
             DbOperation::Query,
             "negative_feedback_count",
         )?,
-        last_applied_at: optional_text(row, 13)?.map(str::to_string),
-        last_validated_at: optional_text(row, 14)?.map(str::to_string),
-        superseded_by: optional_text(row, 15)?.map(str::to_string),
-        created_at: required_text(row, 16, DbOperation::Query, "created_at")?.to_string(),
-        updated_at: required_text(row, 17, DbOperation::Query, "updated_at")?.to_string(),
-        tombstoned_at: optional_text(row, 18)?.map(str::to_string),
+        validation_passes: required_u32(row, 13, DbOperation::Query, "validation_passes")?,
+        validation_contradictions: required_u32(
+            row,
+            14,
+            DbOperation::Query,
+            "validation_contradictions",
+        )?,
+        last_applied_at: optional_text(row, 15)?.map(str::to_string),
+        last_validated_at: optional_text(row, 16)?.map(str::to_string),
+        superseded_by: optional_text(row, 17)?.map(str::to_string),
+        created_at: required_text(row, 18, DbOperation::Query, "created_at")?.to_string(),
+        updated_at: required_text(row, 19, DbOperation::Query, "updated_at")?.to_string(),
+        tombstoned_at: optional_text(row, 20)?.map(str::to_string),
     })
 }
 
@@ -17160,10 +17187,11 @@ mod tests {
 
     use super::{
         CreateArtifactInput, CreateArtifactLinkInput, CreateGraphAlgorithmResultInput,
-        CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateTaskEpisodeInput,
-        CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
-        DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
-        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction, WalCheckpointMode,
+        CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateProceduralRuleInput,
+        CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DatabaseLocation,
+        DatabaseOpenMode, DbConnection, DbError, DbOperation, GraphSnapshotStatus,
+        GraphSnapshotType, MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn,
+        StoredEpisodeAction, UpdateProceduralRuleLifecycleInput, WalCheckpointMode,
         file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
         lock_file_write_owner_gate, subsystem_name,
     };
@@ -17514,6 +17542,89 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn procedural_rule_validation_counters_default_and_increment() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        let rule_id = "rule_01234567890123456789012345";
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/tmp/rule-validation-counter".to_owned(),
+                name: Some("rule-validation-counter".to_owned()),
+            },
+        )?;
+        connection.insert_procedural_rule(
+            rule_id,
+            &CreateProceduralRuleInput {
+                workspace_id: workspace_id.to_owned(),
+                content: "Run cargo fmt --check before release.".to_owned(),
+                confidence: 0.80,
+                utility: 0.60,
+                importance: 0.50,
+                trust_class: "human_explicit".to_owned(),
+                scope: "workspace".to_owned(),
+                scope_pattern: None,
+                maturity: "candidate".to_owned(),
+                protected: false,
+                source_memory_ids: Vec::new(),
+                tags: Vec::new(),
+            },
+        )?;
+
+        let stored = connection
+            .get_procedural_rule(rule_id)?
+            .ok_or_else(|| "stored rule missing".to_owned())?;
+        ensure_equal(&stored.validation_passes, &0, "validation passes default")?;
+        ensure_equal(
+            &stored.validation_contradictions,
+            &0,
+            "validation contradictions default",
+        )?;
+
+        connection.update_procedural_rule_lifecycle(
+            rule_id,
+            &UpdateProceduralRuleLifecycleInput {
+                workspace_id: workspace_id.to_owned(),
+                maturity: "validated".to_owned(),
+                confidence: 0.86,
+                utility: 0.64,
+                positive_feedback_delta: 0,
+                negative_feedback_delta: 0,
+                validation_passes_delta: 2,
+                validation_contradictions_delta: 1,
+                last_validated_at: Some("2026-05-20T00:00:00Z".to_owned()),
+                superseded_by: None,
+                updated_at: "2026-05-20T00:00:00Z".to_owned(),
+            },
+        )?;
+
+        let updated = connection
+            .get_procedural_rule(rule_id)?
+            .ok_or_else(|| "updated rule missing".to_owned())?;
+        ensure_equal(
+            &updated.positive_feedback_count,
+            &0,
+            "validation update must not bump positive feedback",
+        )?;
+        ensure_equal(
+            &updated.negative_feedback_count,
+            &0,
+            "validation update must not bump negative feedback",
+        )?;
+        ensure_equal(
+            &updated.validation_passes,
+            &2,
+            "validation passes increment",
+        )?;
+        ensure_equal(
+            &updated.validation_contradictions,
+            &1,
+            "validation contradictions increment",
+        )
     }
 
     #[test]

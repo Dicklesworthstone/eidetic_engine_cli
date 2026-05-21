@@ -315,6 +315,18 @@ fn rule_mark_and_update_are_audited_and_idempotent() -> TestResult {
         mark_dry_run_json["data"]["status"] == "would_mark",
         "rule mark dry-run reports planned mark",
     )?;
+    ensure(
+        mark_dry_run_json["data"]["previousRule"]["validationPasses"] == 0,
+        "rule mark dry-run starts with zero validation passes",
+    )?;
+    ensure(
+        mark_dry_run_json["data"]["rule"]["validationPasses"] == 1,
+        "rule mark dry-run previews validation pass increment",
+    )?;
+    ensure(
+        mark_dry_run_json["data"]["rule"]["positiveFeedbackCount"] == 0,
+        "rule mark dry-run does not count validation as positive feedback",
+    )?;
 
     let mark_apply_output = run_step(
         &workspace,
@@ -334,6 +346,14 @@ fn rule_mark_and_update_are_audited_and_idempotent() -> TestResult {
     ensure(
         mark_apply_json["data"]["indexJobId"].is_string(),
         "rule mark queues index job",
+    )?;
+    ensure(
+        mark_apply_json["data"]["rule"]["validationPasses"] == 1,
+        "rule mark apply increments validation passes",
+    )?;
+    ensure(
+        mark_apply_json["data"]["rule"]["positiveFeedbackCount"] == 0,
+        "rule mark apply keeps outcome feedback separate",
     )?;
 
     let update_args = |dry_run: bool| {
@@ -425,6 +445,18 @@ fn rule_mark_and_update_are_audited_and_idempotent() -> TestResult {
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "updated rule missing from DB".to_owned())?;
     ensure(rule.maturity == "validated", "DB rule is validated")?;
+    ensure(
+        rule.validation_passes == 1,
+        "DB rule records validation pass count",
+    )?;
+    ensure(
+        rule.validation_contradictions == 0,
+        "DB rule starts with zero validation contradictions",
+    )?;
+    ensure(
+        rule.positive_feedback_count == 0,
+        "DB rule does not count validation as positive feedback",
+    )?;
     ensure(rule.protected, "DB rule is protected")?;
     ensure(rule.scope == "directory", "DB rule scope updated")?;
     ensure(

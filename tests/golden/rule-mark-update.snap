@@ -59,6 +59,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.5,
+        "validationContradictions": 0,
+        "validationPasses": 0,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "rule": {
@@ -83,7 +85,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": false,
         "scope": "workspace",
         "scopePattern": null,
@@ -98,6 +100,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.54,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "ruleId": "<RULE_ID>",
@@ -182,6 +186,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.5,
+        "validationContradictions": 0,
+        "validationPasses": 0,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "rule": {
@@ -206,7 +212,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": false,
         "scope": "workspace",
         "scopePattern": null,
@@ -221,6 +227,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.54,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "ruleId": "<RULE_ID>",
@@ -288,7 +296,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": false,
         "scope": "workspace",
         "scopePattern": null,
@@ -303,6 +311,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.54,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "rule": {
@@ -327,7 +337,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": true,
         "scope": "directory",
         "scopePattern": "src/**",
@@ -343,6 +353,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.66,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "ruleId": "<RULE_ID>",
@@ -398,7 +410,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": false,
         "scope": "workspace",
         "scopePattern": null,
@@ -413,6 +425,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.54,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "rule": {
@@ -437,7 +451,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": true,
         "scope": "directory",
         "scopePattern": "src/**",
@@ -453,6 +467,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.66,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "ruleId": "<RULE_ID>",
@@ -499,7 +515,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": true,
         "scope": "directory",
         "scopePattern": "src/**",
@@ -515,6 +531,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.66,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "rule": {
@@ -539,7 +557,7 @@
         },
         "maturity": "validated",
         "negativeFeedbackCount": 0,
-        "positiveFeedbackCount": 1,
+        "positiveFeedbackCount": 0,
         "protected": true,
         "scope": "directory",
         "scopePattern": "src/**",
@@ -555,6 +573,8 @@
         "trustClass": "human_explicit",
         "updatedAt": "<TIMESTAMP>",
         "utility": 0.66,
+        "validationContradictions": 0,
+        "validationPasses": 1,
         "workspaceId": "<WORKSPACE_ID>"
       },
       "ruleId": "<RULE_ID>",
