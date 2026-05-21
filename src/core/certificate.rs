@@ -1860,10 +1860,7 @@ fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
     reject_key_symlink_chain(&temp_path)?;
     ensure_key_temp_path_absent(&temp_path)?;
 
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)?;
+    let mut file = open_certificate_key_temp_file_for_write(&temp_path)?;
     file.write_all(bytes)?;
     file.sync_all()?;
     drop(file);
@@ -1871,6 +1868,49 @@ fn write_key_file_no_symlinks(path: &Path, bytes: &[u8]) -> io::Result<()> {
     publish_key_temp_file(&temp_path, path)?;
     reject_key_symlink_chain(path)?;
     ensure_key_final_path_writable(path)
+}
+
+fn open_certificate_key_temp_file_for_write(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_certificate_key_open_no_follow(&mut options);
+    configure_certificate_key_private_create_mode(&mut options);
+    let file = options.open(path)?;
+    ensure_certificate_key_private_permissions(&file, path)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn configure_certificate_key_private_create_mode(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.mode(0o600);
+}
+
+#[cfg(not(unix))]
+fn configure_certificate_key_private_create_mode(_options: &mut OpenOptions) {}
+
+#[cfg(unix)]
+fn ensure_certificate_key_private_permissions(file: &File, path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = file.metadata()?.permissions().mode() & 0o777;
+    if mode == 0o600 {
+        return Ok(());
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "certificate key temp path permissions are {mode:o}, expected 600: {}",
+            path.display()
+        ),
+    ))
+}
+
+#[cfg(not(unix))]
+fn ensure_certificate_key_private_permissions(_file: &File, _path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn publish_key_temp_file(temp_path: &Path, path: &Path) -> io::Result<()> {
@@ -3072,6 +3112,48 @@ mod tests {
             Ok(_) => Err("final key path must not be published".to_owned()),
             Err(error) => Err(format!("final key metadata failed: {error}")),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_key_temp_open_uses_private_permissions_before_secret_write() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+        let temp_path = key_temp_path(&key_path).map_err(|error| error.to_string())?;
+        fs::create_dir_all(key_path.parent().expect("key parent"))
+            .map_err(|error| error.to_string())?;
+
+        let file = open_certificate_key_temp_file_for_write(&temp_path)
+            .map_err(|error| error.to_string())?;
+        let mode = file
+            .metadata()
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+
+        ensure_equal(&mode, &0o600, "temp key file mode before write")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_key_write_publishes_private_key_mode() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let key_path = dir.path().join("keys").join("workspace.ed25519");
+
+        write_key_file_no_symlinks(&key_path, b"private key bytes")
+            .map_err(|error| error.to_string())?;
+        let mode = fs::symlink_metadata(&key_path)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+
+        ensure_equal(&mode, &0o600, "published key file mode")
     }
 
     #[cfg(unix)]
