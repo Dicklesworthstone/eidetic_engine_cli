@@ -6375,26 +6375,31 @@ fn filter_candidates_by_memory_scope(
         );
     }
 
+    let candidate_memory_ids: BTreeSet<String> = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect();
+    let candidate_memory_refs: Vec<&str> =
+        candidate_memory_ids.iter().map(String::as_str).collect();
+    let (scope_memories, read_error): (BTreeMap<String, StoredMemory>, Option<String>) =
+        match connection.get_memories_batch(&candidate_memory_refs) {
+            Ok(memories) => (memories, None),
+            Err(error) => (BTreeMap::new(), Some(error.to_string())),
+        };
+
     let mut scoped = Vec::with_capacity(candidates.len());
-    let mut read_error: Option<String> = None;
     for candidate in std::mem::take(candidates) {
         let memory_id = candidate.memory_id.to_string();
-        match connection.get_memory(&memory_id) {
-            Ok(Some(memory)) => {
-                let in_scope = scope_context.memory_in_scope(&memory);
+        match scope_memories.get(&memory_id) {
+            Some(memory) => {
+                let in_scope = scope_context.memory_in_scope(memory);
                 stats.record_candidate_id(in_scope, Some(&memory_id));
                 if in_scope {
                     scoped.push(candidate);
                 }
             }
-            Ok(None) => {
+            None => {
                 stats.record_candidate_id(false, Some(&memory_id));
-            }
-            Err(error) => {
-                stats.record_candidate_id(false, Some(&memory_id));
-                if read_error.is_none() {
-                    read_error = Some(error.to_string());
-                }
             }
         }
     }
