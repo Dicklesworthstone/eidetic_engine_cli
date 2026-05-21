@@ -51,9 +51,10 @@ use crate::models::{
 };
 use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
-    ContextResponseSeverity, PackAdvisoryBanner, PackAdvisoryNote, PackAssemblySlo,
-    PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics, PackSectionMetric,
-    PackSelectedItem, PackSelectionAudit, PackSelectionStep, RenderedPackProvenance,
+    ContextResponseSeverity, PACK_BUDGET_TOO_SMALL_CODE, PackAdvisoryBanner, PackAdvisoryNote,
+    PackAssemblySlo, PackItemProvenance, PackOmission, PackOmissionMetrics, PackQualityMetrics,
+    PackSectionMetric, PackSelectedItem, PackSelectionAudit, PackSelectionStep,
+    RenderedPackProvenance,
 };
 use crate::steward::{
     MAINTENANCE_JOB_LIST_SCHEMA_V1, MAINTENANCE_JOB_ROW_SCHEMA_V1, MAINTENANCE_JOB_SHOW_SCHEMA_V1,
@@ -2762,6 +2763,67 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
         "sources",
         &string_array_json(degraded.sources.iter().map(String::as_str)),
     );
+    if degraded.code == PACK_BUDGET_TOO_SMALL_CODE {
+        let recovery_actions = pack_budget_too_small_recovery_actions();
+        obj.field_object("details", |details| {
+            details.field_array_of_objects(
+                "recovery",
+                &recovery_actions,
+                build_recovery_action_fields,
+            );
+        });
+    }
+}
+
+fn pack_budget_too_small_recovery_actions() -> Vec<RecoveryAction> {
+    vec![
+        RecoveryAction::flag(
+            1,
+            "--max-tokens",
+            "8000",
+            "Most common cause; raise budget until a section fits.",
+        ),
+        RecoveryAction::flag(
+            2,
+            "--profile",
+            "compact",
+            "Switch to the lowest-quota profile if budget can't be raised.",
+        ),
+        RecoveryAction::broaden(
+            3,
+            "Candidate pool may be too narrow; broaden query text or relax EQL tag filters.",
+        ),
+    ]
+}
+
+fn build_recovery_action_fields(obj: &mut JsonBuilder, action: &RecoveryAction) {
+    obj.field_u32("priority", u32::from(action.priority));
+    obj.field_str("kind", action.kind.as_str());
+    obj.field_str("rationale", &action.rationale);
+    if let Some(name) = &action.env_name {
+        obj.field_str("envName", name);
+    }
+    if let Some(hint) = &action.value_hint {
+        obj.field_str("valueHint", hint);
+    }
+    if let Some(path) = &action.config_path {
+        obj.field_str("configPath", path);
+    }
+    if let Some(key) = &action.config_key {
+        obj.field_str("configKey", key);
+    }
+    if let Some(flag) = &action.flag_name {
+        obj.field_str("flagName", flag);
+    }
+    if let Some(command) = &action.command {
+        obj.field_str("command", command);
+    }
+    if let Some(results) = &action.results_in {
+        obj.field_str("resultsIn", results);
+    }
+    if let Some(example) = &action.example {
+        obj.field_str("example", example);
+    }
 }
 
 fn aggregate_status_degradations(
@@ -11628,35 +11690,7 @@ fn domain_error_details(
         );
     }
     if !recovery_actions.is_empty() {
-        details.field_array_of_objects("recovery", recovery_actions, |obj, action| {
-            obj.field_u32("priority", u32::from(action.priority));
-            obj.field_str("kind", action.kind.as_str());
-            obj.field_str("rationale", &action.rationale);
-            if let Some(name) = &action.env_name {
-                obj.field_str("envName", name);
-            }
-            if let Some(hint) = &action.value_hint {
-                obj.field_str("valueHint", hint);
-            }
-            if let Some(path) = &action.config_path {
-                obj.field_str("configPath", path);
-            }
-            if let Some(key) = &action.config_key {
-                obj.field_str("configKey", key);
-            }
-            if let Some(flag) = &action.flag_name {
-                obj.field_str("flagName", flag);
-            }
-            if let Some(command) = &action.command {
-                obj.field_str("command", command);
-            }
-            if let Some(results) = &action.results_in {
-                obj.field_str("resultsIn", results);
-            }
-            if let Some(example) = &action.example {
-                obj.field_str("example", example);
-            }
-        });
+        details.field_array_of_objects("recovery", recovery_actions, build_recovery_action_fields);
     }
 }
 
@@ -15361,17 +15395,18 @@ mod tests {
     use super::{
         Degradation, DegradationSeverity, FieldProfile, JsonBuilder, OutputContext,
         OutputEnvironment, Renderer, ResponseEnvelope, SHADOW_RUN_SCHEMA_V1, ShadowRunComparison,
-        ShadowRunReport, error_response_json, escape_json_string, help_text, human_status,
-        render_agent_docs_json, render_agent_docs_toon, render_context_response_json,
-        render_context_response_markdown, render_context_response_toon,
-        render_dependency_diagnostics_json, render_doctor_json, render_doctor_json_filtered,
-        render_doctor_toon, render_handoff_create_json, render_handoff_create_toon,
-        render_handoff_inspect_json, render_handoff_inspect_toon, render_handoff_preview_json,
-        render_handoff_preview_toon, render_handoff_resume_json, render_handoff_resume_toon,
-        render_health_json, render_health_toon, render_integrity_diagnostics_json,
-        render_learn_cluster_json, render_learn_experiment_proposal_human,
-        render_learn_experiment_proposal_json, render_learn_experiment_proposal_toon,
-        render_memory_history_json, render_memory_history_toon, render_memory_impact_analysis_json,
+        ShadowRunReport, build_aggregated_degradation, error_response_json, escape_json_string,
+        help_text, human_status, render_agent_docs_json, render_agent_docs_toon,
+        render_context_response_json, render_context_response_markdown,
+        render_context_response_toon, render_dependency_diagnostics_json, render_doctor_json,
+        render_doctor_json_filtered, render_doctor_toon, render_handoff_create_json,
+        render_handoff_create_toon, render_handoff_inspect_json, render_handoff_inspect_toon,
+        render_handoff_preview_json, render_handoff_preview_toon, render_handoff_resume_json,
+        render_handoff_resume_toon, render_health_json, render_health_toon,
+        render_integrity_diagnostics_json, render_learn_cluster_json,
+        render_learn_experiment_proposal_human, render_learn_experiment_proposal_json,
+        render_learn_experiment_proposal_toon, render_memory_history_json,
+        render_memory_history_toon, render_memory_impact_analysis_json,
         render_memory_impact_analysis_markdown, render_memory_impact_analysis_toon,
         render_memory_list_json, render_memory_show_human, render_memory_show_json,
         render_pack_dna_json, render_pack_dna_markdown, render_pack_dna_toon,
@@ -15387,6 +15422,7 @@ mod tests {
         render_why_causal_markdown, render_why_causal_toon, status_response_json,
     };
     use crate::core::agent_docs::AgentDocsReport;
+    use crate::core::degraded_aggregation::AggregatedDegradation;
     use crate::core::doctor::{
         DependencyContractEntry, DependencyDiagnosticsReport, DependencyDiagnosticsSummary,
         DependencyDriftPolicy, DependencyFeatureProfile, DependencySource, DoctorReport,
@@ -15440,9 +15476,10 @@ mod tests {
         UnitScore,
     };
     use crate::pack::{
-        ContextRequest, ContextResponse, PackAssemblySlo, PackAssemblySloActuals, PackCandidate,
-        PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection,
-        PackTrustSignal, TokenBudget, assemble_draft,
+        ContextRequest, ContextResponse, PACK_BUDGET_TOO_SMALL_CODE, PackAssemblySlo,
+        PackAssemblySloActuals, PackCandidate, PackCandidateInput, PackProvenance,
+        PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal, TokenBudget,
+        assemble_draft,
         budget_classifier::{AdaptiveBudgetInput, classify_adaptive_budget},
     };
 
@@ -15699,6 +15736,53 @@ mod tests {
         assert_eq!(degraded[0]["code"], "clustering_threshold_too_strict");
         assert_eq!(degraded[0]["sources"], serde_json::json!(["learn_cluster"]));
         Ok(())
+    }
+
+    #[test]
+    fn pack_budget_too_small_degradation_renders_recovery_details() -> TestResult {
+        let degraded = AggregatedDegradation {
+            code: PACK_BUDGET_TOO_SMALL_CODE.to_string(),
+            severity: "warning".to_string(),
+            message: "Pack budget could not fit any candidate.".to_string(),
+            repair: String::new(),
+            sources: vec!["context".to_string()],
+        };
+        let mut builder = JsonBuilder::with_capacity(512);
+
+        build_aggregated_degradation(&mut builder, &degraded);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&builder.finish()).map_err(|error| error.to_string())?;
+        let recovery = parsed
+            .pointer("/details/recovery")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "details.recovery must be an array".to_string())?;
+
+        ensure_equal(&recovery.len(), &3, "recovery action count")?;
+        ensure_equal(
+            &recovery[0]["flagName"].as_str(),
+            &Some("--max-tokens"),
+            "first recovery flag",
+        )?;
+        ensure_equal(
+            &recovery[0]["valueHint"].as_str(),
+            &Some("8000"),
+            "first recovery value hint",
+        )?;
+        ensure_equal(
+            &recovery[1]["flagName"].as_str(),
+            &Some("--profile"),
+            "second recovery flag",
+        )?;
+        ensure_equal(
+            &recovery[1]["valueHint"].as_str(),
+            &Some("compact"),
+            "second recovery value hint",
+        )?;
+        ensure_equal(
+            &recovery[2]["kind"].as_str(),
+            &Some("broaden"),
+            "third recovery kind",
+        )
     }
 
     fn ensure(condition: bool, message: impl Into<String>) -> TestResult {

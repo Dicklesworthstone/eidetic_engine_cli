@@ -402,6 +402,16 @@ pub const MMR_FALLBACK: DegradationCode = DegradationCode {
     repair: None,
 };
 
+pub const PACK_BUDGET_TOO_SMALL: DegradationCode = DegradationCode {
+    id: "D402",
+    subsystem: DegradedSubsystem::Pack,
+    severity: DegradationSeverity::Warning,
+    description: "Pack budget too small",
+    behavior_change: "Context pack has matching candidates but cannot fit any candidate within the requested token budget",
+    auto_recoverable: true,
+    repair: Some("Raise --max-tokens, use --profile compact, or broaden the query/filter set"),
+};
+
 // Curate degradations (D500 - D599)
 pub const CURATION_QUEUE_FULL: DegradationCode = DegradationCode {
     id: "D500",
