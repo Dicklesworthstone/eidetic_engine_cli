@@ -563,7 +563,7 @@ Common red flags:
 | `embed_model_unavailable` | Continue lexical-only or run `ee index reembed --workspace .` |
 | `graph_snapshot_stale` | Continue retrieval, then refresh graph snapshots when graph scores matter |
 | `pack_budget_too_small` | Raise `--max-tokens` or switch to `--profile compact` |
-| `workspace_ambiguous` | Use `ee workspace list`, then pass an explicit workspace or alias |
+| `data.workspace.diagnostics[].severity = "warning"` | Workspace selection conflict; use `ee workspace list`, then pass an explicit workspace or alias |
 | exit `7` | Stop and get human approval before using any bypass-token path |
 | exit `8` | Run `ee migrate run --workspace . --json` |
 
