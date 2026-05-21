@@ -1731,6 +1731,56 @@ fn determinism_regression_fixture_loader_rejects_raw_hex_without_preview() -> Re
 }
 
 #[test]
+fn determinism_regression_fixture_loader_rejects_malformed_raw_payload() -> Result<(), String> {
+    let mut fixture =
+        regression_fixture_for_mismatch(6, b"raw-malformed", b"expected", b"observed")
+            .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+
+    fixture.input = serde_json::json!({
+        "raw": 42,
+    });
+    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
+    fixture.input_hash = hash_bytes(&input_bytes);
+    let raw_file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    let raw_error = parse_regression_fixture_entries(vec![(
+        raw_file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw fallback fixtures require a string preview");
+    assert!(raw_error.contains("raw regression input must be a string"));
+
+    fixture.input = serde_json::json!({
+        "raw": "raw-malformed",
+        "raw_hex": 42,
+    });
+    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
+    fixture.input_hash = hash_bytes(&input_bytes);
+    let raw_hex_type_file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    let raw_hex_type_error = parse_regression_fixture_entries(vec![(
+        raw_hex_type_file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw_hex must be a string when present");
+    assert!(raw_hex_type_error.contains("raw regression input raw_hex must be a string"));
+
+    fixture.input = serde_json::json!({
+        "raw": "raw-malformed",
+        "raw_hex": "not-hex",
+    });
+    let input_bytes = serde_json::to_vec(&fixture.input).map_err(|error| error.to_string())?;
+    fixture.input_hash = hash_bytes(&input_bytes);
+    let raw_hex_value_file_name = regression_fixture_file_name(&fixture.input_hash)?;
+    let raw_hex_value_error = parse_regression_fixture_entries(vec![(
+        raw_hex_value_file_name,
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("raw_hex must contain valid hex bytes");
+    assert!(raw_hex_value_error.contains("invalid raw_hex"));
+    assert!(raw_hex_value_error.contains("contains non-hex digit"));
+    Ok(())
+}
+
+#[test]
 fn determinism_regression_fixture_loader_rejects_structured_input_hash_drift() -> Result<(), String>
 {
     let input = regression_input_for_pack_case(
