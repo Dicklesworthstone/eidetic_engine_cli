@@ -47,6 +47,29 @@ pub const DEFAULT_PRIOR_BETA: f64 = 0.5;
 /// Default harmful event weight per `[curation] harmful_weight` in README.
 pub const DEFAULT_HARMFUL_WEIGHT: f64 = 2.5;
 
+/// Canonical feedback signal used when replaying feedback events into a
+/// Beta-Bernoulli posterior.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FeedbackSignal {
+    Helpful,
+    Harmful,
+    Neutral,
+}
+
+impl FeedbackSignal {
+    /// Normalize stored feedback-event signal strings into posterior updates.
+    #[must_use]
+    pub fn from_signal_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "helpful" | "positive" | "confirmation" => Self::Helpful,
+            "harmful" | "negative" | "contradiction" | "inaccurate" | "outdated" | "stale" => {
+                Self::Harmful
+            }
+            _ => Self::Neutral,
+        }
+    }
+}
+
 /// Beta posterior parameters for a single memory.
 ///
 /// Invariant: `alpha > 0.0 && beta > 0.0` and both are finite.
@@ -82,6 +105,50 @@ impl BetaPosterior {
             beta: DEFAULT_PRIOR_BETA,
             interval_harmful_weight: DEFAULT_HARMFUL_WEIGHT,
         }
+    }
+
+    /// Derive a posterior from a legacy scalar confidence/utility value.
+    ///
+    /// `total_weight` is the total pseudo-evidence assigned to the legacy
+    /// scalar. For example, `confidence=0.8` and `total_weight=2.0` maps to
+    /// `(alpha=1.6, beta=0.4)`.
+    #[must_use]
+    pub fn from_utility_inverse(confidence: f64, total_weight: f64) -> Option<Self> {
+        if !confidence.is_finite()
+            || !total_weight.is_finite()
+            || !(0.0..=1.0).contains(&confidence)
+            || total_weight <= 0.0
+        {
+            return None;
+        }
+        let alpha = confidence * total_weight;
+        let beta = (1.0 - confidence) * total_weight;
+        Self::new(alpha, beta)
+    }
+
+    /// Replay feedback events from the Jeffreys prior.
+    ///
+    /// Helpful signals add their positive event weight to alpha. Harmful
+    /// signals add their event weight to beta, falling back to
+    /// [`DEFAULT_HARMFUL_WEIGHT`] when the supplied weight is invalid so that
+    /// historical harmful rows still register. Neutral/unknown signals are
+    /// ignored.
+    #[must_use]
+    pub fn from_feedback_events(events: impl IntoIterator<Item = (FeedbackSignal, f64)>) -> Self {
+        let mut posterior = Self::jeffreys();
+        for (signal, weight) in events {
+            match signal {
+                FeedbackSignal::Helpful => {
+                    posterior = posterior.update_helpful_weighted(valid_weight_or(weight, 1.0));
+                }
+                FeedbackSignal::Harmful => {
+                    posterior =
+                        posterior.update_harmful(valid_weight_or(weight, DEFAULT_HARMFUL_WEIGHT));
+                }
+                FeedbackSignal::Neutral => {}
+            }
+        }
+        posterior
     }
 
     /// Alpha (helpful-side pseudo-count).
@@ -121,8 +188,18 @@ impl BetaPosterior {
     /// Helpful update — add 1.0 to alpha.
     #[must_use]
     pub fn update_helpful(self) -> Self {
+        self.update_helpful_weighted(1.0)
+    }
+
+    /// Helpful weighted update used by feedback replay.
+    #[must_use]
+    pub fn update_helpful_weighted(self, weight: f64) -> Self {
+        let w = valid_weight_or(weight, 0.0);
+        if w == 0.0 {
+            return self;
+        }
         Self {
-            alpha: self.alpha + 1.0,
+            alpha: self.alpha + w,
             beta: self.beta,
             interval_harmful_weight: self.interval_harmful_weight,
         }
@@ -180,6 +257,16 @@ impl BetaPosterior {
         } else {
             (self.alpha, self.beta)
         }
+    }
+}
+
+fn valid_weight_or(weight: f64, default: f64) -> f64 {
+    if weight.is_finite() && weight > 0.0 {
+        weight
+    } else if default.is_finite() && default > 0.0 {
+        default
+    } else {
+        0.0
     }
 }
 
