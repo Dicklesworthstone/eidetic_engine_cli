@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.serve.endpoint.v1.json",
+  "title": "ee.serve.endpoint.v1",
+  "description": "Per-request transport envelope for the v2 ee serve localhost adapter. It records HTTP/1.1 request metadata, the CLI-equivalent surface, bearer-token posture, bounded body/header sizes, and the wrapped ee.response.v2 or ee.error.v2 payload. Business logic remains owned by the CLI/core services; this schema only describes protocol adaptation.",
+  "type": "object",
+  "required": ["schema", "request", "response"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.serve.endpoint.v1"},
+    "request": {"$ref": "#/$defs/request"},
+    "response": {"$ref": "#/$defs/response"},
+    "sse": {"$ref": "#/$defs/sse"}
+  },
+  "$defs": {
+    "request": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "method",
+        "path",
+        "endpoint",
+        "cliEquivalent",
+        "auth",
+        "bodyBytes",
+        "query"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {"type": "string"},
+        "method": {"type": "string", "enum": ["GET", "POST"]},
+        "path": {"type": "string"},
+        "endpoint": {
+          "type": "string",
+          "enum": [
+            "status",
+            "doctor",
+            "search",
+            "context",
+            "why",
+            "swarmBrief",
+            "durableWrite",
+            "events",
+            "unknown"
+          ]
+        },
+        "cliEquivalent": {"type": ["string", "null"]},
+        "auth": {"$ref": "#/$defs/authPosture"},
+        "bodyBytes": {"type": "integer", "minimum": 0},
+        "query": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "contentLengthRequired": {"type": "boolean"},
+        "chunkedUploadAccepted": {"type": "boolean", "const": false}
+      }
+    },
+    "authPosture": {
+      "type": "object",
+      "required": ["required", "state", "tokenMaterialExposed"],
+      "additionalProperties": false,
+      "properties": {
+        "required": {"type": "boolean"},
+        "state": {
+          "type": "string",
+          "enum": ["not_required", "missing", "weak", "accepted", "rejected"]
+        },
+        "tokenMaterialExposed": {"type": "boolean", "const": false}
+      }
+    },
+    "response": {
+      "type": "object",
+      "required": [
+        "statusCode",
+        "payloadSchema",
+        "payload",
+        "elapsedMs",
+        "degradedCodes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "statusCode": {"type": "integer", "minimum": 100, "maximum": 599},
+        "payloadSchema": {
+          "type": "string",
+          "enum": ["ee.response.v2", "ee.error.v2"]
+        },
+        "payload": {"$ref": "#/$defs/jsonValue"},
+        "elapsedMs": {"type": "integer", "minimum": 0},
+        "degradedCodes": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "volatileTransportFields": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Fields excluded from CLI parity comparisons, such as requestId and elapsedMs."
+        }
+      }
+    },
+    "sse": {
+      "type": "object",
+      "required": ["readOnly", "eventKind", "terminal"],
+      "additionalProperties": false,
+      "properties": {
+        "readOnly": {"type": "boolean", "const": true},
+        "eventKind": {
+          "type": "string",
+          "enum": ["header", "data", "error", "cancelled", "complete"]
+        },
+        "terminal": {"type": "boolean"},
+        "eventBufferRemaining": {"type": "integer", "minimum": 0}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      ]
+    }
+  }
+}

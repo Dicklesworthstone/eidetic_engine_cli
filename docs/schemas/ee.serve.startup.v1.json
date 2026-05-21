@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.serve.startup.v1.json",
+  "title": "ee.serve.startup.v1",
+  "description": "Startup report for the v2 ee serve localhost adapter. The adapter is loopback-only by default, requires an explicit --allow-non-loopback opt-in for non-loopback bind addresses, never exposes EE_SERVE_TOKEN bytes or reusable hashes, and reports readiness without implying cloud, daemon, or HTTP-framework dependence.",
+  "type": "object",
+  "required": [
+    "schema",
+    "bind",
+    "protocol",
+    "tokenPosture",
+    "readiness",
+    "endpoints",
+    "limits",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.serve.startup.v1"},
+    "bind": {
+      "type": "object",
+      "required": ["host", "port", "loopbackOnly", "allowNonLoopback"],
+      "additionalProperties": false,
+      "properties": {
+        "host": {"type": "string"},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "loopbackOnly": {"type": "boolean"},
+        "allowNonLoopback": {"type": "boolean"},
+        "policy": {
+          "type": "string",
+          "enum": ["loopback_default", "non_loopback_explicit", "rejected"]
+        }
+      }
+    },
+    "protocol": {
+      "type": "object",
+      "required": ["httpVersion", "sseReadOnly", "forbiddenHttpDeps"],
+      "additionalProperties": false,
+      "properties": {
+        "httpVersion": {"type": "string", "const": "HTTP/1.1"},
+        "sseReadOnly": {"type": "boolean", "const": true},
+        "forbiddenHttpDeps": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["hyper", "axum", "tower", "reqwest"]
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "tokenPosture": {
+      "type": "object",
+      "required": ["source", "state", "minimumBits", "tokenMaterialExposed"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string", "const": "EE_SERVE_TOKEN"},
+        "state": {
+          "type": "string",
+          "enum": ["missing", "weak", "configured", "not_required"]
+        },
+        "minimumBits": {"type": "integer", "minimum": 256},
+        "tokenMaterialExposed": {"type": "boolean", "const": false},
+        "repair": {"type": ["string", "null"]}
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "required": ["state", "canAcceptConnections", "mutableEndpointsEnabled"],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["ready", "degraded", "policy_denied", "blocked"]
+        },
+        "canAcceptConnections": {"type": "boolean"},
+        "mutableEndpointsEnabled": {"type": "boolean"},
+        "reason": {"type": ["string", "null"]}
+      }
+    },
+    "endpoints": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/endpointSummary"}
+    },
+    "limits": {
+      "type": "object",
+      "required": [
+        "maxHeaderBytes",
+        "maxBodyBytes",
+        "connectionReadTimeoutMs",
+        "handlerBudgetMs",
+        "responseWriteTimeoutMs",
+        "sseEventBuffer"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxHeaderBytes": {"type": "integer", "minimum": 1},
+        "maxBodyBytes": {"type": "integer", "minimum": 0},
+        "connectionReadTimeoutMs": {"type": "integer", "minimum": 1},
+        "handlerBudgetMs": {"type": "integer", "minimum": 1},
+        "responseWriteTimeoutMs": {"type": "integer", "minimum": 1},
+        "sseEventBuffer": {"type": "integer", "minimum": 1}
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
+    }
+  },
+  "$defs": {
+    "endpointSummary": {
+      "type": "object",
+      "required": ["method", "path", "endpoint", "cliEquivalent", "mutable", "authRequired"],
+      "additionalProperties": false,
+      "properties": {
+        "method": {"type": "string", "enum": ["GET", "POST"]},
+        "path": {"type": "string"},
+        "endpoint": {
+          "type": "string",
+          "enum": [
+            "status",
+            "doctor",
+            "search",
+            "context",
+            "why",
+            "swarmBrief",
+            "durableWrite",
+            "events"
+          ]
+        },
+        "cliEquivalent": {"type": ["string", "null"]},
+        "mutable": {"type": "boolean"},
+        "authRequired": {"type": "boolean"}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "severity", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]},
+        "details": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/jsonValue"}
+        }
+      ]
+    }
+  }
+}
