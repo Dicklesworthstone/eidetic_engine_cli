@@ -548,6 +548,7 @@ fn render_report(findings: &[Finding]) -> String {
 #[cfg(test)]
 mod self_tests {
     use super::{render_report, scan_fixture};
+    use std::path::Path;
 
     #[test]
     fn seeded_required_function_does_not_emit_missing_seed() {
@@ -800,5 +801,24 @@ mod self_tests {
         let report = render_report(&scan_fixture(fixture));
         assert_eq!(report.matches("ambient_process_id").count(), 2);
         assert_eq!(report.matches("ambient_thread_current").count(), 2);
+    }
+
+    #[test]
+    fn determinism_required_proc_macro_crate_is_present_and_dependency_free() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest = std::fs::read_to_string(root.join("crates/determinism/Cargo.toml"))
+            .expect("determinism proc-macro manifest");
+        let source = std::fs::read_to_string(root.join("crates/determinism/src/lib.rs"))
+            .expect("determinism proc-macro source");
+
+        assert!(manifest.contains("proc-macro = true"));
+        assert!(!manifest.contains("[dependencies]"));
+        assert!(source.contains("#[proc_macro_attribute]"));
+        assert!(source.contains("pub fn required"));
+        assert!(source.contains("Deterministic<Seed>"));
+        assert!(source.contains("thread_rng("));
+        assert!(source.contains("SystemTime::now("));
+        assert!(source.contains("std::fs::read_dir("));
+        assert!(source.contains("contains_domain_id_now"));
     }
 }

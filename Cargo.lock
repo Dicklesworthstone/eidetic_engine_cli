@@ -1030,6 +1030,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "determinism"
+version = "0.1.0"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1120,6 +1124,7 @@ dependencies = [
  "clap_complete",
  "criterion",
  "crossbeam-queue",
+ "determinism",
  "fnx-algorithms",
  "fnx-classes",
  "fnx-generators",
