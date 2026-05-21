@@ -34,6 +34,8 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::db::{CreateAuditInput, DbConnection, DbError, generate_audit_id};
+
 /// Audit `action` value for "a persisted graph snapshot was just
 /// rebuilt". Target is the `graph_snapshot` row id.
 pub const SNAPSHOT_REFRESHED_ACTION: &str = "graph.snapshot.refreshed";
@@ -150,6 +152,42 @@ pub struct GraphAuditPayload {
     pub target_id: String,
     pub mutation_kind: &'static str,
     pub details: Value,
+}
+
+/// Deterministic audit target id for a cached graph-algorithm result.
+///
+/// `graph_algorithm_results` does not carry a standalone row id, but
+/// the result cache key is unique across `(snapshot_id, algorithm,
+/// params_hash)`. The graph audit surface treats that composite as
+/// the witness target so result-cache insertions and evictions can be
+/// queried without depending on SQLite rowids.
+#[must_use]
+pub fn graph_algorithm_result_audit_target_id(
+    snapshot_id: &str,
+    algorithm: &str,
+    params_hash: &str,
+) -> String {
+    format!("graph_algorithm_result:{snapshot_id}:{algorithm}:{params_hash}")
+}
+
+/// Insert a graph audit payload into the append-only audit log.
+pub fn insert_graph_audit_payload(
+    conn: &DbConnection,
+    workspace_id: &str,
+    actor: &str,
+    payload: GraphAuditPayload,
+) -> Result<(), DbError> {
+    conn.insert_audit(
+        &generate_audit_id(),
+        &CreateAuditInput {
+            workspace_id: Some(workspace_id.to_owned()),
+            actor: Some(actor.to_owned()),
+            action: payload.action.to_owned(),
+            target_type: Some(payload.target_type.to_owned()),
+            target_id: Some(payload.target_id),
+            details: Some(payload.details.to_string()),
+        },
+    )
 }
 
 /// Inputs for a [`SNAPSHOT_REFRESHED_ACTION`] payload.
@@ -419,6 +457,14 @@ mod tests {
         assert_eq!(details.get("params_hash"), Some(&json!("blake3:cafe")));
         assert_eq!(details.get("elapsed_ms"), Some(&json!(27_u64)));
         assert_eq!(details.get("cache_size_after"), Some(&json!(1_234_u64)));
+    }
+
+    #[test]
+    fn graph_algorithm_result_audit_target_id_is_stable_and_composite() {
+        assert_eq!(
+            graph_algorithm_result_audit_target_id("snap_1", "pagerank", "blake3:cafe"),
+            "graph_algorithm_result:snap_1:pagerank:blake3:cafe"
+        );
     }
 
     #[test]

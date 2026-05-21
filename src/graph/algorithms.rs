@@ -12,6 +12,11 @@ use fnx_runtime::{CgsePolicyEngine, CgseValue, CompatibilityMode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::core::graph_audit::{
+    AlgorithmDegradedInputs, ResultCachedInputs, ResultEvictedInputs, ResultEvictedReason,
+    build_algorithm_degraded_payload, build_result_cached_payload, build_result_evicted_payload,
+    graph_algorithm_result_audit_target_id, insert_graph_audit_payload,
+};
 use crate::core::graph_memory_budget::{
     AlgorithmAdmissionDecision, MemoryBudgetPolicy, MemoryBudgetRefusal, check_algorithm_admission,
 };
@@ -21,7 +26,9 @@ use crate::core::graph_telemetry::{
     emit_algorithm_timeout, emit_cache_evict, emit_cache_hit, emit_cache_miss,
 };
 use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
-use crate::graph::{GraphError, GraphResult, graph_algorithm_params_hash};
+use crate::graph::{
+    GraphError, GraphResult, SUBSYSTEM as GRAPH_SUBSYSTEM, graph_algorithm_params_hash,
+};
 
 pub const DEFAULT_PPR_ALPHA: f64 = 0.30;
 pub const DEFAULT_PAGERANK_MAX_ITERATIONS: usize = 100;
@@ -279,7 +286,7 @@ where
     let params_hash =
         graph_algorithm_params_hash(spec.algorithm, spec.snapshot_content_hash, spec.params)?;
     let started = Instant::now();
-    let run = run_with_result_cache_with_params_hash(spec, &params_hash, || {
+    let run = match run_with_result_cache_with_params_hash(spec, &params_hash, || {
         run_with_budget_observed(
             cx,
             name,
@@ -293,7 +300,13 @@ where
             },
             f,
         )
-    })?;
+    }) {
+        Ok(run) => run,
+        Err(error) => {
+            insert_graph_algorithm_degraded_audit(spec, name, &error)?;
+            return Err(error);
+        }
+    };
     emit_algorithm_compute(AlgorithmComputeEvent {
         algorithm: name,
         snapshot_id: spec.snapshot_id,
@@ -561,7 +574,15 @@ where
             });
             compute()
         },
-        |result| store_cached_algorithm_result_with_memory(spec, params_hash, &cache_key, result),
+        |result, elapsed_ms| {
+            store_cached_algorithm_result_with_memory(
+                spec,
+                params_hash,
+                &cache_key,
+                result,
+                elapsed_ms,
+            )
+        },
     )?;
 
     Ok(AlgorithmResultCacheRun {
@@ -581,7 +602,7 @@ where
     R: Clone,
     Load: FnMut() -> GraphResult<Option<R>>,
     Compute: FnOnce() -> GraphResult<R>,
-    Store: FnMut(&R) -> GraphResult<()>,
+    Store: FnMut(&R, u64) -> GraphResult<()>,
 {
     if let Some(result) = load()? {
         return Ok(CachedComputation {
@@ -602,8 +623,10 @@ where
         });
     }
 
+    let compute_started = Instant::now();
     let result = compute()?;
-    store(&result)?;
+    let compute_elapsed_ms = duration_millis_saturating(compute_started.elapsed());
+    store(&result, compute_elapsed_ms)?;
     Ok(CachedComputation {
         result,
         cache_hit: false,
@@ -655,11 +678,12 @@ fn store_cached_algorithm_result_with_memory<R>(
     params_hash: &str,
     cache_key: &str,
     result: &R,
+    compute_elapsed_ms: u64,
 ) -> GraphResult<()>
 where
     R: Clone + Send + Serialize + Sync + 'static,
 {
-    store_cached_algorithm_result(spec, params_hash, result)?;
+    store_cached_algorithm_result(spec, params_hash, result, compute_elapsed_ms)?;
     store_in_memory_algorithm_result(cache_key, result, spec.ttl_seconds);
     Ok(())
 }
@@ -757,6 +781,11 @@ where
                 reason: CacheEvictReason::TtlExpired,
                 count: 1,
             });
+            insert_graph_algorithm_result_evicted_audit(
+                spec,
+                params_hash,
+                ResultEvictedReason::TtlExpired,
+            )?;
             *stale_persistent_eviction_emitted = true;
         }
         return Ok(None);
@@ -783,6 +812,7 @@ fn store_cached_algorithm_result<R>(
     spec: &AlgorithmResultCacheSpec<'_>,
     params_hash: &str,
     result: &R,
+    compute_elapsed_ms: u64,
 ) -> GraphResult<()>
 where
     R: Serialize,
@@ -798,7 +828,72 @@ where
             result_json,
             ttl_seconds: spec.ttl_seconds,
         })
-        .map_err(|error| GraphError::storage("store graph algorithm result cache", error))
+        .map_err(|error| GraphError::storage("store graph algorithm result cache", error))?;
+    let cache_size_after = spec
+        .conn
+        .list_graph_algorithm_results(spec.workspace_id, spec.snapshot_id, Some(spec.algorithm))
+        .map_err(|error| GraphError::storage("count graph algorithm result cache rows", error))
+        .and_then(|rows| {
+            u64::try_from(rows.len()).map_err(|_| {
+                GraphError::numeric_overflow("graph algorithm result cache size", rows.len())
+            })
+        })?;
+    let witness_id =
+        graph_algorithm_result_audit_target_id(spec.snapshot_id, spec.algorithm, params_hash);
+    let payload = build_result_cached_payload(ResultCachedInputs {
+        witness_id: witness_id.as_str(),
+        algorithm: spec.algorithm,
+        params_hash,
+        elapsed_ms: compute_elapsed_ms,
+        cache_size_after,
+    });
+    insert_graph_audit_payload(spec.conn, spec.workspace_id, GRAPH_SUBSYSTEM, payload)
+        .map_err(|error| GraphError::storage("insert graph algorithm result cache audit", error))
+}
+
+fn insert_graph_algorithm_result_evicted_audit(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+    reason: ResultEvictedReason,
+) -> GraphResult<()> {
+    let witness_id =
+        graph_algorithm_result_audit_target_id(spec.snapshot_id, spec.algorithm, params_hash);
+    let payload = build_result_evicted_payload(ResultEvictedInputs {
+        witness_id: witness_id.as_str(),
+        reason,
+    });
+    insert_graph_audit_payload(spec.conn, spec.workspace_id, GRAPH_SUBSYSTEM, payload)
+        .map_err(|error| GraphError::storage("insert graph algorithm result eviction audit", error))
+}
+
+fn insert_graph_algorithm_degraded_audit(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    algorithm: &'static str,
+    error: &GraphError,
+) -> GraphResult<()> {
+    let payload = build_algorithm_degraded_payload(AlgorithmDegradedInputs {
+        algorithm,
+        code: error.kind_str(),
+        severity: graph_error_audit_severity(error),
+        repair: error.repair_hint(),
+        snapshot_version: None,
+    });
+    insert_graph_audit_payload(spec.conn, spec.workspace_id, GRAPH_SUBSYSTEM, payload)
+        .map_err(|error| GraphError::storage("insert graph algorithm degraded audit", error))
+}
+
+const fn graph_error_audit_severity(error: &GraphError) -> &'static str {
+    match error {
+        GraphError::Storage { .. }
+        | GraphError::SnapshotLockHeld { .. }
+        | GraphError::SnapshotLockUnavailable { .. } => "warning",
+        GraphError::Json { .. }
+        | GraphError::GraphEngine { .. }
+        | GraphError::AlgorithmCancelled { .. }
+        | GraphError::AlgorithmTimeout { .. }
+        | GraphError::InvalidSnapshotMetrics { .. } => "medium",
+        GraphError::NumericOverflow { .. } | GraphError::SnapshotVersionOverflow => "high",
+    }
 }
 
 fn cached_algorithm_result_is_fresh(row: &StoredGraphAlgorithmResult) -> bool {
@@ -1055,6 +1150,10 @@ mod tests {
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::registry::Registry;
 
+    use crate::core::graph_audit::{
+        RESULT_CACHED_ACTION, RESULT_EVICTED_ACTION, WITNESS_TARGET_TYPE,
+        graph_algorithm_result_audit_target_id,
+    };
     use crate::core::graph_telemetry::{
         ALGORITHM_CANCELLED_EVENT, ALGORITHM_COMPUTE_EVENT, ALGORITHM_TIMEOUT_EVENT,
         CACHE_EVICT_EVENT, CACHE_HIT_EVENT, CACHE_MISS_EVENT,
@@ -1631,6 +1730,33 @@ mod tests {
         assert_eq!(first.result, second.result);
         assert_eq!(compute_count.load(Ordering::SeqCst), 1);
 
+        let audit_target =
+            graph_algorithm_result_audit_target_id(snapshot_id, "pagerank", &first.params_hash);
+        let audits = connection
+            .list_audit_by_target(WITNESS_TARGET_TYPE, &audit_target, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, RESULT_CACHED_ACTION);
+        let details: serde_json::Value = serde_json::from_str(
+            audits[0]
+                .details
+                .as_deref()
+                .ok_or_else(|| "result cached audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            details.get("algorithm"),
+            Some(&serde_json::json!("pagerank"))
+        );
+        assert_eq!(
+            details.get("params_hash"),
+            Some(&serde_json::json!(first.params_hash))
+        );
+        assert_eq!(
+            details.get("cache_size_after"),
+            Some(&serde_json::json!(1_u64))
+        );
+
         connection.close().map_err(|error| error.to_string())
     }
 
@@ -1896,6 +2022,25 @@ mod tests {
             Some("ttl_expired")
         );
         assert_eq!(evicts[0].fields.get("count").map(String::as_str), Some("1"));
+
+        let audit_target =
+            graph_algorithm_result_audit_target_id(snapshot_id, "pagerank", &params_hash);
+        let audits = connection
+            .list_audit_by_target(WITNESS_TARGET_TYPE, &audit_target, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(audits.len(), 1);
+        assert_eq!(audits[0].action, RESULT_EVICTED_ACTION);
+        let details: serde_json::Value = serde_json::from_str(
+            audits[0]
+                .details
+                .as_deref()
+                .ok_or_else(|| "result evicted audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            details.get("reason"),
+            Some(&serde_json::json!("ttl_expired"))
+        );
 
         connection.close().map_err(|error| error.to_string())
     }

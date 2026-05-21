@@ -9,7 +9,10 @@ use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
 use crate::core::graph_audit::{
-    SnapshotArchivedInputs, SnapshotArchivedReason, build_snapshot_archived_payload,
+    ResultEvictedInputs, ResultEvictedReason, SnapshotArchivedInputs, SnapshotArchivedReason,
+    SnapshotRefreshedInputs, build_result_evicted_payload, build_snapshot_archived_payload,
+    build_snapshot_refreshed_payload, graph_algorithm_result_audit_target_id,
+    insert_graph_audit_payload,
 };
 use crate::core::graph_memory_budget::{
     LARGE_GRAPH_UNCACHED_CODE, MemoryBudgetPolicy, SnapshotAdmissionDecision,
@@ -20,12 +23,12 @@ use crate::core::graph_telemetry::{
     emit_snapshot_refresh,
 };
 use crate::db::{
-    AcquireLockResult, AdvisoryLockId, CreateAuditInput, CreateGraphAlgorithmWitnessInput,
-    CreateGraphSnapshotInput, DbOperation, generate_audit_id,
+    AcquireLockResult, AdvisoryLockId, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
+    DbOperation,
 };
 use crate::db::{
-    DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphSnapshot,
-    StoredMemoryLink,
+    DbConnection, DbError, GraphSnapshotStatus, GraphSnapshotType, StoredGraphAlgorithmResult,
+    StoredGraphSnapshot, StoredMemoryLink,
 };
 use crate::models::MemoryId;
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
@@ -2829,6 +2832,7 @@ fn refresh_typed_graph_snapshot_with_owner(
             content_hash: graph_snapshot_content_hash(graph_type, &topology.metrics_json),
             metrics_json: topology.metrics_json,
             source_generation: topology.source_generation,
+            build_time_ms: float_millis_to_u64_saturating(report.centrality.total_ms),
         };
         let write_owner = write_owner.ok_or_else(|| GraphError::GraphEngine {
             operation: "persist typed graph snapshot",
@@ -2960,6 +2964,7 @@ fn graph_snapshot_persistence_input(
         metrics_json,
         content_hash,
         source_generation,
+        build_time_ms: float_millis_to_u64_saturating(centrality.total_ms),
     })
 }
 
@@ -2970,6 +2975,7 @@ struct GraphSnapshotPersistenceInput {
     metrics_json: String,
     content_hash: String,
     source_generation: u32,
+    build_time_ms: u64,
 }
 
 struct GraphSnapshotWriteOwner<'a> {
@@ -3166,7 +3172,13 @@ fn persist_graph_snapshot_in_transaction(
         &archived_at,
         SnapshotArchivedReason::NewerSnapshot,
     )?;
+    let results_to_evict = graph_algorithm_results_for_snapshots(
+        conn,
+        workspace_id,
+        &snapshots_to_archive[..archived_audit_count],
+    )?;
 
+    let content_hash = input.content_hash.clone();
     conn.insert_graph_snapshot(
         &snapshot_id,
         &CreateGraphSnapshotInput {
@@ -3177,16 +3189,41 @@ fn persist_graph_snapshot_in_transaction(
             node_count: input.node_count,
             edge_count: input.edge_count,
             metrics_json: input.metrics_json,
-            content_hash: input.content_hash.clone(),
+            content_hash: content_hash.clone(),
             source_generation: input.source_generation,
             expires_at: None,
         },
     )
     .map_err(|error| GraphError::storage("persist graph snapshot", error))?;
+    let snapshot = GraphRefreshSnapshot {
+        id: snapshot_id,
+        graph_type: input.graph_type,
+        snapshot_version,
+        source_generation: input.source_generation,
+        content_hash,
+        status: GraphSnapshotStatus::Valid,
+    };
+    insert_graph_snapshot_refreshed_audit(
+        conn,
+        workspace_id,
+        &snapshot,
+        input.build_time_ms,
+        usize::try_from(input.node_count).unwrap_or(usize::MAX),
+        usize::try_from(input.edge_count).unwrap_or(usize::MAX),
+    )?;
 
     let evicted_algorithm_results = conn
         .evict_stale_graph_algorithm_results(workspace_id, input.graph_type)
         .map_err(|error| GraphError::storage("evict stale graph algorithm results", error))?;
+    let evicted_audit_count = usize::try_from(evicted_algorithm_results)
+        .unwrap_or(usize::MAX)
+        .min(results_to_evict.len());
+    insert_graph_algorithm_result_evicted_audits(
+        conn,
+        workspace_id,
+        &results_to_evict[..evicted_audit_count],
+        ResultEvictedReason::SnapshotInvalidated,
+    )?;
     if evicted_algorithm_results > 0 {
         emit_cache_evict(CacheEvictEvent {
             reason: CacheEvictReason::SnapshotArchived,
@@ -3194,14 +3231,28 @@ fn persist_graph_snapshot_in_transaction(
         });
     }
 
-    Ok(GraphRefreshSnapshot {
-        id: snapshot_id,
-        graph_type: input.graph_type,
-        snapshot_version,
-        source_generation: input.source_generation,
-        content_hash: input.content_hash,
-        status: GraphSnapshotStatus::Valid,
-    })
+    Ok(snapshot)
+}
+
+fn insert_graph_snapshot_refreshed_audit(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshot: &GraphRefreshSnapshot,
+    build_time_ms: u64,
+    node_count: usize,
+    edge_count: usize,
+) -> GraphResult<()> {
+    let payload = build_snapshot_refreshed_payload(SnapshotRefreshedInputs {
+        snapshot_id: snapshot.id.as_str(),
+        graph_type: snapshot.graph_type.as_str(),
+        snapshot_version: u64::from(snapshot.snapshot_version),
+        content_hash: snapshot.content_hash.as_str(),
+        build_time_ms,
+        node_count,
+        edge_count,
+    });
+    insert_graph_audit_payload(conn, workspace_id, SUBSYSTEM, payload)
+        .map_err(|error| GraphError::storage("insert graph snapshot refresh audit", error))
 }
 
 fn insert_graph_snapshot_archived_audits(
@@ -3217,18 +3268,48 @@ fn insert_graph_snapshot_archived_audits(
             archived_at,
             reason,
         });
-        conn.insert_audit(
-            &generate_audit_id(),
-            &CreateAuditInput {
-                workspace_id: Some(workspace_id.to_owned()),
-                actor: Some(SUBSYSTEM.to_owned()),
-                action: payload.action.to_owned(),
-                target_type: Some(payload.target_type.to_owned()),
-                target_id: Some(payload.target_id),
-                details: Some(payload.details.to_string()),
-            },
-        )
-        .map_err(|error| GraphError::storage("insert graph snapshot archive audit", error))?;
+        insert_graph_audit_payload(conn, workspace_id, SUBSYSTEM, payload)
+            .map_err(|error| GraphError::storage("insert graph snapshot archive audit", error))?;
+    }
+    Ok(())
+}
+
+fn graph_algorithm_results_for_snapshots(
+    conn: &DbConnection,
+    workspace_id: &str,
+    snapshots: &[StoredGraphSnapshot],
+) -> GraphResult<Vec<StoredGraphAlgorithmResult>> {
+    let mut rows = Vec::new();
+    for snapshot in snapshots {
+        rows.extend(
+            conn.list_graph_algorithm_results(workspace_id, &snapshot.id, None)
+                .map_err(|error| {
+                    GraphError::storage("list graph algorithm results for eviction audit", error)
+                })?,
+        );
+    }
+    Ok(rows)
+}
+
+fn insert_graph_algorithm_result_evicted_audits(
+    conn: &DbConnection,
+    workspace_id: &str,
+    results: &[StoredGraphAlgorithmResult],
+    reason: ResultEvictedReason,
+) -> GraphResult<()> {
+    for result in results {
+        let witness_id = graph_algorithm_result_audit_target_id(
+            result.snapshot_id.as_str(),
+            result.algorithm.as_str(),
+            result.params_hash.as_str(),
+        );
+        let payload = build_result_evicted_payload(ResultEvictedInputs {
+            witness_id: witness_id.as_str(),
+            reason,
+        });
+        insert_graph_audit_payload(conn, workspace_id, SUBSYSTEM, payload).map_err(|error| {
+            GraphError::storage("insert graph algorithm result eviction audit", error)
+        })?;
     }
     Ok(())
 }
@@ -5645,7 +5726,9 @@ fn compare_neighborhood_edges(
 #[cfg(test)]
 mod tests {
     use crate::core::graph_audit::{
-        SNAPSHOT_ARCHIVED_ACTION, SNAPSHOT_TARGET_TYPE, SnapshotArchivedReason,
+        RESULT_EVICTED_ACTION, SNAPSHOT_ARCHIVED_ACTION, SNAPSHOT_REFRESHED_ACTION,
+        SNAPSHOT_TARGET_TYPE, SnapshotArchivedReason, WITNESS_TARGET_TYPE,
+        graph_algorithm_result_audit_target_id,
     };
     use crate::db::{
         CreateCausalEvidenceInput, CreateGraphAlgorithmResultInput, CreateGraphSnapshotInput,
@@ -10041,6 +10124,16 @@ mod tests {
             "gsnap_0000000000000000000000121",
             r#"{"nodes":[],"edges":[]}"#,
         )?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                snapshot_id: "gsnap_0000000000000000000000121".to_owned(),
+                algorithm: "pagerank".to_owned(),
+                params_hash: "blake3:archived-snapshot-cache".to_owned(),
+                result_json: r#"{"scores":[["mem_a",0.9]]}"#.to_owned(),
+                ttl_seconds: 300,
+            })
+            .map_err(|error| error.to_string())?;
 
         let snapshot = graph_result(super::persist_graph_snapshot(
             &connection,
@@ -10056,6 +10149,7 @@ mod tests {
                 .to_string(),
                 content_hash: "blake3:transactional-graph-snapshot".to_owned(),
                 source_generation: 1,
+                build_time_ms: 0,
             },
         ))?;
 
@@ -10125,6 +10219,63 @@ mod tests {
             .ok_or_else(|| "archive audit archived_at missing".to_owned())?;
         chrono::DateTime::parse_from_rfc3339(archived_at).map_err(|error| error.to_string())?;
 
+        let refreshed_audits = connection
+            .list_audit_by_target(SNAPSHOT_TARGET_TYPE, &snapshot.id, None)
+            .map_err(|error| error.to_string())?;
+        let refreshed_audit = refreshed_audits
+            .iter()
+            .find(|entry| entry.action == SNAPSHOT_REFRESHED_ACTION)
+            .ok_or_else(|| "snapshot refresh audit missing".to_owned())?;
+        let refreshed_details: serde_json::Value = serde_json::from_str(
+            refreshed_audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "refresh audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            refreshed_details.get("graph_type"),
+            Some(&serde_json::json!(GraphSnapshotType::MemoryLinks.as_str()))
+        );
+        assert_eq!(
+            refreshed_details.get("snapshot_version"),
+            Some(&serde_json::json!(2_u64))
+        );
+        assert_eq!(
+            refreshed_details.get("content_hash"),
+            Some(&serde_json::json!("blake3:transactional-graph-snapshot"))
+        );
+        assert_eq!(
+            refreshed_details.get("node_count"),
+            Some(&serde_json::json!(2_u64))
+        );
+        assert_eq!(
+            refreshed_details.get("edge_count"),
+            Some(&serde_json::json!(1_u64))
+        );
+
+        let evicted_target = graph_algorithm_result_audit_target_id(
+            "gsnap_0000000000000000000000121",
+            "pagerank",
+            "blake3:archived-snapshot-cache",
+        );
+        let eviction_audits = connection
+            .list_audit_by_target(WITNESS_TARGET_TYPE, &evicted_target, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(eviction_audits.len(), 1);
+        assert_eq!(eviction_audits[0].action, RESULT_EVICTED_ACTION);
+        let eviction_details: serde_json::Value = serde_json::from_str(
+            eviction_audits[0]
+                .details
+                .as_deref()
+                .ok_or_else(|| "eviction audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            eviction_details.get("reason"),
+            Some(&serde_json::json!("snapshot_invalidated"))
+        );
+
         connection.close().map_err(|error| error.to_string())
     }
 
@@ -10161,6 +10312,7 @@ mod tests {
                     .to_string(),
                     content_hash: "blake3:snapshot-archived-cache-evict".to_owned(),
                     source_generation: 1,
+                    build_time_ms: 0,
                 },
             ))
         });
@@ -10261,6 +10413,7 @@ mod tests {
                             .to_string(),
                             content_hash: format!("blake3:linearizable-{index:02}"),
                             source_generation: sequence,
+                            build_time_ms: 0,
                         },
                     ))?;
                     connection.close().map_err(|error| error.to_string())?;
