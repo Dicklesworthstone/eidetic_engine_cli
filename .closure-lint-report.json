@@ -7,6 +7,18 @@
       "reason": "missing tests/golden/plan_cache.snap"
     },
     {
+      "bead": "bd-2xdom.2",
+      "label": "implements-surface",
+      "surface": "remember",
+      "reason": "referenced test path missing: tests/static"
+    },
+    {
+      "bead": "bd-2xdom.5",
+      "label": "implements-surface",
+      "surface": "memory-show",
+      "reason": "missing tests/golden/memory-show.snap"
+    },
+    {
       "bead": "bd-36bbk.1.12",
       "label": "implements-surface",
       "surface": "hello_responder_lifecycle",
@@ -229,6 +241,12 @@
       "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
     },
     {
+      "bead": "bd-3usjw.43",
+      "label": "implements-surface",
+      "surface": "plan_drift_warning",
+      "reason": "missing tests/golden/plan_drift_warning.snap"
+    },
+    {
       "bead": "bd-3usjw.44",
       "label": "math-ambition",
       "surface": "rejection_criteria",
@@ -313,6 +331,24 @@
       "reason": "missing tests/golden/roaring_params_cache.snap"
     },
     {
+      "bead": "bd-3usjw.53",
+      "label": "implements-surface",
+      "surface": "e2e_backup_restore_roundtrip",
+      "reason": "missing tests/golden/e2e_backup_restore_roundtrip.snap"
+    },
+    {
+      "bead": "bd-3usjw.53",
+      "label": "implements-surface",
+      "surface": "e2e_backup_restore_roundtrip",
+      "reason": "tests/e2e_backup_restore_roundtrip.rs does not call init_test_tracing"
+    },
+    {
+      "bead": "bd-3usjw.69",
+      "label": "implements-surface",
+      "surface": "mcp_serve_stdio_subcommand",
+      "reason": "missing tests/golden/mcp_serve_stdio_subcommand.snap"
+    },
+    {
       "bead": "bd-fdvt",
       "label": "implements-surface",
       "surface": "context-pack-dna",
@@ -325,6 +361,6 @@
       "reason": "missing tests/golden/context-ppr.snap"
     }
   ],
-  "count": 54,
+  "count": 60,
   "status": "fail"
 }

@@ -1,21 +1,21 @@
 {
   "schema": "ee.closure_quality_report.v1",
-  "generatedAt": "2026-05-21T18:26:35Z",
+  "generatedAt": "2026-05-21T22:51:32Z",
   "advisory": true,
   "thresholds": {
     "prematureClosureDays": 14,
     "trendWindowDays": 90
   },
   "summary": {
-    "closedBeadsAudited": 2380,
-    "reopenedBeads": 33,
-    "prematureClosures": 33,
-    "recentPrematureClosures": 33
+    "closedBeadsAudited": 2445,
+    "reopenedBeads": 34,
+    "prematureClosures": 34,
+    "recentPrematureClosures": 34
   },
   "trend": {
     "window": "last_quarter",
     "windowDays": 90,
-    "prematureClosures": 33
+    "prematureClosures": 34
   },
   "signals": [
     {
@@ -105,6 +105,17 @@
       "time_basis": "created_at_fallback",
       "reopen_comment_id": 18105,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
+    },
+    {
+      "bead_id": "bd-2xdom",
+      "title": "Agent-ergonomics audit 2026-05-20: post-bd-17c65.2 UX gaps surfaced during live walkthrough",
+      "closed_at": "2026-05-21T22:35:39.049734Z",
+      "reopened_at": "2026-05-21T22:34:22Z",
+      "time_to_reopen_days": 1,
+      "quality_signal": "premature_closure",
+      "time_basis": "created_at_fallback",
+      "reopen_comment_id": 20818,
+      "reopen_reason": "Reopened: Reopened because bd-2xdom.5 was created and claimed after the parent closeout; parent should remain open while that child is active."
     },
     {
       "bead_id": "bd-2xl8v",
