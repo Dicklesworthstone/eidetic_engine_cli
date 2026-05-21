@@ -5,7 +5,7 @@
 .DESCRIPTION
     Downloads and verifies a signed release of ee, then installs it to a
     user-writable directory (default %LOCALAPPDATA%\ee\bin). Verifies SHA256
-    and, when cosign is available, the Sigstore bundle.
+    and the Sigstore bundle unless -NoVerify / EE_SKIP_VERIFY=1 is set.
 
     Mirrors the structure of the POSIX install.sh: branded header, platform
     detection, preflight checks, atomic locking, download + checksum + signature,
@@ -499,9 +499,7 @@ function Test-Sigstore {
     param([string]$TarballPath, [string]$BundlePath)
     $cosign = Get-Command cosign -ErrorAction SilentlyContinue
     if (-not $cosign) {
-        Write-Warning2 "cosign not found; skipping Sigstore signature verification"
-        Write-Warning2 "Install cosign for cryptographic authenticity checks (https://github.com/sigstore/cosign)"
-        return
+        Write-ErrorExit "cosign not found. Cannot verify Sigstore signature. Install cosign or use -NoVerify to skip."
     }
     Write-Info "Verifying Sigstore signature..."
     # `$args` is an automatic variable in PowerShell functions; shadowing it

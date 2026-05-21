@@ -525,18 +525,19 @@ installer_asset_contract() {
         unix_version_normalized=true
     fi
     if [ -f "$unix_installer" ] \
-        && grep -qF 'error "Sigstore verification failed."' "$unix_installer" 2>/dev/null \
+        && grep -qF 'err "Sigstore signature verification failed for $file"' "$unix_installer" 2>/dev/null \
         && ! grep -qF 'Sigstore verification failed. Proceeding anyway.' "$unix_installer" 2>/dev/null; then
         unix_sigstore_hard_fail=true
     fi
     if [ -f "$unix_installer" ] \
-        && grep -qF 'error "Failed to download Sigstore bundle"' "$unix_installer" 2>/dev/null \
+        && grep -qF 'err "Sigstore bundle not available at $bundle_url."' "$unix_installer" 2>/dev/null \
+        && grep -qF 'Cannot verify signature. To skip cryptographic verification, use --no-verify or set EE_SKIP_VERIFY=1.' "$unix_installer" 2>/dev/null \
         && ! grep -qF 'http_download "${SIGSTORE_URL}" "${TMPDIR}/sigstore.json" 2>/dev/null; then' "$unix_installer" 2>/dev/null; then
         unix_sigstore_bundle_required=true
     fi
     if [ -f "$unix_installer" ] \
         && grep -qF 'No SHA256 tool found. Install sha256sum or shasum, or set EE_SKIP_VERIFY=1 to bypass verification.' "$unix_installer" 2>/dev/null \
-        && ! grep -qF 'No SHA256 tool found. Skipping verification.' "$unix_installer" 2>/dev/null; then
+        && ! grep -qF 'skipping checksum verification' "$unix_installer" 2>/dev/null; then
         unix_sha256_tool_required=true
     fi
     if [ -f "$unix_installer" ] \
@@ -565,19 +566,20 @@ installer_asset_contract() {
         windows_version_normalized=true
     fi
     if [ -f "$windows_installer" ] \
-        && grep -qF 'Write-Error-Exit "Sigstore verification failed: $result"' "$windows_installer" 2>/dev/null \
-        && grep -qF 'Write-Error-Exit "Sigstore verification error: $_"' "$windows_installer" 2>/dev/null; then
+        && grep -qF 'Write-ErrorExit "Sigstore signature verification failed: $output"' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Write-ErrorExit "cosign not found. Cannot verify Sigstore signature. Install cosign or use -NoVerify to skip."' "$windows_installer" 2>/dev/null; then
         windows_sigstore_hard_fail=true
     fi
     if [ -f "$windows_installer" ] \
         && grep -qF 'if ($cosign) {' "$windows_installer" 2>/dev/null \
-        && grep -qF 'Download-File (Get-ReleaseAssetUrl $Version $sigstoreName) $sigstorePath' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath' "$windows_installer" 2>/dev/null \
+        && grep -qF 'Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature. Use -NoVerify to skip.' "$windows_installer" 2>/dev/null \
         && ! grep -qF 'Sigstore bundle not available for this release.' "$windows_installer" 2>/dev/null; then
         windows_sigstore_bundle_required=true
     fi
     if [ -f "$windows_installer" ] \
-        && grep -qF -- '--certificate-identity-regexp $certIdentityRegexp' "$windows_installer" 2>/dev/null \
-        && grep -qF -- '--certificate-oidc-issuer $certOidcIssuer' "$windows_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-identity-regexp", $Script:CosignIdentityRegexp' "$windows_installer" 2>/dev/null \
+        && grep -qF -- '--certificate-oidc-issuer",     $Script:CosignOidcIssuer' "$windows_installer" 2>/dev/null \
         && grep -qF 'https://token.actions.githubusercontent.com' "$windows_installer" 2>/dev/null; then
         windows_sigstore_identity_bound=true
     fi

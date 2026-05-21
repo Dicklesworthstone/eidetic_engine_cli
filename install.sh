@@ -696,8 +696,8 @@ verify_checksum() {
   elif command -v shasum &>/dev/null; then
     actual=$(shasum -a 256 "$file" | cut -d' ' -f1)
   else
-    warn "No SHA256 tool found (sha256sum or shasum); skipping checksum verification"
-    return 0
+    err "No SHA256 tool found. Install sha256sum or shasum, or set EE_SKIP_VERIFY=1 to bypass verification."
+    return 1
   fi
 
   if [ "$actual" != "$expected" ]; then
