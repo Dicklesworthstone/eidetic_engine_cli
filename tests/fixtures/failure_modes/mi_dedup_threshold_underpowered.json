@@ -1,0 +1,25 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mi_dedup_threshold_underpowered",
+  "introduced_by": { "bead": "bd-17c65.14.14", "epic_letter": "N" },
+  "surfaces": ["search", "diag search"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The caller requested `--dedupe=mi`, but fewer than two memory hits exposed usable content for deterministic token mutual-information estimation. Search returns the normal doc-id deduped results without MI clustering.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee search 'cargo fmt release' --workspace . --dedupe=mi --json"
+  },
+  "expected_emission": {
+    "code": "mi_dedup_threshold_underpowered",
+    "severity": "info",
+    "message_contains": [
+      "needs at least 2 memory hits",
+      "Search results were left uncollapsed",
+      "docId dedup"
+    ]
+  }
+}

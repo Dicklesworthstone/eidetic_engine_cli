@@ -200,7 +200,8 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    SearchDegradation, SearchOptions, SearchReport, SearchSourceMode, run_diag_search, run_search,
+    SearchDedupMode, SearchDegradation, SearchOptions, SearchReport, SearchSourceMode,
+    run_diag_search, run_search,
 };
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
@@ -6246,6 +6247,10 @@ pub struct SearchArgs {
     #[arg(long, value_name = "FLOAT")]
     pub relevance_floor: Option<f32>,
 
+    /// Deduplication mode: doc_id or mi.
+    #[arg(long, value_parser = parse_search_dedup_mode_arg, default_value = "doc_id")]
+    pub dedupe: SearchDedupMode,
+
     /// Search arm selection for diagnostics: lexical_only, semantic_only, or hybrid.
     #[arg(long, value_parser = parse_search_source_mode_arg, default_value = "hybrid")]
     pub source_mode: SearchSourceMode,
@@ -11864,6 +11869,7 @@ fn pack_quality_actuals_for_cases(
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -12164,6 +12170,7 @@ fn run_eval_retrieval_queries(
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -23409,6 +23416,7 @@ where
         include_future: false,
         include_stale: false,
         relevance_floor: args.relevance_floor,
+        dedup_mode: SearchDedupMode::DocId,
         source_mode: SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: args.memory_scope,
@@ -27306,6 +27314,18 @@ fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String>
         "hybrid" => Ok(SearchSourceMode::Hybrid),
         _ => Err(format!(
             "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid; hyphenated aliases are accepted."
+        )),
+    }
+}
+
+fn parse_search_dedup_mode_arg(value: &str) -> Result<SearchDedupMode, String> {
+    match normalized_search_source_mode_token(value).as_str() {
+        "doc_id" | "docid" => Ok(SearchDedupMode::DocId),
+        "mi" | "mutual_information" | "mutual_information_clusters" => {
+            Ok(SearchDedupMode::MutualInformation)
+        }
+        _ => Err(format!(
+            "Invalid dedupe mode '{value}'. Expected doc_id or mi; hyphenated aliases are accepted."
         )),
     }
 }
@@ -32432,6 +32452,7 @@ where
         include_future: args.include_future,
         include_stale: args.include_stale,
         relevance_floor: args.relevance_floor,
+        dedup_mode: args.dedupe,
         source_mode: args.source_mode,
         strict_source_mode: args.strict_source_mode,
         memory_scope: args.memory_scope,

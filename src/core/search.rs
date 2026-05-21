@@ -81,6 +81,8 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG: &str = "embed-fast";
+const SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
+const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
@@ -140,6 +142,9 @@ pub struct SearchOptions {
     /// back to [`DEFAULT_RELEVANCE_FLOOR`]. Set to `Some(0.0)` to disable.
     /// Bead bd-17c65.2.1 (B1).
     pub relevance_floor: Option<f32>,
+    /// Result deduplication strategy. Defaults to doc-id exact collapse; MI
+    /// mode additionally clusters high-information paraphrase memory hits.
+    pub dedup_mode: SearchDedupMode,
     /// Requested search arm selection. Defaults to hybrid.
     pub source_mode: SearchSourceMode,
     /// Fail closed when the requested source mode cannot be applied.
@@ -148,6 +153,23 @@ pub struct SearchOptions {
     pub memory_scope: MemoryScope,
     /// Fail closed when relevant evidence exists outside the requested scope.
     pub strict_scope: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SearchDedupMode {
+    #[default]
+    DocId,
+    MutualInformation,
+}
+
+impl SearchDedupMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DocId => "doc_id",
+            Self::MutualInformation => "mi",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -227,6 +249,12 @@ pub const fn default_floor_for_source(source: ScoreSource) -> f32 {
 }
 
 impl SearchOptions {
+    fn resolve_database_path(&self) -> PathBuf {
+        self.database_path
+            .clone()
+            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+    }
+
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
@@ -663,6 +691,42 @@ impl SearchDegradation {
                 plural = if collapsed == 1 { "" } else { "s" },
             ),
             repair: None,
+        }
+    }
+
+    /// Search-side mutual-information dedup collapsed paraphrase-like memory
+    /// hits. Kept hits carry `metadata.mergedFrom` so provenance survives.
+    /// Bead bd-17c65.14.14 (N14).
+    #[must_use]
+    pub(crate) fn mi_dedup_candidate_proposed(collapsed: usize) -> Self {
+        Self {
+            code: "mi_dedup_candidate_proposed".to_string(),
+            severity: "info".to_string(),
+            message: format!(
+                "Mutual-information dedup collapsed {collapsed} paraphrase candidate hit{plural}; kept results include metadata.mergedFrom for provenance.",
+                plural = if collapsed == 1 { "" } else { "s" },
+            ),
+            repair: Some(
+                "Review durable proposals with ee curate candidates --type dedup --json."
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The caller requested MI dedup, but too few memory hits had usable
+    /// content to estimate token mutual information deterministically.
+    /// Bead bd-17c65.14.14 (N14).
+    #[must_use]
+    pub(crate) fn mi_dedup_threshold_underpowered(eligible: usize) -> Self {
+        Self {
+            code: "mi_dedup_threshold_underpowered".to_string(),
+            severity: "info".to_string(),
+            message: format!(
+                "Mutual-information dedup needs at least 2 memory hits with content; found {eligible}. Search results were left uncollapsed beyond docId dedup."
+            ),
+            repair: Some(
+                "Rebuild the index or run ee remember before retrying --dedupe=mi.".to_string(),
+            ),
         }
     }
 
@@ -3473,6 +3537,313 @@ fn dedupe_hits_on_doc_id(hits: Vec<SearchHit>) -> (Vec<SearchHit>, usize) {
     (deduped, collapsed)
 }
 
+/// Dedupe memory hits by conservative token mutual-information clusters.
+///
+/// This is opt-in (`--dedupe=mi`) and intentionally runs after exact doc-id
+/// dedupe but before relevance-floor filtering so the metrics and returned
+/// rank order are computed on the final deduped pool. It only clusters memory
+/// docs with loadable content and annotates the retained representative with
+/// `metadata.mergedFrom`.
+///
+/// Returns `(deduped, collapsed_count, eligible_memory_hit_count)`.
+/// Bead bd-17c65.14.14 (N14).
+fn dedupe_hits_on_mutual_information(
+    hits: Vec<SearchHit>,
+    options: &SearchOptions,
+    read_connection: Option<&DbConnection>,
+) -> (Vec<SearchHit>, usize, usize) {
+    if hits.len() < 2 {
+        return (hits, 0, hits.len());
+    }
+
+    let contents_by_doc_id = mi_dedup_hit_contents(&hits, options, read_connection);
+    let eligible_indices = hits
+        .iter()
+        .enumerate()
+        .filter(|(_, hit)| {
+            hit.doc_id.starts_with("mem_")
+                && contents_by_doc_id
+                    .get(&hit.doc_id)
+                    .is_some_and(|content| !content.trim().is_empty())
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if eligible_indices.len() < 2 {
+        return (hits, 0, eligible_indices.len());
+    }
+
+    let mut adjacency: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (left_pos, left_index) in eligible_indices.iter().copied().enumerate() {
+        for right_index in eligible_indices.iter().copied().skip(left_pos + 1) {
+            let Some(left_content) = contents_by_doc_id.get(&hits[left_index].doc_id) else {
+                continue;
+            };
+            let Some(right_content) = contents_by_doc_id.get(&hits[right_index].doc_id) else {
+                continue;
+            };
+            let Some(metrics) = mi_dedup_metrics_for_contents(left_content, right_content) else {
+                continue;
+            };
+            if metrics.cosine_similarity < SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY
+                || metrics.normalized_mi < SEARCH_MI_DEDUP_MIN_NORMALIZED_MI
+            {
+                continue;
+            }
+            adjacency.entry(left_index).or_default().insert(right_index);
+            adjacency.entry(right_index).or_default().insert(left_index);
+        }
+    }
+    if adjacency.is_empty() {
+        return (hits, 0, eligible_indices.len());
+    }
+
+    let mut visited = BTreeSet::new();
+    let mut remove_indices = BTreeSet::new();
+    let mut merged_by_keeper: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    for seed in adjacency.keys().copied() {
+        if visited.contains(&seed) {
+            continue;
+        }
+        let mut stack = vec![seed];
+        let mut members = BTreeSet::new();
+        while let Some(index) = stack.pop() {
+            if !visited.insert(index) {
+                continue;
+            }
+            members.insert(index);
+            if let Some(neighbors) = adjacency.get(&index) {
+                for neighbor in neighbors.iter().rev().copied() {
+                    if !visited.contains(&neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+        if members.len() < 2 {
+            continue;
+        }
+
+        let keeper = members
+            .iter()
+            .copied()
+            .reduce(|best, candidate| {
+                if hits[candidate].score > hits[best].score {
+                    candidate
+                } else {
+                    best
+                }
+            })
+            .unwrap_or(seed);
+        let merged = members
+            .iter()
+            .copied()
+            .filter(|index| *index != keeper)
+            .map(|index| hits[index].doc_id.clone())
+            .collect::<Vec<_>>();
+        remove_indices.extend(members.iter().copied().filter(|index| *index != keeper));
+        if !merged.is_empty() {
+            merged_by_keeper.insert(keeper, merged);
+        }
+    }
+
+    let collapsed = remove_indices.len();
+    if collapsed == 0 {
+        return (hits, 0, eligible_indices.len());
+    }
+
+    let mut deduped = Vec::with_capacity(hits.len() - collapsed);
+    for (index, mut hit) in hits.into_iter().enumerate() {
+        if remove_indices.contains(&index) {
+            continue;
+        }
+        if let Some(merged_from) = merged_by_keeper.remove(&index) {
+            annotate_hit_with_mi_merged_from(&mut hit, merged_from);
+        }
+        deduped.push(hit);
+    }
+    (deduped, collapsed, eligible_indices.len())
+}
+
+fn mi_dedup_hit_contents(
+    hits: &[SearchHit],
+    options: &SearchOptions,
+    read_connection: Option<&DbConnection>,
+) -> BTreeMap<String, String> {
+    let doc_ids = hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("mem_"))
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut contents = hits
+        .iter()
+        .filter(|hit| hit.doc_id.starts_with("mem_"))
+        .filter_map(|hit| {
+            metadata_content_for_mi_dedup(hit).map(|content| (hit.doc_id.clone(), content))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    if doc_ids.is_empty() {
+        return contents;
+    }
+    if let Some(connection) = read_connection {
+        extend_mi_dedup_contents_from_connection(&mut contents, &doc_ids, connection);
+        return contents;
+    }
+
+    let database_path = options.resolve_database_path();
+    if database_path.exists()
+        && let Ok(connection) = DbConnection::open_file(&database_path)
+    {
+        extend_mi_dedup_contents_from_connection(&mut contents, &doc_ids, &connection);
+    }
+    contents
+}
+
+fn extend_mi_dedup_contents_from_connection(
+    contents: &mut BTreeMap<String, String>,
+    doc_ids: &[&str],
+    connection: &DbConnection,
+) {
+    let Ok(memories) = connection.get_memories_batch(doc_ids) else {
+        return;
+    };
+    for (memory_id, memory) in memories {
+        if !memory.content.trim().is_empty() {
+            contents.insert(memory_id, memory.content);
+        }
+    }
+}
+
+fn metadata_content_for_mi_dedup(hit: &SearchHit) -> Option<String> {
+    let metadata = hit.metadata.as_ref()?;
+    metadata_string(metadata, "content")
+        .or_else(|| metadata_string(metadata, SEARCH_ANALYSIS_CONTENT_KEY))
+        .or_else(|| metadata_string(metadata, "contentPreview"))
+        .or_else(|| metadata_string(metadata, "content_preview"))
+        .map(str::to_owned)
+}
+
+fn annotate_hit_with_mi_merged_from(hit: &mut SearchHit, merged_from: Vec<String>) {
+    let metadata = hit.metadata.get_or_insert_with(|| serde_json::json!({}));
+    if !metadata.is_object() {
+        *metadata = serde_json::json!({});
+    }
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "dedupeMode".to_string(),
+            serde_json::json!(SearchDedupMode::MutualInformation.as_str()),
+        );
+        object.insert("mergedFrom".to_string(), serde_json::json!(merged_from));
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SearchMiDedupMetrics {
+    cosine_similarity: f64,
+    normalized_mi: f64,
+}
+
+fn mi_dedup_metrics_for_contents(left: &str, right: &str) -> Option<SearchMiDedupMetrics> {
+    let left_counts = mi_token_counts(left);
+    let right_counts = mi_token_counts(right);
+    if left_counts.is_empty() || right_counts.is_empty() {
+        return None;
+    }
+    let cosine_similarity = token_cosine_similarity(&left_counts, &right_counts);
+    let mutual_information = token_mutual_information(&left_counts, &right_counts);
+    let min_entropy = token_entropy(&left_counts).min(token_entropy(&right_counts));
+    let normalized_mi = if min_entropy > f64::EPSILON {
+        (mutual_information / min_entropy).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Some(SearchMiDedupMetrics {
+        cosine_similarity,
+        normalized_mi,
+    })
+}
+
+fn mi_token_counts(content: &str) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::new();
+    let mut token = String::new();
+    for ch in content.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            token.push(ch);
+        } else if !token.is_empty() {
+            *counts.entry(std::mem::take(&mut token)).or_insert(0) += 1;
+        }
+    }
+    if !token.is_empty() {
+        *counts.entry(token).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn token_cosine_similarity(
+    left_counts: &BTreeMap<String, u32>,
+    right_counts: &BTreeMap<String, u32>,
+) -> f64 {
+    let dot = kahan_sum(left_counts.iter().filter_map(|(token, left_count)| {
+        right_counts
+            .get(token)
+            .map(|right_count| f64::from(*left_count) * f64::from(*right_count))
+    }));
+    let left_norm = kahan_sum(
+        left_counts
+            .values()
+            .map(|count| f64::from(*count) * f64::from(*count)),
+    )
+    .sqrt();
+    let right_norm = kahan_sum(
+        right_counts
+            .values()
+            .map(|count| f64::from(*count) * f64::from(*count)),
+    )
+    .sqrt();
+    if left_norm <= f64::EPSILON || right_norm <= f64::EPSILON {
+        0.0
+    } else {
+        (dot / (left_norm * right_norm)).clamp(0.0, 1.0)
+    }
+}
+
+fn token_mutual_information(
+    left_counts: &BTreeMap<String, u32>,
+    right_counts: &BTreeMap<String, u32>,
+) -> f64 {
+    let left_total = f64::from(left_counts.values().copied().sum::<u32>());
+    let right_total = f64::from(right_counts.values().copied().sum::<u32>());
+    kahan_sum(left_counts.iter().filter_map(|(token, left_count)| {
+        let right_count = right_counts.get(token)?;
+        let px = f64::from(*left_count) / left_total;
+        let py = f64::from(*right_count) / right_total;
+        let pxy = px.min(py);
+        (pxy > 0.0 && px > 0.0 && py > 0.0).then(|| pxy * (pxy / (px * py)).ln())
+    }))
+}
+
+fn token_entropy(counts: &BTreeMap<String, u32>) -> f64 {
+    let total = f64::from(counts.values().copied().sum::<u32>());
+    kahan_sum(counts.values().map(|count| {
+        let probability = f64::from(*count) / total;
+        -probability * probability.ln()
+    }))
+}
+
+fn kahan_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0_f64;
+    let mut compensation = 0.0_f64;
+    for value in values {
+        let adjusted = value - compensation;
+        let next = sum + adjusted;
+        compensation = (next - sum) - adjusted;
+        sum = next;
+    }
+    sum
+}
+
 /// Best-effort audit append. Bead bd-17c65.7.7 (G8).
 ///
 /// Read surfaces (search, context, why, memory show) call this after
@@ -3700,6 +4071,12 @@ fn run_search_inner(
             // and discard the rest. Stable ordering is preserved (first
             // occurrence's position wins among ties).
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
+                if options.dedup_mode == SearchDedupMode::MutualInformation {
+                    dedupe_hits_on_mutual_information(raw_hits, options, read_connection)
+                } else {
+                    (raw_hits, 0, 0)
+                };
 
             // Bead bd-17c65.2.1 (B1): apply relevance floor.
             // Bead bd-n22a4 (B2-followup): when the caller does not pass an
@@ -3760,6 +4137,17 @@ fn run_search_inner(
                 degraded.push(SearchDegradation::duplicates_collapsed(
                     duplicates_collapsed,
                 ));
+            }
+            if options.dedup_mode == SearchDedupMode::MutualInformation {
+                if mi_duplicates_collapsed > 0 {
+                    degraded.push(SearchDegradation::mi_dedup_candidate_proposed(
+                        mi_duplicates_collapsed,
+                    ));
+                } else if mi_eligible_count < 2 {
+                    degraded.push(SearchDegradation::mi_dedup_threshold_underpowered(
+                        mi_eligible_count,
+                    ));
+                }
             }
 
             // Bead bd-17c65.2.5 (B5). When at least one result passed
@@ -3973,6 +4361,12 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
     .map_err(SearchError::Index)?;
 
     let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(diag_result.final_hits);
+    let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
+        if options.dedup_mode == SearchDedupMode::MutualInformation {
+            dedupe_hits_on_mutual_information(raw_hits, options, None)
+        } else {
+            (raw_hits, 0, 0)
+        };
     // Bead bd-n22a4 (B2-followup): mirror `run_search`'s per-source
     // adaptive floor so `ee diag search` reports the same floor
     // semantics that the live search path applies — without this the
@@ -4010,6 +4404,17 @@ pub fn run_diag_search(options: &SearchOptions) -> Result<SearchDiagnosticReport
         degraded.push(SearchDegradation::duplicates_collapsed(
             duplicates_collapsed,
         ));
+    }
+    if options.dedup_mode == SearchDedupMode::MutualInformation {
+        if mi_duplicates_collapsed > 0 {
+            degraded.push(SearchDegradation::mi_dedup_candidate_proposed(
+                mi_duplicates_collapsed,
+            ));
+        } else if mi_eligible_count < 2 {
+            degraded.push(SearchDegradation::mi_dedup_threshold_underpowered(
+                mi_eligible_count,
+            ));
+        }
     }
     if let Some(top) = above_floor.first().map(|hit| hit.score) {
         if top.is_finite() && top >= floor && top < floor * 2.0 {
@@ -5906,6 +6311,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode,
             strict_source_mode,
             memory_scope: MemoryScope::Swarm,
@@ -7269,6 +7675,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -7399,6 +7806,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -7545,6 +7953,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -7719,6 +8128,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -7829,6 +8239,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8212,6 +8623,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8251,6 +8663,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8286,6 +8699,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8428,6 +8842,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8504,6 +8919,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: Some(0.0),
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8587,6 +9003,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8615,6 +9032,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -8657,6 +9075,7 @@ mod tests {
             include_future: false,
             include_stale: false,
             relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
             source_mode: SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
@@ -9842,6 +10261,95 @@ mod tests {
         let (deduped, collapsed) = dedupe_hits_on_doc_id(hits);
         assert!(deduped.is_empty());
         assert_eq!(collapsed, 0);
+    }
+
+    // ========================================================================
+    // Bead bd-17c65.14.14 (N14) — mutual-information dedup
+    // ========================================================================
+
+    fn synthetic_content_hit(doc_id: &str, score: f32, content: &str) -> SearchHit {
+        let mut hit = synthetic_hit(doc_id, score);
+        hit.metadata = Some(serde_json::json!({ "content": content }));
+        hit
+    }
+
+    #[test]
+    fn mi_dedup_collapses_reordered_paraphrase_hits_with_merged_from() {
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        options.dedup_mode = SearchDedupMode::MutualInformation;
+        let hits = vec![
+            synthetic_content_hit("mem_a", 0.90, "run cargo fmt before release cargo test"),
+            synthetic_content_hit("mem_b", 0.80, "cargo test cargo fmt before release run"),
+            synthetic_content_hit(
+                "mem_c",
+                0.70,
+                "graph centrality pagerank maintenance steward",
+            ),
+        ];
+
+        let (deduped, collapsed, eligible) =
+            dedupe_hits_on_mutual_information(hits, &options, None);
+
+        assert_eq!(eligible, 3);
+        assert_eq!(collapsed, 1);
+        assert_eq!(
+            deduped
+                .iter()
+                .map(|hit| hit.doc_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["mem_a", "mem_c"]
+        );
+        assert_eq!(
+            deduped[0].metadata.as_ref().unwrap()["dedupeMode"],
+            SearchDedupMode::MutualInformation.as_str()
+        );
+        assert_eq!(
+            deduped[0].metadata.as_ref().unwrap()["mergedFrom"][0],
+            "mem_b"
+        );
+
+        let report = SearchReport {
+            status: SearchStatus::Success,
+            query: "cargo fmt release".to_string(),
+            requested_limit: 10,
+            results: deduped,
+            elapsed_ms: 1.0,
+            errors: Vec::new(),
+            degraded: vec![SearchDegradation::mi_dedup_candidate_proposed(1)],
+            runtime_profile: test_runtime_profile(),
+            relevance_floor_applied: None,
+            candidates_below_floor: 0,
+            source_mode_requested: SearchSourceMode::Hybrid,
+            source_mode_applied: SearchSourceMode::Hybrid,
+            source_mode_fallback: false,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            scope_stats: test_scope_stats(),
+        };
+        let json = report.data_json();
+        assert_eq!(json["degraded"][0]["code"], "mi_dedup_candidate_proposed");
+        assert_eq!(json["results"][0]["metadata"]["mergedFrom"][0], "mem_b");
+    }
+
+    #[test]
+    fn mi_dedup_underpowered_when_too_few_memory_contents_are_available() {
+        let mut options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        options.dedup_mode = SearchDedupMode::MutualInformation;
+        let hits = vec![
+            synthetic_hit("mem_without_content", 0.90),
+            synthetic_hit("session_without_memory_content", 0.80),
+        ];
+
+        let (deduped, collapsed, eligible) =
+            dedupe_hits_on_mutual_information(hits, &options, None);
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(collapsed, 0);
+        assert_eq!(eligible, 0);
+        let degradation = SearchDegradation::mi_dedup_threshold_underpowered(eligible);
+        assert_eq!(degradation.code, "mi_dedup_threshold_underpowered");
+        assert!(degradation.message.contains("at least 2 memory hits"));
     }
 
     // ========================================================================

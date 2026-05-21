@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mi_dedup_candidate_proposed",
+  "introduced_by": { "bead": "bd-17c65.14.14", "epic_letter": "N" },
+  "surfaces": ["search", "diag search"],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The caller requested `--dedupe=mi` and top memory hits formed a high mutual-information paraphrase cluster. Search keeps the highest-ranked representative and surfaces metadata.mergedFrom so collapsed provenance remains visible.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Run cargo fmt before release and cargo test before release.' --workspace . --level procedural --kind rule",
+      "ee remember 'Before release run cargo test and cargo fmt.' --workspace . --level procedural --kind rule",
+      "ee index rebuild --workspace ."
+    ],
+    "invocation": "ee search 'cargo fmt release' --workspace . --dedupe=mi --json"
+  },
+  "expected_emission": {
+    "code": "mi_dedup_candidate_proposed",
+    "severity": "info",
+    "message_contains": [
+      "Mutual-information dedup collapsed",
+      "metadata.mergedFrom",
+      "provenance"
+    ]
+  }
+}
