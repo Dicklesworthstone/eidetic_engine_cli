@@ -134,6 +134,7 @@ mod tests {
         AuditDiffReport, AuditShowReport, AuditTimelineEntry, AuditTimelineReport,
         AuditVerifyReport, LinkedSnapshot, TimelinePagination, VerificationIssue,
     };
+    use ee::core::curate::{CurateReviewAction, CurateReviewOptions, review_curation_candidate};
     use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
     use ee::core::swarm_brief::{
         SWARM_BRIEF_REDACTION_STATUS, SWARM_BRIEF_SCHEMA_V1, SwarmBriefAgentInventorySummary,
@@ -147,9 +148,10 @@ mod tests {
     };
     use ee::db::{
         CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
-        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
+        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource, StoredAuditEntry,
     };
     use ee::models::{ProducerMetadata, WorkspaceId};
+    use ee::output;
     use ee::policy::{SharePreviewCandidate, SharePreviewInput, build_share_preview};
     use std::path::Path;
     use std::process::{Command, Output};
@@ -2843,6 +2845,204 @@ mod tests {
         connection.close().map_err(|error| error.to_string())?;
 
         Ok(())
+    }
+
+    #[test]
+    fn curate_review_with_reason_matches_golden() -> TestResult {
+        let artifact_dir = unique_artifact_dir("curate-review-reason")?;
+        let workspace = artifact_dir.join("workspace");
+        let database = workspace.join(".ee").join("ee.db");
+        fs::create_dir_all(workspace.join(".ee")).map_err(|error| {
+            format!(
+                "failed to create workspace {}: {error}",
+                workspace.display()
+            )
+        })?;
+
+        let workspace_id = compute_stable_workspace_id(&workspace);
+        let memory_id = "mem_00000000000000curatereason1";
+        let accept_id = "curate_00000000000000000reason01";
+        let reject_id = "curate_00000000000000000reason02";
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("curate-review-reason-test".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_string(),
+                    kind: "guideline".to_string(),
+                    content: "Use explicit reasons when reviewing curation candidates.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.6,
+                    utility: 0.7,
+                    importance: 0.5,
+                    provenance_uri: Some("file://curate-review-reason.md#L1".to_string()),
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    valid_from: None,
+                    valid_to: None,
+                    tags: vec!["curation-test".to_string()],
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for (candidate_id, candidate_reason) in [
+            (accept_id, "Accept candidate fixture."),
+            (reject_id, "Reject candidate fixture."),
+        ] {
+            connection
+                .insert_curation_candidate(
+                    candidate_id,
+                    &CreateCurationCandidateInput {
+                        workspace_id: workspace_id.clone(),
+                        candidate_type: "promote".to_string(),
+                        target_memory_id: memory_id.to_string(),
+                        proposed_content: None,
+                        proposed_confidence: Some(0.82),
+                        proposed_trust_class: Some("agent_validated".to_string()),
+                        source_type: "feedback_event".to_string(),
+                        source_id: Some(format!("golden-{candidate_id}")),
+                        reason: candidate_reason.to_string(),
+                        confidence: 0.76,
+                        status: Some("pending".to_string()),
+                        created_at: Some("2026-05-01T00:00:02Z".to_string()),
+                        ttl_expires_at: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let accept = review_curation_candidate(&CurateReviewOptions {
+            workspace_path: &workspace,
+            database_path: Some(&database),
+            candidate_id: accept_id,
+            action: CurateReviewAction::Accept,
+            actor: Some("agent-1"),
+            dry_run: false,
+            snoozed_until: None,
+            reason: Some("human validated"),
+            merge_into_candidate_id: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let reject = review_curation_candidate(&CurateReviewOptions {
+            workspace_path: &workspace,
+            database_path: Some(&database),
+            candidate_id: reject_id,
+            action: CurateReviewAction::Reject,
+            actor: Some("agent-1"),
+            dry_run: false,
+            snoozed_until: None,
+            reason: Some("duplicate of accepted rule"),
+            merge_into_candidate_id: None,
+        })
+        .map_err(|error| error.to_string())?;
+
+        let accept_audit_id = accept
+            .mutation
+            .audit_id
+            .as_deref()
+            .ok_or_else(|| "accept audit id must be present".to_string())?;
+        let reject_audit_id = reject
+            .mutation
+            .audit_id
+            .as_deref()
+            .ok_or_else(|| "reject audit id must be present".to_string())?;
+        let accept_audit = connection
+            .get_audit(accept_audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "accept audit row missing".to_string())?;
+        let reject_audit = connection
+            .get_audit(reject_audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reject audit row missing".to_string())?;
+
+        let golden = serde_json::json!({
+            "schema": "ee.curate.review_reason_golden.v1",
+            "accept": {
+                "response": curate_review_response_projection(&accept)?,
+                "audit": curate_review_audit_projection(&accept_audit)?,
+            },
+            "reject": {
+                "response": curate_review_response_projection(&reject)?,
+                "audit": curate_review_audit_projection(&reject_audit)?,
+            },
+        });
+        let pretty = serde_json::to_string_pretty(&golden)
+            .map_err(|error| format!("failed to serialize curate review golden: {error}"))?
+            + "\n";
+        assert_golden("curate", "review_with_reason.json", &pretty)
+    }
+
+    fn curate_review_response_projection(
+        report: &ee::core::curate::CurateReviewReport,
+    ) -> Result<serde_json::Value, String> {
+        let response: serde_json::Value =
+            serde_json::from_str(&output::render_curate_review_json(report))
+                .map_err(|error| format!("curate review response JSON parse failed: {error}"))?;
+        Ok(serde_json::json!({
+            "schema": response["schema"],
+            "success": response["success"],
+            "data": {
+                "schema": response["data"]["schema"],
+                "command": response["data"]["command"],
+                "candidateId": response["data"]["candidateId"],
+                "dryRun": response["data"]["dryRun"],
+                "durableMutation": response["data"]["durableMutation"],
+                "review": {
+                    "status": response["data"]["review"]["status"],
+                    "decision": response["data"]["review"]["decision"],
+                    "action": response["data"]["review"]["action"],
+                },
+                "mutation": {
+                    "fromStatus": response["data"]["mutation"]["fromStatus"],
+                    "toStatus": response["data"]["mutation"]["toStatus"],
+                    "fromReviewState": response["data"]["mutation"]["fromReviewState"],
+                    "toReviewState": response["data"]["mutation"]["toReviewState"],
+                    "persisted": response["data"]["mutation"]["persisted"],
+                    "reviewedBy": response["data"]["mutation"]["reviewedBy"],
+                    "reviewedAtPresent": response["data"]["mutation"]["reviewedAt"].is_string(),
+                    "auditIdPresent": response["data"]["mutation"]["auditId"].is_string(),
+                }
+            }
+        }))
+    }
+
+    fn curate_review_audit_projection(
+        audit: &StoredAuditEntry,
+    ) -> Result<serde_json::Value, String> {
+        let details: serde_json::Value = serde_json::from_str(
+            audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "curate review audit details missing".to_string())?,
+        )
+        .map_err(|error| format!("curate review audit details parse failed: {error}"))?;
+        Ok(serde_json::json!({
+            "actor": audit.actor.as_deref(),
+            "action": &audit.action,
+            "targetType": audit.target_type.as_deref(),
+            "targetId": audit.target_id.as_deref(),
+            "details": {
+                "candidateId": details["candidateId"],
+                "action": details["action"],
+                "fromStatus": details["fromStatus"],
+                "toStatus": details["toStatus"],
+                "fromReviewState": details["fromReviewState"],
+                "toReviewState": details["toReviewState"],
+                "decision": details["decision"],
+                "reason": details["reason"],
+            }
+        }))
     }
 
     #[test]
