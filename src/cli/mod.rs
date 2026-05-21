@@ -33387,6 +33387,18 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
         })
     });
 
+    let bayes_posterior = report.bayes_posterior.as_ref().map(|posterior| {
+        serde_json::json!({
+            "schema": "ee.bayes.posterior.v1",
+            "alpha": posterior_json_value(posterior.alpha),
+            "beta": posterior_json_value(posterior.beta),
+            "mean": posterior_json_value(posterior.mean),
+            "effectiveSampleSize": posterior_json_value(posterior.effective_sample_size),
+            "credibleInterval90": posterior_interval_json_value(posterior.credible_interval_90, 0.90),
+            "credibleInterval50": posterior_interval_json_value(posterior.credible_interval_50, 0.50),
+        })
+    });
+
     let degraded = aggregate_why_degraded_json("why", &report.degraded);
 
     let contradictions: Vec<serde_json::Value> = report
@@ -33509,6 +33521,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "graphRetrievalFeatures": graph_retrieval,
             "selection": selection,
             "agentProfile": agent_profile,
+            "bayesPosterior": bayes_posterior,
             "lifecycle": lifecycle,
             "contradictions": contradictions,
             "links": links,
@@ -33562,6 +33575,26 @@ fn graph_score_json_value(value: f64) -> serde_json::Value {
         return serde_json::Value::Null;
     };
     serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn posterior_json_value(value: f64) -> serde_json::Value {
+    let rounded = if value.is_finite() {
+        (value * 1_000_000.0).round() / 1_000_000.0
+    } else {
+        return serde_json::Value::Null;
+    };
+    serde_json::Number::from_f64(rounded).map_or(serde_json::Value::Null, serde_json::Value::Number)
+}
+
+fn posterior_interval_json_value(interval: Option<(f64, f64)>, level: f64) -> serde_json::Value {
+    let Some((lower, upper)) = interval else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "lower": posterior_json_value(lower),
+        "upper": posterior_json_value(upper),
+        "level": posterior_json_value(level),
+    })
 }
 
 fn read_completion_audit_objective(
