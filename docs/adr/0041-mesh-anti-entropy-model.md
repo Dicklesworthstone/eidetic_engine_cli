@@ -131,12 +131,13 @@ name the reference scenarios this ADR commits to:
 4. `stale_tier1_read_gets_revision_notice`
 5. `deterministic_replay_order_independent`
 6. `withdrawal_propagates_as_provenance_tombstone`
-7. `validity_expiry_filters_without_peer_cache_purge`
-8. `tombstone_hides_from_search_without_body_purge`
-9. `withdrawal_wins_over_tombstone_and_validity_expiry`
-10. `malformed_hash_body_policy_schema_events_enter_quarantine`
-11. `crash_after_insert_before_cursor_requires_repair`
-12. `quarantine_repair_actions_are_audited`
+7. `withdrawn_remote_material_renders_search_context_why_contract`
+8. `validity_expiry_filters_without_peer_cache_purge`
+9. `tombstone_hides_from_search_without_body_purge`
+10. `withdrawal_wins_over_tombstone_and_validity_expiry`
+11. `malformed_hash_body_policy_schema_events_enter_quarantine`
+12. `crash_after_insert_before_cursor_requires_repair`
+13. `quarantine_repair_actions_are_audited`
 
 Adding a scenario requires both an ADR amendment and a corresponding entry
 in that constant array, so the test list and the contract cannot drift.
@@ -145,9 +146,12 @@ The focused executable harness is `tests/mesh_anti_entropy_model.rs`. It
 imports the model directly while the runtime `src/mesh/mod.rs` surface is in
 flight, replays the scenario tests, and prints
 `mesh_anti_entropy_model_scenario=<name> result=covered` lines in `--nocapture`
-mode. The e2e driver `scripts/e2e_mesh_anti_entropy_model.sh` emits matching
-`ee.test_event.v1` JSONL records before running the focused harness so replay
-logs can be correlated with the formal scenario catalog.
+mode. The rendering scenario additionally pins that withdrawn remote material
+is suppressed from search and context while `why` can still expose redaction-safe
+provenance and peer-cache purge requirements. The e2e driver
+`scripts/e2e_mesh_anti_entropy_model.sh` emits matching `ee.test_event.v1`
+JSONL records before running the focused harness so replay logs can be
+correlated with the formal scenario catalog.
 
 ## Out of scope for this ADR
 

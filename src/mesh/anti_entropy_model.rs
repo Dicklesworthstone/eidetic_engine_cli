@@ -24,6 +24,7 @@ pub const ANTI_ENTROPY_MODEL_SCENARIOS: &[&str] = &[
     "stale_tier1_read_gets_revision_notice",
     "deterministic_replay_order_independent",
     "withdrawal_propagates_as_provenance_tombstone",
+    "withdrawn_remote_material_renders_search_context_why_contract",
     "validity_expiry_filters_without_peer_cache_purge",
     "tombstone_hides_from_search_without_body_purge",
     "withdrawal_wins_over_tombstone_and_validity_expiry",
@@ -38,6 +39,7 @@ pub const TOMBSTONE_VISIBILITY_REASON: &str =
     "tombstone_preserves_provenance_without_peer_cache_purge";
 pub const VALIDITY_EXPIRY_VISIBILITY_REASON: &str =
     "validity_expiry_filters_reads_without_peer_cache_purge";
+pub const MESH_LOGICAL_VISIBILITY_RENDER_SCHEMA_V1: &str = "ee.mesh.logical_visibility_render.v1";
 pub const MESH_EVENT_QUARANTINED_CODE: &str = "mesh_event_quarantined";
 pub const MESH_CURSOR_REPAIR_REQUIRED_CODE: &str = "mesh_cursor_repair_required";
 pub const MESH_REPLAY_RECOVERY_SCHEMA_V1: &str = "ee.mesh.replay_recovery.v1";
@@ -156,7 +158,8 @@ impl ModelEvent {
 }
 
 /// Effective visibility of one logical memory after replay.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LogicalVisibilityStatus {
     Active,
     Withdrawn,
@@ -176,6 +179,26 @@ impl LogicalVisibilityStatus {
     }
 }
 
+/// Read surface that consumes mesh logical visibility decisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshReadSurface {
+    Search,
+    Context,
+    Why,
+}
+
+impl MeshReadSurface {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::Context => "context",
+            Self::Why => "why",
+        }
+    }
+}
+
 /// Context/search/why rendering contract for replayed mesh material.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogicalVisibility {
@@ -188,6 +211,72 @@ pub struct LogicalVisibility {
     pub why_provenance_visible: bool,
     pub body_cache_purge_required: bool,
     pub residual_metadata_reason: Option<&'static str>,
+}
+
+impl LogicalVisibility {
+    #[must_use]
+    pub fn render_for_surface(&self, surface: MeshReadSurface) -> MeshLogicalVisibilityRender {
+        let included = match surface {
+            MeshReadSurface::Search => self.search_visible,
+            MeshReadSurface::Context => self.context_visible,
+            MeshReadSurface::Why => self.why_provenance_visible,
+        };
+        let body_visible = matches!(surface, MeshReadSurface::Search | MeshReadSurface::Context)
+            && matches!(self.status, LogicalVisibilityStatus::Active)
+            && included;
+        let provenance_visible = matches!(surface, MeshReadSurface::Why) && included;
+        let selected_event_ids = if provenance_visible && !self.provenance_event_ids.is_empty() {
+            self.provenance_event_ids.clone()
+        } else if included && matches!(self.status, LogicalVisibilityStatus::Active) {
+            self.active_head_event_ids.clone()
+        } else {
+            Vec::new()
+        };
+
+        MeshLogicalVisibilityRender {
+            schema: MESH_LOGICAL_VISIBILITY_RENDER_SCHEMA_V1,
+            surface,
+            logical_memory_id: self.logical_memory_id.clone(),
+            status: self.status,
+            included,
+            body_visible,
+            provenance_visible,
+            body_cache_purge_required: self.body_cache_purge_required,
+            selected_event_ids,
+            residual_metadata_reason: self.residual_metadata_reason,
+            render_text: render_visibility_text(self, surface, included, body_visible),
+        }
+    }
+
+    #[must_use]
+    pub fn render_all_surfaces(&self) -> Vec<MeshLogicalVisibilityRender> {
+        [
+            MeshReadSurface::Search,
+            MeshReadSurface::Context,
+            MeshReadSurface::Why,
+        ]
+        .into_iter()
+        .map(|surface| self.render_for_surface(surface))
+        .collect()
+    }
+}
+
+/// Deterministic, redaction-safe render contract for one mesh visibility
+/// decision on one read surface.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshLogicalVisibilityRender {
+    pub schema: &'static str,
+    pub surface: MeshReadSurface,
+    pub logical_memory_id: String,
+    pub status: LogicalVisibilityStatus,
+    pub included: bool,
+    pub body_visible: bool,
+    pub provenance_visible: bool,
+    pub body_cache_purge_required: bool,
+    pub selected_event_ids: Vec<String>,
+    pub residual_metadata_reason: Option<&'static str>,
+    pub render_text: String,
 }
 
 /// Replay result for one delivered event.
@@ -867,15 +956,77 @@ fn cursor_repair_command(record: &CursorRepairRecord) -> String {
     )
 }
 
+fn render_visibility_text(
+    visibility: &LogicalVisibility,
+    surface: MeshReadSurface,
+    included: bool,
+    body_visible: bool,
+) -> String {
+    let reason = visibility
+        .residual_metadata_reason
+        .unwrap_or("active_mesh_memory");
+    match (surface, visibility.status, included, body_visible) {
+        (MeshReadSurface::Search, LogicalVisibilityStatus::Active, true, true) => format!(
+            "mesh memory {} is searchable; active heads={}.",
+            visibility.logical_memory_id,
+            event_list(&visibility.active_head_event_ids)
+        ),
+        (MeshReadSurface::Context, LogicalVisibilityStatus::Active, true, true) => format!(
+            "mesh memory {} may enter context; active heads={}.",
+            visibility.logical_memory_id,
+            event_list(&visibility.active_head_event_ids)
+        ),
+        (MeshReadSurface::Why, LogicalVisibilityStatus::Active, true, false) => format!(
+            "mesh memory {} remains active; why may cite active heads={}.",
+            visibility.logical_memory_id,
+            event_list(&visibility.active_head_event_ids)
+        ),
+        (MeshReadSurface::Search, _, false, false) => format!(
+            "mesh memory {} is suppressed from search because status={} reason={reason}.",
+            visibility.logical_memory_id,
+            visibility.status.as_str()
+        ),
+        (MeshReadSurface::Context, _, false, false) => format!(
+            "mesh memory {} is suppressed from context because status={} reason={reason}.",
+            visibility.logical_memory_id,
+            visibility.status.as_str()
+        ),
+        (MeshReadSurface::Why, _, true, false) => format!(
+            "mesh memory {} keeps why provenance for status={} via events={}; body_visible=false; purge_required={}.",
+            visibility.logical_memory_id,
+            visibility.status.as_str(),
+            event_list(&visibility.provenance_event_ids),
+            visibility.body_cache_purge_required
+        ),
+        _ => format!(
+            "mesh memory {} has surface={} status={} included={} body_visible={} reason={reason}.",
+            visibility.logical_memory_id,
+            surface.as_str(),
+            visibility.status.as_str(),
+            included,
+            body_visible
+        ),
+    }
+}
+
+fn event_list(events: &[String]) -> String {
+    if events.is_empty() {
+        "[]".to_owned()
+    } else {
+        format!("[{}]", events.join(","))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ANTI_ENTROPY_MODEL_SCENARIOS, CURSOR_NOT_ADVANCED_LOG, EventRange, LogicalVisibilityStatus,
         MESH_CURSOR_REPAIR_REQUIRED_CODE, MESH_EVENT_QUARANTINED_CODE,
-        MESH_REPLAY_RECOVERY_SCHEMA_V1, ModelEvent, ModelEventKind, ModelNode,
-        QUARANTINE_ENTERED_LOG, REPAIR_ACTION_LOG, REPLAY_RECOVERED_LOG, ReplayOutcome,
-        ReplayQuarantineReason, ReplayRepairAction, ReplayValidation, TOMBSTONE_VISIBILITY_REASON,
-        VALIDITY_EXPIRY_VISIBILITY_REASON, WITHDRAWAL_VISIBILITY_REASON,
+        MESH_LOGICAL_VISIBILITY_RENDER_SCHEMA_V1, MESH_REPLAY_RECOVERY_SCHEMA_V1, MeshReadSurface,
+        ModelEvent, ModelEventKind, ModelNode, QUARANTINE_ENTERED_LOG, REPAIR_ACTION_LOG,
+        REPLAY_RECOVERED_LOG, ReplayOutcome, ReplayQuarantineReason, ReplayRepairAction,
+        ReplayValidation, TOMBSTONE_VISIBILITY_REASON, VALIDITY_EXPIRY_VISIBILITY_REASON,
+        WITHDRAWAL_VISIBILITY_REASON,
     };
 
     fn event(
@@ -1106,6 +1257,61 @@ mod tests {
             decision.residual_metadata_reason,
             Some(WITHDRAWAL_VISIBILITY_REASON)
         );
+    }
+
+    #[test]
+    fn withdrawn_remote_material_renders_search_context_why_contract() {
+        let scenario = "withdrawn_remote_material_renders_search_context_why_contract";
+        assert!(ANTI_ENTROPY_MODEL_SCENARIOS.contains(&scenario));
+
+        let create = event("node_a", 1, "mem_shared_body", None, "hash_body");
+        let withdraw = event_kind(
+            "node_a",
+            2,
+            "mem_shared_body",
+            Some(create.event_id.as_str()),
+            "hash_withdraw",
+            ModelEventKind::ShareWithdraw,
+        );
+        let node = ModelNode::replay_deterministically([create, withdraw.clone()]);
+        let visibility = node.logical_visibility_at(10_000);
+        let renders = visibility[0].render_all_surfaces();
+
+        assert_eq!(renders.len(), 3);
+        for render in &renders {
+            assert_eq!(render.schema, MESH_LOGICAL_VISIBILITY_RENDER_SCHEMA_V1);
+            assert_eq!(render.logical_memory_id, "mem_shared_body");
+            assert_eq!(render.status, LogicalVisibilityStatus::Withdrawn);
+            assert!(!render.body_visible);
+            assert_eq!(
+                render.residual_metadata_reason,
+                Some(WITHDRAWAL_VISIBILITY_REASON)
+            );
+        }
+
+        let search = &renders[0];
+        assert_eq!(search.surface, MeshReadSurface::Search);
+        assert!(!search.included);
+        assert!(!search.provenance_visible);
+        assert!(search.selected_event_ids.is_empty());
+        assert!(search.render_text.contains("suppressed from search"));
+
+        let context = &renders[1];
+        assert_eq!(context.surface, MeshReadSurface::Context);
+        assert!(!context.included);
+        assert!(!context.provenance_visible);
+        assert!(context.selected_event_ids.is_empty());
+        assert!(context.render_text.contains("suppressed from context"));
+
+        let why = &renders[2];
+        assert_eq!(why.surface, MeshReadSurface::Why);
+        assert!(why.included);
+        assert!(why.provenance_visible);
+        assert!(why.body_cache_purge_required);
+        assert_eq!(why.selected_event_ids, vec![withdraw.event_id]);
+        assert!(why.render_text.contains("keeps why provenance"));
+        assert!(why.render_text.contains("body_visible=false"));
+        assert!(why.render_text.contains("purge_required=true"));
     }
 
     #[test]

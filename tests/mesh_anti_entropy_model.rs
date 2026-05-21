@@ -19,6 +19,7 @@ const EXPECTED_SCENARIOS: &[&str] = &[
     "stale_tier1_read_gets_revision_notice",
     "deterministic_replay_order_independent",
     "withdrawal_propagates_as_provenance_tombstone",
+    "withdrawn_remote_material_renders_search_context_why_contract",
     "validity_expiry_filters_without_peer_cache_purge",
     "tombstone_hides_from_search_without_body_purge",
     "withdrawal_wins_over_tombstone_and_validity_expiry",
