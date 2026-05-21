@@ -197,11 +197,12 @@ memory bodies in `sources[]`.
 | `storage_unimplemented` | status | `fsqlite` core feature | Whole storage subsystem disabled. |
 | `toon_unavailable` | status, doctor | TOON renderer feature | TOON format renderer unavailable or explicitly disabled. |
 
-### `mixed` (3 codes — feature + state)
+### `mixed` (4 codes — feature + state)
 
 | Code | Surface | Notes |
 |------|---------|-------|
 | `cass_unavailable` | doctor, import cass | Build-time: `cass` not on PATH at install. Response-time: PATH check fails per call. After E5, presence in capabilities.available[]; per-call resolution failure stays in degraded[]. |
+| `embed_model_unavailable` | search, context | Build-time: no dense embedder feature compiled. Response-time: embedder/model load failed while lexical fallback remains available. |
 | `graph_unavailable` | doctor, diag graph | Build-time: `fnx-*` feature. Response-time: snapshot generation failed. Split per E5. |
 | `search_unavailable` | status, dependency contract | Build-time: `frankensearch`. Response-time: index manifest missing. Split per E5. |
 

@@ -1,0 +1,36 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "embed_model_unavailable",
+  "introduced_by": {
+    "bead": "bd-3qs2i.4.1",
+    "epic_letter": "F4"
+  },
+  "surfaces": [
+    "search",
+    "context"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "The embedding model or embedder feature is unavailable while the lexical search arm remains functional, so search continues in lexical fallback mode.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json",
+      "export EE_EMBED_MODEL_PATH=/nonexistent/model"
+    ],
+    "invocation": "EE_EMBED_MODEL_PATH=/nonexistent/model ee search 'cargo workspace' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "embed_model_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Embedding model unavailable",
+      "lexical"
+    ],
+    "repair_contains": "ee index reembed --workspace .",
+    "repair_strings": [
+      "ee index reembed --workspace .",
+      "cargo build --features embed-quality"
+    ]
+  }
+}
