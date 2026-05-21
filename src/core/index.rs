@@ -2399,6 +2399,13 @@ impl From<std::io::Error> for IndexStatusError {
 pub fn get_index_status(
     options: &IndexStatusOptions,
 ) -> Result<IndexStatusReport, IndexStatusError> {
+    get_index_status_with_connection(options, None)
+}
+
+pub(crate) fn get_index_status_with_connection(
+    options: &IndexStatusOptions,
+    connection: Option<&DbConnection>,
+) -> Result<IndexStatusReport, IndexStatusError> {
     let start = Instant::now();
     let database_path = options.resolve_database_path();
     let index_dir = options.resolve_index_dir();
@@ -2412,8 +2419,14 @@ pub fn get_index_status(
         if !index_exists || index_file_count == 0 {
             (0, 0, None)
         } else if database_path.exists() {
-            let db = DbConnection::open_file(&database_path)?;
-            get_db_stats(&db)?
+            let owned_connection;
+            let db = if let Some(connection) = connection {
+                connection
+            } else {
+                owned_connection = DbConnection::open_file(&database_path)?;
+                &owned_connection
+            };
+            get_db_stats(db)?
         } else {
             (0, 0, None)
         };

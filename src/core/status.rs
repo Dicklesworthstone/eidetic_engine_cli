@@ -57,6 +57,7 @@ use super::derived_asset_freshness::{
 };
 use super::index::{
     DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, get_index_status,
+    get_index_status_with_connection,
 };
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::swarm_brief::{
@@ -71,7 +72,7 @@ use super::tailscale_probe::{
     TailscaleLocalReport, TailscalePlatform, TailscaleSocketProbeConfig,
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
-use super::verify::{VerificationPostureReport, gather_verification_posture};
+use super::verify::{VerificationPostureReport, gather_verification_posture_with_connection};
 use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
@@ -1172,7 +1173,10 @@ fn probe_storage_capability_with_connection(
     }
 
     if let Some(connection) = connection {
-        return match connection.ping().and_then(|()| connection.needs_migration()) {
+        return match connection
+            .ping()
+            .and_then(|()| connection.needs_migration())
+        {
             Ok(false) => CapabilityStatus::Ready,
             Ok(true) | Err(_) => CapabilityStatus::Degraded,
         };
@@ -1857,7 +1861,8 @@ impl StatusReport {
     pub fn gather_with_options(options: &StatusOptions) -> Self {
         let status_connection = open_status_connection(options.workspace_path.as_deref());
         let status_connection_ref = status_connection.as_ref();
-        let index_status = gather_status_index_status(options.workspace_path.as_deref());
+        let index_status =
+            gather_status_index_status(options.workspace_path.as_deref(), status_connection_ref);
         let capabilities = CapabilityReport::gather_with_workspace_connection_and_index(
             options.workspace_path.as_deref(),
             status_connection_ref,
@@ -1877,7 +1882,10 @@ impl StatusReport {
         );
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
-        let verification_posture = gather_verification_posture(options.workspace_path.as_deref());
+        let verification_posture = gather_verification_posture_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let host_calibration = gather_host_calibration_status(options.workspace_path.as_deref());
         let (memory_health, memory_health_degradations) = gather_memory_health_with_connection(
             options.workspace_path.as_deref(),
@@ -3613,6 +3621,7 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
 
 fn gather_status_index_status(
     workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
 ) -> Option<Result<IndexStatusReport, ()>> {
     let workspace_path = workspace_path?;
     let options = IndexStatusOptions {
@@ -3620,7 +3629,7 @@ fn gather_status_index_status(
         database_path: None,
         index_dir: None,
     };
-    Some(get_index_status(&options).map_err(|_| ()))
+    Some(get_index_status_with_connection(&options, connection).map_err(|_| ()))
 }
 
 #[cfg(test)]
@@ -3643,17 +3652,17 @@ fn gather_derived_assets_with_index_status(
                 DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
             }
             None => {
-            let options = IndexStatusOptions {
-                workspace_path: path.to_path_buf(),
-                database_path: None,
-                index_dir: None,
-            };
-            match get_index_status(&options) {
-                Ok(report) => DerivedAssetReport::from_index_status(&report),
-                Err(_) => {
-                    DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
+                let options = IndexStatusOptions {
+                    workspace_path: path.to_path_buf(),
+                    database_path: None,
+                    index_dir: None,
+                };
+                match get_index_status(&options) {
+                    Ok(report) => DerivedAssetReport::from_index_status(&report),
+                    Err(_) => {
+                        DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
+                    }
                 }
-            }
             }
         },
         None => DerivedAssetReport::not_inspected(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH),

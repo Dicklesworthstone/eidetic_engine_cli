@@ -1160,6 +1160,14 @@ fn parse_verification_audit_entries_with_metadata(
 
 #[must_use]
 pub fn gather_verification_posture(workspace_path: Option<&Path>) -> VerificationPostureReport {
+    gather_verification_posture_with_connection(workspace_path, None)
+}
+
+#[must_use]
+pub(crate) fn gather_verification_posture_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> VerificationPostureReport {
     let Some(workspace_path) = workspace_path else {
         return VerificationPostureReport::not_inspected();
     };
@@ -1172,17 +1180,25 @@ pub fn gather_verification_posture(workspace_path: Option<&Path>) -> Verificatio
         );
     }
 
-    let connection = match DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(_) => {
-            return VerificationPostureReport::unavailable(
-                "unavailable",
-                "verification_ledger_unreadable",
-                "ee doctor --workspace . --json",
-            );
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                owned_connection = connection;
+                &owned_connection
+            }
+            Err(_) => {
+                return VerificationPostureReport::unavailable(
+                    "unavailable",
+                    "verification_ledger_unreadable",
+                    "ee doctor --workspace . --json",
+                );
+            }
         }
     };
-    match list_verification_records(&connection, None) {
+    match list_verification_records(connection, None) {
         Ok(records) => VerificationPostureReport::from_records(Utc::now(), records.as_slice()),
         Err(_) => VerificationPostureReport::unavailable(
             "unavailable",
