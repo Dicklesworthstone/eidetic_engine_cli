@@ -5553,7 +5553,7 @@ fn rch_workers(value: &Value) -> Option<&Vec<Value>> {
 fn rch_worker_is_ready(worker: &Value) -> bool {
     string_field(worker, &["status", "state", "health"])
         .map(|status| {
-            let status = status.to_ascii_lowercase();
+            let status = status.trim().to_ascii_lowercase();
             status.contains("ready")
                 || status.contains("healthy")
                 || status.contains("online")
@@ -5565,7 +5565,7 @@ fn rch_worker_is_ready(worker: &Value) -> bool {
 fn rch_worker_is_unreachable(worker: &Value) -> bool {
     string_field(worker, &["status", "state", "health"])
         .map(|status| {
-            let status = status.to_ascii_lowercase();
+            let status = status.trim().to_ascii_lowercase();
             status.contains("unreachable")
                 || status.contains("offline")
                 || status.contains("unhealthy")
@@ -5697,8 +5697,13 @@ fn string_field_any(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn numeric_field(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| value.get(*key).and_then(Value::as_u64))
+    keys.iter().find_map(|key| {
+        let value = value.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|number| number.try_into().ok()))
+            .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
+    })
 }
 
 fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
@@ -5709,9 +5714,10 @@ fn numeric_field_any(value: &Value, keys: &[&str]) -> Option<u64> {
 fn ratio_bps_field(value: &Value, keys: &[&str], percent_units: bool) -> Option<u64> {
     keys.iter().find_map(|key| {
         let raw = value.get(*key)?;
-        let numeric = raw
-            .as_f64()
-            .or_else(|| raw.as_str().and_then(|text| text.parse::<f64>().ok()))?;
+        let numeric = raw.as_f64().or_else(|| {
+            raw.as_str()
+                .and_then(|text| text.trim().parse::<f64>().ok())
+        })?;
         if !numeric.is_finite() || numeric.is_sign_negative() {
             return None;
         }
@@ -7615,7 +7621,7 @@ mod tests {
     #[test]
     fn rch_parser_reports_queue_pressure() {
         let hints = require_ok(
-            parse_rch_status_json(r#"{"queueDepth":5,"activeBuilds":2}"#),
+            parse_rch_status_json(r#"{"queueDepth":" 5 ","activeBuilds":"2"}"#),
             "valid rch JSON",
         );
         let by_message = hints
@@ -7662,11 +7668,19 @@ mod tests {
     #[test]
     fn rch_parser_distinguishes_no_workers_and_unreachable_workers() {
         let no_workers = require_ok(
-            parse_rch_status_json(r#"{"workersHealthy":0}"#),
+            parse_rch_status_json(r#"{"workersHealthy":"0"}"#),
             "no workers rch JSON",
         );
         assert!(no_workers.iter().any(|hint| {
             hint.message == "rch remote posture: no_remote_workers" && hint.level == "high"
+        }));
+
+        let ready = require_ok(
+            parse_rch_status_json(r#"{"workers":[{"id":"css","status":" OK "}]}"#),
+            "ready workers rch JSON",
+        );
+        assert!(ready.iter().any(|hint| {
+            hint.message == "rch remote posture: remote_ready" && hint.level == "low"
         }));
 
         let unreachable = require_ok(

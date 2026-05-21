@@ -450,14 +450,16 @@ pub fn generate_prune_plan(
 
     let summary = EconomyPrunePlanSummary {
         recommendation_count: recommendations.len(),
-        total_candidates: recommendations
-            .iter()
-            .map(|recommendation| recommendation.candidate_count)
-            .sum(),
-        estimated_token_savings: recommendations
-            .iter()
-            .map(|recommendation| recommendation.estimated_token_savings)
-            .sum(),
+        total_candidates: saturating_sum_u32(
+            recommendations
+                .iter()
+                .map(|recommendation| recommendation.candidate_count),
+        ),
+        estimated_token_savings: saturating_sum_u32(
+            recommendations
+                .iter()
+                .map(|recommendation| recommendation.estimated_token_savings),
+        ),
         actions: recommendations
             .iter()
             .map(|recommendation| recommendation.action.clone())
@@ -1352,12 +1354,15 @@ fn maintenance_debt_from_metrics(metrics: &EconomyWorkspaceMetrics) -> Maintenan
         stale_artifacts,
         consolidation_candidates,
         tombstone_pending: metrics.tombstoned_count,
-        estimated_cleanup_tokens: metrics
-            .active_artifacts
-            .iter()
-            .filter(|artifact| artifact.maintenance_debt >= 0.45 && !artifact.tail_risk_protected)
-            .map(|artifact| artifact.token_cost)
-            .sum(),
+        estimated_cleanup_tokens: saturating_sum_u32(
+            metrics
+                .active_artifacts
+                .iter()
+                .filter(|artifact| {
+                    artifact.maintenance_debt >= 0.45 && !artifact.tail_risk_protected
+                })
+                .map(|artifact| artifact.token_cost),
+        ),
     }
 }
 
@@ -1458,6 +1463,12 @@ fn prune_recommendation_for_artifact(
     } else {
         None
     }
+}
+
+fn saturating_sum_u32(values: impl IntoIterator<Item = u32>) -> u32 {
+    values
+        .into_iter()
+        .fold(0u32, |sum, value| sum.saturating_add(value))
 }
 
 fn stable_workspace_id(path: &Path) -> String {
@@ -1916,6 +1927,59 @@ mod tests {
         assert_eq!(reserves.fallback_procedures, 2);
         assert_eq!(reserves.degradation_coverage, 0.75);
         Ok(())
+    }
+
+    #[test]
+    fn maintenance_debt_cleanup_tokens_saturate_on_large_artifacts() {
+        let metrics = EconomyWorkspaceMetrics {
+            workspace_id: "wsp_overflow".to_owned(),
+            active_artifacts: vec![
+                EconomyArtifactMetric {
+                    artifact_id: "mem_large_a".to_owned(),
+                    artifact_type: "memory".to_owned(),
+                    score: 0.2,
+                    token_cost: u32::MAX,
+                    utility_score: 0.2,
+                    cost_score: 0.0,
+                    confidence_score: 0.4,
+                    freshness_score: 0.1,
+                    false_alarm_rate: 0.0,
+                    maintenance_debt: 0.8,
+                    tail_risk_protected: false,
+                    retrieval_frequency: 2,
+                    last_accessed_days_ago: 400,
+                    citation_count: 0,
+                    confidence_delta: 0.0,
+                    decay_factor: 0.2,
+                    rationale: "fixture".to_owned(),
+                },
+                EconomyArtifactMetric {
+                    artifact_id: "mem_large_b".to_owned(),
+                    artifact_type: "memory".to_owned(),
+                    score: 0.2,
+                    token_cost: 16,
+                    utility_score: 0.2,
+                    cost_score: 0.0,
+                    confidence_score: 0.4,
+                    freshness_score: 0.1,
+                    false_alarm_rate: 0.0,
+                    maintenance_debt: 0.8,
+                    tail_risk_protected: false,
+                    retrieval_frequency: 2,
+                    last_accessed_days_ago: 400,
+                    citation_count: 0,
+                    confidence_delta: 0.0,
+                    decay_factor: 0.2,
+                    rationale: "fixture".to_owned(),
+                },
+            ],
+            active_procedure_count: 0,
+            fallback_procedures: 0,
+            tombstoned_count: 0,
+        };
+
+        let debt = maintenance_debt_from_metrics(&metrics);
+        assert_eq!(debt.estimated_cleanup_tokens, u32::MAX);
     }
 
     #[test]

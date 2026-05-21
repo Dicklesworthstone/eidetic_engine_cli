@@ -207,12 +207,25 @@ impl ShadowMetrics {
 
     #[must_use]
     pub fn size_delta(&self) -> i64 {
-        self.candidate_size as i64 - self.incumbent_size as i64
+        signed_u64_delta(self.candidate_size, self.incumbent_size)
     }
 
     #[must_use]
     pub fn time_delta_us(&self) -> i64 {
-        self.candidate_time_us as i64 - self.incumbent_time_us as i64
+        signed_u64_delta(self.candidate_time_us, self.incumbent_time_us)
+    }
+}
+
+fn signed_u64_delta(candidate: u64, incumbent: u64) -> i64 {
+    if candidate >= incumbent {
+        i64::try_from(candidate - incumbent).unwrap_or(i64::MAX)
+    } else {
+        let delta = incumbent - candidate;
+        if delta > i64::MAX as u64 {
+            i64::MIN
+        } else {
+            -(delta as i64)
+        }
     }
 }
 
@@ -612,6 +625,29 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(metrics.size_delta(), -15);
+    }
+
+    #[test]
+    fn metric_deltas_saturate_instead_of_wrapping() {
+        let positive = ShadowMetrics {
+            incumbent_size: 0,
+            candidate_size: u64::MAX,
+            incumbent_time_us: 1,
+            candidate_time_us: u64::MAX,
+            ..Default::default()
+        };
+        assert_eq!(positive.size_delta(), i64::MAX);
+        assert_eq!(positive.time_delta_us(), i64::MAX);
+
+        let negative = ShadowMetrics {
+            incumbent_size: u64::MAX,
+            candidate_size: 0,
+            incumbent_time_us: u64::MAX,
+            candidate_time_us: 1,
+            ..Default::default()
+        };
+        assert_eq!(negative.size_delta(), i64::MIN);
+        assert_eq!(negative.time_delta_us(), i64::MIN);
     }
 
     #[test]

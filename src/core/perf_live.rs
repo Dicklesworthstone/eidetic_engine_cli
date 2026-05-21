@@ -242,12 +242,13 @@ pub fn parse_perf_live_duration_ms(value: &str) -> Result<u64, DomainError> {
     if trimmed.is_empty() {
         return Err(perf_live_duration_error(value));
     }
-    let (number, multiplier) = if let Some(number) = trimmed.strip_suffix("ms") {
-        (number, 1)
-    } else if let Some(number) = trimmed.strip_suffix('s') {
-        (number, 1_000)
-    } else if let Some(number) = trimmed.strip_suffix('m') {
-        (number, 60_000)
+    let normalized = trimmed.to_ascii_lowercase();
+    let (number, multiplier) = if normalized.ends_with("ms") {
+        (&trimmed[..trimmed.len() - 2], 1)
+    } else if normalized.ends_with('s') {
+        (&trimmed[..trimmed.len() - 1], 1_000)
+    } else if normalized.ends_with('m') {
+        (&trimmed[..trimmed.len() - 1], 60_000)
     } else {
         (trimmed, 1)
     };
@@ -505,11 +506,17 @@ fn infer_healthy_workers(value: &Value) -> Option<u64> {
         workers
             .iter()
             .filter(|worker| {
-                string_field_any(worker, &["status", "health", "state"]).is_some_and(|status| {
-                    matches!(status, "healthy" | "ready" | "ok" | "available")
-                })
+                string_field_any(worker, &["status", "health", "state"])
+                    .is_some_and(is_healthy_worker_status)
             })
             .count() as u64,
+    )
+}
+
+fn is_healthy_worker_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "healthy" | "ready" | "ok" | "available"
     )
 }
 
@@ -679,7 +686,7 @@ fn value_to_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|number| number.try_into().ok()))
-        .or_else(|| value.as_str()?.parse::<u64>().ok())
+        .or_else(|| value.as_str()?.trim().parse::<u64>().ok())
 }
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -738,14 +745,42 @@ mod tests {
             parse_perf_live_duration_ms("3m").map_err(|e| e.message())?,
             180_000
         );
+        assert_eq!(
+            parse_perf_live_duration_ms(" 250MS ").map_err(|e| e.message())?,
+            250
+        );
+        assert_eq!(
+            parse_perf_live_duration_ms("2S").map_err(|e| e.message())?,
+            2_000
+        );
+        assert_eq!(
+            parse_perf_live_duration_ms("3M").map_err(|e| e.message())?,
+            180_000
+        );
         assert!(parse_perf_live_duration_ms("0s").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn infers_healthy_workers_from_status_variants() -> Result<(), String> {
+        let rch = parse_rch_snapshot_json(
+            r#"{
+                "workers": [
+                    {"status": "READY"},
+                    {"health": " Healthy "},
+                    {"state": "available"},
+                    {"status": "degraded"}
+                ]
+            }"#,
+        )?;
+        assert_eq!(rch.workers_healthy, 3);
         Ok(())
     }
 
     #[test]
     fn parses_rch_and_bead_activity_sources() -> Result<(), String> {
         let rch = parse_rch_snapshot_json(
-            r#"{"workersHealthy":5,"slotsAvailable":32,"queueDepth":2,"headOfLineAgeMs":17}"#,
+            r#"{"workersHealthy":" 5 ","slotsAvailable":32,"queueDepth":"2","headOfLineAgeMs":17}"#,
         )?;
         assert_eq!(rch.workers_healthy, 5);
         assert_eq!(rch.slots_available, Some(32));
