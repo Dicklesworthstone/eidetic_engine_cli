@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -220,6 +220,12 @@ impl ServeDispatchPlan {
     }
 }
 
+#[derive(Debug)]
+pub struct ServeListenerBinding {
+    pub listener: TcpListener,
+    pub metadata: JsonValue,
+}
+
 #[must_use]
 pub fn serve_startup_report_json(
     options: &ServeStartupOptions,
@@ -323,6 +329,64 @@ pub fn serve_startup_report_json(
         },
         "degraded": degraded
     }))
+}
+
+pub fn bind_serve_listener(
+    options: &ServeStartupOptions,
+    token: Option<&str>,
+) -> Result<ServeListenerBinding, DomainError> {
+    let startup = serve_startup_report_json(options, token)?;
+    let token_posture = serve_token_posture(token);
+    if token_posture.state != "configured" {
+        return Err(serve_policy_error(
+            "serve_token_required_before_bind",
+            "Refusing to bind ee serve before EE_SERVE_TOKEN is configured with at least 256 bits."
+                .to_owned(),
+            "Set EE_SERVE_TOKEN to at least 32 random bytes before starting the listener.",
+            json!({
+                "host": options.host,
+                "port": options.port,
+                "tokenState": token_posture.state,
+                "minimumBits": MIN_SERVE_TOKEN_BITS,
+                "tokenMaterialExposed": false
+            }),
+        ));
+    }
+
+    let bind_addr = format!("{}:{}", options.host, options.port);
+    let listener = TcpListener::bind(&bind_addr).map_err(|error| DomainError::Configuration {
+        message: format!("Failed to bind ee serve listener at {bind_addr}: {error}"),
+        repair: Some(
+            "Choose another loopback port or stop the process using this port.".to_owned(),
+        ),
+    })?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Failed to set ee serve listener nonblocking mode: {error}"),
+            repair: Some("Retry `ee serve --foreground` or use direct CLI commands.".to_owned()),
+        })?;
+    let local_addr = listener
+        .local_addr()
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Failed to inspect ee serve listener local address: {error}"),
+            repair: Some("Retry `ee serve --foreground` or use direct CLI commands.".to_owned()),
+        })?;
+
+    let metadata = json!({
+        "schema": SERVE_STARTUP_SCHEMA_V1,
+        "listener": {
+            "requestedHost": options.host,
+            "requestedPort": options.port,
+            "boundHost": local_addr.ip().to_string(),
+            "boundPort": local_addr.port(),
+            "loopbackOnly": local_addr.ip().is_loopback(),
+            "nonblocking": true,
+            "tokenMaterialExposed": false
+        },
+        "startup": startup
+    });
+    Ok(ServeListenerBinding { listener, metadata })
 }
 
 pub fn serve_dispatch_plan(request: &ServeHttpRequest) -> Result<ServeDispatchPlan, DomainError> {
@@ -1776,6 +1840,97 @@ mod tests {
             token_error.code(),
             "policy_denied",
             "non-loopback token error code",
+        )
+    }
+
+    #[test]
+    fn serve_listener_bind_allows_loopback_with_token_without_exposing_token() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let options = ServeStartupOptions {
+            port: 0,
+            ..ServeStartupOptions::default()
+        };
+        let binding =
+            bind_serve_listener(&options, Some(token)).map_err(|error| error.to_string())?;
+        let local_addr = binding
+            .listener
+            .local_addr()
+            .map_err(|error| error.to_string())?;
+
+        ensure(local_addr.ip().is_loopback(), true, "listener loopback")?;
+        ensure(
+            binding.metadata["schema"].as_str(),
+            Some(SERVE_STARTUP_SCHEMA_V1),
+            "binding schema",
+        )?;
+        ensure(
+            binding.metadata["listener"]["requestedHost"].as_str(),
+            Some(DEFAULT_SERVE_HOST),
+            "requested host",
+        )?;
+        ensure(
+            binding.metadata["listener"]["requestedPort"].as_u64(),
+            Some(0),
+            "requested port",
+        )?;
+        ensure(
+            binding.metadata["listener"]["boundPort"].as_u64(),
+            Some(u64::from(local_addr.port())),
+            "bound port",
+        )?;
+        ensure(
+            binding.metadata["listener"]["nonblocking"].as_bool(),
+            Some(true),
+            "nonblocking listener",
+        )?;
+        ensure(
+            binding.metadata["startup"]["readiness"]["canAcceptConnections"].as_bool(),
+            Some(true),
+            "startup can accept",
+        )?;
+        ensure(
+            binding.metadata.to_string().contains(token),
+            false,
+            "binding metadata must not expose token material",
+        )
+    }
+
+    #[test]
+    fn serve_listener_bind_refuses_policy_failures_before_socket_bind() -> TestResult {
+        let missing_token_error = match bind_serve_listener(&ServeStartupOptions::default(), None) {
+            Ok(binding) => {
+                return Err(format!(
+                    "missing token should fail before bind, got {:?}",
+                    binding.metadata
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            missing_token_error.code(),
+            "policy_denied",
+            "missing token error code",
+        )?;
+
+        let non_loopback = ServeStartupOptions {
+            host: "0.0.0.0".to_owned(),
+            port: 0,
+            ..ServeStartupOptions::default()
+        };
+        let non_loopback_error =
+            match bind_serve_listener(&non_loopback, Some("01234567890123456789012345678901")) {
+                Ok(binding) => {
+                    return Err(format!(
+                        "non-loopback should fail before bind, got {:?}",
+                        binding.metadata
+                    ));
+                }
+                Err(error) => error,
+            };
+        ensure(
+            non_loopback_error.code(),
+            "policy_denied",
+            "non-loopback error code",
         )
     }
 
