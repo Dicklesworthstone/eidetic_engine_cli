@@ -492,6 +492,7 @@ impl Cli {
             OutputFormat::Compact => output::Renderer::Compact,
             OutputFormat::Hook => output::Renderer::Hook,
             OutputFormat::Markdown => output::Renderer::Markdown,
+            OutputFormat::Binary => output::Renderer::Json,
             OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
             OutputFormat::Mermaid => output::Renderer::Markdown,
         }
@@ -514,6 +515,7 @@ impl Cli {
             OutputFormat::Compact => output::Renderer::Compact,
             OutputFormat::Hook => output::Renderer::Hook,
             OutputFormat::Markdown => output::Renderer::Markdown,
+            OutputFormat::Binary => output::Renderer::Json,
             OutputFormat::Mermaid if self.json || self.robot => output::Renderer::Json,
             OutputFormat::Mermaid => output::Renderer::Markdown,
         }
@@ -2169,6 +2171,10 @@ pub struct ContextArgs {
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
+    /// Write the rendered context pack to a file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -2396,6 +2402,10 @@ pub struct PackArgs {
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
+    /// Write the rendered context pack to a file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -2502,6 +2512,10 @@ pub struct PackBuildArgs {
     #[arg(long, value_name = "PATH")]
     pub index_dir: Option<PathBuf>,
 
+    /// Write the rendered context pack to a file instead of stdout.
+    #[arg(long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -2554,6 +2568,7 @@ impl PackArgs {
             include_non_affecting_degradations: self.include_non_affecting_degradations,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
+            output: self.output.clone(),
             explain_performance: self.explain_performance,
             as_of: self.as_of,
             include_expired: self.include_expired,
@@ -8916,13 +8931,17 @@ pub enum OutputFormat {
     Compact,
     Hook,
     Markdown,
+    Binary,
     Mermaid,
 }
 
 impl OutputFormat {
     #[must_use]
     pub const fn is_machine_readable(self) -> bool {
-        matches!(self, Self::Json | Self::Jsonl | Self::Compact | Self::Hook)
+        matches!(
+            self,
+            Self::Json | Self::Jsonl | Self::Compact | Self::Hook | Self::Binary
+        )
     }
 
     #[must_use]
@@ -8934,6 +8953,7 @@ impl OutputFormat {
             Self::Jsonl => output::Renderer::Jsonl,
             Self::Compact => output::Renderer::Compact,
             Self::Hook => output::Renderer::Hook,
+            Self::Binary => output::Renderer::Json,
             Self::Markdown | Self::Mermaid => output::Renderer::Markdown,
         }
     }
@@ -14437,6 +14457,43 @@ where
         Ok(()) => ProcessExitCode::Success,
         Err(_) => ProcessExitCode::Usage,
     }
+}
+
+fn write_output_bytes<W>(
+    stdout: &mut W,
+    output_path: Option<&Path>,
+    bytes: &[u8],
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    if let Some(output_path) = output_path {
+        return match fs::write(output_path, bytes) {
+            Ok(()) => ProcessExitCode::Success,
+            Err(_) => ProcessExitCode::Usage,
+        };
+    }
+    match stdout.write_all(bytes) {
+        Ok(()) => ProcessExitCode::Success,
+        Err(_) => ProcessExitCode::Usage,
+    }
+}
+
+fn write_context_text<W>(
+    stdout: &mut W,
+    output_path: Option<&Path>,
+    rendered: &str,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    if let Some(output_path) = output_path {
+        return match fs::write(output_path, rendered.as_bytes()) {
+            Ok(()) => ProcessExitCode::Success,
+            Err(_) => ProcessExitCode::Usage,
+        };
+    }
+    write_stdout(stdout, rendered)
 }
 
 fn resolve_workspace_alias_global(cli: &mut Cli) {
@@ -27350,11 +27407,26 @@ fn write_context_response<W>(
     response: &ContextResponse,
     redaction: Option<&EffectiveRedactionLevel>,
     render_options: output::ContextJsonRenderOptions,
+    output_path: Option<&Path>,
     stdout: &mut W,
 ) -> ProcessExitCode
 where
     W: Write,
 {
+    if requested_format == OutputFormat::Binary {
+        let rendered =
+            output::render_context_response_binary_with_options(response, render_options);
+        tracing::debug!(
+            target: "ee::format_render",
+            event = "format_render",
+            format = "binary",
+            byte_size = rendered.len(),
+            hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
+            fields_omitted_count = 0_u32,
+        );
+        return write_output_bytes(stdout, output_path, &rendered);
+    }
+
     let rendered = match renderer {
         output::Renderer::Human => output::render_context_response_human(response),
         output::Renderer::Toon => match redaction {
@@ -27402,12 +27474,21 @@ where
         hash = response.data.pack.hash.as_deref().unwrap_or("absent"),
         fields_omitted_count = context_format_fields_omitted_count(renderer, requested_format, render_options),
     );
-    write_stdout(stdout, &rendered)
+    write_context_text(stdout, output_path, &rendered)
 }
 
 fn validate_context_stream_request(cli: &Cli, args: &ContextArgs) -> Result<(), DomainError> {
     if !args.stream {
         return Ok(());
+    }
+    if cli.format == OutputFormat::Binary {
+        return Err(DomainError::Usage {
+            message: "`ee context --stream` cannot be combined with --format binary.".to_string(),
+            repair: Some(
+                "Use `ee context \"<task>\" --format binary --output pack.eepk` without --stream."
+                    .to_string(),
+            ),
+        });
     }
     if args.explain_performance {
         return Err(DomainError::Usage {
@@ -27489,6 +27570,7 @@ fn context_stream_pack_id(response: &ContextResponse) -> String {
 
 fn context_format_name(renderer: output::Renderer, requested_format: OutputFormat) -> &'static str {
     match (renderer, requested_format) {
+        (_, OutputFormat::Binary) => "binary",
         (output::Renderer::Markdown, OutputFormat::Mermaid) => "mermaid",
         _ => renderer.as_str(),
     }
@@ -27504,6 +27586,7 @@ fn context_format_fields_omitted_count(
         + u32::from(!render_options.include_meta)
         + u32::from(!render_options.include_verbose_meta);
     match (renderer, requested_format) {
+        (_, OutputFormat::Binary) => 0,
         (output::Renderer::Json, _) | (output::Renderer::Toon, _) => json_omissions,
         (output::Renderer::Jsonl, _) => json_omissions + 8,
         (output::Renderer::Compact, _) => json_omissions + 11,
@@ -27747,6 +27830,7 @@ where
     )
     .with_cache_json_response(
         cli.context_renderer() == output::Renderer::Json
+            && cli.format != OutputFormat::Binary
             && !args.explain
             && !args.explain_performance
             && !args.stream
@@ -27838,6 +27922,7 @@ where
                 &response,
                 Some(&redaction),
                 output::ContextJsonRenderOptions::from(output_options),
+                args.output.as_deref(),
                 stdout,
             )
         }
@@ -30334,6 +30419,7 @@ where
             resource_profile: args.resource_profile.unwrap_or_default(),
             database: args.database.clone(),
             index_dir: args.index_dir.clone(),
+            output: args.output.clone(),
             explain_performance: args.explain_performance,
             explain: false,
             no_pack_dna: false,
@@ -30514,6 +30600,7 @@ where
                 &response,
                 None,
                 output::ContextJsonRenderOptions::from(output_options),
+                args.output.as_deref(),
                 stdout,
             )
         }
@@ -49440,6 +49527,7 @@ mod tests {
             ("compact", OutputFormat::Compact),
             ("hook", OutputFormat::Hook),
             ("markdown", OutputFormat::Markdown),
+            ("binary", OutputFormat::Binary),
             ("mermaid", OutputFormat::Mermaid),
         ] {
             let parsed = Cli::try_parse_from(["ee", "--format", arg, "status"])
@@ -49476,6 +49564,10 @@ mod tests {
         ensure(
             OutputFormat::Compact.is_machine_readable(),
             "compact is machine",
+        )?;
+        ensure(
+            OutputFormat::Binary.is_machine_readable(),
+            "binary is machine",
         )?;
         ensure(OutputFormat::Hook.is_machine_readable(), "hook is machine")
     }
@@ -51179,6 +51271,7 @@ mod tests {
             ["ee", "--format", "toon", "context", "test", "--stream"].as_slice(),
             ["ee", "--format", "compact", "context", "test", "--stream"].as_slice(),
             ["ee", "--format", "hook", "context", "test", "--stream"].as_slice(),
+            ["ee", "--format", "binary", "context", "test", "--stream"].as_slice(),
         ] {
             let mut cli = Cli::try_parse_from(args).map_err(|error| {
                 format!("failed to parse stream args {args:?}: {:?}", error.kind())
@@ -51247,6 +51340,17 @@ mod tests {
             &cli.context_renderer(),
             &output::Renderer::Hook,
             "context renderer with --format hook should be hook",
+        )
+    }
+
+    #[test]
+    fn context_renderer_respects_explicit_format_binary() -> TestResult {
+        let cli = Cli::try_parse_from(["ee", "--format", "binary", "context", "test"])
+            .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
+        ensure_equal(
+            &cli.context_renderer(),
+            &output::Renderer::Json,
+            "context renderer with --format binary should use canonical JSON source",
         )
     }
 

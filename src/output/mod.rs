@@ -2433,6 +2433,15 @@ pub fn render_context_response_json_with_options(
     b.finish()
 }
 
+#[must_use]
+pub fn render_context_response_binary_with_options(
+    response: &ContextResponse,
+    options: ContextJsonRenderOptions,
+) -> Vec<u8> {
+    let canonical_json = render_context_response_json_with_options(response, options);
+    crate::pack::binary::serialize_context_response_binary(response, &canonical_json)
+}
+
 fn build_consensus_entry(obj: &mut JsonBuilder, entry: &ConsensusEntry) {
     obj.field_str("schema", entry.schema);
     obj.field_str("subjectFingerprint", &entry.subject_fingerprint);

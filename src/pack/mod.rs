@@ -19,6 +19,7 @@ use crate::models::{
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
+pub mod binary;
 pub mod budget_classifier;
 
 pub const SUBSYSTEM: &str = "pack";

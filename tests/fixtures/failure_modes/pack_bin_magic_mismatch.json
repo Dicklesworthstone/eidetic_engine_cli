@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_bin_magic_mismatch",
+  "introduced_by": {
+    "bead": "bd-17c65.14.1",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "pack",
+    "context"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A binary pack reader receives bytes that do not start with the EEPK magic header.",
+    "setup_commands": [
+      "printf 'NOPE' > /tmp/not-a-pack.eepk"
+    ],
+    "invocation": "examples/pack_binary_reader.py /tmp/not-a-pack.eepk"
+  },
+  "expected_emission": {
+    "code": "pack_bin_magic_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "binary pack magic mismatch",
+      "EEPK"
+    ],
+    "repair_contains": "Read only files emitted by ee context --format binary"
+  }
+}

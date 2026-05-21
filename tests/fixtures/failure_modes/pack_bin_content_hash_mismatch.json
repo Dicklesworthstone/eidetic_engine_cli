@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "pack_bin_content_hash_mismatch",
+  "introduced_by": {
+    "bead": "bd-17c65.14.1",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "pack",
+    "context"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "The binary pack canonical JSON footer was modified after serialization, so its BLAKE3 content_hash no longer matches the header.",
+    "setup_commands": [
+      "ee context 'release prep' --workspace . --format binary --output /tmp/pack.eepk",
+      "python3 - <<'PY'\nfrom pathlib import Path\np = Path('/tmp/pack.eepk')\nb = bytearray(p.read_bytes())\nb[-21] ^= 1\np.write_bytes(b)\nPY"
+    ],
+    "invocation": "examples/pack_binary_reader.py /tmp/pack.eepk"
+  },
+  "expected_emission": {
+    "code": "pack_bin_content_hash_mismatch",
+    "severity": "high",
+    "message_contains": [
+      "content_hash",
+      "canonical JSON"
+    ],
+    "repair_contains": "Regenerate the binary pack from the source workspace"
+  }
+}

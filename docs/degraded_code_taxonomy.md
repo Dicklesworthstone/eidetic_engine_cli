@@ -208,7 +208,7 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### Search and pack quality (46)
+#### Search and pack quality (49)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
@@ -238,6 +238,9 @@ memory bodies in `sources[]`.
 | `output_redaction_disabled` | info | bd-17c65.2.9 (B10) |
 | `pack_assembly_budget_exceeded` | medium | bd-1zb7k.5 (S4) |
 | `pack_assembly_slow` | low | bd-1zb7k.5 (S4) |
+| `pack_bin_content_hash_mismatch` | high | bd-17c65.14.1 (N1) |
+| `pack_bin_magic_mismatch` | medium | bd-17c65.14.1 (N1) |
+| `pack_bin_version_too_new` | medium | bd-17c65.14.1 (N1) |
 | `pack_budget_too_small` | warning | bd-3qs2i.2.1 (F2) |
 | `pack_concurrent_limit_reached` | low | bd-1zb7k.5 (S4) |
 | `swarm_scale_budget_exceeded` | warning | bd-1zb7k.8 (S7) |
