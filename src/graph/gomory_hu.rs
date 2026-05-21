@@ -150,7 +150,7 @@ pub fn query_proximity(
         memory_b: right.to_owned(),
         snapshot_version,
         min_cut,
-        interpretation: proximity_interpretation(min_cut).to_owned(),
+        interpretation: proximity_interpretation(left == right, min_cut).to_owned(),
         tree_path: tree_path_nodes(&tree.tree, left, right),
         degraded: Vec::new(),
     }
@@ -330,10 +330,12 @@ fn proximity_unreachable_degradation(left: &str, right: &str) -> ProximityDegrad
     }
 }
 
-fn proximity_interpretation(min_cut: Option<f64>) -> &'static str {
+fn proximity_interpretation(is_self: bool, min_cut: Option<f64>) -> &'static str {
+    if is_self {
+        return "self";
+    }
     match min_cut {
         None => "unavailable",
-        Some(0.0) => "self",
         Some(cut) if cut < 1.0 => "weak",
         Some(cut) if cut < 3.0 => "moderate",
         Some(_) => "strong",
@@ -545,6 +547,21 @@ mod tests {
         assert_eq!(report.min_cut, Some(0.0));
         assert_eq!(report.interpretation, "self");
         assert_eq!(report.tree_path, Some(vec!["a".to_owned()]));
+        assert!(report.degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn proximity_zero_cut_between_distinct_memories_is_weak_not_self() -> TestResult {
+        let mut graph = Graph::strict();
+        add_weighted_edge(&mut graph, "a", "b", 0.0);
+
+        let tree = graph_result(build_gomory_hu_tree(&graph))?;
+        let report = query_proximity(&tree, "a", "b", 12);
+
+        assert_eq!(report.min_cut, Some(0.0));
+        assert_eq!(report.interpretation, "weak");
+        assert_eq!(report.tree_path, Some(vec!["a".to_owned(), "b".to_owned()]));
         assert!(report.degraded.is_empty());
         Ok(())
     }
