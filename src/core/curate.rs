@@ -7010,9 +7010,15 @@ fn curate_usage_error(message: String, repair: &str) -> DomainError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::registry::Registry;
 
     use super::{
         CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1, CURATE_DISPOSITION_SCHEMA_V1,
@@ -7038,6 +7044,87 @@ mod tests {
     use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
 
     type TestResult = Result<(), String>;
+
+    #[derive(Clone, Debug, Default)]
+    struct CapturedEvent {
+        target: String,
+        fields: BTreeMap<String, String>,
+    }
+
+    #[derive(Clone, Default)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut captured = CapturedEvent {
+                target: event.metadata().target().to_owned(),
+                fields: BTreeMap::new(),
+            };
+            let mut visitor = CaptureVisitor {
+                fields: &mut captured.fields,
+            };
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("curate event capture lock")
+                .push(captured);
+        }
+    }
+
+    struct CaptureVisitor<'a> {
+        fields: &'a mut BTreeMap<String, String>,
+    }
+
+    impl tracing::field::Visit for CaptureVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+            self.fields
+                .insert(field.name().to_owned(), value.to_string());
+        }
+    }
+
+    fn capture_events<T>(thunk: impl FnOnce() -> T) -> (T, Vec<CapturedEvent>) {
+        let layer = CaptureLayer::default();
+        let events = Arc::clone(&layer.events);
+        let subscriber = Registry::default()
+            .with(layer)
+            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+        let result = with_default(subscriber, thunk);
+        let captured = events.lock().expect("curate event capture lock").clone();
+        (result, captured)
+    }
+
+    fn event_field<'a>(event: &'a CapturedEvent, name: &str) -> Result<&'a str, String> {
+        event
+            .fields
+            .get(name)
+            .map(String::as_str)
+            .ok_or_else(|| format!("event missing field {name}; fields={:?}", event.fields))
+    }
 
     fn enable_structural_decay_feature(workspace_path: &Path) -> TestResult {
         let config_dir = workspace_path.join(".ee");
@@ -9001,6 +9088,133 @@ mod tests {
         assert_eq!(stored.status, "pending");
         assert_eq!(stored.review_state, "new");
         assert!(stored.reviewed_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn review_curation_candidate_emits_one_redacted_transition_event_per_persist() -> TestResult {
+        // bd-3qs2i.7: transition telemetry uses structured fields and never logs raw reasons.
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(29)).to_string();
+        let accept_id = curate_id(30);
+        let reject_id = curate_id(31);
+        let connection = seed_candidate_database(
+            &database_path,
+            &workspace_id,
+            &memory_id,
+            &accept_id,
+            "promote",
+            Some("pending"),
+            None,
+        )?;
+        connection
+            .insert_curation_candidate(
+                &reject_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id,
+                    proposed_content: None,
+                    proposed_confidence: Some(0.74),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "human_request".to_owned(),
+                    source_id: Some("reviewer".to_owned()),
+                    reason: "Reject duplicate candidate.".to_owned(),
+                    confidence: 0.62,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:05Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let (result, events) = capture_events(|| {
+            let accept = review_curation_candidate(&CurateReviewOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &accept_id,
+                action: CurateReviewAction::Accept,
+                actor: Some("Alice"),
+                dry_run: false,
+                snoozed_until: None,
+                reason: Some("validated by humans"),
+                merge_into_candidate_id: None,
+            })?;
+            let reject = review_curation_candidate(&CurateReviewOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id: &reject_id,
+                action: CurateReviewAction::Reject,
+                actor: Some("Bob"),
+                dry_run: false,
+                snoozed_until: None,
+                reason: Some("duplicate"),
+                merge_into_candidate_id: None,
+            })?;
+            Ok::<_, DomainError>((accept, reject))
+        });
+        let (accept, reject) = result.map_err(|error| error.to_string())?;
+        assert!(accept.mutation.persisted);
+        assert!(reject.mutation.persisted);
+
+        let transition_events = events
+            .iter()
+            .filter(|event| event.target == "ee::curate::transition")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transition_events.len(),
+            2,
+            "expected exactly one transition event per persisted review; events={transition_events:?}",
+        );
+
+        let accept_event = transition_events
+            .iter()
+            .find(|event| {
+                event_field(event, "candidate_id").is_ok_and(|id| id.contains(&accept_id))
+            })
+            .ok_or_else(|| format!("missing accept transition event: {transition_events:?}"))?;
+        assert!(
+            event_field(accept_event, "actor")?.contains("Alice"),
+            "accept event should carry actor field: {accept_event:?}"
+        );
+        assert!(
+            event_field(accept_event, "transition_kind")?.contains("accept"),
+            "accept event should carry transition kind: {accept_event:?}"
+        );
+        assert_eq!(event_field(accept_event, "reason_present")?, "true");
+        assert_eq!(event_field(accept_event, "reason_len")?, "19");
+        assert_eq!(event_field(accept_event, "dry_run")?, "false");
+
+        let reject_event = transition_events
+            .iter()
+            .find(|event| {
+                event_field(event, "candidate_id").is_ok_and(|id| id.contains(&reject_id))
+            })
+            .ok_or_else(|| format!("missing reject transition event: {transition_events:?}"))?;
+        assert!(
+            event_field(reject_event, "actor")?.contains("Bob"),
+            "reject event should carry actor field: {reject_event:?}"
+        );
+        assert!(
+            event_field(reject_event, "transition_kind")?.contains("reject"),
+            "reject event should carry transition kind: {reject_event:?}"
+        );
+        assert_eq!(event_field(reject_event, "reason_present")?, "true");
+        assert_eq!(event_field(reject_event, "reason_len")?, "9");
+        assert_eq!(event_field(reject_event, "dry_run")?, "false");
+
+        let serialized_events = format!("{transition_events:?}");
+        assert!(
+            !serialized_events.contains("validated by humans"),
+            "transition telemetry must not include raw accept reason"
+        );
+        assert!(
+            !serialized_events.contains("duplicate"),
+            "transition telemetry must not include raw reject reason"
+        );
         Ok(())
     }
 

@@ -3148,6 +3148,65 @@ impl SearchAuditIdSource {
     }
 }
 
+/// bd-21gya: per-search audit batch.
+///
+/// Buffers `search.executed` / `search.returned_mem` / `redact_at_output`
+/// rows so the hot read path opens exactly one DbConnection and writes a
+/// single transaction, instead of `1 + R + R*P` separate opens (one per
+/// returned hit and per redaction pattern).
+struct SearchAuditBatch {
+    entries: Vec<(String, CreateAuditInput)>,
+}
+
+impl SearchAuditBatch {
+    fn new(capacity_hint: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity_hint),
+        }
+    }
+
+    fn push(
+        &mut self,
+        audit_ids: &mut SearchAuditIdSource,
+        workspace_id: Option<&str>,
+        action: &'static str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        details: Option<String>,
+    ) {
+        let audit_id = audit_ids.next_audit_id();
+        let input = CreateAuditInput {
+            workspace_id: workspace_id.map(str::to_owned),
+            actor: None,
+            action: action.to_owned(),
+            target_type: target_type.map(str::to_owned),
+            target_id: target_id.map(str::to_owned),
+            details,
+        };
+        self.entries.push((audit_id, input));
+    }
+
+    fn flush_best_effort(self, database_path: &Path) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let count = self.entries.len();
+        let Ok(conn) = DbConnection::open_file(database_path) else {
+            return;
+        };
+        if let Err(error) = conn.insert_audit_batch(&self.entries) {
+            // Match audit_append_best_effort's failure mode: best-effort,
+            // never block the response. Surface via tracing for diagnostics.
+            tracing::warn!(
+                target: "ee::core::search::audit",
+                count,
+                error = %error,
+                "best-effort audit batch append failed"
+            );
+        }
+    }
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
@@ -3394,8 +3453,12 @@ fn run_search_inner(
                 "status": status.as_str(),
             })
             .to_string();
-            audit_append_best_effort(
-                &database_path,
+            // bd-21gya: buffer audit rows and flush in one connection +
+            // one transaction instead of opening DbConnection per row.
+            // Capacity hint sized for the worst case (1 executed + 1
+            // returned_mem per hit + redaction overhead).
+            let mut audit_batch = SearchAuditBatch::new(1 + above_floor.len().saturating_mul(2));
+            audit_batch.push(
                 audit_ids,
                 Some(&workspace_id),
                 audit_actions::SEARCH_EXECUTED,
@@ -3411,8 +3474,7 @@ fn run_search_inner(
                     "source": hit.source.as_str(),
                 })
                 .to_string();
-                audit_append_best_effort(
-                    &database_path,
+                audit_batch.push(
                     audit_ids,
                     Some(&workspace_id),
                     audit_actions::SEARCH_RETURNED_MEM,
@@ -3431,8 +3493,7 @@ fn run_search_inner(
                             "action": audit_actions::REDACT_AT_OUTPUT,
                         })
                         .to_string();
-                        audit_append_best_effort(
-                            &database_path,
+                        audit_batch.push(
                             audit_ids,
                             Some(&workspace_id),
                             audit_actions::REDACT_AT_OUTPUT,
@@ -3443,6 +3504,7 @@ fn run_search_inner(
                     }
                 }
             }
+            audit_batch.flush_best_effort(&database_path);
 
             Ok(SearchReport {
                 status,
@@ -5284,6 +5346,83 @@ mod tests {
         assert_eq!(first, replay);
         assert_ne!(first, other);
         Ok(())
+    }
+
+    /// bd-21gya: SearchAuditBatch must produce the same persisted audit rows
+    /// (same count, same seeded IDs) as the per-row audit_append_best_effort
+    /// path. This pins the perf refactor: batching changes the number of
+    /// DbConnection opens (1 instead of N) but must not change observable
+    /// audit state.
+    fn seeded_search_audit_ids_via_batch(seed: u64) -> Result<Vec<String>, String> {
+        let workspace = tempfile::Builder::new()
+            .prefix("ee-search-seeded-audit-batch")
+            .tempdir_in("/tmp")
+            .map_err(|error| error.to_string())?;
+        let database_path = workspace.path().join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_01234567890123456789012345";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.path().display().to_string(),
+                    name: Some("seeded-search-audit-batch".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut audit_ids = SearchAuditIdSource::Seeded(Deterministic::from_seed(seed));
+        let mut batch = SearchAuditBatch::new(2);
+        batch.push(
+            &mut audit_ids,
+            Some(workspace_id),
+            audit_actions::SEARCH_EXECUTED,
+            Some("workspace"),
+            Some(workspace_id),
+            Some(r#"{"queryHash":"hash","resultCount":0}"#.to_owned()),
+        );
+        batch.push(
+            &mut audit_ids,
+            Some(workspace_id),
+            audit_actions::SEARCH_RETURNED_MEM,
+            Some("memory"),
+            Some("mem_00000000000000000000000001"),
+            Some(r#"{"queryHash":"hash","rank":1}"#.to_owned()),
+        );
+        batch.flush_best_effort(&database_path);
+
+        let mut entries = connection
+            .list_audit_by_target("workspace", workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        entries.extend(
+            connection
+                .list_audit_by_target("memory", "mem_00000000000000000000000001", None)
+                .map_err(|error| error.to_string())?,
+        );
+        entries.sort_by(|left, right| left.action.cmp(&right.action));
+        Ok(entries.into_iter().map(|entry| entry.id).collect())
+    }
+
+    #[test]
+    fn search_audit_batch_matches_per_row_emit() -> TestResult {
+        let per_row = seeded_search_audit_ids(51_003)?;
+        let batched = seeded_search_audit_ids_via_batch(51_003)?;
+
+        assert_eq!(per_row.len(), 2);
+        assert_eq!(batched.len(), per_row.len());
+        assert_eq!(batched, per_row);
+        Ok(())
+    }
+
+    #[test]
+    fn search_audit_batch_empty_is_no_op() {
+        // An empty batch must not even attempt to open the database.
+        // Pass a path that doesn't exist to prove no I/O is attempted.
+        let bogus = std::path::PathBuf::from("/this/path/does/not/exist/ee.db");
+        let batch = SearchAuditBatch::new(0);
+        batch.flush_best_effort(&bogus);
     }
 
     fn test_runtime_profile() -> RuntimeProfileReport {
