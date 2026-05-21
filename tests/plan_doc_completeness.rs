@@ -12,7 +12,8 @@ struct PlanRow<'a> {
     section_title: &'a str,
     classification: &'a str,
     evidence_path: &'a str,
-    follow_up_bead_id: &'a str,
+    test_bead_id: &'a str,
+    verify_cmd: &'a str,
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -52,15 +53,16 @@ fn matrix_rows() -> Result<Vec<PlanRow<'static>>, String> {
 
         let cells = split_row(line);
         ensure(
-            cells.len() == 5,
-            format!("plan matrix row must have 5 cells: {line}"),
+            cells.len() == 6,
+            format!("plan matrix row must have 6 cells: {line}"),
         )?;
         rows.push(PlanRow {
             section_id: cells[0],
             section_title: cells[1],
             classification: cells[2],
             evidence_path: cells[3],
-            follow_up_bead_id: cells[4],
+            test_bead_id: cells[4],
+            verify_cmd: cells[5],
         });
     }
 
@@ -92,7 +94,7 @@ fn evidence_paths(evidence_path: &str) -> impl Iterator<Item = &str> {
     evidence_path
         .split(';')
         .map(str::trim)
-        .filter(|path| !path.is_empty() && *path != "-")
+        .filter(|path| !path.is_empty() && *path != "-" && *path != "pending")
 }
 
 fn evidence_path_exists(path: &str) -> bool {
@@ -162,6 +164,18 @@ fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
                     !evidence.is_empty(),
                     format!("{} is verified but has no evidence path", row.section_id),
                 )?;
+                ensure(
+                    row.test_bead_id == "-",
+                    format!("{} is verified but has a test bead id", row.section_id),
+                )?;
+                ensure(
+                    !row.verify_cmd.is_empty() && row.verify_cmd != "-",
+                    format!("{} is verified but lacks a verify_cmd", row.section_id),
+                )?;
+                ensure(
+                    !row.verify_cmd.contains('|'),
+                    format!("{} verify_cmd must not contain a pipe", row.section_id),
+                )?;
                 for path in evidence {
                     ensure(
                         evidence_path_exists(path),
@@ -174,26 +188,40 @@ fn plan_sweep_matrix_rows_have_evidence_or_tracking_beads() -> TestResult {
             }
             "Implemented-unverified" | "Stubbed" | "Missing" => {
                 ensure(
-                    row.follow_up_bead_id.starts_with("bd-"),
+                    row.evidence_path == "pending",
                     format!(
-                        "{} is {} but lacks a follow-up bead id",
+                        "{} is {} but evidence_path is not pending",
                         row.section_id, row.classification
                     ),
                 )?;
-                let status = bead_statuses.get(row.follow_up_bead_id).ok_or_else(|| {
+                ensure(
+                    row.test_bead_id.starts_with("bd-"),
                     format!(
-                        "{} references unknown follow-up bead {}",
-                        row.section_id, row.follow_up_bead_id
+                        "{} is {} but lacks a test bead id",
+                        row.section_id, row.classification
+                    ),
+                )?;
+                ensure(
+                    row.verify_cmd == "-",
+                    format!(
+                        "{} is {} but has a verify_cmd",
+                        row.section_id, row.classification
+                    ),
+                )?;
+                let status = bead_statuses.get(row.test_bead_id).ok_or_else(|| {
+                    format!(
+                        "{} references unknown test bead {}",
+                        row.section_id, row.test_bead_id
                     )
                 })?;
                 ensure(
                     matches!(
                         status.as_str(),
-                        "open" | "claimed" | "in_progress" | "blocked" | "closed"
+                        "open" | "in_progress" | "blocked" | "closed" | "deferred"
                     ),
                     format!(
-                        "{} follow-up bead {} has unsupported status {}",
-                        row.section_id, row.follow_up_bead_id, status
+                        "{} test bead {} has unsupported status {}",
+                        row.section_id, row.test_bead_id, status
                     ),
                 )?;
             }

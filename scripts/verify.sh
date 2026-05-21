@@ -9,11 +9,13 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/verify.sh                # Run all gates
+#   ./scripts/verify.sh --plan-doc-smoke # Run plan-sweep verify_cmd smoke checks
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
 #   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
 #   ./scripts/verify.sh --help         # Show this help
 #
 # Gates (in order):
+#   0. Plan Doc Smoke        - optional bd-3usjw.23 verify_cmd manifest checks
 #   1. Forbidden Dependencies  - cargo tree audit for banned crates
 #   2. Closure Linter          - prevent abstention-as-implementation closure
 #   3. Snapshot Proposal Guard - block unreviewed tracked insta proposals
@@ -38,6 +40,7 @@ set -euo pipefail
 
 INCLUDE_BENCH=false
 INCLUDE_EVAL=false
+PLAN_DOC_SMOKE=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
@@ -49,8 +52,11 @@ VERIFY_BUDGET_FAIL_CODE=6
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,27p' "$0" | sed 's/^# //' | sed 's/^#//'
+            sed -n '3,28p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
+            ;;
+        --plan-doc-smoke)
+            PLAN_DOC_SMOKE=true
             ;;
         --include-bench)
             INCLUDE_BENCH=true
@@ -437,18 +443,137 @@ run_stage() {
     fi
 }
 
-closure_lint_or_tracked_drift() {
-    if with_beads_read_locks ./scripts/closure-lint.sh --audit --json; then
-        return 0
+plan_doc_smoke() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "error: python3 is required for --plan-doc-smoke" >&2
+        return 1
     fi
 
-    local closure_exit=$?
-    if with_beads_read_locks ./scripts/verification-drift-guard.sh --gate=closure-lint --json; then
-        echo "[!] Closure linter reported tracked violations; continuing via Verification Drift Guard"
-        return 0
-    fi
+    python3 - "$REPO_ROOT" <<'PY'
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
 
-    return "$closure_exit"
+root = Path(sys.argv[1])
+report = root / "docs" / "plan-sweep-report.md"
+request_id = os.environ.get("EE_REQUEST_ID", "plan-doc-smoke")
+
+
+def trace(phase, section_id="", elapsed_ms=0, degraded_codes=None):
+    print(
+        json.dumps(
+            {
+                "workspace_id": str(root),
+                "request_id": request_id,
+                "bead_id": "bd-3usjw.23",
+                "surface": "plan_doc_verify_cmds",
+                "phase": phase,
+                "section_id": section_id,
+                "elapsed_ms": elapsed_ms,
+                "degraded_codes": degraded_codes or [],
+            },
+            separators=(",", ":"),
+        ),
+        file=sys.stderr,
+    )
+
+
+if not report.exists():
+    trace("input", degraded_codes=["plan_sweep_report_missing"])
+    print(f"error: missing plan sweep report: {report}", file=sys.stderr)
+    sys.exit(1)
+
+trace("input")
+commands = []
+in_matrix = False
+for line in report.read_text(encoding="utf-8").splitlines():
+    stripped = line.strip()
+    if stripped == "## Machine-Checked Section Matrix":
+        in_matrix = True
+        continue
+    if in_matrix and stripped.startswith("## "):
+        break
+    if not in_matrix or not stripped.startswith("|"):
+        continue
+    if "section_id" in stripped or "------------" in stripped:
+        continue
+
+    cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+    if len(cells) != 6:
+        trace("dependency_check", degraded_codes=["plan_sweep_row_malformed"])
+        print(f"error: plan matrix row must have 6 cells: {line}", file=sys.stderr)
+        sys.exit(1)
+
+    section_id, _title, _classification, _evidence, _test_bead, verify_cmd = cells
+    if verify_cmd and verify_cmd != "-":
+        commands.append((section_id, verify_cmd))
+
+if not commands:
+    trace("dependency_check", degraded_codes=["plan_sweep_verify_cmds_missing"])
+    print("error: no plan sweep verify_cmd entries found", file=sys.stderr)
+    sys.exit(1)
+
+failures = 0
+for section_id, command in commands:
+    start = time.monotonic()
+    print(f"[*] {section_id}: {command}")
+    trace("dependency_check", section_id=section_id)
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", f"set -euo pipefail; {command}"],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=60,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        trace(
+            "response",
+            section_id=section_id,
+            elapsed_ms=elapsed_ms,
+            degraded_codes=["verify_cmd_timeout"],
+        )
+        print(f"error: {section_id} verify_cmd exceeded 60s: {command}", file=sys.stderr)
+        if error.stdout:
+            print(error.stdout, end="")
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        failures += 1
+        continue
+
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+
+    if result.returncode == 0:
+        trace("response", section_id=section_id, elapsed_ms=elapsed_ms)
+    else:
+        trace(
+            "response",
+            section_id=section_id,
+            elapsed_ms=elapsed_ms,
+            degraded_codes=["verify_cmd_failed"],
+        )
+        print(
+            f"error: {section_id} verify_cmd exited {result.returncode}: {command}",
+            file=sys.stderr,
+        )
+        failures += 1
+
+if failures:
+    sys.exit(1)
+
+trace("response")
+print(f"[+] plan-doc-smoke passed {len(commands)} verify commands")
+PY
 }
 
 artifact_retention_summary() {
@@ -476,11 +601,18 @@ artifact_retention_summary() {
     fi
 }
 
+if [ "$PLAN_DOC_SMOKE" = "true" ]; then
+    run_stage "Plan Doc Smoke (bd-3usjw.23)" "plan_doc_smoke"
+    echo "=== Verification Summary ==="
+    printf "%b" "$STAGE_RESULTS"
+    exit 0
+fi
+
 # Gate 1: Check Forbidden Dependencies
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
 # Gate 2: Closure Discipline
-run_stage "Closure Linter" "closure_lint_or_tracked_drift"
+run_stage "Closure Linter" "with_beads_read_locks ./scripts/closure-lint.sh --audit --json"
 
 # Gate 2.5: Drift Guard (ensures red gates have tracking beads)
 run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verification-drift-guard.sh --json"
