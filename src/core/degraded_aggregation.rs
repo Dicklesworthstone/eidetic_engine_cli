@@ -40,7 +40,7 @@ pub const DEGRADED_AGGREGATION_TRUNCATED_CODE: &str = "degraded_array_truncated"
 /// emitters of the same code. Mirrors the 6-tier vocabulary
 /// documented in `tests/fixtures/failure_modes/SCHEMA.md` and
 /// surfaced in `docs/degraded_code_taxonomy.md`.
-const SEVERITY_RANK: &[(&str, u8)] = &[
+const SEVERITY_RANK: &[(&str, i8)] = &[
     ("info", 0),
     ("low", 1),
     ("warning", 2),
@@ -102,7 +102,8 @@ impl DegradationAggregationInput {
 struct AggregatedAccumulator {
     code: String,
     severity: String,
-    severity_rank: u8,
+    severity_rank: i8,
+    canonical_source: String,
     message: String,
     repair: String,
     sources: Vec<String>,
@@ -165,18 +166,30 @@ where
                 code: report.code.clone(),
                 severity: report.severity.clone(),
                 severity_rank: severity_rank_for(&report.severity),
+                canonical_source: report.source.clone(),
                 message: report.message.clone(),
                 repair: report.repair.clone(),
                 sources: Vec::new(),
             });
         let report_rank = severity_rank_for(&report.severity);
-        if report_rank > acc.severity_rank {
+        if report_rank > acc.severity_rank
+            || report_rank == acc.severity_rank
+                && (
+                    report.source.as_str(),
+                    report.message.as_str(),
+                    report.repair.as_str(),
+                ) < (
+                    acc.canonical_source.as_str(),
+                    acc.message.as_str(),
+                    acc.repair.as_str(),
+                )
+        {
             acc.severity = report.severity.clone();
             acc.severity_rank = report_rank;
-            // Use the message and repair from the highest-severity
-            // emitter, since that one is the load-bearing one for
-            // remediation. Lower-severity hints would otherwise
-            // mask the urgent action.
+            acc.canonical_source = report.source.clone();
+            // Use the message and repair from the highest-severity emitter.
+            // Ties choose a stable canonical source/message/repair tuple so
+            // aggregation is independent of input iterator order.
             acc.message = report.message.clone();
             acc.repair = report.repair.clone();
         }
@@ -235,11 +248,11 @@ where
     aggregates
 }
 
-fn severity_rank_for(severity: &str) -> u8 {
+fn severity_rank_for(severity: &str) -> i8 {
     SEVERITY_RANK
         .iter()
         .find_map(|(name, rank)| (*name == severity).then_some(*rank))
-        .unwrap_or(0)
+        .unwrap_or(-1)
 }
 
 #[cfg(test)]
@@ -318,6 +331,30 @@ mod tests {
             aggregates[0].repair, "high repair",
             "highest-severity repair hint must win"
         );
+    }
+
+    #[test]
+    fn same_severity_ties_choose_stable_canonical_hint() {
+        let order_a = vec![
+            (
+                "zeta",
+                report("snapshot_stale", "medium", "zeta msg", "zeta repair"),
+            ),
+            (
+                "alpha",
+                report("snapshot_stale", "medium", "alpha msg", "alpha repair"),
+            ),
+        ];
+        let mut order_b = order_a.clone();
+        order_b.reverse();
+
+        let agg_a = aggregate_degraded(order_a);
+        let agg_b = aggregate_degraded(order_b);
+
+        assert_eq!(agg_a, agg_b);
+        assert_eq!(agg_a[0].message, "alpha msg");
+        assert_eq!(agg_a[0].repair, "alpha repair");
+        assert_eq!(agg_a[0].sources, vec!["alpha", "zeta"]);
     }
 
     /// Rule 3: identical repair hints across emitters of the same
@@ -483,10 +520,13 @@ mod tests {
     #[test]
     fn unknown_severity_sorts_below_known_severities() {
         let entries = vec![
-            ("real", report("real_code", "info", "info-msg", "info-fix")),
+            (
+                "real",
+                report("zzz_real_code", "info", "info-msg", "info-fix"),
+            ),
             (
                 "typo",
-                report("typo_code", "criticla", "typo-msg", "typo-fix"),
+                report("aaa_typo_code", "criticla", "typo-msg", "typo-fix"),
             ),
         ];
 
@@ -494,10 +534,10 @@ mod tests {
 
         assert_eq!(aggregates.len(), 2);
         assert_eq!(
-            aggregates[0].code, "real_code",
+            aggregates[0].code, "zzz_real_code",
             "real info entry must rank above the typo'd severity"
         );
-        assert_eq!(aggregates[1].code, "typo_code");
+        assert_eq!(aggregates[1].code, "aaa_typo_code");
     }
 
     /// Empty input must produce empty output, not a trailer.
