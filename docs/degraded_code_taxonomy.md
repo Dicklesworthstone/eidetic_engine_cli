@@ -270,6 +270,11 @@ memory bodies in `sources[]`.
 | `host_calibration_unavailable` | warning | bd-1zb7k.12.3.4 (H3.4) |
 | `perf_latency_evidence_missing` | medium | bd-1zb7k.11 (P) |
 | `perf_latency_evidence_partial` | warning | bd-1zb7k.11 (P) |
+| `l2_pack_cache_corruption` | low | (TBD) |
+| `l2_pack_cache_unavailable` | low | (TBD) |
+| `source_unparsable` | medium | (TBD) |
+| `stale_line_span` | warning | (TBD) |
+| `symbol_index_stale` | warning | (TBD) |
 
 #### Disk pressure and build admission (4)
 | Code | Severity | Bead |
@@ -312,6 +317,10 @@ memory bodies in `sources[]`.
 | `snapshot_pin_force_released` | medium | bd-2caru.6 |
 | `snapshot_release_failed` | medium | bd-2caru.6 |
 | `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
+| `cache_hotset_stale` | medium | (TBD) |
+| `cross_shard_skew_detected` | warning | (TBD) |
+| `flight_recorder_directory_unwritable` | medium | (TBD) |
+| `shard_attach_failed` | warning | (TBD) |
 
 #### Policy and detector (3)
 | Code | Severity | Bead |
@@ -467,6 +476,8 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
 | `discovery_policy_empty_allowlist` | info | bd-36bbk.1.7 |
+| `mesh_peer_policy_denied` | high | (TBD) |
+| `mesh_secret_export_denied` | high | (TBD) |
 
 #### Mesh foreground sync (3)
 | Code | Severity | Bead |
@@ -474,6 +485,11 @@ memory bodies in `sources[]`.
 | `mesh_sync_supervisor_backpressure` | info | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_budget_exhausted` | warning | bd-1ylr3 (SRR6.10) |
 | `mesh_sync_supervisor_runtime_error` | warning | bd-1ylr3 (SRR6.10) |
+| `mesh_audit_ledger_corrupt` | critical | (TBD) |
+| `mesh_audit_ledger_missing` | high | (TBD) |
+| `mesh_cursor_repair_required` | critical | (TBD) |
+| `mesh_event_quarantined` | high | (TBD) |
+| `subscribe_cursor_stale` | warning | (TBD) |
 
 #### Causal lab (13)
 | Code | Severity | Bead |
@@ -624,6 +640,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `workspace_hygiene_output_truncated` | warning | bd-1eq3l.11 |
 | `workspace_hygiene_partial_metadata` | warning | bd-1eq3l.11 |
 | `workspace_hygiene_secret_scan_skipped` | medium | bd-1eq3l.11 |
+| `beads_jsonl_partial_write_transient` | low | (TBD) |
 
 #### Model registry / science (5)
 | Code | Severity | Bead |
@@ -675,6 +692,9 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `unsupported_schema` | medium | (TBD) |
 | `windows_appdata_unavailable` | medium | bd-3usjw.68 |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
+| `ambiguous_containing_symbols` | warning | (TBD) |
+| `load_bearing_tombstone_requires_override` | medium | (TBD) |
+| `unattributed_compile_blocker` | low | (TBD) |
 
 #### Mixed: storage_unavailable
 | Code | Severity | Bead |

@@ -714,9 +714,9 @@ verify_checksum() {
 verify_sigstore_bundle() {
   local file="$1" artifact_url="$2"
   if ! command -v cosign &>/dev/null; then
-    warn "cosign not found; skipping Sigstore signature verification"
-    warn "Install cosign (https://github.com/sigstore/cosign) for cryptographic authenticity checks"
-    return 0
+    err "cosign not found. Cannot verify Sigstore signature."
+    err "Install cosign (https://github.com/sigstore/cosign) or use --no-verify to skip."
+    return 1
   fi
 
   local bundle_url="$SIGSTORE_BUNDLE_URL"
@@ -725,8 +725,9 @@ verify_sigstore_bundle() {
   local bundle_file="$TMP/$(basename "$bundle_url")"
   info "Fetching sigstore bundle"
   if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
-    warn "Sigstore bundle not available at $bundle_url; skipping signature verification"
-    return 0
+    err "Sigstore bundle not available at $bundle_url."
+    err "Cannot verify signature. To skip cryptographic verification, use --no-verify or set EE_SKIP_VERIFY=1."
+    return 1
   fi
 
   if ! cosign verify-blob \
@@ -1112,4 +1113,6 @@ else
   echo ""
   echo -e "  \033[0;90mInspect health:  ee doctor --json\033[0m"
   echo -e "  \033[0;90mUninstall:       rm $DEST/$BINARY  (config in ~/.ee/ and ~/.local/share/ee/ persists)\033[0m"
+fi
+rsists)\033[0m"
 fi

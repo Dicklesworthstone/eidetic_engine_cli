@@ -904,10 +904,10 @@ function Main {
                             Invoke-DownloadFile -Url "$effectiveUrl.sigstore.json" -OutFile $sigstorePath
                             Test-Sigstore -TarballPath $tarballPath -BundlePath $sigstorePath
                         } catch {
-                            Write-Warning2 "Sigstore bundle unavailable: $($_.Exception.Message). Continuing without signature check."
+                            Write-ErrorExit "Sigstore bundle unavailable: $($_.Exception.Message). Cannot verify signature. Use -NoVerify to skip."
                         }
                     } else {
-                        Write-Warning2 "cosign not found; skipping Sigstore signature verification"
+                        Write-ErrorExit "cosign not found. Cannot verify Sigstore signature. Install cosign or use -NoVerify to skip."
                     }
                 }
 

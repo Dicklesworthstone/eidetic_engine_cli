@@ -509,9 +509,8 @@ Current top-level groups:
 Machine readers should inspect the JSON contract before trusting a result:
 
 ```jsonc
-{ "schema": "ee.response.v1", "success": true,  "data": { }, "degraded": [ ] }
 { "schema": "ee.response.v2", "success": true,  "data": { }, "degraded": [ ] }
-{ "schema": "ee.error.v2",    "success": false, "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ] } } }
+{ "schema": "ee.error.v2",    "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ] } } }
 ```
 
 | Check | What to read |

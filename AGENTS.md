@@ -566,7 +566,7 @@ Every machine-facing command emits one of:
 
 ```jsonc
 { "schema": "ee.response.v2", "success": true,  "data": { ... }, "degraded": [ ... ] }
-{ "schema": "ee.error.v2",    "success": false, "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ... ] } } }
+{ "schema": "ee.error.v2",    "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ... ] } } }
 ```
 
 Field invariants:
