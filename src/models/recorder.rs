@@ -42,6 +42,10 @@ pub const RECORDER_SCHEMA_CATALOG_V1: &str = "ee.recorder.schemas.v1";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
+fn normalized_recorder_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Recorder Run
 // ============================================================================
@@ -93,7 +97,7 @@ impl FromStr for RecorderRunStatus {
     type Err = ParseRecorderRunStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "active" => Ok(Self::Active),
             "completed" => Ok(Self::Completed),
             "abandoned" => Ok(Self::Abandoned),
@@ -224,7 +228,7 @@ impl FromStr for RecorderEventType {
     type Err = ParseRecorderEventTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "tool_call" => Ok(Self::ToolCall),
             "tool_result" => Ok(Self::ToolResult),
             "user_message" => Ok(Self::UserMessage),
@@ -386,7 +390,7 @@ impl FromStr for PayloadContentType {
     type Err = ParsePayloadContentTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "json" => Ok(Self::Json),
             "text" => Ok(Self::Text),
             "binary" => Ok(Self::Binary),
@@ -506,7 +510,7 @@ impl FromStr for RedactionStatus {
     type Err = ParseRedactionStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "none" => Ok(Self::None),
             "pending" => Ok(Self::Pending),
             "partial" => Ok(Self::Partial),
@@ -629,7 +633,7 @@ impl FromStr for RationaleTraceKind {
     type Err = ParseRationaleTraceKindError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "hypothesis" => Ok(Self::Hypothesis),
             "decision" => Ok(Self::Decision),
             "question" => Ok(Self::Question),
@@ -683,7 +687,7 @@ impl FromStr for RationaleTracePosture {
     type Err = ParseRationaleTracePostureError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "asserted" => Ok(Self::Asserted),
             "supported" => Ok(Self::Supported),
             "contradicted" => Ok(Self::Contradicted),
@@ -738,7 +742,7 @@ impl FromStr for RationaleTraceVisibility {
     type Err = ParseRationaleTraceVisibilityError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "public" => Ok(Self::Public),
             "redacted" => Ok(Self::Redacted),
             "private_rejected" => Ok(Self::PrivateRejected),
@@ -1081,7 +1085,7 @@ impl FromStr for ImportSourceType {
     type Err = ParseImportSourceTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
+        match normalized_recorder_token(s).as_str() {
             "cass" => Ok(Self::Cass),
             "eidetic_legacy" => Ok(Self::EideticLegacy),
             "recorder" => Ok(Self::Recorder),
@@ -2216,6 +2220,60 @@ mod tests {
         )?;
         ensure(ImportSourceType::Recorder.as_str(), "recorder", "recorder")?;
         ensure(ImportSourceType::Manual.as_str(), "manual", "manual")
+    }
+
+    #[test]
+    fn recorder_enums_accept_operator_spelling_variants() -> TestResult {
+        let run_status: RecorderRunStatus =
+            " COMPLETED ".parse().map_err(|error| format!("{error}"))?;
+        ensure(run_status, RecorderRunStatus::Completed, "run status")?;
+
+        let event_type: RecorderEventType =
+            "tool-call".parse().map_err(|error| format!("{error}"))?;
+        ensure(event_type, RecorderEventType::ToolCall, "event type")?;
+
+        let content_type: PayloadContentType =
+            " JSON ".parse().map_err(|error| format!("{error}"))?;
+        ensure(content_type, PayloadContentType::Json, "content type")?;
+
+        let redaction_status: RedactionStatus =
+            " FULL ".parse().map_err(|error| format!("{error}"))?;
+        ensure(redaction_status, RedactionStatus::Full, "redaction status")?;
+
+        let trace_kind: RationaleTraceKind = "rejected-alternative"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            trace_kind,
+            RationaleTraceKind::RejectedAlternative,
+            "trace kind",
+        )?;
+
+        let trace_posture: RationaleTracePosture =
+            " Supported ".parse().map_err(|error| format!("{error}"))?;
+        ensure(
+            trace_posture,
+            RationaleTracePosture::Supported,
+            "trace posture",
+        )?;
+
+        let trace_visibility: RationaleTraceVisibility = "private-rejected"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            trace_visibility,
+            RationaleTraceVisibility::PrivateRejected,
+            "trace visibility",
+        )?;
+
+        let import_source_type: ImportSourceType = "eidetic-legacy"
+            .parse()
+            .map_err(|error| format!("{error}"))?;
+        ensure(
+            import_source_type,
+            ImportSourceType::EideticLegacy,
+            "import source type",
+        )
     }
 
     #[test]

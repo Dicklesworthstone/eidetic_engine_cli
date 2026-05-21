@@ -21,6 +21,10 @@ const TOTAL_BASIS_POINTS: u16 = 10_000;
 pub const AGENT_PROFILE_BIAS_CAP: f64 = 0.05;
 pub const AGENT_PROFILE_COLD_START_OUTCOMES: u32 = 10;
 
+fn normalized_context_profile_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Outcome counts learned for one agent/memory pair.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -206,7 +210,7 @@ impl ContextProfileName {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_context_profile_token(value).as_str() {
             "compact" => Some(Self::Compact),
             "balanced" => Some(Self::Balanced),
             "grounding" => Some(Self::Grounding),
@@ -270,7 +274,7 @@ impl ContextProfileObjective {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_context_profile_token(value).as_str() {
             "mmr_redundancy" | "mmr" => Some(Self::MmrRedundancy),
             "facility_location" | "submodular" => Some(Self::FacilityLocation),
             _ => None,
@@ -320,19 +324,13 @@ impl ContextProfileSection {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        let trimmed = value.trim();
-        if trimmed.eq_ignore_ascii_case("procedural_rules") {
-            Some(Self::ProceduralRules)
-        } else if trimmed.eq_ignore_ascii_case("decisions") {
-            Some(Self::Decisions)
-        } else if trimmed.eq_ignore_ascii_case("failures") {
-            Some(Self::Failures)
-        } else if trimmed.eq_ignore_ascii_case("evidence") {
-            Some(Self::Evidence)
-        } else if trimmed.eq_ignore_ascii_case("artifacts") {
-            Some(Self::Artifacts)
-        } else {
-            None
+        match normalized_context_profile_token(value).as_str() {
+            "procedural_rules" => Some(Self::ProceduralRules),
+            "decisions" => Some(Self::Decisions),
+            "failures" => Some(Self::Failures),
+            "evidence" => Some(Self::Evidence),
+            "artifacts" => Some(Self::Artifacts),
+            _ => None,
         }
     }
 }
@@ -794,6 +792,11 @@ mod tests {
             "profile parse trims and folds case",
         )?;
         ensure(
+            ContextProfileName::parse(" SUBMODULAR "),
+            Some(ContextProfileName::Submodular),
+            "profile parser accepts operator case variants",
+        )?;
+        ensure(
             ContextProfileName::parse("wide"),
             None,
             "unsupported profile is rejected by model parser",
@@ -817,6 +820,16 @@ mod tests {
             ContextProfileSection::parse("evidence"),
             Some(ContextProfileSection::Evidence),
             "section parse",
+        )?;
+        ensure(
+            ContextProfileObjective::parse("facility-location"),
+            Some(ContextProfileObjective::FacilityLocation),
+            "objective parser accepts hyphenated spelling",
+        )?;
+        ensure(
+            ContextProfileSection::parse("procedural-rules"),
+            Some(ContextProfileSection::ProceduralRules),
+            "section parser accepts hyphenated spelling",
         )
     }
 

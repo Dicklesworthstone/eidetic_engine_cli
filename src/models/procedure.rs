@@ -32,7 +32,32 @@ pub const PROCEDURE_SCHEMA_CATALOG_V1: &str = "ee.procedure.schemas.v1";
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 fn normalized_procedure_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in input.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
 }
 
 // ============================================================================
@@ -1133,6 +1158,11 @@ mod tests {
             Ok(ProcedureExportFormat::SkillCapsule),
             "normalized export format",
         )?;
+        ensure(
+            ProcedureExportFormat::from_str("SkillCapsule"),
+            Ok(ProcedureExportFormat::SkillCapsule),
+            "camel-case export format",
+        )?;
         for mode in SkillCapsuleInstallMode::all() {
             ensure(
                 SkillCapsuleInstallMode::from_str(mode.as_str()),
@@ -1144,6 +1174,11 @@ mod tests {
             SkillCapsuleInstallMode::from_str(" Manual-Review "),
             Ok(SkillCapsuleInstallMode::ManualReview),
             "normalized install mode",
+        )?;
+        ensure(
+            SkillCapsuleInstallMode::from_str("ManualReview"),
+            Ok(SkillCapsuleInstallMode::ManualReview),
+            "camel-case install mode",
         )?;
         ensure(
             ProcedureStatus::from_str("draft").map_err(|error| error.field()),

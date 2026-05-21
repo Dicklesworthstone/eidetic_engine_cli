@@ -48,6 +48,10 @@ fn rounded_metric(value: f64) -> f64 {
     }
 }
 
+fn normalized_economy_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Utility Value
 // ============================================================================
@@ -283,7 +287,7 @@ impl ContextAttentionProfile {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_economy_token(value).as_str() {
             "compact" => Some(Self::Compact),
             "balanced" => Some(Self::Balanced),
             "thorough" => Some(Self::Thorough),
@@ -333,17 +337,12 @@ impl SituationAttentionProfile {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        let trimmed = value.trim();
-        if trimmed.eq_ignore_ascii_case("minimal") {
-            Some(Self::Minimal)
-        } else if trimmed.eq_ignore_ascii_case("summary") {
-            Some(Self::Summary)
-        } else if trimmed.eq_ignore_ascii_case("standard") {
-            Some(Self::Standard)
-        } else if trimmed.eq_ignore_ascii_case("full") {
-            Some(Self::Full)
-        } else {
-            None
+        match normalized_economy_token(value).as_str() {
+            "minimal" => Some(Self::Minimal),
+            "summary" => Some(Self::Summary),
+            "standard" => Some(Self::Standard),
+            "full" => Some(Self::Full),
+            _ => None,
         }
     }
 
@@ -2702,6 +2701,11 @@ mod tests {
             "context parse",
         )?;
         ensure(
+            ContextAttentionProfile::parse(" Broad "),
+            Some(ContextAttentionProfile::Broad),
+            "context parser accepts trimmed case variants",
+        )?;
+        ensure(
             ContextAttentionProfile::parse("missing"),
             None,
             "context invalid",
@@ -2710,6 +2714,11 @@ mod tests {
             SituationAttentionProfile::parse("full"),
             Some(SituationAttentionProfile::Full),
             "situation parse",
+        )?;
+        ensure(
+            SituationAttentionProfile::parse(" STANDARD "),
+            Some(SituationAttentionProfile::Standard),
+            "situation parser accepts trimmed case variants",
         )?;
         ensure(
             SituationAttentionProfile::parse("unknown"),

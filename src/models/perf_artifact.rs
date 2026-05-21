@@ -15,7 +15,32 @@ pub const PERF_SCHEMA_CATALOG_V1: &str = "ee.perf.schema_catalog.v1";
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 fn normalized_artifact_kind_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let mut normalized = String::with_capacity(input.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in input.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -673,6 +698,14 @@ mod tests {
         assert_eq!(
             ArtifactKind::from_str("SUPPORT_BUNDLE_MANIFEST").unwrap(),
             ArtifactKind::SupportBundleManifest
+        );
+        assert_eq!(
+            ArtifactKind::from_str("ExplainPerformanceReport").unwrap(),
+            ArtifactKind::ExplainPerformanceReport
+        );
+        assert_eq!(
+            ArtifactKind::from_str("WriteQueueReport").unwrap(),
+            ArtifactKind::WriteQueueReport
         );
     }
 

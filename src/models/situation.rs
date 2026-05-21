@@ -40,6 +40,10 @@ pub const SITUATION_SCHEMA_CATALOG_V1: &str = "ee.situation.schemas.v1";
 
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
+fn normalized_situation_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Stable Wire Enums
 // ============================================================================
@@ -135,7 +139,7 @@ impl FromStr for SituationCategory {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        let normalized = input.trim().to_ascii_lowercase().replace('-', "_");
+        let normalized = normalized_situation_token(input);
         match normalized.as_str() {
             "bug_fix" | "bugfix" | "fix" => Ok(Self::BugFix),
             "feature" | "feat" => Ok(Self::Feature),
@@ -147,9 +151,7 @@ impl FromStr for SituationCategory {
             "deployment" | "deploy" | "rollout" => Ok(Self::Deployment),
             "release" | "releasing" | "cut_release" | "version_bump" => Ok(Self::Release),
             "exploration" | "explore" | "discovery" | "research" | "spike" => Ok(Self::Exploration),
-            "incident_response" | "incident" | "outage" | "incident-response" | "oncall" => {
-                Ok(Self::IncidentResponse)
-            }
+            "incident_response" | "incident" | "outage" | "oncall" => Ok(Self::IncidentResponse),
             "review" | "code_review" => Ok(Self::Review),
             "unknown" => Ok(Self::Unknown),
             _ => Err(ParseSituationValueError::new(
@@ -204,7 +206,7 @@ impl FromStr for SituationConfidence {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_situation_token(input).as_str() {
             "high" => Ok(Self::High),
             "medium" => Ok(Self::Medium),
             "low" => Ok(Self::Low),
@@ -267,7 +269,7 @@ impl FromStr for SituationFeatureType {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_situation_token(input).as_str() {
             "keyword" => Ok(Self::Keyword),
             "path" => Ok(Self::Path),
             "command" => Ok(Self::Command),
@@ -334,7 +336,7 @@ impl FromStr for SituationRoutingSurface {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_situation_token(input).as_str() {
             "context_profile" => Ok(Self::ContextProfile),
             "preflight_profile" => Ok(Self::PreflightProfile),
             "procedure_candidate" => Ok(Self::ProcedureCandidate),
@@ -385,7 +387,7 @@ impl FromStr for SituationReplayPolicy {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_situation_token(input).as_str() {
             "not_eligible" => Ok(Self::NotEligible),
             "dry_run_only" => Ok(Self::DryRunOnly),
             "allowed" => Ok(Self::Allowed),
@@ -445,13 +447,13 @@ impl FromStr for SituationLinkRelation {
     type Err = ParseSituationValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_situation_token(input).as_str() {
             "similar" => Ok(Self::Similar),
             "refines" => Ok(Self::Refines),
             "supersedes" => Ok(Self::Supersedes),
             "blocks" => Ok(Self::Blocks),
             "contrasts" => Ok(Self::Contrasts),
-            "co_occurs" | "co-occurs" => Ok(Self::CoOccurs),
+            "co_occurs" => Ok(Self::CoOccurs),
             _ => Err(ParseSituationValueError::new(
                 "situation_link_relation",
                 input,
@@ -1420,6 +1422,40 @@ mod tests {
             SituationCategory::from_str("mystery").map_err(|error| error.field()),
             Err("situation_category"),
             "invalid category field",
+        )
+    }
+
+    #[test]
+    fn stable_wire_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            SituationCategory::from_str(" Incident-Response "),
+            Ok(SituationCategory::IncidentResponse),
+            "category",
+        )?;
+        ensure(
+            SituationConfidence::from_str(" HIGH "),
+            Ok(SituationConfidence::High),
+            "confidence",
+        )?;
+        ensure(
+            SituationFeatureType::from_str("error-signal"),
+            Ok(SituationFeatureType::ErrorSignal),
+            "feature type",
+        )?;
+        ensure(
+            SituationRoutingSurface::from_str("preflight-profile"),
+            Ok(SituationRoutingSurface::PreflightProfile),
+            "routing surface",
+        )?;
+        ensure(
+            SituationReplayPolicy::from_str("dry-run-only"),
+            Ok(SituationReplayPolicy::DryRunOnly),
+            "replay policy",
+        )?;
+        ensure(
+            SituationLinkRelation::from_str("co-occurs"),
+            Ok(SituationLinkRelation::CoOccurs),
+            "link relation",
         )
     }
 

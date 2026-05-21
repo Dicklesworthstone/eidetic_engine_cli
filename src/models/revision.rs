@@ -255,8 +255,8 @@ impl SupersessionReason {
     /// Parse from string.
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "user_update" => Self::UserUpdate,
+        match s.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "user_update" | "update" => Self::UserUpdate,
             "curation" => Self::Curation,
             "consolidation" => Self::Consolidation,
             "correction" => Self::Correction,
@@ -569,8 +569,20 @@ mod tests {
     #[test]
     fn supersession_reason_parse_lossy_normalizes_external_values() {
         assert_eq!(
+            SupersessionReason::parse_lossy("user-update"),
+            SupersessionReason::UserUpdate
+        );
+        assert_eq!(
+            SupersessionReason::parse_lossy(" update "),
+            SupersessionReason::UserUpdate
+        );
+        assert_eq!(
             SupersessionReason::parse_lossy(" Correction "),
             SupersessionReason::Correction
+        );
+        assert_eq!(
+            SupersessionReason::parse_lossy("system-generated"),
+            SupersessionReason::SystemGenerated
         );
         assert_eq!(
             SupersessionReason::parse_lossy(" SYSTEM_GENERATED "),

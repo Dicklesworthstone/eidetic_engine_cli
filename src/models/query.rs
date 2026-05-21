@@ -3,6 +3,39 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+fn normalized_query_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn normalized_filter_operator_token(value: &str) -> String {
+    let mut normalized = String::with_capacity(value.len());
+    let mut previous_was_lowercase_or_digit = false;
+
+    for character in value.trim().chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                previous_was_lowercase_or_digit = false;
+            }
+            ch if ch.is_ascii_uppercase() => {
+                if previous_was_lowercase_or_digit && !normalized.ends_with('_') {
+                    normalized.push('_');
+                }
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = false;
+            }
+            ch => {
+                normalized.push(ch.to_ascii_lowercase());
+                previous_was_lowercase_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+            }
+        }
+    }
+
+    normalized
+}
+
 /// A parsed filter from an ee.query.v1 document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct QueryFilters {
@@ -62,7 +95,7 @@ impl MemoryScope {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_query_token(value).as_str() {
             "self" => Some(Self::SelfOnly),
             "team" => Some(Self::Team),
             "workspace" => Some(Self::Workspace),
@@ -241,10 +274,10 @@ impl QueryGraphTraversal {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_query_token(value).as_str() {
             "outbound" => Some(Self::Outbound),
             "inbound" => Some(Self::Inbound),
-            "bidirectional" => Some(Self::Bidirectional),
+            "bidirectional" | "bi_directional" => Some(Self::Bidirectional),
             _ => None,
         }
     }
@@ -262,7 +295,7 @@ impl QueryTemporalValidityPosture {
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
+        match normalized_query_token(value).as_str() {
             "strict" => Some(Self::Strict),
             "relaxed" => Some(Self::Relaxed),
             "ignore" => Some(Self::Ignore),
@@ -337,18 +370,18 @@ pub enum FilterOperator {
 impl FilterOperator {
     #[must_use]
     pub fn parse_name(s: &str) -> Option<Self> {
-        match s {
+        match normalized_filter_operator_token(s).as_str() {
             "eq" => Some(Self::Eq),
             "neq" => Some(Self::Neq),
             "in" => Some(Self::In),
-            "notIn" => Some(Self::NotIn),
+            "not_in" => Some(Self::NotIn),
             "gt" => Some(Self::Gt),
             "gte" => Some(Self::Gte),
             "lt" => Some(Self::Lt),
             "lte" => Some(Self::Lte),
             "exists" => Some(Self::Exists),
-            "startsWith" => Some(Self::StartsWith),
-            "endsWith" => Some(Self::EndsWith),
+            "starts_with" => Some(Self::StartsWith),
+            "ends_with" => Some(Self::EndsWith),
             "contains" => Some(Self::Contains),
             _ => None,
         }
@@ -598,7 +631,7 @@ impl EqlTagsMode {
     }
 
     fn parse(value: &str) -> Option<Self> {
-        match value {
+        match normalized_query_token(value).as_str() {
             "any" => Some(Self::Any),
             "all" => Some(Self::All),
             _ => None,
@@ -624,7 +657,7 @@ impl EqlSpeedMode {
     }
 
     fn parse(value: &str) -> Option<Self> {
-        match value {
+        match normalized_query_token(value).as_str() {
             "instant" => Some(Self::Instant),
             "default" => Some(Self::Default),
             "quality" => Some(Self::Quality),
@@ -1605,6 +1638,10 @@ mod tests {
             QueryGraphTraversal::parse("BIDIRECTIONAL"),
             Some(QueryGraphTraversal::Bidirectional)
         );
+        assert_eq!(
+            QueryGraphTraversal::parse("bi-directional"),
+            Some(QueryGraphTraversal::Bidirectional)
+        );
         assert_eq!(QueryGraphTraversal::parse("sideways"), None);
     }
 
@@ -1619,6 +1656,48 @@ mod tests {
             Some(QueryTemporalValidityPosture::Ignore)
         );
         assert_eq!(QueryTemporalValidityPosture::parse("strictish"), None);
+    }
+
+    #[test]
+    fn filter_operator_parse_accepts_query_file_spelling_variants() {
+        assert_eq!(
+            FilterOperator::parse_name("notIn"),
+            Some(FilterOperator::NotIn)
+        );
+        assert_eq!(
+            FilterOperator::parse_name("not_in"),
+            Some(FilterOperator::NotIn)
+        );
+        assert_eq!(
+            FilterOperator::parse_name("not-in"),
+            Some(FilterOperator::NotIn)
+        );
+        assert_eq!(
+            FilterOperator::parse_name("StartsWith"),
+            Some(FilterOperator::StartsWith)
+        );
+        assert_eq!(
+            FilterOperator::parse_name("starts_with"),
+            Some(FilterOperator::StartsWith)
+        );
+        assert_eq!(
+            FilterOperator::parse_name("ends-with"),
+            Some(FilterOperator::EndsWith)
+        );
+        assert_eq!(FilterOperator::parse_name("missing"), None);
+    }
+
+    #[test]
+    fn eql_modes_parse_normalizes_query_file_values() {
+        assert_eq!(EqlTagsMode::parse(" ALL "), Some(EqlTagsMode::All));
+        assert_eq!(EqlTagsMode::parse("any"), Some(EqlTagsMode::Any));
+        assert_eq!(EqlTagsMode::parse("either"), None);
+        assert_eq!(
+            EqlSpeedMode::parse(" Quality "),
+            Some(EqlSpeedMode::Quality)
+        );
+        assert_eq!(EqlSpeedMode::parse("INSTANT"), Some(EqlSpeedMode::Instant));
+        assert_eq!(EqlSpeedMode::parse("slow"), None);
     }
 
     #[test]
