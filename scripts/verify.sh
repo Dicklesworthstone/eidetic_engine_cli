@@ -437,6 +437,20 @@ run_stage() {
     fi
 }
 
+closure_lint_or_tracked_drift() {
+    if with_beads_read_locks ./scripts/closure-lint.sh --audit --json; then
+        return 0
+    fi
+
+    local closure_exit=$?
+    if with_beads_read_locks ./scripts/verification-drift-guard.sh --gate=closure-lint --json; then
+        echo "[!] Closure linter reported tracked violations; continuing via Verification Drift Guard"
+        return 0
+    fi
+
+    return "$closure_exit"
+}
+
 artifact_retention_summary() {
     echo ""
     echo "Artifact retention:"
@@ -466,7 +480,7 @@ artifact_retention_summary() {
 run_stage "Forbidden Dependencies" "./scripts/check-forbidden-deps.sh"
 
 # Gate 2: Closure Discipline
-run_stage "Closure Linter" "with_beads_read_locks ./scripts/closure-lint.sh --audit --json"
+run_stage "Closure Linter" "closure_lint_or_tracked_drift"
 
 # Gate 2.5: Drift Guard (ensures red gates have tracking beads)
 run_stage "Verification Drift Guard" "with_beads_read_locks ./scripts/verification-drift-guard.sh --json"

@@ -220,13 +220,13 @@
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
+      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
     },
     {
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
+      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
     },
     {
       "bead": "bd-3usjw.44",
@@ -239,6 +239,24 @@
       "label": "implements-surface",
       "surface": "conformal_prediction_sets",
       "reason": "missing tests/golden/conformal_prediction_sets.snap"
+    },
+    {
+      "bead": "bd-3usjw.45",
+      "label": "math-ambition",
+      "surface": "rejection_criteria",
+      "reason": "close_reason must include rejection_threshold_passed, measured_value, expected_value, and decision fields"
+    },
+    {
+      "bead": "bd-3usjw.45",
+      "label": "implements-surface",
+      "surface": "sieve_streaming_consolidator",
+      "reason": "missing tests/golden/sieve_streaming_consolidator.snap"
+    },
+    {
+      "bead": "bd-3usjw.45",
+      "label": "implements-surface",
+      "surface": "sieve_streaming_consolidator",
+      "reason": "no src/ file in FILE SURFACE has #[cfg(test)] mod tests with >=3 non-ignored #[test] fns and assertion coverage (first declared src path: src/steward/consolidate.rs)"
     },
     {
       "bead": "bd-3usjw.47",
@@ -307,6 +325,6 @@
       "reason": "missing tests/golden/context-ppr.snap"
     }
   ],
-  "count": 51,
+  "count": 54,
   "status": "fail"
 }

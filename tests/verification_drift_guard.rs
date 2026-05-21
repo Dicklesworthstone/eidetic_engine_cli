@@ -88,6 +88,15 @@ snapshot_proposal_guard
         .expect("run snapshot proposal guard")
 }
 
+fn run_drift_guard_at(root: &Path, args: &[&str]) -> Output {
+    Command::new("sh")
+        .arg(project_root().join("scripts/verification-drift-guard.sh"))
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("run verification drift guard")
+}
+
 fn verify_stage_names(script: &str) -> BTreeSet<String> {
     script
         .lines()
@@ -337,6 +346,53 @@ fn drift_guard_detects_closure_violations_without_bead() {
                 .join(".verification-drift-report.json")
                 .exists(),
         "script should produce meaningful output or report file: {combined}"
+    );
+}
+
+#[test]
+fn drift_guard_recognizes_open_closure_lint_tracking_bead() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    fs::create_dir_all(temp.path().join(".beads")).expect("create .beads");
+    fs::write(
+        temp.path().join(".closure-lint-report.json"),
+        r#"{"violations":[{"bead":"closed-demo","label":"implements-surface","surface":"demo","reason":"missing tests/golden/demo.snap"}],"count":1,"status":"fail"}"#,
+    )
+    .expect("write closure report");
+    fs::write(
+        temp.path().join(".beads/issues.jsonl"),
+        r#"{"id":"bd-track","title":"closure-lint verifier blocker","status":"open","labels":["verify"],"description":"Tracks closure linter violations until remediation lands."}"#,
+    )
+    .expect("write beads fixture");
+
+    let output = run_drift_guard_at(temp.path(), &["--gate=closure-lint", "--json"]);
+    assert!(
+        output.status.success(),
+        "open closure-lint bead should satisfy drift guard\n{}",
+        output_excerpt(&output)
+    );
+
+    let report_path = temp.path().join(".verification-drift-report.json");
+    let report = fs::read_to_string(&report_path).expect("read drift report");
+    let parsed: serde_json::Value = serde_json::from_str(&report).expect("parse drift report");
+    assert_eq!(parsed["status"], "pass", "tracked closure-lint report");
+    assert_eq!(parsed["count"], 0, "tracked closure-lint drift count");
+}
+
+#[test]
+fn verify_sh_routes_tracked_closure_lint_failures_through_drift_guard() {
+    let verify_script = fs::read_to_string(verify_script_path()).expect("read verify.sh");
+
+    assert!(
+        verify_script.contains("closure_lint_or_tracked_drift()"),
+        "verify.sh should define a closure-lint wrapper"
+    );
+    assert!(
+        verify_script.contains("verification-drift-guard.sh --gate=closure-lint --json"),
+        "closure-lint wrapper should delegate tracked red reports to the drift guard"
+    );
+    assert!(
+        verify_script.contains(r#"run_stage "Closure Linter" "closure_lint_or_tracked_drift""#),
+        "Closure Linter stage should run through the tracked-drift wrapper"
     );
 }
 

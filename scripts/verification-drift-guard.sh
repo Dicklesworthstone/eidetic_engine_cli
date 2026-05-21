@@ -104,7 +104,7 @@ check_closure_lint_drift() {
     violation_count=$(jq -r '.count // 0' "$CLOSURE_REPORT" 2>/dev/null || echo "0")
 
     if [ "$violation_count" -gt 0 ]; then
-        if ! has_open_bead_for "closure.*lint\|lint.*closure\|closure.*violat"; then
+        if ! has_open_bead_for "closure.*lint|lint.*closure|closure.*violat"; then
             add_drift "closure-lint" "Gate has $violation_count violations but no open bead tracking them"
         fi
     fi
@@ -121,7 +121,7 @@ check_test_drift() {
         local missing_count
         missing_count=$(jq -r '.surfaces | to_entries | map(select(.value.status == "missing")) | length' .vision-coverage-report.json 2>/dev/null || echo "0")
         if [ "$missing_count" -gt 5 ]; then
-            if ! has_open_bead_for "test.*fail\|fail.*test\|walking.*skeleton\|core.*job"; then
+            if ! has_open_bead_for "test.*fail|fail.*test|walking.*skeleton|core.*job"; then
                 add_drift "cargo-test" "Vision coverage shows $missing_count missing surfaces but no open bead tracking core functionality gaps"
             fi
         fi
@@ -139,7 +139,7 @@ check_forbidden_deps_drift() {
     forbidden_hits=$(cargo tree -e features 2>/dev/null | grep -cE '(^|\s)(tokio|rusqlite|petgraph|sqlx|diesel)\s' || echo "0")
 
     if [ "$forbidden_hits" -gt 0 ]; then
-        if ! has_open_bead_for "forbidden.*dep\|dep.*forbidden\|tokio\|rusqlite\|petgraph"; then
+        if ! has_open_bead_for "forbidden.*dep|dep.*forbidden|tokio|rusqlite|petgraph"; then
             add_drift "forbidden-deps" "Found $forbidden_hits forbidden dependency references but no open bead"
         fi
     fi
