@@ -5,11 +5,15 @@ use crate::models::{
     CapabilityStatus, INDEX_MANIFEST_SCHEMA_V1, SEARCH_DOCUMENT_SCHEMA_V1, SEARCH_MODULE_SCHEMA_V1,
 };
 
+pub mod bloom_prefilter;
+pub mod bm25_simd;
+pub mod hot_path;
 pub mod lexical_ram_tier;
 pub mod plan_cache;
 pub mod query;
 pub mod scoring;
 pub mod simhash;
+pub mod tag_bitmaps;
 
 pub use frankensearch::core::types::IndexableDocument;
 pub use frankensearch::{
