@@ -536,10 +536,10 @@ fn apply_trust_quarantine_row(
     let state = states
         .entry(source_id.clone())
         .or_insert_with(|| SourceTrustState::new(source_id));
-    for _ in 0..row.harmful_event_count {
-        state.record_import();
-        state.record_harmful();
-    }
+    // Prevent CPU exhaustion on maliciously inflated counts by using saturating_add instead of loops
+    state.total_imports = state.total_imports.saturating_add(row.harmful_event_count);
+    state.harmful_count = state.harmful_count.saturating_add(row.harmful_event_count);
+
     if row.status == "active" {
         state.record_quarantine();
     }

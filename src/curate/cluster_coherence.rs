@@ -474,7 +474,7 @@ fn cluster_id(member_memory_ids: &[String], threshold: f64) -> String {
         hash_text(&mut hasher, "member", memory_id);
     }
     let digest = hasher.finalize().to_hex().to_string();
-    format!("clu_{}", &digest[..24])
+    format!("clu_{}", &digest[..digest.len().min(24)])
 }
 
 fn centroid_hash(members: &[usize], points: &[EmbeddingPoint]) -> String {

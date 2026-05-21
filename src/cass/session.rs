@@ -43,7 +43,7 @@ impl CassAgent {
     /// [`Self::Unknown`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+        match s.trim().to_lowercase().as_str() {
             "claude-code" | "claude_code" | "claudecode" => Self::ClaudeCode,
             "codex" => Self::Codex,
             "cursor" => Self::Cursor,
@@ -580,7 +580,7 @@ impl CassSpanKind {
     /// [`Self::Message`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+        match s.trim().to_lowercase().as_str() {
             "message" | "msg" => Self::Message,
             "tool_call" | "toolcall" | "function_call" => Self::ToolCall,
             "tool_result" | "toolresult" | "function_result" => Self::ToolResult,
@@ -636,7 +636,7 @@ impl CassRole {
     /// [`Self::User`].
     #[must_use]
     pub fn parse_lossy(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+        match s.trim().to_lowercase().as_str() {
             "user" | "human" => Self::User,
             "assistant" | "model" | "ai" => Self::Assistant,
             "system" => Self::System,
@@ -886,6 +886,11 @@ mod tests {
             "CODEX uppercase",
         )?;
         ensure_equal(
+            &CassAgent::parse_lossy(" codex "),
+            &CassAgent::Codex,
+            "codex whitespace",
+        )?;
+        ensure_equal(
             &CassAgent::parse_lossy("cursor"),
             &CassAgent::Cursor,
             "cursor",
@@ -934,6 +939,11 @@ mod tests {
             "tool_call",
         )?;
         ensure_equal(
+            &CassSpanKind::parse_lossy(" Tool_Result "),
+            &CassSpanKind::ToolResult,
+            "tool_result whitespace and case",
+        )?;
+        ensure_equal(
             &CassSpanKind::parse_lossy("tool_result"),
             &CassSpanKind::ToolResult,
             "tool_result",
@@ -971,6 +981,11 @@ mod tests {
             &CassRole::parse_lossy("assistant"),
             &CassRole::Assistant,
             "assistant",
+        )?;
+        ensure_equal(
+            &CassRole::parse_lossy(" Assistant "),
+            &CassRole::Assistant,
+            "assistant whitespace and case",
         )?;
         ensure_equal(
             &CassRole::parse_lossy("system"),

@@ -509,14 +509,14 @@ fn drain_pipe_readers_after_timeout(
     // even if the grace period expires before the readers finish updating the buffers.
     if stdout_bytes.is_none() {
         if let Some(h) = stdout_thread.take() {
-            let _ = h.join();
-            tracing::debug!("cass subprocess stdout pipe reader did not drain after timeout");
+            *stdout_bytes = Some(join_pipe_reader(h)?);
+            tracing::debug!("cass subprocess stdout pipe reader did not drain before timeout");
         }
     }
     if stderr_bytes.is_none() {
         if let Some(h) = stderr_thread.take() {
-            let _ = h.join();
-            tracing::debug!("cass subprocess stderr pipe reader did not drain after timeout");
+            *stderr_bytes = Some(join_pipe_reader(h)?);
+            tracing::debug!("cass subprocess stderr pipe reader did not drain before timeout");
         }
     }
 
@@ -537,7 +537,7 @@ fn terminate_cass_process_group(child_group: Pid) {
 
 fn validate_absolute_cass_binary(path: &Path) -> Result<(), CassError> {
     reject_existing_symlink_component(path)?;
-    let metadata = std::fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS binary metadata is unavailable: {error}"),
     })?;
@@ -570,7 +570,7 @@ fn validate_absolute_cass_binary_permissions(
     }
     if let Some(parent) = path.parent() {
         let parent_metadata =
-            std::fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
+            std::fs::symlink_metadata(parent).map_err(|error| CassError::InvalidBinary {
                 binary: path.to_path_buf(),
                 reason: format!("CASS binary parent metadata is unavailable: {error}"),
             })?;

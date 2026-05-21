@@ -226,7 +226,7 @@ fn categorize_interventions(interventions: &[Intervention]) -> RegretCategory {
         return RegretCategory::Other;
     }
 
-    // Count intervention types to determine dominant pattern
+    // Count intervention types and determine category by severity priority
     let mut add_count = 0u32;
     let mut remove_count = 0u32;
     let mut replace_count = 0u32;

@@ -273,7 +273,7 @@ fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
 
 #[cfg(unix)]
 fn validate_import_binary_metadata(path: &Path, source: DiscoverySource) -> Result<(), CassError> {
-    let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+    let metadata = fs::symlink_metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS import binary metadata is unavailable: {error}"),
     })?;
@@ -314,7 +314,7 @@ fn validate_import_binary_metadata(path: &Path, source: DiscoverySource) -> Resu
         DiscoverySource::EnvVar | DiscoverySource::Config => {
             if let Some(parent) = path.parent() {
                 let parent_metadata =
-                    fs::metadata(parent).map_err(|error| CassError::InvalidBinary {
+                    fs::symlink_metadata(parent).map_err(|error| CassError::InvalidBinary {
                         binary: path.to_path_buf(),
                         reason: format!(
                             "CASS import binary parent metadata is unavailable: {error}"
@@ -343,7 +343,7 @@ fn validate_import_binary_metadata(path: &Path, source: DiscoverySource) -> Resu
 fn validate_import_binary_ancestor_chain(path: &Path) -> Result<(), CassError> {
     let mut current = path.parent();
     while let Some(ancestor) = current {
-        let metadata = fs::metadata(ancestor).map_err(|error| CassError::InvalidBinary {
+        let metadata = fs::symlink_metadata(ancestor).map_err(|error| CassError::InvalidBinary {
             binary: path.to_path_buf(),
             reason: format!(
                 "CASS import binary ancestor `{}` metadata is unavailable: {error}",
@@ -367,7 +367,7 @@ fn validate_import_binary_ancestor_chain(path: &Path) -> Result<(), CassError> {
 
 #[cfg(not(unix))]
 fn validate_import_binary_metadata(path: &Path, _source: DiscoverySource) -> Result<(), CassError> {
-    let metadata = fs::metadata(path).map_err(|error| CassError::InvalidBinary {
+    let metadata = fs::symlink_metadata(path).map_err(|error| CassError::InvalidBinary {
         binary: path.to_path_buf(),
         reason: format!("CASS import binary metadata is unavailable: {error}"),
     })?;

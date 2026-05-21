@@ -428,7 +428,7 @@ pub fn scan_eidetic_legacy_source(
     }
 
     let source = canonicalize_existing_source(&options.source_path)?;
-    let metadata = fs::metadata(&source).map_err(|error| io_error(&source, error))?;
+    let metadata = fs::symlink_metadata(&source).map_err(|error| io_error(&source, error))?;
     let scan_root = if metadata.is_dir() {
         source.clone()
     } else {

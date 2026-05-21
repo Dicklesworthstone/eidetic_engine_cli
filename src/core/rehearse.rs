@@ -86,7 +86,7 @@ impl std::str::FromStr for RehearsalProfile {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.trim().to_ascii_lowercase().as_str() {
             "quick" => Ok(Self::Quick),
             "full" => Ok(Self::Full),
             "privacy" => Ok(Self::Privacy),
@@ -2161,6 +2161,18 @@ mod tests {
         );
         assert_eq!(
             RehearsalProfile::from_str(RehearsalProfile::Privacy.as_str()),
+            Some(RehearsalProfile::Privacy)
+        );
+    }
+
+    #[test]
+    fn rehearsal_profile_parse_normalizes_cli_values() {
+        assert_eq!(
+            RehearsalProfile::from_str(" Quick "),
+            Some(RehearsalProfile::Quick)
+        );
+        assert_eq!(
+            RehearsalProfile::from_str("PRIVACY"),
             Some(RehearsalProfile::Privacy)
         );
     }

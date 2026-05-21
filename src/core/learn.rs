@@ -1218,6 +1218,7 @@ pub fn observe_experiment(
         dry_run: false,
         harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        prompt_injection_guard: true,
     })?;
     persist_learning_observation(
         &database_path,
@@ -1364,6 +1365,7 @@ pub fn close_experiment(options: &LearnCloseOptions) -> Result<LearnCloseReport,
         dry_run: false,
         harmful_per_source_per_hour: crate::core::outcome::DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         harmful_burst_window_seconds: crate::core::outcome::DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        prompt_injection_guard: true,
     })?;
     persist_learning_observation(
         &database_path,

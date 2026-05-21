@@ -64,6 +64,7 @@ pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
+const MAX_CURATE_REVIEW_REASON_BYTES: usize = 4 * 1024;
 const DEFAULT_SNOOZE_SECONDS: u64 = 90 * 24 * 60 * 60;
 const REVIEW_SESSION_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 const PEER_TRUST_CAP_AGENT_ASSERTION: &str = "agent_assertion";
@@ -186,6 +187,8 @@ pub struct CurateReviewOptions<'a> {
     pub dry_run: bool,
     /// RFC 3339 timestamp for `ee curate snooze`.
     pub snoozed_until: Option<&'a str>,
+    /// Reason provided by the operator.
+    pub reason: Option<&'a str>,
     /// Target candidate ID for `ee curate merge <source> <target>`.
     pub merge_into_candidate_id: Option<&'a str>,
 }
@@ -377,6 +380,8 @@ pub struct CurateReviewReport {
     pub candidate: CurateCandidateSummary,
     pub review: CurateReviewResult,
     pub mutation: CurateReviewMutation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_details: Option<CurateReviewPlannedDetails>,
     pub dry_run: bool,
     pub durable_mutation: bool,
     #[serde(serialize_with = "serialize_curate_review_degradations")]
@@ -1009,6 +1014,21 @@ pub struct CurateReviewMutation {
     pub snoozed_until: Option<String>,
     pub merged_into_candidate_id: Option<String>,
     pub audit_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateReviewPlannedDetails {
+    pub candidate_id: String,
+    pub action: String,
+    pub from_status: String,
+    pub to_status: String,
+    pub from_review_state: String,
+    pub to_review_state: String,
+    pub snoozed_until: Option<String>,
+    pub merged_into_candidate_id: Option<String>,
+    pub decision: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2335,7 +2355,21 @@ pub fn validate_curation_candidate(
         })?;
 
     let now = Utc::now().to_rfc3339();
-    let decision = evaluate_candidate_for_validation(&stored, target_memory.as_ref(), &now);
+    let prompt_injection_guard = crate::core::config_surface::get_config(
+        &crate::core::config_surface::ConfigSurfaceOptions {
+            workspace_root: options.workspace_path.to_path_buf(),
+            config_path: None,
+        },
+        crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+    )
+    .map(|c| c.value == "true")
+    .unwrap_or(true);
+    let decision = evaluate_candidate_for_validation(
+        &stored,
+        target_memory.as_ref(),
+        &now,
+        prompt_injection_guard,
+    );
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -2546,6 +2580,7 @@ pub fn review_curation_candidate(
         .filter(|value| !value.is_empty())
         .unwrap_or("ee")
         .to_owned();
+    let reason = validate_curate_review_reason(options.reason)?;
     let merge_into_candidate_id = parse_merge_target_candidate_id(options)?;
     let snoozed_until = parse_snoozed_until(options)?;
 
@@ -2595,6 +2630,7 @@ pub fn review_curation_candidate(
             &decision,
             &now,
             &reviewed_by,
+            reason.as_deref(),
         )?;
         reviewed_at = Some(now.clone());
         persisted = true;
@@ -2603,6 +2639,16 @@ pub fn review_curation_candidate(
         reviewed_at = Some(now.clone());
     }
 
+    let planned_details = if options.dry_run && decision.should_persist {
+        Some(curate_review_planned_details(
+            &stored,
+            options.action,
+            &decision,
+            reason.as_deref(),
+        ))
+    } else {
+        None
+    };
     let mut candidate = candidate_summary_from_stored(stored, &prepared.workspace_path);
     if persisted {
         candidate.status = decision.to_status.clone();
@@ -2644,6 +2690,7 @@ pub fn review_curation_candidate(
             merged_into_candidate_id: decision.merged_into_candidate_id,
             audit_id,
         },
+        planned_details,
         dry_run: options.dry_run,
         durable_mutation: persisted,
         degraded: Vec::new(),
@@ -3501,6 +3548,7 @@ fn evaluate_candidate_for_validation(
     stored: &StoredCurationCandidate,
     target_memory: Option<&StoredMemory>,
     now_rfc3339: &str,
+    prompt_injection_guard: bool,
 ) -> ValidationDecision {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -3585,7 +3633,7 @@ fn evaluate_candidate_for_validation(
                 confidence: stored.confidence,
                 ttl_seconds: None,
             };
-            if let Err(error) = validate_candidate(input, now_rfc3339) {
+            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard) {
                 errors.push(validation_issue(
                     error.code(),
                     error.to_string(),
@@ -5453,6 +5501,7 @@ fn persist_candidate_review(
     decision: &ReviewDecision,
     reviewed_at: &str,
     reviewed_by: &str,
+    reason: Option<&str>,
 ) -> Result<String, DomainError> {
     connection.begin().map_err(|error| DomainError::Storage {
         message: format!("Failed to begin curation review transaction: {error}"),
@@ -5467,6 +5516,7 @@ fn persist_candidate_review(
         decision,
         reviewed_at,
         reviewed_by,
+        reason,
     );
 
     match result {
@@ -5484,6 +5534,26 @@ fn persist_candidate_review(
     }
 }
 
+fn curate_review_planned_details(
+    stored: &StoredCurationCandidate,
+    action: CurateReviewAction,
+    decision: &ReviewDecision,
+    reason: Option<&str>,
+) -> CurateReviewPlannedDetails {
+    CurateReviewPlannedDetails {
+        candidate_id: stored.id.clone(),
+        action: action.as_str().to_owned(),
+        from_status: stored.status.clone(),
+        to_status: decision.to_status.clone(),
+        from_review_state: stored.review_state.clone(),
+        to_review_state: decision.to_review_state.clone(),
+        snoozed_until: decision.snoozed_until.clone(),
+        merged_into_candidate_id: decision.merged_into_candidate_id.clone(),
+        decision: decision.review.decision.clone(),
+        reason: reason.map(str::to_owned),
+    }
+}
+
 fn persist_candidate_review_inner(
     connection: &DbConnection,
     workspace_id: &str,
@@ -5492,6 +5562,7 @@ fn persist_candidate_review_inner(
     decision: &ReviewDecision,
     reviewed_at: &str,
     reviewed_by: &str,
+    reason: Option<&str>,
 ) -> Result<String, DomainError> {
     let updated = connection
         .update_curation_candidate_review(
@@ -5520,18 +5591,13 @@ fn persist_candidate_review_inner(
     }
 
     let audit_id = generate_audit_id();
-    let details = serde_json::json!({
-        "candidateId": stored.id.as_str(),
-        "action": action.as_str(),
-        "fromStatus": stored.status.as_str(),
-        "toStatus": decision.to_status.as_str(),
-        "fromReviewState": stored.review_state.as_str(),
-        "toReviewState": decision.to_review_state.as_str(),
-        "snoozedUntil": decision.snoozed_until.as_deref(),
-        "mergedIntoCandidateId": decision.merged_into_candidate_id.as_deref(),
-        "decision": decision.review.decision.as_str(),
-    })
-    .to_string();
+    let details = serde_json::to_string(&curate_review_planned_details(
+        stored, action, decision, reason,
+    ))
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize curation review audit details: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    })?;
     connection
         .insert_audit(
             &audit_id,
@@ -5548,6 +5614,16 @@ fn persist_candidate_review_inner(
             message: format!("Failed to write curation review audit entry: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
+    tracing::info!(
+        target: "ee::curate::transition",
+        candidate_id = %stored.id,
+        actor = %reviewed_by,
+        transition_kind = %action.as_str(),
+        reason_present = reason.is_some(),
+        reason_len = reason.map(str::len).unwrap_or(0),
+        dry_run = false,
+        "curate transition recorded"
+    );
     Ok(audit_id)
 }
 
@@ -6818,6 +6894,32 @@ fn parse_snoozed_until(options: &CurateReviewOptions<'_>) -> Result<Option<Strin
     }
 }
 
+fn validate_curate_review_reason(raw: Option<&str>) -> Result<Option<String>, DomainError> {
+    let Some(reason) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let actual_bytes = reason.len();
+    if actual_bytes > MAX_CURATE_REVIEW_REASON_BYTES {
+        return Err(DomainError::UsageCodeWithDetails {
+            code: "curate_reason_too_large",
+            message: format!(
+                "curate review --reason must be <= {MAX_CURATE_REVIEW_REASON_BYTES} bytes; got {actual_bytes}"
+            ),
+            repair: Some(
+                "Store long rationale in an external note and pass a short reason pointer."
+                    .to_owned(),
+            ),
+            details_json: serde_json::json!({
+                "field": "--reason",
+                "maxBytes": MAX_CURATE_REVIEW_REASON_BYTES,
+                "actualBytes": actual_bytes,
+            })
+            .to_string(),
+        });
+    }
+    Ok(Some(reason.to_owned()))
+}
+
 fn load_merge_target_candidate(
     connection: &DbConnection,
     workspace_id: &str,
@@ -6933,7 +7035,7 @@ mod tests {
         StoredCurationCandidate, StoredEvidenceSpan, StoredSession, audit_actions,
     };
     use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
-    use crate::models::{CandidateId, EvidenceId, MemoryId, RuleId, SessionId};
+    use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
 
     type TestResult = Result<(), String>;
 
@@ -7317,7 +7419,8 @@ mod tests {
             ttl_policy_id: None,
         };
 
-        let decision = evaluate_candidate_for_validation(&stored, None, "2026-05-01T00:03:00Z");
+        let decision =
+            evaluate_candidate_for_validation(&stored, None, "2026-05-01T00:03:00Z", true);
 
         assert_eq!(decision.validation.status, "failed");
         assert!(
@@ -8671,12 +8774,12 @@ mod tests {
             database_path: Some(&database_path),
             candidate_id: &accept_id,
             action: CurateReviewAction::Accept,
-            actor: Some("MistySalmon"),
+            actor: Some("Alice"),
             dry_run: false,
             snoozed_until: None,
+            reason: Some("validated by humans"),
             merge_into_candidate_id: None,
-        })
-        .map_err(|error| error.message())?;
+        })?;
         assert_eq!(accept.schema, super::CURATE_REVIEW_SCHEMA_V1);
         assert_eq!(accept.review.action, "accept");
         assert_eq!(accept.mutation.to_status, "approved");
@@ -8692,18 +8795,22 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "accept audit entry missing".to_owned())?;
         assert_eq!(audit.action, audit_actions::CURATION_CANDIDATE_ACCEPT);
+        let details: serde_json::Value =
+            serde_json::from_str(audit.details.as_deref().ok_or("accept audit details")?)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(details["reason"].as_str(), Some("validated by humans"));
 
         let reject = review_curation_candidate(&CurateReviewOptions {
             workspace_path,
             database_path: Some(&database_path),
             candidate_id: &reject_id,
             action: CurateReviewAction::Reject,
-            actor: Some("MistySalmon"),
+            actor: Some("Bob"),
             dry_run: false,
             snoozed_until: None,
+            reason: Some("duplicate"),
             merge_into_candidate_id: None,
-        })
-        .map_err(|error| error.message())?;
+        })?;
         assert_eq!(reject.review.action, "reject");
         assert_eq!(reject.mutation.to_status, "rejected");
         assert_eq!(reject.mutation.to_review_state, "rejected");
@@ -8726,6 +8833,10 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "reject audit entry missing".to_owned())?;
         assert_eq!(audit.action, audit_actions::CURATION_CANDIDATE_REJECT);
+        let details: serde_json::Value =
+            serde_json::from_str(audit.details.as_deref().ok_or("reject audit details")?)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(details["reason"].as_str(), Some("duplicate"));
         Ok(())
     }
 
@@ -8773,12 +8884,12 @@ mod tests {
             database_path: Some(&database_path),
             candidate_id: &source_id,
             action: CurateReviewAction::Snooze,
-            actor: Some("MistySalmon"),
+            actor: Some("Charlie"),
             dry_run: false,
             snoozed_until: Some("2030-01-01T00:00:00Z"),
+            reason: None,
             merge_into_candidate_id: None,
-        })
-        .map_err(|error| error.message())?;
+        })?;
         assert_eq!(snooze.mutation.to_status, "pending");
         assert_eq!(snooze.mutation.to_review_state, "snoozed");
         assert_eq!(
@@ -8800,12 +8911,12 @@ mod tests {
             database_path: Some(&database_path),
             candidate_id: &source_id,
             action: CurateReviewAction::Merge,
-            actor: Some("MistySalmon"),
+            actor: Some("Dave"),
             dry_run: false,
             snoozed_until: None,
+            reason: None,
             merge_into_candidate_id: Some(&target_id),
-        })
-        .map_err(|error| error.message())?;
+        })?;
         assert_eq!(merge.mutation.to_status, "rejected");
         assert_eq!(merge.mutation.to_review_state, "merged");
         assert_eq!(
@@ -8859,18 +8970,25 @@ mod tests {
             database_path: Some(&database_path),
             candidate_id: &candidate_id,
             action: CurateReviewAction::Accept,
-            actor: Some("MistySalmon"),
+            actor: Some("Eve"),
             dry_run: true,
             snoozed_until: None,
+            reason: Some("dry-run preview"),
             merge_into_candidate_id: None,
-        })
-        .map_err(|error| error.message())?;
+        })?;
 
         assert_eq!(report.mutation.to_status, "approved");
         assert_eq!(report.mutation.to_review_state, "accepted");
         assert!(!report.mutation.persisted);
         assert!(report.dry_run);
         assert!(report.mutation.audit_id.is_none());
+        assert_eq!(
+            report
+                .planned_details
+                .as_ref()
+                .and_then(|details| details.reason.as_deref()),
+            Some("dry-run preview")
+        );
         let stored = connection
             .get_curation_candidate(&workspace_id, &candidate_id)
             .map_err(|error| error.to_string())?
@@ -8878,6 +8996,29 @@ mod tests {
         assert_eq!(stored.status, "pending");
         assert_eq!(stored.review_state, "new");
         assert!(stored.reviewed_at.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_curate_review_reason_rejects_oversized_values() -> TestResult {
+        let oversized = "x".repeat(super::MAX_CURATE_REVIEW_REASON_BYTES + 1);
+        let error = super::validate_curate_review_reason(Some(&oversized))
+            .expect_err("oversized reason should fail");
+
+        match error {
+            DomainError::UsageCodeWithDetails {
+                code, details_json, ..
+            } => {
+                assert_eq!(code, "curate_reason_too_large");
+                let details: serde_json::Value =
+                    serde_json::from_str(&details_json).map_err(|error| error.to_string())?;
+                assert_eq!(
+                    details["maxBytes"].as_u64(),
+                    Some(super::MAX_CURATE_REVIEW_REASON_BYTES as u64)
+                );
+            }
+            other => return Err(format!("expected UsageCodeWithDetails, got {other:?}")),
+        }
         Ok(())
     }
 
@@ -9404,6 +9545,7 @@ mod tests {
                 merged_into_candidate_id: None,
                 audit_id: None,
             },
+            planned_details: None,
             dry_run: true,
             durable_mutation: false,
             degraded: duplicate_curate_degradations(),
