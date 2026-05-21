@@ -3949,7 +3949,7 @@ fn evaluate_candidate_for_apply(
                 target_after.level = "semantic".to_owned();
             }
         }
-        CandidateType::Rule | CandidateType::Procedure => {
+        CandidateType::Rule | CandidateType::AntiPatternProposal | CandidateType::Procedure => {
             let proposed_content = stored.proposed_content.as_deref().map(str::trim);
             match proposed_content.filter(|value| !value.is_empty()) {
                 Some(content) => {
@@ -3957,11 +3957,14 @@ fn evaluate_candidate_for_apply(
                     if redaction.redacted {
                         warnings.push(validation_issue(
                             "proposed_content_redacted",
-                            "Proposed rule content contained secret-like values and was redacted before rule creation.",
+                            "Proposed procedural content contained secret-like values and was redacted before rule creation.",
                             "Review the candidate and keep only durable, non-secret procedural guidance.",
                         ));
                     }
-                    if candidate_type == CandidateType::Rule {
+                    if matches!(
+                        candidate_type,
+                        CandidateType::Rule | CandidateType::AntiPatternProposal
+                    ) {
                         let source_memory_ids = source_memory_ids_for_rule_candidate(stored);
                         let rule_id = RuleId::now().to_string();
                         let index_job_id = generate_rule_search_index_job_id();
@@ -4008,9 +4011,13 @@ fn evaluate_candidate_for_apply(
                                 scope: "workspace".to_owned(),
                                 scope_pattern: None,
                                 maturity: "candidate".to_owned(),
-                                protected: false,
+                                protected: candidate_type == CandidateType::AntiPatternProposal,
                                 source_memory_ids,
-                                tags: vec!["playbook".to_owned(), "extracted".to_owned()],
+                                tags: if candidate_type == CandidateType::AntiPatternProposal {
+                                    vec!["anti-pattern".to_owned(), "harmful-outcome".to_owned()]
+                                } else {
+                                    vec!["playbook".to_owned(), "extracted".to_owned()]
+                                },
                             },
                             index_job_id,
                             index_job: CreateSearchIndexJobInput {
@@ -4082,6 +4089,7 @@ fn evaluate_candidate_for_apply(
     }
 
     if candidate_type != CandidateType::Rule
+        && candidate_type != CandidateType::AntiPatternProposal
         && candidate_type != CandidateType::Procedure
         && let Some(confidence) = stored.proposed_confidence
     {
@@ -4094,6 +4102,7 @@ fn evaluate_candidate_for_apply(
         target_after.confidence = confidence;
     }
     if candidate_type != CandidateType::Rule
+        && candidate_type != CandidateType::AntiPatternProposal
         && candidate_type != CandidateType::Procedure
         && let Some(trust_class) = &stored.proposed_trust_class
     {
@@ -6282,7 +6291,7 @@ fn peer_evidence_candidate_id(stored_id: &str) -> String {
 fn peer_evidence_candidate_kind(candidate_type: &str) -> &'static str {
     match candidate_type {
         "rule" => "rule",
-        "tombstone" | "retract" | "deprecate" => "anti_pattern",
+        "anti_pattern_proposal" | "tombstone" | "retract" | "deprecate" => "anti_pattern",
         _ => "workflow_hint",
     }
 }
@@ -6320,7 +6329,12 @@ fn peer_evidence_promotion_block_reason(
     if entries.iter().any(|entry| entry.score_delta < 0.0) {
         return Some(PEER_PROMOTION_BLOCK_CONTRADICTING);
     }
-    if peer_only && stored.candidate_type == CandidateType::Rule.as_str() {
+    if peer_only
+        && matches!(
+            stored.candidate_type.as_str(),
+            "anti_pattern_proposal" | "rule"
+        )
+    {
         return Some(PEER_PROMOTION_BLOCK_HUMAN_REVIEW_RULE);
     }
     if entries.iter().any(|entry| entry.outcome_weight.is_none()) {
@@ -6461,6 +6475,7 @@ impl CandidateEvidenceFacts {
 
 fn kind_for_candidate_type(candidate_type: &str) -> String {
     match candidate_type {
+        "anti_pattern_proposal" => "anti_pattern_proposal".to_owned(),
         "rule" => "procedural_rule_proposal".to_owned(),
         "procedure" => "procedure_proposal".to_owned(),
         other => format!("{other}_proposal"),
@@ -6468,16 +6483,28 @@ fn kind_for_candidate_type(candidate_type: &str) -> String {
 }
 
 fn proposed_level_for_candidate_type(candidate_type: &str) -> Option<String> {
-    matches!(candidate_type, "rule" | "procedure").then(|| "procedural".to_owned())
+    matches!(
+        candidate_type,
+        "anti_pattern_proposal" | "rule" | "procedure"
+    )
+    .then(|| "procedural".to_owned())
 }
 
 fn proposed_kind_for_candidate_type(candidate_type: &str) -> Option<String> {
-    matches!(candidate_type, "rule" | "procedure").then(|| candidate_type.to_owned())
+    match candidate_type {
+        "anti_pattern_proposal" => Some("anti_pattern".to_owned()),
+        "rule" | "procedure" => Some(candidate_type.to_owned()),
+        _ => None,
+    }
 }
 
 fn proposal_source_for_candidate(stored: &StoredCurationCandidate) -> String {
     if source_contains_peer_evidence(stored.source_id.as_deref()) {
         "peer_evidence".to_owned()
+    } else if stored.candidate_type == CandidateType::AntiPatternProposal.as_str()
+        && stored.source_type == CandidateSource::FeedbackEvent.as_str()
+    {
+        "auto_propose_anti_pattern".to_owned()
     } else if stored.candidate_type == CandidateType::Rule.as_str()
         && stored.source_type == CandidateSource::FeedbackEvent.as_str()
     {
@@ -6729,6 +6756,10 @@ fn proposed_tags_for_candidate(
     if stored.candidate_type == CandidateType::Rule.as_str() {
         tags.insert("procedural".to_owned());
         tags.insert("rule".to_owned());
+    } else if stored.candidate_type == CandidateType::AntiPatternProposal.as_str() {
+        tags.insert("procedural".to_owned());
+        tags.insert("anti-pattern".to_owned());
+        tags.insert("harmful-outcome".to_owned());
     } else if stored.candidate_type == CandidateType::Procedure.as_str() {
         tags.insert("procedural".to_owned());
         tags.insert("procedure".to_owned());
