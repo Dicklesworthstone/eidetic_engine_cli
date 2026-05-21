@@ -358,7 +358,43 @@
         "headOfLineBlocked": {"type": ["boolean", "null"]},
         "queueRecommendation": {"type": ["string", "null"]},
         "queueStatus": {"type": ["string", "null"]},
-        "queueEvidence": {"type": "array", "items": {"type": "string"}}
+        "queueEvidence": {"type": "array", "items": {"type": "string"}},
+        "admissionCertificate": {"$ref": "#/$defs/admissionCertificate"}
+      }
+    },
+    "admissionCertificate": {
+      "type": "object",
+      "required": ["schema", "action", "ruleId", "confidence", "serviceClass", "evidence", "assumptions", "proofObligations", "safetyInvariant"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.swarm_next_action.rch_admission_certificate.v1"
+        },
+        "action": {
+          "type": "string",
+          "enum": ["queue", "wait", "static_work", "coordinate"]
+        },
+        "ruleId": {
+          "type": "string",
+          "enum": [
+            "rch_admission.orphaned_queued_verifier",
+            "rch_admission.head_of_line_convoy",
+            "rch_admission.no_remote_capacity",
+            "rch_admission.remote_only_unsafe",
+            "rch_admission.remote_capacity_available",
+            "rch_admission.insufficient_evidence"
+          ]
+        },
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "serviceClass": {"type": "string", "enum": ["cargo_verifier", "unknown"]},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "proofObligations": {"type": "array", "items": {"type": "string"}},
+        "safetyInvariant": {
+          "type": "string",
+          "const": "monotonic_queue_pressure_never_increases_aggression"
+        }
       }
     },
     "environmentSummary": {

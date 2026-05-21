@@ -181,12 +181,26 @@ pub struct SwarmNextActionVerificationSummary {
     pub queue_status: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionAdmissionCertificate {
+    pub schema: &'static str,
+    pub action: &'static str,
+    pub rule_id: &'static str,
+    pub confidence: &'static str,
+    pub service_class: &'static str,
+    pub evidence: Vec<String>,
+    pub assumptions: Vec<&'static str>,
+    pub proof_obligations: Vec<&'static str>,
+    pub safety_invariant: &'static str,
+}
+
 impl Serialize for SwarmNextActionVerificationSummary {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("SwarmNextActionVerificationSummary", 13)?;
+        let mut state = serializer.serialize_struct("SwarmNextActionVerificationSummary", 14)?;
         state.serialize_field("rchSourceEnabled", &self.rch_source_enabled)?;
         state.serialize_field("remoteOnlyRequired", &self.remote_only_required)?;
         state.serialize_field("remoteOnlySafe", &self.remote_only_safe)?;
@@ -203,6 +217,7 @@ impl Serialize for SwarmNextActionVerificationSummary {
         state.serialize_field("queueRecommendation", &self.queue_recommendation())?;
         state.serialize_field("queueStatus", &self.queue_status)?;
         state.serialize_field("queueEvidence", &self.queue_evidence())?;
+        state.serialize_field("admissionCertificate", &self.admission_certificate())?;
         state.end()
     }
 }
@@ -293,6 +308,69 @@ impl SwarmNextActionVerificationSummary {
             return Some("remote_verification_can_launch_when_ready");
         }
         None
+    }
+
+    fn admission_certificate(&self) -> SwarmNextActionAdmissionCertificate {
+        let mut assumptions = vec![
+            "remote_cargo_is_required_for_build_or_test_work",
+            "certificate_is_advisory_and_never_mutates_rch_state",
+        ];
+        let mut proof_obligations = vec![
+            "do_not_launch_duplicate_verifier_without_capacity_evidence",
+            "record_admission_decision_in_closeout",
+        ];
+
+        let (action, rule_id, confidence) = if self
+            .suspected_orphaned_queued_verifier_count()
+            .is_some_and(|count| count > 0)
+        {
+            assumptions.push("queued_verifier_may_be_orphaned_when_start_is_stalled");
+            proof_obligations.push("coordinate_before_queue_cleanup_or_retry");
+            (
+                "coordinate",
+                "rch_admission.orphaned_queued_verifier",
+                "medium",
+            )
+        } else if self.head_of_line_blocked() == Some(true) {
+            assumptions.push("queue_head_needs_more_slots_than_currently_available");
+            proof_obligations.push("prefer_static_work_until_queue_head_fits");
+            ("static_work", "rch_admission.head_of_line_convoy", "high")
+        } else if self.slots_available == Some(0)
+            && (self.active_remote_build_count.unwrap_or(0) > 0
+                || self.queued_remote_build_count.unwrap_or(0) > 0)
+        {
+            assumptions.push("zero_free_slots_means_new_remote_work_extends_queue_delay");
+            proof_obligations.push("wait_or_batch_remote_verification");
+            ("wait", "rch_admission.no_remote_capacity", "high")
+        } else if self.remote_only_required && self.remote_only_safe == Some(false) {
+            assumptions.push("remote_only_policy_is_required_but_current_rch_posture_is_not_safe");
+            proof_obligations.push("inspect_rch_status_before_launching_more_remote_work");
+            ("coordinate", "rch_admission.remote_only_unsafe", "medium")
+        } else if self.remote_only_required && self.remote_only_safe == Some(true) {
+            assumptions.push("remote_only_policy_is_satisfied_by_current_rch_posture");
+            proof_obligations.push("use_rch_wrapper_for_any_cargo_command");
+            ("queue", "rch_admission.remote_capacity_available", "medium")
+        } else {
+            assumptions.push("missing_rch_queue_fields_are_treated_conservatively");
+            proof_obligations.push("collect_rch_status_before_remote_verification");
+            ("coordinate", "rch_admission.insufficient_evidence", "low")
+        };
+
+        SwarmNextActionAdmissionCertificate {
+            schema: "ee.swarm_next_action.rch_admission_certificate.v1",
+            action,
+            rule_id,
+            confidence,
+            service_class: if self.remote_only_required {
+                "cargo_verifier"
+            } else {
+                "unknown"
+            },
+            evidence: self.queue_evidence(),
+            assumptions,
+            proof_obligations,
+            safety_invariant: "monotonic_queue_pressure_never_increases_aggression",
+        }
     }
 }
 
@@ -1301,6 +1379,36 @@ mod tests {
                 "slots_available:2"
             ])
         );
+        assert_eq!(
+            json["admissionCertificate"],
+            serde_json::json!({
+                "schema": "ee.swarm_next_action.rch_admission_certificate.v1",
+                "action": "static_work",
+                "ruleId": "rch_admission.head_of_line_convoy",
+                "confidence": "high",
+                "serviceClass": "cargo_verifier",
+                "evidence": [
+                    "active_build_max_age_seconds:79200",
+                    "active_remote_build_count:1",
+                    "head_of_line_blocked:true",
+                    "queue_head_slots_needed:4",
+                    "queue_status:capacity_blocked",
+                    "queued_remote_build_count:1",
+                    "slots_available:2"
+                ],
+                "assumptions": [
+                    "remote_cargo_is_required_for_build_or_test_work",
+                    "certificate_is_advisory_and_never_mutates_rch_state",
+                    "queue_head_needs_more_slots_than_currently_available"
+                ],
+                "proofObligations": [
+                    "do_not_launch_duplicate_verifier_without_capacity_evidence",
+                    "record_admission_decision_in_closeout",
+                    "prefer_static_work_until_queue_head_fits"
+                ],
+                "safetyInvariant": "monotonic_queue_pressure_never_increases_aggression"
+            })
+        );
     }
 
     #[test]
@@ -1368,6 +1476,69 @@ mod tests {
                 "slots_available:4",
                 "suspected_orphaned_queued_verifier_count:1"
             ])
+        );
+        assert_eq!(json["admissionCertificate"]["action"], "coordinate");
+        assert_eq!(
+            json["admissionCertificate"]["ruleId"],
+            "rch_admission.orphaned_queued_verifier"
+        );
+        assert!(
+            json["admissionCertificate"]["proofObligations"]
+                .as_array()
+                .expect("proof obligations array")
+                .iter()
+                .any(|value| value == "coordinate_before_queue_cleanup_or_retry")
+        );
+    }
+
+    #[test]
+    fn next_action_admission_certificate_is_conservative_under_queue_pressure() {
+        let ready = verification_for_queue_posture(
+            Some(true),
+            Some(0),
+            Some(0),
+            Some(2),
+            None,
+            None,
+            Some("ready"),
+        );
+        let saturated = verification_for_queue_posture(
+            Some(false),
+            Some(1),
+            Some(0),
+            Some(0),
+            None,
+            None,
+            Some("saturated"),
+        );
+        let convoy = verification_for_queue_posture(
+            Some(false),
+            Some(1),
+            Some(1),
+            Some(2),
+            Some(4),
+            Some(3_600),
+            Some("capacity_blocked"),
+        );
+        let missing = verification_for_queue_posture(None, None, None, None, None, None, None);
+
+        let decisions = [
+            ready.admission_certificate().action,
+            saturated.admission_certificate().action,
+            convoy.admission_certificate().action,
+            missing.admission_certificate().action,
+        ];
+        assert_eq!(decisions, ["queue", "wait", "static_work", "coordinate"]);
+        assert!(
+            decisions
+                .windows(2)
+                .all(|window| admission_aggression_rank(window[0])
+                    >= admission_aggression_rank(window[1])),
+            "adding queue pressure must not make the admission decision more aggressive: {decisions:?}"
+        );
+        assert_eq!(
+            convoy.admission_certificate().safety_invariant,
+            "monotonic_queue_pressure_never_increases_aggression"
         );
     }
 
@@ -1739,6 +1910,41 @@ mod tests {
                 disk_pressure_hint_count: 0,
             },
             degraded: Vec::new(),
+        }
+    }
+
+    fn verification_for_queue_posture(
+        remote_only_safe: Option<bool>,
+        active_count: Option<u64>,
+        queued_count: Option<u64>,
+        slots_available: Option<u64>,
+        queue_head_slots_needed: Option<u64>,
+        active_build_max_age_seconds: Option<u64>,
+        queue_status: Option<&str>,
+    ) -> SwarmNextActionVerificationSummary {
+        SwarmNextActionVerificationSummary {
+            rch_source_enabled: remote_only_safe.is_some()
+                || active_count.is_some()
+                || queued_count.is_some(),
+            remote_only_required: true,
+            remote_only_safe,
+            healthy_worker_count: Some(1),
+            active_remote_build_count: active_count,
+            queued_remote_build_count: queued_count,
+            slots_available,
+            queue_head_slots_needed,
+            active_build_max_age_seconds,
+            queue_status: queue_status.map(str::to_owned),
+        }
+    }
+
+    fn admission_aggression_rank(action: &str) -> u8 {
+        match action {
+            "queue" => 3,
+            "wait" => 2,
+            "static_work" => 1,
+            "coordinate" => 0,
+            other => panic!("unknown admission action {other}"),
         }
     }
 

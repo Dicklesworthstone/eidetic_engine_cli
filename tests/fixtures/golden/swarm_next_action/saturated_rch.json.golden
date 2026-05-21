@@ -121,7 +121,31 @@
         "queued_remote_build_count:0",
         "queue_status:saturated",
         "slots_available:0"
-      ]
+      ],
+      "admissionCertificate": {
+        "schema": "ee.swarm_next_action.rch_admission_certificate.v1",
+        "action": "wait",
+        "ruleId": "rch_admission.no_remote_capacity",
+        "confidence": "high",
+        "serviceClass": "cargo_verifier",
+        "evidence": [
+          "active_remote_build_count:4",
+          "queued_remote_build_count:0",
+          "queue_status:saturated",
+          "slots_available:0"
+        ],
+        "assumptions": [
+          "remote_cargo_is_required_for_build_or_test_work",
+          "certificate_is_advisory_and_never_mutates_rch_state",
+          "zero_free_slots_means_new_remote_work_extends_queue_delay"
+        ],
+        "proofObligations": [
+          "do_not_launch_duplicate_verifier_without_capacity_evidence",
+          "record_admission_decision_in_closeout",
+          "wait_or_batch_remote_verification"
+        ],
+        "safetyInvariant": "monotonic_queue_pressure_never_increases_aggression"
+      }
     },
     "environment": {
       "cargoTargetExternalized": true,

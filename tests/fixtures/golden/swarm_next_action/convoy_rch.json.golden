@@ -124,7 +124,33 @@
         "queue_status:capacity_blocked",
         "queued_remote_build_count:1",
         "slots_available:2"
-      ]
+      ],
+      "admissionCertificate": {
+        "schema": "ee.swarm_next_action.rch_admission_certificate.v1",
+        "action": "static_work",
+        "ruleId": "rch_admission.head_of_line_convoy",
+        "confidence": "high",
+        "serviceClass": "cargo_verifier",
+        "evidence": [
+          "active_remote_build_count:1",
+          "head_of_line_blocked:true",
+          "queue_head_slots_needed:4",
+          "queue_status:capacity_blocked",
+          "queued_remote_build_count:1",
+          "slots_available:2"
+        ],
+        "assumptions": [
+          "remote_cargo_is_required_for_build_or_test_work",
+          "certificate_is_advisory_and_never_mutates_rch_state",
+          "queue_head_needs_more_slots_than_currently_available"
+        ],
+        "proofObligations": [
+          "do_not_launch_duplicate_verifier_without_capacity_evidence",
+          "record_admission_decision_in_closeout",
+          "prefer_static_work_until_queue_head_fits"
+        ],
+        "safetyInvariant": "monotonic_queue_pressure_never_increases_aggression"
+      }
     },
     "environment": {
       "cargoTargetExternalized": true,
