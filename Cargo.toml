@@ -143,6 +143,10 @@ name = "why"
 harness = false
 
 [[bench]]
+name = "why_toon_token_count"
+harness = false
+
+[[bench]]
 name = "outcome"
 harness = false
 

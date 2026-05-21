@@ -38,6 +38,7 @@ benches = [
   "context_with_ppr",
   "pack_size",
   "why",
+  "why_toon_token_count",
   "outcome",
   "status",
   "workspace_init",
@@ -71,6 +72,7 @@ benches = [
   "context_with_ppr",
   "pack_size",
   "why",
+  "why_toon_token_count",
   "outcome",
   "status",
   "workspace_init",
@@ -131,6 +133,11 @@ description = "Measure context pack JSON/text bytes, token usage, and bytes per 
 p50_ms_max = 25.0
 p99_ms_max = 75.0
 description = "Explain memory provenance and selection"
+
+[operations.ee_why_toon_token_count]
+p50_ms_max = 5.0
+p99_ms_max = 15.0
+description = "Render worst-case ee why TOON and enforce the compact graph-badge token budget"
 
 [operations.ee_outcome]
 p50_ms_max = 8.0
