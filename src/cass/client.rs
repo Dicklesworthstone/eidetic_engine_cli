@@ -230,18 +230,48 @@ fn validate_import_binary(
 }
 
 fn validate_discovery_binary_path(path: &Path) -> Result<PathBuf, CassError> {
+    if path.file_name() != Some(OsStr::new(DEFAULT_BINARY)) {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary file name must be `cass`".to_string(),
+        });
+    }
     reject_existing_symlink_component(path)?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => canonicalize_path(path),
-        Ok(_) => Err(CassError::InvalidBinary {
+    let metadata = fs::symlink_metadata(path).map_err(|error| CassError::InvalidBinary {
+        binary: path.to_path_buf(),
+        reason: format!("CASS binary metadata is unavailable: {error}"),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(CassError::InvalidBinary {
             binary: path.to_path_buf(),
             reason: "CASS binary path does not exist or is not a file".to_string(),
-        }),
-        Err(error) => Err(CassError::InvalidBinary {
-            binary: path.to_path_buf(),
-            reason: format!("CASS binary metadata is unavailable: {error}"),
-        }),
+        });
     }
+    validate_discovery_binary_metadata(path, &metadata)?;
+    canonicalize_path(path)
+}
+
+#[cfg(unix)]
+fn validate_discovery_binary_metadata(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), CassError> {
+    let mode = metadata.permissions().mode();
+    if mode & 0o111 == 0 {
+        return Err(CassError::InvalidBinary {
+            binary: path.to_path_buf(),
+            reason: "CASS binary is not executable".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_discovery_binary_metadata(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), CassError> {
+    Ok(())
 }
 
 fn reject_existing_symlink_component(path: &Path) -> Result<(), CassError> {
@@ -343,13 +373,14 @@ fn validate_import_binary_metadata(path: &Path, source: DiscoverySource) -> Resu
 fn validate_import_binary_ancestor_chain(path: &Path) -> Result<(), CassError> {
     let mut current = path.parent();
     while let Some(ancestor) = current {
-        let metadata = fs::symlink_metadata(ancestor).map_err(|error| CassError::InvalidBinary {
-            binary: path.to_path_buf(),
-            reason: format!(
-                "CASS import binary ancestor `{}` metadata is unavailable: {error}",
-                ancestor.display()
-            ),
-        })?;
+        let metadata =
+            fs::symlink_metadata(ancestor).map_err(|error| CassError::InvalidBinary {
+                binary: path.to_path_buf(),
+                reason: format!(
+                    "CASS import binary ancestor `{}` metadata is unavailable: {error}",
+                    ancestor.display()
+                ),
+            })?;
         let mode = metadata.permissions().mode();
         if mode & 0o022 != 0 {
             return Err(CassError::InvalidBinary {
@@ -901,6 +932,60 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(error.kind_str(), "invalid_binary");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_with_override_rejects_non_cass_file_name() -> TestResult {
+        let dir = unique_test_dir("non-cass-config-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass-dev");
+        write_test_cass_binary(&binary, 0o755)?;
+
+        let result = discover_with_override(Some(&binary));
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "non-cass config binary should be rejected, got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("file name"),
+            "unexpected error: {error}",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_with_override_rejects_non_executable_config_path() -> TestResult {
+        let dir = unique_test_dir("non-executable-config-binary")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&binary, 0o644)?;
+
+        let result = discover_with_override(Some(&binary));
+        let error = match result {
+            Ok(discovered) => {
+                return Err(format!(
+                    "non-executable config binary should be rejected, got {}",
+                    discovered.path.display()
+                ));
+            }
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind_str(), "invalid_binary");
+        assert!(
+            error.to_string().contains("executable"),
+            "unexpected error: {error}",
+        );
         Ok(())
     }
 
