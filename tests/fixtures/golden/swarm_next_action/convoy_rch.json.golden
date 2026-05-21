@@ -131,6 +131,15 @@
         "ruleId": "rch_admission.head_of_line_convoy",
         "confidence": "high",
         "serviceClass": "cargo_verifier",
+        "serviceTimeClass": "long",
+        "serviceTimeIntervalMs": {
+          "lower": 300000,
+          "upper": 1800000
+        },
+        "queueRiskClass": "high",
+        "predictorCoverage": "missing",
+        "predictorMode": "fallback",
+        "conservativeReason": "missing_history",
         "evidence": [
           "active_remote_build_count:1",
           "head_of_line_blocked:true",

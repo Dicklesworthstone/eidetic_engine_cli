@@ -189,10 +189,44 @@ pub struct SwarmNextActionAdmissionCertificate {
     pub rule_id: &'static str,
     pub confidence: &'static str,
     pub service_class: &'static str,
+    pub service_time_class: &'static str,
+    pub service_time_interval_ms: SwarmNextActionServiceTimeIntervalMs,
+    pub queue_risk_class: &'static str,
+    pub predictor_coverage: &'static str,
+    pub predictor_mode: &'static str,
+    pub conservative_reason: Option<&'static str>,
     pub evidence: Vec<String>,
     pub assumptions: Vec<&'static str>,
     pub proof_obligations: Vec<&'static str>,
     pub safety_invariant: &'static str,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionServiceTimeIntervalMs {
+    pub lower: u64,
+    pub upper: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwarmNextActionServiceTimeEstimate {
+    pub service_time_class: &'static str,
+    pub service_time_interval_ms: SwarmNextActionServiceTimeIntervalMs,
+    pub queue_risk_class: &'static str,
+    pub predictor_coverage: &'static str,
+    pub predictor_mode: &'static str,
+    pub conservative_reason: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwarmNextActionServiceTimeEvidenceRecord {
+    pub command_family: String,
+    pub duration_ms: u64,
+    pub queue_wait_ms: u64,
+    pub observed_age_seconds: u64,
+    pub failure_class: Option<String>,
+    pub worker_class: Option<String>,
+    pub duplicate_bead_attribution: bool,
 }
 
 impl Serialize for SwarmNextActionVerificationSummary {
@@ -356,6 +390,8 @@ impl SwarmNextActionVerificationSummary {
             ("coordinate", "rch_admission.insufficient_evidence", "low")
         };
 
+        let estimate = self.service_time_estimate_with_history(&[]);
+
         SwarmNextActionAdmissionCertificate {
             schema: "ee.swarm_next_action.rch_admission_certificate.v1",
             action,
@@ -366,11 +402,140 @@ impl SwarmNextActionVerificationSummary {
             } else {
                 "unknown"
             },
+            service_time_class: estimate.service_time_class,
+            service_time_interval_ms: estimate.service_time_interval_ms,
+            queue_risk_class: estimate.queue_risk_class,
+            predictor_coverage: estimate.predictor_coverage,
+            predictor_mode: estimate.predictor_mode,
+            conservative_reason: estimate.conservative_reason,
             evidence: self.queue_evidence(),
             assumptions,
             proof_obligations,
             safety_invariant: "monotonic_queue_pressure_never_increases_aggression",
         }
+    }
+
+    #[must_use]
+    pub fn service_time_estimate_with_history(
+        &self,
+        records: &[SwarmNextActionServiceTimeEvidenceRecord],
+    ) -> SwarmNextActionServiceTimeEstimate {
+        if records.is_empty() {
+            return self.conservative_service_time_estimate("missing", "missing_history");
+        }
+        if records.len() < 5 {
+            return self.conservative_service_time_estimate("sparse", "sparse_history");
+        }
+        if records
+            .iter()
+            .all(|record| record.observed_age_seconds > 7 * 24 * 60 * 60)
+        {
+            return self.conservative_service_time_estimate("stale", "stale_history");
+        }
+        if records.iter().any(|record| {
+            record
+                .failure_class
+                .as_deref()
+                .is_some_and(|class| matches!(class, "coverage_miss" | "prediction_miss"))
+        }) {
+            return self
+                .conservative_service_time_estimate("miscalibrated", "miscalibrated_predictor");
+        }
+        if records
+            .iter()
+            .any(|record| record.duplicate_bead_attribution)
+            && self.queued_remote_build_count.unwrap_or(0) > 0
+        {
+            return self.conservative_service_time_estimate("sparse", "duplicate_queued_verifier");
+        }
+
+        let mut durations = records
+            .iter()
+            .map(|record| record.duration_ms.saturating_add(record.queue_wait_ms))
+            .collect::<Vec<_>>();
+        durations.sort_unstable();
+        let p50 = percentile(&durations, 50);
+        let p90 = percentile(&durations, 90);
+        if p90 > p50.saturating_mul(4).max(1) {
+            return self.conservative_service_time_estimate("heavy_tailed", "heavy_tailed_history");
+        }
+
+        let lower = percentile(&durations, 20);
+        let upper = p90.max(lower).saturating_add(30_000);
+        SwarmNextActionServiceTimeEstimate {
+            service_time_class: service_time_class_for_upper_bound(upper),
+            service_time_interval_ms: SwarmNextActionServiceTimeIntervalMs { lower, upper },
+            queue_risk_class: self.queue_risk_class(),
+            predictor_coverage: "healthy",
+            predictor_mode: "calibrated",
+            conservative_reason: None,
+        }
+    }
+
+    fn conservative_service_time_estimate(
+        &self,
+        predictor_coverage: &'static str,
+        conservative_reason: &'static str,
+    ) -> SwarmNextActionServiceTimeEstimate {
+        let queue_risk_class = self.queue_risk_class();
+        let (lower, upper) = match queue_risk_class {
+            "low" => (60_000, 600_000),
+            "medium" => (180_000, 900_000),
+            "high" => (300_000, 1_800_000),
+            "blocked" => (900_000, 3_600_000),
+            _ => (300_000, 1_800_000),
+        };
+        SwarmNextActionServiceTimeEstimate {
+            service_time_class: service_time_class_for_upper_bound(upper),
+            service_time_interval_ms: SwarmNextActionServiceTimeIntervalMs { lower, upper },
+            queue_risk_class,
+            predictor_coverage,
+            predictor_mode: "fallback",
+            conservative_reason: Some(conservative_reason),
+        }
+    }
+
+    fn queue_risk_class(&self) -> &'static str {
+        if self
+            .suspected_orphaned_queued_verifier_count()
+            .is_some_and(|count| count > 0)
+        {
+            return "blocked";
+        }
+        if self.head_of_line_blocked() == Some(true)
+            || (self.slots_available == Some(0)
+                && (self.active_remote_build_count.unwrap_or(0) > 0
+                    || self.queued_remote_build_count.unwrap_or(0) > 0))
+            || (self.remote_only_required && self.remote_only_safe == Some(false))
+        {
+            return "high";
+        }
+        if self.queued_remote_build_count.unwrap_or(0) > 0 {
+            return "medium";
+        }
+        if self.remote_only_required
+            && self.remote_only_safe == Some(true)
+            && self.slots_available.unwrap_or(0) > 0
+        {
+            return "low";
+        }
+        "unknown"
+    }
+}
+
+fn percentile(sorted_values: &[u64], percentile: usize) -> u64 {
+    debug_assert!(!sorted_values.is_empty());
+    let last = sorted_values.len() - 1;
+    let index = (last * percentile + 99) / 100;
+    sorted_values[index.min(last)]
+}
+
+fn service_time_class_for_upper_bound(upper_ms: u64) -> &'static str {
+    match upper_ms {
+        0..=120_000 => "short",
+        120_001..=600_000 => "medium",
+        600_001..=1_800_000 => "long",
+        _ => "long_tail",
     }
 }
 
@@ -1387,6 +1552,15 @@ mod tests {
                 "ruleId": "rch_admission.head_of_line_convoy",
                 "confidence": "high",
                 "serviceClass": "cargo_verifier",
+                "serviceTimeClass": "long",
+                "serviceTimeIntervalMs": {
+                    "lower": 300000,
+                    "upper": 1800000
+                },
+                "queueRiskClass": "high",
+                "predictorCoverage": "missing",
+                "predictorMode": "fallback",
+                "conservativeReason": "missing_history",
                 "evidence": [
                     "active_build_max_age_seconds:79200",
                     "active_remote_build_count:1",
@@ -1489,6 +1663,11 @@ mod tests {
                 .iter()
                 .any(|value| value == "coordinate_before_queue_cleanup_or_retry")
         );
+        assert_eq!(json["admissionCertificate"]["queueRiskClass"], "blocked");
+        assert_eq!(
+            json["admissionCertificate"]["serviceTimeClass"],
+            "long_tail"
+        );
     }
 
     #[test]
@@ -1540,6 +1719,109 @@ mod tests {
             convoy.admission_certificate().safety_invariant,
             "monotonic_queue_pressure_never_increases_aggression"
         );
+    }
+
+    #[test]
+    fn next_action_service_time_estimator_uses_calibrated_history_when_healthy() {
+        let verification = verification_for_queue_posture(
+            Some(true),
+            Some(0),
+            Some(0),
+            Some(3),
+            None,
+            None,
+            Some("ready"),
+        );
+        let records = service_records(&[90_000, 100_000, 120_000, 140_000, 160_000, 180_000]);
+
+        let estimate = verification.service_time_estimate_with_history(&records);
+
+        assert_eq!(estimate.predictor_mode, "calibrated");
+        assert_eq!(estimate.predictor_coverage, "healthy");
+        assert_eq!(estimate.queue_risk_class, "low");
+        assert_eq!(estimate.conservative_reason, None);
+        assert_eq!(estimate.service_time_class, "medium");
+        assert!(estimate.service_time_interval_ms.lower >= 90_000);
+        assert!(estimate.service_time_interval_ms.upper <= 240_000);
+    }
+
+    #[test]
+    fn next_action_service_time_estimator_falls_back_for_sparse_missing_and_stale_history() {
+        let verification = verification_for_queue_posture(
+            Some(true),
+            Some(0),
+            Some(1),
+            Some(2),
+            None,
+            None,
+            Some("ready"),
+        );
+        let sparse = verification.service_time_estimate_with_history(&service_records(&[100_000]));
+        let missing = verification.service_time_estimate_with_history(&[]);
+        let mut stale_records = service_records(&[100_000, 110_000, 120_000, 130_000, 140_000]);
+        for record in &mut stale_records {
+            record.observed_age_seconds = 8 * 24 * 60 * 60;
+        }
+        let stale = verification.service_time_estimate_with_history(&stale_records);
+
+        assert_eq!(sparse.conservative_reason, Some("sparse_history"));
+        assert_eq!(missing.conservative_reason, Some("missing_history"));
+        assert_eq!(stale.conservative_reason, Some("stale_history"));
+        assert_eq!(sparse.predictor_mode, "fallback");
+        assert_eq!(missing.predictor_mode, "fallback");
+        assert_eq!(stale.predictor_mode, "fallback");
+        assert_eq!(sparse.queue_risk_class, "medium");
+    }
+
+    #[test]
+    fn next_action_service_time_estimator_falls_back_for_heavy_tail_and_miscalibration() {
+        let verification = verification_for_queue_posture(
+            Some(true),
+            Some(0),
+            Some(0),
+            Some(2),
+            None,
+            None,
+            Some("ready"),
+        );
+        let heavy_tail = verification.service_time_estimate_with_history(&service_records(&[
+            40_000, 41_000, 42_000, 43_000, 44_000, 900_000,
+        ]));
+        let mut miscalibrated = service_records(&[90_000, 100_000, 110_000, 120_000, 130_000]);
+        miscalibrated[2].failure_class = Some("coverage_miss".to_owned());
+        let miscalibrated = verification.service_time_estimate_with_history(&miscalibrated);
+
+        assert_eq!(heavy_tail.conservative_reason, Some("heavy_tailed_history"));
+        assert_eq!(
+            miscalibrated.conservative_reason,
+            Some("miscalibrated_predictor")
+        );
+        assert_eq!(heavy_tail.predictor_coverage, "heavy_tailed");
+        assert_eq!(miscalibrated.predictor_coverage, "miscalibrated");
+    }
+
+    #[test]
+    fn next_action_service_time_estimator_duplicate_queued_verifier_is_conservative() {
+        let verification = verification_for_queue_posture(
+            Some(true),
+            Some(1),
+            Some(1),
+            Some(1),
+            None,
+            None,
+            Some("busy"),
+        );
+        let mut records = service_records(&[80_000, 90_000, 100_000, 110_000, 120_000]);
+        records[0].duplicate_bead_attribution = true;
+
+        let estimate = verification.service_time_estimate_with_history(&records);
+
+        assert_eq!(
+            estimate.conservative_reason,
+            Some("duplicate_queued_verifier")
+        );
+        assert_eq!(estimate.predictor_mode, "fallback");
+        assert_eq!(estimate.queue_risk_class, "medium");
     }
 
     #[test]
@@ -1946,6 +2228,21 @@ mod tests {
             "coordinate" => 0,
             other => panic!("unknown admission action {other}"),
         }
+    }
+
+    fn service_records(durations_ms: &[u64]) -> Vec<SwarmNextActionServiceTimeEvidenceRecord> {
+        durations_ms
+            .iter()
+            .map(|duration_ms| SwarmNextActionServiceTimeEvidenceRecord {
+                command_family: "cargo_test".to_owned(),
+                duration_ms: *duration_ms,
+                queue_wait_ms: 10_000,
+                observed_age_seconds: 60,
+                failure_class: None,
+                worker_class: Some("linux_x86_64".to_owned()),
+                duplicate_bead_attribution: false,
+            })
+            .collect()
     }
 
     fn candidate(

@@ -128,6 +128,15 @@
         "ruleId": "rch_admission.no_remote_capacity",
         "confidence": "high",
         "serviceClass": "cargo_verifier",
+        "serviceTimeClass": "long",
+        "serviceTimeIntervalMs": {
+          "lower": 300000,
+          "upper": 1800000
+        },
+        "queueRiskClass": "high",
+        "predictorCoverage": "missing",
+        "predictorMode": "fallback",
+        "conservativeReason": "missing_history",
         "evidence": [
           "active_remote_build_count:4",
           "queued_remote_build_count:0",

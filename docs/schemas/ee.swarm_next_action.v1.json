@@ -364,7 +364,7 @@
     },
     "admissionCertificate": {
       "type": "object",
-      "required": ["schema", "action", "ruleId", "confidence", "serviceClass", "evidence", "assumptions", "proofObligations", "safetyInvariant"],
+      "required": ["schema", "action", "ruleId", "confidence", "serviceClass", "serviceTimeClass", "serviceTimeIntervalMs", "queueRiskClass", "predictorCoverage", "predictorMode", "conservativeReason", "evidence", "assumptions", "proofObligations", "safetyInvariant"],
       "additionalProperties": false,
       "properties": {
         "schema": {
@@ -388,6 +388,49 @@
         },
         "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
         "serviceClass": {"type": "string", "enum": ["cargo_verifier", "unknown"]},
+        "serviceTimeClass": {
+          "type": "string",
+          "enum": ["short", "medium", "long", "long_tail"],
+          "description": "Conservative service-time bucket for the verifier action."
+        },
+        "serviceTimeIntervalMs": {
+          "type": "object",
+          "required": ["lower", "upper"],
+          "additionalProperties": false,
+          "properties": {
+            "lower": {"type": "integer", "minimum": 0},
+            "upper": {"type": "integer", "minimum": 0}
+          },
+          "description": "Lower and upper duration bounds including queue wait. Fallback bounds are intentionally wide."
+        },
+        "queueRiskClass": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "blocked", "unknown"],
+          "description": "Queue-risk class after applying monotonic fallback triggers."
+        },
+        "predictorCoverage": {
+          "type": "string",
+          "enum": ["healthy", "sparse", "missing", "stale", "heavy_tailed", "miscalibrated"],
+          "description": "Calibration coverage ledger for the service-time estimate."
+        },
+        "predictorMode": {
+          "type": "string",
+          "enum": ["calibrated", "fallback"],
+          "description": "Learned-mode is intentionally absent until calibrated historical evidence is available."
+        },
+        "conservativeReason": {
+          "type": ["string", "null"],
+          "enum": [
+            "missing_history",
+            "sparse_history",
+            "stale_history",
+            "heavy_tailed_history",
+            "miscalibrated_predictor",
+            "duplicate_queued_verifier",
+            null
+          ],
+          "description": "Fallback trigger. Null only when calibrated history is healthy."
+        },
         "evidence": {"type": "array", "items": {"type": "string"}},
         "assumptions": {"type": "array", "items": {"type": "string"}},
         "proofObligations": {"type": "array", "items": {"type": "string"}},
