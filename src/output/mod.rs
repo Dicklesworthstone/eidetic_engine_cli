@@ -6649,6 +6649,7 @@ pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
         d.field_bool("is_tombstoned", report.is_tombstoned);
 
         if let Some(ref details) = report.memory {
+            d.field_str("memoryId", &details.memory.id);
             d.field_object("memory", |m| {
                 render_memory_fields(m, details);
             });
@@ -6665,6 +6666,7 @@ pub fn render_memory_show_json(report: &MemoryShowReport) -> String {
 fn render_memory_fields(b: &mut JsonBuilder, details: &MemoryDetails) {
     let mem = &details.memory;
     b.field_str("id", &mem.id);
+    b.field_str("memoryId", &mem.id);
     b.field_str("workspace_id", &mem.workspace_id);
     b.field_str("level", &mem.level);
     b.field_str("kind", &mem.kind);
@@ -16285,6 +16287,29 @@ mod tests {
         });
 
         let json = render_memory_show_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value
+                .pointer("/data/memoryId")
+                .and_then(serde_json::Value::as_str),
+            &Some("mem_output_redaction"),
+            "memory show root memoryId alias",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/memory/memoryId")
+                .and_then(serde_json::Value::as_str),
+            &Some("mem_output_redaction"),
+            "memory show nested memoryId alias",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/memory/id")
+                .and_then(serde_json::Value::as_str),
+            &Some("mem_output_redaction"),
+            "memory show compatibility id",
+        )?;
         ensure_contains(&json, "[REDACTED_PATH]", "memory show path redaction")?;
         ensure_contains(&json, "[REDACTED:secret]", "memory show secret redaction")?;
         ensure(
