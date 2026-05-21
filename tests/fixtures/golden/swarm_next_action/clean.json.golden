@@ -48,6 +48,10 @@
             "value": "2"
           },
           {
+            "name": "rank_milli",
+            "value": "950"
+          },
+          {
             "name": "source_rank",
             "value": "1"
           },
@@ -56,6 +60,14 @@
             "value": "open"
           }
         ],
+        "suggestedReservations": [
+          {
+            "pathPattern": ".beads/issues.jsonl",
+            "exclusive": true,
+            "reason": "claim_and_close_tracker_state"
+          }
+        ],
+        "doNotTakeBecause": [],
         "overlap": {
           "decision": "refine_existing_bead",
           "queries": [

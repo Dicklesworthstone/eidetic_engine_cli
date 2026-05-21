@@ -94,6 +94,8 @@ pub struct SwarmNextActionRecommendationCard {
     pub decision: &'static str,
     pub confidence: &'static str,
     pub score_inputs: Vec<SwarmNextActionScoreInput>,
+    pub suggested_reservations: Vec<SwarmNextActionSuggestedReservation>,
+    pub do_not_take_because: Vec<String>,
     pub overlap: SwarmNextActionOverlapDecision,
     pub proof_obligations: Vec<String>,
     pub evidence_caveats: Vec<String>,
@@ -105,6 +107,14 @@ pub struct SwarmNextActionRecommendationCard {
 pub struct SwarmNextActionScoreInput {
     pub name: &'static str,
     pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmNextActionSuggestedReservation {
+    pub path_pattern: String,
+    pub exclusive: bool,
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -855,24 +865,60 @@ fn recommendation_cards_from_snapshot(
         .blockers
         .iter()
         .any(|blocker| blocker.owner_agent.is_some());
-    let mut cards = snapshot
+    let mut ranked_cards = snapshot
         .candidates
         .iter()
         .map(|candidate| {
-            recommendation_card_for_candidate(
+            let duplicate = candidate_counts
+                .get(candidate.id.as_str())
+                .copied()
+                .unwrap_or(1)
+                > 1;
+            let blocked_by_owner = candidate.assignee.is_some()
+                || (candidate.blocked_by_compile_health && has_compile_owner_blocker);
+            let rank_milli =
+                recommendation_rank_milli(candidate, duplicate, blocked_by_owner, &caveats);
+            let card = recommendation_card_for_candidate(
                 candidate,
-                candidate_counts
-                    .get(candidate.id.as_str())
-                    .copied()
-                    .unwrap_or(1),
+                duplicate,
+                blocked_by_owner,
+                rank_milli,
                 &caveats,
-                has_compile_owner_blocker,
-            )
+            );
+            (rank_milli, card)
         })
         .collect::<Vec<_>>();
-    cards.sort();
+    ranked_cards.sort_by(|(left_rank, left), (right_rank, right)| {
+        recommendation_card_sort_key(*right_rank, right)
+            .cmp(&recommendation_card_sort_key(*left_rank, left))
+    });
+    let mut cards = ranked_cards
+        .into_iter()
+        .map(|(_, card)| card)
+        .collect::<Vec<_>>();
     cards.dedup();
     cards
+}
+
+fn recommendation_card_sort_key(
+    rank_milli: i64,
+    card: &SwarmNextActionRecommendationCard,
+) -> (
+    i64,
+    i64,
+    std::cmp::Reverse<String>,
+    std::cmp::Reverse<String>,
+) {
+    (
+        rank_milli,
+        card.score_inputs
+            .iter()
+            .find(|input| input.name == "priority")
+            .and_then(|input| input.value.parse::<i64>().ok())
+            .map_or(0, |priority| -priority),
+        std::cmp::Reverse(card.candidate_id.clone().unwrap_or_default()),
+        std::cmp::Reverse(card.candidate_summary.clone()),
+    )
 }
 
 fn no_action_recommendation_cards(
@@ -890,6 +936,8 @@ fn no_action_recommendation_cards(
         decision: "no_action_recommended",
         confidence: "low",
         score_inputs: Vec::new(),
+        suggested_reservations: Vec::new(),
+        do_not_take_because: vec!["selected_evidence_providers_are_degraded".to_owned()],
         overlap: SwarmNextActionOverlapDecision {
             decision: "no_action_recommended",
             queries: Vec::new(),
@@ -905,13 +953,11 @@ fn no_action_recommendation_cards(
 
 fn recommendation_card_for_candidate(
     candidate: &SwarmNextActionCandidate,
-    candidate_id_count: usize,
+    duplicate: bool,
+    blocked_by_owner: bool,
+    rank_milli: i64,
     evidence_caveats: &[String],
-    has_compile_owner_blocker: bool,
 ) -> SwarmNextActionRecommendationCard {
-    let duplicate = candidate_id_count > 1;
-    let blocked_by_owner = candidate.assignee.is_some()
-        || (candidate.blocked_by_compile_health && has_compile_owner_blocker);
     let decision = if duplicate {
         "duplicate_rejected"
     } else if blocked_by_owner {
@@ -934,7 +980,15 @@ fn recommendation_card_for_candidate(
         candidate_summary: candidate.title.clone(),
         decision,
         confidence: recommendation_confidence(candidate, decision, evidence_caveats),
-        score_inputs: recommendation_score_inputs(candidate),
+        score_inputs: recommendation_score_inputs(candidate, rank_milli),
+        suggested_reservations: suggested_reservations_for_candidate(candidate, decision),
+        do_not_take_because: do_not_take_reasons_for_candidate(
+            candidate,
+            decision,
+            duplicate,
+            blocked_by_owner,
+            evidence_caveats,
+        ),
         overlap: overlap_decision_for_candidate(candidate, decision, duplicate),
         proof_obligations: recommendation_proof_obligations(candidate, decision),
         evidence_caveats: evidence_caveats.to_vec(),
@@ -980,10 +1034,48 @@ fn overlap_decision_for_candidate(
     }
 }
 
+fn recommendation_rank_milli(
+    candidate: &SwarmNextActionCandidate,
+    duplicate: bool,
+    blocked_by_owner: bool,
+    evidence_caveats: &[String],
+) -> i64 {
+    let source_bonus = match candidate.source {
+        "bv_top_pick" => 250,
+        "beads_ready" => 150,
+        _ => 0,
+    };
+    let priority_bonus = candidate
+        .priority
+        .map_or(0, |priority| (6_i64.saturating_sub(priority)).max(0) * 75);
+    let mut score = i64::from(candidate.score_milli.unwrap_or(500)) + source_bonus + priority_bonus;
+
+    score -= i64::try_from(candidate.blocked_by.len()).unwrap_or(i64::MAX / 100) * 100;
+    if candidate.blocked_by_compile_health {
+        score -= 350;
+    }
+    if candidate.assignee.is_some() {
+        score -= 400;
+    }
+    if duplicate {
+        score -= 800;
+    }
+    if blocked_by_owner {
+        score -= 500;
+    }
+    score -= i64::try_from(evidence_caveats.len()).unwrap_or(i64::MAX / 25) * 25;
+    score
+}
+
 fn recommendation_score_inputs(
     candidate: &SwarmNextActionCandidate,
+    rank_milli: i64,
 ) -> Vec<SwarmNextActionScoreInput> {
     let mut inputs = vec![
+        SwarmNextActionScoreInput {
+            name: "rank_milli",
+            value: rank_milli.to_string(),
+        },
         SwarmNextActionScoreInput {
             name: "source_rank",
             value: candidate_source_rank(candidate.source).to_string(),
@@ -1015,6 +1107,86 @@ fn recommendation_score_inputs(
     }
     inputs.sort();
     inputs
+}
+
+fn suggested_reservations_for_candidate(
+    candidate: &SwarmNextActionCandidate,
+    decision: &'static str,
+) -> Vec<SwarmNextActionSuggestedReservation> {
+    if matches!(decision, "duplicate_rejected" | "blocked_by_owner") {
+        return Vec::new();
+    }
+
+    let mut reservations = BTreeMap::<String, &'static str>::new();
+    reservations.insert(
+        ".beads/issues.jsonl".to_owned(),
+        "claim_and_close_tracker_state",
+    );
+
+    let title = candidate.title.to_ascii_lowercase();
+    if title.contains("swarm next-action") || title.contains("next-action") {
+        reservations.insert(
+            "src/core/swarm_next_action.rs".to_owned(),
+            "next_action_ranking_surface",
+        );
+        reservations.insert(
+            "docs/schemas/ee.swarm_next_action.v1.json".to_owned(),
+            "next_action_schema_surface",
+        );
+    }
+    if title.contains("db") || title.contains("sqlmodel") {
+        reservations.insert("src/db/**".to_owned(), "storage_schema_surface");
+    }
+    if title.contains("policy") || title.contains("redaction") || title.contains("trust") {
+        reservations.insert("src/policy/**".to_owned(), "policy_surface");
+        reservations.insert("src/models/**".to_owned(), "domain_model_surface");
+    }
+    if title.contains("search") || title.contains("index") || title.contains("embed") {
+        reservations.insert("src/search/**".to_owned(), "search_index_surface");
+    }
+    if title.contains("pack") || title.contains("context") {
+        reservations.insert("src/pack/**".to_owned(), "context_pack_surface");
+    }
+
+    reservations
+        .into_iter()
+        .map(
+            |(path_pattern, reason)| SwarmNextActionSuggestedReservation {
+                path_pattern,
+                exclusive: true,
+                reason,
+            },
+        )
+        .collect()
+}
+
+fn do_not_take_reasons_for_candidate(
+    candidate: &SwarmNextActionCandidate,
+    decision: &'static str,
+    duplicate: bool,
+    blocked_by_owner: bool,
+    evidence_caveats: &[String],
+) -> Vec<String> {
+    let mut reasons = BTreeSet::new();
+    if duplicate {
+        reasons.insert("candidate_already_appears_in_multiple_sources".to_owned());
+    }
+    if let Some(assignee) = &candidate.assignee {
+        reasons.insert(format!("candidate_assigned_to:{assignee}"));
+    }
+    if blocked_by_owner {
+        reasons.insert("active_owner_or_compile_health_blocker_present".to_owned());
+    }
+    if !candidate.blocked_by.is_empty() {
+        reasons.insert(format!("blocked_by:{}", candidate.blocked_by.join(",")));
+    }
+    if candidate.blocked_by_compile_health {
+        reasons.insert("dirty_compile_health_blocks_rch".to_owned());
+    }
+    if matches!(decision, "duplicate_rejected" | "blocked_by_owner") {
+        reasons.extend(evidence_caveats.iter().cloned());
+    }
+    reasons.into_iter().collect()
 }
 
 fn recommendation_proof_obligations(
@@ -2046,6 +2218,16 @@ mod tests {
             card.evidence_caveats
                 .contains(&"dirty_checkout_paths:1".to_owned())
         }));
+        assert!(cards.iter().all(|card| {
+            card.score_inputs
+                .iter()
+                .any(|input| input.name == "rank_milli")
+        }));
+        assert!(cards.iter().all(|card| {
+            card.suggested_reservations
+                .iter()
+                .any(|reservation| reservation.path_pattern == ".beads/issues.jsonl")
+        }));
 
         let json = serde_json::to_value(&snapshot).expect("snapshot serializes");
         assert_eq!(
@@ -2054,6 +2236,56 @@ mod tests {
                 .map(Vec::len),
             Some(2)
         );
+    }
+
+    #[test]
+    fn recommendation_cards_rank_safe_work_and_explain_reservations() {
+        let safe = candidate(
+            "bd-safe",
+            "SWA2: conflict-free slice ranking with suggested reservations for swarm next-action",
+            "beads_ready",
+            Some(2),
+        );
+        let mut blocked = candidate(
+            "bd-owned",
+            "SWA2: reserved competing slice",
+            "bv_top_pick",
+            Some(1),
+        );
+        blocked.assignee = Some("OtherAgent".to_owned());
+        blocked.blocked_by = vec!["bd-upstream".to_owned()];
+        blocked.blocked_by_compile_health = true;
+        let snapshot = snapshot_with_candidates(vec![blocked, safe]);
+
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].candidate_id.as_deref(), Some("bd-safe"));
+        assert_eq!(cards[0].decision, "refine_existing_bead");
+        assert!(
+            cards[0]
+                .suggested_reservations
+                .iter()
+                .any(|reservation| reservation.path_pattern == "src/core/swarm_next_action.rs")
+        );
+        assert!(cards[0].suggested_reservations.iter().any(|reservation| {
+            reservation.path_pattern == "docs/schemas/ee.swarm_next_action.v1.json"
+        }));
+        assert!(cards[0].do_not_take_because.is_empty());
+
+        assert_eq!(cards[1].candidate_id.as_deref(), Some("bd-owned"));
+        assert_eq!(cards[1].decision, "blocked_by_owner");
+        assert!(
+            cards[1]
+                .do_not_take_because
+                .contains(&"candidate_assigned_to:OtherAgent".to_owned())
+        );
+        assert!(
+            cards[1]
+                .do_not_take_because
+                .contains(&"blocked_by:bd-upstream".to_owned())
+        );
+        assert!(cards[1].suggested_reservations.is_empty());
     }
 
     #[test]
@@ -2071,6 +2303,11 @@ mod tests {
         assert_eq!(
             cards[0].overlap.rejected_duplicate_reason,
             Some("candidate_id_already_present")
+        );
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"candidate_already_appears_in_multiple_sources".to_owned())
         );
     }
 

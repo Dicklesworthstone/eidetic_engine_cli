@@ -592,9 +592,28 @@ fn swarm_next_action_sample() -> Value {
                     {"name": "blocked_by_count", "value": "0"},
                     {"name": "bv_score_milli", "value": "900"},
                     {"name": "priority", "value": "2"},
+                    {"name": "rank_milli", "value": "1400"},
                     {"name": "source_rank", "value": "0"},
                     {"name": "status", "value": "open"}
                 ],
+                "suggestedReservations": [
+                    {
+                        "pathPattern": ".beads/issues.jsonl",
+                        "exclusive": true,
+                        "reason": "claim_and_close_tracker_state"
+                    },
+                    {
+                        "pathPattern": "docs/schemas/ee.swarm_next_action.v1.json",
+                        "exclusive": true,
+                        "reason": "next_action_schema_surface"
+                    },
+                    {
+                        "pathPattern": "src/core/swarm_next_action.rs",
+                        "exclusive": true,
+                        "reason": "next_action_ranking_surface"
+                    }
+                ],
+                "doNotTakeBecause": [],
                 "overlap": {
                     "decision": "refine_existing_bead",
                     "queries": [

@@ -97,8 +97,17 @@
               {"name": "blocked_by_count", "value": "0"},
               {"name": "bv_score_milli", "value": "900"},
               {"name": "priority", "value": "2"},
+              {"name": "rank_milli", "value": "525"},
               {"name": "source_rank", "value": "0"},
               {"name": "status", "value": "open"}
+            ],
+            "suggestedReservations": [],
+            "doNotTakeBecause": [
+              "active_owner_or_compile_health_blocker_present",
+              "compile_health_blocks_rch",
+              "dirty_checkout_paths:1",
+              "dirty_compile_health_blocks_rch",
+              "remote_only_rch_not_safe"
             ],
             "overlap": {
               "decision": "blocked_by_owner",
@@ -224,7 +233,7 @@
     },
     "recommendationCard": {
       "type": "object",
-      "required": ["cardId", "candidateId", "candidateSource", "candidateSummary", "decision", "confidence", "scoreInputs", "overlap", "proofObligations", "evidenceCaveats", "fallbackDecision"],
+      "required": ["cardId", "candidateId", "candidateSource", "candidateSummary", "decision", "confidence", "scoreInputs", "suggestedReservations", "doNotTakeBecause", "overlap", "proofObligations", "evidenceCaveats", "fallbackDecision"],
       "additionalProperties": false,
       "properties": {
         "cardId": {"type": "string"},
@@ -240,6 +249,14 @@
           "type": "array",
           "items": {"$ref": "#/$defs/scoreInput"}
         },
+        "suggestedReservations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/suggestedReservation"}
+        },
+        "doNotTakeBecause": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
         "overlap": {"$ref": "#/$defs/overlapDecision"},
         "proofObligations": {"type": "array", "items": {"type": "string"}},
         "evidenceCaveats": {"type": "array", "items": {"type": "string"}},
@@ -253,6 +270,16 @@
       "properties": {
         "name": {"type": "string"},
         "value": {"type": "string"}
+      }
+    },
+    "suggestedReservation": {
+      "type": "object",
+      "required": ["pathPattern", "exclusive", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "pathPattern": {"type": "string"},
+        "exclusive": {"type": "boolean"},
+        "reason": {"type": "string"}
       }
     },
     "overlapDecision": {

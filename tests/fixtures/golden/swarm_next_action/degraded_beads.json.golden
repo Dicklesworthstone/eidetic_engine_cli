@@ -22,6 +22,10 @@
         "decision": "no_action_recommended",
         "confidence": "low",
         "scoreInputs": [],
+        "suggestedReservations": [],
+        "doNotTakeBecause": [
+          "selected_evidence_providers_are_degraded"
+        ],
         "overlap": {
           "decision": "no_action_recommended",
           "queries": [],

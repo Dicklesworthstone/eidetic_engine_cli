@@ -52,6 +52,10 @@
             "value": "1"
           },
           {
+            "name": "rank_milli",
+            "value": "500"
+          },
+          {
             "name": "source_rank",
             "value": "0"
           },
@@ -59,6 +63,14 @@
             "name": "status",
             "value": "open"
           }
+        ],
+        "suggestedReservations": [],
+        "doNotTakeBecause": [
+          "active_owner_or_compile_health_blocker_present",
+          "blocked_by:bd-parent",
+          "compile_health_blocks_rch",
+          "dirty_checkout_paths:3",
+          "dirty_compile_health_blocks_rch"
         ],
         "overlap": {
           "decision": "blocked_by_owner",
