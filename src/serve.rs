@@ -196,6 +196,30 @@ pub struct ServeHttpRequest {
     pub body_bytes: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeDispatchPlan {
+    pub endpoint: ServeEndpoint,
+    pub handler_surface: &'static str,
+    pub cli_argv: Vec<String>,
+    pub payload_schema: &'static str,
+    pub mutable: bool,
+    pub sse_stream: bool,
+}
+
+impl ServeDispatchPlan {
+    #[must_use]
+    pub fn to_json(&self) -> JsonValue {
+        json!({
+            "endpoint": self.endpoint.as_str(),
+            "handlerSurface": self.handler_surface,
+            "cliArgv": self.cli_argv,
+            "payloadSchema": self.payload_schema,
+            "mutable": self.mutable,
+            "sseStream": self.sse_stream
+        })
+    }
+}
+
 #[must_use]
 pub fn serve_startup_report_json(
     options: &ServeStartupOptions,
@@ -299,6 +323,102 @@ pub fn serve_startup_report_json(
         },
         "degraded": degraded
     }))
+}
+
+pub fn serve_dispatch_plan(request: &ServeHttpRequest) -> Result<ServeDispatchPlan, DomainError> {
+    match request.endpoint {
+        ServeEndpoint::Status => Ok(read_only_cli_dispatch(
+            ServeEndpoint::Status,
+            "cli.status",
+            vec!["ee", "status", "--json"],
+        )),
+        ServeEndpoint::Doctor => Ok(read_only_cli_dispatch(
+            ServeEndpoint::Doctor,
+            "cli.doctor",
+            vec!["ee", "doctor", "--json"],
+        )),
+        ServeEndpoint::Search => {
+            let query = require_single_query_value(request, "q", "/v1/search")?;
+            Ok(ServeDispatchPlan {
+                endpoint: ServeEndpoint::Search,
+                handler_surface: "cli.search",
+                cli_argv: vec![
+                    "ee".to_owned(),
+                    "search".to_owned(),
+                    query,
+                    "--json".to_owned(),
+                ],
+                payload_schema: "ee.response.v2",
+                mutable: false,
+                sse_stream: false,
+            })
+        }
+        ServeEndpoint::Context => {
+            let task = require_single_query_value(request, "task", "/v1/context")?;
+            Ok(ServeDispatchPlan {
+                endpoint: ServeEndpoint::Context,
+                handler_surface: "cli.context",
+                cli_argv: vec![
+                    "ee".to_owned(),
+                    "context".to_owned(),
+                    task,
+                    "--json".to_owned(),
+                ],
+                payload_schema: "ee.response.v2",
+                mutable: false,
+                sse_stream: false,
+            })
+        }
+        ServeEndpoint::Why => {
+            let memory_id = request
+                .path
+                .strip_prefix("/v1/why/")
+                .filter(|value| !value.trim().is_empty() && !value.contains('/'))
+                .ok_or_else(|| {
+                    serve_usage_error(
+                        "GET /v1/why/{memory_id} requires exactly one memory ID path segment.",
+                    )
+                })?;
+            Ok(ServeDispatchPlan {
+                endpoint: ServeEndpoint::Why,
+                handler_surface: "cli.why",
+                cli_argv: vec![
+                    "ee".to_owned(),
+                    "why".to_owned(),
+                    memory_id.to_owned(),
+                    "--json".to_owned(),
+                ],
+                payload_schema: "ee.response.v2",
+                mutable: false,
+                sse_stream: false,
+            })
+        }
+        ServeEndpoint::SwarmBrief => Ok(read_only_cli_dispatch(
+            ServeEndpoint::SwarmBrief,
+            "cli.swarm.brief",
+            vec!["ee", "swarm", "brief", "--json"],
+        )),
+        ServeEndpoint::DurableWrite => Ok(ServeDispatchPlan {
+            endpoint: ServeEndpoint::DurableWrite,
+            handler_surface: "serve.durable_write_placeholder",
+            cli_argv: Vec::new(),
+            payload_schema: "ee.response.v2",
+            mutable: true,
+            sse_stream: false,
+        }),
+        ServeEndpoint::Events => Ok(ServeDispatchPlan {
+            endpoint: ServeEndpoint::Events,
+            handler_surface: "serve.sse.events",
+            cli_argv: Vec::new(),
+            payload_schema: "ee.response.v2",
+            mutable: false,
+            sse_stream: true,
+        }),
+        ServeEndpoint::Unknown => Err(serve_usage_error(format!(
+            "No ee serve v2 endpoint is registered for {} {}.",
+            request.method, request.path
+        ))),
+    }
 }
 
 pub fn parse_serve_http_request(
@@ -564,6 +684,40 @@ fn serve_startup_degraded(token_posture: &ServeTokenPosture) -> Vec<JsonValue> {
             "message": "EE_SERVE_TOKEN is required before the localhost HTTP adapter accepts requests.",
             "repair": token_posture.repair
         })],
+    }
+}
+
+fn read_only_cli_dispatch(
+    endpoint: ServeEndpoint,
+    handler_surface: &'static str,
+    argv: Vec<&'static str>,
+) -> ServeDispatchPlan {
+    ServeDispatchPlan {
+        endpoint,
+        handler_surface,
+        cli_argv: argv.into_iter().map(str::to_owned).collect(),
+        payload_schema: "ee.response.v2",
+        mutable: false,
+        sse_stream: false,
+    }
+}
+
+fn require_single_query_value(
+    request: &ServeHttpRequest,
+    name: &str,
+    endpoint_path: &str,
+) -> Result<String, DomainError> {
+    match request.query.get(name).map(Vec::as_slice) {
+        Some([value]) if !value.trim().is_empty() => Ok(value.clone()),
+        Some([_]) => Err(serve_usage_error(format!(
+            "{endpoint_path} requires a non-empty `{name}` query parameter."
+        ))),
+        Some(_) => Err(serve_usage_error(format!(
+            "{endpoint_path} requires exactly one `{name}` query parameter."
+        ))),
+        None => Err(serve_usage_error(format!(
+            "{endpoint_path} requires a `{name}` query parameter."
+        ))),
     }
 }
 
@@ -1332,6 +1486,20 @@ mod tests {
         }
     }
 
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|part| (*part).to_owned()).collect()
+    }
+
+    fn parse_request(raw: &str) -> Result<ServeHttpRequest, String> {
+        parse_serve_http_request(raw.as_bytes(), &ServeLimits::default())
+            .map_err(|error| error.to_string())
+    }
+
+    fn plan_request(raw: &str) -> Result<ServeDispatchPlan, String> {
+        let request = parse_request(raw)?;
+        serve_dispatch_plan(&request).map_err(|error| error.to_string())
+    }
+
     #[test]
     fn serve_startup_report_marks_loopback_ready_without_exposing_token() -> TestResult {
         let token = "01234567890123456789012345678901";
@@ -1457,6 +1625,108 @@ mod tests {
             "accepted",
             "bearer auth state",
         )
+    }
+
+    #[test]
+    fn serve_dispatch_plan_maps_read_only_cli_surfaces() -> TestResult {
+        let status = plan_request("GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        ensure(status.handler_surface, "cli.status", "status handler")?;
+        ensure(
+            status.cli_argv,
+            argv(&["ee", "status", "--json"]),
+            "status argv",
+        )?;
+
+        let search =
+            plan_request("GET /v1/search?q=release+check HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        ensure(search.handler_surface, "cli.search", "search handler")?;
+        ensure(
+            search.cli_argv,
+            argv(&["ee", "search", "release check", "--json"]),
+            "search argv",
+        )?;
+
+        let context = plan_request(
+            "GET /v1/context?task=prepare+release HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )?;
+        ensure(context.handler_surface, "cli.context", "context handler")?;
+        ensure(
+            context.cli_argv,
+            argv(&["ee", "context", "prepare release", "--json"]),
+            "context argv",
+        )?;
+
+        let why = plan_request(
+            "GET /v1/why/mem_00000000000000000000000001 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        )?;
+        ensure(why.handler_surface, "cli.why", "why handler")?;
+        ensure(
+            why.cli_argv,
+            argv(&["ee", "why", "mem_00000000000000000000000001", "--json"]),
+            "why argv",
+        )?;
+        ensure(
+            why.to_json()["handlerSurface"].as_str(),
+            Some("cli.why"),
+            "dispatch json handler",
+        )?;
+
+        let brief = plan_request("GET /v1/swarm/brief HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        ensure(
+            brief.cli_argv,
+            argv(&["ee", "swarm", "brief", "--json"]),
+            "swarm brief argv",
+        )
+    }
+
+    #[test]
+    fn serve_dispatch_plan_bounds_non_cli_surfaces() -> TestResult {
+        let durable = plan_request(
+            "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}",
+        )?;
+        ensure(
+            durable.handler_surface,
+            "serve.durable_write_placeholder",
+            "durable handler",
+        )?;
+        ensure(durable.mutable, true, "durable write is mutable")?;
+        ensure(
+            durable.cli_argv.is_empty(),
+            true,
+            "durable write has no CLI argv",
+        )?;
+
+        let events = plan_request("GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        ensure(events.handler_surface, "serve.sse.events", "events handler")?;
+        ensure(events.mutable, false, "events are read-only")?;
+        ensure(events.sse_stream, true, "events are SSE")?;
+        ensure(events.cli_argv.is_empty(), true, "events have no CLI argv")
+    }
+
+    #[test]
+    fn serve_dispatch_plan_rejects_unknown_or_ambiguous_intents() -> TestResult {
+        let unknown = parse_request("GET /v1/missing HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        let unknown_error = match serve_dispatch_plan(&unknown) {
+            Ok(plan) => return Err(format!("unknown endpoint should fail, got {plan:?}")),
+            Err(error) => error,
+        };
+        ensure(unknown_error.code(), "usage", "unknown endpoint error")?;
+
+        for raw in [
+            "GET /v1/search HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/search?q=one&q=two HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/context?task=+ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/why/mem_1/extra HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        ] {
+            let request = parse_request(raw)?;
+            let error = match serve_dispatch_plan(&request) {
+                Ok(plan) => return Err(format!("ambiguous intent should fail, got {plan:?}")),
+                Err(error) => error,
+            };
+            ensure(error.code(), "usage", "ambiguous intent error")?;
+        }
+
+        Ok(())
     }
 
     #[test]
