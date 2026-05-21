@@ -1,0 +1,36 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "mesh_body_fetch_denied_by_policy",
+  "introduced_by": {
+    "bead": "bd-nw0v3.1",
+    "epic_letter": "SRR6.16"
+  },
+  "surfaces": [
+    "mesh cache",
+    "context",
+    "mesh status",
+    "doctor"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A query needs a cached peer body, but the inbound mesh policy decision has bodyFetchAllowed=false, so ee keeps the peer material metadata-only and reports the policy-gated body-fetch denial without exposing peer body content.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee mesh peer add --workspace . --peer peer_mesh_metadata_only --grant metadata --deny body --json",
+      "ee mesh import --workspace . --file peer-body-metadata-only.json --json"
+    ],
+    "invocation": "ee context 'peer body evidence' --workspace . --memory-scope swarm --json"
+  },
+  "expected_emission": {
+    "code": "mesh_body_fetch_denied_by_policy",
+    "severity": "medium",
+    "message_contains": [
+      "body fetch",
+      "denied",
+      "policy"
+    ],
+    "repair_contains": "bodyFetchAllowed",
+    "repair_string": "Grant the peer body lane only if the operator intends to expose remote body material; otherwise use metadata-only context."
+  }
+}
