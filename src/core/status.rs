@@ -55,7 +55,9 @@ use super::derived_asset_freshness::{
     DerivedAssetFreshnessInput, DerivedAssetFreshnessReport, FreshnessDependency,
     plan_derived_asset_freshness,
 };
-use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
+use super::index::{
+    DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, IndexStatusReport, get_index_status,
+};
 use super::outcome::{DEFAULT_HARMFUL_BURST_WINDOW_SECONDS, DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR};
 use super::swarm_brief::{
     RchWorkerPressureReport, SwarmBriefCommandRunner, SystemSwarmBriefCommandRunner,
@@ -1110,10 +1112,31 @@ impl CapabilityReport {
 
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
+        Self::gather_with_workspace_and_connection(workspace_path, None)
+    }
+
+    #[must_use]
+    fn gather_with_workspace_and_connection(
+        workspace_path: Option<&Path>,
+        connection: Option<&DbConnection>,
+    ) -> Self {
+        Self::gather_with_workspace_connection_and_index(workspace_path, connection, None)
+    }
+
+    #[must_use]
+    fn gather_with_workspace_connection_and_index(
+        workspace_path: Option<&Path>,
+        connection: Option<&DbConnection>,
+        index_status: Option<&Result<IndexStatusReport, ()>>,
+    ) -> Self {
         Self {
             runtime: probe_runtime_capability(),
-            storage: probe_storage_capability(workspace_path),
-            search: probe_search_capability(workspace_path),
+            storage: probe_storage_capability_with_connection(workspace_path, connection),
+            search: probe_search_capability_with_connection(
+                workspace_path,
+                connection,
+                index_status,
+            ),
             mesh: probe_mesh_capability(),
             output_toon: probe_toon_output_capability(),
             agent_detection: CapabilityStatus::Ready,
@@ -1128,6 +1151,13 @@ pub fn default_workspace_path() -> Option<PathBuf> {
 
 #[must_use]
 pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    probe_storage_capability_with_connection(workspace_path, None)
+}
+
+fn probe_storage_capability_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> CapabilityStatus {
     if diag_forced_capability_gap("storage") {
         return CapabilityStatus::Unimplemented;
     }
@@ -1141,6 +1171,13 @@ pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStat
         return CapabilityStatus::Pending;
     }
 
+    if let Some(connection) = connection {
+        return match connection.ping().and_then(|()| connection.needs_migration()) {
+            Ok(false) => CapabilityStatus::Ready,
+            Ok(true) | Err(_) => CapabilityStatus::Degraded,
+        };
+    }
+
     match DbConnection::open_file(&database_path).and_then(|connection| {
         connection.ping()?;
         connection.needs_migration()
@@ -1152,6 +1189,14 @@ pub fn probe_storage_capability(workspace_path: Option<&Path>) -> CapabilityStat
 
 #[must_use]
 pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatus {
+    probe_search_capability_with_connection(workspace_path, None, None)
+}
+
+fn probe_search_capability_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+    index_status: Option<&Result<IndexStatusReport, ()>>,
+) -> CapabilityStatus {
     if diag_forced_capability_gap("search") {
         return CapabilityStatus::Unimplemented;
     }
@@ -1160,7 +1205,7 @@ pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatu
         return CapabilityStatus::Pending;
     };
 
-    match probe_storage_capability(Some(workspace_path)) {
+    match probe_storage_capability_with_connection(Some(workspace_path), connection) {
         CapabilityStatus::Ready => {}
         CapabilityStatus::Pending => return CapabilityStatus::Pending,
         CapabilityStatus::Degraded | CapabilityStatus::Unimplemented => {
@@ -1174,9 +1219,13 @@ pub fn probe_search_capability(workspace_path: Option<&Path>) -> CapabilityStatu
         index_dir: None,
     };
 
-    match get_index_status(&options) {
-        Ok(report) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
-        Ok(_) | Err(_) => CapabilityStatus::Degraded,
+    match index_status {
+        Some(Ok(report)) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
+        Some(Ok(_)) | Some(Err(())) => CapabilityStatus::Degraded,
+        None => match get_index_status(&options) {
+            Ok(report) if report.health == IndexHealth::Ready => CapabilityStatus::Ready,
+            Ok(_) | Err(_) => CapabilityStatus::Degraded,
+        },
     }
 }
 
@@ -1191,6 +1240,14 @@ pub fn probe_toon_output_capability() -> CapabilityStatus {
 
 fn workspace_database_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("ee.db")
+}
+
+fn open_status_connection(workspace_path: Option<&Path>) -> Option<DbConnection> {
+    let database_path = workspace_path.map(workspace_database_path)?;
+    if !database_path.exists() {
+        return None;
+    }
+    DbConnection::open_file(database_path).ok()
 }
 
 #[must_use]
@@ -1429,6 +1486,14 @@ pub struct WalStatusReport {
 impl WalStatusReport {
     #[must_use]
     pub fn gather(workspace_path: Option<&Path>) -> Self {
+        Self::gather_with_connection(workspace_path, None)
+    }
+
+    #[must_use]
+    fn gather_with_connection(
+        workspace_path: Option<&Path>,
+        connection: Option<&DbConnection>,
+    ) -> Self {
         let threshold = wal_checkpoint_bytes_threshold();
         let Some(workspace_path) = workspace_path else {
             return Self {
@@ -1441,6 +1506,15 @@ impl WalStatusReport {
             return Self {
                 checkpoint_threshold_bytes: threshold,
                 ..Self::default()
+            };
+        }
+        if let Some(connection) = connection {
+            return match connection.wal_status() {
+                Ok(status) => Self::from_wal_status(status, threshold),
+                Err(_) => Self {
+                    checkpoint_threshold_bytes: threshold,
+                    ..Self::default()
+                },
             };
         }
         let Ok(connection) = DbConnection::open_file(&database_path) else {
@@ -1781,24 +1855,43 @@ impl StatusReport {
     /// Gather current subsystem status with explicit options.
     #[must_use]
     pub fn gather_with_options(options: &StatusOptions) -> Self {
-        let capabilities =
-            CapabilityReport::gather_with_workspace(options.workspace_path.as_deref());
+        let status_connection = open_status_connection(options.workspace_path.as_deref());
+        let status_connection_ref = status_connection.as_ref();
+        let index_status = gather_status_index_status(options.workspace_path.as_deref());
+        let capabilities = CapabilityReport::gather_with_workspace_connection_and_index(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+            index_status.as_ref(),
+        );
         let runtime = RuntimeReport::gather();
         let read_pool =
             ReadPoolStatusReport::gather_for_workspace(options.workspace_path.as_deref());
-        let wal = WalStatusReport::gather(options.workspace_path.as_deref());
+        let wal = WalStatusReport::gather_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let shard_fanout = gather_shard_fanout_status(options.workspace_path.as_deref());
-        let pack_budget_buckets = gather_pack_budget_buckets(options.workspace_path.as_deref());
+        let pack_budget_buckets = gather_pack_budget_buckets_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
         let verification_posture = gather_verification_posture(options.workspace_path.as_deref());
         let host_calibration = gather_host_calibration_status(options.workspace_path.as_deref());
-        let (memory_health, memory_health_degradations) =
-            gather_memory_health(options.workspace_path.as_deref());
+        let (memory_health, memory_health_degradations) = gather_memory_health_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let workspace = gather_workspace_status(options.workspace_path.as_deref());
-        let graph_compute = gather_graph_compute(options.workspace_path.as_deref());
-        let graph_snapshot_artifact =
-            gather_graph_snapshot_artifact(options.workspace_path.as_deref());
+        let graph_compute = gather_graph_compute_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
+        let graph_snapshot_artifact = gather_graph_snapshot_artifact_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let skyline_feature_enabled =
             status_skyline_feature_enabled(options.workspace_path.as_deref());
         let skyline_community_count = if skyline_feature_enabled == Some(true) {
@@ -1806,16 +1899,26 @@ impl StatusReport {
         } else {
             None
         };
-        let derived_assets =
-            gather_derived_assets(options.workspace_path.as_deref(), &graph_snapshot_artifact);
+        let derived_assets = gather_derived_assets_with_index_status(
+            options.workspace_path.as_deref(),
+            &graph_snapshot_artifact,
+            index_status.as_ref(),
+        );
         let lexical_ram_tier = gather_lexical_ram_tier_status(options.workspace_path.as_deref());
-        let (curation_health, curation_degradations) =
-            gather_curation_health(options.workspace_path.as_deref());
-        let (feedback_health, feedback_degradations) =
-            gather_feedback_health(options.workspace_path.as_deref());
+        let (curation_health, curation_degradations) = gather_curation_health_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
+        let (feedback_health, feedback_degradations) = gather_feedback_health_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let singleflight_posture = super::singleflight::singleflight_posture_report();
         let flight_recorder = gather_flight_recorder_status(options.workspace_path.as_deref());
-        let mesh_storage = gather_mesh_storage_status(options.workspace_path.as_deref());
+        let mesh_storage = gather_mesh_storage_status_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
         let tailscale_local = gather_tailscale_local_report();
         let agent_inventory = AgentInventoryReport::not_inspected();
 
@@ -2082,11 +2185,17 @@ fn push_lexical_ram_tier_degradations(
     }
 }
 
-fn gather_mesh_storage_status(workspace_path: Option<&Path>) -> Option<MeshStorageStatusReport> {
+fn gather_mesh_storage_status_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> Option<MeshStorageStatusReport> {
     let workspace_path = workspace_path?;
     let database_path = workspace_path.join(".ee").join("ee.db");
     if !database_path.exists() {
         return None;
+    }
+    if let Some(connection) = connection {
+        return gather_mesh_storage_status_from_connection(connection, workspace_path);
     }
     let connection = DbConnection::open_file(&database_path).ok()?;
     gather_mesh_storage_status_from_connection(&connection, workspace_path)
@@ -2122,7 +2231,10 @@ fn gather_shard_fanout_status(workspace_path: Option<&Path>) -> ShardFanoutStatu
     })
 }
 
-fn gather_pack_budget_buckets(workspace_path: Option<&Path>) -> PackBudgetBucketReport {
+fn gather_pack_budget_buckets_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> PackBudgetBucketReport {
     let Some(workspace_path) = workspace_path else {
         return PackBudgetBucketReport::default();
     };
@@ -2134,6 +2246,12 @@ fn gather_pack_budget_buckets(workspace_path: Option<&Path>) -> PackBudgetBucket
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace_id = stable_workspace_id(&canonical_workspace);
+    if let Some(connection) = connection {
+        let Ok(entries) = connection.list_audit_entries(Some(&workspace_id), None) else {
+            return PackBudgetBucketReport::default();
+        };
+        return pack_budget_buckets_from_audit_entries(&entries, Utc::now());
+    }
     let Ok(connection) = DbConnection::open_file(&database_path) else {
         return PackBudgetBucketReport::default();
     };
@@ -3493,12 +3611,38 @@ fn gather_workspace_status(workspace_path: Option<&Path>) -> Option<WorkspaceSta
     ))
 }
 
+fn gather_status_index_status(
+    workspace_path: Option<&Path>,
+) -> Option<Result<IndexStatusReport, ()>> {
+    let workspace_path = workspace_path?;
+    let options = IndexStatusOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: None,
+        index_dir: None,
+    };
+    Some(get_index_status(&options).map_err(|_| ()))
+}
+
+#[cfg(test)]
 fn gather_derived_assets(
     workspace_path: Option<&Path>,
     graph_snapshot_artifact: &GraphSnapshotArtifactReport,
 ) -> Vec<DerivedAssetReport> {
+    gather_derived_assets_with_index_status(workspace_path, graph_snapshot_artifact, None)
+}
+
+fn gather_derived_assets_with_index_status(
+    workspace_path: Option<&Path>,
+    graph_snapshot_artifact: &GraphSnapshotArtifactReport,
+    index_status: Option<&Result<IndexStatusReport, ()>>,
+) -> Vec<DerivedAssetReport> {
     let search_index = match workspace_path {
-        Some(path) => {
+        Some(path) => match index_status {
+            Some(Ok(report)) => DerivedAssetReport::from_index_status(report),
+            Some(Err(())) => {
+                DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
+            }
+            None => {
             let options = IndexStatusOptions {
                 workspace_path: path.to_path_buf(),
                 database_path: None,
@@ -3510,7 +3654,8 @@ fn gather_derived_assets(
                     DerivedAssetReport::unavailable(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH)
                 }
             }
-        }
+            }
+        },
         None => DerivedAssetReport::not_inspected(SEARCH_INDEX_ASSET_NAME, SEARCH_INDEX_PATH),
     };
 
@@ -3528,7 +3673,15 @@ fn gather_derived_assets(
     vec![search_index, graph_snapshot, pack_l2_cache]
 }
 
+#[cfg(test)]
 fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
+    gather_graph_compute_with_connection(workspace_path, None)
+}
+
+fn gather_graph_compute_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> GraphComputeReport {
     if diag_forced_capability_gap("graph") {
         return GraphComputeReport {
             status: GraphComputeStatus::Unavailable,
@@ -3547,7 +3700,10 @@ fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
             available_algorithms: GRAPH_COMPUTE_ALGORITHMS,
             live_compute_supported: true,
             fnx_runtime_version: FNX_RUNTIME_VERSION,
-            result_cache: gather_graph_algorithm_result_cache(workspace_path),
+            result_cache: gather_graph_algorithm_result_cache_with_connection(
+                workspace_path,
+                connection,
+            ),
             last_used_at: None,
         }
     }
@@ -3565,20 +3721,28 @@ fn gather_graph_compute(workspace_path: Option<&Path>) -> GraphComputeReport {
 }
 
 #[cfg(feature = "graph")]
-fn gather_graph_algorithm_result_cache(
+fn gather_graph_algorithm_result_cache_with_connection(
     workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
 ) -> GraphAlgorithmResultCacheReport {
     let Some(workspace_path) = workspace_path else {
         return GraphAlgorithmResultCacheReport::not_inspected();
     };
     let database_path = workspace_path.join(".ee").join("ee.db");
-    let Ok(connection) = DbConnection::open_file(&database_path) else {
-        return GraphAlgorithmResultCacheReport::unavailable();
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        let Ok(opened) = DbConnection::open_file(&database_path) else {
+            return GraphAlgorithmResultCacheReport::unavailable();
+        };
+        owned_connection = opened;
+        &owned_connection
     };
 
     let mut cached_result_count = 0_u32;
     let mut observed_compute_count = 0_u32;
-    for workspace_id in resolve_status_workspace_ids(&connection, workspace_path) {
+    for workspace_id in resolve_status_workspace_ids(connection, workspace_path) {
         let Ok(Some(snapshot)) =
             connection.get_latest_graph_snapshot(&workspace_id, GraphSnapshotType::MemoryLinks)
         else {
@@ -3620,7 +3784,15 @@ fn gather_graph_algorithm_result_cache(
     }
 }
 
+#[cfg(test)]
 fn gather_graph_snapshot_artifact(workspace_path: Option<&Path>) -> GraphSnapshotArtifactReport {
+    gather_graph_snapshot_artifact_with_connection(workspace_path, None)
+}
+
+fn gather_graph_snapshot_artifact_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> GraphSnapshotArtifactReport {
     let Some(workspace_path) = workspace_path else {
         return graph_snapshot_artifact_report(
             DerivedAssetStatus::NotInspected,
@@ -3652,6 +3824,10 @@ fn gather_graph_snapshot_artifact(workspace_path: Option<&Path>) -> GraphSnapsho
                 availability: graph_live_compute_availability(),
             },
         );
+    }
+
+    if let Some(connection) = connection {
+        return gather_graph_snapshot_artifact_from_connection(connection, workspace_path);
     }
 
     let connection = match DbConnection::open_file(&database_path) {
@@ -3893,8 +4069,16 @@ fn push_read_pool_degradations(
     }
 }
 
+#[cfg(test)]
 fn gather_memory_health(
     workspace_path: Option<&Path>,
+) -> (MemoryHealthReport, Vec<DegradationReport>) {
+    gather_memory_health_with_connection(workspace_path, None)
+}
+
+fn gather_memory_health_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
 ) -> (MemoryHealthReport, Vec<DegradationReport>) {
     let Some(workspace_path) = workspace_path else {
         return (
@@ -3925,21 +4109,28 @@ fn gather_memory_health(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace_id = stable_workspace_id(&canonical_workspace);
-    let connection = match DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(_) => {
-            return (
-                MemoryHealthReport::gather(),
-                vec![DegradationReport {
-                    code: "memory_health_unavailable",
-                    severity: "medium",
-                    message: "Memory health is unavailable because the database could not be opened.",
-                    repair: "Run `ee doctor --json`.",
-                }],
-            );
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                owned_connection = connection;
+                &owned_connection
+            }
+            Err(_) => {
+                return (
+                    MemoryHealthReport::gather(),
+                    vec![DegradationReport {
+                        code: "memory_health_unavailable",
+                        severity: "medium",
+                        message: "Memory health is unavailable because the database could not be opened.",
+                        repair: "Run `ee doctor --json`.",
+                    }],
+                );
+            }
         }
     };
-
     let memories = match connection.list_memories(&workspace_id, None, true) {
         Ok(memories) => memories,
         Err(_) => {
@@ -4129,8 +4320,9 @@ fn parse_memory_timestamp(timestamp: &str) -> Option<DateTime<Utc>> {
         .map(|timestamp| timestamp.with_timezone(&Utc))
 }
 
-fn gather_curation_health(
+fn gather_curation_health_with_connection(
     workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
 ) -> (CurationHealthReport, Vec<DegradationReport>) {
     let Some(workspace_path) = workspace_path else {
         return (CurationHealthReport::not_inspected(), Vec::new());
@@ -4152,18 +4344,26 @@ fn gather_curation_health(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace_id = stable_workspace_id(&canonical_workspace);
-    let connection = match DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(_) => {
-            return (
-                CurationHealthReport::unavailable(),
-                vec![DegradationReport {
-                    code: "curation_health_unavailable",
-                    severity: "medium",
-                    message: "Curation health is unavailable because the database could not be opened.",
-                    repair: "Run `ee doctor --json`.",
-                }],
-            );
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                owned_connection = connection;
+                &owned_connection
+            }
+            Err(_) => {
+                return (
+                    CurationHealthReport::unavailable(),
+                    vec![DegradationReport {
+                        code: "curation_health_unavailable",
+                        severity: "medium",
+                        message: "Curation health is unavailable because the database could not be opened.",
+                        repair: "Run `ee doctor --json`.",
+                    }],
+                );
+            }
         }
     };
     let candidates = match connection.list_curation_candidates(&workspace_id, None, None, None) {
@@ -4200,8 +4400,9 @@ fn gather_curation_health(
     (health, degradations)
 }
 
-fn gather_feedback_health(
+fn gather_feedback_health_with_connection(
     workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
 ) -> (FeedbackHealthReport, Vec<DegradationReport>) {
     let Some(workspace_path) = workspace_path else {
         return (FeedbackHealthReport::not_inspected(), Vec::new());
@@ -4223,18 +4424,26 @@ fn gather_feedback_health(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace_id = stable_workspace_id(&canonical_workspace);
-    let connection = match DbConnection::open_file(&database_path) {
-        Ok(connection) => connection,
-        Err(_) => {
-            return (
-                FeedbackHealthReport::unavailable(),
-                vec![DegradationReport {
-                    code: "feedback_health_unavailable",
-                    severity: "medium",
-                    message: "Feedback health is unavailable because the database could not be opened.",
-                    repair: "Run `ee doctor --json`.",
-                }],
-            );
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                owned_connection = connection;
+                &owned_connection
+            }
+            Err(_) => {
+                return (
+                    FeedbackHealthReport::unavailable(),
+                    vec![DegradationReport {
+                        code: "feedback_health_unavailable",
+                        severity: "medium",
+                        message: "Feedback health is unavailable because the database could not be opened.",
+                        repair: "Run `ee doctor --json`.",
+                    }],
+                );
+            }
         }
     };
     let since = Utc::now()
