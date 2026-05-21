@@ -1631,12 +1631,25 @@ fn run_context_pack_with_performance_inner(
         determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    let candidate_token_costs_min = draft
+        .selection_audit
+        .steps
+        .iter()
+        .map(|step| step.token_cost)
+        .chain(
+            draft
+                .omitted
+                .iter()
+                .map(|omission| omission.estimated_tokens),
+        )
+        .min();
     push_pack_budget_too_small_degradation(
         &mut degraded,
         draft.selection_audit.candidate_count,
         draft.items.len(),
         draft.used_tokens,
         draft.budget.max_tokens(),
+        candidate_token_costs_min,
     );
     let tombstoned_item_count = draft
         .items
@@ -7258,6 +7271,7 @@ fn push_pack_budget_too_small_degradation(
     item_count: usize,
     used_tokens: u32,
     max_tokens: u32,
+    candidate_token_costs_min: Option<u32>,
 ) {
     if candidate_pool == 0
         || item_count > 0
@@ -7268,6 +7282,13 @@ fn push_pack_budget_too_small_degradation(
         return;
     }
 
+    tracing::warn!(
+        target: "ee::pack::budget_exhausted",
+        pool_size = candidate_pool,
+        max_tokens,
+        candidate_token_costs_min = candidate_token_costs_min.unwrap_or(0),
+        "pack budget too small"
+    );
     push_degradation(
         degraded,
         crate::pack::PACK_BUDGET_TOO_SMALL_CODE,
@@ -7403,7 +7424,7 @@ mod tests {
     -> Result<(), String> {
         let mut degraded = Vec::new();
 
-        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2);
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2, Some(8));
 
         ensure_equal(&degraded.len(), &1, "emitted degradation count")?;
         let entry = &degraded[0];
@@ -7430,10 +7451,10 @@ mod tests {
     -> Result<(), String> {
         let mut degraded = Vec::new();
 
-        push_pack_budget_too_small_degradation(&mut degraded, 0, 0, 0, 2);
+        push_pack_budget_too_small_degradation(&mut degraded, 0, 0, 0, 2, None);
         ensure_equal(&degraded.len(), &0, "empty pool emits nothing")?;
 
-        push_pack_budget_too_small_degradation(&mut degraded, 3, 1, 1, 2);
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 1, 1, 2, Some(1));
         ensure_equal(&degraded.len(), &0, "selected item emits nothing")?;
 
         degraded.push(
@@ -7445,7 +7466,7 @@ mod tests {
             )
             .map_err(|error| format!("failed to build no-results degradation: {error:?}"))?,
         );
-        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2);
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2, Some(8));
         ensure_equal(
             &degraded.len(),
             &1,
@@ -7484,6 +7505,7 @@ mod tests {
                 item_count,
                 u32::from(used_tokens),
                 u32::from(max_tokens),
+                None,
             );
 
             let has_pack_budget_too_small = degraded
