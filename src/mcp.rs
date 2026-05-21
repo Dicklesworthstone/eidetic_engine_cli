@@ -730,7 +730,7 @@ fn context_tool_schema() -> Value {
             "profile": {
                 "type": "string",
                 "description": "Context profile",
-                "enum": ["compact", "balanced", "thorough", "submodular"]
+                "enum": ["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]
             },
             "database": {
                 "type": "string",
@@ -1644,7 +1644,7 @@ fn resource_read_result(
     stderr: String,
 ) -> Value {
     let redacted_stderr = redact_mcp_public_diagnostics(&stderr);
-    
+
     if exit != ProcessExitCode::Success {
         let message = if redacted_stderr.is_empty() {
             format!("Resource read failed with exit code {}", exit as u8)
@@ -2036,7 +2036,7 @@ mod tests {
         fn resource_context_query_uri_decodes_cli_arguments(
             query in uri_component_strategy(),
             workspace in uri_component_strategy(),
-            profile in prop::sample::select(vec!["compact", "balanced", "thorough", "submodular"]),
+            profile in prop::sample::select(vec!["compact", "balanced", "grounding", "orientation", "thorough", "submodular"]),
         ) {
             let uri = format!(
                 "ee://context-packs/by-query?query={}&workspace={}&profile={}",
