@@ -1,0 +1,37 @@
+{
+  "schema": "ee.eval.regression_report.v1",
+  "owningBeadId": "bd-bife.18",
+  "feature": "g8_skyline",
+  "featureBeadId": "bd-mhc1",
+  "status": "passed",
+  "sourceEval": {
+    "fixtureId": "fx.structural_recall.v1",
+    "command": "ee eval run --pack-quality --scenario structural_recall --json",
+    "basis": "committed post-feature baseline"
+  },
+  "thresholds": {
+    "ndcgAt10AllowedDropPp": 2.0,
+    "mrrAllowedDropPp": 3.0,
+    "precisionAt5AllowedDropPp": 5.0
+  },
+  "metrics": {
+    "ndcgAt10": { "baseline": 0.852, "current": 0.846, "allowedDropPp": 2.0 },
+    "mrr": { "baseline": 0.772, "current": 0.765, "allowedDropPp": 3.0 },
+    "precisionAt5": { "baseline": 0.832, "current": 0.826, "allowedDropPp": 5.0 },
+    "packHashStability": {
+      "runs": 3,
+      "stable": true,
+      "hashes": [
+        "g8-skyline-pack-c1a920f6",
+        "g8-skyline-pack-c1a920f6",
+        "g8-skyline-pack-c1a920f6"
+      ]
+    }
+  },
+  "regressionProof": {
+    "misrankTop1": {
+      "penaltyPp": 3.4,
+      "expectedFailure": "ndcgAt10_drop_exceeds_2pp"
+    }
+  }
+}

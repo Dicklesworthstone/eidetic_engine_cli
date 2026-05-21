@@ -10,6 +10,7 @@ set -euo pipefail
 # Usage:
 #   ./scripts/verify.sh                # Run all gates
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
+#   ./scripts/verify.sh --eval          # Include pack-quality eval regression sweep
 #   ./scripts/verify.sh --help         # Show this help
 #
 # Gates (in order):
@@ -29,12 +30,14 @@ set -euo pipefail
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
+#   8.8. Eval Regression       - scripts/eval_regression.sh (optional)
 #   9. Benchmarks (optional)   - scripts/bench_perf_regression.sh --check-regression
 #
 # Exit codes match AGENTS.md conventions (0=success, 1=usage, 3=storage, etc.)
 # Artifacts are written to /tmp/ee-e2e-*/artifacts by E2E scripts.
 
 INCLUDE_BENCH=false
+INCLUDE_EVAL=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
@@ -51,6 +54,9 @@ for arg in "$@"; do
             ;;
         --include-bench)
             INCLUDE_BENCH=true
+            ;;
+        --eval)
+            INCLUDE_EVAL=true
             ;;
         *)
             echo "Unknown argument: $arg" >&2
@@ -548,6 +554,12 @@ run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 # Advisory while fixtures or sub-scripts are missing; set
 # EE_SAFETY_HARNESS_STRICT=1 to fail closed.
 run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
+
+# Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
+# committed report artifacts and intended eval thresholds after feature slices.
+if [ "$INCLUDE_EVAL" = "true" ]; then
+    run_stage "Eval Regression (bd-bife.18)" "./scripts/eval_regression.sh"
+fi
 
 # Gate 9: Performance Benchmarks (optional, gated behind --include-bench)
 if [ "$INCLUDE_BENCH" = "true" ]; then

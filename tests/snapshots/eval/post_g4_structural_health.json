@@ -1,0 +1,37 @@
+{
+  "schema": "ee.eval.regression_report.v1",
+  "owningBeadId": "bd-bife.18",
+  "feature": "g4_structural_health",
+  "featureBeadId": "bd-zx2v",
+  "status": "passed",
+  "sourceEval": {
+    "fixtureId": "fx.structural_recall.v1",
+    "command": "ee eval run --pack-quality --scenario structural_recall --json",
+    "basis": "committed post-feature baseline"
+  },
+  "thresholds": {
+    "ndcgAt10AllowedDropPp": 2.0,
+    "mrrAllowedDropPp": 3.0,
+    "precisionAt5AllowedDropPp": 5.0
+  },
+  "metrics": {
+    "ndcgAt10": { "baseline": 0.856, "current": 0.851, "allowedDropPp": 2.0 },
+    "mrr": { "baseline": 0.776, "current": 0.769, "allowedDropPp": 3.0 },
+    "precisionAt5": { "baseline": 0.836, "current": 0.830, "allowedDropPp": 5.0 },
+    "packHashStability": {
+      "runs": 3,
+      "stable": true,
+      "hashes": [
+        "g4-structural-health-pack-80fed3ad",
+        "g4-structural-health-pack-80fed3ad",
+        "g4-structural-health-pack-80fed3ad"
+      ]
+    }
+  },
+  "regressionProof": {
+    "misrankTop1": {
+      "penaltyPp": 3.3,
+      "expectedFailure": "ndcgAt10_drop_exceeds_2pp"
+    }
+  }
+}
