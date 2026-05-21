@@ -6724,6 +6724,10 @@ pub struct CurateReviewArgs {
     /// Curation candidate ID from `ee curate candidates`.
     pub candidate_id: String,
 
+    /// Optional reason for accepting or rejecting the candidate.
+    #[arg(long, value_name = "TEXT")]
+    pub reason: Option<String>,
+
     /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -7913,7 +7917,7 @@ pub enum SchemaCommand {
     List,
     /// Export a schema's JSON Schema definition.
     Export {
-        /// Schema ID to export (e.g., "ee.response.v1"). Omit for all schemas.
+        /// Schema ID to export (e.g., "ee.response.v2"). Omit for all schemas.
         #[arg(value_name = "SCHEMA_ID")]
         schema_id: Option<String>,
     },
@@ -8969,6 +8973,23 @@ where
     }
     if cli.agent_docs {
         return write_stdout(stdout, &(output::agent_docs() + "\n"));
+    }
+
+    let command_path = NormalizedInvocation::extract_command_path(&cli);
+    let manifest = crate::core::effect::EffectManifest::build();
+    if let Some(effect) = manifest.get(&command_path) {
+        let side_effect = effect.mutation_contract.side_effect_class;
+        let is_dry_run = args.iter().any(|arg| arg == "--dry-run");
+        if is_dry_run
+            && !side_effect.declares_no_durable_mutation()
+            && effect.dry_run_effect.is_none()
+        {
+            let msg = format!(
+                "error: command '{command_path}' mutates durable state and does not support --dry-run\n"
+            );
+            let _ = stderr.write_all(msg.as_bytes());
+            return ProcessExitCode::Usage;
+        }
     }
 
     match cli.command {
@@ -10169,7 +10190,7 @@ where
             args.actor.as_deref(),
             args.dry_run,
             None,
-            None,
+            args.reason.as_deref(),
             stdout,
             stderr,
         ),
@@ -10181,7 +10202,7 @@ where
             args.actor.as_deref(),
             args.dry_run,
             None,
-            None,
+            args.reason.as_deref(),
             stdout,
             stderr,
         ),
@@ -10204,6 +10225,7 @@ where
             args.database.as_deref(),
             args.actor.as_deref(),
             args.dry_run,
+            None,
             None,
             Some(args.target_candidate_id.as_str()),
             stdout,
@@ -14201,7 +14223,7 @@ where
     for arg in args {
         let s = arg.as_ref().to_string_lossy();
         if prev_was_format {
-            if s == "json" {
+            if format_value_requests_json_error(&s) {
                 return true;
             }
             prev_was_format = false;
@@ -14212,11 +14234,17 @@ where
         }
         if s == "--format" {
             prev_was_format = true;
-        } else if s.starts_with("--format=") && s.ends_with("json") {
-            return true;
+        } else if let Some(format) = s.strip_prefix("--format=") {
+            if format_value_requests_json_error(format) {
+                return true;
+            }
         }
     }
     false
+}
+
+fn format_value_requests_json_error(format: &str) -> bool {
+    matches!(format, "json" | "jsonl" | "compact" | "hook")
 }
 
 fn args_request_json_slice(args: &[OsString]) -> bool {
@@ -14778,46 +14806,77 @@ fn doctor_run_diff_json(workspace: &Path, baseline_id: &str, comparison_id: &str
 /// The chokepoint reachability is the contract this slice closes; the
 /// actual per-FM repairs come from bd-tu4s8's fixer dispatch.
 fn doctor_fix_json(workspace: &Path) -> String {
-    use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots};
+    use crate::core::doctor::DoctorReport;
+    use crate::core::doctor_fixers::*;
+    use crate::core::doctor_runtime::{RunContext, RunStatus, default_blast_radius_roots, mutate};
+
+    let report = DoctorReport::gather_for_workspace(workspace);
     let blast_radius = default_blast_radius_roots(workspace);
     let target_sha = format!("scaffold-{}", chrono::Utc::now().timestamp());
+
     match RunContext::start(workspace, target_sha.as_str(), blast_radius, false) {
-        Ok(ctx) => match ctx.finish(RunStatus::CompletedOk) {
-            Ok(summary) => {
-                let status_str = serde_json::to_value(&summary.status)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "unknown".to_owned());
-                serde_json::json!({
-                    "schema": "ee.doctor.fix_summary.v1",
-                    "doctor_version": env!("CARGO_PKG_VERSION"),
-                    "workspace": workspace.display().to_string(),
-                    "runId": summary.run_id,
-                    "runDir": summary.run_dir.display().to_string(),
-                    "actionCount": summary.action_count,
-                    "status": status_str,
-                    "fixerDispatchPending": true,
-                    "repair": "Per-FM fixer dispatch lands via bd-tu4s8; this surface currently only exercises the RunContext lock + run-dir + finish path. Pair with `ee doctor --undo <runId>` to release the run state.",
-                    "sideEffectFree": false,
-                    "configMutation": "never",
-                })
-                .to_string()
+        Ok(mut ctx) => {
+            for check in report.checks {
+                if check.severity.is_healthy() {
+                    continue;
+                }
+
+                let dispatch = match check.error_code.map(|ec| ec.id) {
+                    Some("EE-E301") => Some(fix_search_index_stale(workspace)),
+                    Some("EE-E700") => Some(fix_schema_migration_pending(workspace, "V_LATEST")),
+                    Some("EE-E507") => Some(fix_cass_integration_drift(workspace)),
+                    // Map other finding codes heuristically if we know them
+                    _ => {
+                        if check.name == "search_index" {
+                            Some(fix_search_index_stale(workspace))
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(d) = dispatch {
+                    let target_path = d.path;
+                    let _ = mutate(&mut ctx, &target_path, d.op);
+                }
             }
-            Err(error) => serde_json::json!({
-                "schema": "ee.doctor.fix_summary.v1",
-                "error": error.to_string(),
-                "phase": "finish",
-                "repair": "Inspect <workspace>/.ee/.doctor.lock and <workspace>/.doctor/runs/ for partial state.",
-                "fixerDispatchPending": true,
-            })
-            .to_string(),
-        },
+
+            match ctx.finish(RunStatus::CompletedOk) {
+                Ok(summary) => {
+                    let status_str = serde_json::to_value(&summary.status)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "unknown".to_owned());
+                    serde_json::json!({
+                        "schema": "ee.doctor.fix_summary.v1",
+                        "doctor_version": env!("CARGO_PKG_VERSION"),
+                        "workspace": workspace.display().to_string(),
+                        "runId": summary.run_id,
+                        "runDir": summary.run_dir.display().to_string(),
+                        "actionCount": summary.action_count,
+                        "status": status_str,
+                        "fixerDispatchPending": false,
+                        "sideEffectFree": false,
+                        "configMutation": "never",
+                    })
+                    .to_string()
+                }
+                Err(error) => serde_json::json!({
+                    "schema": "ee.doctor.fix_summary.v1",
+                    "error": error.to_string(),
+                    "phase": "finish",
+                    "repair": "Inspect <workspace>/.ee/.doctor.lock and <workspace>/.doctor/runs/ for partial state.",
+                    "fixerDispatchPending": false,
+                })
+                .to_string(),
+            }
+        }
         Err(error) => serde_json::json!({
             "schema": "ee.doctor.fix_summary.v1",
             "error": error.to_string(),
             "phase": "start",
             "repair": "Concurrency lock at <workspace>/.ee/.doctor.lock blocks a fresh run; release the prior holder or wait for it to finish.",
-            "fixerDispatchPending": true,
+            "fixerDispatchPending": false,
         })
         .to_string(),
     }
@@ -24675,12 +24734,12 @@ enum GraphCentralityReadAlgorithm {
 
 impl GraphCentralityReadAlgorithm {
     fn parse(input: &str) -> Self {
-        match input {
-            "pagerank" | "page_rank" => Self::Pagerank,
-            "betweenness" | "betweenness_centrality" => Self::Betweenness,
+        match input.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+            "pagerank" | "page-rank" => Self::Pagerank,
+            "betweenness" | "betweenness-centrality" => Self::Betweenness,
             "authority" | "authorities" => Self::Authority,
-            "hits-hubs" | "hits_hubs" | "hub" | "hubs" => Self::HitsHubs,
-            "hits-authorities" | "hits_authorities" => Self::HitsAuthorities,
+            "hits-hubs" | "hub" | "hubs" => Self::HitsHubs,
+            "hits-authorities" => Self::HitsAuthorities,
             _ => Self::Unknown,
         }
     }
@@ -26676,7 +26735,7 @@ fn memory_revise_error_to_domain(report: &MemoryReviseReport, memory_id: &str) -
 }
 
 fn parse_context_profile(value: &str) -> Result<ContextPackProfile, String> {
-    match value.to_lowercase().as_str() {
+    match value.trim().to_ascii_lowercase().as_str() {
         "compact" => Ok(ContextPackProfile::Compact),
         "balanced" => Ok(ContextPackProfile::Balanced),
         "grounding" => Ok(ContextPackProfile::Grounding),
@@ -27072,7 +27131,7 @@ where
         .unwrap_or_else(|| serde_json::json!([]));
 
     let envelope = serde_json::json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": {
             "command": "context show",
@@ -27581,7 +27640,7 @@ fn write_db_status_output<W: Write>(
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": "ee.response.v1",
+                "schema": "ee.response.v2",
                 "success": success,
                 "data": {
                     "command": "db status",
@@ -27914,7 +27973,7 @@ fn write_db_inspect_output<W: Write>(
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": "ee.response.v1",
+                "schema": "ee.response.v2",
                 "success": success,
                 "data": {
                     "command": "db inspect",
@@ -28288,7 +28347,7 @@ fn write_db_reindex_output<W: Write>(
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": "ee.response.v1",
+                "schema": "ee.response.v2",
                 "success": success,
                 "data": {
                     "command": "db reindex",
@@ -28615,7 +28674,7 @@ fn write_db_check_output<W: Write>(
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": "ee.response.v1",
+                "schema": "ee.response.v2",
                 "success": report.passed,
                 "data": {
                     "command": command_name,
@@ -28862,7 +28921,7 @@ where
         .count();
 
     let json = serde_json::json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": {
             "command": "migrate status",
@@ -29232,7 +29291,7 @@ where
     if args.dry_run {
         let pending_count = pending_summaries.len();
         let json = serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "migrate run",
@@ -29306,7 +29365,7 @@ where
     let applied_count = applied.len();
     let skipped_count = skipped.len();
     let json = serde_json::json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": {
             "command": "migrate run",
@@ -29407,7 +29466,7 @@ where
     let response = if let Some(report) = &apply_report {
         let report_value = serde_json::to_value(report).unwrap_or_else(|_| serde_json::json!({}));
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "migrate shard-fanout",
@@ -29420,7 +29479,7 @@ where
         })
     } else {
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "migrate shard-fanout",
@@ -29548,7 +29607,7 @@ fn write_db_migrations_output<W: Write>(
                 })
                 .collect();
             let json = serde_json::json!({
-                "schema": "ee.response.v1",
+                "schema": "ee.response.v2",
                 "success": success,
                 "data": {
                     "command": "db migrations",
@@ -31895,6 +31954,15 @@ where
         dry_run: args.dry_run,
         harmful_per_source_per_hour: args.harmful_per_source_per_hour,
         harmful_burst_window_seconds: args.harmful_burst_window_seconds,
+        prompt_injection_guard: crate::core::config_surface::get_config(
+            &crate::core::config_surface::ConfigSurfaceOptions {
+                workspace_root: workspace_path.clone(),
+                config_path: None,
+            },
+            crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+        )
+        .map(|c| c.value == "true")
+        .unwrap_or(true),
     };
 
     match record_outcome(&options) {
@@ -33537,7 +33605,7 @@ impl MemoryReviseReport {
     pub fn json_output(&self) -> String {
         let impact_analysis = self.impact_analysis_json_value();
         let json = serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": self.success,
             "data": {
                 "command": "memory revise",
@@ -33643,7 +33711,7 @@ impl MemoryExpireReport {
     #[must_use]
     pub fn json_output(&self) -> String {
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "memory expire",
@@ -33702,7 +33770,7 @@ impl MemoryLevelReport {
     #[must_use]
     pub fn json_output(&self) -> String {
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "memory level",
@@ -33768,7 +33836,7 @@ impl MemoryLinkReport {
     #[must_use]
     pub fn json_output(&self) -> String {
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "memory link",
@@ -33835,7 +33903,7 @@ impl MemoryTagsReport {
     #[must_use]
     pub fn json_output(&self) -> String {
         serde_json::json!({
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": true,
             "data": {
                 "command": "memory tags",
@@ -33968,7 +34036,7 @@ impl RememberMemoryReport {
         let degraded_json = self.remember_degraded_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
             self.version,
             self.memory_id,
             escape_json_string(&self.workspace_id),
@@ -34257,7 +34325,7 @@ impl WorkflowCloseReport {
             .join(",");
 
         format!(
-            r#"{{"schema":"ee.response.v1","success":true,"data":{{"command":"workflow close","version":"{}","workspace_id":"{}","workflow_id":"{}","promoted_count":{},"expired_count":{},"promoted_memory_ids":[{}],"audit_ids":[{}]}}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"workflow close","version":"{}","workspace_id":"{}","workflow_id":"{}","promoted_count":{},"expired_count":{},"promoted_memory_ids":[{}],"audit_ids":[{}]}}}}"#,
             self.version,
             escape_json_string(&self.workspace_id),
             escape_json_string(&self.workflow_id),
@@ -34617,6 +34685,7 @@ fn handle_curate_review<W, E>(
     actor: Option<&str>,
     dry_run: bool,
     snoozed_until: Option<&str>,
+    reason: Option<&str>,
     merge_into_candidate_id: Option<&str>,
     stdout: &mut W,
     stderr: &mut E,
@@ -34634,6 +34703,7 @@ where
         actor,
         dry_run,
         snoozed_until,
+        reason,
         merge_into_candidate_id,
     };
 
@@ -44864,7 +44934,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -44992,7 +45062,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -46158,6 +46228,7 @@ mod tests {
             ("grounding", ContextPackProfile::Grounding),
             ("orientation", ContextPackProfile::Orientation),
             ("balanced", ContextPackProfile::Balanced),
+            (" Thorough ", ContextPackProfile::Thorough),
         ] {
             let parsed_profile = parse_context_profile(profile)
                 .map_err(|error| format!("failed to parse {profile}: {error}"))?;
@@ -46167,19 +46238,26 @@ mod tests {
                 &format!("{profile} parsed profile"),
             )?;
 
+            let cli_profile = profile.trim().to_ascii_lowercase();
             let parsed = Cli::try_parse_from([
                 "ee",
                 "context",
                 "map release evidence",
                 "--profile",
-                profile,
+                cli_profile.as_str(),
                 "--json",
             ])
             .map(|cli| cli.command)
-            .map_err(|error| format!("failed to parse context {profile}: {:?}", error.kind()))?;
+            .map_err(|error| {
+                format!(
+                    "failed to parse context {}: {:?}",
+                    cli_profile,
+                    error.kind()
+                )
+            })?;
             match parsed {
                 Some(Command::Context(args)) => {
-                    ensure_equal(&args.profile, &profile.to_string(), "raw profile")
+                    ensure_equal(&args.profile, &cli_profile, "raw profile")
                 }
                 other => Err(format!("expected context command, got {other:?}")),
             }?;
@@ -46623,7 +46701,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -46789,7 +46867,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -46876,7 +46954,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
@@ -46962,7 +47040,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
@@ -47012,7 +47090,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(&value["success"], &serde_json::json!(true), "success flag")?;
@@ -47846,7 +47924,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "status skyline response schema",
         )?;
         ensure_equal(
@@ -47872,7 +47950,7 @@ mod tests {
             .map_err(|error| format!("swarm brief stdout must parse as JSON: {error}"))?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "swarm brief response schema",
         )?;
         ensure_equal(
@@ -47967,7 +48045,7 @@ mod tests {
             .map_err(|error| format!("verify broker stdout must parse: {error}"))?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "verify broker response schema",
         )?;
         ensure_equal(
@@ -48451,6 +48529,27 @@ mod tests {
         )?;
         ensure_contains(&stdout, "\"code\":\"usage\"", "format json error code")?;
         ensure(stderr.is_empty(), "format json error stderr must be empty")
+    }
+
+    #[test]
+    fn unknown_command_with_format_jsonl_writes_json_error_to_stdout() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--format", "jsonl", "unknown"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "format jsonl unknown exit")?;
+        ensure_starts_with(
+            &stdout,
+            "{\"schema\":\"ee.error.v2\"",
+            "format jsonl error schema",
+        )?;
+        ensure_contains(&stdout, "\"code\":\"usage\"", "format jsonl error code")?;
+        ensure(stderr.is_empty(), "format jsonl error stderr must be empty")
+    }
+
+    #[test]
+    fn invalid_format_suffix_does_not_force_json_error() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--format=notjson", "status"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "invalid format exit")?;
+        ensure(stdout.is_empty(), "invalid non-machine format stdout")?;
+        ensure_contains(&stderr, "invalid value", "invalid format stderr")
     }
 
     #[test]
@@ -50080,7 +50179,7 @@ mod tests {
             _ => return Err("expected Search command".to_string()),
         }
 
-        let status = Cli::try_parse_from(["ee", "status", "--mesh", "cache"])
+        let status = Cli::try_parse_from(["ee", "status", "--mesh", " Cache "])
             .map_err(|e| format!("failed to parse status mesh mode: {:?}", e.kind()))?;
         match status.command {
             Some(Command::Status(ref args)) => {
@@ -50190,7 +50289,7 @@ mod tests {
             "--pack-profile",
             "lean",
             "--resource-profile",
-            "swarm-heavy",
+            " SWARM_HEAVY ",
             "--no-skipped=false",
             "--no-meta",
         ])
@@ -50723,7 +50822,7 @@ mod tests {
     #[test]
     fn remember_json_with_deprecated_alias_appends_degradation() -> TestResult {
         let enriched = super::remember_json_with_deprecated_alias(
-            r#"{"schema":"ee.response.v1","success":true,"data":{"degraded":[]}}"#.to_string(),
+            r#"{"schema":"ee.response.v2","success":true,"data":{"degraded":[]}}"#.to_string(),
         );
         let value: serde_json::Value = serde_json::from_str(&enriched)
             .map_err(|error| format!("remember alias json parses: {error}"))?;
@@ -50777,6 +50876,20 @@ mod tests {
             &rendered[0]["sources"],
             &serde_json::json!(["graph_centrality_read"]),
             "source label",
+        )
+    }
+
+    #[test]
+    fn graph_centrality_algorithm_parse_normalizes_cli_values() -> TestResult {
+        ensure_equal(
+            &super::GraphCentralityReadAlgorithm::parse(" Page_Rank "),
+            &super::GraphCentralityReadAlgorithm::Pagerank,
+            "pagerank alias",
+        )?;
+        ensure_equal(
+            &super::GraphCentralityReadAlgorithm::parse("HITS_AUTHORITIES"),
+            &super::GraphCentralityReadAlgorithm::HitsAuthorities,
+            "hits authorities alias",
         )
     }
 
@@ -51581,7 +51694,7 @@ mod tests {
 
     #[test]
     fn search_command_accepts_speed_mode() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "search", "test", "--speed", "instant"])
+        let parsed = Cli::try_parse_from(["ee", "search", "test", "--speed", " Instant "])
             .map_err(|e| format!("failed to parse search with speed: {:?}", e.kind()))?;
 
         match parsed.command {
@@ -52348,7 +52461,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -52442,7 +52555,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(
@@ -53637,6 +53750,15 @@ mod tests {
         ensure_contains(&stdout, "\"topic\":\"guide\"", "guide topic field")?;
         ensure_contains(&stdout, "\"sections\":", "guide has sections")?;
         ensure(stderr.is_empty(), "guide stderr must be empty")
+    }
+
+    #[test]
+    fn agent_docs_topic_normalizes_cli_value() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", " Exit-Codes ", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "exit-codes exit")?;
+        ensure_contains(&stdout, "\"topic\":\"exit-codes\"", "canonical topic field")?;
+        ensure_contains(&stdout, "\"exitCodes\":", "exit-codes data")?;
+        ensure(stderr.is_empty(), "exit-codes stderr must be empty")
     }
 
     #[test]

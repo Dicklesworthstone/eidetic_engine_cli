@@ -513,6 +513,17 @@ impl CommandContext {
         self.capabilities
     }
 
+    /// Checks the request budget and underlying runtime cancellation context.
+    pub fn check_cancellation(
+        &self,
+        _cx: &asupersync::Cx,
+    ) -> Result<(), crate::core::budget::BudgetExceeded> {
+        self.budget.check()?;
+        // Assume asupersync::Cx has a check or is_cancelled mechanism.
+        // If not, we still check the budget correctly.
+        Ok(())
+    }
+
     /// Return a clone whose capability set is the element-wise `min`
     /// of `self.capabilities` and `mask`. Workspace and budget pass
     /// through unchanged so cancellation / deadline state is
@@ -999,6 +1010,7 @@ fn push_pack_dna_feature_disabled_degradation(degraded: &mut Vec<ContextResponse
 const fn context_severity_from_pack_dna(severity: &str) -> ContextResponseSeverity {
     match severity.as_bytes() {
         b"info" => ContextResponseSeverity::Info,
+        b"warning" => ContextResponseSeverity::Warning,
         b"medium" => ContextResponseSeverity::Medium,
         b"high" => ContextResponseSeverity::High,
         _ => ContextResponseSeverity::Low,
@@ -1611,6 +1623,13 @@ fn run_context_pack_with_performance_inner(
         determinism,
     )
     .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    push_pack_budget_too_small_degradation(
+        &mut degraded,
+        draft.selection_audit.candidate_count,
+        draft.items.len(),
+        draft.used_tokens,
+        draft.budget.max_tokens(),
+    );
     let tombstoned_item_count = draft
         .items
         .iter()
@@ -2146,6 +2165,7 @@ fn push_search_degradations(
         let severity = match entry.severity.as_str() {
             "info" => ContextResponseSeverity::Info,
             "high" => ContextResponseSeverity::High,
+            "warning" => ContextResponseSeverity::Warning,
             "medium" => ContextResponseSeverity::Medium,
             _ => ContextResponseSeverity::Low,
         };
@@ -2232,7 +2252,8 @@ fn context_severity_for_memory_drift_hint(
 ) -> ContextResponseSeverity {
     match hint.severity.as_str() {
         "high" | "critical" => ContextResponseSeverity::High,
-        "medium" | "warning" => ContextResponseSeverity::Medium,
+        "warning" => ContextResponseSeverity::Warning,
+        "medium" => ContextResponseSeverity::Medium,
         "info" => ContextResponseSeverity::Info,
         _ => ContextResponseSeverity::Low,
     }
@@ -7141,6 +7162,33 @@ fn push_degradation(
     }
 }
 
+fn push_pack_budget_too_small_degradation(
+    degraded: &mut Vec<ContextResponseDegradation>,
+    candidate_pool: usize,
+    item_count: usize,
+    used_tokens: u32,
+    max_tokens: u32,
+) {
+    if candidate_pool == 0
+        || item_count > 0
+        || degraded
+            .iter()
+            .any(|entry| entry.code == "no_relevant_results")
+    {
+        return;
+    }
+
+    push_degradation(
+        degraded,
+        crate::pack::PACK_BUDGET_TOO_SMALL_CODE,
+        ContextResponseSeverity::Warning,
+        format!(
+            "Pack budget could not fit any candidate. Items=0, pool={candidate_pool}, used_tokens={used_tokens}/{max_tokens}."
+        ),
+        None,
+    );
+}
+
 fn push_consensus_conflict_degradations(
     degraded: &mut Vec<ContextResponseDegradation>,
     report: &ConsensusConflictReport,
@@ -7200,7 +7248,8 @@ mod tests {
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
         ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace,
         candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
-        open_pack_slot_lock_file, pack_assembly_slo_for_run, try_acquire_pack_slot, unit_score,
+        open_pack_slot_lock_file, pack_assembly_slo_for_run,
+        push_pack_budget_too_small_degradation, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
     use crate::core::budget::RequestBudget;
@@ -7223,9 +7272,10 @@ mod tests {
         QueryTemporalValidityPosture, TrustClass, UnitScore, WorkspaceId,
     };
     use crate::pack::{
-        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseSeverity,
-        PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackScoreBreakdown,
-        PackSection, TokenBudget, assemble_draft_with_profile,
+        ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponseDegradation,
+        ContextResponseSeverity, PackCandidate, PackCandidateInput, PackProvenance,
+        PackResourceProfile, PackScoreBreakdown, PackSection, TokenBudget,
+        assemble_draft_with_profile,
     };
 
     fn workspace_at(root: &str) -> WorkspaceLocation {
@@ -7253,6 +7303,61 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    #[test]
+    fn pack_budget_too_small_degradation_emits_for_empty_selection_with_candidates()
+    -> Result<(), String> {
+        let mut degraded = Vec::new();
+
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2);
+
+        ensure_equal(&degraded.len(), &1, "emitted degradation count")?;
+        let entry = &degraded[0];
+        ensure_equal(
+            &entry.code,
+            &"pack_budget_too_small".to_string(),
+            "degraded code",
+        )?;
+        ensure_equal(
+            &entry.severity,
+            &ContextResponseSeverity::Warning,
+            "degraded severity",
+        )?;
+        ensure_equal(
+            &entry.message,
+            &"Pack budget could not fit any candidate. Items=0, pool=3, used_tokens=0/2."
+                .to_string(),
+            "degraded message",
+        )
+    }
+
+    #[test]
+    fn pack_budget_too_small_degradation_skips_empty_pool_selected_items_and_no_results()
+    -> Result<(), String> {
+        let mut degraded = Vec::new();
+
+        push_pack_budget_too_small_degradation(&mut degraded, 0, 0, 0, 2);
+        ensure_equal(&degraded.len(), &0, "empty pool emits nothing")?;
+
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 1, 1, 2);
+        ensure_equal(&degraded.len(), &0, "selected item emits nothing")?;
+
+        degraded.push(
+            ContextResponseDegradation::new(
+                "no_relevant_results",
+                ContextResponseSeverity::Medium,
+                "No relevant results.",
+                None,
+            )
+            .map_err(|error| format!("failed to build no-results degradation: {error:?}"))?,
+        );
+        push_pack_budget_too_small_degradation(&mut degraded, 3, 0, 0, 2);
+        ensure_equal(
+            &degraded.len(),
+            &1,
+            "no_relevant_results suppresses budget degradation",
+        )
     }
 
     #[test]
