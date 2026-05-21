@@ -14,6 +14,12 @@
 //!   `tests/fixtures/rch_verify_control_plane/topology_refusal.json`.
 //! - `rch_remote_compile_error.json` — a genuine code failure, used to
 //!   prove environment blockers and code failures are separated.
+//! - `verify_script_rch_e327_event.json` — `ee.test_event.v1`
+//!   verify-script tail with the active RCH-E327 environment blocker.
+//! - `github_actions_check_failure.json` — canonical check-run summary
+//!   that failed in code.
+//! - `static_check_pass.json` / `static_check_failed_shell_text.json` —
+//!   local static-only proof records.
 //! - `malformed_wrong_schema.json` — wrong-schema input that the parser
 //!   must reject loudly rather than silently classify.
 
@@ -21,7 +27,7 @@ use std::path::PathBuf;
 
 use ee::obs::verification_evidence::{
     EvidenceSource, EvidenceStatus, ParseError, VERIFICATION_EVIDENCE_SCHEMA_V1, compact_summary,
-    parse_rch_verify,
+    parse_github_actions_job, parse_rch_verify, parse_static_check, parse_verify_script_event,
 };
 
 fn fixture(name: &str) -> serde_json::Value {
@@ -110,6 +116,102 @@ fn rch_remote_compile_error_fixture_classifies_as_code_failure() {
     assert_eq!(
         evidence.first_error.message.as_deref(),
         Some("expected struct, got enum")
+    );
+}
+
+#[test]
+fn verify_script_event_fixture_classifies_rch_e327_as_environment_blocked() {
+    let evidence =
+        parse_verify_script_event(&fixture("verify_script_rch_e327_event.json")).expect("parses");
+    assert_eq!(evidence.source, EvidenceSource::VerifyScript);
+    assert_eq!(evidence.status, EvidenceStatus::EnvironmentBlocked);
+    assert_eq!(evidence.bead_id.as_deref(), Some("bd-1nxz4.5"));
+    assert_eq!(evidence.command_kind.as_deref(), Some("command_end"));
+    assert_eq!(
+        evidence.command_hash.as_deref(),
+        Some("blake3:rch-e327-focused-test")
+    );
+    assert_eq!(evidence.error_codes, vec!["RCH-E327".to_owned()]);
+    assert!(
+        evidence
+            .environment_blocker_codes
+            .iter()
+            .any(|code| code == "rch_verify_topology_blocked")
+    );
+    assert!(
+        evidence
+            .environment_blocker_codes
+            .iter()
+            .any(|code| code == "rch_verify_local_fallback_refused")
+    );
+}
+
+#[test]
+fn github_actions_check_failure_fixture_classifies_as_code_failure() {
+    let evidence =
+        parse_github_actions_job(&fixture("github_actions_check_failure.json")).expect("parses");
+    assert_eq!(evidence.source, EvidenceSource::GitHubActionsJob);
+    assert_eq!(evidence.status, EvidenceStatus::FailedInCode);
+    assert_eq!(
+        evidence.command.as_deref(),
+        Some("ci / verification_evidence_parsers")
+    );
+    assert_eq!(
+        evidence.command_kind.as_deref(),
+        Some("github_actions_check_run")
+    );
+    assert_eq!(
+        evidence.git_head.as_deref(),
+        Some("308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000")
+    );
+    assert_eq!(
+        evidence.first_error.message.as_deref(),
+        Some("assertion failed: environment blockers were empty")
+    );
+}
+
+#[test]
+fn static_check_pass_fixture_classifies_as_passed() {
+    let evidence = parse_static_check(&fixture("static_check_pass.json")).expect("parses");
+    assert_eq!(evidence.source, EvidenceSource::StaticCheck);
+    assert_eq!(evidence.status, EvidenceStatus::Passed);
+    assert_eq!(evidence.command_kind.as_deref(), Some("rustfmt_check"));
+    assert_eq!(
+        evidence.command_hash.as_deref(),
+        Some("blake3:rustfmt-static")
+    );
+    assert!(evidence.environment_blocker_codes.is_empty());
+}
+
+#[test]
+fn static_check_failed_fixture_classifies_as_code_failure() {
+    let evidence =
+        parse_static_check(&fixture("static_check_failed_shell_text.json")).expect("parses");
+    assert_eq!(evidence.source, EvidenceSource::StaticCheck);
+    assert_eq!(evidence.status, EvidenceStatus::FailedInCode);
+    assert_eq!(evidence.exit_code, Some(1));
+    assert_eq!(
+        evidence.first_error.file.as_deref(),
+        Some("src/obs/verification_evidence.rs")
+    );
+}
+
+#[test]
+fn compact_summary_strips_shell_command_substitution_text() {
+    let evidence =
+        parse_static_check(&fixture("static_check_failed_shell_text.json")).expect("parses");
+    let summary = compact_summary(&evidence);
+    assert!(
+        !summary.contains("$("),
+        "summary should strip command substitution openers: {summary}"
+    );
+    assert!(
+        !summary.contains("`touch"),
+        "summary should not preserve executable payload inside inline code: {summary}"
+    );
+    assert!(
+        summary.contains("git diff --check __touch /tmp/ee-owned_"),
+        "summary should keep a readable sanitized command: {summary}"
     );
 }
 

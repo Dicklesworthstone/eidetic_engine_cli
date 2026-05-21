@@ -22,13 +22,16 @@
 //!
 //! - [`parse_rch_verify`] for the `ee.rch.verify.v1` proof JSON that
 //!   `scripts/rch_verify.sh` already emits.
+//! - [`parse_verify_script_event`] for `ee.test_event.v1` command-tail
+//!   rows emitted by verify and e2e scripts.
+//! - [`parse_github_actions_job`] for canonical GitHub Actions check-run
+//!   summaries.
+//! - [`parse_static_check`] for local static-only records such as
+//!   `rustfmt --check` and `git diff --check`.
 //! - [`compact_summary`] that renders a Beads-ready Markdown bullet list.
 //!
 //! ## Follow-up (tracked under `bd-1nxz4.5`)
 //!
-//! - Parsers for `ee.test_event.v1` verify-script tails, GitHub Actions
-//!   job summaries, and local static-check (`rustfmt`/`clippy`/`UBS`)
-//!   records.
 //! - `ee verification evidence ...` CLI surface and golden output.
 //! - End-to-end harness driving fake input files into the normalizer
 //!   without launching Cargo.
@@ -41,6 +44,10 @@ use serde_json::Value;
 /// Stable schema tag emitted on every normalized envelope. Mirrored in
 /// `docs/schemas/ee.verification_evidence.v1.json`.
 pub const VERIFICATION_EVIDENCE_SCHEMA_V1: &str = "ee.verification_evidence.v1";
+const RCH_VERIFY_SCHEMA_V1: &str = "ee.rch.verify.v1";
+const TEST_EVENT_SCHEMA_V1: &str = "ee.test_event.v1";
+const GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1: &str = "ee.github_actions.check_run.v1";
+const STATIC_CHECK_SCHEMA_V1: &str = "ee.static_check.v1";
 
 /// Where the raw proof came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -202,10 +209,10 @@ pub fn parse_rch_verify(raw: &Value) -> Result<VerificationEvidence, ParseError>
         .get("schema")
         .and_then(Value::as_str)
         .ok_or(ParseError::MissingSchema)?;
-    if schema != "ee.rch.verify.v1" {
+    if schema != RCH_VERIFY_SCHEMA_V1 {
         return Err(ParseError::UnexpectedSchema {
             found: schema.to_owned(),
-            expected: "ee.rch.verify.v1",
+            expected: RCH_VERIFY_SCHEMA_V1,
         });
     }
 
@@ -301,6 +308,158 @@ pub fn parse_rch_verify(raw: &Value) -> Result<VerificationEvidence, ParseError>
     })
 }
 
+/// Parse an `ee.test_event.v1` command-tail row into the normalized
+/// envelope. The parser accepts fields either at top level or under the
+/// conventional `fields` object used by the e2e logger.
+pub fn parse_verify_script_event(raw: &Value) -> Result<VerificationEvidence, ParseError> {
+    let object = checked_object(raw, TEST_EVENT_SCHEMA_V1)?;
+    let raw_status = string_field_any(object, &["status", "outcome", "kind"])
+        .or_else(|| string_field_from_fields(object, "status"));
+    let exit_code = i64_field_any(object, &["exit_code", "exitCode", "rc"]);
+    let degraded_codes = combined_degraded_codes(object);
+    let error_codes = string_arrays_any(object, &["error_codes", "errorCodes"]);
+    let environment_blocker_codes = environment_blockers_from(object, &degraded_codes);
+    let status =
+        classify_generic_status(raw_status.as_deref(), exit_code, &environment_blocker_codes);
+
+    Ok(VerificationEvidence {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1,
+        source: EvidenceSource::VerifyScript,
+        status,
+        bead_id: string_field_any(object, &["bead_id", "beadId", "test_id", "testId"]),
+        command: command_from_script_event(object),
+        command_kind: string_field_any(object, &["command_kind", "commandKind", "kind", "phase"]),
+        command_hash: string_field_any(object, &["command_hash", "commandHash"]),
+        worker_id: string_field_any(
+            object,
+            &[
+                "worker_id",
+                "workerId",
+                "worker_host",
+                "workerHost",
+                "runner_name",
+            ],
+        ),
+        exit_code,
+        elapsed_ms: u64_field_any(object, &["elapsed_ms", "elapsedMs", "duration_ms"]),
+        git_head: string_field_any(object, &["git_head", "gitHead", "head_sha", "headSha"]),
+        git_tree: string_field_any(object, &["git_tree", "gitTree"]),
+        dirty_status_hash: string_field_any(object, &["dirty_status_hash", "dirtyStatusHash"]),
+        verification_attribution: string_field_any(
+            object,
+            &[
+                "verification_attribution",
+                "verificationAttribution",
+                "agent_name",
+            ],
+        ),
+        degraded_codes,
+        error_codes,
+        environment_blocker_codes,
+        first_error: first_error_from_fields(object),
+        raw_status,
+    })
+}
+
+/// Parse a canonical GitHub Actions check-run/job summary. This accepts
+/// compact summaries exported by `gh api` adapters, not the full nested
+/// GitHub API payload.
+pub fn parse_github_actions_job(raw: &Value) -> Result<VerificationEvidence, ParseError> {
+    let object = checked_object(raw, GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1)?;
+    let raw_status = string_field_any(object, &["conclusion", "status", "outcome"]);
+    let exit_code = i64_field_any(object, &["exit_code", "exitCode"]);
+    let degraded_codes = combined_degraded_codes(object);
+    let error_codes = string_arrays_any(object, &["error_codes", "errorCodes"]);
+    let environment_blocker_codes = environment_blockers_from(object, &degraded_codes);
+    let status =
+        classify_github_status(raw_status.as_deref(), exit_code, &environment_blocker_codes);
+
+    Ok(VerificationEvidence {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1,
+        source: EvidenceSource::GitHubActionsJob,
+        status,
+        bead_id: string_field_any(object, &["bead_id", "beadId"]),
+        command: github_action_label(object),
+        command_kind: string_field_any(object, &["command_kind", "commandKind"])
+            .or_else(|| Some("github_actions_check_run".to_owned())),
+        command_hash: string_field_any(object, &["command_hash", "commandHash"]),
+        worker_id: string_field_any(
+            object,
+            &["runner_name", "runnerName", "runner_id", "runnerId"],
+        ),
+        exit_code,
+        elapsed_ms: u64_field_any(
+            object,
+            &["elapsed_ms", "elapsedMs", "run_duration_ms", "duration_ms"],
+        ),
+        git_head: string_field_any(object, &["head_sha", "headSha", "git_head", "gitHead"]),
+        git_tree: string_field_any(object, &["git_tree", "gitTree"]),
+        dirty_status_hash: string_field_any(object, &["dirty_status_hash", "dirtyStatusHash"]),
+        verification_attribution: string_field_any(
+            object,
+            &[
+                "verification_attribution",
+                "verificationAttribution",
+                "html_url",
+                "htmlUrl",
+            ],
+        ),
+        degraded_codes,
+        error_codes,
+        environment_blocker_codes,
+        first_error: first_error_from_fields(object),
+        raw_status,
+    })
+}
+
+/// Parse a local static-only proof record. Static checks are deliberately
+/// parser-only here: the normalizer never launches `rustfmt`, `clippy`,
+/// UBS, or Git itself.
+pub fn parse_static_check(raw: &Value) -> Result<VerificationEvidence, ParseError> {
+    let object = checked_object(raw, STATIC_CHECK_SCHEMA_V1)?;
+    let raw_status = string_field_any(object, &["status", "outcome"]);
+    let exit_code = i64_field_any(object, &["exit_code", "exitCode", "rc"]);
+    let degraded_codes = combined_degraded_codes(object);
+    let error_codes = string_arrays_any(object, &["error_codes", "errorCodes"]);
+    let environment_blocker_codes = environment_blockers_from(object, &degraded_codes);
+    let status =
+        classify_generic_status(raw_status.as_deref(), exit_code, &environment_blocker_codes);
+
+    Ok(VerificationEvidence {
+        schema: VERIFICATION_EVIDENCE_SCHEMA_V1,
+        source: EvidenceSource::StaticCheck,
+        status,
+        bead_id: string_field_any(object, &["bead_id", "beadId"]),
+        command: command_from_script_event(object),
+        command_kind: string_field_any(
+            object,
+            &[
+                "command_kind",
+                "commandKind",
+                "check_kind",
+                "checkKind",
+                "tool",
+            ],
+        ),
+        command_hash: string_field_any(object, &["command_hash", "commandHash"]),
+        worker_id: string_field_any(object, &["worker_id", "workerId", "host", "runner_name"]),
+        exit_code,
+        elapsed_ms: u64_field_any(object, &["elapsed_ms", "elapsedMs", "duration_ms"]),
+        git_head: string_field_any(object, &["git_head", "gitHead"]),
+        git_tree: string_field_any(object, &["git_tree", "gitTree"]),
+        dirty_status_hash: string_field_any(object, &["dirty_status_hash", "dirtyStatusHash"]),
+        verification_attribution: string_field_any(
+            object,
+            &["verification_attribution", "verificationAttribution"],
+        ),
+        degraded_codes,
+        error_codes,
+        environment_blocker_codes,
+        first_error: first_error_from_fields(object),
+        raw_status,
+    })
+}
+
 fn classify_rch_status(
     raw_status: Option<&str>,
     exit_code: Option<i64>,
@@ -348,6 +507,98 @@ fn classify_rch_status(
     }
 }
 
+fn classify_generic_status(
+    raw_status: Option<&str>,
+    exit_code: Option<i64>,
+    environment_blockers: &[String],
+) -> EvidenceStatus {
+    if !environment_blockers.is_empty() {
+        return EvidenceStatus::EnvironmentBlocked;
+    }
+    if let Some(raw) = raw_status {
+        match normalized_status(raw).as_str() {
+            "pass" | "passed" | "success" | "successful" | "ok" | "remote_pass" => {
+                return EvidenceStatus::Passed;
+            }
+            "environment_blocked"
+            | "blocked"
+            | "skipped"
+            | "cancelled"
+            | "canceled"
+            | "timed_out"
+            | "timeout"
+            | "action_required"
+            | "queued"
+            | "pending"
+            | "in_progress"
+            | "neutral"
+            | "rch_environment_failure"
+            | "source_state_refused" => {
+                return EvidenceStatus::EnvironmentBlocked;
+            }
+            "fail" | "failed" | "failure" | "error" | "failed_in_code" | "remote_failure"
+            | "assert_fail" | "test_failed" => return EvidenceStatus::FailedInCode,
+            _ => {}
+        }
+    }
+    match exit_code {
+        Some(0) => EvidenceStatus::Passed,
+        Some(_) => EvidenceStatus::FailedInCode,
+        None => EvidenceStatus::FailedInCode,
+    }
+}
+
+fn classify_github_status(
+    raw_status: Option<&str>,
+    exit_code: Option<i64>,
+    environment_blockers: &[String],
+) -> EvidenceStatus {
+    if !environment_blockers.is_empty() {
+        return EvidenceStatus::EnvironmentBlocked;
+    }
+    if let Some(raw) = raw_status {
+        match normalized_status(raw).as_str() {
+            "success" | "passed" | "pass" => return EvidenceStatus::Passed,
+            "failure" | "failed" | "error" => return EvidenceStatus::FailedInCode,
+            "cancelled" | "canceled" | "timed_out" | "timeout" | "action_required" | "skipped"
+            | "neutral" | "queued" | "pending" | "in_progress" | "startup_failure" => {
+                return EvidenceStatus::EnvironmentBlocked;
+            }
+            _ => {}
+        }
+    }
+    classify_generic_status(raw_status, exit_code, environment_blockers)
+}
+
+fn normalized_status(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|ch| match ch {
+            '-' | ' ' => '_',
+            _ => ch.to_ascii_lowercase(),
+        })
+        .collect()
+}
+
+fn checked_object<'a>(
+    raw: &'a Value,
+    expected_schema: &'static str,
+) -> Result<&'a serde_json::Map<String, Value>, ParseError> {
+    let object = raw.as_object().ok_or(ParseError::NotAnObject)?;
+    let schema = object
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or(ParseError::MissingSchema)?;
+    if schema != expected_schema {
+        return Err(ParseError::UnexpectedSchema {
+            found: schema.to_owned(),
+            expected: expected_schema,
+        });
+    }
+    Ok(object)
+}
+
 fn string_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     object
         .get(key)
@@ -370,6 +621,181 @@ fn string_array(object: &serde_json::Map<String, Value>, key: &str) -> Vec<Strin
         .unwrap_or_default()
 }
 
+fn nested_fields(
+    object: &serde_json::Map<String, Value>,
+) -> Option<&serde_json::Map<String, Value>> {
+    object.get("fields").and_then(Value::as_object)
+}
+
+fn value_field<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a Value> {
+    object
+        .get(key)
+        .or_else(|| nested_fields(object).and_then(|fields| fields.get(key)))
+}
+
+fn value_field_any<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<&'a Value> {
+    keys.iter().find_map(|key| value_field(object, key))
+}
+
+fn string_field_from_fields(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    nested_fields(object)
+        .and_then(|fields| fields.get(key))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|s| !s.is_empty())
+}
+
+fn string_field_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value_field(object, key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+fn i64_field_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    value_field_any(object, keys).and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|n| i64::try_from(n).ok()))
+            .or_else(|| value.as_f64().map(|n| n as i64))
+            .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+    })
+}
+
+fn u64_field_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    value_field_any(object, keys).and_then(|value| {
+        value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .map(|n| n.max(0.0) as u64)
+                .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
+    })
+}
+
+fn string_arrays_any(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    let mut values = Vec::new();
+    for key in keys {
+        for source in [
+            object.get(*key),
+            nested_fields(object).and_then(|fields| fields.get(*key)),
+        ] {
+            if let Some(array) = source.and_then(Value::as_array) {
+                for value in array.iter().filter_map(Value::as_str) {
+                    push_unique(&mut values, value.to_owned());
+                }
+            }
+        }
+    }
+    values
+}
+
+fn combined_degraded_codes(object: &serde_json::Map<String, Value>) -> Vec<String> {
+    string_arrays_any(
+        object,
+        &[
+            "degraded_codes",
+            "degradedCodes",
+            "source_state_degraded_codes",
+            "sourceStateDegradedCodes",
+            "worker_state_degraded_codes",
+            "workerStateDegradedCodes",
+        ],
+    )
+}
+
+fn environment_blockers_from(
+    object: &serde_json::Map<String, Value>,
+    degraded_codes: &[String],
+) -> Vec<String> {
+    let mut blockers = string_arrays_any(
+        object,
+        &["environment_blocker_codes", "environmentBlockerCodes"],
+    );
+    for code in degraded_codes {
+        if ENVIRONMENT_BLOCKER_DEGRADED_CODES.contains(&code.as_str()) {
+            push_unique(&mut blockers, code.clone());
+        }
+    }
+    blockers
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn first_error_from_fields(object: &serde_json::Map<String, Value>) -> FirstError {
+    let first_error_object = value_field(object, "first_error")
+        .or_else(|| value_field(object, "firstError"))
+        .and_then(Value::as_object);
+    let object_value = |key: &str| first_error_object.and_then(|fields| fields.get(key));
+
+    FirstError {
+        file: string_field_any(object, &["first_error_file", "firstErrorFile"]).or_else(|| {
+            object_value("file")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+        }),
+        line: u64_field_any(object, &["first_error_line", "firstErrorLine"]).or_else(|| {
+            object_value("line").and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
+        }),
+        message: string_field_any(object, &["first_error_message", "firstErrorMessage"]).or_else(
+            || {
+                object_value("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .filter(|s| !s.is_empty())
+            },
+        ),
+    }
+}
+
+fn command_from_script_event(object: &serde_json::Map<String, Value>) -> Option<String> {
+    string_field_any(
+        object,
+        &["command_text", "commandText", "command_line", "commandLine"],
+    )
+    .or_else(|| value_field_any(object, &["args", "argv"]).and_then(command_from_array))
+    .or_else(|| string_field_any(object, &["command"]))
+}
+
+fn command_from_array(value: &Value) -> Option<String> {
+    let joined = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn github_action_label(object: &serde_json::Map<String, Value>) -> Option<String> {
+    if let Some(command) = string_field_any(object, &["command"]) {
+        return Some(command);
+    }
+    if let Some(workflow) = string_field_any(object, &["workflow", "workflow_name", "workflowName"])
+    {
+        let job = string_field_any(object, &["job", "job_name", "jobName", "name"]);
+        return Some(match job {
+            Some(job) => format!("{workflow} / {job}"),
+            None => workflow,
+        });
+    }
+    string_field_any(object, &["name"])
+}
+
 /// Render a Beads-ready Markdown bullet list summary. The format matches
 /// the style other agents already paste into bead comments so consumers
 /// (closeout playbook, completion-audit) can read either prose-by-human or
@@ -380,27 +806,29 @@ pub fn compact_summary(evidence: &VerificationEvidence) -> String {
     let _ = writeln!(
         out,
         "Verification evidence: `{}` => `{}`.",
-        evidence
-            .command
-            .as_deref()
-            .unwrap_or(evidence.command_kind.as_deref().unwrap_or("(unspecified)")),
+        inline_code(
+            evidence
+                .command
+                .as_deref()
+                .unwrap_or(evidence.command_kind.as_deref().unwrap_or("(unspecified)"))
+        ),
         evidence.status.as_str()
     );
     if let Some(bead) = evidence.bead_id.as_deref() {
-        let _ = writeln!(out, "- bead_id: `{bead}`");
+        let _ = writeln!(out, "- bead_id: `{}`", inline_code(bead));
     }
     let _ = writeln!(out, "- source: `{}`", evidence.source.as_str());
     if let Some(raw_status) = evidence.raw_status.as_deref() {
-        let _ = writeln!(out, "- raw_status: `{raw_status}`");
+        let _ = writeln!(out, "- raw_status: `{}`", inline_code(raw_status));
     }
     if let Some(kind) = evidence.command_kind.as_deref() {
-        let _ = writeln!(out, "- command_kind: `{kind}`");
+        let _ = writeln!(out, "- command_kind: `{}`", inline_code(kind));
     }
     if let Some(hash) = evidence.command_hash.as_deref() {
-        let _ = writeln!(out, "- command_hash: `{hash}`");
+        let _ = writeln!(out, "- command_hash: `{}`", inline_code(hash));
     }
     if let Some(worker) = evidence.worker_id.as_deref() {
-        let _ = writeln!(out, "- worker_id: `{worker}`");
+        let _ = writeln!(out, "- worker_id: `{}`", inline_code(worker));
     }
     if let Some(exit) = evidence.exit_code {
         let _ = writeln!(out, "- exit_code: `{exit}`");
@@ -409,7 +837,7 @@ pub fn compact_summary(evidence: &VerificationEvidence) -> String {
         let _ = writeln!(out, "- elapsed_ms: `{ms}`");
     }
     if let Some(attrib) = evidence.verification_attribution.as_deref() {
-        let _ = writeln!(out, "- verification_attribution: `{attrib}`");
+        let _ = writeln!(out, "- verification_attribution: `{}`", inline_code(attrib));
     }
     if !evidence.environment_blocker_codes.is_empty() {
         let _ = writeln!(
@@ -438,7 +866,11 @@ pub fn compact_summary(evidence: &VerificationEvidence) -> String {
             .line
             .map(|n| format!(":{n}"))
             .unwrap_or_default();
-        let _ = writeln!(out, "- first_error: `{file}{line}`");
+        let _ = writeln!(
+            out,
+            "- first_error: `{}`",
+            inline_code(&format!("{file}{line}"))
+        );
     }
     out
 }
@@ -446,9 +878,25 @@ pub fn compact_summary(evidence: &VerificationEvidence) -> String {
 fn backtick_list(values: &[String]) -> String {
     values
         .iter()
-        .map(|value| format!("`{value}`"))
+        .map(|value| format!("`{}`", inline_code(value)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn inline_code(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|ch| match ch {
+            '`' | '$' | '(' | ')' | '<' | '>' | '|' | ';' | '&' | '\n' | '\r' => '_',
+            _ if ch.is_control() => '_',
+            _ => ch,
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(test)]

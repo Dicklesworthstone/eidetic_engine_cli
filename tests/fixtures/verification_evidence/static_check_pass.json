@@ -1,0 +1,14 @@
+{
+  "schema": "ee.static_check.v1",
+  "bead_id": "bd-1nxz4.5",
+  "tool": "rustfmt_check",
+  "command": "rustfmt +nightly --edition 2024 --check src/obs/verification_evidence.rs tests/verification_evidence_parsers.rs",
+  "command_hash": "blake3:rustfmt-static",
+  "status": "passed",
+  "exit_code": 0,
+  "elapsed_ms": 1200,
+  "git_head": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+  "degraded_codes": [],
+  "error_codes": [],
+  "verification_attribution": "CalmBay"
+}

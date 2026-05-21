@@ -150,6 +150,80 @@
         "message": "expected struct, got enum"
       },
       "rawStatus": "remote_failure"
+    },
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "verify_script",
+      "status": "environment_blocked",
+      "beadId": "bd-1nxz4.5",
+      "command": "cargo test --test verification_evidence_parsers -- --nocapture",
+      "commandKind": "command_end",
+      "commandHash": "blake3:rch-e327-focused-test",
+      "workerId": null,
+      "exitCode": 1,
+      "elapsedMs": 32700,
+      "gitHead": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+      "gitTree": "tree:verification-evidence-fixture",
+      "dirtyStatusHash": "dirty:none",
+      "verificationAttribution": "CalmBay",
+      "degradedCodes": [
+        "rch_verify_remote_command_failed",
+        "rch_verify_topology_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing"
+      ],
+      "errorCodes": ["RCH-E327"],
+      "environmentBlockerCodes": [
+        "rch_verify_topology_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing"
+      ],
+      "rawStatus": "rch_environment_failure"
+    },
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "github_actions_job",
+      "status": "failed_in_code",
+      "beadId": null,
+      "command": "ci / verification_evidence_parsers",
+      "commandKind": "github_actions_check_run",
+      "commandHash": "blake3:github-actions-verification",
+      "workerId": "ubuntu-latest",
+      "exitCode": null,
+      "elapsedMs": 91000,
+      "gitHead": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+      "gitTree": null,
+      "dirtyStatusHash": null,
+      "verificationAttribution": "https://github.example/eidetic-engine/actions/runs/18446744073709551615",
+      "degradedCodes": [],
+      "errorCodes": ["test_failure"],
+      "environmentBlockerCodes": [],
+      "firstError": {
+        "file": "tests/verification_evidence_parsers.rs",
+        "line": 144,
+        "message": "assertion failed: environment blockers were empty"
+      },
+      "rawStatus": "failure"
+    },
+    {
+      "schema": "ee.verification_evidence.v1",
+      "source": "static_check",
+      "status": "passed",
+      "beadId": "bd-1nxz4.5",
+      "command": "rustfmt +nightly --edition 2024 --check src/obs/verification_evidence.rs tests/verification_evidence_parsers.rs",
+      "commandKind": "rustfmt_check",
+      "commandHash": "blake3:rustfmt-static",
+      "workerId": null,
+      "exitCode": 0,
+      "elapsedMs": 1200,
+      "gitHead": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+      "gitTree": null,
+      "dirtyStatusHash": null,
+      "verificationAttribution": "CalmBay",
+      "degradedCodes": [],
+      "errorCodes": [],
+      "environmentBlockerCodes": [],
+      "rawStatus": "passed"
     }
   ]
 }

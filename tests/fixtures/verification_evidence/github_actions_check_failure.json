@@ -1,0 +1,22 @@
+{
+  "schema": "ee.github_actions.check_run.v1",
+  "workflow": "ci",
+  "name": "verification_evidence_parsers",
+  "status": "completed",
+  "conclusion": "failure",
+  "run_id": "18446744073709551615",
+  "runner_name": "ubuntu-latest",
+  "head_sha": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+  "html_url": "https://github.example/eidetic-engine/actions/runs/18446744073709551615",
+  "command_hash": "blake3:github-actions-verification",
+  "elapsed_ms": 91000,
+  "degraded_codes": [],
+  "error_codes": [
+    "test_failure"
+  ],
+  "first_error": {
+    "file": "tests/verification_evidence_parsers.rs",
+    "line": 144,
+    "message": "assertion failed: environment blockers were empty"
+  }
+}

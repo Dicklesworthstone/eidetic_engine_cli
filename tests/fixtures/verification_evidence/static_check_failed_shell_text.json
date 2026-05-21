@@ -1,0 +1,18 @@
+{
+  "schema": "ee.static_check.v1",
+  "bead_id": "bd-1nxz4.5",
+  "tool": "git_diff_check",
+  "command": "git diff --check $(touch /tmp/ee-owned)",
+  "command_hash": "blake3:diff-check-static",
+  "status": "failed",
+  "exit_code": 1,
+  "elapsed_ms": 85,
+  "first_error_file": "src/obs/verification_evidence.rs",
+  "first_error_line": 742,
+  "first_error_message": "trailing whitespace",
+  "degraded_codes": [],
+  "error_codes": [
+    "static_check_failed"
+  ],
+  "verification_attribution": "CalmBay"
+}

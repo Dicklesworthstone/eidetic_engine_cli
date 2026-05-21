@@ -1,0 +1,39 @@
+{
+  "schema": "ee.test_event.v1",
+  "ts": "2026-05-21T20:14:00Z",
+  "test_id": "bd-1nxz4.5",
+  "kind": "command_end",
+  "command": "cargo",
+  "args": [
+    "cargo",
+    "test",
+    "--test",
+    "verification_evidence_parsers",
+    "--",
+    "--nocapture"
+  ],
+  "stdout_hash": "blake3:stdout-rch-e327",
+  "stderr_excerpt": "worker-preflight-fail + local-fallback-refused",
+  "exit_code": 1,
+  "elapsed_ms": 32700.0,
+  "fields": {
+    "bead_id": "bd-1nxz4.5",
+    "status": "rch_environment_failure",
+    "command_hash": "blake3:rch-e327-focused-test",
+    "git_head": "308e122e5e44b7b1f8c9d7101b5f5edb5ad1e000",
+    "git_tree": "tree:verification-evidence-fixture",
+    "dirty_status_hash": "dirty:none",
+    "verification_attribution": "CalmBay",
+    "source_state_degraded_codes": [
+      "rch_verify_remote_command_failed"
+    ],
+    "worker_state_degraded_codes": [
+      "rch_verify_topology_blocked",
+      "rch_verify_local_fallback_refused",
+      "rch_verify_remote_marker_missing"
+    ],
+    "error_codes": [
+      "RCH-E327"
+    ]
+  }
+}
