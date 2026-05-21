@@ -27,8 +27,9 @@ use sha2::{Digest, Sha256};
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::swarm_brief::{
-    collect_swarm_brief_summary, render_swarm_brief_summary_for_handoff,
-    swarm_brief_summary_evidence_id,
+    collect_swarm_brief_summary, collect_swarm_incident_summary,
+    render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
+    swarm_brief_summary_evidence_id, swarm_incident_summary_evidence_id,
 };
 use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
@@ -439,6 +440,7 @@ pub struct PreviewReport {
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
+    pub swarm_incident_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -477,6 +479,7 @@ impl PreviewReport {
             active_focus: None,
             task_frame: None,
             swarm_brief_summary: None,
+            swarm_incident_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -658,6 +661,7 @@ pub struct CreateReport {
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
+    pub swarm_incident_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -686,6 +690,7 @@ impl CreateReport {
             active_focus: None,
             task_frame: None,
             swarm_brief_summary: None,
+            swarm_incident_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1045,6 +1050,7 @@ pub struct ResumeReport {
     pub active_focus: Option<serde_json::Value>,
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
+    pub swarm_incident_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1229,6 +1235,7 @@ impl ResumeReport {
             active_focus: None,
             task_frame: None,
             swarm_brief_summary: None,
+            swarm_incident_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -2560,6 +2567,72 @@ fn add_swarm_brief_summary_to_resume(report: &mut ResumeReport, summary: &serde_
     }
 }
 
+fn add_swarm_incident_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let counts = summary.get("counts").unwrap_or(&serde_json::Value::Null);
+    let incidents = counts
+        .get("summarizedIncidentCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let omitted = counts
+        .get("omittedIncidentCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let malformed = counts
+        .get("malformedIncidentCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let redaction_status = summary
+        .get("redactionStatus")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let posture = format!(
+        "Embedded swarm incident summary: status={status}, incidents={incidents}, omitted={omitted}, malformed={malformed}, summary_hash={hash}, redaction_status={redaction_status}; raw_logs_included=false; raw_commands_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    let evidence_id = swarm_incident_summary_evidence_id(summary);
+    report.artifact_pointers.push(ArtifactPointer {
+        id: evidence_id,
+        path: None,
+        description:
+            "Redacted swarm incident replay summary embedded in the handoff capsule; fixture paths and support-bundle artifacts are referenced by hashed provenance."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Replay the relevant committed incident fixture before acting on incident context.",
+        )
+        .with_reason("Embedded incident summaries are compact evidence, not live repair execution.")
+        .with_command("ee diag incident --fixture <path> --json"),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            report.degradations.push(
+                DegradationInfo::new(
+                    format!("swarm_incident_{code}"),
+                    "Embedded swarm incident summary reported a degraded incident condition.",
+                )
+                .with_next_action("ee diag incident --fixture <path> --json"),
+            );
+        }
+    }
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -2614,6 +2687,25 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         confidence: swarm_brief_section.confidence.as_str().to_owned(),
         evidence_count: swarm_brief_section.evidence_ids.len(),
         token_estimate: swarm_brief_section.token_estimate,
+    });
+
+    let swarm_incident_summary = collect_swarm_incident_summary(&options.workspace);
+    let swarm_incident_evidence = vec![swarm_incident_summary_evidence_id(&swarm_incident_summary)];
+    let swarm_incident_section =
+        CapsuleSection::new("swarm_incident_summary", "Swarm Incident Summary")
+            .with_content(render_swarm_incident_summary_for_handoff(
+                &swarm_incident_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(swarm_incident_evidence.clone());
+    report.evidence_ids.extend(swarm_incident_evidence);
+    report.swarm_incident_summary = Some(swarm_incident_summary);
+    report.planned_sections.push(PlannedSection {
+        id: swarm_incident_section.id.clone(),
+        title: swarm_incident_section.title.clone(),
+        confidence: swarm_incident_section.confidence.as_str().to_owned(),
+        evidence_count: swarm_incident_section.evidence_ids.len(),
+        token_estimate: swarm_incident_section.token_estimate,
     });
 
     let singleflight_posture = singleflight_posture_report();
@@ -2792,6 +2884,21 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(swarm_brief_evidence.len());
     report.swarm_brief_summary = Some(swarm_brief_summary.clone());
 
+    let swarm_incident_summary = collect_swarm_incident_summary(&options.workspace);
+    let swarm_incident_evidence = vec![swarm_incident_summary_evidence_id(&swarm_incident_summary)];
+    sections.push(
+        CapsuleSection::new("swarm_incident_summary", "Swarm Incident Summary")
+            .with_content(render_swarm_incident_summary_for_handoff(
+                &swarm_incident_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(swarm_incident_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(swarm_incident_evidence.len());
+    report.swarm_incident_summary = Some(swarm_incident_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -2853,6 +2960,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "active_focus": active_focus,
         "task_frame": task_frame_json,
         "swarm_brief_summary": swarm_brief_summary,
+        "swarm_incident_summary": swarm_incident_summary,
         "created_at": created_at,
     });
     let capsule_content = sign_capsule_content(
@@ -3188,6 +3296,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.swarm_brief_summary.clone() {
         add_swarm_brief_summary_to_resume(&mut report, &summary);
+    }
+
+    report.swarm_incident_summary = capsule
+        .get("swarm_incident_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.swarm_incident_summary.clone() {
+        add_swarm_incident_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
@@ -5584,6 +5700,76 @@ memories_revised = 3
                 .any(|action| action.description.contains("Review high-risk symbols")),
             "resume should tell agents to review high-risk symbols before edits",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_incident_summary_without_raw_fixture_details() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.swarm_incident_summary.v1",
+            "status": "available",
+            "summaryHash": "blake3:abcdef1234567890",
+            "redactionStatus": "scenario_ids_status_counts_hashes_only_no_raw_logs_no_mail_bodies_no_commands_no_paths",
+            "counts": {
+                "summarizedIncidentCount": 1,
+                "omittedIncidentCount": 0,
+                "malformedIncidentCount": 0
+            },
+            "degradedCodes": ["agent_mail_unavailable", "rch_worker_topology_blocked"],
+            "redaction": {
+                "rawLogsIncluded": false,
+                "mailBodiesIncluded": false,
+                "commandsIncluded": false,
+                "commandArgsIncluded": false,
+                "filesystemPathsIncluded": false,
+                "workerHostnamesIncluded": false
+            }
+        });
+        let mut report =
+            ResumeReport::new("hcap_incident".to_owned(), PathBuf::from("handoff.json"));
+
+        add_swarm_incident_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded swarm incident summary: status=available"),
+            "resume status includes incident posture",
+        )?;
+        ensure(
+            status.contains("raw_logs_included=false")
+                && status.contains("raw_commands_included=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status records compact redaction and no-live-action posture",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("swarm_incident_summary:")),
+            "resume artifact pointers include incident summary evidence id",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee diag incident --fixture <path> --json")
+            }),
+            "resume next actions include incident replay command",
+        )?;
+        for forbidden in [
+            "/Users/alice",
+            "raw mail body",
+            "rm -rf",
+            "--token",
+            "worker-host",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("incident handoff status leaked forbidden text {forbidden:?}"),
+            )?;
+        }
         Ok(())
     }
 

@@ -76,6 +76,7 @@ const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
+const SWARM_INCIDENT_SUMMARY_FILE: &str = "swarm_incident_summary.json";
 const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
 const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
@@ -277,6 +278,7 @@ struct CollectedDiagnostics {
     performance_explain_samples_json: String,
     pack_replay_summary_json: String,
     swarm_brief_summary_json: String,
+    swarm_incident_summary_json: String,
     coordination_fallback_summary_json: String,
     singleflight_posture_json: String,
     qos_lane_summary_json: String,
@@ -388,6 +390,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             SWARM_BRIEF_SUMMARY_FILE,
             &diagnostics.swarm_brief_summary_json,
+        ),
+        (
+            SWARM_INCIDENT_SUMMARY_FILE,
+            &diagnostics.swarm_incident_summary_json,
         ),
         (
             COORDINATION_FALLBACK_SUMMARY_FILE,
@@ -868,6 +874,7 @@ fn collect_diagnostics(
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
+    let swarm_incident_summary_json = swarm_incident_summary_json(workspace);
     let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
     let singleflight_posture_json = singleflight_posture_json();
     let qos_lane_summary_json = qos_lane_summary_json(workspace);
@@ -891,6 +898,7 @@ fn collect_diagnostics(
         performance_explain_samples_json,
         pack_replay_summary_json,
         swarm_brief_summary_json,
+        swarm_incident_summary_json,
         coordination_fallback_summary_json,
         singleflight_posture_json,
         qos_lane_summary_json,
@@ -1619,6 +1627,12 @@ fn pack_replay_summary_json(workspace: &Path) -> String {
 
 fn swarm_brief_summary_json(workspace: &Path) -> String {
     stable_json(&super::swarm_brief::collect_swarm_brief_summary(workspace))
+}
+
+fn swarm_incident_summary_json(workspace: &Path) -> String {
+    stable_json(&super::swarm_brief::collect_swarm_incident_summary(
+        workspace,
+    ))
 }
 
 fn coordination_fallback_summary_json(workspace: &Path) -> String {
@@ -2976,6 +2990,7 @@ fn planned_files() -> Vec<String> {
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
         SWARM_BRIEF_SUMMARY_FILE.to_owned(),
+        SWARM_INCIDENT_SUMMARY_FILE.to_owned(),
         COORDINATION_FALLBACK_SUMMARY_FILE.to_owned(),
         SINGLEFLIGHT_POSTURE_FILE.to_owned(),
         QOS_LANE_SUMMARY_FILE.to_owned(),
@@ -4077,6 +4092,7 @@ mod tests {
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
             PACK_REPLAY_SUMMARY_FILE,
             SWARM_BRIEF_SUMMARY_FILE,
+            SWARM_INCIDENT_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
             QOS_LANE_SUMMARY_FILE,
             LOCAL_CARGO_TRIPWIRE_FILE,
@@ -4088,6 +4104,121 @@ mod tests {
                 "planned support-bundle files must include {required}"
             );
         }
+    }
+
+    #[test]
+    fn swarm_incident_summary_redacts_replay_evidence_for_support_and_handoff() -> TestResult {
+        let workspace = unique_test_path("swarm-incident-summary");
+        let fixture_dir = workspace
+            .join("tests")
+            .join("fixtures")
+            .join("swarm_incidents");
+        fs::create_dir_all(&fixture_dir)
+            .map_err(|error| format!("failed to create incident fixture dir: {error}"))?;
+
+        let fixture = json!({
+            "schema": "ee.swarm_incident.v1",
+            "scenarioId": "redaction_fixture",
+            "fixedClock": "2026-05-21T00:00:00Z",
+            "purpose": "Exercise /Users/alice/private incident evidence without leaking it.",
+            "substrates": {
+                "agentMail": {"status": "unavailable", "evidence": ["mail body: secret"], "degradedCodes": ["agent_mail_unavailable"]},
+                "beads": {"status": "ok", "evidence": [], "degradedCodes": []},
+                "rch": {"status": "blocked", "evidence": ["worker host alpha.internal"], "degradedCodes": ["rch_worker_topology_blocked"]},
+                "disk": {"status": "degraded", "evidence": [], "degradedCodes": ["disk_pressure_high"]},
+                "hotPath": {"status": "ok", "evidence": [], "degradedCodes": []}
+            },
+            "expectedDegraded": [
+                {"code": "agent_mail_unavailable", "severity": "medium", "surface": "diag incident", "reason": "raw mail body omitted"},
+                {"code": "rch_worker_topology_blocked", "severity": "warning", "surface": "diag incident", "reason": "raw worker hostname omitted"}
+            ],
+            "expectedRecoveryActions": [
+                {
+                    "priority": 1,
+                    "kind": "observe",
+                    "summary": "Capture a redacted incident note for /Users/alice/private/workspace.",
+                    "command": "rm -rf /Users/alice/private/workspace --token sk-test-redaction",
+                    "manualStep": "Open /Users/alice/private/mail.txt and redact the body.",
+                    "evidence": ["RCH-E327", "bd-17c65.10.17.1.2"],
+                    "destructive": false,
+                    "preconditions": ["human approval"]
+                }
+            ],
+            "redactionExpectations": {"pathPolicy": "redact_home", "secretPolicy": "no_secrets"},
+            "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
+            "artifacts": [
+                {"path": "/Users/alice/private/raw-log.txt", "kind": "fixture-log"},
+                {"path": "tests/fixtures/swarm_incidents/redaction_fixture.json", "kind": "fixture"}
+            ]
+        });
+        fs::write(
+            fixture_dir.join("redaction_fixture.json"),
+            stable_json(&fixture),
+        )
+        .map_err(|error| format!("failed to write incident fixture: {error}"))?;
+
+        let summary = crate::core::swarm_brief::collect_swarm_incident_summary(&workspace);
+        let encoded = stable_json(&summary);
+
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!(
+                crate::core::swarm_brief::SWARM_INCIDENT_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(summary.pointer("/status"), Some(&json!("available")));
+        assert_eq!(
+            summary.pointer("/counts/summarizedIncidentCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/incidents/0/scenarioId"),
+            Some(&json!("redaction_fixture"))
+        );
+        assert_eq!(
+            summary.pointer("/incidents/0/substratePosture/rch"),
+            Some(&json!("blocked"))
+        );
+        assert_eq!(
+            summary.pointer("/incidents/0/recoveryActionSummaries/0/commandIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            summary
+                .pointer("/incidents/0/recoveryActionSummaries/0/evidenceHashes/0")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "summary must keep evidence hashes for provenance"
+        );
+        assert!(
+            summary
+                .pointer("/incidents/0/outputHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "summary must expose deterministic replay output hash"
+        );
+        assert_eq!(summary.pointer("/withinSizeBudget"), Some(&json!(true)));
+        for forbidden in [
+            "/Users/alice",
+            "rm -rf",
+            "--token",
+            "sk-test-redaction",
+            "mail body: secret",
+            "Open /Users/alice",
+            "raw-log.txt",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "incident support summary leaked forbidden text {forbidden:?}: {encoded}"
+            );
+        }
+
+        let rendered =
+            crate::core::swarm_brief::render_swarm_incident_summary_for_handoff(&summary);
+        assert!(rendered.contains("Swarm incident summary: status=available"));
+        assert!(rendered.contains("raw logs"));
+        assert!(!rendered.contains("rm -rf"));
+        Ok(())
     }
 
     #[test]
@@ -5086,6 +5217,12 @@ mod tests {
                 .contains(&SWARM_BRIEF_SUMMARY_FILE.to_owned()),
             "support bundle must include swarm brief summary"
         );
+        assert!(
+            report
+                .files_collected
+                .contains(&SWARM_INCIDENT_SUMMARY_FILE.to_owned()),
+            "support bundle must include swarm incident summary"
+        );
         let bundle_dir = report
             .output_path
             .clone()
@@ -5191,6 +5328,36 @@ mod tests {
         assert!(
             swarm_summary.pointer("/fileSurfaceRiskSummary").is_some(),
             "swarm brief summary must include the compact ownership-risk section"
+        );
+        let incident_summary_text =
+            fs::read_to_string(bundle_dir.join(SWARM_INCIDENT_SUMMARY_FILE))
+                .map_err(|error| format!("failed to read swarm incident summary: {error}"))?;
+        let incident_summary: Value = serde_json::from_str(&incident_summary_text)
+            .map_err(|error| format!("swarm incident summary must parse: {error}"))?;
+        assert_eq!(
+            incident_summary.pointer("/schema"),
+            Some(&json!(
+                super::super::swarm_brief::SWARM_INCIDENT_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            incident_summary.pointer("/redaction/rawLogsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            incident_summary.pointer("/redaction/mailBodiesIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            incident_summary.pointer("/redaction/commandArgsIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            incident_summary
+                .pointer("/summaryHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "swarm incident summary must hash the compact incident projection"
         );
 
         Ok(())

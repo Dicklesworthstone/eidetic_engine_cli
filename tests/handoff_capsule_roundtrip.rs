@@ -112,6 +112,12 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             == Some("ee.support_bundle.swarm_brief_summary.v1"),
         "create stdout includes swarm brief summary schema",
     )?;
+    ensure(
+        json.pointer("/swarm_incident_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_incident_summary.v1"),
+        "create stdout includes swarm incident summary schema",
+    )?;
 
     ensure(
         PathBuf::from(&cap).exists(),
@@ -135,9 +141,11 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             .is_some_and(|sections| {
                 sections.iter().any(|section| {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_brief_summary")
+                }) && sections.iter().any(|section| {
+                    section.get("id").and_then(|v| v.as_str()) == Some("swarm_incident_summary")
                 })
             }),
-        "capsule sections include compact swarm brief summary",
+        "capsule sections include compact swarm and incident summaries",
     )?;
     let swarm_summary = capsule_json
         .get("swarm_brief_summary")
@@ -162,6 +170,29 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             .and_then(|v| v.as_str())
             .is_some_and(|hash| hash.starts_with("blake3:")),
         "capsule swarm brief summary includes report hash",
+    )?;
+    let incident_summary = capsule_json
+        .get("swarm_incident_summary")
+        .ok_or_else(|| "capsule missing swarm_incident_summary".to_string())?;
+    ensure(
+        incident_summary.get("schema").and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_incident_summary.v1"),
+        "capsule swarm incident summary schema",
+    )?;
+    ensure(
+        incident_summary.pointer("/redaction/rawLogsIncluded") == Some(&serde_json::json!(false))
+            && incident_summary.pointer("/redaction/mailBodiesIncluded")
+                == Some(&serde_json::json!(false))
+            && incident_summary.pointer("/redaction/commandArgsIncluded")
+                == Some(&serde_json::json!(false)),
+        "capsule swarm incident summary is redaction-safe",
+    )?;
+    ensure(
+        incident_summary
+            .get("summaryHash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "capsule swarm incident summary includes summary hash",
     )?;
     Ok(())
 }
@@ -345,6 +376,12 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
         "resume includes embedded swarm brief summary",
     )?;
     ensure(
+        json.pointer("/swarm_incident_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_incident_summary.v1"),
+        "resume includes embedded swarm incident summary",
+    )?;
+    ensure(
         json.get("artifact_pointers")
             .and_then(|v| v.as_array())
             .is_some_and(|items| {
@@ -355,6 +392,18 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
                 })
             }),
         "resume exposes swarm brief summary artifact pointer",
+    )?;
+    ensure(
+        json.get("artifact_pointers")
+            .and_then(|v| v.as_array())
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id.starts_with("swarm_incident_summary:"))
+                })
+            }),
+        "resume exposes swarm incident summary artifact pointer",
     )?;
     Ok(())
 }

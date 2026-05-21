@@ -30,6 +30,10 @@ pub const SWARM_BRIEF_REDACTION_STATUS: &str = "paths_counts_subjects_only_no_co
 pub const SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_brief_summary.v1";
 pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
     "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings";
+pub const SWARM_INCIDENT_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_incident_summary.v1";
+pub const SWARM_INCIDENT_SUMMARY_REDACTION_STATUS: &str =
+    "scenario_ids_status_counts_hashes_only_no_raw_logs_no_mail_bodies_no_commands_no_paths";
+pub const MAX_SWARM_INCIDENT_SUMMARY_BYTES: usize = 8192;
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
@@ -46,6 +50,10 @@ const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
 pub const RCH_WORKER_PRESSURE_SCHEMA_V1: &str = "ee.rch.worker_pressure.v1";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
 const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
+const MAX_SWARM_INCIDENT_SUMMARY_RECORDS: usize = 8;
+const MAX_SWARM_INCIDENT_DEGRADED_CODES: usize = 8;
+const MAX_SWARM_INCIDENT_RECOVERY_ACTIONS: usize = 4;
+const MAX_SWARM_INCIDENT_ARTIFACT_REFS: usize = 8;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
 
 /// Options used by the internal source collection layer.
@@ -2522,6 +2530,481 @@ pub fn swarm_brief_summary_evidence_id(summary: &Value) -> String {
         .trim_start_matches("blake3:");
     let short_hash = hash.get(..12).unwrap_or(hash);
     format!("swarm_brief_summary:{short_hash}")
+}
+
+/// Collect redaction-safe incident replay summaries from committed synthetic fixtures.
+#[must_use]
+pub fn collect_swarm_incident_summary(workspace: &Path) -> Value {
+    let fixture_dir = workspace
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_incidents");
+    let mut source = json!({
+        "kind": "fixture_directory",
+        "schema": "ee.swarm_incident.v1",
+        "pathIncluded": false,
+        "pathHash": blake3_summary_hash(&fixture_dir.display().to_string()),
+        "supportBundleFile": "swarm_incident_summary.json",
+    });
+    let mut counts = json!({
+        "fixtureCount": 0,
+        "summarizedIncidentCount": 0,
+        "omittedIncidentCount": 0,
+        "malformedIncidentCount": 0,
+    });
+
+    if !fixture_dir.is_dir() {
+        return swarm_incident_summary_value(
+            "fixture_directory_missing",
+            source,
+            counts,
+            Vec::new(),
+        );
+    }
+
+    let Ok(entries) = fs::read_dir(&fixture_dir) else {
+        return swarm_incident_summary_value(
+            "fixture_directory_unreadable",
+            source,
+            counts,
+            Vec::new(),
+        );
+    };
+
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    counts["fixtureCount"] = json!(paths.len());
+
+    let mut incidents = Vec::new();
+    for path in paths {
+        if incidents.len() >= MAX_SWARM_INCIDENT_SUMMARY_RECORDS {
+            increment_summary_count(&mut counts, "omittedIncidentCount");
+            continue;
+        }
+        match summarize_swarm_incident_fixture(&path) {
+            Some(summary) => incidents.push(summary),
+            None => increment_summary_count(&mut counts, "malformedIncidentCount"),
+        }
+    }
+
+    incidents.sort_by(|left, right| {
+        left.get("scenarioId")
+            .and_then(Value::as_str)
+            .cmp(&right.get("scenarioId").and_then(Value::as_str))
+            .then_with(|| {
+                left.get("fixtureHash")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("fixtureHash").and_then(Value::as_str))
+            })
+    });
+    counts["summarizedIncidentCount"] = json!(incidents.len());
+    if counts
+        .get("malformedIncidentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        > 0
+    {
+        source["malformedFixturesIncluded"] = json!(false);
+    }
+
+    let status = if incidents.is_empty() {
+        "no_valid_incident_fixtures"
+    } else {
+        "available"
+    };
+    swarm_incident_summary_value(status, source, counts, incidents)
+}
+
+#[must_use]
+pub fn render_swarm_incident_summary_for_handoff(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let counts = summary.get("counts").unwrap_or(&Value::Null);
+    let summarized = counts
+        .get("summarizedIncidentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let omitted = counts
+        .get("omittedIncidentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let malformed = counts
+        .get("malformedIncidentCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let scenario_ids = summary
+        .get("incidents")
+        .and_then(Value::as_array)
+        .map(|incidents| {
+            incidents
+                .iter()
+                .filter_map(|incident| incident.get("scenarioId").and_then(Value::as_str))
+                .take(4)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let degraded_codes = summary
+        .get("degradedCodes")
+        .and_then(Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(MAX_SWARM_INCIDENT_DEGRADED_CODES)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!(
+            "Swarm incident summary: status={status}, incidents={summarized}, omitted={omitted}, malformed={malformed}."
+        ),
+        format!("Incident summary hash: {hash}."),
+        "Read-only fixture replay evidence; raw logs, mail bodies, commands, command args, and filesystem paths are not embedded.".to_owned(),
+    ];
+    if !scenario_ids.is_empty() {
+        lines.push(format!("Scenario ids: {}.", scenario_ids.join(", ")));
+    }
+    if !degraded_codes.is_empty() {
+        lines.push(format!("Degraded codes: {}.", degraded_codes.join(", ")));
+    }
+    lines.push("Run `ee diag incident --fixture <path> --json` against a committed fixture for full replay details; do not run live repair actions from this summary.".to_owned());
+    lines.join("\n")
+}
+
+#[must_use]
+pub fn swarm_incident_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim_start_matches("blake3:");
+    let short_hash = hash.get(..12).unwrap_or(hash);
+    format!("swarm_incident_summary:{short_hash}")
+}
+
+fn summarize_swarm_incident_fixture(path: &Path) -> Option<Value> {
+    if !fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
+    let fixture: Value = serde_json::from_str(&raw).ok()?;
+    if fixture.get("schema").and_then(Value::as_str) != Some("ee.swarm_incident.v1") {
+        return None;
+    }
+
+    let scenario_id = fixture
+        .get("scenarioId")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let substrate_posture = swarm_incident_substrate_posture(&fixture);
+    let status_counts = swarm_incident_status_counts(&substrate_posture);
+    let dominant_status = swarm_incident_dominant_status(&substrate_posture);
+    let posture = swarm_incident_global_posture(dominant_status);
+    let degraded_codes = swarm_incident_degraded_codes(&fixture);
+    let recovery_action_summaries = swarm_incident_recovery_action_summaries(&fixture);
+    let artifact_refs = swarm_incident_artifact_refs(&fixture);
+    let output_core = json!({
+        "scenarioId": scenario_id,
+        "posture": posture,
+        "dominantStatus": dominant_status,
+        "substratePosture": substrate_posture,
+        "statusCounts": status_counts,
+        "degradedCodes": degraded_codes,
+        "recoveryActionSummaries": recovery_action_summaries,
+        "artifactRefs": artifact_refs,
+    });
+    let output_hash = blake3_summary_hash(&stable_summary_json(&output_core));
+    let fixture_hash = blake3_summary_hash(&stable_summary_json(&redact_summary_value(&fixture)));
+
+    Some(json!({
+        "scenarioId": scenario_id,
+        "fixedClock": fixture.get("fixedClock").and_then(Value::as_str),
+        "purposeIncluded": false,
+        "purposeHash": fixture.get("purpose").and_then(Value::as_str).map(blake3_summary_hash),
+        "fixtureHash": fixture_hash,
+        "outputHash": output_hash,
+        "posture": posture,
+        "dominantStatus": dominant_status,
+        "substratePosture": substrate_posture,
+        "statusCounts": status_counts,
+        "degradedCodes": degraded_codes,
+        "recoveryActionSummaries": recovery_action_summaries,
+        "redactionStatus": SWARM_INCIDENT_SUMMARY_REDACTION_STATUS,
+        "redaction": {
+            "rawLogsIncluded": false,
+            "mailBodiesIncluded": false,
+            "commandsIncluded": false,
+            "commandArgsIncluded": false,
+            "filesystemPathsIncluded": false,
+            "workerHostnamesIncluded": false,
+            "fixturePathsIncluded": false,
+            "allowedHostLabelCount": fixture.pointer("/redactionExpectations/allowedHostLabels").and_then(Value::as_array).map_or(0, Vec::len),
+            "allowedHostLabelsHash": fixture.pointer("/redactionExpectations/allowedHostLabels").map(|labels| blake3_summary_hash(&stable_summary_json(labels))),
+        },
+        "provenance": {
+            "fixture": {
+                "pathIncluded": false,
+                "pathHash": blake3_summary_hash(&path.display().to_string()),
+                "artifactHash": blake3_summary_hash(&raw),
+            },
+            "supportBundleFile": "swarm_incident_summary.json",
+            "artifactRefs": artifact_refs,
+        },
+    }))
+}
+
+fn swarm_incident_summary_value(
+    status: &str,
+    source: Value,
+    mut counts: Value,
+    mut incidents: Vec<Value>,
+) -> Value {
+    loop {
+        counts["summarizedIncidentCount"] = json!(incidents.len());
+        let degraded_codes = swarm_incident_summary_degraded_codes(&incidents);
+        let status_counts = swarm_incident_summary_status_counts(&incidents);
+        let mut value = json!({
+            "schema": SWARM_INCIDENT_SUMMARY_SCHEMA_V1,
+            "sourceSchema": "ee.swarm_incident.v1",
+            "source": source,
+            "status": status,
+            "redactionStatus": SWARM_INCIDENT_SUMMARY_REDACTION_STATUS,
+            "limits": {
+                "maxIncidents": MAX_SWARM_INCIDENT_SUMMARY_RECORDS,
+                "maxRecoveryActionsPerIncident": MAX_SWARM_INCIDENT_RECOVERY_ACTIONS,
+                "maxDegradedCodesPerIncident": MAX_SWARM_INCIDENT_DEGRADED_CODES,
+                "maxSummaryBytes": MAX_SWARM_INCIDENT_SUMMARY_BYTES,
+            },
+            "counts": counts,
+            "statusCounts": status_counts,
+            "degradedCodes": degraded_codes,
+            "incidents": incidents,
+            "redaction": {
+                "rawLogsIncluded": false,
+                "mailBodiesIncluded": false,
+                "commandsIncluded": false,
+                "commandArgsIncluded": false,
+                "filesystemPathsIncluded": false,
+                "workerHostnamesIncluded": false,
+            },
+        });
+        let summary_hash = blake3_summary_hash(&stable_summary_json(&value));
+        value["summaryHash"] = json!(summary_hash);
+        let bytes = stable_summary_json(&value).len();
+        value["summaryBytes"] = json!(bytes);
+        value["withinSizeBudget"] = json!(bytes <= MAX_SWARM_INCIDENT_SUMMARY_BYTES);
+        if bytes <= MAX_SWARM_INCIDENT_SUMMARY_BYTES || incidents.is_empty() {
+            return value;
+        }
+        incidents.pop();
+        increment_summary_count(&mut counts, "omittedIncidentCount");
+    }
+}
+
+fn swarm_incident_substrate_posture(fixture: &Value) -> Value {
+    let mut posture = serde_json::Map::new();
+    if let Some(substrates) = fixture.get("substrates").and_then(Value::as_object) {
+        for name in ["agentMail", "beads", "rch", "disk", "hotPath"] {
+            if let Some(status) = substrates
+                .get(name)
+                .and_then(|substrate| substrate.get("status"))
+                .and_then(Value::as_str)
+            {
+                posture.insert(name.to_owned(), Value::String(status.to_owned()));
+            }
+        }
+    }
+    Value::Object(posture)
+}
+
+fn swarm_incident_status_counts(substrate_posture: &Value) -> Value {
+    let mut counts = BTreeMap::<String, u64>::new();
+    if let Some(postures) = substrate_posture.as_object() {
+        for status in postures.values().filter_map(Value::as_str) {
+            *counts.entry(status.to_owned()).or_insert(0) += 1;
+        }
+    }
+    json!(counts)
+}
+
+fn swarm_incident_dominant_status(substrate_posture: &Value) -> &'static str {
+    substrate_posture
+        .as_object()
+        .into_iter()
+        .flat_map(|postures| postures.values())
+        .filter_map(Value::as_str)
+        .max_by_key(|status| swarm_incident_status_rank(status))
+        .map(swarm_incident_status_match)
+        .unwrap_or("ok")
+}
+
+fn swarm_incident_status_rank(status: &str) -> u8 {
+    match status {
+        "blocked" => 5,
+        "unavailable" => 4,
+        "stale" => 3,
+        "degraded" => 2,
+        "ok" => 1,
+        "not_applicable" => 0,
+        _ => 0,
+    }
+}
+
+fn swarm_incident_status_match(status: &str) -> &'static str {
+    match status {
+        "blocked" => "blocked",
+        "unavailable" => "unavailable",
+        "stale" => "stale",
+        "degraded" => "degraded",
+        "ok" => "ok",
+        "not_applicable" => "not_applicable",
+        _ => "unknown",
+    }
+}
+
+fn swarm_incident_global_posture(dominant_status: &str) -> &'static str {
+    match dominant_status {
+        "blocked" => "blocked",
+        "unavailable" | "stale" | "degraded" => "degraded_recoverable",
+        _ => "ok",
+    }
+}
+
+fn swarm_incident_degraded_codes(fixture: &Value) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    if let Some(degraded) = fixture.get("expectedDegraded").and_then(Value::as_array) {
+        for item in degraded {
+            if let Some(code) = item.get("code").and_then(Value::as_str) {
+                codes.insert(code.to_owned());
+            }
+        }
+    }
+    if let Some(substrates) = fixture.get("substrates").and_then(Value::as_object) {
+        for substrate in substrates.values() {
+            if let Some(values) = substrate.get("degradedCodes").and_then(Value::as_array) {
+                for value in values {
+                    if let Some(code) = value.as_str() {
+                        codes.insert(code.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    codes
+        .into_iter()
+        .take(MAX_SWARM_INCIDENT_DEGRADED_CODES)
+        .collect()
+}
+
+fn swarm_incident_recovery_action_summaries(fixture: &Value) -> Vec<Value> {
+    fixture
+        .get("expectedRecoveryActions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_SWARM_INCIDENT_RECOVERY_ACTIONS)
+        .map(|action| {
+            let summary = action
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(redact_brief_text)
+                .map(|text| clamp_summary_text(&text, 180));
+            let evidence_hashes = action
+                .get("evidence")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(blake3_summary_hash)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            json!({
+                "priority": action.get("priority").cloned().unwrap_or(Value::Null),
+                "kind": action.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+                "summary": summary,
+                "commandPresent": action.get("command").is_some_and(|value| !value.is_null()),
+                "commandIncluded": false,
+                "manualStepPresent": action.get("manualStep").is_some_and(|value| !value.is_null()),
+                "manualStepIncluded": false,
+                "destructive": action.get("destructive").and_then(Value::as_bool).unwrap_or(false),
+                "preconditionCount": action.get("preconditions").and_then(Value::as_array).map_or(0, Vec::len),
+                "evidenceHashes": evidence_hashes,
+            })
+        })
+        .collect()
+}
+
+fn swarm_incident_artifact_refs(fixture: &Value) -> Vec<Value> {
+    fixture
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_SWARM_INCIDENT_ARTIFACT_REFS)
+        .map(|artifact| {
+            let path = artifact.get("path").and_then(Value::as_str).unwrap_or("");
+            json!({
+                "kind": artifact.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+                "pathIncluded": false,
+                "pathHash": blake3_summary_hash(path),
+            })
+        })
+        .collect()
+}
+
+fn swarm_incident_summary_degraded_codes(incidents: &[Value]) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    for incident in incidents {
+        if let Some(values) = incident.get("degradedCodes").and_then(Value::as_array) {
+            for value in values {
+                if let Some(code) = value.as_str() {
+                    codes.insert(code.to_owned());
+                }
+            }
+        }
+    }
+    codes.into_iter().collect()
+}
+
+fn swarm_incident_summary_status_counts(incidents: &[Value]) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for incident in incidents {
+        let posture = incident
+            .get("posture")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *counts.entry(posture.to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn increment_summary_count(value: &mut Value, field: &str) {
+    value[field] = json!(value.get(field).and_then(Value::as_u64).unwrap_or(0) + 1);
+}
+
+fn clamp_summary_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_owned();
+    }
+    let mut output = text
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    output.push_str("...");
+    output
 }
 
 fn swarm_brief_degraded_codes(report: &SwarmBriefReport) -> Vec<String> {
