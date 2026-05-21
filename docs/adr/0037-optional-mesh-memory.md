@@ -164,6 +164,35 @@ the named beads as part of the intended design, not as optional embellishments:
 23. `bd-26d7w` keeps the verification matrix and structured e2e logging
     contract aligned with the whole SRR6 surface.
 
+### Rolling-upgrade compatibility matrix
+
+`bd-97rgf` owns the mixed-version mesh contract. Mesh peers must negotiate
+schema and protocol compatibility before exchanging events, body material, or
+transport frames. The conservative default is local-only operation: if a peer is
+too new, too old, malformed, or requires an unknown feature, the current node
+must decline that peer while keeping local search, context, remember, and replay
+behavior unchanged.
+
+| Peer condition | Decision | Disabled features | Repair command | Local-only? |
+| --- | --- | --- | --- | --- |
+| Same protocol major, older minor | Accept. The older peer may omit newer optional fields; current node uses defaults. | none | none | no |
+| Same protocol major, newer minor | Accept. Unknown optional fields are ignored or preserved according to the receiving schema. | none | none | no |
+| Newer protocol major | Decline with `unsupported_protocol_version`; do not exchange events or bodies. | event exchange, body fetch, anti-entropy sync | `ee mesh status --json` | yes |
+| Older protocol major | Decline with `unsupported_protocol_version`; do not downgrade local mesh behavior. | event exchange, body fetch, anti-entropy sync | `ee mesh status --json` | yes |
+| Malformed protocol version | Decline with `unsupported_protocol_version`; treat as a bad peer probe, not as consent. | event exchange, body fetch, anti-entropy sync | `ee mesh status --json` | yes |
+| Unknown optional field in a known schema | Accept the known subset. Preserve or ignore the field only as the schema states. | field-specific behavior only | none | no |
+| Unknown required field or required capability | Decline before import or fetch; never silently drop the field. | event replay, body fetch, curation import | `ee mesh status --json` | yes |
+| Unsupported mesh event schema | Quarantine the event and keep the peer enrolled only if other negotiated lanes remain valid. | event replay for that schema | `ee mesh repair --dry-run --json` | partial |
+| Unsupported transport frame version | Reject the frame before payload parsing; leave peer cache and local truth unchanged. | transport session, event exchange, body fetch | `ee mesh status --json` | yes |
+| Policy feature mismatch, such as body sharing not advertised | Keep metadata-only lanes that were negotiated; disable the missing material lane. | missing policy lane only | `ee mesh peer show <peer-id> --json` | partial |
+
+The structured e2e log for mixed-version peers must include
+`negotiated_version`, `disabled_features`, and `repair_command` so agents can
+distinguish compatible minor skew from a fail-closed peer. The responder decline
+payload must remain privacy-safe: it may expose public protocol requirements,
+but not responder identity, workspace IDs, capabilities, tags, or timing
+metadata.
+
 The minimum proof set is:
 
 - Mesh-off byte-stability and no-network regression tests.
