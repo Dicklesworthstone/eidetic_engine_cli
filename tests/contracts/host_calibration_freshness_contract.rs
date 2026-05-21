@@ -14,13 +14,15 @@
 //! - the report is byte-equal across repeated calls for the same probe and
 //!   options (clock-independent / order-independent).
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fs};
 
 use ee::core::profile::{
     CpuProbe, EnvironmentProbe, HOST_PROFILE_PROBE_SCHEMA_V1, HostCalibrationFreshness,
     HostClassReport, HostClassificationOptions, HostResourceProbeReport, HostTopologyProbe,
-    MemoryProbe, OperatingProfile, RchTopologyProbe, WorkspaceProbe, classify_host_profile,
+    MemoryProbe, OperatingProfile, PathCapacityProbe, RchTopologyProbe, WorkspaceProbe,
+    classify_host_profile,
 };
+use serde_json::json;
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -119,6 +121,47 @@ fn synthetic_probe(
     }
 }
 
+fn path_capacity(
+    label: &'static str,
+    role: &'static str,
+    available_gib: u64,
+    same_filesystem_as_workspace: Option<bool>,
+) -> PathCapacityProbe {
+    PathCapacityProbe {
+        label,
+        role,
+        path: None,
+        exists: true,
+        nearest_existing_ancestor: false,
+        same_filesystem_as_workspace,
+        total_bytes: Some(available_gib * GIB),
+        available_bytes: Some(available_gib * GIB),
+        redaction: "path_not_emitted",
+    }
+}
+
+fn synthetic_topology_probe(
+    logical_cores: u32,
+    total_gib: u64,
+    cargo_target_gib: u64,
+    cargo_target_external: bool,
+    rch_available: bool,
+) -> HostResourceProbeReport {
+    let mut probe = synthetic_probe(logical_cores, total_gib, rch_available);
+    probe.memory.available_bytes = probe.memory.total_bytes;
+    probe.environment.cargo_target_dir_configured = cargo_target_external;
+    probe.paths = vec![
+        path_capacity("workspace", "workspace_root", cargo_target_gib, Some(true)),
+        path_capacity(
+            "cargo_target",
+            "cargo_target_dir",
+            cargo_target_gib,
+            Some(!cargo_target_external),
+        ),
+    ];
+    probe
+}
+
 fn classify_with_freshness(
     probe: &HostResourceProbeReport,
     freshness: HostCalibrationFreshness,
@@ -145,6 +188,183 @@ fn contains_destructive_token(text: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|token| lowered.contains(token))
+}
+
+#[test]
+fn synthetic_host_topology_golden_matrix_is_stable() {
+    let cases = [
+        ("portable", synthetic_topology_probe(4, 12, 32, false, true)),
+        ("laptop", synthetic_topology_probe(4, 12, 32, true, true)),
+        (
+            "workstation",
+            synthetic_topology_probe(8, 32, 64, false, true),
+        ),
+        (
+            "local_256gb",
+            synthetic_topology_probe(32, 256, 512, true, true),
+        ),
+        (
+            "rch_only_topology",
+            synthetic_topology_probe(16, 64, 4, false, true),
+        ),
+    ];
+
+    let actual = cases
+        .into_iter()
+        .map(|(name, probe)| {
+            let report = classify_with_freshness(&probe, HostCalibrationFreshness::Fresh);
+            json!({
+                "case": name,
+                "hostClass": report.host_class,
+                "profileCeiling": report.profile_ceiling,
+                "confidence": report.confidence,
+                "reasonCodes": report.reason_codes,
+                "repairActionKinds": report
+                    .repair_actions
+                    .iter()
+                    .map(|action| action.kind)
+                    .collect::<Vec<_>>(),
+                "degradedCodes": report
+                    .degraded
+                    .iter()
+                    .map(|entry| entry.code)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let expected = json!([
+        {
+            "case": "portable",
+            "hostClass": "portable",
+            "profileCeiling": "portable",
+            "confidence": "high",
+            "reasonCodes": [
+                "cpu_logical_cores_portable",
+                "memory_available_portable",
+                "disk_capacity_sufficient",
+                "target_dir_shared",
+                "rch_topology_available",
+                "calibration_fresh"
+            ],
+            "repairActionKinds": [],
+            "degradedCodes": []
+        },
+        {
+            "case": "laptop",
+            "hostClass": "laptop",
+            "profileCeiling": "portable",
+            "confidence": "high",
+            "reasonCodes": [
+                "cpu_logical_cores_portable",
+                "memory_available_portable",
+                "disk_capacity_sufficient",
+                "target_dir_external",
+                "rch_topology_available",
+                "calibration_fresh"
+            ],
+            "repairActionKinds": [],
+            "degradedCodes": []
+        },
+        {
+            "case": "workstation",
+            "hostClass": "workstation",
+            "profileCeiling": "workstation",
+            "confidence": "high",
+            "reasonCodes": [
+                "cpu_logical_cores_workstation",
+                "memory_available_swarm",
+                "disk_capacity_sufficient",
+                "target_dir_shared",
+                "rch_topology_available",
+                "calibration_fresh"
+            ],
+            "repairActionKinds": [],
+            "degradedCodes": []
+        },
+        {
+            "case": "local_256gb",
+            "hostClass": "local_256gb",
+            "profileCeiling": "swarm",
+            "confidence": "high",
+            "reasonCodes": [
+                "cpu_logical_cores_swarm",
+                "memory_available_swarm",
+                "disk_capacity_swarm_ready",
+                "target_dir_external",
+                "rch_topology_available",
+                "calibration_fresh"
+            ],
+            "repairActionKinds": [],
+            "degradedCodes": []
+        },
+        {
+            "case": "rch_only_topology",
+            "hostClass": "rch_only_topology",
+            "profileCeiling": "portable",
+            "confidence": "high",
+            "reasonCodes": [
+                "cpu_logical_cores_swarm",
+                "memory_available_swarm",
+                "disk_capacity_constrained",
+                "target_dir_shared",
+                "rch_topology_available",
+                "calibration_fresh"
+            ],
+            "repairActionKinds": ["rch_status_probe"],
+            "degradedCodes": ["host_calibration_rch_topology_blocked"]
+        }
+    ]);
+
+    assert_eq!(actual, expected);
+    let first = serde_json::to_string(&actual).expect("matrix serializes");
+    let second = serde_json::to_string(&expected).expect("expected matrix serializes");
+    assert_eq!(
+        first, second,
+        "host topology matrix JSON must be byte-stable"
+    );
+}
+
+#[test]
+fn host_calibration_e2e_script_logs_decisions_without_destructive_cleanup() {
+    let script_path = format!(
+        "{}/scripts/e2e_overhaul/host_calibration.sh",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let script = fs::read_to_string(&script_path)
+        .unwrap_or_else(|error| panic!("failed to read {script_path}: {error}"));
+
+    for needle in [
+        "EE_TEST_LOG_PATH",
+        "ee.test_event.v1",
+        "kind: \"host_calibration\"",
+        "phase: $operation",
+        "exit_code: ($rc | tonumber)",
+    ] {
+        assert!(
+            script.contains(needle),
+            "host calibration e2e script must log `{needle}` for no-mock decision auditing"
+        );
+    }
+
+    let lowered = script.to_ascii_lowercase();
+    for forbidden in [
+        "rm -",
+        "git reset",
+        "git clean",
+        "git checkout --",
+        "git worktree",
+        "git stash",
+        "drop table",
+        "truncate ",
+        "delete from",
+        "ee serve",
+    ] {
+        assert!(
+            !lowered.contains(forbidden),
+            "host calibration e2e script must not contain destructive or daemon-only operation `{forbidden}`"
+        );
+    }
 }
 
 #[test]
