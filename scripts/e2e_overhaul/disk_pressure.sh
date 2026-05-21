@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# P1 disk-pressure e2e harness.
+# P6 no-deletion disk-pressure e2e harness.
 #
 # This script is deliberately non-destructive. It creates a synthetic workspace
-# under TMPDIR, runs `ee diag disk-pressure --json`, and verifies the diagnostic
-# did not mutate the synthetic files. It does not delete the workspace.
+# under TMPDIR, exercises disk-pressure diagnostics, artifact retention,
+# artifact relocation, fake Agent Mail archive discovery, and build-admission
+# dry-runs. It verifies the synthetic files are preserved and does not delete
+# the workspace.
 
 set -euo pipefail
 
@@ -20,10 +22,23 @@ trap e2e_log_end EXIT
 SCRATCH_ROOT="${TMPDIR:-/tmp}/ee-disk-pressure-e2e"
 RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 WORKSPACE="$SCRATCH_ROOT/$RUN_ID/workspace"
+DESTINATION="$SCRATCH_ROOT/$RUN_ID/external-artifacts"
+MANIFEST_DIR="$SCRATCH_ROOT/$RUN_ID/manifests"
+PLAN_MANIFEST="$MANIFEST_DIR/plan.json"
+APPLY_MANIFEST="$MANIFEST_DIR/apply.json"
+RESTORE_MANIFEST="$MANIFEST_DIR/restore.json"
+FAKE_HOME="$WORKSPACE/home"
+
+_e2e_emit_event "disk_pressure_e2e_start" \
+    "workspace" "$WORKSPACE" \
+    "scratch_root" "$SCRATCH_ROOT"
 
 mkdir -p "$WORKSPACE/.ee" "$WORKSPACE/tests/audit_artifacts" "$WORKSPACE/target/debug" \
     "$WORKSPACE/target/ee-e2e/run-a" "$WORKSPACE/target/ee-golden-artifacts" \
-    "$WORKSPACE/target/ee-bench" "$WORKSPACE/.ee/support-bundles" "$WORKSPACE/tmp"
+    "$WORKSPACE/target/ee-bench" "$WORKSPACE/.ee/support-bundles" "$WORKSPACE/tmp" \
+    "$WORKSPACE/target/restored" "$DESTINATION" "$MANIFEST_DIR" \
+    "$DESTINATION/ee-relocated-artifacts/target/restored" \
+    "$FAKE_HOME/.local/share/mcp_agent_mail/messages/2026/05"
 printf 'workspace-state\n' > "$WORKSPACE/.ee/ee.db.placeholder"
 printf 'audit-artifact\n' > "$WORKSPACE/tests/audit_artifacts/sample.json"
 printf 'build-artifact\n' > "$WORKSPACE/target/debug/sample.o"
@@ -35,14 +50,43 @@ printf '{"schema":"ee.e2e.retention_manifest.v1"}\n' \
     > "$WORKSPACE/tmp/e2e_retention_manifest.json"
 printf '{"schema":"ee.test_event.v1","kind":"note"}\n' > "$WORKSPACE/tmp/j1.jsonl"
 printf 'scratch\n' > "$WORKSPACE/tmp/sample.tmp"
+printf 'agent-mail-archive-message\n' \
+    > "$FAKE_HOME/.local/share/mcp_agent_mail/messages/2026/05/message.md"
+printf 'restored artifact bytes\n' \
+    > "$DESTINATION/ee-relocated-artifacts/target/restored/missing.o"
+
+_e2e_emit_event "synthetic_tree_created" \
+    "workspace" "$WORKSPACE" \
+    "destination" "$DESTINATION" \
+    "fake_home" "$FAKE_HOME"
 
 snapshot() {
-    find "$WORKSPACE" -type f -print0 |
+    find "$WORKSPACE" "$DESTINATION" -type f -print0 |
         sort -z |
         xargs -0 shasum -a 256
 }
 
+assert_snapshot_preserved() {
+    local snapshot_text="${1:?snapshot text required}"
+    local line expected_hash path actual_hash
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        expected_hash="${line%% *}"
+        path="${line#*  }"
+        if [ ! -f "$path" ]; then
+            echo "disk_pressure: synthetic file disappeared: $path" >&2
+            exit 1
+        fi
+        actual_hash="$(shasum -a 256 "$path" | awk '{print $1}')"
+        if [ "$actual_hash" != "$expected_hash" ]; then
+            echo "disk_pressure: synthetic file changed: $path" >&2
+            exit 1
+        fi
+    done <<< "$snapshot_text"
+}
+
 before_snapshot="$(snapshot)"
+source_hash_before="$(shasum -a 256 "$WORKSPACE/target/debug/sample.o")"
 
 if [ -n "${EE_BIN:-}" ]; then
     EE_BINARY="$EE_BIN"
@@ -54,23 +98,79 @@ if [ ! -x "$EE_BINARY" ]; then
 fi
 
 IMPOSSIBLE_MIN_FREE_BYTES="18446744073709551615"
-report="$("$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \
+report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" diag disk-pressure --json \
     --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
 artifacts_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
     TMPDIR="$WORKSPACE/tmp" \
+    HOME="$FAKE_HOME" \
     EE_TEST_LOG_PATH="$WORKSPACE/tmp/j1.jsonl" \
     EE_E2E_RETENTION_MANIFEST="$WORKSPACE/tmp/e2e_retention_manifest.json" \
     "$EE_BINARY" --workspace "$WORKSPACE" diag artifacts --json \
     --top-limit 3 --consumer-depth 1 --consumer-entry-limit 100)"
 build_admission_report="$(CARGO_TARGET_DIR="$WORKSPACE/target" \
     TMPDIR="$WORKSPACE/tmp" \
+    HOME="$FAKE_HOME" \
     "$EE_BINARY" --workspace "$WORKSPACE" diag build-admission --json \
     --min-free-bytes "$IMPOSSIBLE_MIN_FREE_BYTES" \
     --artifact-destination "$WORKSPACE/target/ee-e2e/sync-down")"
+plan_report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" artifact relocate \
+    --from "$WORKSPACE/target/debug/sample.o" \
+    --to "$DESTINATION" \
+    --manifest "$PLAN_MANIFEST" \
+    --json)"
+apply_report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" artifact relocate \
+    --from "$WORKSPACE/target/debug/sample.o" \
+    --to "$DESTINATION" \
+    --manifest "$APPLY_MANIFEST" \
+    --apply \
+    --actor "p6-e2e" \
+    --json)"
 
-after_snapshot="$(snapshot)"
+restore_original="$WORKSPACE/target/restored/missing.o"
+restore_destination="$DESTINATION/ee-relocated-artifacts/target/restored/missing.o"
+restore_size_bytes="$(wc -c < "$restore_destination" | tr -d ' ')"
+jq -n \
+    --arg schema "ee.artifact.relocation.v1" \
+    --arg version "p6-e2e" \
+    --arg actor "p6-e2e" \
+    --arg created_at "2026-05-21T00:00:00Z" \
+    --arg workspace "$WORKSPACE" \
+    --arg source "$WORKSPACE/target/restored" \
+    --arg destination_root "$DESTINATION" \
+    --arg restore_command "ee artifact relocate --restore --manifest $RESTORE_MANIFEST --json" \
+    --arg original "$restore_original" \
+    --arg destination "$restore_destination" \
+    --argjson size_bytes "$restore_size_bytes" \
+    '{
+      schema: $schema,
+      commandVersion: $version,
+      actor: $actor,
+      createdAt: $created_at,
+      workspacePath: $workspace,
+      sourcePath: $source,
+      destinationRoot: $destination_root,
+      restorationCommand: $restore_command,
+      forceWithExplicitPath: false,
+      entries: [{
+        originalPath: $original,
+        destinationPath: $destination,
+        kind: "file",
+        sizeBytes: $size_bytes,
+        mtimeUnixSeconds: null,
+        blake3: null,
+        status: "planned"
+      }]
+    }' > "$RESTORE_MANIFEST"
+restore_report="$(HOME="$FAKE_HOME" "$EE_BINARY" --workspace "$WORKSPACE" artifact relocate \
+    --restore \
+    --manifest "$RESTORE_MANIFEST" \
+    --json)"
 
-e2e_log_assert_eq "$after_snapshot" "$before_snapshot" "disk_pressure_no_mutation"
+assert_snapshot_preserved "$before_snapshot"
+source_hash_after="$(shasum -a 256 "$WORKSPACE/target/debug/sample.o")"
+
+e2e_log_assert_eq "$source_hash_after" "$source_hash_before" \
+    "disk_pressure_relocation_preserves_original"
 
 assert_jq "$report" '.schema' "ee.response.v1" "disk_pressure_response_schema"
 assert_jq "$report" '.success' "true" "disk_pressure_response_success"
@@ -83,10 +183,20 @@ assert_jq "$report" '(.data.roots | map(.label) | index("workspace") != null)' \
     "true" "disk_pressure_workspace_root"
 assert_jq "$report" '(.data.roots | map(.label) | index("cargo_target") != null)' \
     "true" "disk_pressure_cargo_target_root"
+assert_jq "$report" '(.data.roots | any(.label == "agent_mail_archive"
+    and .role == "agent_mail_archive_root"
+    and .exists == true
+    and (.path | startswith("'"$FAKE_HOME"'"))))' \
+    "true" "disk_pressure_fake_agent_mail_archive_root"
 # shellcheck disable=SC2016
 assert_jq "$report" '(.data.recoveryActions | all(.kind as $kind |
     ["move_preserve", "compress_preserve", "rotate_with_manifest", "ask_human", "noop"]
     | index($kind) != null))' "true" "disk_pressure_recovery_actions_preserve_only"
+
+_e2e_emit_event "repair_plan_checked" \
+    "workspace" "$WORKSPACE" \
+    "posture" "$(printf '%s\n' "$report" | jq -r '.data.posture')" \
+    "recovery_action_count" "$(printf '%s\n' "$report" | jq -r '.data.recoveryActions | length')"
 
 assert_jq "$artifacts_report" '.schema' "ee.response.v1" "artifact_retention_response_schema"
 assert_jq "$artifacts_report" '.success' "true" "artifact_retention_response_success"
@@ -148,17 +258,75 @@ assert_jq "$build_admission_report" \
         and index("artifact_destination") != null)' \
     "true" "build_admission_expected_checks"
 
+if [ -e "$PLAN_MANIFEST" ]; then
+    echo "disk_pressure: artifact relocation plan mode wrote a manifest" >&2
+    exit 1
+fi
+applied_destination="$DESTINATION/ee-relocated-artifacts/target/debug/sample.o"
+if [ ! -f "$applied_destination" ]; then
+    echo "disk_pressure: artifact relocation apply did not copy artifact" >&2
+    exit 1
+fi
+if [ ! -f "$APPLY_MANIFEST" ]; then
+    echo "disk_pressure: artifact relocation apply did not write manifest" >&2
+    exit 1
+fi
+if [ "$(cat "$restore_original")" != "restored artifact bytes" ]; then
+    echo "disk_pressure: artifact relocation restore did not copy preserved artifact back" >&2
+    exit 1
+fi
+assert_jq "$plan_report" '.schema' "ee.response.v1" "relocation_plan_response_schema"
+assert_jq "$plan_report" '.success' "true" "relocation_plan_response_success"
+assert_jq "$plan_report" '.data.mode' "plan" "relocation_plan_mode"
+assert_jq "$plan_report" '.data.applied' "false" "relocation_plan_not_applied"
+assert_jq "$plan_report" '.data.preservationPolicy' \
+    "copy_preserve_no_delete_no_overwrite" "relocation_plan_preservation_policy"
+assert_jq "$apply_report" '.schema' "ee.response.v1" "relocation_apply_response_schema"
+assert_jq "$apply_report" '.success' "true" "relocation_apply_response_success"
+assert_jq "$apply_report" '.data.mode' "apply" "relocation_apply_mode"
+assert_jq "$apply_report" '.data.applied' "true" "relocation_apply_applied"
+assert_jq "$apply_report" '.data.restored' "false" "relocation_apply_not_restored"
+assert_jq "$apply_report" '.data.manifestHash != null' \
+    "true" "relocation_apply_manifest_hash"
+assert_jq "$apply_report" '.data.preservationPolicy' \
+    "copy_preserve_no_delete_no_overwrite" "relocation_apply_preservation_policy"
+assert_jq "$restore_report" '.schema' "ee.response.v1" "relocation_restore_response_schema"
+assert_jq "$restore_report" '.success' "true" "relocation_restore_response_success"
+assert_jq "$restore_report" '.data.mode' "restore" "relocation_restore_mode"
+assert_jq "$restore_report" '.data.restored' "true" "relocation_restore_restored"
+assert_jq "$restore_report" '.data.preservationPolicy' \
+    "copy_preserve_no_delete_no_overwrite" "relocation_restore_preservation_policy"
+
+_e2e_emit_event "relocation_manifest_checked" \
+    "plan_manifest" "$PLAN_MANIFEST" \
+    "apply_manifest" "$APPLY_MANIFEST" \
+    "restore_manifest" "$RESTORE_MANIFEST" \
+    "applied_destination" "$applied_destination"
+
+_e2e_emit_event "disk_pressure_e2e_summary" \
+    "workspace" "$WORKSPACE" \
+    "destination" "$DESTINATION" \
+    "mutation" "copy_preserve_only" \
+    "asserts_pass" "$EE_TEST_LOG_ASSERTS_PASS" \
+    "asserts_fail" "$EE_TEST_LOG_ASSERTS_FAIL"
+
 jq -n \
     --arg schema "ee.disk_pressure.e2e.v1" \
     --arg workspace "$WORKSPACE" \
+    --arg destination "$DESTINATION" \
+    --arg apply_manifest "$APPLY_MANIFEST" \
+    --arg restore_manifest "$RESTORE_MANIFEST" \
     --arg posture "$(printf '%s\n' "$report" | jq -r '.data.posture')" \
     --arg artifact_roots "$(printf '%s\n' "$artifacts_report" | jq -r '.data.summary.rootCount')" \
     --arg build_admitted "$(printf '%s\n' "$build_admission_report" | jq -r '.data.admitted')" \
-    --arg mutation "none" \
+    --arg mutation "copy_preserve_only" \
     '{
       schema: $schema,
       success: true,
       workspace: $workspace,
+      destination: $destination,
+      applyManifest: $apply_manifest,
+      restoreManifest: $restore_manifest,
       posture: $posture,
       artifactRoots: ($artifact_roots | tonumber),
       buildAdmissionAdmitted: ($build_admitted == "true"),
