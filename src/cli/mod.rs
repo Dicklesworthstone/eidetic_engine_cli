@@ -35063,8 +35063,9 @@ impl RememberMemoryReport {
         let degraded_json = self.remember_degraded_json();
 
         let mut json = format!(
-            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
+            r#"{{"schema":"ee.response.v2","success":true,"data":{{"command":"remember","version":"{}","memory_id":"{}","memoryId":"{}","workspace_id":"{}","database_path":"{}","content":"{}","workflow_id":{},"level":"{}","kind":"{}","confidence":{},"tags":[{}],"source":{}{},"producer":{},"valid_from":{},"valid_to":{},"validity_status":"{}","validity_window_kind":"{}","dry_run":{},"persisted":{},"revision_number":{},"revision_group_id":{},"audit_id":{},"index_job_id":{},"index_status":"{}","effect_ids":[],"suggested_links":{},"suggested_link_status":"{}","suggested_link_degradations":{},"auto_links":{},"auto_link_status":"{}","auto_link_degradations":{},"curation_candidate":{},"curation_candidate_status":"{}","curation_candidate_degradations":{},"redaction_status":"{}","policy_bypass_used":{},"policy_bypass":{},"degraded":{}}}"#,
             self.version,
+            self.memory_id,
             self.memory_id,
             escape_json_string(&self.workspace_id),
             escape_json_string(&self.database_path.display().to_string()),
@@ -52101,6 +52102,18 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "remember write exit")?;
         let value: serde_json::Value = serde_json::from_slice(&stdout)
             .map_err(|error| format!("remember output parses as JSON: {error}"))?;
+        ensure_equal(
+            &value.pointer("/data/memoryId"),
+            &value.pointer("/data/memory_id"),
+            "remember JSON canonical memoryId alias",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/memoryId")
+                .and_then(serde_json::Value::as_str),
+            &Some("mem_00000000000000000000000001"),
+            "remember JSON memoryId value",
+        )?;
         let degraded = value
             .pointer("/data/degraded")
             .and_then(serde_json::Value::as_array)
