@@ -2868,9 +2868,21 @@ where
             let data = match serde_json::to_value(report) {
                 Ok(data) => data,
                 Err(error) => {
-                    return ee_response_v2_mesh_error(format!(
-                        "Failed to serialize mesh CLI report: {error}"
-                    ));
+                    let domain_error = DomainError::Storage {
+                        message: format!("Failed to serialize mesh CLI report: {error}"),
+                        repair: Some(
+                            "Retry with --format json and report the serialization failure."
+                                .to_owned(),
+                        ),
+                    };
+                    let rendered =
+                        output::render_toon_from_json(&output::error_response_json(&domain_error));
+                    let write_exit = write_stdout(stdout, &(rendered + "\n"));
+                    return if write_exit == ProcessExitCode::Success {
+                        domain_error.exit_code()
+                    } else {
+                        write_exit
+                    };
                 }
             };
             write_stdout(
