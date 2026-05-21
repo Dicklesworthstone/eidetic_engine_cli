@@ -563,6 +563,12 @@ mod tests {
         }
     }
 
+    fn fixture_request_with_protocol(protocol_version: impl Into<String>) -> HelloRequest {
+        let mut req = fixture_request();
+        req.requester_ee_protocol_version = protocol_version.into();
+        req
+    }
+
     fn fixture_ctx<'a>(
         responder_node_key: &'a str,
         responder_workspace_ids: &'a [String],
@@ -634,6 +640,50 @@ mod tests {
             minor: local.minor,
         };
         assert!(!other_major.is_compatible_with(local));
+    }
+
+    #[test]
+    fn protocol_version_same_major_matrix_allows_minor_skew() {
+        let simulated_local = ProtocolVersion {
+            major: 7,
+            minor: 10,
+        };
+        for requester in [
+            ProtocolVersion { major: 7, minor: 0 },
+            ProtocolVersion {
+                major: 7,
+                minor: 10,
+            },
+            ProtocolVersion {
+                major: 7,
+                minor: 99,
+            },
+        ] {
+            assert!(
+                requester.is_compatible_with(simulated_local),
+                "same-major requester {requester} should negotiate with local {simulated_local}"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_version_matrix_rejects_older_and_newer_majors() {
+        let local = ProtocolVersion {
+            major: 7,
+            minor: 10,
+        };
+        for requester in [
+            ProtocolVersion {
+                major: 6,
+                minor: 99,
+            },
+            ProtocolVersion { major: 8, minor: 0 },
+        ] {
+            assert!(
+                !requester.is_compatible_with(local),
+                "cross-major requester {requester} must not negotiate with local {local}"
+            );
+        }
     }
 
     // ---- Request building --------------------------------------------------
@@ -736,12 +786,11 @@ mod tests {
         let deny = empty_set();
         let tags = vec![];
         let ctx = fixture_ctx("nodekey:responder", &[], &[], &tags, &allow, &deny);
-        let mut req = fixture_request();
-        req.requester_ee_protocol_version = format!(
+        let req = fixture_request_with_protocol(format!(
             "{}.{}",
             HELLO_PROTOCOL_VERSION_MAJOR + 1,
             HELLO_PROTOCOL_VERSION_MINOR
-        );
+        ));
         let outcome = decide_hello_response(&req, &ctx);
         let err = outcome.error().expect("declined");
         assert_eq!(err.code, HelloErrorCode::UnsupportedProtocolVersion);
@@ -753,11 +802,75 @@ mod tests {
         let deny = empty_set();
         let tags = vec![];
         let ctx = fixture_ctx("nodekey:responder", &[], &[], &tags, &allow, &deny);
-        let mut req = fixture_request();
-        req.requester_ee_protocol_version = "garbage".to_owned();
+        let req = fixture_request_with_protocol("garbage");
         let outcome = decide_hello_response(&req, &ctx);
         let err = outcome.error().expect("declined");
         assert_eq!(err.code, HelloErrorCode::UnsupportedProtocolVersion);
+    }
+
+    #[test]
+    fn handler_accepts_same_major_protocol_minor_skew_matrix() {
+        let allow = empty_set();
+        let deny = empty_set();
+        let tags = vec![];
+        let ws = vec!["wsp_one".to_owned()];
+        let caps = vec!["discovery".to_owned()];
+        let ctx = fixture_ctx("nodekey:responder", &ws, &caps, &tags, &allow, &deny);
+
+        for requester_version in [
+            format!("{HELLO_PROTOCOL_VERSION_MAJOR}.0"),
+            local_protocol_version_string(),
+            format!(
+                "{}.{}",
+                HELLO_PROTOCOL_VERSION_MAJOR,
+                HELLO_PROTOCOL_VERSION_MINOR.saturating_add(1)
+            ),
+            format!("{HELLO_PROTOCOL_VERSION_MAJOR}.99"),
+        ] {
+            let req = fixture_request_with_protocol(&requester_version);
+            let outcome = decide_hello_response(&req, &ctx);
+            let resp = outcome
+                .response()
+                .unwrap_or_else(|| panic!("same-major requester {requester_version} declined"));
+            assert_eq!(
+                resp.responder_ee_protocol_version,
+                local_protocol_version_string()
+            );
+            assert_eq!(resp.responder_capabilities, vec!["discovery"]);
+        }
+    }
+
+    #[test]
+    fn handler_fail_closed_matrix_rejects_cross_major_and_malformed_protocols() {
+        let allow = empty_set();
+        let deny = empty_set();
+        let tags = vec![];
+        let ctx = fixture_ctx("nodekey:responder", &[], &[], &tags, &allow, &deny);
+
+        for requester_version in [
+            format!(
+                "{}.{}",
+                HELLO_PROTOCOL_VERSION_MAJOR.saturating_sub(1),
+                HELLO_PROTOCOL_VERSION_MINOR
+            ),
+            format!(
+                "{}.{}",
+                HELLO_PROTOCOL_VERSION_MAJOR.saturating_add(1),
+                HELLO_PROTOCOL_VERSION_MINOR
+            ),
+            "garbage".to_owned(),
+            "1.0.0".to_owned(),
+        ] {
+            let req = fixture_request_with_protocol(&requester_version);
+            let outcome = decide_hello_response(&req, &ctx);
+            let err = outcome
+                .error()
+                .unwrap_or_else(|| panic!("requester {requester_version} was granted"));
+            assert_eq!(err.code, HelloErrorCode::UnsupportedProtocolVersion);
+            assert!(assert_no_responder_metadata_leak(err).is_ok());
+            let expected_detail = format!("requires major {HELLO_PROTOCOL_VERSION_MAJOR}.x");
+            assert_eq!(err.detail.as_deref(), Some(expected_detail.as_str()));
+        }
     }
 
     #[test]
@@ -850,8 +963,7 @@ mod tests {
         let deny = empty_set();
         let tags = vec![];
         let ctx = fixture_ctx("nodekey:responder", &[], &[], &tags, &allow, &deny);
-        let mut req = fixture_request();
-        req.requester_ee_protocol_version = "99.0".to_owned();
+        let req = fixture_request_with_protocol("99.0");
         let outcome = decide_hello_response(&req, &ctx);
         let err = outcome.error().expect("declined");
         // Detail is allowed to carry the local major-version constant
