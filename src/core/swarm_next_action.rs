@@ -213,6 +213,26 @@ impl SwarmNextActionVerificationSummary {
         Some(queued > 0 && slots_available > 0 && slots_available < queue_head_slots_needed)
     }
 
+    #[must_use]
+    pub fn suspected_orphaned_queued_verifier_count(&self) -> Option<u64> {
+        let queued = self.queued_remote_build_count?;
+        let active = self.active_remote_build_count?;
+        if queued == 0 {
+            return Some(0);
+        }
+        let queue_head_can_start = self
+            .slots_available
+            .zip(self.queue_head_slots_needed)
+            .is_some_and(|(available, needed)| available >= needed);
+        let start_stalled = self.queue_status.as_deref() == Some("start_stalled");
+
+        if active == 0 && (queue_head_can_start || start_stalled) {
+            Some(queued)
+        } else {
+            Some(0)
+        }
+    }
+
     fn queue_evidence(&self) -> Vec<String> {
         let mut evidence = BTreeSet::new();
         if let Some(count) = self.active_remote_build_count {
@@ -233,10 +253,23 @@ impl SwarmNextActionVerificationSummary {
         if let Some(blocked) = self.head_of_line_blocked() {
             evidence.insert(format!("head_of_line_blocked:{blocked}"));
         }
+        if let Some(count) = self.suspected_orphaned_queued_verifier_count()
+            && count > 0
+        {
+            evidence.insert(format!("suspected_orphaned_queued_verifier_count:{count}"));
+            evidence.insert("orphaned_queue_cleanup:coordination_first".to_owned());
+            evidence.insert("orphaned_queue_cancelability:unknown".to_owned());
+        }
         evidence.into_iter().collect()
     }
 
     fn queue_recommendation(&self) -> Option<&'static str> {
+        if self
+            .suspected_orphaned_queued_verifier_count()
+            .is_some_and(|count| count > 0)
+        {
+            return Some("avoid_duplicate_verifier_until_orphaned_queue_is_explained");
+        }
         if self.head_of_line_blocked() == Some(true) {
             return Some("prefer_static_work_until_queue_head_fits");
         }
@@ -780,6 +813,13 @@ fn recommendation_evidence_caveats(snapshot: &SwarmNextActionSnapshot) -> Vec<St
     if snapshot.verification.head_of_line_blocked() == Some(true) {
         caveats.insert("rch_head_of_line_blocked".to_owned());
     }
+    if snapshot
+        .verification
+        .suspected_orphaned_queued_verifier_count()
+        .is_some_and(|count| count > 0)
+    {
+        caveats.insert("rch_orphaned_queue_possible".to_owned());
+    }
     for degradation in &snapshot.degraded {
         caveats.insert(format!(
             "degraded:{}:{}",
@@ -1242,6 +1282,73 @@ mod tests {
                 "queue_status:capacity_blocked",
                 "queued_remote_build_count:1",
                 "slots_available:2"
+            ])
+        );
+    }
+
+    #[test]
+    fn next_action_verification_flags_suspected_orphaned_queued_verifier() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-static", "Static proof while queue is stale", 2)];
+        brief.rch_local_capability = Some(RchLocalCapabilityReport {
+            schema: "ee.rch.local_capability.v1",
+            cli_version: Some("1.0.24".to_owned()),
+            direct_exec_available: true,
+            codex_hook: RchCodexHookCapability {
+                installed: true,
+                status: "ready".to_owned(),
+            },
+            daemon_status_socket: None,
+            status_socket_consistent: None,
+            dry_run_would_offload: Some(true),
+            worker_probe_summary: RchWorkerProbeSummary {
+                healthy_count: 1,
+                failed_count: 0,
+                status: "healthy".to_owned(),
+            },
+            queue_health: Some(RchQueueHealth {
+                queued_count: 1,
+                active_count: 0,
+                slots_available: Some(4),
+                queue_head_slots_needed: Some(4),
+                status: "start_stalled".to_owned(),
+            }),
+            worker_pressure: unknown_worker_pressure(),
+            remote_only_required: true,
+            remote_only_safe: false,
+            degraded: Vec::new(),
+            recovery: Vec::new(),
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        assert_eq!(
+            snapshot
+                .verification
+                .suspected_orphaned_queued_verifier_count(),
+            Some(1)
+        );
+        assert!(
+            recommendation_evidence_caveats(&snapshot)
+                .contains(&"rch_orphaned_queue_possible".to_owned())
+        );
+        let json = serde_json::to_value(&snapshot.verification).expect("verification serializes");
+        assert_eq!(
+            json["queueRecommendation"],
+            "avoid_duplicate_verifier_until_orphaned_queue_is_explained"
+        );
+        assert_eq!(
+            json["queueEvidence"],
+            serde_json::json!([
+                "active_remote_build_count:0",
+                "head_of_line_blocked:false",
+                "orphaned_queue_cancelability:unknown",
+                "orphaned_queue_cleanup:coordination_first",
+                "queue_head_slots_needed:4",
+                "queue_status:start_stalled",
+                "queued_remote_build_count:1",
+                "slots_available:4",
+                "suspected_orphaned_queued_verifier_count:1"
             ])
         );
     }
