@@ -371,6 +371,16 @@ pub const SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE: &str =
 /// "evidence captured but I/O is broken" — bd-25z97.
 pub const SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE: &str = "search_score_calibration_unreadable";
 
+/// Response degraded code for outcome feedback absorbed by the harmful
+/// burst-rate guard.
+///
+/// The event is preserved in `feedback_quarantine` and does NOT affect
+/// live scoring; the degraded entry tells agents that observed rate
+/// exceeded the configured per-source cap so they can stop retrying or
+/// raise the cap intentionally rather than diagnosing a silent absorb.
+/// bd-3qs2i.3.1.
+pub const HARMFUL_BURST_QUARANTINE_CODE: &str = "harmful_burst_quarantine";
+
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {
     id: "D400",

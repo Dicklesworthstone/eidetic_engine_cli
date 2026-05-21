@@ -37,6 +37,7 @@ use crate::db::{
     StoredFeedbackEvent, StoredFeedbackQuarantine, UpsertAgentContextProfileInput, audit_actions,
     feedback_scoring, generate_audit_id, generate_audit_id_seeded,
 };
+use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
 use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode};
 use crate::runtime::determinism::{Deterministic, Seed};
 
@@ -606,6 +607,37 @@ pub struct OutcomeRecordReport {
     pub session_id: Option<String>,
     pub quarantine: Option<OutcomeQuarantineSummary>,
     pub feedback: OutcomeFeedbackSummary,
+    /// bd-3qs2i.3.1: response-level degraded entries explaining behavior
+    /// changes the agent should know about (e.g., harmful burst-rate
+    /// quarantine absorbed the event without affecting live scoring).
+    /// Empty for the steady-state success path.
+    pub degraded: Vec<OutcomeDegradation>,
+}
+
+/// Response-level degraded entry for outcome commands.
+///
+/// bd-3qs2i.3.1: mirrors `core::search::SearchDegradation` with an extra
+/// `details` payload for structured per-code metadata. Lives next to
+/// `OutcomeRecordReport` rather than at the model layer because the only
+/// emitter today is the outcome write path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutcomeDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub details: Option<serde_json::Value>,
+}
+
+impl OutcomeDegradation {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "details": self.details,
+        })
+    }
 }
 
 impl OutcomeRecordReport {
@@ -675,6 +707,10 @@ impl OutcomeRecordReport {
             },
             "quarantine": self.quarantine.as_ref().map(OutcomeQuarantineSummary::data_json),
             "feedback": self.feedback.data_json(),
+            // bd-3qs2i.3.1: surface response-level degraded entries
+            // (currently: harmful_burst_quarantine) so agents can branch
+            // on a stable code rather than parsing the human summary.
+            "degraded": self.degraded.iter().map(OutcomeDegradation::data_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -878,6 +914,13 @@ fn record_outcome_inner(
             options.harmful_burst_window_seconds,
         )?;
         trace_sprt_quarantine("response", 0, &[]);
+        // bd-3qs2i.3.1: dry-run preview also surfaces the harmful_burst_quarantine
+        // degraded entry when the live write WOULD absorb the event, so agents
+        // can branch on the same code in dry-run as in the persisted path.
+        let degraded = quarantine
+            .as_ref()
+            .map(|q| vec![harmful_burst_quarantine_degradation(q, &[])])
+            .unwrap_or_default();
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::DryRun,
@@ -897,6 +940,7 @@ fn record_outcome_inner(
             session_id,
             quarantine,
             feedback,
+            degraded,
         });
     }
 
@@ -929,6 +973,7 @@ fn record_outcome_inner(
                 session_id,
                 quarantine: None,
                 feedback,
+                degraded: Vec::new(),
             });
         }
 
@@ -975,6 +1020,21 @@ fn record_outcome_inner(
         )?;
         let feedback = current_feedback_summary(&connection, &target_type, &target_id)?;
         trace_sprt_quarantine("response", 0, &[]);
+        // bd-3qs2i.3.1: surface the harmful_burst_quarantine degraded
+        // entry so agents notice that the event was absorbed by the
+        // burst-rate guard and did NOT update live scoring, without
+        // having to parse `status == Quarantined` and the textual
+        // quarantine reason.
+        let final_quarantine = OutcomeQuarantineSummary {
+            id: Some(quarantine_id.clone()),
+            raw_event_hash: Some(raw_event_hash),
+            ..quarantine
+        };
+        let quarantined_candidate_ids = vec![quarantine_id];
+        let degraded = vec![harmful_burst_quarantine_degradation(
+            &final_quarantine,
+            &quarantined_candidate_ids,
+        )];
         return Ok(OutcomeRecordReport {
             version: env!("CARGO_PKG_VERSION"),
             status: OutcomeRecordStatus::Quarantined,
@@ -992,12 +1052,9 @@ fn record_outcome_inner(
             reason_present: feedback_input.reason.is_some(),
             evidence_json_present: evidence_json.is_some(),
             session_id,
-            quarantine: Some(OutcomeQuarantineSummary {
-                id: Some(quarantine_id),
-                raw_event_hash: Some(raw_event_hash),
-                ..quarantine
-            }),
+            quarantine: Some(final_quarantine),
             feedback,
+            degraded,
         });
     }
 
@@ -1142,7 +1199,40 @@ fn record_outcome_inner(
         session_id,
         quarantine: None,
         feedback,
+        degraded: Vec::new(),
     })
+}
+
+/// bd-3qs2i.3.1: build the `harmful_burst_quarantine` degraded entry that
+/// accompanies an `OutcomeRecordReport` whenever the harmful burst-rate
+/// guard absorbs an outcome write into the quarantine queue.
+///
+/// `quarantined_candidate_ids` lists the candidate row IDs the absorbed
+/// event was rolled into; on the dry-run path it is empty because no row
+/// is persisted yet.
+fn harmful_burst_quarantine_degradation(
+    summary: &OutcomeQuarantineSummary,
+    quarantined_candidate_ids: &[String],
+) -> OutcomeDegradation {
+    let safe_source_id = redacted_outcome_public_source_id(summary.source_id.as_deref());
+    let observed_rate = summary.observed_count;
+    let configured_cap = summary.limit;
+    let window_seconds = summary.window_seconds;
+    let details = serde_json::json!({
+        "sourceId": safe_source_id,
+        "observedRate": observed_rate,
+        "configuredCap": configured_cap,
+        "windowSeconds": window_seconds,
+        "quarantinedCandidateIds": quarantined_candidate_ids,
+    });
+    OutcomeDegradation {
+        code: HARMFUL_BURST_QUARANTINE_CODE.to_string(),
+        severity: "warning".to_string(),
+        message: format!(
+            "Harmful outcome feedback rate exceeded: {observed_rate} events in {window_seconds}s (cap {configured_cap}); event was quarantined and did NOT update live scoring."
+        ),
+        details: Some(details),
+    }
 }
 
 /// List quarantined feedback events for a workspace.
@@ -2585,6 +2675,7 @@ mod tests {
                 net_score: 0.0,
                 trust_score: 0.0,
             },
+            degraded: Vec::new(),
         };
 
         let rendered = report.data_json().to_string();
@@ -2599,6 +2690,115 @@ mod tests {
         ensure(
             !rendered.contains("redaction-fixture"),
             "query secret does not leak in report JSON",
+        )
+    }
+
+    /// bd-3qs2i.3.1: the harmful_burst_quarantine degradation must (a) carry
+    /// the documented details fields with sane snake_case→camelCase
+    /// translation, (b) redact path-like / secret-like source ids the same
+    /// way the rest of the outcome surface does, and (c) include the
+    /// quarantined candidate ids that were actually rolled up.
+    #[test]
+    fn harmful_burst_quarantine_degradation_carries_documented_details() -> TestResult {
+        let summary = OutcomeQuarantineSummary {
+            id: Some("fq_00000000000000000000000099".to_string()),
+            status: "pending".to_string(),
+            source_id: Some("file:///Users/alice/private/outcome.json?api_key=leaky".to_string()),
+            limit: 5,
+            window_seconds: 3600,
+            observed_count: 7,
+            reason: "harmful feedback rate limit exceeded".to_string(),
+            raw_event_hash: Some("blake3:fixture".to_string()),
+        };
+        let candidate_ids = vec!["fq_00000000000000000000000099".to_string()];
+
+        let degradation = harmful_burst_quarantine_degradation(&summary, &candidate_ids);
+
+        ensure_equal(
+            &degradation.code,
+            &HARMFUL_BURST_QUARANTINE_CODE.to_string(),
+            "code matches the published degraded-code constant",
+        )?;
+        ensure_equal(
+            &degradation.severity,
+            &"warning".to_string(),
+            "severity is warning per F3a design notes",
+        )?;
+        ensure(
+            degradation.message.contains("7 events in 3600s"),
+            "message includes the rate/window so an agent can branch without parsing details",
+        )?;
+        ensure(
+            degradation.message.contains("did NOT update live scoring"),
+            "message tells agents the live score did not move",
+        )?;
+        let details = degradation
+            .details
+            .as_ref()
+            .ok_or_else(|| "details payload must be present".to_string())?;
+        ensure_equal(
+            &details["observedRate"],
+            &serde_json::json!(7),
+            "observedRate is the live+pending+1 count",
+        )?;
+        ensure_equal(
+            &details["configuredCap"],
+            &serde_json::json!(5),
+            "configuredCap is the per-source per-window limit",
+        )?;
+        ensure_equal(
+            &details["windowSeconds"],
+            &serde_json::json!(3600),
+            "windowSeconds carries through unchanged",
+        )?;
+        ensure_equal(
+            &details["quarantinedCandidateIds"],
+            &serde_json::json!(["fq_00000000000000000000000099"]),
+            "quarantinedCandidateIds enumerates the rolled-up rows",
+        )?;
+        ensure(
+            !details.to_string().contains("/Users/alice"),
+            "raw user path must not leak through the details payload",
+        )?;
+        ensure(
+            !details.to_string().contains("leaky"),
+            "query secret must not leak through the details payload",
+        )?;
+        Ok(())
+    }
+
+    /// bd-3qs2i.3.1: the dry-run path must emit the same degraded code as
+    /// the persisted path but with NO quarantinedCandidateIds — there's no
+    /// row to point at yet. Pin the empty-array shape so consumers can
+    /// rely on it instead of branching on presence.
+    #[test]
+    fn harmful_burst_quarantine_degradation_dry_run_emits_empty_candidate_ids() -> TestResult {
+        let summary = OutcomeQuarantineSummary {
+            id: None,
+            status: "pending".to_string(),
+            source_id: Some("agent-cc_1".to_string()),
+            limit: 1,
+            window_seconds: 60,
+            observed_count: 2,
+            reason: "harmful feedback rate limit exceeded".to_string(),
+            raw_event_hash: None,
+        };
+
+        let degradation = harmful_burst_quarantine_degradation(&summary, &[]);
+
+        let details = degradation
+            .details
+            .as_ref()
+            .ok_or_else(|| "details payload must be present in dry-run".to_string())?;
+        ensure_equal(
+            &details["quarantinedCandidateIds"],
+            &serde_json::json!([]),
+            "dry-run quarantinedCandidateIds is the empty array, not null",
+        )?;
+        ensure_equal(
+            &degradation.code,
+            &HARMFUL_BURST_QUARANTINE_CODE.to_string(),
+            "dry-run still emits the same code",
         )
     }
 
@@ -2635,6 +2835,7 @@ mod tests {
                 net_score: 1.0,
                 trust_score: 1.0,
             },
+            degraded: Vec::new(),
         };
 
         let rendered = report.data_json().to_string();
