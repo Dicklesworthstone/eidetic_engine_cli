@@ -82,6 +82,41 @@ fn cass_import_error_lists_attempted_paths_and_recovery() -> TestResult {
 }
 
 #[test]
+fn memory_not_found_lists_recovery_actions() -> TestResult {
+    let value = parse_error(DomainError::NotFound {
+        resource: "memory".to_owned(),
+        id: "mem_missing".to_owned(),
+        repair: Some("ee memory list".to_owned()),
+    })?;
+    let recovery = pointer(&value, "/error/details/recovery")?
+        .as_array()
+        .ok_or_else(|| "recovery must be an array".to_owned())?;
+    assert_eq!(recovery.len(), 3);
+    assert_eq!(
+        pointer(&recovery[0], "/kind")?,
+        &serde_json::json!("broaden")
+    );
+    assert_eq!(
+        pointer(&recovery[0], "/command")?,
+        &serde_json::json!("ee memory list --workspace . --json")
+    );
+    assert_eq!(pointer(&recovery[1], "/kind")?, &serde_json::json!("flag"));
+    assert_eq!(
+        pointer(&recovery[1], "/flagName")?,
+        &serde_json::json!("--workspace")
+    );
+    assert_eq!(
+        pointer(&recovery[2], "/kind")?,
+        &serde_json::json!("narrow")
+    );
+    assert_eq!(
+        pointer(&recovery[2], "/command")?,
+        &serde_json::json!("ee search '<terms>' --workspace . --json")
+    );
+    Ok(())
+}
+
+#[test]
 fn schema_export_serves_error_v2_document() -> TestResult {
     let exported: Value = serde_json::from_str(&render_schema_export_json(Some("ee.error.v2")))
         .map_err(|err| err.to_string())?;

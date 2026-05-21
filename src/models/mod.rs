@@ -1011,6 +1011,47 @@ impl DomainError {
                 },
             ]
             }
+            // Memory ID lookups are often copied from a different
+            // workspace or from stale context. Make the error envelope tell
+            // agents how to recover without scraping the prose repair hint.
+            Self::NotFound { resource, .. } if resource.to_ascii_lowercase().contains("memory") => {
+                vec![
+                    RecoveryAction {
+                        priority: 1,
+                        kind: RecoveryKind::Broaden,
+                        rationale: "List known memories in the active workspace to discover the current ID."
+                            .to_owned(),
+                        env_name: None,
+                        value_hint: None,
+                        config_path: None,
+                        config_key: None,
+                        flag_name: None,
+                        command: Some("ee memory list --workspace . --json".to_owned()),
+                        results_in: None,
+                        example: None,
+                    },
+                    RecoveryAction::flag(
+                        2,
+                        "--workspace",
+                        "<path>",
+                        "Point at the workspace that owns the memory ID.",
+                    ),
+                    RecoveryAction {
+                        priority: 3,
+                        kind: RecoveryKind::Narrow,
+                        rationale: "Search by nearby content or provenance when the copied ID is stale."
+                            .to_owned(),
+                        env_name: None,
+                        value_hint: None,
+                        config_path: None,
+                        config_key: None,
+                        flag_name: None,
+                        command: Some("ee search '<terms>' --workspace . --json".to_owned()),
+                        results_in: None,
+                        example: None,
+                    },
+                ]
+            }
             // R-012 (Pass 2): Storage + "database not found" is the most
             // common first-time error path — agents that run `ee context`,
             // `ee remember`, `ee why`, or any other workspace-touching
