@@ -48,11 +48,11 @@ DEST="${EE_INSTALL_DIR:-${DEST:-$DEST_DEFAULT}}"
 ARTIFACT_URL="${ARTIFACT_URL:-}"
 CHECKSUM="${CHECKSUM:-}"
 CHECKSUM_URL="${CHECKSUM_URL:-}"
-SIGSTORE_BUNDLE_URL="${SIGSTORE_BUNDLE_URL:-}"
 
-# Sigstore identity regexp must match the release.yml-published bundle.
-COSIGN_IDENTITY_RE="${COSIGN_IDENTITY_RE:-^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$}"
-COSIGN_OIDC_ISSUER="${COSIGN_OIDC_ISSUER:-https://token.actions.githubusercontent.com}"
+# Sigstore trust anchors are part of the installer security boundary. Do not
+# honor environment overrides here; curl-pipe-bash callers can set env inline.
+CERT_IDENTITY_REGEXP="^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$"
+CERT_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 EASY=0
 QUIET=0
@@ -719,11 +719,14 @@ verify_sigstore_bundle() {
     return 1
   fi
 
-  local bundle_url="$SIGSTORE_BUNDLE_URL"
-  [ -z "$bundle_url" ] && bundle_url="${artifact_url}.sigstore.json"
+  local bundle_url="${artifact_url}.sigstore.json"
 
-  local bundle_file="$TMP/$(basename "$bundle_url")"
+  local bundle_file
+  bundle_file="$TMP/$(basename "$bundle_url")"
   info "Fetching sigstore bundle"
+  info "Sigstore bundle: $bundle_url" >&2
+  info "Sigstore identity regexp: $CERT_IDENTITY_REGEXP" >&2
+  info "Sigstore OIDC issuer: $CERT_OIDC_ISSUER" >&2
   if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
     err "Sigstore bundle not available at $bundle_url."
     err "Cannot verify signature. To skip cryptographic verification, use --no-verify or set EE_SKIP_VERIFY=1."
@@ -732,8 +735,8 @@ verify_sigstore_bundle() {
 
   if ! cosign verify-blob \
         --bundle "$bundle_file" \
-        --certificate-identity-regexp "$COSIGN_IDENTITY_RE" \
-        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
         "$file" >/dev/null 2>&1; then
     err "Sigstore signature verification failed for $file"
     return 1
@@ -1113,6 +1116,4 @@ else
   echo ""
   echo -e "  \033[0;90mInspect health:  ee doctor --json\033[0m"
   echo -e "  \033[0;90mUninstall:       rm $DEST/$BINARY  (config in ~/.ee/ and ~/.local/share/ee/ persists)\033[0m"
-fi
-rsists)\033[0m"
 fi
