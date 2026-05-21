@@ -369,8 +369,7 @@ pub const SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE: &str =
 /// invalid UTF-8, interrupted I/O, etc.). Without this code, operators
 /// cannot tell whether `status: absent` means "no evidence captured" or
 /// "evidence captured but I/O is broken" — bd-25z97.
-pub const SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE: &str =
-    "search_score_calibration_unreadable";
+pub const SEARCH_SCORE_CALIBRATION_UNREADABLE_CODE: &str = "search_score_calibration_unreadable";
 
 // Pack degradations (D400 - D499)
 pub const TOKEN_BUDGET_EXCEEDED: DegradationCode = DegradationCode {

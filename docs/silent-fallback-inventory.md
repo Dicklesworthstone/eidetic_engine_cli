@@ -285,6 +285,33 @@ empty strings which are semantically valid (no schema specified, no unit inferen
 
 ---
 
+## Category 19a: Search Score Calibration JSONL I/O (RESOLVED 2026-05-20)
+
+### src/core/search.rs
+
+Pre-bd-25z97, `load_search_score_calibration_jsonl` and
+`stream_search_score_calibration_jsonl` mapped every `std::fs::metadata` or
+`std::fs::File::open` error to `SearchScoreCalibrationJsonlLoad::absent()`.
+Permission-denied JSONL, invalid UTF-8, interrupted reads, and racing
+deletes all collapsed into `status: absent` — indistinguishable from a
+genuinely missing calibration file.
+
+Resolved by `SearchScoreCalibrationStatus::Unreadable` plus the new
+`search_score_calibration_unreadable` degraded code: I/O errors other
+than `ErrorKind::NotFound` are classified into a stable snake_case label
+(`permission_denied`, `invalid_data`, `interrupted`, ...) and surfaced
+via `data.degraded[]` and `scoreCalibration.status`. Genuinely absent
+files still report `status: absent` and emit no degradation.
+
+**Regression:**
+`core::search::tests::search_score_calibration_unreadable_jsonl_surfaces_degradation`
+(unix-only chmod 0o000 reproducer),
+`core::search::tests::search_score_calibration_absent_jsonl_emits_no_unreadable_degradation`,
+`core::search::tests::classify_calibration_io_error_splits_not_found_from_everything_else`.
+**Linked bead:** bd-25z97.
+
+---
+
 ## Category 19: Contract Inventory Resync (2026-05-15)
 
 The executable source of truth for this inventory is
