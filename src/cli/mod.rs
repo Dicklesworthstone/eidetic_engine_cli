@@ -200,7 +200,8 @@ use crate::core::rule::{
     protect_rule, show_rule, update_rule,
 };
 use crate::core::search::{
-    SearchDedupMode, SearchDegradation, SearchOptions, SearchReport, SearchSourceMode,
+    SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
+    SearchScoreRecalibrationReport, SearchSourceMode, recalibrate_search_score_calibration,
     run_diag_search, run_search,
 };
 use crate::core::status::{
@@ -6328,6 +6329,10 @@ pub struct SearchArgs {
     /// Fail closed when relevant evidence exists outside the requested memory scope.
     #[arg(long, action = ArgAction::SetTrue)]
     pub strict_scope: bool,
+
+    /// Refresh .ee/search/calibration.jsonl from outcome/curation feedback events before searching.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub recalibrate_now: bool,
 
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
@@ -32578,6 +32583,25 @@ where
     E: Write,
 {
     let workspace_path = cli.resolve_workspace();
+    let recalibration = if args.recalibrate_now {
+        match recalibrate_search_score_calibration(&workspace_path, args.database.as_deref()) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                let domain_error = DomainError::SearchIndex {
+                    message: error.to_string(),
+                    repair: error.repair_hint().map(str::to_string),
+                };
+                return write_domain_error(
+                    &domain_error,
+                    cli.wants_json() || args.explain_performance,
+                    stdout,
+                    stderr,
+                );
+            }
+        }
+    } else {
+        None
+    };
     let options = SearchOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -32620,7 +32644,11 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => write_stdout(
                 stdout,
-                &(format_search_json_with_mesh(&report, args.mesh_mode) + "\n"),
+                &(format_search_json_with_mesh_and_recalibration(
+                    &report,
+                    args.mesh_mode,
+                    recalibration.as_ref(),
+                ) + "\n"),
             ),
         },
         Err(error) => {
@@ -32643,12 +32671,25 @@ fn format_search_json(report: &SearchReport) -> String {
 }
 
 fn format_search_json_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
+    format_search_json_with_mesh_and_recalibration(report, mesh_mode, None)
+}
+
+fn format_search_json_with_mesh_and_recalibration(
+    report: &SearchReport,
+    mesh_mode: MeshCommandMode,
+    recalibration: Option<&SearchScoreRecalibrationReport>,
+) -> String {
     let mut data = report.data_json();
     if let Some(revision) =
         crate::core::search::SearchRevisionMetadata::for_report(report, mesh_mode)
         && let Some(data_object) = data.as_object_mut()
     {
         data_object.insert("revision".to_owned(), revision.data_json());
+    }
+    if let Some(recalibration) = recalibration
+        && let Some(data_object) = data.as_object_mut()
+    {
+        data_object.insert("recalibration".to_owned(), recalibration.data_json());
     }
     serde_json::json!({
         "schema": crate::models::RESPONSE_SCHEMA_V1,
@@ -53037,6 +53078,24 @@ mod tests {
                 &crate::search::SpeedMode::Instant,
                 "search speed",
             ),
+            _ => Err("expected Search command".to_string()),
+        }
+    }
+
+    #[test]
+    fn search_command_accepts_recalibrate_now() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "search", "test", "--recalibrate-now"]).map_err(|e| {
+                format!(
+                    "failed to parse search with recalibrate flag: {:?}",
+                    e.kind()
+                )
+            })?;
+
+        match parsed.command {
+            Some(Command::Search(ref args)) => {
+                ensure_equal(&args.recalibrate_now, &true, "search recalibrate now")
+            }
             _ => Err("expected Search command".to_string()),
         }
     }

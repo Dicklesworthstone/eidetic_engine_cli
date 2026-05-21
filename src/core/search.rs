@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -65,6 +65,7 @@ pub const PERFORMANCE_EXPLAIN_SCHEMA_V1: &str = "ee.explain.performance.v1";
 pub const SEARCH_REVISION_TOKEN_SCHEMA_V1: &str = "ee.search.revision_token.v1";
 pub const SEARCH_SCORE_INTERVAL_SCHEMA_V1: &str = "ee.search.score_interval.v1";
 pub const SEARCH_SCORE_CALIBRATION_SCHEMA_V1: &str = "ee.search.score_calibration.v1";
+pub const SEARCH_SCORE_RECALIBRATION_SCHEMA_V1: &str = "ee.search.score_recalibration.v1";
 const INDEX_STATUS_CACHE_TTL: Duration = Duration::from_secs(1);
 const SEARCH_SCORE_COVERAGE_GUARANTEE: f32 = 0.95;
 const MIN_SEARCH_SCORE_CALIBRATION_SAMPLES: usize = 20;
@@ -389,6 +390,34 @@ fn shell_quote(value: &str) -> String {
         return "''".to_owned();
     }
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchScoreRecalibrationReport {
+    pub schema: &'static str,
+    pub status: &'static str,
+    pub path: PathBuf,
+    pub samples_written: usize,
+    pub feedback_events_considered: usize,
+    pub feedback_events_malformed: usize,
+    pub feedback_events_unavailable_reason: Option<String>,
+    pub jsonl_hash: String,
+}
+
+impl SearchScoreRecalibrationReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "status": self.status,
+            "path": self.path.display().to_string(),
+            "samplesWritten": self.samples_written,
+            "feedbackEventsConsidered": self.feedback_events_considered,
+            "feedbackEventsMalformed": self.feedback_events_malformed,
+            "feedbackEventsUnavailableReason": self.feedback_events_unavailable_reason,
+            "jsonlHash": self.jsonl_hash,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2333,8 +2362,38 @@ fn record_corrupt_calibration_line(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SearchScoreCalibrationSample {
+    score: f32,
+    ground_truth_relevance: f32,
+}
+
+impl SearchScoreCalibrationSample {
+    fn residual(self) -> f32 {
+        let scale = score_uncertainty_scale(self.score);
+        ((self.score.clamp(0.0, 1.0) - self.ground_truth_relevance.clamp(0.0, 1.0)).abs() / scale)
+            .min(20.0)
+    }
+
+    fn data_json(self, feedback_event_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.search.calibration_feedback.v1",
+            "score": round_metric_f32(self.score),
+            "groundTruthRelevance": round_metric_f32(self.ground_truth_relevance),
+            "source": "feedback_event",
+            "feedbackEventId": feedback_event_id,
+        })
+    }
+}
+
 fn calibration_residual_from_value(value: &serde_json::Value) -> Option<f32> {
-    calibration_residual_from_object(value).or_else(|| {
+    calibration_sample_from_value(value).map(SearchScoreCalibrationSample::residual)
+}
+
+fn calibration_sample_from_value(
+    value: &serde_json::Value,
+) -> Option<SearchScoreCalibrationSample> {
+    calibration_sample_from_object(value).or_else(|| {
         [
             "searchCalibration",
             "search_calibration",
@@ -2343,11 +2402,13 @@ fn calibration_residual_from_value(value: &serde_json::Value) -> Option<f32> {
             "score_calibration",
         ]
         .iter()
-        .find_map(|key| value.get(*key).and_then(calibration_residual_from_object))
+        .find_map(|key| value.get(*key).and_then(calibration_sample_from_object))
     })
 }
 
-fn calibration_residual_from_object(value: &serde_json::Value) -> Option<f32> {
+fn calibration_sample_from_object(
+    value: &serde_json::Value,
+) -> Option<SearchScoreCalibrationSample> {
     let score = calibration_number(
         value,
         &["score", "predictedScore", "predicted_score", "fusionScore"],
@@ -2361,8 +2422,10 @@ fn calibration_residual_from_object(value: &serde_json::Value) -> Option<f32> {
             "label",
         ],
     )?;
-    let scale = score_uncertainty_scale(score);
-    Some(((score.clamp(0.0, 1.0) - truth.clamp(0.0, 1.0)).abs() / scale).min(20.0))
+    Some(SearchScoreCalibrationSample {
+        score,
+        ground_truth_relevance: truth,
+    })
 }
 
 fn line_number_summary(line_numbers: &[usize]) -> String {
@@ -2524,6 +2587,105 @@ fn search_score_calibration_feedback_events(
             SearchScoreCalibrationFeedbackEvents::unavailable("feedback_events_read_failed")
         }
     }
+}
+
+pub fn recalibrate_search_score_calibration(
+    workspace_path: &Path,
+    database_path: Option<&Path>,
+) -> Result<SearchScoreRecalibrationReport, SearchError> {
+    let feedback_events =
+        search_score_calibration_feedback_events(workspace_path, database_path, None);
+    let calibration_path = workspace_path
+        .join(".ee")
+        .join("search")
+        .join("calibration.jsonl");
+
+    let mut rows = Vec::new();
+    let mut malformed_count = 0usize;
+    for event in &feedback_events.events {
+        let Some(evidence_json) = &event.evidence_json else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(evidence_json) else {
+            malformed_count = malformed_count.saturating_add(1);
+            continue;
+        };
+        let Some(sample) = calibration_sample_from_value(&value) else {
+            continue;
+        };
+        rows.push(sample.data_json(&event.id).to_string());
+    }
+
+    if feedback_events.unavailable_reason.is_some() {
+        let existing = std::fs::read(&calibration_path).unwrap_or_default();
+        return Ok(SearchScoreRecalibrationReport {
+            schema: SEARCH_SCORE_RECALIBRATION_SCHEMA_V1,
+            status: "feedback_unavailable",
+            path: calibration_path,
+            samples_written: 0,
+            feedback_events_considered: feedback_events.events.len(),
+            feedback_events_malformed: malformed_count,
+            feedback_events_unavailable_reason: feedback_events.unavailable_reason,
+            jsonl_hash: format!("blake3:{}", blake3::hash(&existing).to_hex()),
+        });
+    }
+
+    let output = if rows.is_empty() {
+        String::new()
+    } else {
+        let mut output = rows.join("\n");
+        output.push('\n');
+        output
+    };
+
+    if let Some(parent) = calibration_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            SearchError::Index(format!(
+                "could not create search calibration directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&calibration_path)
+        .map_err(|error| {
+            SearchError::Index(format!(
+                "could not open search calibration file {}: {error}",
+                calibration_path.display()
+            ))
+        })?;
+    file.write_all(output.as_bytes()).map_err(|error| {
+        SearchError::Index(format!(
+            "could not write search calibration file {}: {error}",
+            calibration_path.display()
+        ))
+    })?;
+
+    if let Some(cache) = SEARCH_SCORE_CALIBRATION_JSONL_CACHE.get()
+        && let Ok(mut cache_guard) = cache.lock()
+    {
+        cache_guard.remove(&calibration_path);
+    }
+
+    let samples_written = rows.len();
+    let status = if samples_written >= MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+        "calibrated"
+    } else {
+        "insufficient"
+    };
+    Ok(SearchScoreRecalibrationReport {
+        schema: SEARCH_SCORE_RECALIBRATION_SCHEMA_V1,
+        status,
+        path: calibration_path,
+        samples_written,
+        feedback_events_considered: feedback_events.events.len(),
+        feedback_events_malformed: malformed_count,
+        feedback_events_unavailable_reason: feedback_events.unavailable_reason,
+        jsonl_hash: format!("blake3:{}", blake3::hash(output.as_bytes()).to_hex()),
+    })
 }
 
 fn search_hit_score_interval_json(hit: &SearchHit) -> serde_json::Value {
@@ -3959,10 +4121,17 @@ impl SearchAuditBatch {
         if self.entries.is_empty() {
             return;
         }
-        let count = self.entries.len();
         let Ok(conn) = DbConnection::open_file(database_path) else {
             return;
         };
+        self.flush_best_effort_with_connection(&conn);
+    }
+
+    fn flush_best_effort_with_connection(self, conn: &DbConnection) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let count = self.entries.len();
         if let Err(error) = conn.insert_audit_batch(&self.entries) {
             // Match audit_append_best_effort's failure mode: best-effort,
             // never block the response. Surface via tracing for diagnostics.
@@ -3979,7 +4148,7 @@ impl SearchAuditBatch {
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, None, &determinism, &mut audit_ids)
+    run_search_inner(options, None, &determinism, &mut audit_ids, None)
 }
 
 pub fn run_search_seeded(
@@ -3989,7 +4158,7 @@ pub fn run_search_seeded(
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, None, determinism, &mut audit_ids)
+    run_search_inner(options, None, determinism, &mut audit_ids, None)
 }
 
 pub fn run_search_with_read_connection(
@@ -3998,7 +4167,13 @@ pub fn run_search_with_read_connection(
 ) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, Some(read_connection), &determinism, &mut audit_ids)
+    run_search_inner(
+        options,
+        Some(read_connection),
+        &determinism,
+        &mut audit_ids,
+        None,
+    )
 }
 
 pub fn run_search_with_read_connection_seeded(
@@ -4009,7 +4184,31 @@ pub fn run_search_with_read_connection_seeded(
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, Some(read_connection), determinism, &mut audit_ids)
+    run_search_inner(
+        options,
+        Some(read_connection),
+        determinism,
+        &mut audit_ids,
+        None,
+    )
+}
+
+pub fn run_search_with_read_connection_seeded_and_audit_connection(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    // Search determinism controls ranking/output replay. Audit rows are durable
+    // side effects, so they must remain unique across repeated seeded calls.
+    let mut audit_ids = SearchAuditIdSource::Ambient;
+    run_search_inner(
+        options,
+        Some(read_connection),
+        determinism,
+        &mut audit_ids,
+        audit_connection,
+    )
 }
 
 fn run_search_inner(
@@ -4017,6 +4216,7 @@ fn run_search_inner(
     read_connection: Option<&DbConnection>,
     determinism: &Deterministic<Seed>,
     audit_ids: &mut SearchAuditIdSource,
+    audit_connection: Option<&DbConnection>,
 ) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -4294,7 +4494,11 @@ fn run_search_inner(
                     }
                 }
             }
-            audit_batch.flush_best_effort(&database_path);
+            if let Some(conn) = audit_connection {
+                audit_batch.flush_best_effort_with_connection(conn);
+            } else {
+                audit_batch.flush_best_effort(&database_path);
+            }
 
             Ok(SearchReport {
                 status,
@@ -7003,6 +7207,107 @@ mod tests {
                 })
                 .and_then(serde_json::Value::as_str),
             Some("ok")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_recalibrate_now_persists_feedback_events_jsonl() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-recalibrate-now");
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(
+            database_path
+                .parent()
+                .ok_or_else(|| "database path must have a parent".to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = crate::core::curate::stable_workspace_id(&workspace);
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.display().to_string(),
+                    name: Some("score-calibration-recalibrate-now".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for index in 0..MIN_SEARCH_SCORE_CALIBRATION_SAMPLES {
+            let score = 0.40 + (index as f32 * 0.01);
+            let truth = score + 0.03;
+            let evidence = serde_json::json!({
+                "schema": "ee.search.calibration_feedback.v1",
+                "scoreCalibration": {
+                    "score": score,
+                    "groundTruthRelevance": truth,
+                },
+            })
+            .to_string();
+            connection
+                .insert_feedback_event(
+                    &format!("fb_{index:026}"),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "candidate".to_owned(),
+                        target_id: format!("cand_recal_{index:02}"),
+                        signal: "confirmation".to_owned(),
+                        weight: 1.0,
+                        source_type: "outcome_observed".to_owned(),
+                        source_id: Some("curate-validation".to_owned()),
+                        reason: Some("calibration refresh sample".to_owned()),
+                        evidence_json: Some(evidence),
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let report = recalibrate_search_score_calibration(&workspace, Some(&database_path))
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.status, "calibrated");
+        assert_eq!(report.samples_written, MIN_SEARCH_SCORE_CALIBRATION_SAMPLES);
+        assert_eq!(
+            report.path,
+            workspace
+                .join(".ee")
+                .join("search")
+                .join("calibration.jsonl")
+        );
+        let persisted = std::fs::read_to_string(&report.path).map_err(|error| error.to_string())?;
+        assert!(persisted.contains("\"feedbackEventId\":\"fb_00000000000000000000000000\""));
+        let calibration = SearchScoreCalibration::for_workspace(&workspace);
+        assert_eq!(calibration.status, SearchScoreCalibrationStatus::Calibrated);
+        assert_eq!(
+            calibration.jsonl_sample_count,
+            MIN_SEARCH_SCORE_CALIBRATION_SAMPLES
+        );
+        assert_ne!(calibration.interval_for_score(0.8), [0.0, 1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn search_score_recalibrate_now_preserves_jsonl_when_feedback_unavailable() -> TestResult {
+        let workspace = unique_test_dir("score-calibration-recalibrate-now-unavailable");
+        let calibration_dir = workspace.join(".ee").join("search");
+        std::fs::create_dir_all(&calibration_dir).map_err(|error| error.to_string())?;
+        let calibration_path = calibration_dir.join("calibration.jsonl");
+        let original = r#"{"score":0.9,"groundTruthRelevance":0.8}"#;
+        std::fs::write(&calibration_path, original).map_err(|error| error.to_string())?;
+        let database_path = workspace.join(".ee").join("ee.db");
+        std::fs::create_dir_all(&database_path).map_err(|error| error.to_string())?;
+
+        let report = recalibrate_search_score_calibration(&workspace, Some(&database_path))
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.status, "feedback_unavailable");
+        assert_eq!(report.samples_written, 0);
+        assert_eq!(
+            std::fs::read_to_string(&calibration_path).map_err(|error| error.to_string())?,
+            original
         );
         Ok(())
     }
