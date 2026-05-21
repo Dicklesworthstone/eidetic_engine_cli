@@ -660,6 +660,64 @@ pub fn render_serve_http_sse_response(first_frame: &str) -> String {
     render_serve_http_response(200, "text/event-stream; charset=utf-8", None, first_frame)
 }
 
+#[must_use]
+pub fn render_serve_transport_exchange(
+    request_id: &str,
+    request_bytes: &[u8],
+    limits: &ServeLimits,
+    token: Option<&str>,
+    elapsed_ms: u64,
+) -> String {
+    let request = match parse_serve_http_request(request_bytes, limits) {
+        Ok(request) => request,
+        Err(error) => return render_serve_http_json_response(400, &serve_error_payload(&error)),
+    };
+
+    let auth_state = serve_auth_state(&request, token);
+    if auth_state != "accepted" {
+        return render_serve_http_json_response(
+            401,
+            &serve_auth_failure_envelope(request_id, &request, auth_state, elapsed_ms),
+        );
+    }
+
+    let plan = match serve_dispatch_plan(&request) {
+        Ok(plan) => plan,
+        Err(error) => {
+            let status_code = if request.endpoint == ServeEndpoint::Unknown {
+                404
+            } else {
+                400
+            };
+            return render_serve_http_json_response(
+                status_code,
+                &serve_error_exchange_envelope(
+                    request_id,
+                    &request,
+                    auth_state,
+                    status_code,
+                    &error,
+                    elapsed_ms,
+                ),
+            );
+        }
+    };
+
+    if plan.sse_stream {
+        let frame = render_serve_sse_event(
+            "header",
+            false,
+            &serve_dispatch_payload_json(&plan, "transport_only"),
+        );
+        return render_serve_http_sse_response(&frame);
+    }
+
+    render_serve_http_json_response(
+        200,
+        &serve_dispatch_exchange_envelope(request_id, &request, auth_state, 200, &plan, elapsed_ms),
+    )
+}
+
 fn render_serve_http_response(
     status_code: u16,
     content_type: &str,
@@ -734,6 +792,69 @@ fn serve_startup_degraded(token_posture: &ServeTokenPosture) -> Vec<JsonValue> {
             "repair": token_posture.repair
         })],
     }
+}
+
+fn serve_dispatch_exchange_envelope(
+    request_id: &str,
+    request: &ServeHttpRequest,
+    auth_state: &'static str,
+    status_code: u16,
+    plan: &ServeDispatchPlan,
+    elapsed_ms: u64,
+) -> JsonValue {
+    json!({
+        "schema": SERVE_ENDPOINT_SCHEMA_V1,
+        "request": serve_request_metadata_json(request_id, request, auth_state),
+        "response": {
+            "statusCode": status_code,
+            "payloadSchema": "ee.response.v2",
+            "payload": serve_dispatch_payload_json(plan, "not_started"),
+            "elapsedMs": elapsed_ms,
+            "degradedCodes": [],
+            "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
+        }
+    })
+}
+
+fn serve_error_exchange_envelope(
+    request_id: &str,
+    request: &ServeHttpRequest,
+    auth_state: &'static str,
+    status_code: u16,
+    error: &DomainError,
+    elapsed_ms: u64,
+) -> JsonValue {
+    json!({
+        "schema": SERVE_ENDPOINT_SCHEMA_V1,
+        "request": serve_request_metadata_json(request_id, request, auth_state),
+        "response": {
+            "statusCode": status_code,
+            "payloadSchema": "ee.error.v2",
+            "payload": serve_error_payload(error),
+            "elapsedMs": elapsed_ms,
+            "degradedCodes": [error.code()],
+            "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
+        }
+    })
+}
+
+fn serve_dispatch_payload_json(plan: &ServeDispatchPlan, execution: &'static str) -> JsonValue {
+    json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "execution": execution,
+            "executionBoundary": "serve_transport_adapter",
+            "businessLogicExecuted": false,
+            "dispatchPlan": plan.to_json()
+        },
+        "degraded": []
+    })
+}
+
+fn serve_error_payload(error: &DomainError) -> JsonValue {
+    serde_json::from_str(&crate::output::error_response_json(error))
+        .unwrap_or_else(|_| json!({"schema": "ee.error.v2"}))
 }
 
 fn read_only_cli_dispatch(
@@ -1995,6 +2116,197 @@ mod tests {
             body.starts_with("event: complete\n"),
             true,
             "sse event body",
+        )
+    }
+
+    #[test]
+    fn serve_transport_exchange_returns_dispatch_envelope_without_executing_business_logic()
+    -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let raw = format!(
+            "GET /v1/search?q=release+check HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let response = render_serve_transport_exchange(
+            "req-transport-1",
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            11,
+        );
+
+        ensure(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            "transport status line",
+        )?;
+        let (_, body) = split_http_response(&response)?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "transport envelope schema",
+        )?;
+        ensure(
+            envelope["request"]["auth"]["state"].as_str(),
+            Some("accepted"),
+            "accepted auth state",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["businessLogicExecuted"].as_bool(),
+            Some(false),
+            "business logic boundary",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["dispatchPlan"]["handlerSurface"].as_str(),
+            Some("cli.search"),
+            "dispatch handler",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["dispatchPlan"]["cliArgv"]
+                .as_array()
+                .is_some_and(|argv| {
+                    argv.iter().map(JsonValue::as_str).collect::<Vec<_>>()
+                        == vec![
+                            Some("ee"),
+                            Some("search"),
+                            Some("release check"),
+                            Some("--json"),
+                        ]
+                }),
+            true,
+            "dispatch argv",
+        )
+    }
+
+    #[test]
+    fn serve_transport_exchange_rejects_missing_auth_before_dispatch() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let response = render_serve_transport_exchange(
+            "req-transport-auth",
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+            Some(token),
+            5,
+        );
+
+        ensure(
+            response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            true,
+            "missing auth status line",
+        )?;
+        ensure(
+            response.contains(token),
+            false,
+            "transport auth response must not expose token",
+        )?;
+        let (_, body) = split_http_response(&response)?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["request"]["auth"]["state"].as_str(),
+            Some("missing"),
+            "missing auth state",
+        )
+    }
+
+    #[test]
+    fn serve_transport_exchange_maps_parse_and_unknown_endpoint_errors() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let parse_response = render_serve_transport_exchange(
+            "req-parse",
+            b"GET /v1/status HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+            Some(token),
+            0,
+        );
+        ensure(
+            parse_response.starts_with("HTTP/1.1 400 Bad Request\r\n"),
+            true,
+            "parse error status",
+        )?;
+        let (_, parse_body) = split_http_response(&parse_response)?;
+        let parse_payload: JsonValue =
+            serde_json::from_str(parse_body).map_err(|error| error.to_string())?;
+        ensure(
+            parse_payload["schema"].as_str(),
+            Some("ee.error.v2"),
+            "parse error schema",
+        )?;
+
+        let raw_unknown = format!(
+            "GET /v1/missing HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let unknown_response = render_serve_transport_exchange(
+            "req-unknown",
+            raw_unknown.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            2,
+        );
+        ensure(
+            unknown_response.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            true,
+            "unknown endpoint status",
+        )?;
+        let (_, unknown_body) = split_http_response(&unknown_response)?;
+        let unknown_envelope: JsonValue =
+            serde_json::from_str(unknown_body).map_err(|error| error.to_string())?;
+        ensure(
+            unknown_envelope["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "unknown endpoint envelope",
+        )?;
+        ensure(
+            unknown_envelope["request"]["endpoint"].as_str(),
+            Some("unknown"),
+            "unknown endpoint metadata",
+        )?;
+        ensure(
+            unknown_envelope["response"]["payload"]["schema"].as_str(),
+            Some("ee.error.v2"),
+            "unknown wrapped error",
+        )
+    }
+
+    #[test]
+    fn serve_transport_exchange_returns_sse_header_frame_for_events() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let raw = format!(
+            "GET /v1/events HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let response = render_serve_transport_exchange(
+            "req-events",
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            1,
+        );
+
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Content-Type"),
+            Some("text/event-stream; charset=utf-8"),
+            "transport sse content type",
+        )?;
+        ensure(
+            header_value(headers, "Content-Length").is_none(),
+            true,
+            "transport sse no content length",
+        )?;
+        ensure(
+            body.starts_with("event: header\n"),
+            true,
+            "transport sse header event",
+        )?;
+        let data_line = body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .ok_or_else(|| "missing transport sse data line".to_owned())?;
+        let event: JsonValue =
+            serde_json::from_str(data_line).map_err(|error| error.to_string())?;
+        ensure(
+            event["response"]["payload"]["data"]["dispatchPlan"]["endpoint"].as_str(),
+            Some("events"),
+            "events dispatch plan",
         )
     }
 
