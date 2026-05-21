@@ -26747,12 +26747,13 @@ fn parse_mesh_command_mode_arg(value: &str) -> Result<MeshCommandMode, String> {
 }
 
 fn parse_search_source_mode_arg(value: &str) -> Result<SearchSourceMode, String> {
-    match value {
+    let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
         "lexical_only" => Ok(SearchSourceMode::LexicalOnly),
         "semantic_only" => Ok(SearchSourceMode::SemanticOnly),
         "hybrid" => Ok(SearchSourceMode::Hybrid),
         _ => Err(format!(
-            "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid."
+            "Invalid source mode '{value}'. Expected lexical_only, semantic_only, or hybrid; hyphenated aliases are accepted."
         )),
     }
 }
@@ -43008,8 +43009,9 @@ mod tests {
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         hook_git_readiness_response_json, mesh, parse_completion_audit_evidence_input,
         parse_context_profile, parse_lab_counterfactual_swap,
-        parse_lab_counterfactual_swap_revision, parse_verification_evidence_record_input,
-        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
+        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
+        parse_verification_evidence_record_input, plan_cache_diag_degraded,
+        plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -51599,7 +51601,7 @@ mod tests {
             "search",
             "test",
             "--source-mode",
-            "lexical_only",
+            "lexical-only",
             "--strict-source-mode",
         ])
         .map_err(|e| {
@@ -51619,7 +51621,13 @@ mod tests {
                 ensure_equal(&args.strict_source_mode, &true, "search strict source mode")
             }
             _ => Err("expected Search command".to_string()),
-        }
+        }?;
+
+        ensure_equal(
+            &parse_search_source_mode_arg(" Semantic_Only ")?,
+            &SearchSourceMode::SemanticOnly,
+            "normalized search source mode",
+        )
     }
 
     #[test]
