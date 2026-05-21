@@ -44,9 +44,10 @@
 //! `src/cli/mod.rs` and is queued as a follow-up bead. The chokepoint is
 //! self-contained, fully testable, and ready for the wiring pass.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
@@ -769,10 +770,7 @@ pub fn mutate(ctx: &mut RunContext, path: &Path, op: Op) -> Result<ActionLine, D
             let dest = ctx.run_dir.join("quarantine").join(dest_under_quarantine);
             if dest.exists() {
                 return Err(DoctorRuntimeError::Io {
-                    context: format!(
-                        "quarantine destination already exists: {}",
-                        dest.display()
-                    ),
+                    context: format!("quarantine destination already exists: {}", dest.display()),
                     source: io::Error::new(
                         io::ErrorKind::AlreadyExists,
                         "quarantine destination collision",
@@ -1559,19 +1557,35 @@ fn is_path_in_blast_radius(path: &Path, roots: &[PathBuf]) -> bool {
 /// Walk upward from `path` to the nearest existing ancestor, canonicalize
 /// it, then re-append the not-yet-existing tail. Returns the resulting
 /// concrete (canonical + tail) path if an existing ancestor was found.
+///
+/// The not-yet-existing tail is accepted only when every component is
+/// `Normal`. Refusing `..` here is the defense-in-depth boundary that keeps a
+/// missing intermediate directory from turning a literal in-radius prefix into
+/// an out-of-radius write once the kernel resolves the final path.
 fn nearest_existing_ancestor_canonical(path: &Path) -> Option<PathBuf> {
-    let mut tail = PathBuf::new();
+    let mut tail: Vec<OsString> = Vec::new();
     let mut p = path.to_path_buf();
     loop {
         if p.exists() {
-            let canon = p.canonicalize().ok()?;
-            return Some(canon.join(&tail));
+            let mut canon = p.canonicalize().ok()?;
+            for component in tail.iter().rev() {
+                canon.push(component);
+            }
+            return Some(canon);
         }
+
+        let name = match p.components().next_back()? {
+            Component::Normal(name) => name.to_os_string(),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::Prefix(_)
+            | Component::RootDir => {
+                return None;
+            }
+        };
+
         let parent = p.parent()?.to_path_buf();
-        let name = p.file_name()?.to_os_string();
-        let mut new_tail = PathBuf::from(name);
-        new_tail.push(&tail);
-        tail = new_tail;
+        tail.push(name);
         p = parent;
     }
 }
@@ -1595,18 +1609,15 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // paths (R5-3 absolutizes the workspace, which propagates everywhere).
     // Enforce that invariant at the leaf: refuse any parent that isn't
     // itself absolute. This catches `""`, `"."`, `"./sub"`, `".."` etc.
-    let parent = path
-        .parent()
-        .filter(|p| p.is_absolute())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "write_file_atomic: path lacks an absolute parent: {}",
-                    path.display()
-                ),
-            )
-        })?;
+    let parent = path.parent().filter(|p| p.is_absolute()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "write_file_atomic: path lacks an absolute parent: {}",
+                path.display()
+            ),
+        )
+    })?;
     fs::create_dir_all(parent)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(bytes)?;
@@ -2268,7 +2279,11 @@ mod tests {
         let summary = replay_undo(&run_dir).expect("returns Ok with partial");
         assert!(matches!(summary.status, RunStatus::UndonePartial));
         let err = summary.first_error.unwrap();
-        assert!(err.contains("drifted"), "expected drift error, got: {}", err);
+        assert!(
+            err.contains("drifted"),
+            "expected drift error, got: {}",
+            err
+        );
         // The new unrelated file is preserved.
         assert_eq!(fs::read(&victim).unwrap(), b"new_unrelated_file");
         // The quarantined original is still safely in quarantine.
@@ -2381,7 +2396,10 @@ mod tests {
             );
             let err = result.unwrap_err();
             assert!(
-                matches!(err.kind(), io::ErrorKind::InvalidInput | io::ErrorKind::NotFound),
+                matches!(
+                    err.kind(),
+                    io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
+                ),
                 "unexpected error kind for {}: {:?}",
                 parentless.display(),
                 err.kind()

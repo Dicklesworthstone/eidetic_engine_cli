@@ -159,6 +159,36 @@ fn write_outside_blast_radius_refuses_with_blast_radius_exceeded() {
 }
 
 #[test]
+fn write_with_parent_components_under_missing_tail_refuses_blast_radius_escape() {
+    let ws = fresh_workspace();
+    let restricted = vec![ws.path().join(".ee")];
+    let mut ctx = RunContext::start(ws.path(), "sha", restricted, true).expect("start");
+
+    let target = ws
+        .path()
+        .join(".ee")
+        .join("missing")
+        .join("..")
+        .join("..")
+        .join("blast_radius_escape.txt");
+    let escaped = ws.path().join("blast_radius_escape.txt");
+
+    let result = mutate(
+        &mut ctx,
+        &target,
+        Op::WriteFile {
+            bytes: b"x".to_vec(),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(DoctorRuntimeError::BlastRadiusExceeded { .. })
+    ));
+    assert!(!escaped.exists());
+}
+
+#[test]
 fn capabilities_report_serializes_with_stable_schema() {
     let ws = fresh_workspace();
     let report = CapabilitiesReport::build("0.1.0", ws.path());
