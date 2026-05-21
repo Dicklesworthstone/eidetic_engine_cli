@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.why.influence.v1.json",
+  "title": "ee.why.influence.v1",
+  "description": "Leave-one-out influence attribution block emitted by ee why.",
+  "type": "object",
+  "required": [
+    "schema",
+    "method",
+    "targetMemoryId",
+    "baselineTopScore",
+    "approximationErrorRatio",
+    "totalAbsoluteInfluence",
+    "topPositive",
+    "topNegative",
+    "entries"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.why.influence.v1"
+    },
+    "method": {
+      "type": "string",
+      "const": "deterministic_link_leave_one_out"
+    },
+    "targetMemoryId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baselineTopScore": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "approximationErrorRatio": {
+      "type": "number",
+      "minimum": 0
+    },
+    "totalAbsoluteInfluence": {
+      "type": "number",
+      "minimum": 0
+    },
+    "topPositive": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/influenceEntry"
+      }
+    },
+    "topNegative": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/influenceEntry"
+      }
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/influenceEntry"
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "topPositive", "topNegative"],
+    "summary": ["schema", "totalAbsoluteInfluence", "topPositive", "topNegative"],
+    "standard": ["schema", "method", "totalAbsoluteInfluence", "topPositive", "topNegative"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "influenceEntry": {
+      "type": "object",
+      "required": [
+        "memoryId",
+        "rank",
+        "relation",
+        "baselineScore",
+        "leaveOneOutScore",
+        "influenceDelta",
+        "absoluteInfluence",
+        "direction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "relation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "baselineScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "leaveOneOutScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "influenceDelta": {
+          "type": "number",
+          "minimum": -1,
+          "maximum": 1
+        },
+        "absoluteInfluence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["positive", "negative"]
+        }
+      }
+    }
+  }
+}

@@ -33987,6 +33987,34 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
             "predictionSet": prediction_set,
         })
     });
+    let counterfactual_influence = report.counterfactual_influence.as_ref().map(|influence| {
+        let top_positive = influence
+            .top_positive
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        let top_negative = influence
+            .top_negative
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        let entries = influence
+            .entries
+            .iter()
+            .map(why_influence_entry_json)
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "schema": influence.schema,
+            "method": influence.method,
+            "targetMemoryId": &influence.target_memory_id,
+            "baselineTopScore": score_json_value(influence.baseline_top_score),
+            "approximationErrorRatio": score_json_value(influence.approximation_error_ratio),
+            "totalAbsoluteInfluence": score_json_value(influence.total_absolute_influence),
+            "topPositive": top_positive,
+            "topNegative": top_negative,
+            "entries": entries,
+        })
+    });
 
     let degraded = aggregate_why_degraded_json("why", &report.degraded);
 
@@ -34155,8 +34183,33 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
     {
         data.insert("confidenceIntervals".to_owned(), confidence_intervals);
     }
+    if let Some(counterfactual_influence) = counterfactual_influence
+        && let Some(data) = json
+            .get_mut("data")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        data.insert(
+            "counterfactualInfluence".to_owned(),
+            counterfactual_influence,
+        );
+    }
 
     json.to_string()
+}
+
+fn why_influence_entry_json(
+    entry: &crate::core::influence::WhyInfluenceEntry,
+) -> serde_json::Value {
+    serde_json::json!({
+        "memoryId": &entry.memory_id,
+        "rank": entry.rank,
+        "relation": &entry.relation,
+        "baselineScore": score_json_value(entry.baseline_score),
+        "leaveOneOutScore": score_json_value(entry.leave_one_out_score),
+        "influenceDelta": score_json_value(entry.influence_delta),
+        "absoluteInfluence": score_json_value(entry.absolute_influence),
+        "direction": entry.direction,
+    })
 }
 
 fn score_json_value(value: f32) -> serde_json::Value {

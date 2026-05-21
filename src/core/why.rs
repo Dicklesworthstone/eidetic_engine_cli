@@ -21,6 +21,10 @@ use crate::core::conformal::{
     WhyConformalCandidate, WhyConformalConfidenceIntervals, why_conformal_confidence_intervals,
 };
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
+use crate::core::influence::{
+    WhyCounterfactualInfluence, WhyInfluenceCandidate, WhyInfluenceDirection,
+    why_counterfactual_influence,
+};
 use crate::core::memory::{
     EvidenceFreshness, EvidenceFreshnessStatus, assess_memory_evidence_freshness, memory_validity,
 };
@@ -564,6 +568,8 @@ pub struct WhyReport {
     pub bayes_posterior: Option<BayesPosteriorSummary>,
     /// Split-conformal prediction-set view for this explanation.
     pub confidence_intervals: Option<WhyConformalConfidenceIntervals>,
+    /// Leave-one-out influence attribution over related pack-mate candidates.
+    pub counterfactual_influence: Option<WhyCounterfactualInfluence>,
     /// Optional causal explanation block requested by `ee why --causal-explain`.
     pub causal_explanation: Option<serde_json::Value>,
     /// Optional revision lineage block derived from the revision DAG.
@@ -664,6 +670,7 @@ impl WhyReport {
             lifecycle: None,
             bayes_posterior: None,
             confidence_intervals: None,
+            counterfactual_influence: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -720,6 +727,7 @@ impl WhyReport {
             lifecycle: None,
             bayes_posterior: None,
             confidence_intervals: None,
+            counterfactual_influence: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -751,6 +759,7 @@ impl WhyReport {
             lifecycle: None,
             bayes_posterior: None,
             confidence_intervals: None,
+            counterfactual_influence: None,
             causal_explanation: None,
             revision_lineage: None,
             load_bearing: None,
@@ -867,6 +876,16 @@ impl WhyReport {
         confidence_intervals: WhyConformalConfidenceIntervals,
     ) -> Self {
         self.confidence_intervals = Some(confidence_intervals);
+        self
+    }
+
+    /// Attach deterministic counterfactual influence attribution for this report.
+    #[must_use]
+    pub fn with_counterfactual_influence(
+        mut self,
+        counterfactual_influence: WhyCounterfactualInfluence,
+    ) -> Self {
+        self.counterfactual_influence = Some(counterfactual_influence);
         self
     }
 
@@ -1211,6 +1230,8 @@ fn explain_memory_inner(
     let agent_profile =
         fetch_agent_profile_selection_explanation(&conn, &memory.workspace_id, memory_id);
     let conformal_candidates = why_conformal_candidates(memory_id, selection_score, &links);
+    let counterfactual_influence =
+        why_counterfactual_influence(memory_id, selection_score, why_influence_candidates(&links));
 
     let latest_pack_selection = match latest_pack_selection(&conn, memory_id) {
         Ok(selection) => selection,
@@ -1238,7 +1259,8 @@ fn explain_memory_inner(
                     dedup_link: find_embed_dedup_link(&conn, memory_id),
                 },
             )
-            .with_content(memory.content.clone());
+            .with_content(memory.content.clone())
+            .with_counterfactual_influence(counterfactual_influence);
             trace_why_math_surfaces(
                 &memory.workspace_id,
                 memory_id,
@@ -1285,6 +1307,7 @@ fn explain_memory_inner(
         selection_score,
         conformal_candidates,
     ));
+    let report = report.with_counterfactual_influence(counterfactual_influence);
 
     // N7.1 (bd-17c65.14.7.2 / ADR 0032): attach the Bayesian
     // (alpha, beta) posterior summary so an agent reading `ee why`
@@ -1910,6 +1933,40 @@ fn why_conformal_candidates(
         source: format!("link:{}", link.relation),
     }));
     candidates
+}
+
+fn why_influence_candidates(links: &[MemoryLinkSummary]) -> Vec<WhyInfluenceCandidate> {
+    links
+        .iter()
+        .map(|link| WhyInfluenceCandidate {
+            memory_id: link.linked_memory_id.clone(),
+            relation: link.relation.clone(),
+            score: link_influence_score(link),
+            direction: relation_influence_direction(&link.relation),
+        })
+        .collect()
+}
+
+fn link_influence_score(link: &MemoryLinkSummary) -> f32 {
+    let confidence = finite_unit_score(link.confidence);
+    let weight = finite_unit_score(link.weight.abs());
+    confidence * weight
+}
+
+fn relation_influence_direction(relation: &str) -> WhyInfluenceDirection {
+    match relation.trim().to_ascii_lowercase().as_str() {
+        "contradicts" | "contradiction" | "contradicted_by" | "invalidates" | "refutes"
+        | "conflicts_with" | "supersedes" | "superseded_by" => WhyInfluenceDirection::Negative,
+        _ => WhyInfluenceDirection::Positive,
+    }
+}
+
+fn finite_unit_score(score: f32) -> f32 {
+    if score.is_finite() {
+        score.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn build_report(

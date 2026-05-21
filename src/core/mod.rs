@@ -54,6 +54,7 @@ pub mod hygiene_beads_state;
 pub mod hygiene_classifier;
 pub mod hygiene_coordination;
 pub mod index;
+pub mod influence;
 pub mod init;
 pub mod install;
 pub mod jsonl_import;
