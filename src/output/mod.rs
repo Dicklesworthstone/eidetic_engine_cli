@@ -3190,7 +3190,9 @@ fn build_pack_assembly_slo(obj: &mut JsonBuilder, slo: &PackAssemblySlo) {
                 build_pack_admission_posture(admission_obj, admission);
             });
         }
-        None => obj.field_raw("admission", "null"),
+        None => {
+            obj.field_raw("admission", "null");
+        }
     };
     obj.field_object("actuals", |actuals| {
         actuals.field_raw("candidateCount", &slo.actuals.candidate_count.to_string());

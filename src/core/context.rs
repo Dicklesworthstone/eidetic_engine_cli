@@ -1233,6 +1233,7 @@ fn run_context_pack_with_performance_inner(
             // is not dropped by the interactive search command's presentation floor.
             // An explicit caller floor still applies for diagnostic/e2e paths.
             relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
             source_mode: crate::core::search::SearchSourceMode::Hybrid,
             strict_source_mode: false,
             memory_scope: options.memory_scope,

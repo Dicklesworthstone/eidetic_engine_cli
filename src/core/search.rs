@@ -3553,7 +3553,8 @@ fn dedupe_hits_on_mutual_information(
     read_connection: Option<&DbConnection>,
 ) -> (Vec<SearchHit>, usize, usize) {
     if hits.len() < 2 {
-        return (hits, 0, hits.len());
+        let eligible_memory_hit_count = hits.len();
+        return (hits, 0, eligible_memory_hit_count);
     }
 
     let contents_by_doc_id = mi_dedup_hit_contents(&hits, options, read_connection);

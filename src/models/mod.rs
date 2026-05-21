@@ -592,6 +592,8 @@ pub enum RecoveryKind {
     Permission,
     /// Run a one-time data migration.
     Migration,
+    /// Run a command.
+    Command,
     /// Broaden a query (search-specific).
     Broaden,
     /// Narrow / filter a query.
@@ -613,6 +615,7 @@ impl RecoveryKind {
             Self::Rebuild => "rebuild",
             Self::Permission => "permission",
             Self::Migration => "migration",
+            Self::Command => "command",
             Self::Broaden => "broaden",
             Self::Narrow => "narrow",
             Self::Seed => "seed",

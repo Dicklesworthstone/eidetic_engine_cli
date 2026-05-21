@@ -3128,6 +3128,7 @@ fn remember_search_neighbor_ids(
         include_future: false,
         include_stale: false,
         relevance_floor: Some(0.0),
+        dedup_mode: crate::core::search::SearchDedupMode::DocId,
         source_mode: crate::core::search::SearchSourceMode::Hybrid,
         strict_source_mode: false,
         memory_scope: crate::models::MemoryScope::Swarm,
