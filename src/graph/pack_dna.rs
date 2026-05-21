@@ -10,8 +10,8 @@ use crate::core::degraded_aggregation::{
 use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
-use crate::models::{MemoryId, TrustClass};
 use crate::models::degradation::GRAPH_PACK_DNA_NO_DOMINATOR_CODE;
+use crate::models::{MemoryId, TrustClass};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 pub use crate::models::PACK_DNA_SCHEMA_V1;

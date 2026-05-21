@@ -401,13 +401,13 @@ pub fn bead_affinity_score(
 
     let tag_overlap = intersection_count(&context.labels, &candidate.tags);
     let content_token_overlap = intersection_count(&context.tokens, &candidate.content_tokens);
-    let content_hash_overlap = candidate
-        .content_hash
-        .as_deref()
-        .is_some_and(|hash| {
-            let digest = hash.strip_prefix("blake3:").unwrap_or(hash);
-            context.tokens.iter().any(|token| token.len() >= 8 && digest.contains(token))
-        });
+    let content_hash_overlap = candidate.content_hash.as_deref().is_some_and(|hash| {
+        let digest = hash.strip_prefix("blake3:").unwrap_or(hash);
+        context
+            .tokens
+            .iter()
+            .any(|token| token.len() >= 8 && digest.contains(token))
+    });
     let link_overlap = candidate
         .link_refs
         .iter()
