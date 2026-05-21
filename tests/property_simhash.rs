@@ -339,7 +339,7 @@ proptest! {
         let expected =
             expected_ranked_candidates(query, &candidates, max_hamming_distance, limit);
 
-        prop_assert_eq!(ranked, expected);
+        prop_assert_eq!(&ranked, &expected);
         prop_assert!(ranked.len() <= limit);
         for candidate in &ranked {
             prop_assert!(candidate.hamming_distance <= max_hamming_distance);

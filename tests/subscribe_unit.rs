@@ -1,8 +1,6 @@
-use eidetic_engine::core::init::{InitOptions, init_workspace};
-use eidetic_engine::core::memory::{RememberMemoryOptions, remember_memory};
-use eidetic_engine::core::subscribe::{
-    SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas,
-};
+use ee::core::init::{InitOptions, init_workspace};
+use ee::core::memory::{RememberMemoryOptions, remember_memory};
+use ee::core::subscribe::{SubscribePollOptions, parse_subscribe_filter, poll_memory_deltas};
 
 type TestResult = Result<(), String>;
 

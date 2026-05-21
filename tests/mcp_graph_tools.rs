@@ -1,5 +1,7 @@
 //! Contract tests for graph-oriented MCP tool registration.
 
+#![cfg(feature = "mcp")]
+
 use std::collections::BTreeSet;
 
 use serde_json::{Value, json};

@@ -911,6 +911,13 @@ fn render_context_response_for_format(response: &ContextResponse, format: Output
         OutputFormat::Hook => ee::output::render_context_response_hook(response),
         OutputFormat::Markdown => ee::output::render_context_response_markdown(response),
         OutputFormat::Mermaid => ee::output::render_context_response_mermaid(response),
+        OutputFormat::Binary => {
+            String::from_utf8_lossy(&ee::output::render_context_response_binary_with_options(
+                response,
+                ee::output::ContextJsonRenderOptions::default(),
+            ))
+            .into_owned()
+        }
     }
 }
 

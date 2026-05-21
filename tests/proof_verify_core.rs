@@ -1,3 +1,7 @@
+mod models {
+    pub use ee::models::*;
+}
+
 #[path = "../src/core/proof_verify.rs"]
 mod proof_verify;
 
