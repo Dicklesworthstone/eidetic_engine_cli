@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -159,7 +159,7 @@ fn personalized_pagerank_wrapper_threads_cancelled_cx() -> TestResult {
         CancelReason::timeout().with_message("graph cancellation contract pre-cancel"),
     );
     let graph = DiGraph::strict();
-    let seeds = HashMap::<MemoryId, f64>::new();
+    let seeds = BTreeMap::<MemoryId, f64>::new();
 
     let error = match graph_result(compute_personalized_pagerank_with_cx(
         &cx,

@@ -89,7 +89,7 @@ pub fn personalized_pagerank_cache_seed_signature(
 pub fn compute_personalized_pagerank(
     graph: &DiGraph,
     seed_map: &BTreeMap<MemoryId, f64>,
-) -> GraphResult<HashMap<MemoryId, f64>> {
+) -> GraphResult<BTreeMap<MemoryId, f64>> {
     let cx = current_or_testing_cx();
     compute_personalized_pagerank_with_cx(
         &cx,
@@ -103,7 +103,7 @@ pub fn compute_personalized_pagerank_with_policy(
     graph: &DiGraph,
     seed_map: &BTreeMap<MemoryId, f64>,
     policy: PersonalizedPageRankPolicy,
-) -> GraphResult<HashMap<MemoryId, f64>> {
+) -> GraphResult<BTreeMap<MemoryId, f64>> {
     let cx = current_or_testing_cx();
     compute_personalized_pagerank_with_cx(&cx, graph, seed_map, policy)
 }
@@ -720,7 +720,7 @@ mod tests {
                 edge_attrs("supports", 1.0, 1.0),
             )
             .map_err(|error| error.to_string())?;
-        let seeds = HashMap::from([(a, 1.0)]);
+        let seeds = BTreeMap::from([(a, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
@@ -758,7 +758,7 @@ mod tests {
                 edge_attrs("supports", 1.0, 1.0),
             )
             .map_err(|error| error.to_string())?;
-        let seeds = HashMap::from([(a, 3.0), (c, 1.0)]);
+        let seeds = BTreeMap::from([(a, 3.0), (c, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank_with_policy(
             &graph,
@@ -788,7 +788,7 @@ mod tests {
         for node in [a, b, zero, negative, nan, infinite] {
             graph.add_node(node.to_string());
         }
-        let seeds = HashMap::from([
+        let seeds = BTreeMap::from([
             (a, 2.0),
             (b, 1.0),
             (zero, 0.0),
@@ -838,7 +838,7 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        let seeds = HashMap::from([(a, 0.8), (b, 0.2)]);
+        let seeds = BTreeMap::from([(a, 0.8), (b, 0.2)]);
 
         let result = graph_result(compute_personalized_pagerank_with_policy(
             &graph,
@@ -897,7 +897,7 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        let seeds = HashMap::from([(seed, 1.0)]);
+        let seeds = BTreeMap::from([(seed, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
 
@@ -934,7 +934,7 @@ mod tests {
                 edge_attrs("supports", 0.1, 1.0),
             )
             .map_err(|error| error.to_string())?;
-        let seeds = HashMap::from([(seed, 1.0)]);
+        let seeds = BTreeMap::from([(seed, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank_with_policy(
             &graph,
@@ -982,7 +982,7 @@ mod tests {
                 edge_attrs("supports", 1.0, 0.1),
             )
             .map_err(|error| error.to_string())?;
-        let seeds = HashMap::from([(seed, 1.0)]);
+        let seeds = BTreeMap::from([(seed, 1.0)]);
 
         let result = graph_result(compute_personalized_pagerank_with_policy(
             &graph,
@@ -1024,10 +1024,10 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let empty = graph_result(compute_personalized_pagerank(&graph, &HashMap::new()))?;
+        let empty = graph_result(compute_personalized_pagerank(&graph, &BTreeMap::new()))?;
         let unmatched = graph_result(compute_personalized_pagerank(
             &graph,
-            &HashMap::from([(missing, 1.0)]),
+            &BTreeMap::from([(missing, 1.0)]),
         ))?;
 
         for result in [&empty, &unmatched] {
@@ -1065,7 +1065,7 @@ mod tests {
                 edge_attrs("related", 0.4, 0.5),
             )
             .map_err(|error| error.to_string())?;
-        let seeds = HashMap::from([(a, 2.0), (b, 1.0)]);
+        let seeds = BTreeMap::from([(a, 2.0), (b, 1.0)]);
 
         let first = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
         let second = graph_result(compute_personalized_pagerank(&graph, &seeds))?;
@@ -1107,11 +1107,11 @@ mod tests {
                 )
                 .map_err(|error| error.to_string())?;
         }
-        let mut forward = HashMap::new();
+        let mut forward = BTreeMap::new();
         forward.insert(a, 2.0);
         forward.insert(b, 1.0);
         forward.insert(c, 0.5);
-        let mut reverse = HashMap::new();
+        let mut reverse = BTreeMap::new();
         reverse.insert(c, 0.5);
         reverse.insert(b, 1.0);
         reverse.insert(a, 2.0);
