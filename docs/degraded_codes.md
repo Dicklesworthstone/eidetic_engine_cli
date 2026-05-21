@@ -6436,6 +6436,68 @@ ee model status --workspace . --json
 
 ---
 
+## `rerank_model_corrupt`
+
+**Severity:** high
+
+**Surfaces:** model status, model list
+
+**Introduced by:** bd-17c65.14.8 (epic N)
+
+**Trigger.** A workspace has an available default reranker entry, but its blake3 content hash does not match the bundled manifest.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee diag model-registry --workspace . --model-id mdl_n8000000000000000000000002 --provider external --model-name rerank-default-v1 --purpose reranker --status available --version rerank-default-v1 --content-hash blake3:0000000000000000000000000000000000000000000000000000000000000000 --json
+```
+
+**Invocation.**
+
+```bash
+ee model status --workspace . --json
+```
+
+**Expected emission.** Message contains: `registered default rerank model hash ... bundled manifest`
+
+**Repair hint.** `ee model fetch rerank-default`
+
+**Fixture.** [`tests/fixtures/failure_modes/rerank_model_corrupt.json`](../tests/fixtures/failure_modes/rerank_model_corrupt.json)
+
+---
+
+## `rerank_model_missing`
+
+**Severity:** warning
+
+**Surfaces:** model status, model list
+
+**Introduced by:** bd-17c65.14.8 (epic N)
+
+**Trigger.** A workspace has a reranker registry row, but no default rerank model artifact is available.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee diag model-registry --workspace . --model-id mdl_n8000000000000000000000001 --provider external --model-name rerank-default-v1 --purpose reranker --status unavailable --version rerank-default-v1 --json
+```
+
+**Invocation.**
+
+```bash
+ee model status --workspace . --json
+```
+
+**Expected emission.** Message contains: `reranker is registered ... no default rerank model artifact`
+
+**Repair hint.** `ee model fetch rerank-default`
+
+**Fixture.** [`tests/fixtures/failure_modes/rerank_model_missing.json`](../tests/fixtures/failure_modes/rerank_model_missing.json)
+
+---
+
 ## `no_confounders`
 
 **Severity:** info

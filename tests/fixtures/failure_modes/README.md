@@ -153,6 +153,8 @@ in the same commit, keeping the catalog complete by construction.
 | `trust_quarantine_rows_unreadable` | quarantine, status | medium | bd-17c65.10.6 (J6) |
 | `model_registry_empty` | model status, model list | low | bd-17c65.10.6 (J6) |
 | `model_registry_no_available_entry` | model status, model list | medium | bd-17c65.10.6 (J6) |
+| `rerank_model_corrupt` | model status, model list | high | bd-17c65.14.8 (N) |
+| `rerank_model_missing` | model status, model list | warning | bd-17c65.14.8 (N) |
 | `heavy_gates_skipped` | profile config plan | info | bd-17c65.10.6 (J6) |
 | `manual_heavy_strategy` | profile config plan | warning | bd-17c65.10.6 (J6) |
 | `index_locked` | index vacuum | medium | bd-17c65.10.6 (J6) |

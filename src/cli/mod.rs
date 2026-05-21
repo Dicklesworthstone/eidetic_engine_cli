@@ -8068,6 +8068,8 @@ pub enum ModelCommand {
     Status(ModelStatusArgs),
     /// List all registered models for the workspace.
     List(ModelListArgs),
+    /// Fetch and register a local model artifact.
+    Fetch(ModelFetchArgs),
 }
 
 /// Arguments for `ee model status`.
@@ -8081,6 +8083,22 @@ pub struct ModelStatusArgs {
 /// Arguments for `ee model list`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ModelListArgs {
+    /// Database path. Defaults to <workspace>/.ee/ee.db.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee model fetch`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ModelFetchArgs {
+    /// Model alias or manifest model ID. Use `rerank-default` for the bundled reranker.
+    #[arg(value_name = "MODEL")]
+    pub model: String,
+
+    /// Read the model artifact from a local tarball instead of the network.
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: Option<PathBuf>,
+
     /// Database path. Defaults to <workspace>/.ee/ee.db.
     #[arg(long, value_name = "PATH")]
     pub database: Option<PathBuf>,
@@ -13534,6 +13552,19 @@ where
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             }
         }
+        ModelCommand::Fetch(args) => {
+            let options = crate::core::model::ModelFetchOptions {
+                workspace_path: &workspace_path,
+                database_path: args.database.as_deref(),
+                model_id: &args.model,
+                from_file: args.from_file.as_deref(),
+                model_store_root: None,
+            };
+            match crate::core::model::fetch_rerank_model(&options) {
+                Ok(report) => render_model_fetch(cli, &report, stdout),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
     }
 }
 
@@ -13588,6 +13619,39 @@ where
                 "MODEL_LIST|{}|count={}\n",
                 report.workspace_id,
                 report.entries.len(),
+            ),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let json = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "success": true,
+                "data": report.data_json(),
+            });
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn render_model_fetch<W>(
+    cli: &Cli,
+    report: &crate::core::model::ModelFetchReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &report.human_summary())
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &format!(
+                "MODEL_FETCH|{}|bytes={}|copied={}\n",
+                report.model_id, report.content_length_bytes, report.copied,
             ),
         ),
         output::Renderer::Json
@@ -42603,6 +42667,7 @@ impl NormalizedInvocation {
                 Command::Model(model) => match model {
                     ModelCommand::Status(_) => "model status".to_string(),
                     ModelCommand::List(_) => "model list".to_string(),
+                    ModelCommand::Fetch(_) => "model fetch".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
                 Command::OutcomeQuarantine(command) => match command {

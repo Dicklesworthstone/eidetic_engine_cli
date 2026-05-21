@@ -649,11 +649,13 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `workspace_hygiene_secret_scan_skipped` | medium | bd-1eq3l.11 |
 | `beads_jsonl_partial_write_transient` | low | (TBD) |
 
-#### Model registry / science (5)
+#### Model registry / science (7)
 | Code | Severity | Bead |
 |------|----------|------|
 | `model_registry_empty` | low | bd-17c65.10.6 (J6) |
 | `model_registry_no_available_entry` | medium | bd-17c65.10.6 (J6) |
+| `rerank_model_corrupt` | high | bd-17c65.14.8 (N8) |
+| `rerank_model_missing` | warning | bd-17c65.14.8 (N8) |
 | `science_backend_unavailable` | medium | bd-17c65.11.7 (K7) |
 | `science_budget_exceeded` | warning | bd-17c65.11.7 (K7) |
 | `science_input_too_large` | warning | bd-17c65.11.7 (K7) |

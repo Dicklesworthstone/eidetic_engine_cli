@@ -127,6 +127,16 @@ const KNOWN_CODE_EXPECTATIONS: &[(&str, DegradedCategory, &str)] = &[
         DegradedCategory::WorkspaceStateNotPerResponse,
         "registry populated but no available entry — workspace state",
     ),
+    (
+        "rerank_model_missing",
+        DegradedCategory::WorkspaceStateNotPerResponse,
+        "reranker artifact missing — workspace model state",
+    ),
+    (
+        "rerank_model_corrupt",
+        DegradedCategory::WorkspaceStateNotPerResponse,
+        "reranker artifact hash mismatch — workspace model state",
+    ),
     // AFFECTS THIS RESPONSE — the current response was affected.
     // Always emit per the bead spec.
     (

@@ -10,9 +10,14 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
-use crate::db::{DbConnection, DbError, StoredModelRegistryEntry};
+use crate::db::{CreateModelRegistryInput, DbConnection, DbError, StoredModelRegistryEntry};
 use crate::models::DomainError;
+use crate::models::model_registry::{ModelProvider, ModelPurpose, ModelRegistryStatus};
 use crate::search::HashEmbedder;
 use frankensearch::Embedder;
 
@@ -42,9 +47,15 @@ fn db_error_to_domain(error: DbError, context: &str, repair: Option<String>) -> 
     }
 }
 
-pub use crate::models::{MODEL_STATUS_SCHEMA_V2, MODEL_LIST_SCHEMA_V1};
+pub use crate::models::{MODEL_LIST_SCHEMA_V1, MODEL_STATUS_SCHEMA_V2};
 
 const DEFAULT_DB_FILE: &str = "ee.db";
+const RERANK_MODEL_MANIFEST_JSON: &str = include_str!("../data/rerank_model_manifest.json");
+const DEFAULT_RERANK_MODEL_ALIAS: &str = "rerank-default";
+const DEFAULT_RERANK_MODEL_ARTIFACT_NAME: &str = "rerank-default-v1.tar.zst";
+
+pub const RERANK_MODEL_MANIFEST_SCHEMA_V1: &str = "ee.model_manifest.v1";
+pub const MODEL_FETCH_SCHEMA_V1: &str = "ee.model_fetch.v1";
 
 /// Options for `ee model status`.
 #[derive(Clone, Debug)]
@@ -58,6 +69,127 @@ pub struct ModelStatusOptions<'a> {
 pub struct ModelListOptions<'a> {
     pub workspace_path: &'a Path,
     pub database_path: Option<&'a Path>,
+}
+
+/// Options for `ee model fetch`.
+#[derive(Clone, Debug)]
+pub struct ModelFetchOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub model_id: &'a str,
+    pub from_file: Option<&'a Path>,
+    pub model_store_root: Option<&'a Path>,
+}
+
+/// Bundled local-first model manifest for the default reranker.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RerankModelManifest {
+    pub schema: String,
+    pub model_id: String,
+    pub hash_blake3: String,
+    pub hash_sha256: String,
+    pub content_length_bytes: u64,
+    pub source_uri: String,
+    pub fallback_source_uris: Vec<String>,
+    pub license: String,
+    pub license_uri: String,
+    pub quantization: String,
+    pub inference_dimensions: RerankModelInferenceDimensions,
+    pub signed_attestation: RerankModelSignedAttestation,
+}
+
+impl RerankModelManifest {
+    fn validate(&self) -> Result<(), String> {
+        if self.schema != RERANK_MODEL_MANIFEST_SCHEMA_V1 {
+            return Err(format!(
+                "unexpected rerank model manifest schema `{}`",
+                self.schema
+            ));
+        }
+        if self.model_id.trim().is_empty() {
+            return Err("rerank model manifest has an empty model_id".to_string());
+        }
+        if !is_hex_hash_64(&self.hash_blake3) {
+            return Err("rerank model manifest hash_blake3 must be 64 hex characters".to_string());
+        }
+        if !is_hex_hash_64(&self.hash_sha256) {
+            return Err("rerank model manifest hash_sha256 must be 64 hex characters".to_string());
+        }
+        if self.content_length_bytes == 0 {
+            return Err("rerank model manifest content_length_bytes must be positive".to_string());
+        }
+        if !is_https_uri(&self.source_uri) {
+            return Err("rerank model manifest source_uri must be HTTPS".to_string());
+        }
+        if self
+            .fallback_source_uris
+            .iter()
+            .any(|source| !is_https_uri(source))
+        {
+            return Err("rerank model manifest fallback_source_uris must all be HTTPS".to_string());
+        }
+        if self.license.trim().is_empty() || !is_https_uri(&self.license_uri) {
+            return Err(
+                "rerank model manifest must include a license and HTTPS license_uri".to_string(),
+            );
+        }
+        if self.quantization.trim().is_empty()
+            || self.inference_dimensions.input_max_tokens == 0
+            || self.inference_dimensions.output_dimension == 0
+        {
+            return Err("rerank model manifest inference dimensions are incomplete".to_string());
+        }
+        if self.signed_attestation.sigstore_bundle.trim().is_empty()
+            || self.signed_attestation.signer_identity.trim().is_empty()
+            || self.signed_attestation.signed_at.trim().is_empty()
+        {
+            return Err("rerank model manifest signed_attestation is incomplete".to_string());
+        }
+        Ok(())
+    }
+
+    fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "modelId": self.model_id,
+            "hashBlake3": self.hash_blake3,
+            "hashSha256": self.hash_sha256,
+            "contentLengthBytes": self.content_length_bytes,
+            "sourceUri": redact_model_source_uri(&self.source_uri),
+            "fallbackSourceUris": self
+                .fallback_source_uris
+                .iter()
+                .map(|source| redact_model_source_uri(source))
+                .collect::<Vec<_>>(),
+            "license": self.license,
+            "licenseUri": self.license_uri,
+            "quantization": self.quantization,
+            "inferenceDimensions": {
+                "inputMaxTokens": self.inference_dimensions.input_max_tokens,
+                "outputDimension": self.inference_dimensions.output_dimension,
+            },
+            "signedAttestation": {
+                "sigstoreBundle": self.signed_attestation.sigstore_bundle,
+                "signerIdentity": self.signed_attestation.signer_identity,
+                "signedAt": self.signed_attestation.signed_at,
+            },
+        })
+    }
+}
+
+/// Inference shape declared by the rerank model manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RerankModelInferenceDimensions {
+    pub input_max_tokens: u32,
+    pub output_dimension: u32,
+}
+
+/// Sigstore provenance pointer declared by the rerank model manifest.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RerankModelSignedAttestation {
+    pub sigstore_bundle: String,
+    pub signer_identity: String,
+    pub signed_at: String,
 }
 
 /// Single registry entry shaped for public output.
@@ -157,6 +289,8 @@ pub struct ModelStatusReranker {
     pub available_count: usize,
     pub available_model_ids: Vec<String>,
     pub selected_registry_entry: Option<ModelRegistryEntryView>,
+    pub manifest: RerankModelManifest,
+    pub fetch_command: String,
 }
 
 impl ModelStatusReranker {
@@ -169,6 +303,8 @@ impl ModelStatusReranker {
                 .selected_registry_entry
                 .as_ref()
                 .map(ModelRegistryEntryView::data_json),
+            "manifest": self.manifest.data_json(),
+            "fetchCommand": self.fetch_command,
         })
     }
 }
@@ -194,6 +330,20 @@ const DEG_NO_AVAILABLE_MODEL: ModelDegradation = ModelDegradation {
     severity: "medium",
     message: "Model registry has entries but no embedding model is marked available; semantic search is degraded.",
     repair: "ee doctor --json",
+};
+
+const DEG_RERANK_MODEL_MISSING: ModelDegradation = ModelDegradation {
+    code: "rerank_model_missing",
+    severity: "warning",
+    message: "A reranker is registered but no default rerank model artifact is marked available.",
+    repair: "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
+};
+
+const DEG_RERANK_MODEL_CORRUPT: ModelDegradation = ModelDegradation {
+    code: "rerank_model_corrupt",
+    severity: "high",
+    message: "The registered default rerank model hash does not match the bundled manifest.",
+    repair: "Remove the corrupt model artifact and rerun `ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst`.",
 };
 
 const SEMANTIC_DIMENSION_BUDGET: u32 = 384;
@@ -290,6 +440,49 @@ pub struct ModelListReport {
     pub workspace_id: String,
     pub entries: Vec<ModelRegistryEntryView>,
     pub degradations: Vec<ModelDegradation>,
+}
+
+/// Report shape returned by `ee model fetch`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelFetchReport {
+    pub schema: &'static str,
+    pub workspace_path: PathBuf,
+    pub database_path: PathBuf,
+    pub model_id: String,
+    pub source_path: PathBuf,
+    pub stored_path: PathBuf,
+    pub copied: bool,
+    pub content_length_bytes: u64,
+    pub hash_blake3: String,
+    pub hash_sha256: String,
+    pub registry_entry: ModelRegistryEntryView,
+}
+
+impl ModelFetchReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "workspacePath": self.workspace_path.to_string_lossy(),
+            "databasePath": self.database_path.to_string_lossy(),
+            "modelId": self.model_id,
+            "sourcePath": redact_model_source_uri(&self.source_path.to_string_lossy()),
+            "storedPath": redact_model_source_uri(&self.stored_path.to_string_lossy()),
+            "copied": self.copied,
+            "contentLengthBytes": self.content_length_bytes,
+            "hashBlake3": self.hash_blake3,
+            "hashSha256": self.hash_sha256,
+            "registryEntry": self.registry_entry.data_json(),
+        })
+    }
+
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        format!(
+            "Fetched reranker model {} ({} bytes, blake3:{})\nRegistered model: {}\n",
+            self.model_id, self.content_length_bytes, self.hash_blake3, self.registry_entry.id,
+        )
+    }
 }
 
 impl ModelListReport {
@@ -548,6 +741,7 @@ fn resolve_workspace_id(
 pub fn build_model_status_report(
     options: &ModelStatusOptions<'_>,
 ) -> Result<ModelStatusReport, DomainError> {
+    let manifest = bundled_rerank_model_manifest()?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
     let connection = DbConnection::open_file(&database_path).map_err(|error| {
@@ -600,6 +794,8 @@ pub fn build_model_status_report(
             .first()
             .map(|entry| (*entry).clone())
             .map(ModelRegistryEntryView::from_stored),
+        manifest: manifest.clone(),
+        fetch_command: format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}"),
     };
 
     let fast_embedder = HashEmbedder::default_256();
@@ -629,6 +825,12 @@ pub fn build_model_status_report(
     if entries.iter().any(entry_exceeds_semantic_dimension_budget) {
         degradations.push(DEG_SEMANTIC_DIMENSION_EXCEEDS_BUDGET);
     }
+    degradations.extend(rerank_model_degradations(
+        &entries,
+        &manifest,
+        reranker_registered_count,
+        reranker_available_entries.len(),
+    ));
 
     Ok(ModelStatusReport {
         schema: MODEL_STATUS_SCHEMA_V2,
@@ -665,6 +867,7 @@ fn entry_is_available_reranker(entry: &StoredModelRegistryEntry) -> bool {
 pub fn build_model_list_report(
     options: &ModelListOptions<'_>,
 ) -> Result<ModelListReport, DomainError> {
+    let manifest = bundled_rerank_model_manifest()?;
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
     let connection = DbConnection::open_file(&database_path).map_err(|error| {
@@ -692,6 +895,20 @@ pub fn build_model_list_report(
     } else if !entries.iter().any(entry_is_available_embedding) {
         degradations.push(DEG_NO_AVAILABLE_MODEL);
     }
+    let reranker_registered_count = entries
+        .iter()
+        .filter(|entry| entry_is_reranker(entry))
+        .count();
+    let reranker_available_count = entries
+        .iter()
+        .filter(|entry| entry_is_available_reranker(entry))
+        .count();
+    degradations.extend(rerank_model_degradations(
+        &entries,
+        &manifest,
+        reranker_registered_count,
+        reranker_available_count,
+    ));
 
     Ok(ModelListReport {
         schema: MODEL_LIST_SCHEMA_V1,
@@ -704,6 +921,360 @@ pub fn build_model_list_report(
             .collect(),
         degradations,
     })
+}
+
+/// Parse and validate the bundled manifest for the default rerank model.
+pub fn bundled_rerank_model_manifest() -> Result<RerankModelManifest, DomainError> {
+    let manifest: RerankModelManifest =
+        serde_json::from_str(RERANK_MODEL_MANIFEST_JSON).map_err(|error| {
+            DomainError::Configuration {
+                message: format!("Bundled rerank model manifest is invalid JSON: {error}"),
+                repair: Some("Fix src/data/rerank_model_manifest.json.".to_string()),
+            }
+        })?;
+    manifest
+        .validate()
+        .map_err(|message| DomainError::Configuration {
+            message,
+            repair: Some("Fix src/data/rerank_model_manifest.json.".to_string()),
+        })?;
+    Ok(manifest)
+}
+
+/// Fetch and register the default rerank model.
+pub fn fetch_rerank_model(
+    options: &ModelFetchOptions<'_>,
+) -> Result<ModelFetchReport, DomainError> {
+    let manifest = resolve_rerank_model_manifest(options.model_id)?;
+    let Some(source_path) = options.from_file else {
+        return Err(DomainError::Configuration {
+            message: "Network model fetch is not available in this build; use the explicit offline artifact path."
+                .to_string(),
+            repair: Some(format!(
+                "ee model fetch {DEFAULT_RERANK_MODEL_ALIAS} --from-file /path/to/{DEFAULT_RERANK_MODEL_ARTIFACT_NAME}"
+            )),
+        });
+    };
+
+    let workspace_path = resolve_workspace_path(options.workspace_path)?;
+    let database_path = resolved_database_path(&workspace_path, options.database_path)?;
+    let source_bytes = fs::read(source_path).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read rerank model artifact {}: {error}",
+            source_path.display()
+        ),
+        repair: Some("Pass a readable artifact path to --from-file.".to_string()),
+    })?;
+    let content_length_bytes =
+        u64::try_from(source_bytes.len()).map_err(|error| DomainError::Configuration {
+            message: format!("Rerank model artifact is too large to measure: {error}"),
+            repair: Some("Use the manifest-sized rerank artifact.".to_string()),
+        })?;
+    let hash_blake3 = blake3_hash_hex(&source_bytes);
+    let hash_sha256 = sha256_hash_hex(&source_bytes);
+    if content_length_bytes != manifest.content_length_bytes {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Rerank model artifact length mismatch: expected {}, found {}",
+                manifest.content_length_bytes, content_length_bytes
+            ),
+            repair: Some(format!(
+                "Use the artifact documented in src/data/rerank_model_manifest.json for {}.",
+                manifest.model_id
+            )),
+        });
+    }
+    if hash_blake3 != manifest.hash_blake3 || hash_sha256 != manifest.hash_sha256 {
+        return Err(DomainError::Configuration {
+            message: "Rerank model artifact hash mismatch against bundled manifest.".to_string(),
+            repair: Some(format!(
+                "Re-fetch {} from the manifest source and rerun with --from-file.",
+                manifest.model_id
+            )),
+        });
+    }
+
+    let store_root = options
+        .model_store_root
+        .map(Path::to_path_buf)
+        .map(Ok)
+        .unwrap_or_else(default_model_store_root)?;
+    let stored_dir = store_root.join("rerank").join(&manifest.model_id);
+    let stored_path = stored_dir.join(DEFAULT_RERANK_MODEL_ARTIFACT_NAME);
+    fs::create_dir_all(&stored_dir).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to create rerank model store {}: {error}",
+            stored_dir.display()
+        ),
+        repair: Some("Check model store permissions.".to_string()),
+    })?;
+    let copied = if stored_path.exists() {
+        let existing_bytes =
+            fs::read(&stored_path).map_err(|error| DomainError::Configuration {
+                message: format!(
+                    "Failed to read existing rerank model artifact {}: {error}",
+                    stored_path.display()
+                ),
+                repair: Some("Move the bad artifact aside and rerun model fetch.".to_string()),
+            })?;
+        if blake3_hash_hex(&existing_bytes) != manifest.hash_blake3 {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Existing rerank model artifact {} does not match the bundled manifest",
+                    stored_path.display()
+                ),
+                repair: Some("Move the bad artifact aside and rerun model fetch.".to_string()),
+            });
+        }
+        false
+    } else {
+        fs::copy(source_path, &stored_path).map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to copy rerank model artifact to {}: {error}",
+                stored_path.display()
+            ),
+            repair: Some("Check model store permissions and free space.".to_string()),
+        })?;
+        true
+    };
+
+    let connection = DbConnection::open_file(&database_path).map_err(|error| {
+        db_error_to_domain(
+            error,
+            "Failed to open database",
+            Some("ee init --workspace .".to_string()),
+        )
+    })?;
+    let workspace_id = resolve_workspace_id(&connection, &workspace_path)?;
+    let registry_entry = match connection
+        .find_model_registry_entry(
+            &workspace_id,
+            ModelProvider::External,
+            &manifest.model_id,
+            ModelPurpose::Reranker,
+        )
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to inspect existing rerank model registry entry",
+                Some("ee model status --workspace . --json".to_string()),
+            )
+        })? {
+        Some(entry)
+            if entry.status == ModelRegistryStatus::Available
+                && entry
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(|hash| model_content_hash_matches_manifest(hash, &manifest)) =>
+        {
+            entry
+        }
+        Some(entry) if entry.status == ModelRegistryStatus::Available => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Rerank model registry entry {} is available but does not match the bundled manifest",
+                    entry.id
+                ),
+                repair: Some(
+                    "Inspect the existing model entry before fetching again: ee model status --workspace . --json"
+                        .to_string(),
+                ),
+            });
+        }
+        Some(entry) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Rerank model registry entry {} already exists with status {}",
+                    entry.id, entry.status
+                ),
+                repair: Some(
+                    "Use ee diag model-registry to inspect the stale entry before fetching again."
+                        .to_string(),
+                ),
+            });
+        }
+        None => {
+            let id = generate_model_registry_id();
+            connection
+                .insert_model_registry_entry(
+                    &id,
+                    &CreateModelRegistryInput {
+                        workspace_id: workspace_id.clone(),
+                        provider: ModelProvider::External,
+                        model_name: manifest.model_id.clone(),
+                        purpose: ModelPurpose::Reranker,
+                        dimension: Some(manifest.inference_dimensions.output_dimension),
+                        distance_metric: None,
+                        status: ModelRegistryStatus::Available,
+                        version: Some(manifest.model_id.clone()),
+                        source_uri: Some(stored_path.to_string_lossy().into_owned()),
+                        content_hash: Some(format!("blake3:{}", manifest.hash_blake3)),
+                        metadata_json: Some(rerank_model_metadata_json(&manifest, &stored_path)?),
+                        last_checked_at: Some(Utc::now().to_rfc3339()),
+                    },
+                )
+                .map_err(|error| {
+                    db_error_to_domain(
+                        error,
+                        "Failed to register rerank model",
+                        Some("ee model status --workspace . --json".to_string()),
+                    )
+                })?;
+            connection
+                .get_model_registry_entry(&id)
+                .map_err(|error| {
+                    db_error_to_domain(
+                        error,
+                        "Failed to reload registered rerank model",
+                        Some("ee model status --workspace . --json".to_string()),
+                    )
+                })?
+                .ok_or_else(|| DomainError::Storage {
+                    message: format!("Registered rerank model {id} was not readable"),
+                    repair: Some("ee doctor --json".to_string()),
+                })?
+        }
+    };
+
+    connection
+        .insert_audit(
+            &crate::db::generate_audit_id(),
+            &crate::db::CreateAuditInput {
+                workspace_id: Some(workspace_id),
+                actor: None,
+                action: "model.fetched".to_string(),
+                target_type: Some("model_registry".to_string()),
+                target_id: Some(registry_entry.id.clone()),
+                details: Some(
+                    serde_json::json!({
+                        "schema": MODEL_FETCH_SCHEMA_V1,
+                        "modelId": manifest.model_id.clone(),
+                        "storedPath": stored_path.to_string_lossy(),
+                        "hashBlake3": hash_blake3.clone(),
+                        "hashSha256": hash_sha256.clone(),
+                        "copied": copied,
+                    })
+                    .to_string(),
+                ),
+            },
+        )
+        .map_err(|error| {
+            db_error_to_domain(
+                error,
+                "Failed to audit rerank model fetch",
+                Some("ee audit verify --workspace . --json".to_string()),
+            )
+        })?;
+
+    Ok(ModelFetchReport {
+        schema: MODEL_FETCH_SCHEMA_V1,
+        workspace_path,
+        database_path,
+        model_id: manifest.model_id,
+        source_path: source_path.to_path_buf(),
+        stored_path,
+        copied,
+        content_length_bytes,
+        hash_blake3,
+        hash_sha256,
+        registry_entry: ModelRegistryEntryView::from_stored(registry_entry),
+    })
+}
+
+fn resolve_rerank_model_manifest(model_id: &str) -> Result<RerankModelManifest, DomainError> {
+    let manifest = bundled_rerank_model_manifest()?;
+    if model_id == DEFAULT_RERANK_MODEL_ALIAS || model_id == manifest.model_id {
+        Ok(manifest)
+    } else {
+        Err(DomainError::Usage {
+            message: format!(
+                "unknown model `{model_id}`; expected `{DEFAULT_RERANK_MODEL_ALIAS}` or `{}`",
+                manifest.model_id
+            ),
+            repair: Some(format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}")),
+        })
+    }
+}
+
+fn rerank_model_degradations(
+    entries: &[StoredModelRegistryEntry],
+    manifest: &RerankModelManifest,
+    reranker_registered_count: usize,
+    reranker_available_count: usize,
+) -> Vec<ModelDegradation> {
+    let mut degradations = Vec::new();
+    if reranker_registered_count > 0 && reranker_available_count == 0 {
+        degradations.push(DEG_RERANK_MODEL_MISSING);
+    }
+    if entries
+        .iter()
+        .filter(|entry| entry_is_available_reranker(entry))
+        .any(|entry| {
+            entry.model_name == manifest.model_id
+                && entry
+                    .content_hash
+                    .as_deref()
+                    .is_some_and(|hash| !model_content_hash_matches_manifest(hash, manifest))
+        })
+    {
+        degradations.push(DEG_RERANK_MODEL_CORRUPT);
+    }
+    degradations
+}
+
+fn model_content_hash_matches_manifest(hash: &str, manifest: &RerankModelManifest) -> bool {
+    hash.strip_prefix("blake3:")
+        .is_some_and(|value| value.eq_ignore_ascii_case(&manifest.hash_blake3))
+}
+
+fn rerank_model_metadata_json(
+    manifest: &RerankModelManifest,
+    stored_path: &Path,
+) -> Result<String, DomainError> {
+    serde_json::to_string(&serde_json::json!({
+        "schema": "ee.rerank_model_registry_metadata.v1",
+        "manifest": manifest.data_json(),
+        "storedPath": stored_path.to_string_lossy(),
+    }))
+    .map_err(|error| DomainError::Configuration {
+        message: format!("Failed to render rerank model metadata: {error}"),
+        repair: Some("Check src/data/rerank_model_manifest.json.".to_string()),
+    })
+}
+
+fn default_model_store_root() -> Result<PathBuf, DomainError> {
+    let home = std::env::var_os("HOME").ok_or_else(|| DomainError::Configuration {
+        message: "HOME is not set; cannot resolve the default ee model store.".to_string(),
+        repair: Some("Pass a model store through the calling harness or set HOME.".to_string()),
+    })?;
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("share")
+        .join("ee")
+        .join("models"))
+}
+
+fn generate_model_registry_id() -> String {
+    let simple = uuid::Uuid::now_v7().simple().to_string();
+    format!("mdl_{}", &simple[..26])
+}
+
+fn blake3_hash_hex(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn sha256_hash_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn is_hex_hash_64(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_https_uri(value: &str) -> bool {
+    value.starts_with("https://")
 }
 
 #[cfg(test)]
@@ -831,11 +1402,15 @@ mod tests {
     }
 
     fn empty_reranker_status() -> ModelStatusReranker {
+        let manifest =
+            bundled_rerank_model_manifest().expect("bundled rerank model manifest should parse");
         ModelStatusReranker {
             registered_count: 0,
             available_count: 0,
             available_model_ids: Vec::new(),
             selected_registry_entry: None,
+            manifest,
+            fetch_command: format!("ee model fetch {DEFAULT_RERANK_MODEL_ALIAS}"),
         }
     }
 

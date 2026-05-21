@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "rerank_model_missing",
+  "introduced_by": {
+    "bead": "bd-17c65.14.8",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "model status",
+    "model list"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A workspace has a reranker registry row, but no default rerank model artifact is available.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee diag model-registry --workspace . --model-id mdl_n8000000000000000000000001 --provider external --model-name rerank-default-v1 --purpose reranker --status unavailable --version rerank-default-v1 --json"
+    ],
+    "invocation": "ee model status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "rerank_model_missing",
+    "severity": "warning",
+    "message_contains": [
+      "reranker is registered",
+      "no default rerank model artifact"
+    ],
+    "repair_contains": "ee model fetch rerank-default",
+    "repair_string": "ee model fetch rerank-default --from-file /path/to/rerank-default-v1.tar.zst",
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

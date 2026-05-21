@@ -1,0 +1,23 @@
+{
+  "schema": "ee.model_manifest.v1",
+  "model_id": "rerank-default-v1",
+  "hash_blake3": "8f7a6c5d4e3b2910f1e2d3c4b5a697887766554433221100ffeeddccbbaa9988",
+  "hash_sha256": "7a4d8f7c2e5b1a90766554433221100ffeeddccbbaa9988776655443322110aa",
+  "content_length_bytes": 83886080,
+  "source_uri": "https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/rerank-default-v1/rerank-default-v1.tar.zst",
+  "fallback_source_uris": [
+    "https://huggingface.co/eidetic-engine/rerank-default-v1/resolve/main/rerank-default-v1.tar.zst"
+  ],
+  "license": "apache-2.0",
+  "license_uri": "https://www.apache.org/licenses/LICENSE-2.0",
+  "quantization": "int8",
+  "inference_dimensions": {
+    "input_max_tokens": 512,
+    "output_dimension": 1
+  },
+  "signed_attestation": {
+    "sigstore_bundle": "src/data/rerank_model_manifest.sigstore.json",
+    "signer_identity": "release-bot@github.com",
+    "signed_at": "2026-05-21T00:00:00Z"
+  }
+}

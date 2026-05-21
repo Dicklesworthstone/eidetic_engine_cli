@@ -4004,7 +4004,9 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
         | b"graph_unavailable"
         | b"agent_detection_unavailable"
         | b"model_registry_empty"
-        | b"model_registry_no_available_entry" => DegradedCategory::WorkspaceStateNotPerResponse,
+        | b"model_registry_no_available_entry"
+        | b"rerank_model_missing"
+        | b"rerank_model_corrupt" => DegradedCategory::WorkspaceStateNotPerResponse,
 
         // Everything else affects the current response (the safe
         // default for unknown codes too).
