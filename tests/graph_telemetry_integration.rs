@@ -53,11 +53,21 @@ use tracing_subscriber::registry::Registry;
 
 type TestResult = Result<(), String>;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct CapturedEvent {
     target: String,
     level: Level,
     fields: BTreeMap<String, String>,
+}
+
+impl Default for CapturedEvent {
+    fn default() -> Self {
+        Self {
+            target: String::new(),
+            level: Level::INFO,
+            fields: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Default, Clone)]
@@ -134,7 +144,7 @@ fn pub_api_emits_only_canonical_ee_graph_events_and_sweep_slice_resolves() -> Te
             &cx,
             "calmbridge_boundary_smoke",
             Duration::from_secs(5),
-            || Ok(7),
+            || 7,
         );
     });
 
