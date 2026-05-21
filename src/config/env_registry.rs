@@ -38,6 +38,8 @@ pub enum EnvVar {
     EmbedDedupEnabled,
     /// `EE_EMBED_DEDUP_HAMMING_K`
     EmbedDedupHammingK,
+    /// `EE_EMBED_MODEL_PATH`
+    EmbedModelPath,
     /// `EE_EXPERIMENTAL_TRIAD`
     ExperimentalTriad,
     /// `EE_FLIGHT_RECORDER`
@@ -193,6 +195,7 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor,
             Self::EmbedDedupEnabled,
             Self::EmbedDedupHammingK,
+            Self::EmbedModelPath,
             Self::ExperimentalTriad,
             Self::FlightRecorder,
             Self::FlightRecorderDir,
@@ -281,6 +284,7 @@ impl EnvVar {
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
+            Self::EmbedModelPath => "EE_EMBED_MODEL_PATH",
             Self::ExperimentalTriad => "EE_EXPERIMENTAL_TRIAD",
             Self::FlightRecorder => "EE_FLIGHT_RECORDER",
             Self::FlightRecorderDir => "EE_FLIGHT_RECORDER_DIR",
@@ -389,6 +393,9 @@ impl EnvVar {
             }
             Self::EmbedDedupHammingK => {
                 "Set the maximum SimHash Hamming distance admitted to dedup cosine confirmation."
+            }
+            Self::EmbedModelPath => {
+                "Override the embedder model path used by search-time embedder availability checks."
             }
             Self::ExperimentalTriad => {
                 "Compatibility no-op for the promoted ee pack/note/why aliases."
@@ -615,9 +622,10 @@ impl EnvVar {
             | Self::TestLogLevel
             | Self::TestLogPath
             | Self::TestLogTestId => "diagnostics",
-            Self::EmbedDedupCosineFloor | Self::EmbedDedupEnabled | Self::EmbedDedupHammingK => {
-                "embeddings"
-            }
+            Self::EmbedDedupCosineFloor
+            | Self::EmbedDedupEnabled
+            | Self::EmbedDedupHammingK
+            | Self::EmbedModelPath => "embeddings",
             Self::MeshEnabled
             | Self::MeshMode
             | Self::MeshDiscoveryCacheTtlSeconds

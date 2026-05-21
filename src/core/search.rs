@@ -79,6 +79,8 @@ const SEARCH_ANALYSIS_CONFIDENCE_KEY: &str = "_ee_analysis_confidence";
 const SEARCH_ANALYSIS_UTILITY_KEY: &str = "_ee_analysis_utility";
 const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
+const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
+const EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG: &str = "embed-fast";
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
@@ -172,6 +174,12 @@ struct SourceModeResolution {
     applied: SearchSourceMode,
     fallback_applied: bool,
     unavailable_no_results: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SearchTierState<'a> {
+    lexical_available: bool,
+    embed_model_unavailable: Option<&'a str>,
 }
 
 /// Default relevance floor for 0..=1-normalized score sources (bead
@@ -839,6 +847,28 @@ impl SearchDegradation {
     }
 
     #[must_use]
+    fn embed_model_unavailable(reason: &str) -> Self {
+        Self {
+            code: "embed_model_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: format!(
+                "Embedding model unavailable ({reason}); falling back to lexical search."
+            ),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn search_unavailable(reason: &str) -> Self {
+        Self {
+            code: "search_unavailable".to_string(),
+            severity: "medium".to_string(),
+            message: format!("Search is unavailable because {reason}."),
+            repair: Some("Run `ee index status --workspace . --json`.".to_string()),
+        }
+    }
+
+    #[must_use]
     fn lexical_hugepages_unavailable() -> Self {
         Self {
             code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE.to_string(),
@@ -1497,15 +1527,34 @@ pub(crate) fn search_degraded_data_json(
 
 fn append_degradation_recovery_details(value: &mut serde_json::Value, code: &str) {
     let recovery_actions = degraded_recovery_actions(code);
-    if recovery_actions.is_empty() {
+    if recovery_actions.is_empty() && code != "embed_model_unavailable" {
         return;
     }
-    value["details"] = serde_json::json!({
-        "recovery": recovery_actions
-            .iter()
-            .map(crate::models::RecoveryAction::data_json)
-            .collect::<Vec<_>>(),
-    });
+
+    let mut details = serde_json::Map::new();
+    if !recovery_actions.is_empty() {
+        details.insert(
+            "recovery".to_string(),
+            serde_json::Value::Array(
+                recovery_actions
+                    .iter()
+                    .map(crate::models::RecoveryAction::data_json)
+                    .collect(),
+            ),
+        );
+    }
+    if code == "embed_model_unavailable" {
+        details.insert(
+            "modelId".to_string(),
+            serde_json::json!(EMBED_MODEL_UNAVAILABLE_MODEL_ID),
+        );
+        details.insert(
+            "featureFlag".to_string(),
+            serde_json::json!(EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG),
+        );
+        details.insert("lexicalAvailable".to_string(), serde_json::json!(true));
+    }
+    value["details"] = serde_json::Value::Object(details);
 }
 
 impl SearchDiagnosticReport {
@@ -4089,8 +4138,60 @@ fn resolve_source_mode(
     index_dir: &Path,
     degraded: &mut Vec<SearchDegradation>,
 ) -> Result<SourceModeResolution, SearchError> {
+    let embed_model_unavailable = embed_model_unavailable_reason_from_env();
+    let tiers = SearchTierState {
+        lexical_available: lexical_search_available(index_dir),
+        embed_model_unavailable: embed_model_unavailable.as_deref(),
+    };
+    resolve_source_mode_with_tiers(options, degraded, tiers)
+}
+
+fn resolve_source_mode_with_tiers(
+    options: &SearchOptions,
+    degraded: &mut Vec<SearchDegradation>,
+    tiers: SearchTierState<'_>,
+) -> Result<SourceModeResolution, SearchError> {
     let requested = options.source_mode;
-    let lexical_available = lexical_search_available(index_dir);
+    let lexical_available = tiers.lexical_available;
+
+    if let Some(reason) = tiers.embed_model_unavailable {
+        match requested {
+            SearchSourceMode::Hybrid if lexical_available && !options.strict_source_mode => {
+                degraded.push(SearchDegradation::embed_model_unavailable(reason));
+                tracing::warn!(
+                    target: "ee::search::embedder_down",
+                    code = "embed_model_unavailable",
+                    model_id = EMBED_MODEL_UNAVAILABLE_MODEL_ID,
+                    feature_flag = EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG,
+                    lexical_available = true,
+                    reason,
+                    "embedding model unavailable; using lexical fallback"
+                );
+                return Ok(SourceModeResolution {
+                    applied: SearchSourceMode::LexicalOnly,
+                    fallback_applied: true,
+                    unavailable_no_results: false,
+                });
+            }
+            SearchSourceMode::Hybrid if options.strict_source_mode => {
+                return Err(SearchError::SourceModeUnavailable {
+                    requested,
+                    reason: format!("embedding model unavailable: {reason}"),
+                });
+            }
+            SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly => {
+                degraded.push(SearchDegradation::search_unavailable(
+                    "the embedding model is unavailable and the lexical/BM25 arm is unavailable",
+                ));
+                return Ok(SourceModeResolution {
+                    applied: requested,
+                    fallback_applied: false,
+                    unavailable_no_results: true,
+                });
+            }
+            SearchSourceMode::LexicalOnly => {}
+        }
+    }
 
     match requested {
         SearchSourceMode::LexicalOnly if lexical_available => Ok(SourceModeResolution {
@@ -4142,6 +4243,23 @@ fn resolve_source_mode(
             })
         }
     }
+}
+
+fn embed_model_unavailable_reason_from_env() -> Option<String> {
+    let raw = read(EnvVar::EmbedModelPath)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path = Path::new(trimmed);
+    if path.exists() {
+        return None;
+    }
+    Some(format!(
+        "{} points at missing path `{}`",
+        EnvVar::EmbedModelPath.name(),
+        trimmed
+    ))
 }
 
 #[cfg(feature = "lexical-bm25")]
@@ -6975,6 +7093,115 @@ mod tests {
     }
 
     #[test]
+    fn emit_embed_model_unavailable_when_embedder_only_down() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: Some("missing model fixture"),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
+        assert!(resolution.fallback_applied);
+        assert!(!resolution.unavailable_no_results);
+        let codes: Vec<&str> = degraded
+            .iter()
+            .map(|degradation| degradation.code.as_str())
+            .collect();
+        assert_eq!(codes, vec!["embed_model_unavailable"]);
+        Ok(())
+    }
+
+    #[test]
+    fn emit_lexical_unavailable_when_fts5_only_down() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::LexicalOnly, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: false,
+                embed_model_unavailable: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::LexicalOnly);
+        assert!(!resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        let codes: Vec<&str> = degraded
+            .iter()
+            .map(|degradation| degradation.code.as_str())
+            .collect();
+        assert_eq!(codes, vec!["lexical_unavailable"]);
+        Ok(())
+    }
+
+    #[test]
+    fn emit_search_unavailable_when_both_tiers_down() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: false,
+                embed_model_unavailable: Some("missing model fixture"),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::Hybrid);
+        assert!(!resolution.fallback_applied);
+        assert!(resolution.unavailable_no_results);
+        let codes: Vec<&str> = degraded
+            .iter()
+            .map(|degradation| degradation.code.as_str())
+            .collect();
+        assert_eq!(codes, vec!["search_unavailable"]);
+        Ok(())
+    }
+
+    #[test]
+    fn embed_model_unavailable_details_includes_model_id_and_feature_flag() {
+        let rendered =
+            SearchDegradation::embed_model_unavailable("missing model fixture").data_json();
+
+        assert_eq!(rendered["code"], "embed_model_unavailable");
+        assert_eq!(
+            rendered["details"]["modelId"],
+            EMBED_MODEL_UNAVAILABLE_MODEL_ID
+        );
+        assert_eq!(
+            rendered["details"]["featureFlag"],
+            EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG
+        );
+        assert_eq!(rendered["details"]["lexicalAvailable"], true);
+    }
+
+    #[test]
+    fn embed_model_unavailable_recovery_two_or_three_actions() {
+        let rendered =
+            SearchDegradation::embed_model_unavailable("missing model fixture").data_json();
+        let recovery = rendered
+            .pointer("/details/recovery")
+            .and_then(serde_json::Value::as_array)
+            .expect("embed_model_unavailable should expose recovery details");
+
+        assert_eq!(recovery.len(), 2, "F4b chose the two-action rebuild recipe");
+        assert_eq!(recovery[0]["command"], "ee index reembed --workspace .");
+        assert_eq!(
+            recovery[1]["command"],
+            "cargo build --features embed-quality"
+        );
+    }
+
+    #[test]
     fn tombstone_visibility_excludes_by_default_and_marks_opt_in_results() -> TestResult {
         let workspace = unique_test_dir("tombstone-visibility");
         std::fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
@@ -9058,6 +9285,15 @@ mod tests {
             recovery[1]["command"],
             "cargo build --features embed-quality"
         );
+        assert_eq!(
+            rendered[0]["details"]["modelId"],
+            EMBED_MODEL_UNAVAILABLE_MODEL_ID
+        );
+        assert_eq!(
+            rendered[0]["details"]["featureFlag"],
+            EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG
+        );
+        assert_eq!(rendered[0]["details"]["lexicalAvailable"], true);
     }
 
     // ========================================================================

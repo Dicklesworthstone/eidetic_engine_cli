@@ -305,6 +305,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::EmbedDedupHammingK.category(),
     },
     EnvVarEntry {
+        name: EnvVar::EmbedModelPath.name(),
+        description: EnvVar::EmbedModelPath.description(),
+        default: EnvVar::EmbedModelPath.default_value(),
+        category: EnvVar::EmbedModelPath.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::ExperimentalTriad.name(),
         description: EnvVar::ExperimentalTriad.description(),
         default: EnvVar::ExperimentalTriad.default_value(),
