@@ -169,6 +169,7 @@ in the same commit, keeping the catalog complete by construction.
 | `integrity_provenance_sample_unavailable` | diag integrity | medium | bd-17c65.10.6 (J6) |
 | `tripwire_inputs_incomplete` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
 | `unsupported_condition` | tripwire check, preflight | warning | bd-17c65.10.6 (J6) |
+| `unsupported_protocol_version` | mesh hello, mesh auto-enroll | medium | bd-97rgf.5 (SRR6.27) |
 | `tombstone_visibility_unavailable` | search | medium | bd-17c65.10.6 (J6) |
 | `semantic_dimension_exceeds_budget` | semantic model admissibility, search | medium | bd-17c65.10.6 (J6) |
 | `unsupported_schema` | import jsonl, perf compare | high | bd-17c65.10.6 (J6) |

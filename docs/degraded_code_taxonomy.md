@@ -485,6 +485,11 @@ memory bodies in `sources[]`.
 | `peer_discovery_workspace_mismatch` | info | bd-36bbk.1.2 |
 | `peer_discovery_budget_exhausted` | warning | bd-36bbk.1.2 |
 
+#### Mesh hello negotiation (1)
+| Code | Severity | Bead |
+|------|----------|------|
+| `unsupported_protocol_version` | medium | bd-97rgf.5 (SRR6.27) |
+
 #### Mesh discovery policy (2)
 | Code | Severity | Bead |
 |------|----------|------|

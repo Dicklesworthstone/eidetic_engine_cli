@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "unsupported_protocol_version",
+  "introduced_by": {
+    "bead": "bd-97rgf.5",
+    "epic_letter": "SRR6.27"
+  },
+  "surfaces": [
+    "mesh hello",
+    "mesh auto-enroll"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mesh hello requester advertises a protocol major version that differs from the responder's supported major version, so the responder declines without exposing responder metadata.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '%s\\n' '{\"schema\":\"ee.mesh.hello.v1\",\"requestId\":\"req-version-major\",\"requesterNodeKey\":\"nodekey:caller\",\"requesterEeVersion\":\"9.0.0\",\"requesterEeProtocolVersion\":\"9.0\",\"requesterWorkspaceIds\":[\"workspace-alpha\"],\"requesterCapabilities\":[\"discovery\"],\"requesterAdvertisedTags\":[\"tag:ee-mesh\"]}' > /tmp/ee-mesh-hello-major-skew.json"
+    ],
+    "invocation": "EE_MESH_ENABLED=1 ee mesh auto-enroll --dry-run --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "unsupported_protocol_version",
+    "severity": "medium",
+    "message_contains": [
+      "unsupported protocol",
+      "requires major"
+    ],
+    "repair_contains": "matching ee versions",
+    "repair_string": "Run matching ee versions or upgrade/downgrade the peer before enabling mesh sync."
+  }
+}
