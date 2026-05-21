@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use ee::models::{
-    SYMBOL_INDEX_STALE_CODE, SymbolEvidenceLinkDegradationCode, SymbolGraphDegradationCode,
+    SymbolEvidenceLinkDegradationCode, SymbolGraphDegradationCode, symbol::SYMBOL_INDEX_STALE_CODE,
 };
 use serde_json::Value;
 

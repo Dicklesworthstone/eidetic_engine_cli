@@ -104,6 +104,7 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
         include_expired: false,
         include_future: false,
         include_stale: false,
+        relevance_floor: None,
         redaction_level: ee::models::RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,

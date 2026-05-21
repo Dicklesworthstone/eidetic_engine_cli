@@ -842,7 +842,11 @@ fn peer_restart_rehydrates_durable_log_without_cursor_regression() -> TestResult
     );
     let restarted = ReplayNode::from_durable_log("node01", node.durable_log());
 
-    assert_equal(restarted.frontier, node.frontier, "restart keeps frontiers")?;
+    assert_equal(
+        &restarted.frontier,
+        &node.frontier,
+        "restart keeps frontiers",
+    )?;
     assert_equal(
         restarted.outputs("rule", 50),
         node.outputs("rule", 50),

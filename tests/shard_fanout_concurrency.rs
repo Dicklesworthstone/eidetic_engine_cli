@@ -21,7 +21,7 @@ const ORDERING_CONTRACT: &str = "\
 events are sorted by profile, operation ordinal, and phase order \
 enqueue < grant < commit; volatile ts and elapsed_ms fields are scrub targets";
 
-type TestResult = Result<(), String>;
+type TestResult<T = ()> = Result<T, String>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HarnessProfile {

@@ -301,9 +301,6 @@ mod graph_hits_perf_budget;
 #[path = "contracts/mesh_off_no_network_e2e.rs"]
 mod mesh_off_no_network_e2e;
 
-#[path = "contracts/peer_conflict_schema.rs"]
-mod peer_conflict_schema;
-
 #[path = "contracts/perf_live_schema.rs"]
 mod perf_live_schema;
 

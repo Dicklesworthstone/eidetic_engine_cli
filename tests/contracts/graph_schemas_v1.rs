@@ -764,7 +764,6 @@ fn why_schema_documents_load_bearing_graph_block() -> TestResult {
 
     let example = schema
         .pointer("/examples/0")
-        .and_then(Value::as_object)
         .ok_or_else(|| "ee.why.v1 must include a loadBearing example".to_owned())?;
     ensure_eq(
         example.get("schema").and_then(Value::as_str),
@@ -936,7 +935,6 @@ fn why_schema_documents_hits_graph_block() -> TestResult {
 
     let example = schema
         .pointer("/examples/0")
-        .and_then(Value::as_object)
         .ok_or_else(|| "ee.why.v1 must include a HITS example".to_owned())?;
     ensure_eq(
         example

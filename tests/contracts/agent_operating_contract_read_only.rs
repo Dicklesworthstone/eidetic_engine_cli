@@ -409,8 +409,8 @@ fn assert_stdout_is_single_response_envelope(stdout: &str, stderr: &str) -> Test
         "stdout response envelope schema",
     )?;
     ensure_equal(
-        parsed.get("success").and_then(Value::as_bool),
-        Some(true),
+        &parsed.get("success").and_then(Value::as_bool),
+        &Some(true),
         "stdout response envelope success",
     )?;
     ensure_equal(
@@ -623,8 +623,8 @@ fn agent_operating_contract_core_e2e_is_deterministic_and_read_only() -> TestRes
         "event kind",
     )?;
     ensure_equal(
-        event["stdout_hash"].as_str(),
-        event
+        &event["stdout_hash"].as_str(),
+        &event
             .pointer("/fields/output_artifact_hash")
             .and_then(Value::as_str),
         "event output artifact hash mirrors stdout hash",

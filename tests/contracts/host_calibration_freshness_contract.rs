@@ -316,7 +316,7 @@ fn synthetic_host_topology_golden_matrix_is_stable() {
         }
     ]);
 
-    assert_eq!(actual, expected);
+    assert_eq!(serde_json::Value::Array(actual.clone()), expected);
     let first = serde_json::to_string(&actual).expect("matrix serializes");
     let second = serde_json::to_string(&expected).expect("expected matrix serializes");
     assert_eq!(
