@@ -708,6 +708,14 @@ fn regression_fixture_file_name(input_hash: &str) -> Result<String, String> {
             "input_hash {input_hash:?} is too short for regression fixture file name"
         ));
     }
+    if !input_hash_hex
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(format!(
+            "input_hash {input_hash:?} must contain only lowercase hex digits"
+        ));
+    }
     Ok(format!("{}.json", &input_hash_hex[..16]))
 }
 
@@ -1656,6 +1664,23 @@ fn determinism_regression_fixture_loader_rejects_missing_input_hash_scheme() -> 
 
     assert!(error.contains("must start with blake3:"));
     assert!(error.contains(&fixture.input_hash));
+    Ok(())
+}
+
+#[test]
+fn determinism_regression_fixture_loader_rejects_non_hex_input_hash() -> Result<(), String> {
+    let mut fixture = regression_fixture_for_mismatch(6, b"non-hex", b"expected", b"observed")
+        .ok_or_else(|| "fixture should detect mismatch".to_owned())?;
+    fixture.input_hash = "blake3:not-a-hex-prefix".to_string();
+
+    let error = parse_regression_fixture_entries(vec![(
+        "0000000000000000.json".to_string(),
+        serialize_regression_fixture(&fixture)?,
+    )])
+    .expect_err("non-hex input_hash should be rejected before filename comparison");
+
+    assert!(error.contains("must contain only lowercase hex digits"));
+    assert!(error.contains("blake3:not-a-hex-prefix"));
     Ok(())
 }
 
