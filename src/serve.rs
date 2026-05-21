@@ -644,6 +644,55 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
     format!("event: {event_kind}\ndata: {event_payload}\n\n")
 }
 
+#[must_use]
+pub fn render_serve_http_json_response(status_code: u16, payload: &JsonValue) -> String {
+    let body = payload.to_string();
+    render_serve_http_response(
+        status_code,
+        "application/json; charset=utf-8",
+        Some(body.len()),
+        &body,
+    )
+}
+
+#[must_use]
+pub fn render_serve_http_sse_response(first_frame: &str) -> String {
+    render_serve_http_response(200, "text/event-stream; charset=utf-8", None, first_frame)
+}
+
+fn render_serve_http_response(
+    status_code: u16,
+    content_type: &str,
+    content_length: Option<usize>,
+    body: &str,
+) -> String {
+    let mut response = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {content_type}\r\n",
+        status_code,
+        serve_http_reason_phrase(status_code)
+    );
+    if let Some(content_length) = content_length {
+        response.push_str(&format!("Content-Length: {content_length}\r\n"));
+    }
+    response.push_str("Cache-Control: no-store\r\nConnection: close\r\n\r\n");
+    response.push_str(body);
+    response
+}
+
+fn serve_http_reason_phrase(status_code: u16) -> &'static str {
+    match status_code {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ServeTokenPosture {
     state: &'static str,
@@ -1500,6 +1549,19 @@ mod tests {
         serve_dispatch_plan(&request).map_err(|error| error.to_string())
     }
 
+    fn split_http_response(response: &str) -> Result<(&str, &str), String> {
+        response
+            .split_once("\r\n\r\n")
+            .ok_or_else(|| "HTTP response missing header/body separator".to_owned())
+    }
+
+    fn header_value<'a>(headers: &'a str, name: &str) -> Option<&'a str> {
+        let prefix = format!("{name}: ");
+        headers
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str()))
+    }
+
     #[test]
     fn serve_startup_report_marks_loopback_ready_without_exposing_token() -> TestResult {
         let token = "01234567890123456789012345678901";
@@ -1824,6 +1886,115 @@ mod tests {
             event["response"]["payload"]["data"]["ok"].as_bool(),
             Some(true),
             "sse wrapped data",
+        )
+    }
+
+    #[test]
+    fn serve_http_json_response_sets_close_headers_and_exact_length() -> TestResult {
+        let payload = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {"ok": true},
+            "degraded": []
+        });
+        let response = render_serve_http_json_response(200, &payload);
+        ensure(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            "status line",
+        )?;
+
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Content-Type"),
+            Some("application/json; charset=utf-8"),
+            "json content type",
+        )?;
+        ensure(
+            header_value(headers, "Cache-Control"),
+            Some("no-store"),
+            "cache control",
+        )?;
+        ensure(
+            header_value(headers, "Connection"),
+            Some("close"),
+            "connection close",
+        )?;
+        let content_length = header_value(headers, "Content-Length")
+            .ok_or_else(|| "missing JSON content length".to_owned())?
+            .parse::<usize>()
+            .map_err(|error| error.to_string())?;
+        ensure(
+            content_length,
+            body.len(),
+            "content length must match body bytes",
+        )?;
+        let body_json: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            body_json["schema"].as_str(),
+            Some("ee.response.v2"),
+            "body schema",
+        )
+    }
+
+    #[test]
+    fn serve_http_json_response_preserves_auth_failure_without_token_material() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let request = parse_request("GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        let auth_state = serve_auth_state(&request, Some(token));
+        let payload = serve_auth_failure_envelope("req-1", &request, auth_state, 3);
+        let response = render_serve_http_json_response(401, &payload);
+
+        ensure(
+            response.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+            true,
+            "auth status line",
+        )?;
+        ensure(
+            response.contains(token),
+            false,
+            "auth response must not expose bearer token",
+        )?;
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Content-Length").is_some(),
+            true,
+            "auth response content length",
+        )?;
+        let body_json: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            body_json["response"]["statusCode"].as_u64(),
+            Some(401),
+            "auth payload status",
+        )
+    }
+
+    #[test]
+    fn serve_http_sse_response_is_streaming_and_unbuffered_by_contract() -> TestResult {
+        let frame = render_serve_sse_event("complete", true, &json!({"ok": true}));
+        let response = render_serve_http_sse_response(&frame);
+        ensure(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            "sse status line",
+        )?;
+        ensure(response.ends_with(&frame), true, "sse frame body")?;
+
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Content-Type"),
+            Some("text/event-stream; charset=utf-8"),
+            "sse content type",
+        )?;
+        ensure(
+            header_value(headers, "Content-Length").is_none(),
+            true,
+            "sse stream omits content length",
+        )?;
+        ensure(
+            body.starts_with("event: complete\n"),
+            true,
+            "sse event body",
         )
     }
 
