@@ -64,15 +64,27 @@ fn context_json(
     query: &str,
     max_tokens: &str,
 ) -> Result<serde_json::Value, String> {
-    let output = run_ee(&[
+    context_json_with_extra_args(workspace, query, max_tokens, &[])
+}
+
+fn context_json_with_extra_args(
+    workspace: &str,
+    query: &str,
+    max_tokens: &str,
+    extra_args: &[&str],
+) -> Result<serde_json::Value, String> {
+    let mut args = vec![
         "--workspace",
         workspace,
         "context",
         query,
         "--max-tokens",
         max_tokens,
-        "--json",
-    ])?;
+    ];
+    args.extend_from_slice(extra_args);
+    args.push("--json");
+
+    let output = run_ee(&args)?;
     assert_success(&output, &format!("context {max_tokens}"))?;
     assert_stderr_empty(&output, &format!("context {max_tokens}"))?;
     stdout_json(&output)
@@ -175,6 +187,21 @@ fn wide_budget_does_not_emit_pack_budget_too_small() -> TestResult {
 }
 
 #[test]
+fn compact_profile_still_emits_pack_budget_too_small() -> TestResult {
+    let (_tempdir, workspace) = setup_release_workspace()?;
+
+    let value =
+        context_json_with_extra_args(&workspace, "release ritual", "1", &["--profile", "compact"])?;
+    let codes = degraded_codes(&value)?;
+
+    ensure(
+        codes.contains(&PACK_BUDGET_TOO_SMALL),
+        format!("compact profile should still emit {PACK_BUDGET_TOO_SMALL}: {codes:?}"),
+    )?;
+    ensure_equal(&pack_items(&value)?.len(), &0, "compact profile item count")
+}
+
+#[test]
 fn recovery_actions_machine_readable() -> TestResult {
     let (_tempdir, workspace) = setup_release_workspace()?;
 
@@ -206,6 +233,13 @@ fn recovery_actions_machine_readable() -> TestResult {
         "recovery[0] flag",
     )?;
     ensure_equal(
+        &recovery[0]
+            .get("valueHint")
+            .and_then(serde_json::Value::as_str),
+        &Some("8000"),
+        "recovery[0] value hint",
+    )?;
+    ensure_equal(
         &recovery[1]
             .get("flagName")
             .and_then(serde_json::Value::as_str),
@@ -213,9 +247,23 @@ fn recovery_actions_machine_readable() -> TestResult {
         "recovery[1] flag",
     )?;
     ensure_equal(
+        &recovery[1]
+            .get("valueHint")
+            .and_then(serde_json::Value::as_str),
+        &Some("compact"),
+        "recovery[1] value hint",
+    )?;
+    ensure_equal(
         &recovery[2].get("kind").and_then(serde_json::Value::as_str),
         &Some("broaden"),
         "recovery[2] kind",
+    )?;
+    ensure(
+        recovery[2]
+            .get("rationale")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|rationale| rationale.contains("broaden query")),
+        "recovery[2] should explain the broaden-query path",
     )
 }
 
