@@ -1137,6 +1137,7 @@ dependencies = [
  "pulldown-cmark",
  "regex-lite",
  "ring",
+ "roaring",
  "rustix",
  "serde",
  "serde_json",
@@ -3860,6 +3861,16 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "roaring"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b96237efa0c878c64bd89c436f661be4e46b2f3eff1ebb976f7ef2321d2f58f"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]

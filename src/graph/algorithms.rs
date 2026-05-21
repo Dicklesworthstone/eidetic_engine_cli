@@ -27,7 +27,8 @@ use crate::core::graph_telemetry::{
 };
 use crate::db::{CreateGraphAlgorithmResultInput, DbConnection, StoredGraphAlgorithmResult};
 use crate::graph::{
-    GraphError, GraphResult, SUBSYSTEM as GRAPH_SUBSYSTEM, graph_algorithm_params_hash,
+    GraphError, GraphResult, SUBSYSTEM as GRAPH_SUBSYSTEM, graph_algorithm_legacy_json_params_hash,
+    graph_algorithm_params_hash,
 };
 
 pub const DEFAULT_PPR_ALPHA: f64 = 0.30;
@@ -763,15 +764,7 @@ fn load_cached_algorithm_result<R>(
 where
     R: DeserializeOwned,
 {
-    let row = spec
-        .conn
-        .get_graph_algorithm_result(
-            spec.workspace_id,
-            spec.snapshot_id,
-            spec.algorithm,
-            params_hash,
-        )
-        .map_err(|error| GraphError::storage("load graph algorithm result cache", error))?;
+    let row = load_cached_algorithm_result_row(spec, params_hash)?;
     let Some(row) = row else {
         return Ok(None);
     };
@@ -783,7 +776,7 @@ where
             });
             insert_graph_algorithm_result_evicted_audit(
                 spec,
-                params_hash,
+                &row.params_hash,
                 ResultEvictedReason::TtlExpired,
             )?;
             *stale_persistent_eviction_emitted = true;
@@ -799,13 +792,49 @@ where
                 workspace_id = spec.workspace_id,
                 snapshot_id = spec.snapshot_id,
                 algorithm = spec.algorithm,
-                params_hash,
+                params_hash = row.params_hash.as_str(),
                 error = %error,
                 "graph algorithm result cache row could not be deserialized"
             );
             Ok(None)
         }
     }
+}
+
+fn load_cached_algorithm_result_row(
+    spec: &AlgorithmResultCacheSpec<'_>,
+    params_hash: &str,
+) -> GraphResult<Option<StoredGraphAlgorithmResult>> {
+    let primary = spec
+        .conn
+        .get_graph_algorithm_result(
+            spec.workspace_id,
+            spec.snapshot_id,
+            spec.algorithm,
+            params_hash,
+        )
+        .map_err(|error| GraphError::storage("load graph algorithm result cache", error))?;
+    if primary.is_some() {
+        return Ok(primary);
+    }
+
+    let legacy_hash = graph_algorithm_legacy_json_params_hash(
+        spec.algorithm,
+        spec.snapshot_content_hash,
+        spec.params,
+    )?;
+    if legacy_hash == params_hash {
+        return Ok(None);
+    }
+
+    spec.conn
+        .get_graph_algorithm_result(
+            spec.workspace_id,
+            spec.snapshot_id,
+            spec.algorithm,
+            &legacy_hash,
+        )
+        .map_err(|error| GraphError::storage("load legacy graph algorithm result cache", error))
 }
 
 fn store_cached_algorithm_result<R>(
@@ -1932,6 +1961,83 @@ mod tests {
             compute[1].fields.get("cache_hit").map(String::as_str),
             Some("true")
         );
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn result_cache_reads_legacy_json_keyed_rows_during_transition() -> TestResult {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_8123456789abcdef012345679a";
+        let snapshot_id = "gsnap_8123456789abcdef01234568a";
+        let snapshot_content_hash = "blake3:algorithm-legacy-json-cache-snapshot";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/workspace/algorithm-legacy-json-cache".to_owned(),
+                    name: Some("algorithm-legacy-json-cache".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                snapshot_id,
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 1,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 2,
+                    edge_count: 1,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: snapshot_content_hash.to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let params = serde_json::json!({"algorithm": "pagerank", "alpha": 0.30});
+        let legacy_hash = graph_result(graph_algorithm_legacy_json_params_hash(
+            "pagerank",
+            snapshot_content_hash,
+            &params,
+        ))?;
+        connection
+            .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: workspace_id.to_owned(),
+                snapshot_id: snapshot_id.to_owned(),
+                algorithm: "pagerank".to_owned(),
+                params_hash: legacy_hash.clone(),
+                result_json: r#"{"scores":[["mem_legacy",0.75]]}"#.to_owned(),
+                ttl_seconds: 300,
+            })
+            .map_err(|error| error.to_string())?;
+
+        let spec = AlgorithmResultCacheSpec {
+            conn: &connection,
+            workspace_id,
+            snapshot_id,
+            snapshot_content_hash,
+            algorithm: "pagerank",
+            params: &params,
+            ttl_seconds: 300,
+        };
+        let run = graph_result(run_with_result_cache(&spec, || {
+            Ok(serde_json::json!({"scores":[["mem_new",0.25]]}))
+        }))?;
+
+        assert!(run.cache_hit);
+        assert_ne!(run.params_hash, legacy_hash);
+        assert_eq!(run.result["scores"][0][0], "mem_legacy");
+
+        let rows = connection
+            .list_graph_algorithm_results(workspace_id, snapshot_id, Some("pagerank"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].params_hash, legacy_hash);
 
         connection.close().map_err(|error| error.to_string())
     }

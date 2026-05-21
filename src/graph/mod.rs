@@ -54,6 +54,7 @@ pub mod numa_pin;
 pub mod pack_dna;
 pub mod ppr;
 pub mod ppr_prefetch_cache;
+pub mod result_cache_keys;
 pub mod skyline;
 
 pub const SUBSYSTEM: &str = "graph";
@@ -132,50 +133,7 @@ fn u64_from_usize_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-pub fn graph_algorithm_params_hash(
-    algorithm: &str,
-    snapshot_content_hash: &str,
-    params: &serde_json::Value,
-) -> GraphResult<String> {
-    let canonical_params = canonical_graph_algorithm_params_json(params)?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(GRAPH_ALGORITHM_RESULT_CACHE_KEY_SCHEMA_V1.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(algorithm.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(snapshot_content_hash.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(canonical_params.as_bytes());
-    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
-}
-
-fn canonical_graph_algorithm_params_json(params: &serde_json::Value) -> GraphResult<String> {
-    serde_json::to_string(&canonical_graph_algorithm_params_value(params))
-        .map_err(|error| GraphError::json("serialize graph algorithm cache params", error))
-}
-
-fn canonical_graph_algorithm_params_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(items) => serde_json::Value::Array(
-            items
-                .iter()
-                .map(canonical_graph_algorithm_params_value)
-                .collect(),
-        ),
-        serde_json::Value::Object(fields) => {
-            let mut sorted = serde_json::Map::new();
-            let mut keys: Vec<_> = fields.keys().collect();
-            keys.sort();
-            for key in keys {
-                if let Some(value) = fields.get(key) {
-                    sorted.insert(key.clone(), canonical_graph_algorithm_params_value(value));
-                }
-            }
-            serde_json::Value::Object(sorted)
-        }
-        other => other.clone(),
-    }
-}
+pub use result_cache_keys::{graph_algorithm_legacy_json_params_hash, graph_algorithm_params_hash};
 
 pub fn emit_complexity_witness(
     conn: &DbConnection,
