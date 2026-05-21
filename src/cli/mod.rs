@@ -12524,6 +12524,21 @@ where
         Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
     };
 
+    if args.json_stream {
+        if cli.json || cli.robot || cli.format_explicit {
+            let error = DomainError::Usage {
+                message: "`ee insights --json-stream` is mutually exclusive with other output format flags."
+                    .to_owned(),
+                repair: Some(
+                    "Run `ee insights --json-stream` without --json, --robot, or --format."
+                        .to_owned(),
+                ),
+            };
+            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+        }
+        return write_stdout(stdout, &insights::render_insights_json_stream(&report));
+    }
+
     match cli.renderer() {
         output::Renderer::Human => write_stdout(stdout, &insights::render_insights_human(&report)),
         output::Renderer::Markdown => write_stdout(
@@ -48449,6 +48464,7 @@ mod tests {
         ensure_contains(&stdout, "Usage:", "insights help usage")?;
         ensure_contains(&stdout, "--section", "insights help section flag")?;
         ensure_contains(&stdout, "--explain", "insights help explain flag")?;
+        ensure_contains(&stdout, "--json-stream", "insights help json-stream flag")?;
         ensure(stderr.is_empty(), "insights help stderr must be empty")
     }
 
@@ -48472,6 +48488,33 @@ mod tests {
             ),
             other => Err(format!("expected insights command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn insights_json_stream_parser_sets_stream_flag() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "insights", "--json-stream"])
+            .map_err(|error| format!("failed to parse insights json stream: {:?}", error.kind()))?;
+        match parsed.command {
+            Some(Command::Insights(args)) => {
+                ensure_equal(&args.json_stream, &true, "insights json stream flag")
+            }
+            other => Err(format!("expected insights command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn insights_json_stream_rejects_json_global() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "--json", "insights", "--json-stream"]);
+        ensure_equal(&exit, &ProcessExitCode::Usage, "json-stream conflict exit")?;
+        ensure(
+            stderr.is_empty(),
+            "json-stream conflict stderr must be empty",
+        )?;
+        ensure_contains(
+            &stdout,
+            "mutually exclusive",
+            "json-stream conflict error message",
+        )
     }
 
     #[test]

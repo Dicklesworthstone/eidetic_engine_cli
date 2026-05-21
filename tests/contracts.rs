@@ -145,6 +145,9 @@ mod symbol_graph_artifacts;
 #[path = "contracts/graph_schemas_v1.rs"]
 mod graph_schemas_v1;
 
+#[path = "contracts/insights_stream.rs"]
+mod insights_stream;
+
 #[path = "contracts/graph_additive_only.rs"]
 mod graph_additive_only;
 

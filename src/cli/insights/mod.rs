@@ -25,6 +25,9 @@ use crate::models::{DomainError, RESPONSE_SCHEMA_V1};
 use crate::output::render_toon_from_json;
 
 pub const INSIGHTS_SCHEMA_V1: &str = "ee.insights.v1";
+pub const INSIGHTS_JSON_STREAM_HEADER_SCHEMA_V1: &str = "ee.insights.json_stream.header.v1";
+pub const INSIGHTS_JSON_STREAM_SECTION_SCHEMA_V1: &str = "ee.insights.json_stream.section.v1";
+pub const INSIGHTS_JSON_STREAM_FOOTER_SCHEMA_V1: &str = "ee.insights.json_stream.footer.v1";
 const PROXIMITY_REPORT_SCHEMA_V1: &str = PROXIMITY_SCHEMA_V1;
 const CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1: &str = "ee.graph.causal_evidence_projection.v1";
 const DEFAULT_SECTION_LIMIT: usize = 10;
@@ -56,6 +59,10 @@ pub struct InsightsArgs {
     /// Number of section items to skip for --section output.
     #[arg(long, default_value_t = 0, value_name = "N")]
     pub offset: usize,
+
+    /// Emit insights as newline-delimited JSON: header, sections, footer.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub json_stream: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -790,6 +797,56 @@ pub fn render_insights_json(report: &InsightsReport) -> String {
     .to_string()
 }
 
+pub fn render_insights_json_stream(report: &InsightsReport) -> String {
+    let mut rendered = String::new();
+    let _ = writeln!(
+        rendered,
+        "{}",
+        serde_json::json!({
+            "schema": INSIGHTS_JSON_STREAM_HEADER_SCHEMA_V1,
+            "kind": "header",
+            "reportSchema": report.schema,
+            "command": report.command,
+            "mode": report.mode.as_str(),
+            "snapshotVersion": report.snapshot_version,
+            "generatedAt": report.generated_at,
+            "selectedSection": &report.selected_section,
+            "explainMemoryId": &report.explain_memory_id,
+            "explainCommand": &report.explain_command,
+            "pagination": &report.pagination,
+            "availableSections": &report.available_sections,
+            "sectionCount": report.sections.len(),
+        })
+    );
+
+    for (index, section) in report.sections.iter().enumerate() {
+        let _ = writeln!(
+            rendered,
+            "{}",
+            serde_json::json!({
+                "schema": INSIGHTS_JSON_STREAM_SECTION_SCHEMA_V1,
+                "kind": "section",
+                "index": index,
+                "name": section.name,
+                "section": section,
+            })
+        );
+    }
+
+    let _ = writeln!(
+        rendered,
+        "{}",
+        serde_json::json!({
+            "schema": INSIGHTS_JSON_STREAM_FOOTER_SCHEMA_V1,
+            "kind": "footer",
+            "degraded": &report.degraded_signals,
+            "runDurationMs": report.run_duration_ms,
+        })
+    );
+
+    rendered
+}
+
 /// Render the insights report as TOON through the canonical JSON envelope.
 #[must_use]
 pub fn render_insights_toon(report: &InsightsReport) -> String {
@@ -1345,6 +1402,7 @@ mod tests {
             explain: None,
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
 
@@ -1396,6 +1454,7 @@ mod tests {
             explain: Some("mem_123".to_owned()),
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
 
@@ -1417,6 +1476,7 @@ mod tests {
             explain: None,
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
         let json: serde_json::Value = serde_json::from_str(&render_insights_json(&report))
@@ -1444,12 +1504,58 @@ mod tests {
     }
 
     #[test]
+    fn rendered_json_stream_emits_parseable_header_sections_footer() -> TestResult {
+        let report = build_insights_report(&InsightsArgs {
+            section: Some("topMemories".to_owned()),
+            explain: None,
+            limit: DEFAULT_SECTION_LIMIT,
+            offset: 0,
+            json_stream: false,
+        })
+        .map_err(|error| error.to_string())?;
+        let rendered = render_insights_json_stream(&report);
+        let lines = rendered.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), report.sections.len() + 2);
+
+        let values = lines
+            .iter()
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .map_err(|error| format!("stream line should parse as JSON: {error}: {line}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(values[0]["schema"], INSIGHTS_JSON_STREAM_HEADER_SCHEMA_V1);
+        assert_eq!(values[0]["kind"], "header");
+        assert_eq!(values[0]["reportSchema"], INSIGHTS_SCHEMA_V1);
+        assert_eq!(values[0]["snapshotVersion"], 0);
+        assert_eq!(values[0]["generatedAt"], EMPTY_WORKSPACE_GENERATED_AT);
+        assert_eq!(values[0]["sectionCount"], 1);
+
+        assert_eq!(values[1]["schema"], INSIGHTS_JSON_STREAM_SECTION_SCHEMA_V1);
+        assert_eq!(values[1]["kind"], "section");
+        assert_eq!(values[1]["index"], 0);
+        assert_eq!(values[1]["name"], "topMemories");
+        assert_eq!(values[1]["section"]["name"], "topMemories");
+
+        let footer = values
+            .last()
+            .ok_or_else(|| "stream footer should be present".to_owned())?;
+        assert_eq!(footer["schema"], INSIGHTS_JSON_STREAM_FOOTER_SCHEMA_V1);
+        assert_eq!(footer["kind"], "footer");
+        assert_eq!(footer["degraded"][0]["code"], "graph.workspace_empty");
+        assert_eq!(footer["runDurationMs"], 0);
+
+        Ok(())
+    }
+
+    #[test]
     fn rendered_markdown_preserves_sections_items_and_degraded() -> TestResult {
         let mut report = build_insights_report(&InsightsArgs {
             section: Some("topMemories".to_owned()),
             explain: None,
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
         report.sections = vec![InsightsSection {
@@ -1494,6 +1600,7 @@ mod tests {
             explain: None,
             limit: DEFAULT_SECTION_LIMIT,
             offset: 0,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
         let json = render_insights_json(&report);
@@ -1522,6 +1629,7 @@ mod tests {
                 explain: None,
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
+                json_stream: false,
             })
             .map_err(|error| error.to_string())?;
 
@@ -1579,6 +1687,7 @@ mod tests {
                     explain: None,
                     limit: DEFAULT_SECTION_LIMIT,
                     offset: 0,
+                    json_stream: false,
                 },
                 InsightsBuildOptions {
                     workspace: Some(&workspace),
@@ -1613,6 +1722,7 @@ mod tests {
                 explain: None,
                 limit: DEFAULT_SECTION_LIMIT,
                 offset: 0,
+                json_stream: false,
             },
             InsightsBuildOptions {
                 workspace: Some(&workspace),
@@ -1688,6 +1798,7 @@ mod tests {
             explain: None,
             limit: 500,
             offset: 50,
+            json_stream: false,
         })
         .map_err(|error| error.to_string())?;
 
