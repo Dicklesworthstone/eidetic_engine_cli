@@ -747,7 +747,7 @@ ee swarm brief --workspace . --json
 
 ```bash
 ee init --workspace .
-for i in 1 2 3 4 5; do ee preflight issue-bypass-token --reason "approved $i" --json; done
+for i in 1 2 3 4 5; do ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason "approved $i" --json; done
 ```
 
 **Invocation.**
@@ -778,7 +778,7 @@ ee preflight check --cmd 'rm -rf build-output' --override-token <sixth-token> --
 
 ```bash
 ee init --workspace .
-ee preflight issue-bypass-token --reason 'approved once' --json
+ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --json
 ee preflight check --cmd 'rm -rf build-output' --override-token <token> --json
 ```
 
@@ -810,7 +810,7 @@ ee preflight check --cmd 'rm -rf build-output' --override-token <same-token> --j
 
 ```bash
 ee init --workspace .
-ee preflight issue-bypass-token --reason 'approved once' --ttl-minutes 1 --json
+ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --ttl-minutes 1 --json
 ```
 
 **Invocation.**
@@ -871,7 +871,7 @@ ee preflight check --cmd 'rm -rf build-output' --override-token not-a-real-token
 
 ```bash
 ee init --workspace .
-ee preflight issue-bypass-token --reason 'approved once' --json
+ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --json
 ee preflight revoke-bypass-token --token <token> --json
 ```
 

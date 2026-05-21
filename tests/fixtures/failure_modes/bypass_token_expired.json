@@ -14,7 +14,7 @@
     "description": "A preflight bypass token is presented after its short TTL has elapsed.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee preflight issue-bypass-token --reason 'approved once' --ttl-minutes 1 --json"
+      "ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --ttl-minutes 1 --json"
     ],
     "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <expired-token> --json"
   },

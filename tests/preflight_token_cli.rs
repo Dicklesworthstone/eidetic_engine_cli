@@ -41,6 +41,8 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         "--json",
         "preflight",
         "issue-bypass-token",
+        "--cmd",
+        "rm -rf /",
         "--reason",
         "approve one destructive test command",
     ])?;
@@ -54,6 +56,33 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         .as_str()
         .ok_or_else(|| "issued token hash prefix should be present".to_owned())?
         .to_owned();
+    assert_eq!(issued_json["data"]["report"]["command"], "rm -rf /");
+    assert_eq!(
+        issued_json["data"]["report"]["rule_ids"][0],
+        "builtin:file_deletion"
+    );
+
+    let wrong_use = ee(&[
+        "--workspace",
+        &workspace_path,
+        "--json",
+        "preflight",
+        "check",
+        "--cmd",
+        "rm -rf /tmp/other",
+        "--override-token",
+        &token,
+    ])?;
+    assert_eq!(wrong_use.status.code(), Some(6));
+    let wrong_use_json = parse_stdout(&wrong_use)?;
+    assert_eq!(wrong_use_json["schema"], "ee.error.v2");
+    assert_eq!(wrong_use_json["error"]["code"], "bypass_token_invalid");
+    let wrong_message = wrong_use_json["error"]["message"]
+        .as_str()
+        .ok_or_else(|| "wrong-scope error should include message".to_owned())?;
+    if !wrong_message.contains("not valid for this command") {
+        return Err(format!("unexpected wrong-scope message: {wrong_message}"));
+    }
 
     let first_use = ee(&[
         "--workspace",
@@ -116,6 +145,8 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         "--json",
         "preflight",
         "issue-bypass-token",
+        "--cmd",
+        "rm -rf /",
         "--reason",
         "approve then revoke",
     ])?;
@@ -182,6 +213,8 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
         "--json",
         "preflight",
         "issue-bypass-token",
+        "--cmd",
+        "rm -rf /tmp/work",
         "--reason",
         "approve one destructive test command",
     ])?;

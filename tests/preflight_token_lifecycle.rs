@@ -18,6 +18,8 @@ use ee::core::preflight_token::{
 use ee::db::{CreateWorkspaceInput, DbConnection, audit_actions};
 
 const WORKSPACE_ID: &str = "wsp_01234567890123456789012345";
+const APPROVED_COMMAND: &str = "rm -rf /tmp/work";
+const APPROVED_RULE_ID: &str = "builtin:rm_rf_tmp";
 
 fn test_connection() -> DbConnection {
     let connection = DbConnection::open_memory().expect("memory database opens");
@@ -38,6 +40,8 @@ fn issue_options(reason: &str, max_uses: u32) -> IssueBypassTokenOptions {
     IssueBypassTokenOptions {
         workspace_id: WORKSPACE_ID.to_owned(),
         issuer_workspace: "/tmp/preflight-token-test".to_owned(),
+        command: APPROVED_COMMAND.to_owned(),
+        rule_ids: vec![APPROVED_RULE_ID.to_owned()],
         reason: reason.to_owned(),
         ttl_minutes: Some(DEFAULT_TTL_MINUTES),
         max_uses: Some(max_uses),
@@ -84,6 +88,11 @@ fn issued_token_is_stored_as_hash_metadata_and_audited() {
     assert_eq!(stored.used_count, 0);
     assert_eq!(stored.max_uses, 1);
     assert_eq!(stored.reason, "approve one command");
+    assert_eq!(stored.command, APPROVED_COMMAND);
+    assert_eq!(stored.rule_ids_json, r#"["builtin:rm_rf_tmp"]"#);
+    assert_eq!(stored.command_hash, report.command_hash);
+    assert_eq!(report.command, APPROVED_COMMAND);
+    assert_eq!(report.rule_ids, vec![APPROVED_RULE_ID.to_owned()]);
     assert!(stored.revoked_at.is_none());
 
     let listed = list_bypass_tokens(&connection, WORKSPACE_ID).expect("tokens list");
@@ -115,6 +124,8 @@ fn one_shot_token_allows_first_use_and_rejects_second_use() {
         &VerifyBypassTokenOptions {
             workspace_id: WORKSPACE_ID.to_owned(),
             token: issued.token.clone(),
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
             actor: Some("test-agent".to_owned()),
             now: Some(Utc::now()),
         },
@@ -129,12 +140,64 @@ fn one_shot_token_allows_first_use_and_rejects_second_use() {
         &VerifyBypassTokenOptions {
             workspace_id: WORKSPACE_ID.to_owned(),
             token: issued.token,
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
             actor: Some("test-agent".to_owned()),
             now: Some(Utc::now()),
         },
     )
     .expect_err("second use is rejected");
     assert_eq!(second_use.code, "bypass_token_exhausted");
+}
+
+#[test]
+fn token_scope_mismatch_fails_closed_without_consuming_use() {
+    let connection = test_connection();
+    let issued =
+        issue_bypass_token(&connection, &issue_options("scoped command", 1)).expect("token issues");
+
+    let command_mismatch = verify_bypass_token(
+        &connection,
+        &VerifyBypassTokenOptions {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            token: issued.token.clone(),
+            command: "rm -rf /tmp/other".to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+            actor: Some("test-agent".to_owned()),
+            now: Some(Utc::now()),
+        },
+    )
+    .expect_err("different command is rejected");
+    assert_eq!(command_mismatch.code, "bypass_token_invalid");
+
+    let rule_mismatch = verify_bypass_token(
+        &connection,
+        &VerifyBypassTokenOptions {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            token: issued.token.clone(),
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec!["builtin:rm_rf_root".to_owned()],
+            actor: Some("test-agent".to_owned()),
+            now: Some(Utc::now()),
+        },
+    )
+    .expect_err("different rule set is rejected");
+    assert_eq!(rule_mismatch.code, "bypass_token_invalid");
+
+    let use_report = verify_bypass_token(
+        &connection,
+        &VerifyBypassTokenOptions {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            token: issued.token,
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
+            actor: Some("test-agent".to_owned()),
+            now: Some(Utc::now()),
+        },
+    )
+    .expect("approved command and rule set still succeeds");
+    assert_eq!(use_report.used_count, 1);
+    assert_eq!(use_report.remaining_uses, 0);
 }
 
 #[test]
@@ -155,6 +218,8 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
         &VerifyBypassTokenOptions {
             workspace_id: WORKSPACE_ID.to_owned(),
             token: expired.token,
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
             actor: Some("test-agent".to_owned()),
             now: Some(now),
         },
@@ -179,6 +244,8 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
         &VerifyBypassTokenOptions {
             workspace_id: WORKSPACE_ID.to_owned(),
             token: revoked.token,
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
             actor: Some("test-agent".to_owned()),
             now: Some(Utc::now()),
         },
@@ -194,6 +261,8 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
             &VerifyBypassTokenOptions {
                 workspace_id: WORKSPACE_ID.to_owned(),
                 token: issued.token,
+                command: APPROVED_COMMAND.to_owned(),
+                rule_ids: vec![APPROVED_RULE_ID.to_owned()],
                 actor: Some("test-agent".to_owned()),
                 now: Some(Utc::now()),
             },
@@ -208,6 +277,8 @@ fn expiry_revocation_and_rate_limit_are_enforced() {
         &VerifyBypassTokenOptions {
             workspace_id: WORKSPACE_ID.to_owned(),
             token: over_limit.token,
+            command: APPROVED_COMMAND.to_owned(),
+            rule_ids: vec![APPROVED_RULE_ID.to_owned()],
             actor: Some("test-agent".to_owned()),
             now: Some(Utc::now()),
         },

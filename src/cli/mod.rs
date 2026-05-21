@@ -4865,6 +4865,10 @@ pub struct PreflightCloseArgs {
 /// Arguments for `ee preflight issue-bypass-token`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct PreflightIssueBypassTokenArgs {
+    /// Exact command string approved for this bypass token.
+    #[arg(long = "cmd", value_name = "COMMAND")]
+    pub cmd: String,
+
     /// Human approval reason for the bypass.
     #[arg(long, value_name = "TEXT")]
     pub reason: String,
@@ -16638,9 +16642,23 @@ where
             Ok(opened) => opened,
             Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
         };
+    let registry = match PreflightGuardRegistry::load(&workspace) {
+        Ok(registry) => registry,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let matches = registry.match_command(&args.cmd);
+    if matches.is_empty() {
+        let error = DomainError::Usage {
+            message: "preflight bypass token command did not match any guard rules".to_owned(),
+            repair: Some("Run `ee preflight check --cmd '<command>' --json` and issue override tokens only for commands that the guard would block or warn about.".to_owned()),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
     let options = IssueBypassTokenOptions {
         workspace_id,
         issuer_workspace: workspace.to_string_lossy().into_owned(),
+        command: args.cmd.clone(),
+        rule_ids: preflight_rule_ids_from_matches(&matches),
         reason: args.reason.clone(),
         ttl_minutes: args.ttl_minutes,
         max_uses: args.max_uses,
@@ -16809,6 +16827,16 @@ fn preflight_token_error_to_domain(error: PreflightBypassTokenError) -> DomainEr
     }
 }
 
+fn preflight_rule_ids_from_matches(matches: &[&PreflightGuardRule]) -> Vec<String> {
+    let mut rule_ids = matches
+        .iter()
+        .map(|rule| rule.id.clone())
+        .collect::<Vec<_>>();
+    rule_ids.sort();
+    rule_ids.dedup();
+    rule_ids
+}
+
 fn write_preflight_token_report<W, T>(
     cli: &Cli,
     command: &'static str,
@@ -16845,8 +16873,13 @@ fn render_preflight_issue_bypass_token_human(
     report: &crate::core::preflight_token::BypassTokenIssueReport,
 ) -> String {
     format!(
-        "preflight bypass token issued\n  token: {}\n  token hash prefix: {}\n  expires at: {}\n  max uses: {}\n",
-        report.token, report.token_hash_prefix, report.expires_at, report.max_uses
+        "preflight bypass token issued\n  token: {}\n  token hash prefix: {}\n  command hash: {}\n  rule ids: {}\n  expires at: {}\n  max uses: {}\n",
+        report.token,
+        report.token_hash_prefix,
+        report.command_hash,
+        report.rule_ids.join(", "),
+        report.expires_at,
+        report.max_uses
     )
 }
 
@@ -16869,12 +16902,13 @@ fn render_preflight_list_bypass_tokens_human(
     );
     for token in &report.tokens {
         output.push_str(&format!(
-            "  - {} used {}/{} expires {} revoked={} reason={}\n",
+            "  - {} used {}/{} expires {} revoked={} command_hash={} reason={}\n",
             token.token_hash_prefix,
             token.used_count,
             token.max_uses,
             token.expires_at,
             token.revoked,
+            token.command_hash,
             token.reason
         ));
     }
@@ -16919,6 +16953,8 @@ where
             let options = VerifyBypassTokenOptions {
                 workspace_id: workspace_id.clone(),
                 token: override_token.to_owned(),
+                command: command.clone(),
+                rule_ids: preflight_rule_ids_from_matches(&matches),
                 actor: None,
                 now: None,
             };

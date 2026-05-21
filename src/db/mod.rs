@@ -4804,6 +4804,25 @@ CREATE INDEX idx_mesh_import_ledger_import_decision
     "blake3:v057_mesh_import_ledger_share_withdraw_2026_05_20",
 );
 
+/// V058: Bind preflight bypass tokens to the approved command and rule set.
+pub const V058_PREFLIGHT_BYPASS_TOKEN_SCOPE: Migration = Migration::new(
+    58,
+    "preflight_bypass_token_scope",
+    r#"
+ALTER TABLE preflight_bypass_tokens
+    ADD COLUMN command TEXT NOT NULL DEFAULT '';
+ALTER TABLE preflight_bypass_tokens
+    ADD COLUMN command_hash TEXT NOT NULL DEFAULT '';
+ALTER TABLE preflight_bypass_tokens
+    ADD COLUMN rule_ids_json TEXT NOT NULL DEFAULT '[]'
+    CHECK (json_valid(rule_ids_json));
+
+CREATE INDEX idx_preflight_bypass_tokens_scope
+    ON preflight_bypass_tokens(workspace_id, command_hash);
+"#,
+    "blake3:v058_preflight_bypass_token_scope_2026_05_21",
+);
+
 /// V042: Allow every pack omission reason emitted by the packer.
 pub const V042_PACK_OMISSION_REASONS: Migration = Migration::new(
     42,
@@ -4977,6 +4996,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V055_MESH_IMPORT_LEDGER_POLICY_DECISION,
     V056_MEMORY_CONTENT_SIMHASH,
     V057_MESH_IMPORT_LEDGER_SHARE_WITHDRAW,
+    V058_PREFLIGHT_BYPASS_TOKEN_SCOPE,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -13088,6 +13108,9 @@ pub struct CreatePreflightBypassTokenInput {
     pub max_uses: u32,
     pub issuer_workspace: String,
     pub reason: String,
+    pub command: String,
+    pub command_hash: String,
+    pub rule_ids_json: String,
 }
 
 /// Stored preflight bypass token metadata. The raw token is never persisted.
@@ -13102,6 +13125,9 @@ pub struct StoredPreflightBypassToken {
     pub used_count: u32,
     pub issuer_workspace: String,
     pub reason: String,
+    pub command: String,
+    pub command_hash: String,
+    pub rule_ids_json: String,
     pub revoked_at: Option<String>,
     pub last_used_at: Option<String>,
 }
@@ -13115,7 +13141,7 @@ impl DbConnection {
         let token_hash_prefix: String = token_hash.chars().take(20).collect();
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO preflight_bypass_tokens (token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, NULL, NULL)",
+            "INSERT INTO preflight_bypass_tokens (token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, command, command_hash, rule_ids_json, revoked_at, last_used_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, NULL, NULL)",
             &[
                 Value::Text(token_hash.to_string()),
                 Value::Text(token_hash_prefix),
@@ -13125,6 +13151,9 @@ impl DbConnection {
                 Value::BigInt(i64::from(input.max_uses)),
                 Value::Text(input.issuer_workspace.clone()),
                 Value::Text(input.reason.clone()),
+                Value::Text(input.command.clone()),
+                Value::Text(input.command_hash.clone()),
+                Value::Text(input.rule_ids_json.clone()),
             ],
         )?;
         Ok(())
@@ -13136,7 +13165,7 @@ impl DbConnection {
     ) -> Result<Option<StoredPreflightBypassToken>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE token_hash = ?1",
+            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, command, command_hash, rule_ids_json, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE token_hash = ?1",
             &[Value::Text(token_hash.to_string())],
         )?;
         rows.first()
@@ -13150,7 +13179,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredPreflightBypassToken>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE workspace_id = ?1 ORDER BY issued_at DESC, token_hash_prefix ASC",
+            "SELECT token_hash, token_hash_prefix, workspace_id, issued_at, expires_at, max_uses, used_count, issuer_workspace, reason, command, command_hash, rule_ids_json, revoked_at, last_used_at FROM preflight_bypass_tokens WHERE workspace_id = ?1 ORDER BY issued_at DESC, token_hash_prefix ASC",
             &[Value::Text(workspace_id.to_string())],
         )?;
         rows.iter()
@@ -13232,8 +13261,11 @@ fn stored_preflight_bypass_token_from_row(row: &Row) -> Result<StoredPreflightBy
         issuer_workspace: required_text(row, 7, DbOperation::Query, "issuer_workspace")?
             .to_string(),
         reason: required_text(row, 8, DbOperation::Query, "reason")?.to_string(),
-        revoked_at: optional_text(row, 9)?.map(str::to_string),
-        last_used_at: optional_text(row, 10)?.map(str::to_string),
+        command: required_text(row, 9, DbOperation::Query, "command")?.to_string(),
+        command_hash: required_text(row, 10, DbOperation::Query, "command_hash")?.to_string(),
+        rule_ids_json: required_text(row, 11, DbOperation::Query, "rule_ids_json")?.to_string(),
+        revoked_at: optional_text(row, 12)?.map(str::to_string),
+        last_used_at: optional_text(row, 13)?.map(str::to_string),
     })
 }
 

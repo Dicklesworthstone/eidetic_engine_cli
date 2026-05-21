@@ -14,7 +14,7 @@
     "description": "A workspace attempts more than five successful preflight bypass-token uses in one hour.",
     "setup_commands": [
       "ee init --workspace .",
-      "for i in 1 2 3 4 5; do ee preflight issue-bypass-token --reason \"approved $i\" --json; done"
+      "for i in 1 2 3 4 5; do ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason \"approved $i\" --json; done"
     ],
     "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <sixth-token> --json"
   },

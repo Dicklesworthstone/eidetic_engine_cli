@@ -39,6 +39,8 @@ pub const BYPASS_TOKEN_STORAGE_ERROR: &str = "bypass_token_storage_error";
 pub struct IssueBypassTokenOptions {
     pub workspace_id: String,
     pub issuer_workspace: String,
+    pub command: String,
+    pub rule_ids: Vec<String>,
     pub reason: String,
     pub ttl_minutes: Option<i64>,
     pub max_uses: Option<u32>,
@@ -50,6 +52,8 @@ pub struct IssueBypassTokenOptions {
 pub struct VerifyBypassTokenOptions {
     pub workspace_id: String,
     pub token: String,
+    pub command: String,
+    pub rule_ids: Vec<String>,
     pub actor: Option<String>,
     pub now: Option<DateTime<Utc>>,
 }
@@ -77,6 +81,9 @@ pub struct BypassTokenIssueReport {
     pub schema: String,
     pub token: String,
     pub token_hash_prefix: String,
+    pub command: String,
+    pub command_hash: String,
+    pub rule_ids: Vec<String>,
     pub expires_at: String,
     pub max_uses: u32,
     pub audit_id: String,
@@ -116,6 +123,9 @@ pub struct BypassTokenListEntry {
     pub revoked: bool,
     pub issuer_workspace: String,
     pub reason: String,
+    pub command: String,
+    pub command_hash: String,
+    pub rule_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +182,40 @@ pub fn token_hash_prefix(hash: &str) -> String {
     hash.chars().take(20).collect()
 }
 
+#[must_use]
+pub fn normalize_bypass_command_scope(command: &str) -> String {
+    command.trim().to_owned()
+}
+
+#[must_use]
+pub fn canonical_bypass_rule_ids(rule_ids: &[String]) -> Vec<String> {
+    let mut ids = rule_ids
+        .iter()
+        .map(|rule_id| rule_id.trim())
+        .filter(|rule_id| !rule_id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[must_use]
+pub fn bypass_command_scope_hash(command: &str, rule_ids: &[String]) -> String {
+    let command = normalize_bypass_command_scope(command);
+    let rule_ids = canonical_bypass_rule_ids(rule_ids);
+    let mut payload = String::with_capacity(
+        command.len() + rule_ids.iter().map(String::len).sum::<usize>() + rule_ids.len() + 1,
+    );
+    payload.push_str(&command);
+    payload.push('\0');
+    for rule_id in &rule_ids {
+        payload.push_str(rule_id);
+        payload.push('\0');
+    }
+    format!("blake3:{}", blake3::hash(payload.as_bytes()).to_hex())
+}
+
 pub fn generate_bypass_token() -> Result<String> {
     let mut bytes = [0_u8; TOKEN_BYTES];
     getrandom::fill(&mut bytes).map_err(|error| {
@@ -195,6 +239,18 @@ pub fn issue_bypass_token(
     let ttl_minutes = options.ttl_minutes.unwrap_or(DEFAULT_TTL_MINUTES);
     let max_uses = options.max_uses.unwrap_or(DEFAULT_MAX_USES);
     let expires_at = now + Duration::minutes(ttl_minutes);
+    let command = normalize_bypass_command_scope(&options.command);
+    let rule_ids = canonical_bypass_rule_ids(&options.rule_ids);
+    let command_hash = bypass_command_scope_hash(&command, &rule_ids);
+    let rule_ids_json = serde_json::to_string(&rule_ids).map_err(|error| {
+        PreflightBypassTokenError::new(
+            BYPASS_TOKEN_STORAGE_ERROR,
+            "critical",
+            format!("failed to encode preflight bypass token rule ids: {error}"),
+            "Retry after inspecting the preflight rule identifiers.",
+            None,
+        )
+    })?;
     let token = generate_bypass_token()?;
     let hash = token_hash(&token);
     let prefix = token_hash_prefix(&hash);
@@ -209,6 +265,9 @@ pub fn issue_bypass_token(
                 max_uses,
                 issuer_workspace: options.issuer_workspace.clone(),
                 reason: options.reason.clone(),
+                command: command.clone(),
+                command_hash: command_hash.clone(),
+                rule_ids_json,
             },
         )
         .map_err(storage_error)?;
@@ -224,6 +283,9 @@ pub fn issue_bypass_token(
             "expires_at": expires_at.to_rfc3339(),
             "max_uses": max_uses,
             "issuer_workspace": options.issuer_workspace,
+            "command": &command,
+            "command_hash": &command_hash,
+            "rule_ids": &rule_ids,
             "reason": options.reason,
         }),
     )?;
@@ -232,6 +294,8 @@ pub fn issue_bypass_token(
         action = audit_actions::PREFLIGHT_BYPASS_TOKEN_ISSUE,
         workspace_id = %options.workspace_id,
         token_hash_prefix = %prefix,
+        command_hash = %command_hash,
+        rule_count = rule_ids.len(),
         max_uses,
         expires_at = %expires_at.to_rfc3339(),
         "issued preflight bypass token"
@@ -241,6 +305,9 @@ pub fn issue_bypass_token(
         schema: PREFLIGHT_BYPASS_TOKEN_SCHEMA_V1.to_owned(),
         token,
         token_hash_prefix: prefix,
+        command,
+        command_hash,
+        rule_ids,
         expires_at: expires_at.to_rfc3339(),
         max_uses,
         audit_id,
@@ -277,6 +344,22 @@ pub fn verify_bypass_token(
             "workspace mismatch",
         );
         return Err(invalid_token_error(prefix));
+    }
+
+    let command = normalize_bypass_command_scope(&options.command);
+    let rule_ids = canonical_bypass_rule_ids(&options.rule_ids);
+    let command_hash = bypass_command_scope_hash(&command, &rule_ids);
+    let stored_rule_ids = stored_token_rule_ids(&token)?;
+    if token.command != command || token.command_hash != command_hash || stored_rule_ids != rule_ids
+    {
+        audit_reject(
+            connection,
+            options,
+            &prefix,
+            BYPASS_TOKEN_INVALID,
+            "command scope mismatch",
+        );
+        return Err(scope_mismatch_error(prefix));
     }
 
     if token.revoked_at.is_some() {
@@ -364,6 +447,8 @@ pub fn verify_bypass_token(
         &prefix,
         json!({
             "token_hash_prefix": prefix,
+            "command_hash": &command_hash,
+            "rule_ids": &rule_ids,
             "used_count": used_count,
             "remaining_uses": token.max_uses.saturating_sub(used_count),
         }),
@@ -373,6 +458,7 @@ pub fn verify_bypass_token(
         action = audit_actions::PREFLIGHT_BYPASS_TOKEN_USE,
         workspace_id = %options.workspace_id,
         token_hash_prefix = %prefix,
+        command_hash = %command_hash,
         used_count,
         remaining_uses = token.max_uses.saturating_sub(used_count),
         "used preflight bypass token"
@@ -508,6 +594,12 @@ fn validate_issue_options(options: &IssueBypassTokenOptions) -> Result<()> {
     if options.issuer_workspace.trim().is_empty() {
         errors.insert("issuer_workspace", "must not be empty");
     }
+    if normalize_bypass_command_scope(&options.command).is_empty() {
+        errors.insert("command", "must not be empty");
+    }
+    if canonical_bypass_rule_ids(&options.rule_ids).is_empty() {
+        errors.insert("rule_ids", "must include at least one matching rule id");
+    }
     if options.reason.trim().is_empty() {
         errors.insert("reason", "must not be empty");
     }
@@ -525,7 +617,7 @@ fn validate_issue_options(options: &IssueBypassTokenOptions) -> Result<()> {
         BYPASS_TOKEN_INVALID,
         "medium",
         format!("invalid preflight bypass token options: {errors:?}"),
-        "Provide workspace_id, issuer_workspace, reason, ttl 1..60, and max_uses >= 1.",
+        "Provide workspace_id, issuer_workspace, command, rule_ids, reason, ttl 1..60, and max_uses >= 1.",
         None,
     ))
 }
@@ -564,6 +656,30 @@ fn invalid_token_error(prefix: String) -> PreflightBypassTokenError {
     )
 }
 
+fn scope_mismatch_error(prefix: String) -> PreflightBypassTokenError {
+    PreflightBypassTokenError::new(
+        BYPASS_TOKEN_INVALID,
+        "high",
+        "preflight bypass token is not valid for this command and rule set",
+        "Issue a fresh bypass token for this exact command after human confirmation.",
+        Some(prefix),
+    )
+}
+
+fn stored_token_rule_ids(token: &StoredPreflightBypassToken) -> Result<Vec<String>> {
+    serde_json::from_str::<Vec<String>>(&token.rule_ids_json)
+        .map(|rule_ids| canonical_bypass_rule_ids(&rule_ids))
+        .map_err(|error| {
+            PreflightBypassTokenError::new(
+                BYPASS_TOKEN_STORAGE_ERROR,
+                "critical",
+                format!("stored preflight bypass token rule scope is invalid: {error}"),
+                "Run `ee doctor --json` and inspect preflight_bypass_tokens rows.",
+                Some(token.token_hash_prefix.clone()),
+            )
+        })
+}
+
 fn audit_reject(
     connection: &DbConnection,
     options: &VerifyBypassTokenOptions,
@@ -571,6 +687,9 @@ fn audit_reject(
     code: &'static str,
     reason: &'static str,
 ) {
+    let command = normalize_bypass_command_scope(&options.command);
+    let rule_ids = canonical_bypass_rule_ids(&options.rule_ids);
+    let command_hash = bypass_command_scope_hash(&command, &rule_ids);
     tracing::info!(
         action = audit_actions::PREFLIGHT_BYPASS_TOKEN_REJECT,
         workspace_id = %options.workspace_id,
@@ -589,6 +708,9 @@ fn audit_reject(
             "token_hash_prefix": token_hash_prefix,
             "code": code,
             "reason": reason,
+            "command": &command,
+            "command_hash": &command_hash,
+            "rule_ids": &rule_ids,
         }),
     ) {
         tracing::error!(%error, "failed to insert token audit");
@@ -631,6 +753,11 @@ impl From<StoredPreflightBypassToken> for BypassTokenListEntry {
             revoked: token.revoked_at.is_some(),
             issuer_workspace: token.issuer_workspace,
             reason: token.reason,
+            command: token.command,
+            command_hash: token.command_hash,
+            rule_ids: serde_json::from_str::<Vec<String>>(&token.rule_ids_json)
+                .map(|rule_ids| canonical_bypass_rule_ids(&rule_ids))
+                .unwrap_or_default(),
         }
     }
 }

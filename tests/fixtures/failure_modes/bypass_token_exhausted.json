@@ -14,7 +14,7 @@
     "description": "A one-shot preflight bypass token is reused after its max_uses allowance is consumed.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee preflight issue-bypass-token --reason 'approved once' --json",
+      "ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --json",
       "ee preflight check --cmd 'rm -rf build-output' --override-token <token> --json"
     ],
     "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <same-token> --json"

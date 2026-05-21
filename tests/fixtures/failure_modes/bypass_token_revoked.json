@@ -14,7 +14,7 @@
     "description": "A preflight bypass token is presented after it was explicitly revoked.",
     "setup_commands": [
       "ee init --workspace .",
-      "ee preflight issue-bypass-token --reason 'approved once' --json",
+      "ee preflight issue-bypass-token --cmd 'rm -rf build-output' --reason 'approved once' --json",
       "ee preflight revoke-bypass-token --token <token> --json"
     ],
     "invocation": "ee preflight check --cmd 'rm -rf build-output' --override-token <revoked-token> --json"
