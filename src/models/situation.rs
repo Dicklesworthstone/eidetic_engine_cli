@@ -41,7 +41,37 @@ pub const SITUATION_SCHEMA_CATALOG_V1: &str = "ee.situation.schemas.v1";
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 fn normalized_situation_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 // ============================================================================
@@ -1433,6 +1463,16 @@ mod tests {
             "category",
         )?;
         ensure(
+            SituationCategory::from_str("bugFix"),
+            Ok(SituationCategory::BugFix),
+            "camelCase category",
+        )?;
+        ensure(
+            SituationCategory::from_str("IncidentResponse"),
+            Ok(SituationCategory::IncidentResponse),
+            "PascalCase category",
+        )?;
+        ensure(
             SituationConfidence::from_str(" HIGH "),
             Ok(SituationConfidence::High),
             "confidence",
@@ -1443,9 +1483,29 @@ mod tests {
             "feature type",
         )?;
         ensure(
+            SituationFeatureType::from_str("repositoryFingerprint"),
+            Ok(SituationFeatureType::RepositoryFingerprint),
+            "camelCase feature type",
+        )?;
+        ensure(
+            SituationFeatureType::from_str("AgentIntent"),
+            Ok(SituationFeatureType::AgentIntent),
+            "PascalCase feature type",
+        )?;
+        ensure(
             SituationRoutingSurface::from_str("preflight-profile"),
             Ok(SituationRoutingSurface::PreflightProfile),
             "routing surface",
+        )?;
+        ensure(
+            SituationRoutingSurface::from_str("fixtureFamily"),
+            Ok(SituationRoutingSurface::FixtureFamily),
+            "camelCase routing surface",
+        )?;
+        ensure(
+            SituationRoutingSurface::from_str("CounterfactualReplay"),
+            Ok(SituationRoutingSurface::CounterfactualReplay),
+            "PascalCase routing surface",
         )?;
         ensure(
             SituationReplayPolicy::from_str("dry-run-only"),
@@ -1453,9 +1513,24 @@ mod tests {
             "replay policy",
         )?;
         ensure(
+            SituationReplayPolicy::from_str("notEligible"),
+            Ok(SituationReplayPolicy::NotEligible),
+            "camelCase replay policy",
+        )?;
+        ensure(
+            SituationReplayPolicy::from_str("DryRunOnly"),
+            Ok(SituationReplayPolicy::DryRunOnly),
+            "PascalCase replay policy",
+        )?;
+        ensure(
             SituationLinkRelation::from_str("co-occurs"),
             Ok(SituationLinkRelation::CoOccurs),
             "link relation",
+        )?;
+        ensure(
+            SituationLinkRelation::from_str("coOccurs"),
+            Ok(SituationLinkRelation::CoOccurs),
+            "camelCase link relation",
         )
     }
 

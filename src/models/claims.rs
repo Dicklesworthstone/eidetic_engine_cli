@@ -19,7 +19,37 @@ use std::fmt;
 use super::{ClaimId, DemoId, EvidenceId, PolicyId, TraceId};
 
 fn normalized_claim_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 pub const CLAIMS_FILE_SCHEMA_V1: &str = "ee.claims_file.v1";
@@ -655,6 +685,20 @@ mod tests {
             &VerificationFrequency::OnChange,
             "normalized verification frequency",
         )?;
+        ensure_equal(
+            &"onChange"
+                .parse::<VerificationFrequency>()
+                .map_err(|e: ParseVerificationFrequencyError| e.to_string())?,
+            &VerificationFrequency::OnChange,
+            "camelCase verification frequency",
+        )?;
+        ensure_equal(
+            &"OnChange"
+                .parse::<VerificationFrequency>()
+                .map_err(|e: ParseVerificationFrequencyError| e.to_string())?,
+            &VerificationFrequency::OnChange,
+            "PascalCase verification frequency",
+        )?;
         Ok(())
     }
 
@@ -673,6 +717,20 @@ mod tests {
                 .map_err(|e: ParseArtifactTypeError| e.to_string())?,
             &ArtifactType::SchemaContract,
             "normalized artifact type",
+        )?;
+        ensure_equal(
+            &"GoldenFixture"
+                .parse::<ArtifactType>()
+                .map_err(|e: ParseArtifactTypeError| e.to_string())?,
+            &ArtifactType::GoldenFixture,
+            "PascalCase artifact type",
+        )?;
+        ensure_equal(
+            &"schemaContract"
+                .parse::<ArtifactType>()
+                .map_err(|e: ParseArtifactTypeError| e.to_string())?,
+            &ArtifactType::SchemaContract,
+            "camelCase artifact type",
         )?;
         Ok(())
     }
