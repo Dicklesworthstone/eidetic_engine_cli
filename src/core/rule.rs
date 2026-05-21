@@ -4267,6 +4267,50 @@ mod tests {
     }
 
     #[test]
+    fn validation_counter_deltas_default_to_one_and_ignore_outcome_triggers() -> TestResult {
+        let empty_evidence = RuleLifecycleEvidence::new();
+        ensure(
+            validation_passes_delta(RuleLifecycleTrigger::ValidationPassed, &empty_evidence) == 1,
+            "validation_passed without an explicit override must add one pass",
+        )?;
+        ensure(
+            validation_contradictions_delta(
+                RuleLifecycleTrigger::ValidationContradicted,
+                &empty_evidence,
+            ) == 1,
+            "validation_contradicted without an explicit override must add one contradiction",
+        )?;
+
+        let outcome_harmful = RuleLifecycleEvidence::new()
+            .with_harmful_outcomes(3, 2)
+            .with_validation_passes(5)
+            .with_validation_contradictions(7);
+        ensure(
+            negative_feedback_delta(RuleLifecycleTrigger::OutcomeHarmful, &outcome_harmful) == 3,
+            "outcome_harmful still bumps negative feedback",
+        )?;
+        ensure(
+            validation_passes_delta(RuleLifecycleTrigger::OutcomeHarmful, &outcome_harmful) == 0,
+            "outcome_harmful must not bump validation passes",
+        )?;
+        ensure(
+            validation_contradictions_delta(RuleLifecycleTrigger::OutcomeHarmful, &outcome_harmful)
+                == 0,
+            "outcome_harmful must not bump validation contradictions",
+        )?;
+
+        let outcome_helpful = RuleLifecycleEvidence::new()
+            .with_helpful_outcomes(4)
+            .with_validation_passes(6)
+            .with_validation_contradictions(8);
+        ensure(
+            validation_contradictions_delta(RuleLifecycleTrigger::OutcomeHelpful, &outcome_helpful)
+                == 0,
+            "outcome_helpful must not bump validation contradictions",
+        )
+    }
+
+    #[test]
     fn rule_add_data_json_aggregates_duplicate_degradations() -> TestResult {
         let report = RuleAddReport {
             schema: RULE_ADD_SCHEMA_V1,
