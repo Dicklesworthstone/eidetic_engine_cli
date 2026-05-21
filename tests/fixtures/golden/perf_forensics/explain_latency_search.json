@@ -1,0 +1,57 @@
+{
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {
+    "command": "perf explain-latency",
+    "schema": "ee.perf.explain_latency.v1",
+    "effect": {
+      "commandPath": "perf explain-latency",
+      "defaultEffect": "read_only",
+      "sideEffectClass": "class=read_only",
+      "idempotency": "idempotent",
+      "dbGenerationEffect": "none",
+      "indexGenerationEffect": "none",
+      "requiresAudit": false,
+      "writeSurfaces": {
+        "dbTables": [],
+        "derivedPaths": [],
+        "workspaceFiles": []
+      }
+    },
+    "report": {
+      "schema": "ee.perf.explain_latency.v1",
+      "surface": "search",
+      "artifact": {
+        "artifactId": "j1-search-latency",
+        "artifactKind": "explain_performance_report",
+        "sourceSchema": "ee.test_event.v1",
+        "commandFamily": "search",
+        "fixtureTier": null
+      },
+      "queryShapeHash": "<J1_LOG_HASH>",
+      "workspaceGeneration": null,
+      "indexGeneration": null,
+      "profile": null,
+      "stageTimings": [
+        {
+          "stage": "retrieval",
+          "elapsedMs": "<MEASURED>",
+          "sourceMetrics": [
+            "search_command_end_elapsed_ms_0001"
+          ],
+          "ownerHint": "search"
+        }
+      ],
+      "cacheStatus": {
+        "status": "unknown",
+        "hitRate": null,
+        "evidenceMetrics": []
+      },
+      "degraded": [],
+      "nextCommands": [
+        "ee index status --workspace . --json",
+        "ee perf compare --baseline <baseline.json> --candidate <candidate.json> --json"
+      ]
+    }
+  }
+}
