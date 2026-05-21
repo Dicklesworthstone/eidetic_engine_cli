@@ -214,6 +214,7 @@ fn options(
         include_expired: false,
         include_future: false,
         include_stale: false,
+        relevance_floor: None,
         redaction_level: RedactionLevel::Minimal,
         memory_scope: MemoryScope::Swarm,
         strict_scope: false,

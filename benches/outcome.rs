@@ -169,6 +169,7 @@ fn record_once(fixture: &OutcomeFixture, counter: usize, dry_run: bool) -> Resul
         dry_run,
         harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
         harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+        prompt_injection_guard: true,
     })
     .map_err(|error| format!("record_outcome failed: {error:?}"))?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;

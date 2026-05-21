@@ -4,7 +4,7 @@
 
 #![allow(clippy::expect_used)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
@@ -42,7 +42,7 @@ fn edge_attrs(weight: f64) -> AttrMap {
     attrs
 }
 
-fn seeded_graph(node_count: usize) -> (DiGraph, HashMap<MemoryId, f64>) {
+fn seeded_graph(node_count: usize) -> (DiGraph, BTreeMap<MemoryId, f64>) {
     let mut graph = DiGraph::strict();
     for index in 0..node_count {
         graph.add_node(memory_id(index).to_string());
@@ -65,7 +65,7 @@ fn seeded_graph(node_count: usize) -> (DiGraph, HashMap<MemoryId, f64>) {
                 .expect("skip edge should be valid");
         }
     }
-    let seeds = HashMap::from([(memory_id(0), 1.0)]);
+    let seeds = BTreeMap::from([(memory_id(0), 1.0)]);
     (graph, seeds)
 }
 

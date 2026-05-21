@@ -296,7 +296,7 @@ fn seed_l2_warm_cache(cache_root: &Path) -> (PackL2Cache, String) {
     );
     let key = "blake3:ee-context-pack-l2-warm-benchmark-key".to_owned();
     cache
-        .put(&key, l2_warm_pack_json())
+        .put(&key, &l2_warm_pack_json())
         .expect("seed warm L2 pack cache entry");
     (cache, key)
 }
@@ -350,6 +350,7 @@ fn bench_context(c: &mut Criterion) {
                         include_expired: false,
                         include_future: false,
                         include_stale: false,
+                        relevance_floor: None,
                         redaction_level: RedactionLevel::Minimal,
                         memory_scope: MemoryScope::Swarm,
                         strict_scope: false,
@@ -404,6 +405,7 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     include_expired: false,
                     include_future: false,
                     include_stale: false,
+                    relevance_floor: None,
                     redaction_level: RedactionLevel::Minimal,
                     memory_scope: MemoryScope::Swarm,
                     strict_scope: false,
@@ -456,6 +458,7 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                         include_expired: false,
                         include_future: false,
                         include_stale: false,
+                        relevance_floor: None,
                         redaction_level: RedactionLevel::Minimal,
                         memory_scope: MemoryScope::Swarm,
                         strict_scope: false,
