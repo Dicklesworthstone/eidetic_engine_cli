@@ -53365,6 +53365,114 @@ mod tests {
     }
 
     #[test]
+    fn curate_review_args_accept_reason_flag() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "accept",
+            "curate_00000000000000000000000000",
+            "--reason",
+            "validated by humans",
+        ])
+        .map_err(|error| format!("failed to parse curate accept --reason: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Accept(ref args))) => ensure_equal(
+                &args.reason,
+                &Some("validated by humans".to_string()),
+                "accept reason",
+            ),
+            _ => Err("expected Curate Accept command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_review_args_omitting_reason_is_none() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "curate",
+            "reject",
+            "curate_00000000000000000000000001",
+            "--actor",
+            "MistySalmon",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse curate reject without reason: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Curate(CurateCommand::Reject(ref args))) => {
+                ensure_equal(&args.reason, &None, "reject reason")
+            }
+            _ => Err("expected Curate Reject command".to_string()),
+        }
+    }
+
+    #[test]
+    fn curate_review_args_reason_bounded_at_4kib() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = workspace
+            .path()
+            .to_str()
+            .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
+        let oversized = "x".repeat(5000);
+        let cli = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "--workspace",
+            workspace_path,
+            "curate",
+            "accept",
+            "curate_00000000000000000000000000",
+            "--reason",
+            oversized.as_str(),
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse oversized curate accept reason: {:?}",
+                error.kind()
+            )
+        })?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = super::handle_curate_review(
+            &cli,
+            super::CurateReviewAction::Accept,
+            "curate_00000000000000000000000000",
+            None,
+            None,
+            false,
+            None,
+            Some(oversized.as_str()),
+            None,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        ensure_equal(&exit_code, &ProcessExitCode::Usage, "exit code")?;
+        ensure(
+            stderr.is_empty(),
+            "json usage error should not write stderr",
+        )?;
+        let response: serde_json::Value = serde_json::from_slice(&stdout)
+            .map_err(|error| format!("usage error stdout must be JSON: {error}"))?;
+        ensure_equal(
+            &response["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "error schema",
+        )?;
+        ensure_equal(
+            &response["error"]["code"],
+            &serde_json::json!("curate_reason_too_large"),
+            "error code",
+        )
+    }
+
+    #[test]
     fn curate_snooze_and_merge_commands_parse_lifecycle_options() -> TestResult {
         let snooze = Cli::try_parse_from([
             "ee",
