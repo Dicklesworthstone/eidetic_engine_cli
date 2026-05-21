@@ -5,6 +5,7 @@
 //! higher-priority scores have already tied. This module keeps that comparison
 //! integer-only and stable for equal IDs.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 /// Canonical Crockford/ULID payload length in public `ee` IDs.
@@ -152,6 +153,42 @@ where
     }
 }
 
+/// Compare two keys by canonical ULID payload when both support it.
+///
+/// If either key is not a bare payload or public `<prefix>_<payload>` ID, this
+/// falls back to ordinary lexical ordering so fixture and imported IDs keep the
+/// same deterministic behavior as [`sort_by_ulid_payload_or_lexical`].
+#[must_use]
+pub fn compare_ulid_payload_or_lexical(left: &str, right: &str) -> Ordering {
+    match (
+        validate_payload_key(0, left),
+        validate_payload_key(1, right),
+    ) {
+        (Ok(left_offset), Ok(right_offset)) => {
+            compare_validated_payloads(left, left_offset, right, right_offset)
+        }
+        _ => left.cmp(right),
+    }
+}
+
+fn compare_validated_payloads(
+    left: &str,
+    left_offset: usize,
+    right: &str,
+    right_offset: usize,
+) -> Ordering {
+    let left_bytes = left.as_bytes();
+    let right_bytes = right.as_bytes();
+    for position in 0..ULID_PAYLOAD_LEN {
+        let ordering = digit_value(left_bytes[left_offset + position])
+            .cmp(&digit_value(right_bytes[right_offset + position]));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    Ordering::Equal
+}
+
 fn validate_payload_key(index: usize, key: &str) -> Result<usize, RadixUlidSortError> {
     let offset = payload_offset_opt(key).ok_or_else(|| RadixUlidSortError {
         index,
@@ -206,7 +243,10 @@ fn digit_value_checked(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RadixUlidSortErrorKind, sort_by_ulid_payload, sort_by_ulid_payload_or_lexical};
+    use super::{
+        RadixUlidSortErrorKind, compare_ulid_payload_or_lexical, sort_by_ulid_payload,
+        sort_by_ulid_payload_or_lexical,
+    };
 
     #[test]
     fn stable_radix_sort_matches_lexical_payload_order() -> Result<(), String> {
@@ -272,6 +312,21 @@ mod tests {
         assert_eq!(
             sorted_ids,
             vec!["mem_fixture_a", "mem_fixture_b", "mem_fixture_c"]
+        );
+    }
+
+    #[test]
+    fn payload_comparator_orders_canonical_ids_and_keeps_fixture_fallback() {
+        assert_eq!(
+            compare_ulid_payload_or_lexical(
+                "mem_01J0000000000000000000000A",
+                "mem_01J0000000000000000000000B",
+            ),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_ulid_payload_or_lexical("mem_fixture_b", "mem_fixture_a"),
+            std::cmp::Ordering::Greater
         );
     }
 }

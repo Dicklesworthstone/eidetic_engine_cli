@@ -32,7 +32,9 @@ use crate::db::{
 };
 use crate::models::MemoryId;
 use crate::models::{CapabilityStatus, GRAPH_MODULE_SCHEMA_V1};
-use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
+use crate::util::radix_ulid_sort::{
+    compare_ulid_payload_or_lexical, sort_by_ulid_payload_or_lexical,
+};
 
 pub use fnx_algorithms::{
     BetweennessCentralityResult, PageRankResult, betweenness_centrality_directed, pagerank_directed,
@@ -707,7 +709,8 @@ pub fn generate_autolink_candidates(
         .map(NormalizedAutolinkMemory::from_input)
         .filter(|memory| !memory.tags.is_empty())
         .collect();
-    normalized_memories.sort_by(|left, right| left.memory_id.cmp(right.memory_id));
+    normalized_memories
+        .sort_by(|left, right| compare_ulid_payload_or_lexical(left.memory_id, right.memory_id));
 
     let tag_counts = tag_frequencies(&normalized_memories);
     let existing_pairs = existing_relation_pairs(existing_edges, "co_tag");
@@ -794,7 +797,8 @@ pub fn generate_co_mention_candidates(
         .map(NormalizedCoMentionMemory::from_input)
         .filter(|memory| !memory.entity_ids.is_empty())
         .collect();
-    normalized_memories.sort_by(|left, right| left.memory_id.cmp(right.memory_id));
+    normalized_memories
+        .sort_by(|left, right| compare_ulid_payload_or_lexical(left.memory_id, right.memory_id));
 
     let entity_counts = entity_frequencies(&normalized_memories);
     let existing_pairs = existing_relation_pairs(existing_edges, "co_mention");
@@ -972,7 +976,7 @@ fn existing_relation_pairs<'a>(
 }
 
 fn canonical_memory_pair<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
-    if left <= right {
+    if compare_ulid_payload_or_lexical(left, right) != std::cmp::Ordering::Greater {
         (left, right)
     } else {
         (right, left)
@@ -1121,8 +1125,8 @@ fn compare_autolink_candidates(
                 .cmp(&left.shared_tags.len().max(left.shared_entities.len()))
         })
         .then_with(|| left.relation.cmp(&right.relation))
-        .then_with(|| left.src_memory_id.cmp(&right.src_memory_id))
-        .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.src_memory_id, &right.src_memory_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.dst_memory_id, &right.dst_memory_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -1367,7 +1371,7 @@ fn build_revision_dag_from_rows(
             left.valid_from
                 .cmp(&right.valid_from)
                 .then_with(|| left.created_at.cmp(&right.created_at))
-                .then_with(|| left.memory_id.cmp(&right.memory_id))
+                .then_with(|| compare_ulid_payload_or_lexical(&left.memory_id, &right.memory_id))
         });
 
         for pair in chain_rows.windows(2) {
@@ -4539,7 +4543,7 @@ fn centrality_rank_map(
     ranked.sort_by(|left, right| {
         score_fn(right)
             .total_cmp(&score_fn(left))
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| compare_ulid_payload_or_lexical(&left.memory_id, &right.memory_id))
     });
 
     ranked
@@ -4612,7 +4616,7 @@ fn compare_enriched_features(
         .selection_boost
         .total_cmp(&left.selection_boost)
         .then_with(|| right.combined_score.total_cmp(&left.combined_score))
-        .then_with(|| left.memory_id.cmp(&right.memory_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.memory_id, &right.memory_id))
 }
 
 // ============================================================================
@@ -5691,11 +5695,13 @@ fn compare_neighborhood_edges(
 ) -> std::cmp::Ordering {
     left.relative_direction
         .cmp(&right.relative_direction)
-        .then_with(|| left.neighbor_memory_id.cmp(&right.neighbor_memory_id))
+        .then_with(|| {
+            compare_ulid_payload_or_lexical(&left.neighbor_memory_id, &right.neighbor_memory_id)
+        })
         .then_with(|| left.relation.cmp(&right.relation))
-        .then_with(|| left.src_memory_id.cmp(&right.src_memory_id))
-        .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
-        .then_with(|| left.link_id.cmp(&right.link_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.src_memory_id, &right.src_memory_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.dst_memory_id, &right.dst_memory_id))
+        .then_with(|| compare_ulid_payload_or_lexical(&left.link_id, &right.link_id))
 }
 
 #[cfg(test)]
