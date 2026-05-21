@@ -15,6 +15,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+fn normalized_progress_event_type_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
+}
+
 /// Schema identifier for progress events.
 pub const PROGRESS_EVENT_SCHEMA_V1: &str = "ee.progress.v1";
 
@@ -90,7 +94,7 @@ impl FromStr for ProgressEventType {
     type Err = ParseProgressEventTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_progress_event_type_token(s).as_str() {
             "started" => Ok(Self::Started),
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
@@ -325,6 +329,18 @@ mod tests {
             ensure(parsed, event_type, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn progress_event_type_accepts_operator_spelling_variants() {
+        assert_eq!(
+            ProgressEventType::from_str(" Started ").expect("trimmed event type parses"),
+            ProgressEventType::Started
+        );
+        assert_eq!(
+            ProgressEventType::from_str("WARNING").expect("uppercase event type parses"),
+            ProgressEventType::Warning
+        );
     }
 
     #[test]

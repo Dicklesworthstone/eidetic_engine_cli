@@ -22,12 +22,21 @@
 //!
 //! `MemoryLevel` and `MemoryKind` are stable on the wire — their
 //! string forms are part of the `ee.response.v1` schema and must not
-//! change without a contract bump. `Tag` lowercases incoming
-//! identifiers so the canonical wire form matches the canonical
-//! Rust form.
+//! change without a contract bump. Their parsers accept common operator
+//! spelling variants and normalize them back to the canonical strings.
+//! `Tag` lowercases incoming identifiers so the canonical wire form
+//! matches the canonical Rust form.
 
 use std::fmt;
 use std::str::FromStr;
+
+fn normalized_memory_level_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase()
+}
+
+fn normalized_memory_kind_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('_', "-")
+}
 
 /// Maximum number of bytes accepted for a single tag.
 ///
@@ -90,7 +99,7 @@ impl FromStr for MemoryLevel {
     type Err = MemoryValidationError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_memory_level_token(input).as_str() {
             "working" => Ok(Self::Working),
             "episodic" => Ok(Self::Episodic),
             "semantic" => Ok(Self::Semantic),
@@ -103,7 +112,7 @@ impl FromStr for MemoryLevel {
 }
 
 /// Memory kinds. The first nine variants are the canonical README set;
-/// [`MemoryKind::Custom`] preserves arbitrary project-specific
+/// [`MemoryKind::Custom`] preserves canonical project-specific
 /// identifiers without losing them through round-trip.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MemoryKind {
@@ -154,7 +163,7 @@ impl MemoryKind {
     /// Returns `true` if `name` parses to a known kind (not [`Custom`]).
     #[must_use]
     pub fn is_known(name: &str) -> bool {
-        KNOWN_MEMORY_KINDS.contains(&name)
+        KNOWN_MEMORY_KINDS.contains(&normalized_memory_kind_token(name).as_str())
     }
 }
 
@@ -168,7 +177,8 @@ impl FromStr for MemoryKind {
     type Err = MemoryValidationError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        let normalized = normalized_memory_kind_token(input);
+        match normalized.as_str() {
             "rule" => Ok(Self::Rule),
             "fact" => Ok(Self::Fact),
             "decision" => Ok(Self::Decision),
@@ -184,7 +194,7 @@ impl FromStr for MemoryKind {
                 }
                 if !is_valid_kind_identifier(other) {
                     return Err(MemoryValidationError::InvalidKind {
-                        input: other.to_owned(),
+                        input: input.to_owned(),
                     });
                 }
                 Ok(Self::Custom(other.to_owned()))
@@ -410,7 +420,7 @@ impl fmt::Display for MemoryValidationError {
             Self::EmptyKind => formatter.write_str("memory kind cannot be empty"),
             Self::InvalidKind { input } => write!(
                 formatter,
-                "memory kind `{input}` must match [a-z][a-z0-9-]*"
+                "memory kind `{input}` must normalize to [a-z][a-z0-9-]*"
             ),
             Self::EmptyTag => formatter.write_str("tag cannot be empty"),
             Self::TagTooLong { input, limit } => write!(
@@ -502,15 +512,27 @@ mod tests {
 
     #[test]
     fn level_rejects_unknown_input() {
-        let err = match MemoryLevel::from_str("Working") {
+        let err = match MemoryLevel::from_str("durable") {
             Ok(value) => panic!("expected error, got Ok({value:?})"), // ubs:ignore
             Err(error) => error,
         };
         assert_eq!(
             err,
             MemoryValidationError::UnknownLevel {
-                input: "Working".to_owned(),
+                input: "durable".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn level_accepts_operator_spelling_variants() {
+        assert_eq!(
+            MemoryLevel::from_str(" Working ").expect("trimmed level parses"),
+            MemoryLevel::Working
+        );
+        assert_eq!(
+            MemoryLevel::from_str("PROCEDURAL").expect("uppercase level parses"),
+            MemoryLevel::Procedural
         );
     }
 
@@ -538,8 +560,25 @@ mod tests {
     }
 
     #[test]
-    fn kind_rejects_empty_and_uppercase_and_leading_digit() {
-        for input in ["", "Rule", "1rule", "rule!", "ru le", "-foo"] {
+    fn kind_accepts_operator_spelling_variants() {
+        assert_eq!(
+            MemoryKind::from_str(" Anti_Pattern ").expect("known alias parses"),
+            MemoryKind::AntiPattern
+        );
+        assert_eq!(
+            MemoryKind::from_str("PLAYBOOK_STEP").expect("known underscore alias parses"),
+            MemoryKind::PlaybookStep
+        );
+        assert!(MemoryKind::is_known(" Anti_Pattern "));
+
+        let custom = MemoryKind::from_str(" Project_Rule ").expect("custom identifier normalizes");
+        assert_eq!(custom.as_str(), "project-rule");
+        assert!(matches!(custom, MemoryKind::Custom(_)));
+    }
+
+    #[test]
+    fn kind_rejects_empty_and_invalid_identifiers() {
+        for input in ["", "1rule", "rule!", "ru le", "-foo"] {
             let err = match MemoryKind::from_str(input) {
                 Ok(value) => panic!("expected error for `{input}`, got Ok({value:?})"),
                 Err(error) => error,

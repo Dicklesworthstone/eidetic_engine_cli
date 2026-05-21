@@ -10,6 +10,10 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+fn normalized_mutation_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema identifier for mutation response.
 pub const MUTATION_RESPONSE_SCHEMA_V1: &str = "ee.mutation.v1";
 
@@ -82,7 +86,7 @@ impl FromStr for MutationActionStatus {
     type Err = ParseMutationActionStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_mutation_token(s).as_str() {
             "pending" => Ok(Self::Pending),
             "skipped" => Ok(Self::Skipped),
             "completed" => Ok(Self::Completed),
@@ -176,7 +180,7 @@ impl FromStr for MutationActionType {
     type Err = ParseMutationActionTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_mutation_token(s).as_str() {
             "create" => Ok(Self::Create),
             "update" => Ok(Self::Update),
             "delete" => Ok(Self::Delete),
@@ -306,7 +310,7 @@ impl FromStr for IdempotencyClass {
     type Err = ParseIdempotencyClassError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_mutation_token(s).as_str() {
             "fully_idempotent" => Ok(Self::FullyIdempotent),
             "conditionally_idempotent" => Ok(Self::ConditionallyIdempotent),
             "not_idempotent" => Ok(Self::NotIdempotent),
@@ -565,6 +569,25 @@ mod tests {
             ensure(parsed, class, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn mutation_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            MutationActionStatus::from_str(" Blocked "),
+            Ok(MutationActionStatus::Blocked),
+            "status alias",
+        )?;
+        ensure(
+            MutationActionType::from_str("REBUILD"),
+            Ok(MutationActionType::Rebuild),
+            "action type alias",
+        )?;
+        ensure(
+            IdempotencyClass::from_str("conditionally-idempotent"),
+            Ok(IdempotencyClass::ConditionallyIdempotent),
+            "idempotency alias",
+        )
     }
 
     #[test]

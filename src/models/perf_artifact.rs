@@ -14,6 +14,10 @@ pub const PERF_METRIC_SCHEMA_V1: &str = "ee.perf.metric.v1";
 pub const PERF_SCHEMA_CATALOG_V1: &str = "ee.perf.schema_catalog.v1";
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
+fn normalized_artifact_kind_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
@@ -72,7 +76,7 @@ impl FromStr for ArtifactKind {
     type Err = ParseArtifactKindError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_artifact_kind_token(s).as_str() {
             "benchmark_report" => Ok(Self::BenchmarkReport),
             "support_bundle_manifest" => Ok(Self::SupportBundleManifest),
             "explain_performance_report" => Ok(Self::ExplainPerformanceReport),
@@ -658,6 +662,18 @@ mod tests {
             let parsed: ArtifactKind = s.parse().unwrap();
             assert_eq!(kind, parsed);
         }
+    }
+
+    #[test]
+    fn artifact_kind_accepts_operator_spelling_variants() {
+        assert_eq!(
+            ArtifactKind::from_str(" Benchmark-Report ").unwrap(),
+            ArtifactKind::BenchmarkReport
+        );
+        assert_eq!(
+            ArtifactKind::from_str("SUPPORT_BUNDLE_MANIFEST").unwrap(),
+            ArtifactKind::SupportBundleManifest
+        );
     }
 
     #[test]

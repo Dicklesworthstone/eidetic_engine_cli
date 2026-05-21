@@ -10,6 +10,10 @@ use std::str::FromStr;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+fn normalized_decision_plane_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema identifier for decision plane records.
 pub const DECISION_PLANE_SCHEMA_V1: &str = "ee.decision_plane.v1";
 
@@ -84,7 +88,7 @@ impl FromStr for DecisionPlane {
     type Err = ParseDecisionPlaneError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_decision_plane_token(s).as_str() {
             "packing" => Ok(Self::Packing),
             "ranking" => Ok(Self::Ranking),
             "curation" => Ok(Self::Curation),
@@ -413,6 +417,18 @@ mod tests {
             ensure(parsed, *plane, &format!("roundtrip {s}"))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn decision_plane_accepts_operator_spelling_variants() {
+        assert_eq!(
+            DecisionPlane::from_str(" Repair-Order ").expect("hyphenated plane parses"),
+            DecisionPlane::RepairOrder
+        );
+        assert_eq!(
+            DecisionPlane::from_str("CACHE_ADMISSION").expect("uppercase plane parses"),
+            DecisionPlane::CacheAdmission
+        );
     }
 
     #[test]

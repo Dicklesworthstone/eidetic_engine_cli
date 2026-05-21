@@ -49,6 +49,10 @@ fn rounded_metric(value: f64) -> f64 {
     }
 }
 
+fn normalized_learning_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Stable Wire Enums
 // ============================================================================
@@ -94,7 +98,7 @@ impl FromStr for LearningQuestionStatus {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "open" => Ok(Self::Open),
             "ready_for_experiment" => Ok(Self::ReadyForExperiment),
             "resolved" => Ok(Self::Resolved),
@@ -155,7 +159,7 @@ impl FromStr for LearningTargetKind {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "memory" => Ok(Self::Memory),
             "procedure" => Ok(Self::Procedure),
             "tripwire" => Ok(Self::Tripwire),
@@ -215,7 +219,7 @@ impl FromStr for LearningExperimentStatus {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "proposed" => Ok(Self::Proposed),
             "dry_run_ready" => Ok(Self::DryRunReady),
             "observing" => Ok(Self::Observing),
@@ -271,7 +275,7 @@ impl FromStr for ExperimentSafetyBoundary {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "dry_run_only" => Ok(Self::DryRunOnly),
             "ask_before_acting" => Ok(Self::AskBeforeActing),
             "human_review" => Ok(Self::HumanReview),
@@ -321,7 +325,7 @@ impl FromStr for LearningObservationSignal {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "positive" => Ok(Self::Positive),
             "negative" => Ok(Self::Negative),
             "neutral" => Ok(Self::Neutral),
@@ -376,7 +380,7 @@ impl FromStr for ExperimentOutcomeStatus {
     type Err = ParseLearningValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_learning_token(input).as_str() {
             "confirmed" => Ok(Self::Confirmed),
             "rejected" => Ok(Self::Rejected),
             "inconclusive" => Ok(Self::Inconclusive),
@@ -1476,6 +1480,40 @@ mod tests {
             ExperimentOutcomeStatus::from_str("success").map_err(|error| error.field()),
             Err("experiment_outcome_status"),
             "invalid outcome field",
+        )
+    }
+
+    #[test]
+    fn stable_wire_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            LearningQuestionStatus::from_str(" Ready-For-Experiment "),
+            Ok(LearningQuestionStatus::ReadyForExperiment),
+            "question status alias",
+        )?;
+        ensure(
+            LearningTargetKind::from_str(" Decision "),
+            Ok(LearningTargetKind::Decision),
+            "target kind alias",
+        )?;
+        ensure(
+            LearningExperimentStatus::from_str("DRY_RUN_READY"),
+            Ok(LearningExperimentStatus::DryRunReady),
+            "experiment status alias",
+        )?;
+        ensure(
+            ExperimentSafetyBoundary::from_str("ask-before-acting"),
+            Ok(ExperimentSafetyBoundary::AskBeforeActing),
+            "safety boundary alias",
+        )?;
+        ensure(
+            LearningObservationSignal::from_str(" Positive "),
+            Ok(LearningObservationSignal::Positive),
+            "observation signal alias",
+        )?;
+        ensure(
+            ExperimentOutcomeStatus::from_str("INCONCLUSIVE"),
+            Ok(ExperimentOutcomeStatus::Inconclusive),
+            "outcome status alias",
         )
     }
 

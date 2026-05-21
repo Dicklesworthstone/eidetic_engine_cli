@@ -44,6 +44,10 @@ use serde::Deserialize;
 
 use super::{ClaimId, DemoId};
 
+fn normalized_demo_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema version for demo file.
 pub const DEMO_FILE_SCHEMA_V1: &str = "ee.demo_file.v1";
 
@@ -132,7 +136,7 @@ impl FromStr for DemoStatus {
     type Err = ParseDemoStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_demo_token(s).as_str() {
             "pending" => Ok(Self::Pending),
             "running" => Ok(Self::Running),
             "passed" => Ok(Self::Passed),
@@ -205,7 +209,7 @@ impl FromStr for OutputVerification {
     type Err = ParseOutputVerificationError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_demo_token(s).as_str() {
             "none" => Ok(Self::None),
             "exact" => Ok(Self::Exact),
             "contains" => Ok(Self::Contains),
@@ -1202,11 +1206,32 @@ mod tests {
     }
 
     #[test]
+    fn demo_status_accepts_operator_spelling_variants() {
+        assert_eq!(
+            " Timed-Out ".parse::<DemoStatus>(),
+            Ok(DemoStatus::TimedOut)
+        );
+        assert_eq!("PASSED".parse::<DemoStatus>(), Ok(DemoStatus::Passed));
+    }
+
+    #[test]
     fn output_verification_roundtrip() {
         for verification in OutputVerification::all() {
             let parsed = verification.as_str().parse::<OutputVerification>();
             assert_eq!(parsed, Ok(verification));
         }
+    }
+
+    #[test]
+    fn output_verification_accepts_operator_spelling_variants() {
+        assert_eq!(
+            " Schema ".parse::<OutputVerification>(),
+            Ok(OutputVerification::Schema)
+        );
+        assert_eq!(
+            "REGEX".parse::<OutputVerification>(),
+            Ok(OutputVerification::Regex)
+        );
     }
 
     #[test]

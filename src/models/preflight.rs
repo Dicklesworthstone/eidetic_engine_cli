@@ -14,6 +14,10 @@
 use std::fmt;
 use std::str::FromStr;
 
+fn normalized_preflight_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 /// Schema version for preflight run.
 pub const PREFLIGHT_RUN_SCHEMA_V1: &str = "ee.preflight_run.v1";
 
@@ -196,7 +200,7 @@ impl FromStr for PreflightStatus {
     type Err = ParsePreflightStatusError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "failed" => Ok(Self::Failed),
@@ -282,7 +286,7 @@ impl FromStr for RiskLevel {
     type Err = ParseRiskLevelError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "none" => Ok(Self::None),
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
@@ -481,7 +485,7 @@ impl FromStr for RiskCategory {
     type Err = ParseRiskCategoryError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "data_loss" => Ok(Self::DataLoss),
             "security" => Ok(Self::Security),
             "stability" => Ok(Self::Stability),
@@ -646,7 +650,7 @@ impl FromStr for TripwireType {
     type Err = ParseTripwireTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "file_change" => Ok(Self::FileChange),
             "resource_threshold" => Ok(Self::ResourceThreshold),
             "time_limit" => Ok(Self::TimeLimit),
@@ -721,7 +725,7 @@ impl FromStr for TripwireAction {
     type Err = ParseTripwireActionError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "halt" => Ok(Self::Halt),
             "pause" => Ok(Self::Pause),
             "warn" => Ok(Self::Warn),
@@ -788,7 +792,7 @@ impl FromStr for TripwireState {
     type Err = ParseTripwireStateError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "armed" => Ok(Self::Armed),
             "triggered" => Ok(Self::Triggered),
             "disarmed" => Ok(Self::Disarmed),
@@ -913,7 +917,7 @@ impl FromStr for TripwireEventType {
     type Err = ParseTripwireEventTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match normalized_preflight_token(s).as_str() {
             "armed" => Ok(Self::Armed),
             "checked" => Ok(Self::Checked),
             "triggered" => Ok(Self::Triggered),
@@ -1363,5 +1367,44 @@ mod tests {
             ensure(parsed, Ok(e), e.as_str())?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn preflight_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            PreflightStatus::from_str(" Completed "),
+            Ok(PreflightStatus::Completed),
+            "status alias",
+        )?;
+        ensure(
+            RiskLevel::from_str("CRITICAL"),
+            Ok(RiskLevel::Critical),
+            "risk level alias",
+        )?;
+        ensure(
+            RiskCategory::from_str("data-loss"),
+            Ok(RiskCategory::DataLoss),
+            "risk category alias",
+        )?;
+        ensure(
+            TripwireType::from_str("RESOURCE-THRESHOLD"),
+            Ok(TripwireType::ResourceThreshold),
+            "tripwire type alias",
+        )?;
+        ensure(
+            TripwireAction::from_str(" Warn "),
+            Ok(TripwireAction::Warn),
+            "tripwire action alias",
+        )?;
+        ensure(
+            TripwireState::from_str("DISARMED"),
+            Ok(TripwireState::Disarmed),
+            "tripwire state alias",
+        )?;
+        ensure(
+            TripwireEventType::from_str(" Triggered "),
+            Ok(TripwireEventType::Triggered),
+            "tripwire event alias",
+        )
     }
 }

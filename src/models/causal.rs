@@ -63,6 +63,10 @@ fn rounded_metric(value: f64) -> f64 {
     }
 }
 
+fn normalized_causal_token(input: &str) -> String {
+    input.trim().to_ascii_lowercase().replace('-', "_")
+}
+
 // ============================================================================
 // Stable Wire Enums
 // ============================================================================
@@ -114,7 +118,7 @@ impl FromStr for CausalExposureChannel {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "context_pack" => Ok(Self::ContextPack),
             "search_result" => Ok(Self::SearchResult),
             "why_explanation" => Ok(Self::WhyExplanation),
@@ -174,7 +178,7 @@ impl FromStr for DecisionTraceOutcome {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "used" => Ok(Self::Used),
             "ignored" => Ok(Self::Ignored),
             "deferred" => Ok(Self::Deferred),
@@ -233,10 +237,10 @@ impl FromStr for CausalEvidenceMethod {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "manual" => Ok(Self::Manual),
-            "graph-inferred" => Ok(Self::GraphInferred),
-            "cass-derived" => Ok(Self::CassDerived),
+            "graph_inferred" => Ok(Self::GraphInferred),
+            "cass_derived" => Ok(Self::CassDerived),
             _ => Err(ParseCausalValueError::new(
                 "causal_evidence_method",
                 input,
@@ -280,7 +284,7 @@ impl FromStr for CausalEvidenceStrength {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "exposure_only" => Ok(Self::ExposureOnly),
             "correlational" => Ok(Self::Correlational),
             "replay_supported" => Ok(Self::ReplaySupported),
@@ -344,7 +348,7 @@ impl FromStr for UpliftDirection {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "positive" => Ok(Self::Positive),
             "negative" => Ok(Self::Negative),
             "neutral" => Ok(Self::Neutral),
@@ -405,7 +409,7 @@ impl FromStr for ConfounderKind {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "selection_bias" => Ok(Self::SelectionBias),
             "task_difficulty" => Ok(Self::TaskDifficulty),
             "agent_skill" => Ok(Self::AgentSkill),
@@ -465,7 +469,7 @@ impl FromStr for PromotionAction {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "promote" => Ok(Self::Promote),
             "hold" => Ok(Self::Hold),
             "demote" => Ok(Self::Demote),
@@ -527,7 +531,7 @@ impl FromStr for PromotionPlanStatus {
     type Err = ParseCausalValueError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input {
+        match normalized_causal_token(input).as_str() {
             "proposed" => Ok(Self::Proposed),
             "dry_run_ready" => Ok(Self::DryRunReady),
             "approved" => Ok(Self::Approved),
@@ -1675,6 +1679,50 @@ mod tests {
             PromotionAction::from_str("ship").map_err(|error| error.field()),
             Err("promotion_action"),
             "invalid action field",
+        )
+    }
+
+    #[test]
+    fn stable_wire_enums_accept_operator_spelling_variants() -> TestResult {
+        ensure(
+            CausalExposureChannel::from_str(" Context-Pack "),
+            Ok(CausalExposureChannel::ContextPack),
+            "channel alias",
+        )?;
+        ensure(
+            DecisionTraceOutcome::from_str("USED"),
+            Ok(DecisionTraceOutcome::Used),
+            "outcome alias",
+        )?;
+        ensure(
+            CausalEvidenceMethod::from_str("graph_inferred"),
+            Ok(CausalEvidenceMethod::GraphInferred),
+            "method alias",
+        )?;
+        ensure(
+            CausalEvidenceStrength::from_str("Replay-Supported"),
+            Ok(CausalEvidenceStrength::ReplaySupported),
+            "strength alias",
+        )?;
+        ensure(
+            UpliftDirection::from_str(" Positive "),
+            Ok(UpliftDirection::Positive),
+            "direction alias",
+        )?;
+        ensure(
+            ConfounderKind::from_str("tooling-change"),
+            Ok(ConfounderKind::ToolingChange),
+            "confounder alias",
+        )?;
+        ensure(
+            PromotionAction::from_str("QUARANTINE"),
+            Ok(PromotionAction::Quarantine),
+            "action alias",
+        )?;
+        ensure(
+            PromotionPlanStatus::from_str("dry-run-ready"),
+            Ok(PromotionPlanStatus::DryRunReady),
+            "status alias",
         )
     }
 
