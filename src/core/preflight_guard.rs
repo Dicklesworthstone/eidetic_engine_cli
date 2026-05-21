@@ -381,6 +381,11 @@ enum RmTargetClass {
 }
 
 fn matches_rm_rf_target(command: &str, target_class: RmTargetClass) -> bool {
+    if command_contains_active_command_substitution(command, |body| {
+        matches_rm_rf_target(body, target_class)
+    }) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| rm_segment_matches_target(segment, target_class))
@@ -390,9 +395,17 @@ fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) ->
     let Some(command_index) = shell_segment_command_index(segment) else {
         return false;
     };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_rm_rf_target(shell_body, target_class);
+    }
+    if inline_interpreter_body(segment, command_index)
+        .is_some_and(|body| script_body_mentions_rm_rf_target(body, target_class))
+    {
+        return true;
+    }
     if segment
         .get(command_index)
-        .is_none_or(|word| command_basename(word) != "rm")
+        .is_none_or(|word| command_basename(word) != "rm" && !is_variable_command(word))
     {
         return false;
     }
@@ -427,6 +440,9 @@ fn rm_segment_matches_target(segment: &[String], target_class: RmTargetClass) ->
 }
 
 fn matches_file_deletion(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_file_deletion) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| file_deletion_segment_matches(segment))
@@ -439,12 +455,19 @@ fn file_deletion_segment_matches(segment: &[String]) -> bool {
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_file_deletion(shell_body);
     }
+    if inline_interpreter_body(segment, command_index).is_some_and(script_body_mentions_file_deletion)
+    {
+        return true;
+    }
     let Some(command_name) = segment
         .get(command_index)
         .map(|word| command_basename(word))
     else {
         return false;
     };
+    if is_variable_command(command_name) {
+        return rm_has_deletion_target(segment, command_index);
+    }
     match command_name {
         "rm" => rm_has_deletion_target(segment, command_index),
         "unlink" | "rmdir" => rm_has_deletion_target(segment, command_index),
@@ -534,6 +557,13 @@ fn matches_rust_verifier_command_substitution(command: &str) -> bool {
 }
 
 fn command_contains_active_rust_verifier_command_substitution(command: &str) -> bool {
+    command_contains_active_command_substitution(command, command_substitution_mentions_rust_verifier)
+}
+
+fn command_contains_active_command_substitution(
+    command: &str,
+    mut body_matches: impl FnMut(&str) -> bool,
+) -> bool {
     let chars = command.chars().collect::<Vec<_>>();
     let mut index = 0;
     let mut quote: Option<char> = None;
@@ -577,7 +607,7 @@ fn command_contains_active_rust_verifier_command_substitution(command: &str) -> 
         if ch == '`' {
             if let Some((body, close_index)) = backtick_command_substitution_body(&chars, index + 1)
             {
-                if command_substitution_mentions_rust_verifier(&body) {
+                if body_matches(&body) {
                     return true;
                 }
                 index = close_index + 1;
@@ -588,7 +618,7 @@ fn command_contains_active_rust_verifier_command_substitution(command: &str) -> 
             if let Some((body, close_index)) =
                 dollar_paren_command_substitution_body(&chars, index + 2)
             {
-                if command_substitution_mentions_rust_verifier(&body) {
+                if body_matches(&body) {
                     return true;
                 }
                 index = close_index + 1;
@@ -774,7 +804,11 @@ fn local_cargo_target_dir_is_non_external(value: &str) -> bool {
 }
 
 fn shell_c_argument(segment: &[String], command_index: usize) -> Option<&str> {
-    if !is_shell_command(segment.get(command_index)?) {
+    let command = segment.get(command_index)?;
+    if command_basename(command) == "eval" {
+        return segment.get(command_index + 1).map(String::as_str);
+    }
+    if !is_shell_command(command) {
         return None;
     }
     let mut index = command_index + 1;
@@ -794,7 +828,8 @@ fn shell_c_argument(segment: &[String], command_index: usize) -> Option<&str> {
 fn is_shell_command(word: &str) -> bool {
     matches!(
         command_basename(word),
-        "bash" | "dash" | "fish" | "sh" | "zsh"
+        "bash" | "csh" | "dash" | "elvish" | "fish" | "ksh" | "nu" | "sh" | "tcsh" | "xonsh"
+            | "zsh"
     )
 }
 
@@ -805,6 +840,10 @@ fn is_rch_wrapper_command(word: &str) -> bool {
 
 fn command_basename(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
+}
+
+fn is_variable_command(word: &str) -> bool {
+    word.starts_with('$')
 }
 
 fn matches_git_checkout_off_main(command: &str) -> bool {
@@ -977,6 +1016,32 @@ fn script_rewrite_segment_matches(segment: &[String]) -> bool {
     }
 }
 
+fn inline_interpreter_body(segment: &[String], command_index: usize) -> Option<&str> {
+    let command_name = segment
+        .get(command_index)
+        .map(|word| command_basename(word))?;
+    if !is_inline_interpreter_command(command_name) {
+        return None;
+    }
+    inline_script_body(segment, command_index, command_name)
+}
+
+fn is_inline_interpreter_command(command_name: &str) -> bool {
+    matches!(
+        command_name,
+        "bun"
+            | "deno"
+            | "lua"
+            | "node"
+            | "perl"
+            | "php"
+            | "python"
+            | "python3"
+            | "ruby"
+            | "tcl"
+    )
+}
+
 fn inline_script_body<'a>(
     segment: &'a [String],
     command_index: usize,
@@ -1021,6 +1086,52 @@ fn inline_script_mentions_repo_code(body: &str) -> bool {
     ]
     .iter()
     .any(|needle| body.contains(needle))
+}
+
+fn script_body_mentions_file_deletion(body: &str) -> bool {
+    matches_file_deletion(body)
+        || quoted_string_literals(body)
+            .iter()
+            .any(|literal| matches_file_deletion(literal))
+}
+
+fn script_body_mentions_rm_rf_target(body: &str, target_class: RmTargetClass) -> bool {
+    matches_rm_rf_target(body, target_class)
+        || quoted_string_literals(body)
+            .iter()
+            .any(|literal| matches_rm_rf_target(literal, target_class))
+}
+
+fn quoted_string_literals(body: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for ch in body.chars() {
+        if escaped {
+            if quote.is_some() {
+                current.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        match quote {
+            Some(quote_ch) if ch == quote_ch => {
+                literals.push(std::mem::take(&mut current));
+                quote = None;
+            }
+            Some(_) => current.push(ch),
+            None if ch == '\'' || ch == '"' || ch == '`' => quote = Some(ch),
+            None => {}
+        }
+    }
+
+    literals
 }
 
 fn matches_unsafe_cleanup(command: &str) -> bool {
@@ -2462,6 +2573,44 @@ action = "explode"
             assert!(report.matches.iter().any(|matched| {
                 matched.rule_id == "builtin:rm_rf_root" || matched.rule_id == "builtin:rm_rf_home"
             }));
+        }
+    }
+
+    #[test]
+    fn builtin_deletion_rules_recurse_through_indirect_execution_bypasses() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "python -c \"import os; os.system('rm -rf /')\"",
+            "node -e \"require('child_process').execSync('rm -rf /')\"",
+            "perl -e \"system('rm -rf /')\"",
+            "ruby -e \"system('rm -rf /')\"",
+            "ksh -c 'rm -rf /'",
+            "tcsh -c 'rm -rf /'",
+            "RM=rm $RM -rf /",
+            "env RM=rm bash -c \"$RM -rf /\"",
+            "$(rm -rf /)",
+            "`rm -rf /`",
+            "eval 'rm -rf /'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:rm_rf_root"),
+                "command `{command}` did not cite rm_rf_root: {:?}",
+                report.matches,
+            );
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:file_deletion"),
+                "command `{command}` did not cite file_deletion: {:?}",
+                report.matches,
+            );
         }
     }
 
