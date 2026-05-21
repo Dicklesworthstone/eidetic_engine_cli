@@ -263,8 +263,10 @@ impl SingleFlightPostureReport {
             "observed_failures"
         } else if active_leader_count > 0 {
             "active"
-        } else {
+        } else if configured_surface_count > 0 {
             "idle"
+        } else {
+            "unconfigured"
         };
 
         Self {
@@ -647,6 +649,24 @@ mod tests {
             SingleFlightKey::from_input(&reordered_duplicate).key_hash,
             "duplicate option keys should still be order-independent"
         );
+    }
+
+    #[test]
+    fn aggregate_posture_reports_unconfigured_when_no_surface_is_configured() {
+        let report =
+            SingleFlightPostureReport::from_surfaces(vec![SingleFlightSurfacePosture::new(
+                SingleFlightSurface::Search,
+                false,
+                0,
+                SingleFlightSurfaceCounters::default(),
+                2_000,
+                None,
+            )]);
+
+        assert_eq!(report.configured_surface_count, 0);
+        assert_eq!(report.active_leader_count, 0);
+        assert_eq!(report.status, "unconfigured");
+        assert_eq!(report.surfaces[0].status, "unconfigured");
     }
 
     #[test]

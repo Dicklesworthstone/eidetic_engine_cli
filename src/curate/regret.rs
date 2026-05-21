@@ -424,7 +424,7 @@ pub fn suggest_curation(entry: &RegretEntry) -> SuggestedCurationAction {
         RegretCategory::MissingKnowledge => SuggestedCurationAction::AddMemory,
         RegretCategory::StaleInformation => SuggestedCurationAction::SupersedeMemory,
         RegretCategory::RetrievalFailure => SuggestedCurationAction::TuneRetrieval,
-        RegretCategory::UnderutilizedMemory => SuggestedCurationAction::PromoteConfidence,
+        RegretCategory::UnderutilizedMemory => SuggestedCurationAction::DeprecateMemory,
         RegretCategory::Misinformation => SuggestedCurationAction::DeprecateMemory,
         RegretCategory::Other => {
             if entry.regret_score >= 0.7 {
@@ -1010,6 +1010,23 @@ mod tests {
             0.9,
             0.95,
             RegretCategory::Misinformation,
+            "2026-04-30T12:00:00Z",
+        );
+
+        let action = suggest_curation(&entry);
+        assert_eq!(action, SuggestedCurationAction::DeprecateMemory);
+    }
+
+    #[test]
+    fn suggest_curation_for_noisy_memory_deprecates() {
+        let entry = RegretEntry::new(
+            "reg_noisy_001",
+            "ep_001",
+            "cfr_001",
+            "int_remove_noisy",
+            0.6,
+            0.8,
+            RegretCategory::UnderutilizedMemory,
             "2026-04-30T12:00:00Z",
         );
 
