@@ -1,0 +1,43 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "anti_pattern_proposed",
+  "introduced_by": {
+    "bead": "bd-17c65.14.12",
+    "epic_letter": "N"
+  },
+  "surfaces": [
+    "outcome"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "A memory receives enough harmful outcome events to cross the anti-pattern proposal threshold, so ee records a pending anti_pattern_proposal curation candidate.",
+    "setup_commands": [
+      "ee init --workspace . --json",
+      "ee remember 'Run cargo fmt --check before release.' --workspace . --level procedural --kind rule --json",
+      "ee outcome <memory-id> --signal harmful --source-id anti-pattern-a --reason 'harm 1' --workspace . --json",
+      "ee outcome <memory-id> --signal harmful --source-id anti-pattern-b --reason 'harm 2' --workspace . --json"
+    ],
+    "invocation": "ee outcome <memory-id> --signal harmful --source-id anti-pattern-c --reason 'harm 3' --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "anti_pattern_proposed",
+    "severity": "info",
+    "message_contains": [
+      "Anti-pattern candidate",
+      "proposed after",
+      "harmful outcomes"
+    ],
+    "details_contains": [
+      "candidateId",
+      "targetMemoryId",
+      "harmfulCount",
+      "threshold",
+      "advisorySeverity",
+      "recovery"
+    ],
+    "recovery_kinds": [
+      "command"
+    ]
+  }
+}
