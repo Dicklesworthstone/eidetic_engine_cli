@@ -213,6 +213,19 @@ socket artifacts are retained during agent sessions under the repository
 no-deletion rule; use their event logs as closeout evidence rather than cleaning
 them up implicitly.
 
+### Opt-In Real Tailscale Smoke
+
+`scripts/e2e_overhaul/mesh_tailscale_smoke.sh` is the only SRR6 shell driver
+that may inspect a real tailnet. It is quarantined outside normal verification:
+when `EE_E2E_REAL_TAILSCALE=1` is unset it exits `78` after writing a
+redaction-safe `ee.test_event.v1` skip event. When enabled, it requires
+`EE_REAL_TAILSCALE_PEER` to name a visible peer from `tailscale status --json`,
+uses an existing `EE_BINARY`, and retains its workspace plus artifacts.
+
+The smoke must not run Cargo, must not delete retained workspaces, and must not
+emit raw node keys, Tailscale IPs, MagicDNS names, memory bodies, or remote
+workspace paths. Logs use short hashes for peer and route identifiers.
+
 ### RCH Stranded-Result Recovery
 
 Remote verification can produce useful RCH artifacts even when the local wrapper

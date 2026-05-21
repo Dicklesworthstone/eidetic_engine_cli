@@ -95,6 +95,10 @@ uses the stable node id. Workspaces created by shell e2e scripts live under
   fixture strings unless the test is specifically about id generation.
 - Tests must not require real Tailscale unless the bead is an explicit
   opt-in transport smoke test.
+- The opt-in real transport smoke is
+  `scripts/e2e_overhaul/mesh_tailscale_smoke.sh`. It exits `78` by default and
+  only runs against a live tailnet when `EE_E2E_REAL_TAILSCALE=1` and
+  `EE_REAL_TAILSCALE_PEER` are both set.
 
 ## Structured E2E Log Contract
 
@@ -157,7 +161,7 @@ checks. Multi-node scripts call `mesh_node_workspace node01` and pass
 | bd-3i5q7 | Privacy, redaction, body/embedding denial, and support-bundle leak checks |
 | bd-3url9 | Latency, freshness, resource-budget, and cache-hit evidence |
 | bd-ghey6 | Local two-node fixture without real Tailscale |
-| bd-1crtj | Explicit opt-in real Tailscale smoke, quarantined outside normal verify |
+| bd-1crtj | Explicit opt-in real Tailscale smoke via `scripts/e2e_overhaul/mesh_tailscale_smoke.sh`, quarantined outside normal verify |
 | bd-3omr5 | Agent-facing command modes and JSON contracts |
 | bd-2irom | Embedding/search-surrogate privacy and compatibility |
 | bd-2vu8m | Final matrix audit proving every SRR6 shipped surface has unit proof plus e2e or golden proof |
