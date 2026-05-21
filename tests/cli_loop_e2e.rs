@@ -107,7 +107,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     persist_json_artifact("01_init", &init_json);
     ensure_equal(
         &init_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "init response schema",
     )?;
     ensure_equal(
@@ -152,7 +152,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     persist_json_artifact("02_remember_rule", &remember_rule_json);
     ensure_equal(
         &remember_rule_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "remember rule response schema",
     )?;
     let rule_memory_id = remember_rule_json["data"]["memory_id"]
@@ -239,7 +239,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     persist_json_artifact("05_search", &search_json);
     ensure_equal(
         &search_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "search response schema",
     )?;
     let search_results = search_json["data"]["results"]
@@ -296,7 +296,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     persist_json_artifact("06_context", &context_json);
     ensure_equal(
         &context_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "context response schema",
     )?;
     let pack_items = context_json["data"]["pack"]["items"]
@@ -362,7 +362,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     persist_json_artifact("07_why", &why_json);
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "why response schema",
     )?;
     ensure(
@@ -656,7 +656,7 @@ fn cli_loop_status_reports_workspace_health() -> TestResult {
     persist_json_artifact("status_check", &status_json);
     ensure_equal(
         &status_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "status response schema",
     )?;
     ensure_equal(

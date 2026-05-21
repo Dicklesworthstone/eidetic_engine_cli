@@ -108,7 +108,7 @@ fn status_supports_default_v1_and_explicit_v0_response_envelopes() -> TestResult
     let workspace_path = workspace.path();
 
     let v1 = run_json(workspace_path, &["--workspace", ".", "--json", "status"])?;
-    ensure_string(&v1, &["schema"], "ee.response.v1")?;
+    ensure_string(&v1, &["schema"], "ee.response.v2")?;
     ensure_bool(&v1, &["success"], true)?;
     if v1.get("data").is_none() || v1.get("result").is_some() {
         return Err("v1 response should use data and not result".to_string());

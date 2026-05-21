@@ -146,7 +146,7 @@ fn subscribe_filter_error_recovery_matches_error_v2_contract() -> TestResult {
     expect_success(&poll, "subscribe poll")?;
     let poll_json = stdout_json(&poll, "subscribe poll")?;
     ensure(
-        poll_json.pointer("/schema").and_then(Value::as_str) == Some("ee.response.v1"),
+        poll_json.pointer("/schema").and_then(Value::as_str) == Some("ee.response.v2"),
         "successful subscribe poll should use the normal response envelope",
     )?;
     ensure(

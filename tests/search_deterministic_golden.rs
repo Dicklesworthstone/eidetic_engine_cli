@@ -517,7 +517,7 @@ fn sort_object_keys(value: &mut JsonValue) {
 fn assert_search_contract(value: &JsonValue) -> TestResult {
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "search response schema",
     )?;
     ensure_equal(

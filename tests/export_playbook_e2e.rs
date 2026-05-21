@@ -267,7 +267,7 @@ fn export_and_playbook_surfaces_round_trip_with_logged_binary_run() -> TestResul
     let export_output = run_step(&source_workspace, &events_path, "export", export_args)?;
     let export_json = parse_stdout_json(&export_output, "export")?;
     ensure(
-        export_json["schema"] == "ee.response.v1",
+        export_json["schema"] == "ee.response.v2",
         "export response schema",
     )?;
     ensure(export_json["success"] == true, "export response success")?;

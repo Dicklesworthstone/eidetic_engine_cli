@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 type TestResult = Result<(), String>;
 
 const SCHEMA_DOCS: &[(&str, &str)] = &[
-    ("ee.response.v1", "ee.response.v1.json"),
+    ("ee.response.v2", "ee.response.v1.json"),
     ("ee.error.v2", "ee.error.v2.json"),
     ("ee.pack.v2", "ee.pack.v2.json"),
     ("ee.search.v1", "ee.search.v1.json"),
@@ -451,7 +451,7 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
 fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     let fixture_cases = [
         (
-            "ee.response.v1",
+            "ee.response.v2",
             read_json(&fixture_path("golden/agent/status.json.golden"))?,
         ),
         (

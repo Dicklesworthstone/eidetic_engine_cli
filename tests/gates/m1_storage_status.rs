@@ -66,7 +66,7 @@ fn m1_init_creates_workspace_database() -> TestResult {
     let json = parse_json_output(&output, "ee init")?;
 
     ensure(
-        json.get("schema") == Some(&JsonValue::String("ee.response.v1".to_owned())),
+        json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
         "init response must use ee.response.v1 schema",
     )?;
 
@@ -95,7 +95,7 @@ fn m1_status_reports_workspace_state() -> TestResult {
     let json = parse_json_output(&output, "ee status")?;
 
     ensure(
-        json.get("schema") == Some(&JsonValue::String("ee.response.v1".to_owned())),
+        json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
         "status response must use ee.response.v1 schema",
     )?;
 
@@ -128,7 +128,7 @@ fn m1_health_returns_overall_verdict() -> TestResult {
     let json = parse_json_output(&output, "ee health")?;
 
     ensure(
-        json.get("schema") == Some(&JsonValue::String("ee.response.v1".to_owned())),
+        json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
         "health response must use ee.response.v1 schema",
     )?;
 
@@ -147,7 +147,7 @@ fn m1_capabilities_reports_feature_availability() -> TestResult {
     let json = parse_json_output(&output, "ee capabilities")?;
 
     ensure(
-        json.get("schema") == Some(&JsonValue::String("ee.response.v1".to_owned())),
+        json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
         "capabilities response must use ee.response.v1 schema",
     )?;
 

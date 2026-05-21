@@ -157,7 +157,7 @@ fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
                     ));
                 }
             }
-            if selected_json.get("schema").and_then(Value::as_str) != Some("ee.response.v1") {
+            if selected_json.get("schema").and_then(Value::as_str) != Some("ee.response.v2") {
                 return Err(format!(
                     "{} {preset_name}: envelope schema missing",
                     surface.surface
@@ -290,7 +290,7 @@ fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
     data.insert("command".to_string(), Value::String(command.to_string()));
     enrich_surface_samples(command, &mut data);
     let response = json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": data,
     });

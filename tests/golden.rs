@@ -1703,7 +1703,7 @@ mod tests {
         )?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "preflight run response schema",
         )?;
         ensure_equal(
@@ -1898,7 +1898,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "search schema",
         )?;
         ensure_equal(
@@ -2023,7 +2023,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "context schema",
         )?;
         ensure_equal(
@@ -2168,7 +2168,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "pack query-file schema",
         )?;
         ensure_equal(
@@ -2316,7 +2316,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "pack graph query-file schema",
         )?;
         ensure_equal(
@@ -2765,7 +2765,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &json["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "curate accept schema",
         )?;
         ensure_equal(
@@ -3048,7 +3048,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "why schema",
         )?;
         ensure_equal(&value["success"], &serde_json::json!(true), "why success")?;
@@ -3145,7 +3145,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "outcome schema",
         )?;
         ensure_equal(

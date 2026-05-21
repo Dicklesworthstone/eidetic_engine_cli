@@ -205,7 +205,7 @@ fn install_check_detects_duplicate_path_binaries_without_stderr() -> TestResult 
 
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -582,7 +582,7 @@ fn install_check_already_current_is_idempotent() -> TestResult {
 
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -752,7 +752,7 @@ fn install_plan_handles_duplicate_target_ids() -> TestResult {
 
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "response schema",
     )?;
     let has_duplicate_finding = has_finding(&value, "duplicate_target").unwrap_or(false)
@@ -805,7 +805,7 @@ fn install_check_handles_symlinked_install_root() -> TestResult {
 
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -866,7 +866,7 @@ fn install_plan_huge_manifest_does_not_hang() -> TestResult {
 
     ensure_equal(
         json_str(&value, "/schema")?,
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "response schema",
     )?;
     let status = json_str(&value, "/data/status")?;

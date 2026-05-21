@@ -633,7 +633,7 @@ fn successful_capabilities_output_has_no_fake_success_markers() -> TestResult {
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "response envelope schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
@@ -1095,7 +1095,7 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "support bundle dry-run schema",
     )?;
     ensure_json_pointer(
@@ -1131,7 +1131,7 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "support bundle create schema",
     )?;
     ensure_json_pointer(
@@ -1637,7 +1637,7 @@ fn diag_quarantine_reports_persisted_state_instead_of_placeholder_health() -> Te
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "diag quarantine response schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
@@ -1758,7 +1758,7 @@ fn rehearse_commands_emit_real_sandbox_artifacts_instead_of_degraded_stub() -> T
     ensure_json_pointer(
         &plan.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "rehearse plan response schema",
     )?;
     ensure_json_pointer(&plan.parsed, "/success", json!(true), "plan success flag")?;
@@ -2233,7 +2233,7 @@ fn lab_replay_reports_missing_frozen_inputs_without_generated_success() -> TestR
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "lab replay response schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
@@ -2374,7 +2374,7 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
                 "economy missing-database repair command",
             )?;
         }
-        "ee.response.v1" => {
+        "ee.response.v2" => {
             ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
             ensure_json_pointer(
                 &result.parsed,
@@ -2512,7 +2512,7 @@ fn causal_trace_without_failure_id_reports_empty_evidence_query() -> TestResult 
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "causal response schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(true), "success flag")?;
@@ -2949,7 +2949,7 @@ fn eval_run_and_list_report_fixture_results_without_unavailable_sentinel() -> Te
         ensure_json_pointer(
             &result.parsed,
             "/schema",
-            json!("ee.response.v1"),
+            json!("ee.response.v2"),
             &format!("{command} response schema"),
         )?;
         ensure_json_pointer(
@@ -3066,7 +3066,7 @@ fn eval_run_pack_quality_reports_fixture_comparison_without_unavailable_sentinel
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "eval run pack-quality response schema",
     )?;
     ensure_json_pointer(
@@ -3433,7 +3433,7 @@ fn handoff_create_degrades_instead_of_writing_placeholder_capsule() -> TestResul
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "handoff degraded response schema",
     )?;
     ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
@@ -3562,7 +3562,7 @@ fn daemon_foreground_runs_real_health_job_without_unavailable_sentinel() -> Test
     ensure_json_pointer(
         &result.parsed,
         "/schema",
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "daemon response schema",
     )?;
     ensure_json_pointer(
@@ -4645,11 +4645,11 @@ fn successful_validity_claims_need_concrete_evidence_sources() -> TestResult {
         ),
         (
             "causal estimate",
-            r#"{"schema":"ee.response.v1","success":true,"data":{"uplift":0.12,"confidenceState":"medium"}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"uplift":0.12,"confidenceState":"medium"}}"#,
         ),
         (
             "lab replay",
-            r#"{"schema":"ee.response.v1","success":true,"data":{"replayOutcome":"success","episodeHashVerified":true}}"#,
+            r#"{"schema":"ee.response.v2","success":true,"data":{"replayOutcome":"success","episodeHashVerified":true}}"#,
         ),
     ];
 

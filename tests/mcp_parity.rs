@@ -818,7 +818,7 @@ fn schema_list_covers_mcp_schemas() -> TestResult {
         .filter_map(|s| s.get("id").and_then(JsonValue::as_str))
         .collect();
 
-    let required_schemas = ["ee.response.v1", "ee.error.v2"];
+    let required_schemas = ["ee.response.v2", "ee.error.v2"];
 
     for schema in required_schemas {
         ensure(

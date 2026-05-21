@@ -1231,7 +1231,7 @@ fn run_swarm_brief_case(
             name: case.id,
             args: case.args,
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &case.envs,
@@ -1964,7 +1964,7 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
                 "status".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2016,7 +2016,7 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2039,7 +2039,7 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
                 "status".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2158,7 +2158,7 @@ fn no_mocks_core_memory_loop_succeeds_with_hostile_network_env() -> TestResult {
                 name,
                 args,
                 expected_exit_code: 0,
-                expected_schema: "ee.response.v1",
+                expected_schema: "ee.response.v2",
                 expect_clean_stderr: true,
             },
             &envs,
@@ -2403,7 +2403,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &envs,
@@ -2428,7 +2428,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "5".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &envs,
@@ -2522,7 +2522,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "rebuild".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &envs,
@@ -2548,7 +2548,7 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 "CASS session codex".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &envs,
@@ -2638,7 +2638,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2700,7 +2700,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 redacted_content,
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2726,7 +2726,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 "rebuild".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2749,7 +2749,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 "5".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2779,7 +2779,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 "2000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2805,7 +2805,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 memory_id,
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2832,7 +2832,7 @@ fn no_mocks_public_outputs_redact_secret_like_memory_content() -> TestResult {
                 "--dry-run".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -2936,7 +2936,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &secret_envs,
@@ -2996,7 +2996,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 source_content.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3027,7 +3027,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 redacted_content,
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3055,7 +3055,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 "rebuild".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3100,7 +3100,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 "4000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3157,7 +3157,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 query_file_arg.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3234,7 +3234,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 "4000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3285,7 +3285,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 query_file_arg,
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3351,7 +3351,7 @@ fn no_mocks_pack_replay_diff_freshness_and_egress_are_logged() -> TestResult {
                 source_memory_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3695,7 +3695,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
         &secret_envs,
@@ -3728,7 +3728,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                     .to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3760,7 +3760,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                     .to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3788,7 +3788,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 "rebuild".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3837,7 +3837,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 "4000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3877,7 +3877,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 query_file_arg,
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3923,7 +3923,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 "usr_pre_task_brief".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -3989,7 +3989,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 "usr_context_medium_workspace".to_owned(),
             ],
             expected_exit_code: 9,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4264,7 +4264,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "init".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4297,7 +4297,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "Run cargo fmt --check, cargo clippy --all-targets -- -D warnings, and cargo test before release.".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4328,7 +4328,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                     .to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4350,7 +4350,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "rebuild".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4375,7 +4375,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "release clippy".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4418,7 +4418,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "4000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4451,7 +4451,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "4000".to_owned(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;
@@ -4491,7 +4491,7 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 rule_memory_id.clone(),
             ],
             expected_exit_code: 0,
-            expected_schema: "ee.response.v1",
+            expected_schema: "ee.response.v2",
             expect_clean_stderr: true,
         },
     )?;

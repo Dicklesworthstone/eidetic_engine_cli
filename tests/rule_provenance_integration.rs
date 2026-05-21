@@ -114,7 +114,7 @@ fn rule_provenance_unknown_rule_returns_structured_empty_report() -> TestResult 
     let json = parse_stdout_json(&output, "rule provenance missing rule")?;
 
     ensure(
-        json["schema"] == "ee.response.v1",
+        json["schema"] == "ee.response.v2",
         "response envelope schema",
     )?;
     ensure(json["success"] == true, "response envelope success")?;

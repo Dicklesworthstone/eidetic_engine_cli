@@ -135,7 +135,7 @@ fn profile_workflow_probe_recommend_plan_apply_dryrun() -> TestResult {
     // Validate plan JSON structure
     ensure_equal(
         &plan_json.pointer("/schema"),
-        &Some(&json!("ee.response.v1")),
+        &Some(&json!("ee.response.v2")),
         "plan response schema",
     )?;
     ensure_equal(

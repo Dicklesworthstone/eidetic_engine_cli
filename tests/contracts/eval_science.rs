@@ -66,7 +66,7 @@ fn eval_run_science_json_reports_fixture_without_science_metrics() -> TestResult
 
     ensure_json_equal(
         value.get("schema"),
-        json!("ee.response.v1"),
+        json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_json_equal(value.get("success"), JsonValue::Bool(true), "success")?;

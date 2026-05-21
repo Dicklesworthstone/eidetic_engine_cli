@@ -158,7 +158,7 @@ fn rule_provenance_reports_cited_memory_and_co_citing_rule() -> TestResult {
     let json = parse_stdout_json(&output, "rule provenance")?;
 
     ensure(
-        json["schema"] == "ee.response.v1",
+        json["schema"] == "ee.response.v2",
         "response envelope schema",
     )?;
     ensure(json["success"] == true, "response envelope success")?;

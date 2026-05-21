@@ -96,7 +96,7 @@ fn cli_json_owned_with_exit(
 }
 
 fn assert_success_response(json: &JsonValue, command: &str, data_schema: &str) -> TestResult {
-    assert_schema_field(json, "ee.response.v1", command)?;
+    assert_schema_field(json, "ee.response.v2", command)?;
     ensure(
         json.get("success").and_then(JsonValue::as_bool) == Some(true),
         format!("{command}: success must be true"),

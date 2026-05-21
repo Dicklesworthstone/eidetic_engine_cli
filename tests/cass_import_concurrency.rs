@@ -276,7 +276,7 @@ fn parallel_cass_imports_preserve_ledger_counters() -> TestResult {
             })?;
         ensure_equal(
             &report["schema"],
-            &serde_json::json!("ee.response.v1"),
+            &serde_json::json!("ee.response.v2"),
             "response schema",
         )?;
         ensure_equal(

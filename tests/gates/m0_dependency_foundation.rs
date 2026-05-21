@@ -98,7 +98,7 @@ fn m0_frankensearch_present() -> TestResult {
 #[test]
 fn m0_agent_native_envelope_in_source() -> TestResult {
     let output = Command::new("grep")
-        .args(["-r", "ee.response.v1", "src/"])
+        .args(["-r", "ee.response.v2", "src/"])
         .output()
         .map_err(|e| format!("failed to run grep: {e}"))?;
 

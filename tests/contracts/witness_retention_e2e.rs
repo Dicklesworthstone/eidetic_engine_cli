@@ -238,7 +238,7 @@ fn graph_witnesses_prune_preserves_active_and_fresh_rows() -> TestResult {
 
     ensure_json_eq(
         &dry_run_json["schema"],
-        Value::String("ee.response.v1".to_string()),
+        Value::String("ee.response.v2".to_string()),
         "dry-run envelope schema",
     )?;
     ensure_json_eq(

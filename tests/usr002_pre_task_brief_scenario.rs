@@ -328,7 +328,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         &workspace,
         &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(init.dossier_dir.clone());
@@ -355,7 +355,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "Before release, run cargo fmt --check, cargo clippy --all-targets -- -D warnings, and cargo test.",
         ],
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(rule.dossier_dir.clone());
@@ -387,7 +387,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "Release failed after clippy found an unused import in CI because checks were skipped locally.",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(failure.dossier_dir.clone());
@@ -414,7 +414,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "rebuild",
         ],
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(rebuild.dossier_dir.clone());
@@ -430,7 +430,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         &workspace,
         &["--workspace", workspace_arg.as_str(), "--json", "status"],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/status/status_json.golden"),
     )?;
     command_dossiers.push(status.dossier_dir.clone());
@@ -456,7 +456,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         &workspace,
         &["--json", "health"],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/health_unavailable.json.golden"),
     )?;
     command_dossiers.push(health.dossier_dir.clone());
@@ -481,7 +481,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
         &workspace,
         &["--json", "capabilities"],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/capabilities/capabilities_json.golden"),
     )?;
     command_dossiers.push(capabilities.dossier_dir.clone());
@@ -516,7 +516,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "release clippy",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/search_unavailable.json.golden"),
     )?;
     command_dossiers.push(search.dossier_dir.clone());
@@ -582,7 +582,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "4000",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/context_pack.json.golden"),
     )?;
     command_dossiers.push(context_json_first.dossier_dir.clone());
@@ -608,7 +608,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "4000",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/context_pack.json.golden"),
     )?;
     command_dossiers.push(context_json_second.dossier_dir.clone());
@@ -667,7 +667,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
             "deploy production database migration",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(preflight.dossier_dir.clone());
@@ -678,7 +678,7 @@ fn pre_task_briefing_scenario_produces_actionable_context_with_logged_artifacts(
     assert_json_machine_stdout(&preflight.output, "preflight run")?;
     let preflight_json = parse_json_stdout(&preflight.output, "preflight run")?;
     ensure(
-        preflight_json["schema"] == json!("ee.response.v1")
+        preflight_json["schema"] == json!("ee.response.v2")
             && preflight_json["data"]["cleared"] == json!(false)
             && preflight_json["data"]["degraded"][0]["code"]
                 == json!("preflight_evidence_unavailable"),

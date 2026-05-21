@@ -379,7 +379,7 @@ fn malformed_jsonl_import_reports_rejected_contract_with_issue_codes() -> TestRe
     )?;
     ensure_equal(
         &result.parsed.pointer("/schema"),
-        &Some(&json!("ee.response.v1")),
+        &Some(&json!("ee.response.v2")),
         "jsonl response envelope",
     )?;
     ensure_equal(

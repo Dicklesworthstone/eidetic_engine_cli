@@ -261,7 +261,7 @@ fn validate_search_response(value: &Value) -> TestResult {
     validate_docs_schema("ee.search.v1.json", "ee.search.v1")?;
     ensure_equal(
         value.get("schema").and_then(Value::as_str),
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "search envelope schema",
     )?;
     ensure_equal(
@@ -604,7 +604,7 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
     )?;
     ensure_equal(
         init.json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "init schema",
     )?;
     emit_event(
@@ -680,7 +680,7 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
     )?;
     ensure_equal(
         index.json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "index schema",
     )?;
 

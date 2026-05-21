@@ -62,7 +62,7 @@ fn release_context_demo_file() -> Result<DemoFile, String> {
         .with_tag("gate14")
         .with_command(
             DemoCommand::new("ee context \"prepare release\" --workspace . --json")
-                .with_stdout_schema("ee.response.v1")
+                .with_stdout_schema("ee.response.v2")
                 .with_stdout_contains("\"command\":\"context\"")
                 .with_artifact_output(
                     DemoArtifactOutput::new("stdout.json").with_blake3_hash(stdout_hash),

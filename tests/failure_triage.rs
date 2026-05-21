@@ -207,7 +207,7 @@ impl ReplayMetadata {
             cwd,
             env_names,
             binary_version: env!("CARGO_PKG_VERSION").to_string(),
-            schema_version: "ee.response.v1".to_string(),
+            schema_version: "ee.response.v2".to_string(),
             feature_flags: vec![],
             fixture_hash: None,
             db_migration_version: None,

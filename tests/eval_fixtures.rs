@@ -553,7 +553,7 @@ fn release_failure_scenario_contract_is_complete() -> TestResult {
         )?;
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure(
@@ -820,7 +820,7 @@ fn dangerous_cleanup_scenario_contract_is_complete() -> TestResult {
         )?;
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure(
@@ -1545,7 +1545,7 @@ fn data_size_tiers_scenario_contract_is_complete() -> TestResult {
         )?;
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure(
@@ -1975,7 +1975,7 @@ fn async_migration_scenario_contract_is_complete() -> TestResult {
         )?;
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure(
@@ -2252,7 +2252,7 @@ fn semantic_model_admissibility_scenario_contract_is_complete() -> TestResult {
     for command in commands {
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure_equal(
@@ -2587,7 +2587,7 @@ fn metamorphic_evaluation_scenario_contract_is_complete() -> TestResult {
         )?;
         ensure_equal(
             string_field(command, "stdout_schema")?,
-            "ee.response.v1",
+            "ee.response.v2",
             "stdout schema",
         )?;
         ensure_equal(

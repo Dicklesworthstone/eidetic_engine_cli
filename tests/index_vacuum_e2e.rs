@@ -144,7 +144,7 @@ fn index_vacuum_reports_missing_index_preview_with_logged_binary_run() -> TestRe
     )?;
 
     let vacuum_json = parse_stdout_json(&vacuum_output, "index vacuum")?;
-    ensure(vacuum_json["schema"] == "ee.response.v1", "response schema")?;
+    ensure(vacuum_json["schema"] == "ee.response.v2", "response schema")?;
     ensure(vacuum_json["success"] == true, "response success")?;
     ensure(
         vacuum_json["data"]["command"] == "index_vacuum",

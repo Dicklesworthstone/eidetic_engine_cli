@@ -233,7 +233,7 @@ fn recorder_start_event_finish_persist_and_list_events() -> TestResult {
     let listed_json = stdout_json(&listed)?;
     ensure_equal(
         &listed_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "list response schema",
     )?;
     ensure_equal(
@@ -375,7 +375,7 @@ fn recorder_import_dry_run_maps_cass_view_without_mutation() -> TestResult {
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response envelope",
     )?;
     ensure_equal(
@@ -1154,7 +1154,7 @@ fn rule_add_dry_run_returns_response_envelope() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -1575,7 +1575,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
     let context_json = stdout_json(&context)?;
     ensure_equal(
         &context_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "context response schema",
     )?;
     let pack_items = context_json["data"]["pack"]["items"]
@@ -1655,7 +1655,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
     let why_json = stdout_json(&why)?;
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "why response schema",
     )?;
     ensure_equal(
@@ -1729,7 +1729,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
     let doctor_json = stdout_json(&doctor)?;
     ensure_equal(
         &doctor_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "doctor response schema",
     )?;
     ensure_equal(
@@ -1770,7 +1770,7 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
     let json = stdout_json(&output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "preflight run response schema",
     )?;
     ensure_equal(
@@ -2026,7 +2026,7 @@ fn assert_causal_success(output: &std::process::Output, command: &str, schema: &
     let json = stdout_json(output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&json["success"], &serde_json::json!(true), "success")?;
@@ -2142,7 +2142,7 @@ fn assert_lab_report_common(output: &std::process::Output) -> Result<serde_json:
     let json = stdout_json(output)?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&json["success"], &serde_json::json!(true), "success")?;
@@ -2364,7 +2364,7 @@ fn rehearse_plan_reports_sandbox_ready_contract() -> TestResult {
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "schema",
     )?;
     ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
@@ -2419,7 +2419,7 @@ fn rehearse_plan_with_command_spec_reports_unsupported_commands() -> TestResult 
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "schema",
     )?;
     ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
@@ -2474,7 +2474,7 @@ fn rehearse_run_creates_sandbox_manifest_without_mutating_source() -> TestResult
     let value = stdout_json(&output)?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "schema",
     )?;
     ensure_equal(&value["success"], &serde_json::json!(true), "success")?;
@@ -2548,7 +2548,7 @@ fn rehearse_inspect_and_promote_plan_read_run_manifest() -> TestResult {
     let inspect_json = stdout_json(&inspect_output)?;
     ensure_equal(
         &inspect_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "inspect schema",
     )?;
     ensure_equal(
@@ -2577,7 +2577,7 @@ fn rehearse_inspect_and_promote_plan_read_run_manifest() -> TestResult {
     let promote_json = stdout_json(&promote_output)?;
     ensure_equal(
         &promote_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "promote schema",
     )?;
     ensure_equal(

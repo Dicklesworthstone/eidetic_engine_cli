@@ -275,7 +275,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "check_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("check"),
         },
         ContractCase {
@@ -285,7 +285,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "check_toon",
             format: ContractFormat::Toon,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("check"),
         },
         ContractCase {
@@ -295,7 +295,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "doctor_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("doctor"),
         },
         ContractCase {
@@ -311,7 +311,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "doctor_toon",
             format: ContractFormat::Toon,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("doctor"),
         },
         ContractCase {
@@ -321,7 +321,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "doctor_franken_health",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("doctor"),
         },
         ContractCase {
@@ -331,7 +331,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "diag_dependencies",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("diag dependencies"),
         },
         ContractCase {
@@ -347,7 +347,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "diag_integrity",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("diag integrity"),
         },
         ContractCase {
@@ -357,7 +357,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "capabilities_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("capabilities"),
         },
         ContractCase {
@@ -367,7 +367,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "capabilities_toon",
             format: ContractFormat::Toon,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("capabilities"),
         },
         ContractCase {
@@ -377,7 +377,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "status_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("status"),
         },
         ContractCase {
@@ -397,7 +397,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "version",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("version"),
         },
         ContractCase {
@@ -407,7 +407,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "agent_docs_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("agent-docs"),
         },
         ContractCase {
@@ -417,7 +417,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "schema_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("schema"),
         },
         ContractCase {
@@ -427,7 +427,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "schema_list_json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("schema list"),
         },
         ContractCase {
@@ -437,7 +437,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
             golden_name: "health_unavailable.json",
             format: ContractFormat::Json,
             expected_success: true,
-            expected_schema: Some("ee.response.v1"),
+            expected_schema: Some("ee.response.v2"),
             expected_command: Some("health"),
         },
     ]
@@ -552,7 +552,7 @@ fn validate_json_contract(case: ContractCase, stdout: &str, exit_code: Option<i3
     }
 
     match case.expected_schema {
-        Some("ee.response.v1") => {
+        Some("ee.response.v2") => {
             if value.get("success").and_then(Value::as_bool).is_none() {
                 return Err(contract_failure(
                     case,
@@ -616,7 +616,7 @@ fn validate_json_contract(case: ContractCase, stdout: &str, exit_code: Option<i3
 }
 
 fn validate_toon_contract(case: ContractCase, stdout: &str, exit_code: Option<i32>) -> TestResult {
-    let expected_schema = case.expected_schema.unwrap_or("ee.response.v1");
+    let expected_schema = case.expected_schema.unwrap_or("ee.response.v2");
     let schema_line = format!("schema: {expected_schema}");
     if !stdout.starts_with(&schema_line) {
         return Err(contract_failure(
@@ -1855,7 +1855,7 @@ fn version_json_contract_case_records_artifacts() -> TestResult {
         golden_name: "version",
         format: ContractFormat::Json,
         expected_success: true,
-        expected_schema: Some("ee.response.v1"),
+        expected_schema: Some("ee.response.v2"),
         expected_command: Some("version"),
     })
 }
@@ -2047,7 +2047,7 @@ fn contract_failure_report_includes_debugging_context() -> TestResult {
         golden_name: "status_json",
         format: ContractFormat::Json,
         expected_success: true,
-        expected_schema: Some("ee.response.v1"),
+        expected_schema: Some("ee.response.v2"),
         expected_command: Some("status"),
     };
 

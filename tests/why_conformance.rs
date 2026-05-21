@@ -151,7 +151,7 @@ fn why_response_schema_is_ee_response_v1() -> TestResult {
     // Schema assertions
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -254,7 +254,7 @@ fn why_result_target_non_memory_doc_id_explains_unsupported_source() -> TestResu
 
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(

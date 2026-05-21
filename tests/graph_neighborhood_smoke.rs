@@ -602,7 +602,7 @@ fn graph_centrality_read_json_toon_and_golden_are_stable() -> TestResult {
     let parsed: Value = serde_json::from_slice(&first.stdout)
         .map_err(|error| format!("graph centrality stdout must be JSON: {error}"))?;
     ensure(
-        parsed["schema"] == Value::String("ee.response.v1".to_string()),
+        parsed["schema"] == Value::String("ee.response.v2".to_string()),
         "graph centrality should use the response envelope",
     )?;
     ensure(
@@ -854,7 +854,7 @@ fn insights_causal_bottlenecks_returns_seeded_bridge_memory() -> TestResult {
     let parsed: Value =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     ensure(
-        parsed["schema"] == Value::String("ee.response.v1".to_string()),
+        parsed["schema"] == Value::String("ee.response.v2".to_string()),
         "insights uses the response envelope",
     )?;
     ensure(
@@ -935,7 +935,7 @@ fn why_causal_explain_returns_seeded_min_cost_path() -> TestResult {
     let parsed: Value =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     ensure(
-        parsed["schema"] == Value::String("ee.response.v1".to_string()),
+        parsed["schema"] == Value::String("ee.response.v2".to_string()),
         "why uses the response envelope",
     )?;
     let causal = &parsed["data"]["causalExplanation"];
@@ -1489,7 +1489,7 @@ fn insights_proximity_hotspots_returns_seeded_min_cut_pair() -> TestResult {
     let parsed: Value =
         serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
     ensure(
-        parsed["schema"] == Value::String("ee.response.v1".to_string()),
+        parsed["schema"] == Value::String("ee.response.v2".to_string()),
         "insights uses the response envelope",
     )?;
     ensure(

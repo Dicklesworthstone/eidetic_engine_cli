@@ -114,7 +114,7 @@ fn agent_status_fixture_json_matches_golden() -> TestResult {
 
     ensure_json_equal(
         value.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
+        JsonValue::String("ee.response.v2".to_string()),
         "response schema",
     )?;
     ensure_json_equal(

@@ -482,7 +482,7 @@ fn workspace_hygiene_json_public_surface_emits_degraded_codes() -> TestResult {
         "workspace hygiene public JSON",
     )?;
 
-    if value["schema"] != "ee.response.v1" {
+    if value["schema"] != "ee.response.v2" {
         return Err(format!("unexpected response schema: {}", value["schema"]));
     }
     if value["success"] != true {

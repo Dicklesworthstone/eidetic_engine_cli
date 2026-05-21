@@ -797,7 +797,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
         &workspace,
         &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "USR006-INIT-001",
-        "ee.response.v1",
+        "ee.response.v2",
     )?;
     ensure(step.output.status.success(), "init should succeed")?;
     ensure(
@@ -821,7 +821,7 @@ fn backup_workflow_creates_verifiable_artifact() -> TestResult {
             &build_redacted_evidence_memory(0),
         ],
         "USR006-REMEMBER-001",
-        "ee.response.v1",
+        "ee.response.v2",
     )?;
     ensure(step.output.status.success(), "remember should succeed")?;
 
@@ -1011,7 +1011,7 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
         &workspace,
         &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "USR006-EXPORT-INIT",
-        "ee.response.v1",
+        "ee.response.v2",
     )?;
     ensure(step.output.status.success(), "init should succeed")?;
 
@@ -1033,7 +1033,7 @@ fn export_with_redaction_prevents_secret_leakage() -> TestResult {
                 redacted_evidence.as_str(),
             ],
             &format!("USR006-REMEMBER-{i}"),
-            "ee.response.v1",
+            "ee.response.v2",
         )?;
         ensure(
             step.output.status.success(),

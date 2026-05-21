@@ -388,7 +388,7 @@ mod enabled_mcp {
         let status_json: Value = serde_json::from_str(status_text)
             .map_err(|error| format!("ee_status returned invalid JSON: {error}"))?;
         ensure(
-            status_json.get("schema").and_then(Value::as_str) == Some("ee.response.v1"),
+            status_json.get("schema").and_then(Value::as_str) == Some("ee.response.v2"),
             "ee_status must delegate to the stable CLI response envelope",
         )?;
 

@@ -212,7 +212,7 @@ fn response_envelope_success_emits_stable_prefix() {
         "unexpected envelope prefix: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
-    assert_eq!(parsed["schema"], "ee.response.v1");
+    assert_eq!(parsed["schema"], "ee.response.v2");
     assert_eq!(parsed["success"], true);
 }
 
@@ -226,7 +226,7 @@ fn response_envelope_failure_emits_stable_prefix() {
         "unexpected envelope prefix: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
-    assert_eq!(parsed["schema"], "ee.response.v1");
+    assert_eq!(parsed["schema"], "ee.response.v2");
     assert_eq!(parsed["success"], false);
 }
 

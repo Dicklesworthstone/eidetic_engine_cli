@@ -382,7 +382,7 @@ fn agent_detect_cli_json_uses_response_envelope() -> TestResult {
 
     ensure_equal(
         value.get("schema"),
-        Some(&JsonValue::String("ee.response.v1".to_string())),
+        Some(&JsonValue::String("ee.response.v2".to_string())),
         "response schema",
     )?;
     ensure_equal(

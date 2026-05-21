@@ -80,7 +80,7 @@ fn assert_response_envelope(json: &serde_json::Value, context: &str) -> TestResu
         .get("schema")
         .and_then(|s| s.as_str())
         .ok_or_else(|| format!("{context}: missing schema field"))?;
-    ensure_equal(&schema, &"ee.response.v1", &format!("{context} schema"))?;
+    ensure_equal(&schema, &"ee.response.v2", &format!("{context} schema"))?;
 
     let success = json
         .get("success")

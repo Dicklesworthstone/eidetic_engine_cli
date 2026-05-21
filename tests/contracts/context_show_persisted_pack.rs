@@ -183,7 +183,7 @@ fn context_show_returns_canonical_pack_envelope_for_persisted_pack() -> TestResu
         .get("schema")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing schema".to_string())?;
-    if schema != "ee.response.v1" {
+    if schema != "ee.response.v2" {
         return Err(format!("schema mismatch: got {schema}"));
     }
     let pack = json

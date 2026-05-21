@@ -140,7 +140,7 @@ fn context_response_fixture() -> ContextResponse {
 fn context_response_json_roundtrips() -> TestResult {
     let response = context_response_fixture();
     let rendered = render_context_response_json(&response);
-    assert_roundtrip("context_response_json", &rendered, "ee.response.v1")
+    assert_roundtrip("context_response_json", &rendered, "ee.response.v2")
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn context_response_json_is_deterministic() -> TestResult {
 fn health_response_json_roundtrips() -> TestResult {
     let report = ee::core::health::HealthReport::gather();
     let rendered = render_health_json(&report);
-    assert_roundtrip("health_response_json", &rendered, "ee.response.v1")
+    assert_roundtrip("health_response_json", &rendered, "ee.response.v2")
 }
 
 #[test]

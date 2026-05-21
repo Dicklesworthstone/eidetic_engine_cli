@@ -68,7 +68,7 @@ fn dependency_surface_reports_unavailable_dependency_codes() -> TestResult {
     ensure(
         json.get("schema")
             .and_then(JsonValue::as_str)
-            .is_some_and(|schema| schema == "ee.response.v1"),
+            .is_some_and(|schema| schema == "ee.response.v2"),
         "diag dependencies response schema",
     )?;
 

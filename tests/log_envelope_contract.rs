@@ -48,7 +48,7 @@ fn status_command_emits_real_json_log_envelope_to_stderr_when_enabled() -> TestR
         .map_err(|error| format!("status stdout must be JSON: {error}"))?;
     assert_eq!(
         stdout.pointer("/schema").and_then(Value::as_str),
-        Some("ee.response.v1")
+        Some("ee.response.v2")
     );
 
     let stderr = String::from_utf8(status.stderr)

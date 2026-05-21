@@ -74,7 +74,7 @@ fn assert_machine_json_response(output: &Output, context: &str) -> Result<JsonVa
         .map_err(|error| format!("{context} stdout must parse as JSON: {error}"))?;
     ensure_equal(
         json.get("schema"),
-        Some(&JsonValue::String("ee.response.v1".to_owned())),
+        Some(&JsonValue::String("ee.response.v2".to_owned())),
         context,
     )?;
     ensure_equal(json.get("success"), Some(&JsonValue::Bool(true)), context)?;

@@ -107,7 +107,7 @@ fn assert_success(output: &EeOutput, context: &str) -> TestResult {
     )?;
     ensure_equal(
         &output.json.pointer("/schema"),
-        &Some(&Value::String("ee.response.v1".to_owned())),
+        &Some(&Value::String("ee.response.v2".to_owned())),
         context,
     )?;
     ensure_equal(

@@ -166,7 +166,7 @@ fn eval_list_json_enumerates_all_fixture_directories() -> TestResult {
 
     ensure_equal(
         &string_field(&value, "/schema")?,
-        &"ee.response.v1",
+        &"ee.response.v2",
         "response schema",
     )?;
     ensure_equal(

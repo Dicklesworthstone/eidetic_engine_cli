@@ -405,7 +405,7 @@ fn assert_stdout_is_single_response_envelope(stdout: &str, stderr: &str) -> Test
             .get("schema")
             .and_then(Value::as_str)
             .unwrap_or_default(),
-        "ee.response.v1",
+        "ee.response.v2",
         "stdout response envelope schema",
     )?;
     ensure_equal(

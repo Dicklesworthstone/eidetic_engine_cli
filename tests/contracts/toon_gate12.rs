@@ -558,7 +558,7 @@ fn toon_default_format_does_not_override_json_flag_machine_contract() -> TestRes
         "ee status --json with TOON_DEFAULT_FORMAT=toon",
     )?;
     ensure(
-        schema == "ee.response.v1",
+        schema == "ee.response.v2",
         format!("expected ee.response.v1 schema, got {schema}"),
     )
 }
@@ -578,7 +578,7 @@ fn toon_default_format_does_not_override_hook_mode_machine_contract() -> TestRes
         "ee status with EE_HOOK_MODE=1 and TOON_DEFAULT_FORMAT=toon",
     )?;
     ensure(
-        schema == "ee.response.v1",
+        schema == "ee.response.v2",
         format!("expected ee.response.v1 schema in hook mode, got {schema}"),
     )
 }
@@ -598,7 +598,7 @@ fn toon_default_format_does_not_override_mcp_mode_machine_contract() -> TestResu
         "ee status with EE_AGENT_MODE=1 and TOON_DEFAULT_FORMAT=toon",
     )?;
     ensure(
-        schema == "ee.response.v1",
+        schema == "ee.response.v2",
         format!("expected ee.response.v1 schema in agent mode, got {schema}"),
     )
 }
@@ -683,7 +683,7 @@ mod unit_tests {
 
     #[test]
     fn render_toon_preserves_response_envelope() -> TestResult {
-        let json = r#"{"schema": "ee.response.v1", "success": true, "data": {"command": "test"}}"#;
+        let json = r#"{"schema": "ee.response.v2", "success": true, "data": {"command": "test"}}"#;
         let toon = render_toon_from_json(json);
 
         ensure_contains(&toon, "schema: ee.response.v1", "TOON preserves schema")?;
@@ -708,7 +708,7 @@ mod unit_tests {
 
     #[test]
     fn toon_output_is_shorter_than_json_input() -> TestResult {
-        let json = r#"{"schema": "ee.response.v1", "success": true, "data": {"command": "status", "version": "0.1.0"}}"#;
+        let json = r#"{"schema": "ee.response.v2", "success": true, "data": {"command": "status", "version": "0.1.0"}}"#;
         let toon = render_toon_from_json(json);
 
         ensure(

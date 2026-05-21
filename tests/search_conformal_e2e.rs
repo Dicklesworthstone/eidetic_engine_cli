@@ -169,7 +169,7 @@ fn search_json_uses_real_calibration_rows_for_score_intervals() -> TestResult {
     let search_json = stdout_json(&search, "search")?;
     persist_json_artifact("search_calibrated_intervals", &search_json);
     ensure(
-        search_json.pointer("/schema").and_then(Value::as_str) == Some("ee.response.v1"),
+        search_json.pointer("/schema").and_then(Value::as_str) == Some("ee.response.v2"),
         "search response envelope schema must be ee.response.v1",
     )?;
     ensure(

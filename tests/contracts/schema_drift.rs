@@ -90,7 +90,7 @@ impl SchemaCategory {
 
 /// Core response schemas.
 pub const CORE_SCHEMAS: &[SchemaEntry] = &[
-    SchemaEntry::new("response", "ee.response.v1", SchemaCategory::Response),
+    SchemaEntry::new("response", "ee.response.v2", SchemaCategory::Response),
     SchemaEntry::new("error", "ee.error.v2", SchemaCategory::Error),
     SchemaEntry::new(
         "version_provenance",
@@ -1410,8 +1410,8 @@ mod tests {
     fn core_schemas_include_response_and_error() -> TestResult {
         let versions: Vec<&str> = CORE_SCHEMAS.iter().map(|s| s.version).collect();
         ensure(
-            versions.contains(&"ee.response.v1"),
-            "core schemas must include ee.response.v1",
+            versions.contains(&"ee.response.v2"),
+            "core schemas must include ee.response.v2",
         )?;
         ensure(
             versions.contains(&"ee.error.v2"),
@@ -1591,7 +1591,7 @@ mod tests {
         assert!(validate_schema_version("invalid").is_err());
         assert!(validate_schema_version("foo.bar").is_err());
         assert!(validate_schema_version("ee.test.v1").is_ok());
-        assert!(validate_schema_version("ee.response.v1").is_ok());
+        assert!(validate_schema_version("ee.response.v2").is_ok());
     }
 
     #[test]

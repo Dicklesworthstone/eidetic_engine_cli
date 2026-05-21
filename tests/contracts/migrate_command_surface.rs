@@ -138,7 +138,7 @@ fn migrate_status_on_fresh_workspace_reports_up_to_date() -> TestResult {
         .get("schema")
         .and_then(Value::as_str)
         .ok_or_else(|| "missing schema".to_string())?;
-    if schema != "ee.response.v1" {
+    if schema != "ee.response.v2" {
         return Err(format!("schema mismatch: got {schema}"));
     }
     let up_to_date = json

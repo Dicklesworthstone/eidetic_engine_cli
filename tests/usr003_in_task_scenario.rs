@@ -293,7 +293,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
         &workspace,
         &["--workspace", workspace_arg.as_str(), "--json", "init"],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(init.dossier_dir.clone());
@@ -321,7 +321,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "Run cargo fmt --check, cargo clippy --all-targets -- -D warnings, and cargo test before tagging a release.",
         ],
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(rule.dossier_dir.clone());
@@ -354,7 +354,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "Release v0.1.4 failed because clippy errors slipped past local checks.",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(failure.dossier_dir.clone());
@@ -382,7 +382,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "rebuild",
         ],
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(rebuild.dossier_dir.clone());
@@ -405,7 +405,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "release clippy",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(search.dossier_dir.clone());
@@ -438,7 +438,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "4000",
         ],
         "fx.release_failure.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(context.dossier_dir.clone());
@@ -480,7 +480,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             rule_id.as_str(),
         ],
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(why.dossier_dir.clone());
@@ -538,7 +538,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "--fix-plan",
         ],
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(doctor.dossier_dir.clone());

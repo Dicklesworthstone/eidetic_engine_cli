@@ -1007,7 +1007,7 @@ fn boundary_log_accepts_clean_real_binary_json_step() -> TestResult {
     let dir = unique_dossier_dir("boundary-logging-clean")?.join("status");
     let output = run_ee(&["--json", "status"])?;
     write_step_artifacts(&dir, &output)?;
-    let record = make_record(&dir, &output, "ee.response.v1")?;
+    let record = make_record(&dir, &output, "ee.response.v2")?;
     write_boundary_log(&dir, &record)?;
 
     validate_boundary_log_extended(&dir.join("boundary-log.json"))
@@ -1021,7 +1021,7 @@ fn boundary_log_accepts_clean_real_binary_json_step() -> TestResult {
         "boundary log must use ee.e2e.boundary_log.v1 schema",
     )?;
     ensure(
-        observed_schema_from_stdout(&dir.join("stdout")) == "ee.response.v1",
+        observed_schema_from_stdout(&dir.join("stdout")) == "ee.response.v2",
         "observed stdout schema must be extracted for diagnostics",
     )
 }
@@ -1127,7 +1127,7 @@ fn boundary_log_accepts_runtime_budget_and_cancellation_envelopes() -> TestResul
     for case in cases {
         let dir = root.join(case.name);
         write_step_artifacts(&dir, &output)?;
-        let mut record = make_record(&dir, &output, "ee.response.v1")?;
+        let mut record = make_record(&dir, &output, "ee.response.v2")?;
         record.argv = case.argv.iter().map(|arg| (*arg).to_owned()).collect();
         record.exit_code = Some(case.exit_code);
         record.runtime_budget = case.runtime_budget;
@@ -1230,7 +1230,7 @@ fn boundary_log_records_real_binary_budgeted_index_dry_run() -> TestResult {
 
     let step_dir = root.join("index-rebuild-dry-run");
     write_step_artifacts(&step_dir, &output)?;
-    let mut record = make_record(&step_dir, &output, "ee.response.v1")?;
+    let mut record = make_record(&step_dir, &output, "ee.response.v2")?;
     record.argv = vec![
         "--workspace".to_owned(),
         workspace_arg,
@@ -1366,7 +1366,7 @@ fn boundary_log_rejects_inconsistent_runtime_envelopes() -> TestResult {
     for case in cases {
         let dir = root.join(case.name);
         write_step_artifacts(&dir, &output)?;
-        let mut record = make_record(&dir, &output, "ee.response.v1")?;
+        let mut record = make_record(&dir, &output, "ee.response.v2")?;
         (case.mutate)(&mut record);
         write_boundary_log(&dir, &record)?;
 
@@ -1423,7 +1423,7 @@ fn boundary_log_rejects_missing_required_field_and_unredacted_env() -> TestResul
     let env_dir = unique_dossier_dir("boundary-logging-env")?.join("status");
     let output = run_ee(&["--json", "status"])?;
     write_step_artifacts(&env_dir, &output)?;
-    let mut record = make_record(&env_dir, &output, "ee.response.v1")?;
+    let mut record = make_record(&env_dir, &output, "ee.response.v2")?;
     record.env_sanitized = json!({
         "EE_API_TOKEN": "raw-token",
         "SAFE_FLAG": "1"
@@ -1450,7 +1450,7 @@ fn boundary_log_rejects_stdout_pollution_and_schema_mismatch() -> TestResult {
     )
     .map_err(|error| error.to_string())?;
     fs::write(polluted_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
-    let polluted_record = make_record(&polluted_dir, &clean_output, "ee.response.v1")?;
+    let polluted_record = make_record(&polluted_dir, &clean_output, "ee.response.v2")?;
     write_boundary_log(&polluted_dir, &polluted_record)?;
     let pollution = validate_boundary_log(&polluted_dir.join("boundary-log.json"));
     ensure(
@@ -1466,11 +1466,11 @@ fn boundary_log_rejects_stdout_pollution_and_schema_mismatch() -> TestResult {
     )
     .map_err(|error| error.to_string())?;
     fs::write(mismatch_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
-    let mismatch_record = make_record(&mismatch_dir, &clean_output, "ee.response.v1")?;
+    let mismatch_record = make_record(&mismatch_dir, &clean_output, "ee.response.v2")?;
     write_boundary_log(&mismatch_dir, &mismatch_record)?;
     let mismatch = validate_boundary_log(&mismatch_dir.join("boundary-log.json"));
     let mismatch_failure = BoundaryLogFailure::SchemaMismatch {
-        expected: "ee.response.v1".to_owned(),
+        expected: "ee.response.v2".to_owned(),
         observed: "ee.other.v1".to_owned(),
     };
     ensure(
@@ -1479,7 +1479,7 @@ fn boundary_log_rejects_stdout_pollution_and_schema_mismatch() -> TestResult {
     )?;
     ensure(
         first_failure_for_boundary_failure(&BoundaryLogFailure::SchemaMismatch {
-            expected: "ee.response.v1".to_owned(),
+            expected: "ee.response.v2".to_owned(),
             observed: "ee.other.v1".to_owned(),
         }) == "schema_mismatch:ee.other.v1",
         "schema mismatch first failure code must be stable",
@@ -1512,7 +1512,7 @@ fn boundary_log_detects_unexpected_mutation() -> TestResult {
         exit_code: clean_output.status.code(),
         stdout_artifact_path: mutation_dir.join("stdout"),
         stderr_artifact_path: mutation_dir.join("stderr"),
-        expected_schema: "ee.response.v1".to_owned(),
+        expected_schema: "ee.response.v2".to_owned(),
         golden_path: None,
         golden_status: "not_applicable".to_owned(),
         redaction_status: "checked".to_owned(),
@@ -1566,7 +1566,7 @@ fn boundary_log_requires_forbidden_filesystem_operation_check() -> TestResult {
     .map_err(|error| error.to_string())?;
     fs::write(check_dir.join("stderr"), b"").map_err(|error| error.to_string())?;
 
-    let mut record = make_record(&check_dir, &clean_output, "ee.response.v1")?;
+    let mut record = make_record(&check_dir, &clean_output, "ee.response.v2")?;
     record.forbidden_filesystem_operations_checked = false;
     write_boundary_log(&check_dir, &record)?;
 
@@ -1629,7 +1629,7 @@ fn boundary_log_detects_missing_matrix_row() -> TestResult {
         exit_code: clean_output.status.code(),
         stdout_artifact_path: matrix_dir.join("stdout"),
         stderr_artifact_path: matrix_dir.join("stderr"),
-        expected_schema: "ee.response.v1".to_owned(),
+        expected_schema: "ee.response.v2".to_owned(),
         golden_path: None,
         golden_status: "not_applicable".to_owned(),
         redaction_status: "checked".to_owned(),
@@ -1720,7 +1720,7 @@ fn boundary_log_detects_missing_fixture_hash() -> TestResult {
         exit_code: clean_output.status.code(),
         stdout_artifact_path: fixture_dir.join("stdout"),
         stderr_artifact_path: fixture_dir.join("stderr"),
-        expected_schema: "ee.response.v1".to_owned(),
+        expected_schema: "ee.response.v2".to_owned(),
         golden_path: None,
         golden_status: "not_applicable".to_owned(),
         redaction_status: "checked".to_owned(),
@@ -1773,7 +1773,7 @@ fn boundary_log_renders_reproduction_command_and_summary_deterministically() -> 
 
     let status_dir = root.join("status");
     write_step_artifacts(&status_dir, &output)?;
-    let status_record = make_record(&status_dir, &output, "ee.response.v1")?;
+    let status_record = make_record(&status_dir, &output, "ee.response.v2")?;
     write_boundary_log(&status_dir, &status_record)?;
     ensure(
         status_record
@@ -1787,7 +1787,7 @@ fn boundary_log_renders_reproduction_command_and_summary_deterministically() -> 
 
     let agent_dir = root.join("agent-status");
     write_step_artifacts(&agent_dir, &output)?;
-    let mut agent_record = make_record(&agent_dir, &output, "ee.response.v1")?;
+    let mut agent_record = make_record(&agent_dir, &output, "ee.response.v2")?;
     agent_record.argv = vec!["--json".to_owned(), "agent".to_owned(), "status".to_owned()];
     agent_record.command_boundary_matrix_row = Some("agent".to_owned());
     agent_record.reproduction_command =

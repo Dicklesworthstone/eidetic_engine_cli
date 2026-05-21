@@ -120,7 +120,7 @@ fn assert_cli_preflight_run_stdout_clean(args: &[&str], display: &str, code: &st
         .map_err(|error| format!("stdout was not parseable JSON: {error}"))?;
     ensure_equal(
         &value["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "public CLI preflight schema",
     )?;
     ensure_equal(

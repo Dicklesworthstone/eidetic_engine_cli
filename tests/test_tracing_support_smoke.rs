@@ -22,8 +22,8 @@ fn test_tracing_helper_emits_normalized_jsonl_contract() -> TestResult {
     );
     trace.verify(
         "minimal_fixture",
-        "ee.response.v1",
-        "ee.response.v1",
+        "ee.response.v2",
+        "ee.response.v2",
         "schema matched",
     );
     trace.teardown("minimal_fixture", "removed temp workspace");

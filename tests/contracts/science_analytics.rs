@@ -123,7 +123,7 @@ fn parse_json_stdout(output: Output, context: &str) -> Result<JsonValue, String>
 fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult {
     ensure_json_equal(
         payload.get("schema").ok_or("missing schema")?,
-        &json!("ee.response.v1"),
+        &json!("ee.response.v2"),
         context,
     )?;
     ensure_json_equal(
@@ -166,7 +166,7 @@ fn assert_eval_report_payload(payload: &JsonValue, context: &str) -> TestResult 
 fn assert_eval_list_payload(payload: &JsonValue, context: &str) -> TestResult {
     ensure_json_equal(
         payload.get("schema").ok_or("missing schema")?,
-        &json!("ee.response.v1"),
+        &json!("ee.response.v2"),
         context,
     )?;
     ensure_json_equal(

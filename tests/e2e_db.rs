@@ -65,7 +65,7 @@ fn e2e_db_contract_exercises_real_initialized_workspace() {
         OsString::from("--json"),
     ]);
     assert_eq!(status_exit, ee::models::ProcessExitCode::Success);
-    assert_eq!(status["schema"], Value::String("ee.response.v1".into()));
+    assert_eq!(status["schema"], Value::String("ee.response.v2".into()));
     assert_eq!(status["data"]["command"], Value::String("db status".into()));
     let status_report = &status["data"]["report"];
     assert_eq!(status_report["exists"], Value::Bool(true));

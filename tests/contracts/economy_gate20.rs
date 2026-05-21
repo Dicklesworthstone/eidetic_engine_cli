@@ -172,7 +172,7 @@ fn run_json_with_exit(args: &[&str], expected_exit: i32) -> Result<JsonValue, St
 fn assert_success_envelope(actual: &JsonValue, command: &str, payload_key: &str) -> TestResult {
     ensure_json_equal(
         actual.get("schema"),
-        JsonValue::String("ee.response.v1".to_string()),
+        JsonValue::String("ee.response.v2".to_string()),
         "economy success envelope schema",
     )?;
     ensure_json_equal(

@@ -60,7 +60,7 @@ fn response_envelope_uses_stable_schema() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(output.status.success(), "ee status should succeed")?;
-    ensure_contains(&stdout, "ee.response.v1", "response schema version")
+    ensure_contains(&stdout, "ee.response.v2", "response schema version")
 }
 
 #[test]
@@ -69,7 +69,7 @@ fn check_command_returns_posture_without_crash() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(output.status.success(), "ee check should succeed")?;
-    ensure_contains(&stdout, "ee.response.v1", "check response schema")?;
+    ensure_contains(&stdout, "ee.response.v2", "check response schema")?;
     ensure_contains(&stdout, "posture", "posture field in check output")
 }
 
@@ -79,7 +79,7 @@ fn doctor_command_returns_health_without_crash() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(output.status.success(), "ee doctor should succeed")?;
-    ensure_contains(&stdout, "ee.response.v1", "doctor response schema")
+    ensure_contains(&stdout, "ee.response.v2", "doctor response schema")
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn capabilities_reports_subsystem_status() -> TestResult {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(output.status.success(), "ee capabilities should succeed")?;
-    ensure_contains(&stdout, "ee.response.v1", "capabilities response schema")?;
+    ensure_contains(&stdout, "ee.response.v2", "capabilities response schema")?;
     ensure_contains(&stdout, "subsystems", "subsystems field in capabilities")
 }
 
@@ -140,7 +140,7 @@ fn toon_format_produces_structured_output() -> TestResult {
         "ee status --format toon should succeed",
     )?;
     ensure_contains(&stdout, "schema:", "TOON format has schema field")?;
-    ensure_contains(&stdout, "ee.response.v1", "TOON format has response schema")
+    ensure_contains(&stdout, "ee.response.v2", "TOON format has response schema")
 }
 
 #[test]

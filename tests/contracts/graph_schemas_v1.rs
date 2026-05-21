@@ -126,7 +126,7 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
 
     ensure_eq(
         json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "ee insights envelope",
         "schema",
     )?;

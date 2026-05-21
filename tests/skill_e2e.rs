@@ -136,7 +136,7 @@ fn all_skills_have_required_sections() -> TestResult {
 
 #[test]
 fn all_skills_reference_ee_evidence_commands() -> TestResult {
-    let required_patterns = ["ee status", "ee.response.v1", "--json"];
+    let required_patterns = ["ee status", "ee.response.v2", "--json"];
     for (name, content, _) in ALL_SKILLS {
         for pattern in required_patterns {
             if !content.contains(pattern) {

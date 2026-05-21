@@ -276,7 +276,7 @@ fn parse_json_output(output: Output, context: &str) -> Result<serde_json::Value,
 fn ensure_success(value: &serde_json::Value, context: &str) -> TestResult {
     ensure_equal(
         json_field(value, &["schema"], &format!("{context} response schema"))?,
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         &format!("{context} response schema"),
     )?;
     ensure_equal(

@@ -222,7 +222,7 @@ fn perf_compare_json_success_is_read_only_and_stdout_only() -> TestResult {
 
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "perf compare response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
@@ -337,7 +337,7 @@ fn perf_budget_check_profile_mismatch_degrades_but_stays_read_only() -> TestResu
         .map_err(|error| format!("perf budget check stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -856,7 +856,7 @@ fn parse_logged_response(run: &LoggedEeRun, context: &str) -> Result<serde_json:
         .map_err(|error| format!("{context} stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         context,
     )?;
     ensure_equal(&json["success"], &serde_json::json!(true), context)?;
@@ -1158,7 +1158,7 @@ fn profile_config_plan_and_apply_json_are_stable_machine_data() -> TestResult {
         .map_err(|error| format!("profile config plan stdout must be JSON: {error}"))?;
     ensure_equal(
         &plan_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "profile config plan outer schema",
     )?;
     ensure_equal(
@@ -1335,7 +1335,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &workspace,
         None,
         "fx.model.status.empty.v2",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let status_empty_json = parse_logged_response(&status_empty, "model status empty")?;
@@ -1418,7 +1418,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &workspace,
         None,
         "fx.model.status.registry.v2",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let status_registry_json = parse_logged_response(&status_registry, "model status registry")?;
@@ -1450,7 +1450,7 @@ fn model_status_and_list_json_report_registry_contracts() -> TestResult {
         &workspace,
         None,
         "fx.model.list.registry.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let list_json = parse_logged_response(&list, "model list registry")?;
@@ -1514,7 +1514,7 @@ fn status_workspace_reports_ambiguity_diagnostics() -> TestResult {
         .map_err(|error| format!("status ambiguity stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "status schema",
     )?;
     ensure_equal(
@@ -1838,7 +1838,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1851,7 +1851,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.fresh_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1872,7 +1872,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1898,7 +1898,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1916,7 +1916,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1933,7 +1933,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -1970,7 +1970,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2007,7 +2007,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2042,7 +2042,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.cass_v1.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2065,7 +2065,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2089,7 +2089,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.manual_memory.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2117,7 +2117,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &client_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2172,7 +2172,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &billing_workspace,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2211,7 +2211,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &root,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -2246,7 +2246,7 @@ fn workspace_continuity_scenario_keeps_context_scoped() -> TestResult {
         &ambiguous_outer,
         None,
         "fx.multi_workspace.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
         Some(&ambiguous_leaf),
@@ -2396,7 +2396,7 @@ fn curate_candidates_json_lists_empty_pending_queue() -> TestResult {
         &workspace,
         None,
         "fx.curate_candidates.empty.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let stdout = String::from_utf8_lossy(&run.output.stdout);
@@ -2411,7 +2411,7 @@ fn curate_candidates_json_lists_empty_pending_queue() -> TestResult {
         .map_err(|error| format!("curate candidates stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "outer schema",
     )?;
     ensure_equal(&json["success"], &serde_json::json!(true), "success")?;
@@ -2718,7 +2718,7 @@ fn curate_validate_json_approves_pending_candidate() -> TestResult {
         &workspace,
         None,
         "fx.curate_validate.approve.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let stdout = String::from_utf8_lossy(&run.output.stdout);
@@ -2733,7 +2733,7 @@ fn curate_validate_json_approves_pending_candidate() -> TestResult {
         .map_err(|error| format!("curate validate stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "outer schema",
     )?;
     ensure_equal(
@@ -2872,7 +2872,7 @@ fn curate_apply_json_updates_approved_candidate_target() -> TestResult {
         &workspace,
         None,
         "fx.curate_apply.approved.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let stdout = String::from_utf8_lossy(&run.output.stdout);
@@ -2887,7 +2887,7 @@ fn curate_apply_json_updates_approved_candidate_target() -> TestResult {
         .map_err(|error| format!("curate apply stdout must be JSON: {error}"))?;
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "outer schema",
     )?;
     ensure_equal(
@@ -3261,7 +3261,7 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &workspace,
         None,
         "fx.curate_review.accept.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let accept_json = parse_logged_response(&accept, "curate accept")?;
@@ -3305,7 +3305,7 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &workspace,
         None,
         "fx.curate_review.reject.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let reject_json = parse_logged_response(&reject, "curate reject")?;
@@ -3351,7 +3351,7 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &workspace,
         None,
         "fx.curate_review.snooze.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let snooze_json = parse_logged_response(&snooze, "curate snooze")?;
@@ -3401,7 +3401,7 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
         &workspace,
         None,
         "fx.curate_review.merge.v1",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     let merge_json = parse_logged_response(&merge, "curate merge")?;
@@ -3748,7 +3748,7 @@ fn import_cass_json_uses_cass_robot_contract_and_is_idempotent() -> TestResult {
         .map_err(|error| format!("first import stdout must be JSON: {error}"))?;
     ensure_equal(
         &first_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "first envelope schema",
     )?;
     ensure_equal(
@@ -4064,7 +4064,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
             &workspace,
             None,
             "lp4p7.real_cass.import_degraded",
-            "ee.response.v1",
+            "ee.response.v2",
             None,
             &envs,
         )?;
@@ -4084,7 +4084,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         if import_run.output.status.success() {
             ensure_equal(
                 &import_json["schema"],
-                &serde_json::json!("ee.response.v1"),
+                &serde_json::json!("ee.response.v2"),
                 "CASS import fallback response schema",
             )?;
             ensure_equal(
@@ -4144,7 +4144,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         &workspace,
         None,
         "lp4p7.real_cass.import",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -4235,7 +4235,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         &workspace,
         None,
         "lp4p7.real_cass.index_rebuild",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -4262,7 +4262,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         &workspace,
         None,
         "lp4p7.real_cass.search",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -4304,7 +4304,7 @@ fn import_cass_real_robot_output_retrieves_evidence_with_provenance() -> TestRes
         &workspace,
         None,
         "lp4p7.real_cass.context",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
         &envs,
     )?;
@@ -4571,7 +4571,7 @@ fn backup_create_json_writes_redacted_artifacts_and_manifest() -> TestResult {
         .map_err(|error| format!("backup stdout must be JSON: {error}"))?;
     ensure_equal(
         &backup_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(
@@ -5153,7 +5153,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-init",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("init", init.dossier_dir.clone()));
@@ -5181,7 +5181,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-remember-procedural-rule",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("remember-rule", remember_rule.dossier_dir.clone()));
@@ -5218,7 +5218,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-remember-temporal-fact",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("remember-fact", remember_fact.dossier_dir.clone()));
@@ -5245,7 +5245,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-memory-index-rebuild",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("memory-index-rebuild", memory_rebuild.dossier_dir.clone()));
@@ -5284,7 +5284,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         Some(&query_file),
         "lp4p2-query-file-pack",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/query_file_context_pack.json.golden"),
     )?;
     command_dossiers.push(("query-file-pack", pack.dossier_dir.clone()));
@@ -5307,7 +5307,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-why-after-pack",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("why-after-pack", why_after_pack.dossier_dir.clone()));
@@ -5354,7 +5354,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-artifact-register",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("artifact-register", artifact_register.dossier_dir.clone()));
@@ -5382,7 +5382,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-artifact-index-rebuild",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push((
@@ -5408,7 +5408,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-search",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("search", search.dossier_dir.clone()));
@@ -5434,7 +5434,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-context-artifact-link",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("context", context.dossier_dir.clone()));
@@ -5466,7 +5466,7 @@ fn expanded_memory_substrate_composition_logged_e2e_scenario() -> TestResult {
         &workspace,
         None,
         "lp4p2-support-bundle-dry-run",
-        "ee.response.v1",
+        "ee.response.v2",
         None,
     )?;
     command_dossiers.push(("support-bundle", support.dossier_dir.clone()));
@@ -5848,7 +5848,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         .map_err(|error| format!("context stdout must be JSON: {error}"))?;
     ensure_equal(
         &context_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "context schema",
     )?;
 
@@ -5877,7 +5877,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         &workspace,
         Some(&query_file),
         "d19r-valid-query-file-json-pack",
-        "ee.response.v1",
+        "ee.response.v2",
         Some("tests/fixtures/golden/agent/query_file_context_pack.json.golden"),
     )?;
     let pack_dossier_dir = pack_run.dossier_dir.clone();
@@ -5892,7 +5892,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
         .map_err(|error| format!("pack query-file stdout must be JSON: {error}"))?;
     ensure_equal(
         &pack_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "pack query-file schema",
     )?;
     ensure_equal(
@@ -6211,7 +6211,7 @@ fn index_reembed_json_rebuilds_index_and_records_job() -> TestResult {
         .map_err(|error| format!("reembed stdout must be JSON: {error}"))?;
     ensure_equal(
         &reembed_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "reembed schema",
     )?;
     ensure_equal(
@@ -7563,7 +7563,7 @@ fn integration_foundation_response_envelope_schema() -> TestResult {
 
     ensure_equal(
         &json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response envelope schema must be ee.response.v1",
     )?;
     ensure(
@@ -7834,7 +7834,7 @@ fn contract_drift_response_schema_is_used() -> TestResult {
     let schema = json["schema"].as_str();
     ensure(schema.is_some(), "JSON output must have schema field")?;
     ensure(
-        schema == Some("ee.response.v1"),
+        schema == Some("ee.response.v2"),
         format!(
             "successful command must use ee.response.v1, got {:?}",
             schema
@@ -8008,7 +8008,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .map_err(|error| format!("init stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &init_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "init schema",
     )?;
     ensure_no_ansi(&init_stdout, "init stdout")?;
@@ -8217,7 +8217,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .map_err(|error| format!("context --json stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &context_json_parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "context --json schema",
     )?;
     ensure_no_ansi(
@@ -8270,7 +8270,7 @@ fn walking_skeleton_durability_scenario() -> TestResult {
         .map_err(|error| format!("why stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &why_json["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "why schema",
     )?;
     ensure(
@@ -8312,7 +8312,7 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
         .map_err(|error| format!("mcp manifest stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
@@ -8364,7 +8364,7 @@ fn mcp_manifest_json_real_binary_smoke() -> TestResult {
     ensure(
         schemas
             .iter()
-            .any(|schema| schema["id"] == "ee.response.v1"),
+            .any(|schema| schema["id"] == "ee.response.v2"),
         "manifest should include the response envelope schema",
     )?;
     ensure(
@@ -8455,7 +8455,7 @@ fn mcp_validate_json_real_binary_smoke() -> TestResult {
         .map_err(|error| format!("mcp validate stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
@@ -8537,7 +8537,7 @@ fn mcp_serve_stdio_default_build_reports_capability_gap() -> TestResult {
         .map_err(|error| format!("mcp serve-stdio stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
@@ -8661,7 +8661,7 @@ fn daemon_foreground_once_json_runs_real_health_job_in_isolated_workspace() -> T
         .map_err(|error| format!("daemon stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;
@@ -8745,7 +8745,7 @@ fn insights_section_pagination_json_is_deterministic_and_stdout_only() -> TestRe
         .map_err(|error| format!("insights stdout must be valid JSON: {error}"))?;
     ensure_equal(
         &parsed["schema"],
-        &serde_json::json!("ee.response.v1"),
+        &serde_json::json!("ee.response.v2"),
         "response schema",
     )?;
     ensure_equal(&parsed["success"], &serde_json::json!(true), "success")?;

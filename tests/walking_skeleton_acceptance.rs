@@ -87,7 +87,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     // ---- Criterion 1 + 2: all commands work without daemon, stable JSON ----
     let init = run_ee(&workspace, &["init", "--json"])?;
     require_ok(&init, "init")?;
-    require_schema(&stdout_json(&init, "init")?, "ee.response.v1", "init")?;
+    require_schema(&stdout_json(&init, "init")?, "ee.response.v2", "init")?;
 
     let remember = run_ee(
         &workspace,
@@ -103,7 +103,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     )?;
     require_ok(&remember, "remember")?;
     let remember_json = stdout_json(&remember, "remember")?;
-    require_schema(&remember_json, "ee.response.v1", "remember")?;
+    require_schema(&remember_json, "ee.response.v2", "remember")?;
 
     // Capture the memory_id for later why-explanation assertions.
     let memory_id = remember_json
@@ -131,7 +131,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     )?;
     require_ok(&search, "search")?;
     let search_json = stdout_json(&search, "search")?;
-    require_schema(&search_json, "ee.response.v1", "search")?;
+    require_schema(&search_json, "ee.response.v2", "search")?;
 
     // Either we got at least one result OR we got a degraded notice
     // explaining the absence — never silent zero-score returns.
@@ -166,7 +166,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     )?;
     require_ok(&context, "context")?;
     let context_json = stdout_json(&context, "context")?;
-    require_schema(&context_json, "ee.response.v1", "context")?;
+    require_schema(&context_json, "ee.response.v2", "context")?;
     let items = context_json
         .pointer("/data/pack/items")
         .and_then(serde_json::Value::as_array)
@@ -194,7 +194,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     let why = run_ee(&workspace, &["why", &memory_id, "--json"])?;
     require_ok(&why, "why")?;
     let why_json = stdout_json(&why, "why")?;
-    require_schema(&why_json, "ee.response.v1", "why")?;
+    require_schema(&why_json, "ee.response.v2", "why")?;
     for field in ["storage", "retrieval", "selection"] {
         if why_json.pointer(&format!("/data/{field}")).is_none() {
             return Err(format!(
@@ -237,7 +237,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     let status = run_ee(&workspace, &["status", "--json"])?;
     require_ok(&status, "status")?;
     let status_json = stdout_json(&status, "status")?;
-    require_schema(&status_json, "ee.response.v1", "status")?;
+    require_schema(&status_json, "ee.response.v2", "status")?;
     let capabilities = status_json
         .pointer("/data/capabilities")
         .and_then(serde_json::Value::as_object)

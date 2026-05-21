@@ -147,7 +147,7 @@ fn eval_report_summarizes_fixture_hashes_and_first_failure_with_logged_binary_ru
     )?;
 
     let report_json = parse_stdout_json(&report_output, "eval report")?;
-    ensure(report_json["schema"] == "ee.response.v1", "response schema")?;
+    ensure(report_json["schema"] == "ee.response.v2", "response schema")?;
     ensure(report_json["success"] == true, "response success")?;
     ensure(
         report_json["data"]["command"] == "eval report",

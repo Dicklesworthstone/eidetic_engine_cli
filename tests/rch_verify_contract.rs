@@ -207,7 +207,7 @@ fn write_fake_build_admission_ee(name: &str, admitted: bool) -> Result<PathBuf, 
             r#"#!/usr/bin/env bash
 set -euo pipefail
 cat <<'JSON'
-{{"schema":"ee.response.v1","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":1024,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}},{{"label":"cargo_target","path":"/Volumes/USBNVME16TB/temp_agent_space/cargo-target","bytesAvailable":9000000000000,"minFreeBytes":1073741824,"admitted":true,"externalRequired":true,"external":true}}],"degraded":{degraded}}}}}
+{{"schema":"ee.response.v2","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":1024,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}},{{"label":"cargo_target","path":"/Volumes/USBNVME16TB/temp_agent_space/cargo-target","bytesAvailable":9000000000000,"minFreeBytes":1073741824,"admitted":true,"externalRequired":true,"external":true}}],"degraded":{degraded}}}}}
 JSON
 "#,
         ),
@@ -235,7 +235,7 @@ if [ "${{1:-}}" = "--version" ]; then
   exit 0
 fi
 cat <<'JSON'
-{{"schema":"ee.response.v1","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":9000000000,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}}],"degraded":{degraded}}}}}
+{{"schema":"ee.response.v2","success":true,"data":{{"schema":"ee.build_admission.diagnostics.v1","admitted":{status},"minFreeBytes":1073741824,"checks":[{{"label":"workspace","path":"/tmp/ws","bytesAvailable":9000000000,"minFreeBytes":1073741824,"admitted":{status},"externalRequired":false,"external":false}}],"degraded":{degraded}}}}}
 JSON
 "#,
         ),

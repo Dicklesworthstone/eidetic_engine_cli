@@ -153,7 +153,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
         "init exit code",
     )?;
     let init_json = stdout_json(&init_output)?;
-    assert_schema(&init_json, "ee.response.v1", "init")?;
+    assert_schema(&init_json, "ee.response.v2", "init")?;
 
     // Step 2: ee remember (add 3 memories)
     let memories = [
@@ -184,7 +184,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
         let remember_json = stdout_json(&remember_output)?;
         assert_schema(
             &remember_json,
-            "ee.response.v1",
+            "ee.response.v2",
             &format!("remember '{content}'"),
         )?;
 
@@ -216,11 +216,11 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
         "search exit code",
     )?;
     let search_json = stdout_json(&search_output)?;
-    assert_schema(&search_json, "ee.response.v1", "search")?;
+    assert_schema(&search_json, "ee.response.v2", "search")?;
     trace.verify(
         "core_workflow",
-        "ee.response.v1",
-        "ee.response.v1",
+        "ee.response.v2",
+        "ee.response.v2",
         "search schema matched",
     );
 
@@ -250,7 +250,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
         "context exit code",
     )?;
     let context_json = stdout_json(&context_output)?;
-    assert_schema(&context_json, "ee.response.v1", "context")?;
+    assert_schema(&context_json, "ee.response.v2", "context")?;
 
     // Verify context pack has items
     let pack_items = context_json
@@ -271,7 +271,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
             "why exit code",
         )?;
         let why_json = stdout_json(&why_output)?;
-        assert_schema(&why_json, "ee.response.v1", "why")?;
+        assert_schema(&why_json, "ee.response.v2", "why")?;
 
         // Verify why has explanation data
         let has_storage = why_json.pointer("/data/storage").is_some();
@@ -339,7 +339,7 @@ fn context_and_why_report_changed_file_provenance() -> TestResult {
     ensure_equal(&context.status.code(), &Some(EXIT_SUCCESS), "context")?;
     assert_stderr_empty(&context, "context")?;
     let context_json = stdout_json(&context)?;
-    assert_schema(&context_json, "ee.response.v1", "context")?;
+    assert_schema(&context_json, "ee.response.v2", "context")?;
     ensure(
         degraded_codes(&context_json).contains(&"context_evidence_freshness_changed_source"),
         "context should report changed source evidence freshness",
@@ -349,7 +349,7 @@ fn context_and_why_report_changed_file_provenance() -> TestResult {
     ensure_equal(&why.status.code(), &Some(EXIT_SUCCESS), "why")?;
     assert_stderr_empty(&why, "why")?;
     let why_json = stdout_json(&why)?;
-    assert_schema(&why_json, "ee.response.v1", "why")?;
+    assert_schema(&why_json, "ee.response.v2", "why")?;
     ensure(
         degraded_codes(&why_json).contains(&"why_evidence_freshness_changed_source"),
         "why should report changed source evidence freshness",
@@ -525,7 +525,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         assert_stderr_empty(&context, &format!("context {max_tokens}"))?;
         let context_json = stdout_json(&context)?;
         persist_json_artifact(&format!("pack_context_context_{max_tokens}"), &context_json);
-        assert_schema(&context_json, "ee.response.v1", "context")?;
+        assert_schema(&context_json, "ee.response.v2", "context")?;
         let requested_tokens = max_tokens
             .parse::<u64>()
             .map_err(|error| error.to_string())?;
@@ -611,7 +611,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         assert_stderr_empty(&why, &format!("why {memory_id}"))?;
         let why_json = stdout_json(&why)?;
         persist_json_artifact(&format!("pack_context_why_{memory_id}"), &why_json);
-        assert_schema(&why_json, "ee.response.v1", "why")?;
+        assert_schema(&why_json, "ee.response.v2", "why")?;
         ensure_equal(
             &json_str(&why_json, "/data/memoryId", "why")?,
             &memory_id.as_str(),

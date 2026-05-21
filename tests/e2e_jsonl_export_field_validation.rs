@@ -189,7 +189,7 @@ fn import_jsonl_rejects_blank_memory_id_with_issue_code() -> TestResult {
     )?;
     ensure_equal(
         &parsed.pointer("/schema"),
-        &Some(&json!("ee.response.v1")),
+        &Some(&json!("ee.response.v2")),
         "response schema",
     )?;
     ensure_equal(

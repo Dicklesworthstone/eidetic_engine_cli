@@ -572,7 +572,7 @@ fn command_boundary_matrix_has_required_columns_and_complete_rows() -> Result<()
             "matrix row must include workflow, data source, side-effect, and runtime posture: {row:?}"
         );
         assert!(
-            schema.contains("ee.response.v1") || schema.contains("ee.error.v2"),
+            schema.contains("ee.response.v2") || schema.contains("ee.error.v2"),
             "matrix row must name machine schema expectation: {row:?}"
         );
         assert!(
