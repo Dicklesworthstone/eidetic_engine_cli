@@ -448,7 +448,10 @@ fn lock_database_write_file(database_path: &Path) -> Result<File> {
                     if (error == Errno::WOULDBLOCK || error == Errno::AGAIN)
                         && attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS
                     {
-                        std::thread::sleep(advisory_lock_retry_delay(attempt));
+                        sleep_retry_delay_or_cancel(
+                            DbOperation::BeginTransaction,
+                            advisory_lock_retry_delay(attempt),
+                        )?;
                         continue;
                     }
                     return Err(DbError::InvalidPath {
@@ -892,7 +895,10 @@ impl DbConnection {
                             last_retryable_error = Some(error);
                             drop(write_owner);
                             if attempt + 1 < MAX_ATTEMPTS {
-                                std::thread::sleep(advisory_lock_retry_delay(attempt));
+                                sleep_retry_delay_or_cancel(
+                                    DbOperation::BeginTransaction,
+                                    advisory_lock_retry_delay(attempt),
+                                )?;
                             }
                         }
                         Err(error) => return Err(error),
@@ -1567,6 +1573,15 @@ const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
 
 fn retry_sqlite_contention<T>(
     retry_operation: DbOperation,
+    operation: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let cx = asupersync::Cx::current();
+    retry_sqlite_contention_with_cx(retry_operation, cx.as_ref(), operation)
+}
+
+fn retry_sqlite_contention_with_cx<T>(
+    retry_operation: DbOperation,
+    cx: Option<&asupersync::Cx>,
     mut operation: impl FnMut() -> Result<T>,
 ) -> Result<T> {
     let mut last_retryable_error = None;
@@ -1577,7 +1592,11 @@ fn retry_sqlite_contention<T>(
             Err(error) if db_error_is_transient_sqlite_contention(&error) => {
                 last_retryable_error = Some(error);
                 if attempt + 1 < SQLITE_CONTENTION_MAX_ATTEMPTS {
-                    std::thread::sleep(advisory_lock_retry_delay(attempt));
+                    sleep_retry_delay_or_cancel_with_cx(
+                        retry_operation,
+                        advisory_lock_retry_delay(attempt),
+                        cx,
+                    )?;
                 }
             }
             Err(error) => return Err(error),
@@ -1593,7 +1612,15 @@ fn retry_sqlite_contention<T>(
     }
 }
 
-fn retry_file_database_open<T>(mut open_once: impl FnMut() -> Result<T>) -> Result<T> {
+fn retry_file_database_open<T>(open_once: impl FnMut() -> Result<T>) -> Result<T> {
+    let cx = asupersync::Cx::current();
+    retry_file_database_open_with_cx(cx.as_ref(), open_once)
+}
+
+fn retry_file_database_open_with_cx<T>(
+    cx: Option<&asupersync::Cx>,
+    mut open_once: impl FnMut() -> Result<T>,
+) -> Result<T> {
     let mut last_retryable_error = None;
 
     for attempt in 0..FILE_DATABASE_OPEN_MAX_ATTEMPTS {
@@ -1602,7 +1629,11 @@ fn retry_file_database_open<T>(mut open_once: impl FnMut() -> Result<T>) -> Resu
             Err(error) if database_open_error_is_retryable(&error) => {
                 last_retryable_error = Some(error);
                 if attempt + 1 < FILE_DATABASE_OPEN_MAX_ATTEMPTS {
-                    std::thread::sleep(advisory_lock_retry_delay(attempt));
+                    sleep_retry_delay_or_cancel_with_cx(
+                        DbOperation::OpenReadWrite,
+                        advisory_lock_retry_delay(attempt),
+                        cx,
+                    )?;
                 }
             }
             Err(error) => return Err(error),
@@ -15668,27 +15699,34 @@ fn advisory_lock_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
-// NOTE ON Asupersync / CANCELLATION CONTRACT (as of 2026-05 ownership-posture review):
-// The retry loops that call `std::thread::sleep(advisory_lock_retry_delay(...))` (in
-// `retry_file_database_open`, `retry_sqlite_contention`, advisory lock acquisition,
-// and the write-owner begin_tx path) use a hard OS thread sleep.
-//
-// Per AGENTS.md and the core architecture, all long-running/contended work should
-// respect `&Cx`, `Outcome`, budgets, and cancellation via asupersync. `thread::sleep`
-// cannot be cancelled and does not participate in structured concurrency.
-//
-// Current mitigation (best judgement at time of review):
-// - Total backoff across all attempts is intentionally capped at < ~400 ms (16 attempts
-//   at 50 ms cap).
-// - The primary callers for the hot query contention path are bounded.
-// - DB open paths are synchronous CLI entry points (init, workspace resolution).
-//
-// TODO (follow-up bead): Provide a Cx-aware variant of the retry helpers that accepts
-// `Option<&Cx>` and uses `asupersync::time::sleep(cx.now(), dur).await` (see steward/mod.rs
-// for the pattern) when a Cx is supplied, falling back to thread::sleep only for
-// truly synchronous open. When that lands, remove this note and the `std::thread::sleep`
-// calls in async-reachable paths. The write-owner flock + process gate remain the
-// correct safety mechanism; only the *waiting* strategy needs to become cancellation-aware.
+pub(crate) fn sleep_retry_delay_or_cancel(operation: DbOperation, delay: Duration) -> Result<()> {
+    let cx = asupersync::Cx::current();
+    sleep_retry_delay_or_cancel_with_cx(operation, delay, cx.as_ref())
+}
+
+fn sleep_retry_delay_or_cancel_with_cx(
+    operation: DbOperation,
+    delay: Duration,
+    cx: Option<&asupersync::Cx>,
+) -> Result<()> {
+    checkpoint_retry_cx(operation, cx)?;
+    let mut remaining = delay;
+    while !remaining.is_zero() {
+        let chunk = remaining.min(Duration::from_millis(5));
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+        checkpoint_retry_cx(operation, cx)?;
+    }
+    Ok(())
+}
+
+fn checkpoint_retry_cx(operation: DbOperation, cx: Option<&asupersync::Cx>) -> Result<()> {
+    let Some(cx) = cx else {
+        return Ok(());
+    };
+    cx.checkpoint()
+        .map_err(|_| DbError::sqlmodel(operation, sqlmodel_core::Error::Cancelled))
+}
 
 /// Result of attempting to acquire an advisory lock.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15788,7 +15826,10 @@ impl DbConnection {
                 Err(error) if advisory_lock_error_is_retryable(&error) => {
                     last_retryable_error = Some(error);
                     if attempt + 1 < MAX_ATTEMPTS {
-                        std::thread::sleep(advisory_lock_retry_delay(attempt));
+                        sleep_retry_delay_or_cancel(
+                            DbOperation::Execute,
+                            advisory_lock_retry_delay(attempt),
+                        )?;
                     }
                 }
                 Err(error) => return Err(error),
@@ -17450,6 +17491,24 @@ mod tests {
         )
     }
 
+    fn ensure_cancelled_retry_error(
+        result: super::Result<impl fmt::Debug>,
+        expected_operation: DbOperation,
+    ) -> TestResult {
+        match result {
+            Err(DbError::SqlModel { operation, source }) => {
+                ensure_equal(&operation, &expected_operation, "cancelled retry operation")?;
+                ensure(
+                    matches!(source.as_ref(), sqlmodel_core::Error::Cancelled),
+                    format!("cancelled retry should return sqlmodel cancellation, got {source:?}"),
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "expected cancelled retry error, got {other:?}"
+            ))),
+        }
+    }
+
     fn table_exists(
         connection: &DbConnection,
         table_name: &str,
@@ -17833,6 +17892,23 @@ mod tests {
     }
 
     #[test]
+    fn file_database_open_retry_cancelled_cx_stops_before_second_attempt() -> TestResult {
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(
+            asupersync::CancelReason::timeout().with_message("file database open retry cancelled"),
+        );
+        let mut attempts = 0;
+        let result: super::Result<usize> =
+            super::retry_file_database_open_with_cx(Some(&cx), || {
+                attempts += 1;
+                Err(read_write_open_error("database is busy"))
+            });
+
+        ensure_cancelled_retry_error(result, DbOperation::OpenReadWrite)?;
+        ensure_equal(&attempts, &1, "cancelled open retry attempts")
+    }
+
+    #[test]
     fn sqlite_contention_retry_succeeds_after_query_lock_errors() -> TestResult {
         let mut attempts = 0;
         let value = super::retry_sqlite_contention(DbOperation::Query, || {
@@ -17852,6 +17928,29 @@ mod tests {
 
         ensure_equal(&value, &3, "query retry value")?;
         ensure_equal(&attempts, &3, "query retry attempts")
+    }
+
+    #[test]
+    fn sqlite_contention_retry_cancelled_cx_stops_before_second_attempt() -> TestResult {
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(
+            asupersync::CancelReason::timeout().with_message("sqlite retry cancelled"),
+        );
+        let mut attempts = 0;
+        let result: super::Result<usize> =
+            super::retry_sqlite_contention_with_cx(DbOperation::Query, Some(&cx), || {
+                attempts += 1;
+                Err(DbError::sqlmodel(
+                    DbOperation::Query,
+                    sqlmodel_query_error(
+                        sqlmodel_core::error::QueryErrorKind::Database,
+                        "database is locked",
+                    ),
+                ))
+            });
+
+        ensure_cancelled_retry_error(result, DbOperation::Query)?;
+        ensure_equal(&attempts, &1, "cancelled sqlite retry attempts")
     }
 
     #[test]
@@ -17880,6 +17979,26 @@ mod tests {
             "permanent query error should surface unchanged",
         )?;
         ensure_equal(&attempts, &1, "permanent query error attempts")
+    }
+
+    #[test]
+    fn retry_sleep_cancelled_cx_returns_without_waiting() -> TestResult {
+        let cx = asupersync::Cx::for_testing();
+        cx.set_cancel_reason(
+            asupersync::CancelReason::timeout().with_message("retry sleep cancelled"),
+        );
+        let started = std::time::Instant::now();
+        let result: super::Result<()> = super::sleep_retry_delay_or_cancel_with_cx(
+            DbOperation::Execute,
+            Duration::from_secs(1),
+            Some(&cx),
+        );
+
+        ensure_cancelled_retry_error(result, DbOperation::Execute)?;
+        ensure(
+            started.elapsed() < Duration::from_millis(50),
+            "pre-cancelled retry sleep must return promptly",
+        )
     }
 
     #[test]

@@ -32,8 +32,9 @@ use crate::curate::{CandidateSource, CandidateStatus, CandidateType};
 use crate::db::{
     ApplyMemoryLevelTransitionInput, CreateAuditInput, CreateCurationCandidateInput,
     CreateMemoryInput, CreateMemoryLinkInput, CreateSearchIndexJobInput, CreateWorkspaceInput,
-    DbConnection, MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource, SearchIndexJobType,
-    StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id, generate_audit_id_seeded,
+    DbConnection, DbOperation, MemoryContentSimHash, MemoryLinkRelation, MemoryLinkSource,
+    SearchIndexJobType, StoredMemory, StoredMemoryLink, audit_actions, generate_audit_id,
+    generate_audit_id_seeded,
 };
 use crate::models::{
     DomainError, MAX_TAG_BYTES, MemoryContent, MemoryId, MemoryKind, MemoryLevel,
@@ -989,7 +990,7 @@ fn open_remember_database_with_retry(database_path: &Path) -> Result<DbConnectio
             Ok(connection) => return Ok(connection),
             Err(error) if remember_write_contention_is_retryable(&error) => {
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
-                    std::thread::sleep(remember_write_retry_delay(attempt));
+                    remember_retry_sleep(remember_write_retry_delay(attempt), "open database")?;
                 } else {
                     return Err(DomainError::Storage {
                         message: format!(
@@ -1020,7 +1021,7 @@ fn migrate_remember_database_with_retry(connection: &DbConnection) -> Result<(),
             Ok(_) => return Ok(()),
             Err(error) if remember_write_contention_is_retryable(&error) => {
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
-                    std::thread::sleep(remember_write_retry_delay(attempt));
+                    remember_retry_sleep(remember_write_retry_delay(attempt), "migrate database")?;
                 } else {
                     return Err(DomainError::Storage {
                         message: format!(
@@ -1055,7 +1056,7 @@ fn process_remember_index_job_with_retry(
             Ok(report) => return Ok(report),
             Err(error) if remember_write_contention_is_retryable(&error) => {
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
-                    std::thread::sleep(remember_write_retry_delay(attempt));
+                    remember_retry_sleep(remember_write_retry_delay(attempt), "publish index job")?;
                 } else {
                     return Ok(remember_index_job_queued_after_contention(
                         index_job_id,
@@ -2331,7 +2332,7 @@ fn store_remembered_memory_with_retry(
                     return Ok(());
                 }
                 if attempt + 1 < REMEMBER_CONTENTION_MAX_ATTEMPTS {
-                    std::thread::sleep(remember_write_retry_delay(attempt));
+                    remember_retry_sleep(remember_write_retry_delay(attempt), "store memory")?;
                 } else {
                     return Err(DomainError::Storage {
                         message: format!(
@@ -2596,6 +2597,17 @@ fn remember_write_contention_is_retryable(error: &impl ToString) -> bool {
 fn remember_write_retry_delay(attempt: usize) -> Duration {
     let capped = attempt.min(6) as u64;
     Duration::from_millis(10 * (1 << capped))
+}
+
+fn remember_retry_sleep(delay: Duration, phase: &'static str) -> Result<(), DomainError> {
+    crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, delay).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Remember retry cancelled while waiting to {phase}: {error}"),
+            repair: Some(
+                "Retry after storage contention clears or with a larger runtime budget.".to_owned(),
+            ),
+        }
+    })
 }
 
 fn stable_workspace_id(path: &Path) -> String {

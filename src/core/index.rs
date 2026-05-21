@@ -6,7 +6,7 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, CreateSearchIndexJobInput, DbConnection, DbError,
-    SearchIndexJobType, StoredSearchIndexJob,
+    DbOperation, SearchIndexJobType, StoredSearchIndexJob,
 };
 use crate::models::MemoryId;
 use crate::search::{
@@ -114,7 +114,8 @@ where
                         );
                     }
                     if !delay.is_zero() {
-                        std::thread::sleep(delay);
+                        crate::db::sleep_retry_delay_or_cancel(DbOperation::Execute, delay)
+                            .map_err(IndexRebuildError::Database)?;
                     }
                 }
             }
