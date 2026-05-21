@@ -786,6 +786,84 @@ impl RecoveryAction {
             example: None,
         }
     }
+
+    /// Render this action in the canonical error/degradation recovery shape.
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        let mut action = serde_json::Map::new();
+        action.insert("priority".to_owned(), serde_json::json!(self.priority));
+        action.insert("kind".to_owned(), serde_json::json!(self.kind.as_str()));
+        action.insert(
+            "rationale".to_owned(),
+            serde_json::json!(self.rationale.as_str()),
+        );
+        if let Some(name) = &self.env_name {
+            action.insert("envName".to_owned(), serde_json::json!(name));
+        }
+        if let Some(hint) = &self.value_hint {
+            action.insert("valueHint".to_owned(), serde_json::json!(hint));
+        }
+        if let Some(path) = &self.config_path {
+            action.insert("configPath".to_owned(), serde_json::json!(path));
+        }
+        if let Some(key) = &self.config_key {
+            action.insert("configKey".to_owned(), serde_json::json!(key));
+        }
+        if let Some(flag) = &self.flag_name {
+            action.insert("flagName".to_owned(), serde_json::json!(flag));
+        }
+        if let Some(command) = &self.command {
+            action.insert("command".to_owned(), serde_json::json!(command));
+        }
+        if let Some(results_in) = &self.results_in {
+            action.insert("resultsIn".to_owned(), serde_json::json!(results_in));
+        }
+        if let Some(example) = &self.example {
+            action.insert("example".to_owned(), serde_json::json!(example));
+        }
+        serde_json::Value::Object(action)
+    }
+}
+
+/// Stable degraded-code specific recovery actions shared by renderers.
+#[must_use]
+pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
+    match code {
+        "embed_model_unavailable" => vec![
+            RecoveryAction {
+                priority: 1,
+                kind: RecoveryKind::Rebuild,
+                rationale: "The embedder model is unloadable; re-embed forces a fresh initialization."
+                    .to_owned(),
+                env_name: None,
+                value_hint: None,
+                config_path: None,
+                config_key: None,
+                flag_name: None,
+                command: Some("ee index reembed --workspace .".to_owned()),
+                results_in: Some(
+                    "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+                        .to_owned(),
+                ),
+                example: None,
+            },
+            RecoveryAction {
+                priority: 2,
+                kind: RecoveryKind::Rebuild,
+                rationale: "If the embed-fast model is corrupt and the binary was built with embed-fast, rebuild with the alternate model."
+                    .to_owned(),
+                env_name: None,
+                value_hint: None,
+                config_path: None,
+                config_key: None,
+                flag_name: None,
+                command: Some("cargo build --features embed-quality".to_owned()),
+                results_in: None,
+                example: None,
+            },
+        ],
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1429,6 +1507,39 @@ mod tests {
         assert_eq!(action.kind, super::RecoveryKind::Install);
         assert_eq!(action.command.as_deref(), Some("brew install cass"));
         assert_eq!(action.results_in.as_deref(), Some("/opt/homebrew/bin/cass"));
+    }
+
+    #[test]
+    fn degraded_recovery_actions_for_embed_model_unavailable_are_rebuilds() {
+        let actions = super::degraded_recovery_actions("embed_model_unavailable");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].priority, 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Rebuild);
+        assert_eq!(
+            actions[0].command.as_deref(),
+            Some("ee index reembed --workspace .")
+        );
+        assert_eq!(
+            actions[0].results_in.as_deref(),
+            Some(
+                "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+            )
+        );
+        assert_eq!(actions[1].priority, 2);
+        assert_eq!(actions[1].kind, super::RecoveryKind::Rebuild);
+        assert_eq!(
+            actions[1].command.as_deref(),
+            Some("cargo build --features embed-quality")
+        );
+        assert!(actions[1].results_in.is_none());
+
+        let first_json = actions[0].data_json();
+        assert_eq!(first_json["kind"], "rebuild");
+        assert_eq!(first_json["command"], "ee index reembed --workspace .");
+        assert_eq!(
+            first_json["resultsIn"],
+            "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+        );
     }
 
     #[test]

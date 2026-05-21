@@ -21,6 +21,7 @@ use crate::models::degradation::{
 use crate::models::query::{EqlQuery, EqlSpeedMode, EqlTagsMode};
 use crate::models::{
     MemoryId, MemoryScope, MemoryScopeStats, ProvenanceUri, TrustClass, UnitScore,
+    degraded_recovery_actions,
 };
 use crate::obs::audit_events::query_hash as audit_query_hash;
 use crate::pack::{
@@ -568,12 +569,14 @@ pub struct SearchDegradation {
 impl SearchDegradation {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "code": self.code,
             "severity": self.severity,
             "message": self.message,
             "repair": self.repair,
-        })
+        });
+        append_degradation_recovery_details(&mut value, &self.code);
+        value
     }
 
     #[must_use]
@@ -1473,15 +1476,36 @@ pub(crate) fn search_degraded_data_json(
     }))
     .into_iter()
     .map(|entry| {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "code": entry.code,
             "severity": entry.severity,
             "message": entry.message,
             "repair": entry.repair,
             "sources": entry.sources,
-        })
+        });
+        if let Some(code) = value
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        {
+            append_degradation_recovery_details(&mut value, &code);
+        }
+        value
     })
     .collect()
+}
+
+fn append_degradation_recovery_details(value: &mut serde_json::Value, code: &str) {
+    let recovery_actions = degraded_recovery_actions(code);
+    if recovery_actions.is_empty() {
+        return;
+    }
+    value["details"] = serde_json::json!({
+        "recovery": recovery_actions
+            .iter()
+            .map(crate::models::RecoveryAction::data_json)
+            .collect::<Vec<_>>(),
+    });
 }
 
 impl SearchDiagnosticReport {
@@ -9007,6 +9031,33 @@ mod tests {
         assert_eq!(json["severity"], "high");
         assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
         assert!(json["repair"].as_str().is_some());
+    }
+
+    #[test]
+    fn search_degraded_data_json_includes_embed_model_recovery_details() {
+        let degraded = vec![SearchDegradation {
+            code: "embed_model_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: "Embedding model unavailable.".to_string(),
+            repair: Some("ee index reembed --workspace .".to_string()),
+        }];
+
+        let rendered = search_degraded_data_json("search", &degraded);
+        assert_eq!(rendered.len(), 1);
+        assert_eq!(rendered[0]["code"], "embed_model_unavailable");
+        assert_eq!(rendered[0]["sources"], serde_json::json!(["search"]));
+        let recovery = rendered[0]
+            .pointer("/details/recovery")
+            .and_then(serde_json::Value::as_array)
+            .expect("embed_model_unavailable should expose details.recovery");
+        assert_eq!(recovery.len(), 2);
+        assert_eq!(recovery[0]["kind"], "rebuild");
+        assert_eq!(recovery[0]["command"], "ee index reembed --workspace .");
+        assert_eq!(recovery[1]["kind"], "rebuild");
+        assert_eq!(
+            recovery[1]["command"],
+            "cargo build --features embed-quality"
+        );
     }
 
     // ========================================================================

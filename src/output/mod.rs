@@ -48,6 +48,7 @@ use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionReco
 use crate::models::{
     DomainError, ERROR_SCHEMA_V2, InstallCheckReport, InstallPlanReport, ProducerMetadata,
     RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V2, RecoveryAction, RecoveryKind,
+    degraded_recovery_actions,
 };
 use crate::pack::{
     ConflictEntry, ConsensusEntry, ConsensusProducer, ContextResponse, ContextResponseDegradation,
@@ -2763,8 +2764,8 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
         "sources",
         &string_array_json(degraded.sources.iter().map(String::as_str)),
     );
-    if degraded.code == PACK_BUDGET_TOO_SMALL_CODE {
-        let recovery_actions = pack_budget_too_small_recovery_actions();
+    let recovery_actions = degraded_recovery_actions_for_code(&degraded.code);
+    if !recovery_actions.is_empty() {
         obj.field_object("details", |details| {
             details.field_array_of_objects(
                 "recovery",
@@ -2773,6 +2774,13 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
             );
         });
     }
+}
+
+fn degraded_recovery_actions_for_code(code: &str) -> Vec<RecoveryAction> {
+    if code == PACK_BUDGET_TOO_SMALL_CODE {
+        return pack_budget_too_small_recovery_actions();
+    }
+    degraded_recovery_actions(code)
 }
 
 fn pack_budget_too_small_recovery_actions() -> Vec<RecoveryAction> {
@@ -15782,6 +15790,55 @@ mod tests {
             &recovery[2]["kind"].as_str(),
             &Some("broaden"),
             "third recovery kind",
+        )
+    }
+
+    #[test]
+    fn embed_model_unavailable_degradation_renders_recovery_details() -> TestResult {
+        let degraded = AggregatedDegradation {
+            code: "embed_model_unavailable".to_string(),
+            severity: "warning".to_string(),
+            message: "Embedding model unavailable.".to_string(),
+            repair: "ee index reembed --workspace .".to_string(),
+            sources: vec!["search".to_string()],
+        };
+        let mut builder = JsonBuilder::with_capacity(512);
+
+        build_aggregated_degradation(&mut builder, &degraded);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&builder.finish()).map_err(|error| error.to_string())?;
+        let recovery = parsed
+            .pointer("/details/recovery")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "details.recovery must be an array".to_string())?;
+
+        ensure_equal(&recovery.len(), &2, "recovery action count")?;
+        ensure_equal(
+            &recovery[0]["kind"].as_str(),
+            &Some("rebuild"),
+            "first recovery kind",
+        )?;
+        ensure_equal(
+            &recovery[0]["command"].as_str(),
+            &Some("ee index reembed --workspace ."),
+            "first recovery command",
+        )?;
+        ensure_equal(
+            &recovery[0]["resultsIn"].as_str(),
+            &Some(
+                "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag.",
+            ),
+            "first recovery resultsIn",
+        )?;
+        ensure_equal(
+            &recovery[1]["kind"].as_str(),
+            &Some("rebuild"),
+            "second recovery kind",
+        )?;
+        ensure_equal(
+            &recovery[1]["command"].as_str(),
+            &Some("cargo build --features embed-quality"),
+            "second recovery command",
         )
     }
 
