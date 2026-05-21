@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -20,6 +21,11 @@ pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
 pub const DAEMON_WRITE_OWNER_IDENTITY: &str = "ee-daemon-single-write-owner";
 pub const SERVE_UNAVAILABLE_V1_CODE: &str = "serve_unavailable_v1";
+pub const SERVE_STARTUP_SCHEMA_V1: &str = "ee.serve.startup.v1";
+pub const SERVE_ENDPOINT_SCHEMA_V1: &str = "ee.serve.endpoint.v1";
+pub const DEFAULT_SERVE_HOST: &str = "127.0.0.1";
+pub const DEFAULT_SERVE_PORT: u16 = 8766;
+pub const MIN_SERVE_TOKEN_BITS: usize = 256;
 
 fn trace_serve_localhost(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
@@ -79,6 +85,643 @@ pub fn serve_unavailable_v1_error() -> DomainError {
                     "resultsIn": "Local CLI readiness and repair information without a background HTTP server."
                 }
             ]
+        })
+        .to_string(),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeLimits {
+    pub max_header_bytes: usize,
+    pub max_body_bytes: usize,
+    pub connection_read_timeout_ms: u64,
+    pub handler_budget_ms: u64,
+    pub response_write_timeout_ms: u64,
+    pub sse_event_buffer: usize,
+}
+
+impl Default for ServeLimits {
+    fn default() -> Self {
+        Self {
+            max_header_bytes: 16 * 1024,
+            max_body_bytes: 1024 * 1024,
+            connection_read_timeout_ms: 5_000,
+            handler_budget_ms: 30_000,
+            response_write_timeout_ms: 5_000,
+            sse_event_buffer: 64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeStartupOptions {
+    pub host: String,
+    pub port: u16,
+    pub allow_non_loopback: bool,
+    pub limits: ServeLimits,
+}
+
+impl Default for ServeStartupOptions {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_SERVE_HOST.to_owned(),
+            port: DEFAULT_SERVE_PORT,
+            allow_non_loopback: false,
+            limits: ServeLimits::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServeEndpoint {
+    Status,
+    Doctor,
+    Search,
+    Context,
+    Why,
+    SwarmBrief,
+    DurableWrite,
+    Events,
+    Unknown,
+}
+
+impl ServeEndpoint {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Doctor => "doctor",
+            Self::Search => "search",
+            Self::Context => "context",
+            Self::Why => "why",
+            Self::SwarmBrief => "swarmBrief",
+            Self::DurableWrite => "durableWrite",
+            Self::Events => "events",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    #[must_use]
+    pub const fn cli_equivalent(self) -> Option<&'static str> {
+        match self {
+            Self::Status => Some("ee status --json"),
+            Self::Doctor => Some("ee doctor --json"),
+            Self::Search => Some("ee search \"<query>\" --json"),
+            Self::Context => Some("ee context \"<task>\" --json"),
+            Self::Why => Some("ee why <memory-id> --json"),
+            Self::SwarmBrief => Some("ee swarm brief --json"),
+            Self::DurableWrite | Self::Events | Self::Unknown => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn mutable(self) -> bool {
+        matches!(self, Self::DurableWrite)
+    }
+
+    #[must_use]
+    pub const fn auth_required(self) -> bool {
+        !matches!(self, Self::Unknown)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeHttpRequest {
+    pub method: String,
+    pub target: String,
+    pub path: String,
+    pub endpoint: ServeEndpoint,
+    pub query: BTreeMap<String, Vec<String>>,
+    pub headers: BTreeMap<String, String>,
+    pub body_bytes: usize,
+}
+
+#[must_use]
+pub fn serve_startup_report_json(
+    options: &ServeStartupOptions,
+    token: Option<&str>,
+) -> Result<JsonValue, DomainError> {
+    let loopback_only = serve_host_is_loopback(&options.host)?;
+    if !loopback_only && !options.allow_non_loopback {
+        return Err(serve_policy_error(
+            "serve_non_loopback_requires_opt_in",
+            format!(
+                "Refusing to bind ee serve to non-loopback host '{}'.",
+                options.host
+            ),
+            "Re-run with --allow-non-loopback only after configuring EE_SERVE_TOKEN.",
+            json!({
+                "host": options.host,
+                "allowNonLoopback": options.allow_non_loopback,
+                "recovery": [
+                    {
+                        "priority": 1,
+                        "kind": "narrow",
+                        "command": "ee serve --foreground --host 127.0.0.1 --json"
+                    },
+                    {
+                        "priority": 2,
+                        "kind": "configure",
+                        "command": "export EE_SERVE_TOKEN=<256-bit-random-token>"
+                    }
+                ]
+            }),
+        ));
+    }
+
+    let token_posture = serve_token_posture(token);
+    if !loopback_only && token_posture.state != "configured" {
+        return Err(serve_policy_error(
+            "serve_non_loopback_requires_strong_token",
+            "Refusing non-loopback ee serve without a configured 256-bit EE_SERVE_TOKEN."
+                .to_owned(),
+            "Set EE_SERVE_TOKEN to at least 32 random bytes before using --allow-non-loopback.",
+            json!({
+                "host": options.host,
+                "tokenState": token_posture.state,
+                "minimumBits": MIN_SERVE_TOKEN_BITS,
+                "recovery": [
+                    {
+                        "priority": 1,
+                        "kind": "configure",
+                        "command": "export EE_SERVE_TOKEN=<256-bit-random-token>"
+                    }
+                ]
+            }),
+        ));
+    }
+
+    let can_accept = token_posture.state == "configured";
+    let degraded = serve_startup_degraded(&token_posture);
+    Ok(json!({
+        "schema": SERVE_STARTUP_SCHEMA_V1,
+        "bind": {
+            "host": options.host,
+            "port": options.port,
+            "loopbackOnly": loopback_only,
+            "allowNonLoopback": options.allow_non_loopback,
+            "policy": if loopback_only {
+                "loopback_default"
+            } else {
+                "non_loopback_explicit"
+            }
+        },
+        "protocol": {
+            "httpVersion": "HTTP/1.1",
+            "sseReadOnly": true,
+            "forbiddenHttpDeps": ["hyper", "axum", "tower", "reqwest"]
+        },
+        "tokenPosture": {
+            "source": "EE_SERVE_TOKEN",
+            "state": token_posture.state,
+            "minimumBits": MIN_SERVE_TOKEN_BITS,
+            "tokenMaterialExposed": false,
+            "repair": token_posture.repair
+        },
+        "readiness": {
+            "state": if can_accept { "ready" } else { "policy_denied" },
+            "canAcceptConnections": can_accept,
+            "mutableEndpointsEnabled": can_accept,
+            "reason": if can_accept {
+                JsonValue::Null
+            } else {
+                json!("EE_SERVE_TOKEN is required before accepting localhost HTTP requests.")
+            }
+        },
+        "endpoints": serve_endpoint_catalog_json(),
+        "limits": {
+            "maxHeaderBytes": options.limits.max_header_bytes,
+            "maxBodyBytes": options.limits.max_body_bytes,
+            "connectionReadTimeoutMs": options.limits.connection_read_timeout_ms,
+            "handlerBudgetMs": options.limits.handler_budget_ms,
+            "responseWriteTimeoutMs": options.limits.response_write_timeout_ms,
+            "sseEventBuffer": options.limits.sse_event_buffer
+        },
+        "degraded": degraded
+    }))
+}
+
+pub fn parse_serve_http_request(
+    bytes: &[u8],
+    limits: &ServeLimits,
+) -> Result<ServeHttpRequest, DomainError> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| serve_usage_error("HTTP request is missing the CRLF header terminator."))?;
+    if header_end > limits.max_header_bytes {
+        return Err(serve_usage_error(format!(
+            "HTTP request headers exceed the {} byte limit.",
+            limits.max_header_bytes
+        )));
+    }
+    let header_text = std::str::from_utf8(&bytes[..header_end])
+        .map_err(|_| serve_usage_error("HTTP request headers must be valid UTF-8."))?;
+    let mut lines = header_text.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or_else(|| serve_usage_error("HTTP request line is missing."))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| serve_usage_error("HTTP method is missing."))?;
+    let target = parts
+        .next()
+        .ok_or_else(|| serve_usage_error("HTTP request target is missing."))?;
+    let version = parts
+        .next()
+        .ok_or_else(|| serve_usage_error("HTTP version is missing."))?;
+    if parts.next().is_some() || version != "HTTP/1.1" {
+        return Err(serve_usage_error(
+            "Only narrow HTTP/1.1 request lines are supported.",
+        ));
+    }
+    if !matches!(method, "GET" | "POST") {
+        return Err(serve_usage_error(
+            "Only GET and POST are supported by ee serve v2.",
+        ));
+    }
+    if !target.starts_with('/') {
+        return Err(serve_usage_error(
+            "HTTP request target must be an absolute path.",
+        ));
+    }
+
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(serve_usage_error(
+                "HTTP header line is missing ':' separator.",
+            ));
+        };
+        let normalized_name = name.trim().to_ascii_lowercase();
+        if normalized_name.is_empty() {
+            return Err(serve_usage_error("HTTP header name must not be empty."));
+        }
+        headers.insert(normalized_name, value.trim().to_owned());
+    }
+
+    let body = &bytes[header_end + 4..];
+    let declared_body_bytes = match headers.get("content-length") {
+        Some(value) => value
+            .parse::<usize>()
+            .map_err(|_| serve_usage_error("Content-Length must be a non-negative integer."))?,
+        None => 0,
+    };
+    if headers
+        .get("transfer-encoding")
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        return Err(serve_usage_error(
+            "Chunked uploads are not accepted by the first ee serve v2 slice.",
+        ));
+    }
+    if declared_body_bytes > limits.max_body_bytes {
+        return Err(serve_usage_error(format!(
+            "HTTP request body exceeds the {} byte limit.",
+            limits.max_body_bytes
+        )));
+    }
+    if method == "POST" && !headers.contains_key("content-length") {
+        return Err(serve_usage_error(
+            "POST requests must include an explicit Content-Length.",
+        ));
+    }
+    if body.len() < declared_body_bytes {
+        return Err(serve_usage_error(
+            "HTTP request body is shorter than Content-Length.",
+        ));
+    }
+    if body.len() > declared_body_bytes {
+        return Err(serve_usage_error(
+            "HTTP request body contains bytes beyond Content-Length; keepalive is not supported.",
+        ));
+    }
+
+    let (path, query) = parse_serve_target(target)?;
+    let endpoint = serve_endpoint_for(method, &path);
+    Ok(ServeHttpRequest {
+        method: method.to_owned(),
+        target: target.to_owned(),
+        path,
+        endpoint,
+        query,
+        headers,
+        body_bytes: declared_body_bytes,
+    })
+}
+
+#[must_use]
+pub fn serve_auth_state(request: &ServeHttpRequest, token: Option<&str>) -> &'static str {
+    if !request.endpoint.auth_required() {
+        return "not_required";
+    }
+    let posture = serve_token_posture(token);
+    if posture.state != "configured" {
+        return posture.state;
+    }
+    let Some(configured_token) = token else {
+        return "missing";
+    };
+    match request.headers.get("authorization") {
+        Some(value) if value == &format!("Bearer {configured_token}") => "accepted",
+        Some(_) => "rejected",
+        None => "missing",
+    }
+}
+
+#[must_use]
+pub fn serve_auth_failure_envelope(
+    request_id: &str,
+    request: &ServeHttpRequest,
+    auth_state: &'static str,
+    elapsed_ms: u64,
+) -> JsonValue {
+    let error = DomainError::PolicyDeniedWithDetails {
+        message: "ee serve requires a valid bearer token before endpoint dispatch.".to_owned(),
+        repair: Some("Set EE_SERVE_TOKEN and send Authorization: Bearer <token>.".to_owned()),
+        details_json: json!({
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "configure",
+                    "command": "export EE_SERVE_TOKEN=<256-bit-random-token>"
+                }
+            ],
+            "authState": auth_state,
+            "tokenMaterialExposed": false
+        })
+        .to_string(),
+    };
+    let payload: JsonValue = serde_json::from_str(&crate::output::error_response_json(&error))
+        .unwrap_or_else(|_| json!({"schema": "ee.error.v2"}));
+    json!({
+        "schema": SERVE_ENDPOINT_SCHEMA_V1,
+        "request": serve_request_metadata_json(request_id, request, auth_state),
+        "response": {
+            "statusCode": 401,
+            "payloadSchema": "ee.error.v2",
+            "payload": payload,
+            "elapsedMs": elapsed_ms,
+            "degradedCodes": [serve_auth_degraded_code(auth_state)],
+            "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
+        }
+    })
+}
+
+#[must_use]
+pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonValue) -> String {
+    let wrapped_payload = if matches!(
+        payload.get("schema").and_then(JsonValue::as_str),
+        Some("ee.response.v2" | "ee.error.v2")
+    ) {
+        payload.clone()
+    } else {
+        json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": payload,
+            "degraded": []
+        })
+    };
+    let payload_schema = match wrapped_payload.get("schema").and_then(JsonValue::as_str) {
+        Some("ee.error.v2") => "ee.error.v2",
+        _ => "ee.response.v2",
+    };
+    let event_payload = json!({
+        "schema": SERVE_ENDPOINT_SCHEMA_V1,
+        "request": {
+            "requestId": "sse-stream",
+            "method": "GET",
+            "path": "/v1/events",
+            "endpoint": ServeEndpoint::Events.as_str(),
+            "cliEquivalent": ServeEndpoint::Events.cli_equivalent(),
+            "auth": {
+                "required": true,
+                "state": "accepted",
+                "tokenMaterialExposed": false
+            },
+            "bodyBytes": 0,
+            "query": {},
+            "contentLengthRequired": false,
+            "chunkedUploadAccepted": false
+        },
+        "response": {
+            "statusCode": if payload_schema == "ee.error.v2" { 500 } else { 200 },
+            "payloadSchema": payload_schema,
+            "payload": wrapped_payload,
+            "elapsedMs": 0,
+            "degradedCodes": [],
+            "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
+        },
+        "sse": {
+            "readOnly": true,
+            "eventKind": event_kind,
+            "terminal": terminal,
+            "eventBufferRemaining": 0
+        }
+    });
+    format!("event: {event_kind}\ndata: {event_payload}\n\n")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ServeTokenPosture {
+    state: &'static str,
+    repair: Option<&'static str>,
+}
+
+fn serve_token_posture(token: Option<&str>) -> ServeTokenPosture {
+    match token {
+        None | Some("") => ServeTokenPosture {
+            state: "missing",
+            repair: Some("Set EE_SERVE_TOKEN to at least 32 random bytes before serving HTTP."),
+        },
+        Some(value) if value.as_bytes().len().saturating_mul(8) < MIN_SERVE_TOKEN_BITS => {
+            ServeTokenPosture {
+                state: "weak",
+                repair: Some("Use at least 32 random bytes of bearer-token material."),
+            }
+        }
+        Some(_) => ServeTokenPosture {
+            state: "configured",
+            repair: None,
+        },
+    }
+}
+
+fn serve_startup_degraded(token_posture: &ServeTokenPosture) -> Vec<JsonValue> {
+    match token_posture.state {
+        "configured" => Vec::new(),
+        "weak" => vec![json!({
+            "code": "serve_token_weak",
+            "severity": "high",
+            "message": "EE_SERVE_TOKEN is present but below the 256-bit minimum.",
+            "repair": token_posture.repair
+        })],
+        _ => vec![json!({
+            "code": "serve_token_missing",
+            "severity": "high",
+            "message": "EE_SERVE_TOKEN is required before the localhost HTTP adapter accepts requests.",
+            "repair": token_posture.repair
+        })],
+    }
+}
+
+fn serve_endpoint_catalog_json() -> Vec<JsonValue> {
+    [
+        ("GET", "/v1/status", ServeEndpoint::Status),
+        ("GET", "/v1/doctor", ServeEndpoint::Doctor),
+        ("GET", "/v1/search", ServeEndpoint::Search),
+        ("GET", "/v1/context", ServeEndpoint::Context),
+        ("GET", "/v1/why/{memory_id}", ServeEndpoint::Why),
+        ("GET", "/v1/swarm/brief", ServeEndpoint::SwarmBrief),
+        ("POST", "/v1/durable-write", ServeEndpoint::DurableWrite),
+        ("GET", "/v1/events", ServeEndpoint::Events),
+    ]
+    .into_iter()
+    .map(|(method, path, endpoint)| {
+        json!({
+            "method": method,
+            "path": path,
+            "endpoint": endpoint.as_str(),
+            "cliEquivalent": endpoint.cli_equivalent(),
+            "mutable": endpoint.mutable(),
+            "authRequired": endpoint.auth_required()
+        })
+    })
+    .collect()
+}
+
+fn serve_request_metadata_json(
+    request_id: &str,
+    request: &ServeHttpRequest,
+    auth_state: &'static str,
+) -> JsonValue {
+    json!({
+        "requestId": request_id,
+        "method": request.method,
+        "path": request.path,
+        "endpoint": request.endpoint.as_str(),
+        "cliEquivalent": request.endpoint.cli_equivalent(),
+        "auth": {
+            "required": request.endpoint.auth_required(),
+            "state": auth_state,
+            "tokenMaterialExposed": false
+        },
+        "bodyBytes": request.body_bytes,
+        "query": request.query,
+        "contentLengthRequired": request.method == "POST",
+        "chunkedUploadAccepted": false
+    })
+}
+
+fn serve_auth_degraded_code(auth_state: &'static str) -> &'static str {
+    match auth_state {
+        "weak" => "serve_auth_weak_token",
+        "rejected" => "serve_auth_rejected",
+        _ => "serve_auth_missing",
+    }
+}
+
+fn serve_host_is_loopback(host: &str) -> Result<bool, DomainError> {
+    let ip: IpAddr = host.parse().map_err(|_| {
+        serve_usage_error(format!(
+            "ee serve host '{host}' is not a supported numeric IP address."
+        ))
+    })?;
+    Ok(ip.is_loopback())
+}
+
+fn serve_endpoint_for(method: &str, path: &str) -> ServeEndpoint {
+    match (method, path) {
+        ("GET", "/v1/status") => ServeEndpoint::Status,
+        ("GET", "/v1/doctor") => ServeEndpoint::Doctor,
+        ("GET", "/v1/search") => ServeEndpoint::Search,
+        ("GET", "/v1/context") => ServeEndpoint::Context,
+        ("GET", "/v1/swarm/brief") => ServeEndpoint::SwarmBrief,
+        ("POST", "/v1/durable-write") => ServeEndpoint::DurableWrite,
+        ("GET", "/v1/events") => ServeEndpoint::Events,
+        ("GET", path) if path.starts_with("/v1/why/") => ServeEndpoint::Why,
+        _ => ServeEndpoint::Unknown,
+    }
+}
+
+fn parse_serve_target(
+    target: &str,
+) -> Result<(String, BTreeMap<String, Vec<String>>), DomainError> {
+    let (path, query_raw) = target.split_once('?').unwrap_or((target, ""));
+    let mut query = BTreeMap::<String, Vec<String>>::new();
+    for pair in query_raw.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        query
+            .entry(percent_decode_query_component(key)?)
+            .or_default()
+            .push(percent_decode_query_component(value)?);
+    }
+    Ok((path.to_owned(), query))
+}
+
+fn percent_decode_query_component(value: &str) -> Result<String, DomainError> {
+    let mut output = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                output.push(' ');
+                index += 1;
+            }
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err(serve_usage_error("Percent escape in query is truncated."));
+                }
+                let hi = hex_digit(bytes[index + 1])?;
+                let lo = hex_digit(bytes[index + 2])?;
+                output.push(char::from((hi << 4) | lo));
+                index += 3;
+            }
+            byte => {
+                output.push(char::from(byte));
+                index += 1;
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn hex_digit(byte: u8) -> Result<u8, DomainError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(serve_usage_error(
+            "Percent escape in query contains a non-hex digit.",
+        )),
+    }
+}
+
+fn serve_usage_error(message: impl Into<String>) -> DomainError {
+    DomainError::Usage {
+        message: message.into(),
+        repair: Some(
+            "Use narrow HTTP/1.1 requests documented by `ee schema export ee.serve.endpoint.v1`."
+                .to_owned(),
+        ),
+    }
+}
+
+fn serve_policy_error(
+    code: &'static str,
+    message: String,
+    repair: &'static str,
+    details: JsonValue,
+) -> DomainError {
+    DomainError::PolicyDeniedWithDetails {
+        message,
+        repair: Some(repair.to_owned()),
+        details_json: json!({
+            "code": code,
+            "serve": details
         })
         .to_string(),
     }
@@ -687,6 +1330,231 @@ mod tests {
         } else {
             Err(format!("{label}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn serve_startup_report_marks_loopback_ready_without_exposing_token() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let report = serve_startup_report_json(&ServeStartupOptions::default(), Some(token))
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            report["schema"].as_str(),
+            Some(SERVE_STARTUP_SCHEMA_V1),
+            "startup schema",
+        )?;
+        ensure(
+            report["bind"]["host"].as_str(),
+            Some(DEFAULT_SERVE_HOST),
+            "default bind host",
+        )?;
+        ensure(
+            report["bind"]["loopbackOnly"].as_bool(),
+            Some(true),
+            "default bind is loopback",
+        )?;
+        ensure(
+            report["tokenPosture"]["state"].as_str(),
+            Some("configured"),
+            "token posture",
+        )?;
+        ensure(
+            report["tokenPosture"]["tokenMaterialExposed"].as_bool(),
+            Some(false),
+            "token exposure",
+        )?;
+        ensure(
+            report["readiness"]["canAcceptConnections"].as_bool(),
+            Some(true),
+            "startup readiness",
+        )?;
+        ensure(
+            report["endpoints"].as_array().is_some_and(|endpoints| {
+                endpoints.iter().all(|endpoint| {
+                    endpoint["authRequired"].as_bool() == Some(true)
+                        && !endpoint.to_string().contains(token)
+                })
+            }),
+            true,
+            "endpoint catalog auth posture",
+        )?;
+        ensure(
+            report.to_string().contains(token),
+            false,
+            "startup report must not expose token material",
+        )
+    }
+
+    #[test]
+    fn serve_startup_report_requires_non_loopback_opt_in_and_token() -> TestResult {
+        let non_loopback = ServeStartupOptions {
+            host: "0.0.0.0".to_owned(),
+            ..ServeStartupOptions::default()
+        };
+        let opt_in = ServeStartupOptions {
+            allow_non_loopback: true,
+            ..non_loopback.clone()
+        };
+
+        let opt_in_error = match serve_startup_report_json(
+            &non_loopback,
+            Some("01234567890123456789012345678901"),
+        ) {
+            Ok(report) => {
+                return Err(format!(
+                    "non-loopback without opt-in should fail, got {report}"
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            opt_in_error.code(),
+            "policy_denied",
+            "non-loopback opt-in error code",
+        )?;
+
+        let token_error = match serve_startup_report_json(&opt_in, Some("short-token")) {
+            Ok(report) => {
+                return Err(format!(
+                    "non-loopback with weak token should fail, got {report}"
+                ));
+            }
+            Err(error) => error,
+        };
+        ensure(
+            token_error.code(),
+            "policy_denied",
+            "non-loopback token error code",
+        )
+    }
+
+    #[test]
+    fn serve_http_parser_maps_search_query_and_bearer_auth() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let request = parse_serve_http_request(
+            format!(
+                "GET /v1/search?q=release+check&tag=rust%2Bcli HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            )
+            .as_bytes(),
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(request.method.as_str(), "GET", "request method")?;
+        ensure(request.endpoint, ServeEndpoint::Search, "mapped endpoint")?;
+        ensure(
+            request.query.get("q").cloned(),
+            Some(vec!["release check".to_owned()]),
+            "decoded query",
+        )?;
+        ensure(
+            request.query.get("tag").cloned(),
+            Some(vec!["rust+cli".to_owned()]),
+            "percent-decoded query",
+        )?;
+        ensure(
+            serve_auth_state(&request, Some(token)),
+            "accepted",
+            "bearer auth state",
+        )
+    }
+
+    #[test]
+    fn serve_http_parser_rejects_keepalive_body_bytes() -> TestResult {
+        let error = match parse_serve_http_request(
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\nabc",
+            &ServeLimits::default(),
+        ) {
+            Ok(request) => return Err(format!("extra body bytes should fail, got {request:?}")),
+            Err(error) => error,
+        };
+        ensure(error.code(), "usage", "extra body byte error code")
+    }
+
+    #[test]
+    fn serve_auth_failure_envelope_is_error_v2_before_dispatch() -> TestResult {
+        let request = parse_serve_http_request(
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let auth_state = serve_auth_state(&request, Some("01234567890123456789012345678901"));
+        let envelope = serve_auth_failure_envelope("req-1", &request, auth_state, 7);
+
+        ensure(
+            envelope["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "endpoint schema",
+        )?;
+        ensure(
+            envelope["request"]["auth"]["state"].as_str(),
+            Some("missing"),
+            "auth state",
+        )?;
+        ensure(
+            envelope["response"]["statusCode"].as_u64(),
+            Some(401),
+            "http status",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["schema"].as_str(),
+            Some("ee.error.v2"),
+            "wrapped error schema",
+        )?;
+        ensure(
+            envelope
+                .to_string()
+                .contains("01234567890123456789012345678901"),
+            false,
+            "auth failure must not expose token material",
+        )
+    }
+
+    #[test]
+    fn serve_sse_event_is_read_only_endpoint_envelope() -> TestResult {
+        let frame = render_serve_sse_event("complete", true, &json!({"ok": true}));
+        ensure(
+            frame.starts_with("event: complete\n"),
+            true,
+            "sse event line",
+        )?;
+        let data_line = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .ok_or_else(|| "missing sse data line".to_owned())?;
+        let event: JsonValue =
+            serde_json::from_str(data_line).map_err(|error| error.to_string())?;
+
+        ensure(
+            event["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "sse endpoint schema",
+        )?;
+        ensure(
+            event["request"]["endpoint"].as_str(),
+            Some("events"),
+            "sse endpoint",
+        )?;
+        ensure(
+            event["sse"]["readOnly"].as_bool(),
+            Some(true),
+            "sse read-only",
+        )?;
+        ensure(
+            event["sse"]["terminal"].as_bool(),
+            Some(true),
+            "sse terminal",
+        )?;
+        ensure(
+            event["response"]["payload"]["schema"].as_str(),
+            Some("ee.response.v2"),
+            "sse wrapped response schema",
+        )?;
+        ensure(
+            event["response"]["payload"]["data"]["ok"].as_bool(),
+            Some(true),
+            "sse wrapped data",
+        )
     }
 
     #[test]
