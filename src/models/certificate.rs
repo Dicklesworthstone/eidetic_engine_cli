@@ -15,7 +15,37 @@ use std::fmt;
 use std::str::FromStr;
 
 fn normalized_certificate_token(input: &str) -> String {
-    input.trim().to_ascii_lowercase().replace('-', "_")
+    let trimmed = input.trim();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut previous_was_lowercase = false;
+    let mut previous_was_separator = false;
+
+    for character in trimmed.chars() {
+        match character {
+            '-' | '_' => {
+                if !normalized.is_empty() && !previous_was_separator {
+                    normalized.push('_');
+                }
+                previous_was_lowercase = false;
+                previous_was_separator = true;
+            }
+            character if character.is_ascii_uppercase() => {
+                if previous_was_lowercase && !previous_was_separator {
+                    normalized.push('_');
+                }
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = false;
+                previous_was_separator = false;
+            }
+            character => {
+                normalized.push(character.to_ascii_lowercase());
+                previous_was_lowercase = character.is_ascii_lowercase();
+                previous_was_separator = false;
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Schema version for certificate JSON output.
@@ -1329,6 +1359,11 @@ mod tests {
             "certificate kind alias",
         )?;
         ensure_equal(
+            &CertificateKind::from_str("privacyBudget").map_err(|e| e.to_string())?,
+            &CertificateKind::PrivacyBudget,
+            "camel certificate kind alias",
+        )?;
+        ensure_equal(
             &CertificateStatus::from_str("VALID").map_err(|e| e.to_string())?,
             &CertificateStatus::Valid,
             "certificate status alias",
@@ -1339,9 +1374,19 @@ mod tests {
             "aggregate kind alias",
         )?;
         ensure_equal(
+            &ShareableAggregateKind::from_str("topK").map_err(|e| e.to_string())?,
+            &ShareableAggregateKind::TopK,
+            "camel aggregate kind alias",
+        )?;
+        ensure_equal(
             &LifecycleEvent::from_str(" Hook-Execution ").map_err(|e| e.to_string())?,
             &LifecycleEvent::HookExecution,
             "lifecycle event alias",
+        )?;
+        ensure_equal(
+            &LifecycleEvent::from_str("indexPublish").map_err(|e| e.to_string())?,
+            &LifecycleEvent::IndexPublish,
+            "camel lifecycle event alias",
         )
     }
 
