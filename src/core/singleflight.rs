@@ -5,11 +5,12 @@
 //! [`SingleFlightKey`](crate::models::SingleFlightKey); it never mutates memory,
 //! indexes, Beads, Agent Mail, or cache state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{
-    Arc, Condvar, Mutex, OnceLock,
+    Arc, Barrier, Condvar, Mutex, OnceLock,
     atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::models::{
@@ -38,6 +39,8 @@ const SINGLEFLIGHT_REQUIRED_TELEMETRY_PHASES: [&str; 5] = [
     SINGLEFLIGHT_COALESCED_RESULT_REUSED_EVENT,
 ];
 const GRAPH_FEATURE_ENRICHMENT_FOLLOWER_TIMEOUT: Duration = Duration::from_secs(30);
+const GRAPH_FEATURE_ENRICHMENT_BURST_SCHEMA_V1: &str =
+    "ee.graph.feature_enrichment.singleflight_burst.v1";
 
 static GRAPH_FEATURE_ENRICHMENT_GROUP: OnceLock<
     SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
@@ -566,6 +569,194 @@ where
     )
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFeatureEnrichmentBurstOptions {
+    pub identical_requests: usize,
+    pub distinct_requests: usize,
+    pub node_count: usize,
+}
+
+impl Default for GraphFeatureEnrichmentBurstOptions {
+    fn default() -> Self {
+        Self {
+            identical_requests: 6,
+            distinct_requests: 2,
+            node_count: 64,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphFeatureEnrichmentBurstReport {
+    pub schema: &'static str,
+    pub workspace_identity_hash: String,
+    pub requested_identical: usize,
+    pub requested_distinct: usize,
+    pub node_count: usize,
+    pub execution_count: usize,
+    pub identical_leader_count: usize,
+    pub identical_follower_count: usize,
+    pub distinct_leader_count: usize,
+    pub distinct_follower_count: usize,
+    pub timeout_count: usize,
+    pub leader_failure_count: usize,
+    pub state_poisoned_count: usize,
+    pub latency_ms: GraphFeatureEnrichmentBurstLatency,
+    pub identical_result_hashes: Vec<String>,
+    pub distinct_result_hashes: Vec<String>,
+    pub passed: bool,
+    pub diagnoses: Vec<String>,
+}
+
+impl GraphFeatureEnrichmentBurstReport {
+    #[must_use]
+    pub fn data_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "schema": self.schema,
+            "command": "graph feature-enrichment --singleflight-burst",
+            "workspaceIdentityHash": &self.workspace_identity_hash,
+            "requested": {
+                "identical": self.requested_identical,
+                "distinct": self.requested_distinct,
+                "nodeCount": self.node_count,
+            },
+            "summary": {
+                "passed": self.passed,
+                "executionCount": self.execution_count,
+                "identicalLeaderCount": self.identical_leader_count,
+                "identicalFollowerCount": self.identical_follower_count,
+                "distinctLeaderCount": self.distinct_leader_count,
+                "distinctFollowerCount": self.distinct_follower_count,
+                "timeoutCount": self.timeout_count,
+                "leaderFailureCount": self.leader_failure_count,
+                "statePoisonedCount": self.state_poisoned_count,
+            },
+            "latencyMs": {
+                "p50": self.latency_ms.p50,
+                "p95": self.latency_ms.p95,
+                "p99": self.latency_ms.p99,
+                "max": self.latency_ms.max,
+            },
+            "resultHashes": {
+                "identical": &self.identical_result_hashes,
+                "identicalUniqueCount": self.identical_result_hashes.len(),
+                "distinct": &self.distinct_result_hashes,
+                "distinctUniqueCount": self.distinct_result_hashes.len(),
+            },
+            "diagnoses": &self.diagnoses,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphFeatureEnrichmentBurstLatency {
+    pub p50: u64,
+    pub p95: u64,
+    pub p99: u64,
+    pub max: u64,
+}
+
+#[must_use]
+pub fn run_graph_feature_enrichment_burst_smoke(
+    workspace_identity: &str,
+    enrichment_options: &crate::graph::GraphFeatureEnrichmentOptions,
+    burst_options: &GraphFeatureEnrichmentBurstOptions,
+) -> GraphFeatureEnrichmentBurstReport {
+    let identical_count = burst_options.identical_requests.max(2);
+    let distinct_count = burst_options.distinct_requests;
+    let node_count = burst_options.node_count.max(1);
+    let group = Arc::new(SingleFlightGroup::new());
+    let executions = Arc::new(AtomicUsize::new(0));
+    let identical_barrier = Arc::new(Barrier::new(identical_count));
+    let mut handles = Vec::with_capacity(identical_count.saturating_add(distinct_count));
+
+    for _ in 0..identical_count {
+        let group = Arc::clone(&group);
+        let executions = Arc::clone(&executions);
+        let options = enrichment_options.clone();
+        let identical_barrier = Arc::clone(&identical_barrier);
+        let workspace_identity = workspace_identity.to_owned();
+        handles.push(thread::spawn(move || {
+            identical_barrier.wait();
+            let started = Instant::now();
+            let outcome = run_graph_feature_enrichment_with_group(
+                GraphFeatureEnrichmentSingleFlightInput {
+                    group: &group,
+                    follower_timeout: Duration::from_secs(5),
+                    workspace_identity: &workspace_identity,
+                    workspace_generation: 77,
+                    graph_generation: Some(13),
+                    source_mode: "burst_smoke",
+                    options: &options,
+                },
+                || {
+                    executions.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(50));
+                    crate::graph::enrich_graph_features(
+                        &burst_centrality_report(node_count, 0),
+                        &options,
+                    )
+                },
+            );
+            BurstOutcome::from_run("identical", started.elapsed(), outcome)
+        }));
+    }
+
+    if distinct_count > 0 {
+        let distinct_barrier = Arc::new(Barrier::new(distinct_count));
+        for index in 0..distinct_count {
+            let group = Arc::clone(&group);
+            let executions = Arc::clone(&executions);
+            let options = enrichment_options.clone();
+            let distinct_barrier = Arc::clone(&distinct_barrier);
+            let workspace_identity = workspace_identity.to_owned();
+            handles.push(thread::spawn(move || {
+                distinct_barrier.wait();
+                let started = Instant::now();
+                let outcome = run_graph_feature_enrichment_with_group(
+                    GraphFeatureEnrichmentSingleFlightInput {
+                        group: &group,
+                        follower_timeout: Duration::from_secs(5),
+                        workspace_identity: &workspace_identity,
+                        workspace_generation: 100_u64
+                            .saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                        graph_generation: Some(
+                            200_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                        ),
+                        source_mode: "burst_smoke",
+                        options: &options,
+                    },
+                    || {
+                        executions.fetch_add(1, Ordering::SeqCst);
+                        crate::graph::enrich_graph_features(
+                            &burst_centrality_report(node_count, index.saturating_add(1)),
+                            &options,
+                        )
+                    },
+                );
+                BurstOutcome::from_run("distinct", started.elapsed(), outcome)
+            }));
+        }
+    }
+
+    let mut outcomes = Vec::with_capacity(handles.len());
+    for handle in handles {
+        match handle.join() {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(_) => outcomes.push(BurstOutcome::thread_panic()),
+        }
+    }
+
+    summarize_burst(
+        workspace_identity,
+        identical_count,
+        distinct_count,
+        node_count,
+        executions.load(Ordering::SeqCst),
+        &outcomes,
+    )
+}
+
 struct GraphFeatureEnrichmentSingleFlightInput<'a> {
     group: &'a SingleFlightGroup<crate::graph::GraphFeatureEnrichmentReport>,
     follower_timeout: Duration,
@@ -609,6 +800,249 @@ where
 
 fn stable_f64_option(value: f64) -> String {
     format!("{:016x}", value.to_bits())
+}
+
+#[derive(Debug)]
+struct BurstOutcome {
+    request_kind: &'static str,
+    role: Option<SingleFlightRole>,
+    shared: bool,
+    result_hash: Option<String>,
+    elapsed_ms: u64,
+    error_code: Option<&'static str>,
+}
+
+impl BurstOutcome {
+    fn from_run(
+        request_kind: &'static str,
+        elapsed: Duration,
+        outcome: Result<
+            SingleFlightRun<crate::graph::GraphFeatureEnrichmentReport>,
+            SingleFlightError,
+        >,
+    ) -> Self {
+        match outcome {
+            Ok(run) => Self {
+                request_kind,
+                role: Some(run.role),
+                shared: run.shared,
+                result_hash: Some(graph_feature_report_hash(&run.value)),
+                elapsed_ms: duration_ms(elapsed),
+                error_code: None,
+            },
+            Err(error) => Self {
+                request_kind,
+                role: None,
+                shared: false,
+                result_hash: None,
+                elapsed_ms: duration_ms(elapsed),
+                error_code: Some(error.code()),
+            },
+        }
+    }
+
+    fn thread_panic() -> Self {
+        Self {
+            request_kind: "panic",
+            role: None,
+            shared: false,
+            result_hash: None,
+            elapsed_ms: 0,
+            error_code: Some(SINGLEFLIGHT_LEADER_FAILED_CODE),
+        }
+    }
+}
+
+fn summarize_burst(
+    workspace_identity: &str,
+    identical_count: usize,
+    distinct_count: usize,
+    node_count: usize,
+    execution_count: usize,
+    outcomes: &[BurstOutcome],
+) -> GraphFeatureEnrichmentBurstReport {
+    let mut identical_leader_count = 0;
+    let mut identical_follower_count = 0;
+    let mut distinct_leader_count = 0;
+    let mut distinct_follower_count = 0;
+    let mut timeout_count = 0;
+    let mut leader_failure_count = 0;
+    let mut state_poisoned_count = 0;
+    let mut identical_hashes = BTreeSet::new();
+    let mut distinct_hashes = BTreeSet::new();
+    let mut latency_values = Vec::with_capacity(outcomes.len());
+
+    for outcome in outcomes {
+        latency_values.push(outcome.elapsed_ms);
+        match (outcome.request_kind, outcome.role) {
+            ("identical", Some(SingleFlightRole::Leader)) => identical_leader_count += 1,
+            ("identical", Some(SingleFlightRole::Follower)) => identical_follower_count += 1,
+            ("distinct", Some(SingleFlightRole::Leader)) => distinct_leader_count += 1,
+            ("distinct", Some(SingleFlightRole::Follower)) => distinct_follower_count += 1,
+            _ => {}
+        }
+        match outcome.error_code {
+            Some(SINGLEFLIGHT_FOLLOWER_TIMEOUT_CODE) => timeout_count += 1,
+            Some(SINGLEFLIGHT_LEADER_FAILED_CODE) => leader_failure_count += 1,
+            Some(SINGLEFLIGHT_STATE_POISONED_CODE) => state_poisoned_count += 1,
+            _ => {}
+        }
+        if let Some(hash) = &outcome.result_hash {
+            match outcome.request_kind {
+                "identical" => {
+                    identical_hashes.insert(hash.clone());
+                }
+                "distinct" => {
+                    distinct_hashes.insert(hash.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let identical_shared_count = outcomes
+        .iter()
+        .filter(|outcome| outcome.request_kind == "identical" && outcome.shared)
+        .count();
+    let mut diagnoses = Vec::new();
+    if identical_leader_count != 1 {
+        diagnoses.push(format!(
+            "expected one identical leader, got {identical_leader_count}"
+        ));
+    }
+    if identical_follower_count != identical_count.saturating_sub(1) {
+        diagnoses.push(format!(
+            "expected {} identical followers, got {identical_follower_count}",
+            identical_count.saturating_sub(1)
+        ));
+    }
+    if identical_shared_count != identical_count {
+        diagnoses.push(format!(
+            "expected every identical response to be marked shared, got {identical_shared_count}"
+        ));
+    }
+    if distinct_leader_count != distinct_count {
+        diagnoses.push(format!(
+            "expected {distinct_count} distinct leaders, got {distinct_leader_count}"
+        ));
+    }
+    if distinct_follower_count != 0 {
+        diagnoses.push(format!(
+            "expected zero distinct followers, got {distinct_follower_count}"
+        ));
+    }
+    if identical_hashes.len() != 1 {
+        diagnoses.push(format!(
+            "expected one identical result hash, got {}",
+            identical_hashes.len()
+        ));
+    }
+    if distinct_hashes.len() != distinct_count {
+        diagnoses.push(format!(
+            "expected {distinct_count} distinct result hashes, got {}",
+            distinct_hashes.len()
+        ));
+    }
+    if timeout_count > 0 || leader_failure_count > 0 || state_poisoned_count > 0 {
+        diagnoses.push(format!(
+            "observed errors: timeout={timeout_count}, leader_failure={leader_failure_count}, state_poisoned={state_poisoned_count}"
+        ));
+    }
+    let expected_executions = 1_usize.saturating_add(distinct_count);
+    if execution_count != expected_executions {
+        diagnoses.push(format!(
+            "expected {expected_executions} expensive executions, got {execution_count}"
+        ));
+    }
+
+    GraphFeatureEnrichmentBurstReport {
+        schema: GRAPH_FEATURE_ENRICHMENT_BURST_SCHEMA_V1,
+        workspace_identity_hash: format!(
+            "blake3:{}",
+            blake3::hash(workspace_identity.as_bytes()).to_hex()
+        ),
+        requested_identical: identical_count,
+        requested_distinct: distinct_count,
+        node_count,
+        execution_count,
+        identical_leader_count,
+        identical_follower_count,
+        distinct_leader_count,
+        distinct_follower_count,
+        timeout_count,
+        leader_failure_count,
+        state_poisoned_count,
+        latency_ms: burst_latency(&latency_values),
+        identical_result_hashes: identical_hashes.into_iter().collect(),
+        distinct_result_hashes: distinct_hashes.into_iter().collect(),
+        passed: diagnoses.is_empty(),
+        diagnoses,
+    }
+}
+
+fn graph_feature_report_hash(report: &crate::graph::GraphFeatureEnrichmentReport) -> String {
+    let canonical = serde_json::to_string(&report.data_json())
+        .unwrap_or_else(|error| format!("graph_feature_report_serialization_error:{error}"));
+    format!("blake3:{}", blake3::hash(canonical.as_bytes()).to_hex())
+}
+
+fn burst_latency(values: &[u64]) -> GraphFeatureEnrichmentBurstLatency {
+    GraphFeatureEnrichmentBurstLatency {
+        p50: latency_percentile(values, 50),
+        p95: latency_percentile(values, 95),
+        p99: latency_percentile(values, 99),
+        max: values.iter().copied().max().unwrap_or(0),
+    }
+}
+
+fn latency_percentile(values: &[u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    let last_index = sorted.len().saturating_sub(1);
+    let index = last_index.saturating_mul(percentile).saturating_add(50) / 100;
+    sorted[index.min(last_index)]
+}
+
+fn burst_centrality_report(
+    node_count: usize,
+    salt: usize,
+) -> crate::graph::CentralityRefreshReport {
+    let denominator = node_count.max(1) as f64;
+    let salt_offset = salt as f64 * 0.000_001;
+    let scores: Vec<_> = (0..node_count)
+        .map(|index| {
+            let forward = (node_count.saturating_sub(index)) as f64 / denominator;
+            let reverse = index.saturating_add(1) as f64 / denominator;
+            crate::graph::MemoryCentralityScore {
+                memory_id: format!("mem_{salt:04}_{index:05}"),
+                pagerank: forward + salt_offset,
+                betweenness: reverse + salt_offset,
+                hub: 0.0,
+                authority: 0.0,
+            }
+        })
+        .collect();
+
+    crate::graph::CentralityRefreshReport {
+        version: env!("CARGO_PKG_VERSION"),
+        status: crate::graph::CentralityRefreshStatus::Refreshed,
+        dry_run: false,
+        node_count,
+        edge_count: node_count.saturating_mul(2),
+        projection_ms: 0.0,
+        pagerank_ms: 0.0,
+        betweenness_ms: 0.0,
+        hits_ms: 0.0,
+        total_ms: 0.0,
+        scores,
+        top_pagerank: Vec::new(),
+        top_betweenness: Vec::new(),
+        top_hubs: Vec::new(),
+        top_authorities: Vec::new(),
+    }
 }
 
 #[derive(Debug)]

@@ -3566,6 +3566,18 @@ pub struct GraphFeatureEnrichmentArgs {
     /// Cap applied to derived selection boosts.
     #[arg(long, value_name = "BOOST")]
     pub max_selection_boost: Option<f64>,
+
+    /// Hidden e2e harness: run an in-process single-flight burst with N identical requests.
+    #[arg(long, hide = true, value_name = "COUNT")]
+    pub singleflight_burst: Option<usize>,
+
+    /// Hidden e2e harness: number of deliberately distinct requests in the burst.
+    #[arg(long, hide = true, default_value_t = 2, value_name = "COUNT")]
+    pub singleflight_distinct: usize,
+
+    /// Hidden e2e harness: synthetic graph node count for dry-run enrichment.
+    #[arg(long, hide = true, default_value_t = 64, value_name = "COUNT")]
+    pub singleflight_nodes: usize,
 }
 
 /// Arguments for `ee graph neighborhood`.
@@ -25320,6 +25332,60 @@ where
         enrichment_options.max_selection_boost = max_selection_boost;
     }
 
+    if let Some(identical_requests) = args.singleflight_burst {
+        if !args.dry_run {
+            let domain_error = DomainError::Usage {
+                message: "--singleflight-burst requires --dry-run".to_string(),
+                repair: Some(
+                    "Use `ee graph feature-enrichment --dry-run --singleflight-burst 6 --json`."
+                        .to_string(),
+                ),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+        let burst_options = crate::core::singleflight::GraphFeatureEnrichmentBurstOptions {
+            identical_requests,
+            distinct_requests: args.singleflight_distinct,
+            node_count: args.singleflight_nodes,
+        };
+        let report = crate::core::singleflight::run_graph_feature_enrichment_burst_smoke(
+            workspace.to_string_lossy().as_ref(),
+            &enrichment_options,
+            &burst_options,
+        );
+        let exit_code = if report.passed {
+            ProcessExitCode::Success
+        } else {
+            ProcessExitCode::UnsatisfiedDegradedMode
+        };
+        match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(
+                    stdout,
+                    &graph_feature_enrichment_burst_human_output(&report),
+                );
+            }
+            output::Renderer::Toon => {
+                write_stdout(
+                    stdout,
+                    &(graph_feature_enrichment_burst_toon_output(&report) + "\n"),
+                );
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let json = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": report.passed,
+                    "data": report.data_json(),
+                });
+                write_stdout(stdout, &(json.to_string() + "\n"));
+            }
+        }
+        return exit_code;
+    }
+
     let report = if args.dry_run {
         match crate::core::singleflight::run_graph_feature_enrichment(
             workspace.to_string_lossy().as_ref(),
@@ -25429,6 +25495,46 @@ where
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
     }
+}
+
+fn graph_feature_enrichment_burst_human_output(
+    report: &crate::core::singleflight::GraphFeatureEnrichmentBurstReport,
+) -> String {
+    let mut output = format!(
+        "Graph feature-enrichment single-flight burst ({})\n\n  Identical: leaders {}, followers {}\n  Distinct: leaders {}, followers {}\n  Expensive executions: {}\n  Latency p50/p95/p99: {}/{}/{}ms\n",
+        if report.passed { "passed" } else { "failed" },
+        report.identical_leader_count,
+        report.identical_follower_count,
+        report.distinct_leader_count,
+        report.distinct_follower_count,
+        report.execution_count,
+        report.latency_ms.p50,
+        report.latency_ms.p95,
+        report.latency_ms.p99,
+    );
+    if !report.diagnoses.is_empty() {
+        output.push_str("\nDiagnoses:\n");
+        for diagnosis in &report.diagnoses {
+            output.push_str(&format!("  - {diagnosis}\n"));
+        }
+    }
+    output
+}
+
+fn graph_feature_enrichment_burst_toon_output(
+    report: &crate::core::singleflight::GraphFeatureEnrichmentBurstReport,
+) -> String {
+    format!(
+        "schema: {}\nsuccess: {}\ndata:\n  command: graph feature-enrichment --singleflight-burst\n  passed: {}\n  identicalLeaderCount: {}\n  identicalFollowerCount: {}\n  distinctLeaderCount: {}\n  distinctFollowerCount: {}\n  executionCount: {}",
+        crate::models::RESPONSE_SCHEMA_V1,
+        report.passed,
+        report.passed,
+        report.identical_leader_count,
+        report.identical_follower_count,
+        report.distinct_leader_count,
+        report.distinct_follower_count,
+        report.execution_count,
+    )
 }
 
 fn graph_feature_enrichment_singleflight_error_report(
