@@ -1014,11 +1014,19 @@ fn assert_curate_review_audit_reason(
         .ok_or_else(|| format!("audit details missing for {audit_id}"))?;
     let details: serde_json::Value = serde_json::from_str(details_raw)
         .map_err(|error| format!("audit details must be valid JSON: {error}"))?;
-    ensure_equal(
-        &details["reason"],
-        &serde_json::json!(expected_reason),
-        "audit details reason",
-    )
+    match expected_reason {
+        Some(reason) => ensure_equal(
+            &details["reason"],
+            &serde_json::json!(reason),
+            "audit details reason",
+        ),
+        None => ensure(
+            !details
+                .as_object()
+                .is_some_and(|object| object.contains_key("reason")),
+            "audit details reason key must be omitted when no reason was provided",
+        ),
+    }
 }
 
 #[cfg(unix)]
@@ -3668,8 +3676,8 @@ fn curate_review_with_reason_pins_audit_row_shape() -> TestResult {
     )?;
     assert_curate_review_audit_reason(&database_path, reject_audit_id, Some("duplicate"))?;
 
-    // Companion absent-reason check: reject without --reason must persist
-    // reason: null in the audit row.
+    // Companion absent-reason check: reject without --reason must omit
+    // the reason key in the audit row.
     let bare = run_ee(&[
         "--workspace",
         workspace_arg.as_str(),

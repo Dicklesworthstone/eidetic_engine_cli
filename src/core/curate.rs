@@ -1028,6 +1028,7 @@ pub struct CurateReviewPlannedDetails {
     pub snoozed_until: Option<String>,
     pub merged_into_candidate_id: Option<String>,
     pub decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
@@ -8826,6 +8827,7 @@ mod tests {
         let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(19)).to_string();
         let accept_id = curate_id(20);
         let reject_id = curate_id(21);
+        let bare_reject_id = curate_id(32);
         let connection = seed_candidate_database(
             &database_path,
             &workspace_id,
@@ -8851,6 +8853,26 @@ mod tests {
                     confidence: 0.60,
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:03Z".to_owned()),
+                    ttl_expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_curation_candidate(
+                &bare_reject_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: memory_id.clone(),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.68),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "human_request".to_owned(),
+                    source_id: Some("reviewer".to_owned()),
+                    reason: "Reject without an explicit operator reason.".to_owned(),
+                    confidence: 0.58,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:04Z".to_owned()),
                     ttl_expires_at: None,
                 },
             )
@@ -8926,6 +8948,41 @@ mod tests {
             serde_json::from_str(audit.details.as_deref().ok_or("reject audit details")?)
                 .map_err(|error| error.to_string())?;
         assert_eq!(details["reason"].as_str(), Some("duplicate"));
+
+        let bare_reject = review_curation_candidate(&CurateReviewOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &bare_reject_id,
+            action: CurateReviewAction::Reject,
+            actor: Some("Carol"),
+            dry_run: false,
+            snoozed_until: None,
+            reason: None,
+            merge_into_candidate_id: None,
+        })
+        .map_err(|error| error.to_string())?;
+        let bare_audit = bare_reject
+            .mutation
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "bare reject should write an audit id".to_owned())?;
+        let audit = connection
+            .get_audit(bare_audit)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "bare reject audit entry missing".to_owned())?;
+        let details: serde_json::Value = serde_json::from_str(
+            audit
+                .details
+                .as_deref()
+                .ok_or("bare reject audit details")?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert!(
+            !details
+                .as_object()
+                .is_some_and(|object| object.contains_key("reason")),
+            "absent review reason must omit the audit details key: {details}"
+        );
         Ok(())
     }
 
@@ -9055,6 +9112,10 @@ mod tests {
             Some("pending"),
             None,
         )?;
+        let audit_count_before = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
 
         let report = review_curation_candidate(&CurateReviewOptions {
             workspace_path,
@@ -9088,6 +9149,14 @@ mod tests {
         assert_eq!(stored.status, "pending");
         assert_eq!(stored.review_state, "new");
         assert!(stored.reviewed_at.is_none());
+        let audit_count_after = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        assert_eq!(
+            audit_count_after, audit_count_before,
+            "dry-run review must not write audit rows"
+        );
         Ok(())
     }
 
