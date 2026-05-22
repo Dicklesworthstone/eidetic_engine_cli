@@ -17,7 +17,7 @@ scenarios=(
   unsafe_remote_evidence_uri_rejected
 )
 
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"remote evidence materialization fixture loaded"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "remote evidence materialization fixture loaded"
 for scenario in "${scenarios[@]}"; do
   mesh_e2e_emit_scheduled "$surface" "$scenario"
 done
@@ -47,4 +47,4 @@ if [ "${#missing_terms[@]}" -gt 0 ]; then
 fi
 
 mesh_e2e_emit_outcomes "$surface" "pass" "0.0" "" "${scenarios[@]}"
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"complete","scenario":"matrix","message":"remote evidence materialization static proof passed"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "remote evidence materialization static proof passed" "complete"

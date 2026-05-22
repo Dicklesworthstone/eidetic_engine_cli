@@ -14,7 +14,7 @@ scenarios=(
   local_tier1_unaffected
 )
 
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"admission fixture loaded"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "admission fixture loaded"
 for scenario in "${scenarios[@]}"; do
   mesh_e2e_emit_scheduled "$surface" "$scenario"
 done

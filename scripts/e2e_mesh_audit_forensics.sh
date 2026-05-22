@@ -21,7 +21,7 @@ scenarios=(
   corrupt_ledger_failure_mode
 )
 
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"mesh audit forensics fixture loaded"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "mesh audit forensics fixture loaded"
 for scenario in "${scenarios[@]}"; do
   mesh_e2e_emit_scheduled "$surface" "$scenario"
 done

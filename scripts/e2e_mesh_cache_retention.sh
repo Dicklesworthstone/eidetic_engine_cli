@@ -16,7 +16,7 @@ scenarios=(
   local_source_truth_protected
 )
 
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"mesh cache retention fixture loaded"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "mesh cache retention fixture loaded"
 for scenario in "${scenarios[@]}"; do
   mesh_e2e_emit_scheduled "$surface" "$scenario"
 done

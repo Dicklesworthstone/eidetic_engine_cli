@@ -3,26 +3,87 @@
 
 set -o pipefail
 
+mesh_e2e_event_ts() {
+  if [ -n "${MESH_E2E_EVENT_TS:-}" ]; then
+    printf '%s\n' "$MESH_E2E_EVENT_TS"
+  else
+    python3 - <<'PY'
+from datetime import datetime, timezone
+
+print(datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"))
+PY
+  fi
+}
+
+mesh_e2e_emit_event() {
+  local kind="${1:?kind required}"
+  local surface="${2:?surface required}"
+  local scenario="${3:?scenario required}"
+  local phase="${4:?phase required}"
+  local status="${5:?status required}"
+  local duration_ms="${6:-}"
+  local stderr_tail="${7:-}"
+  local command="${8:-}"
+  local message="${9:-}"
+  python3 - "$kind" "$surface" "$scenario" "$phase" "$status" "$duration_ms" "$stderr_tail" "$command" "$message" "$(mesh_e2e_event_ts)" <<'PY'
+import json
+import sys
+
+kind, surface, scenario, phase, status, duration_ms, stderr_tail, command, message, ts = sys.argv[1:]
+test_id = f"{surface}.{scenario}"
+label = f"{surface}:{scenario}:{phase}"
+fields = {
+    "label": label,
+    "surface": surface,
+    "phase": phase,
+    "scenario": scenario,
+    "status": status,
+    "ok": status == "pass",
+}
+if duration_ms != "":
+    try:
+        duration = float(duration_ms)
+    except ValueError:
+        duration = 0.0
+    fields["duration_ms"] = duration
+if stderr_tail:
+    fields["stderr_tail"] = stderr_tail
+if command:
+    fields["command"] = command
+if message:
+    fields["message"] = message
+if kind == "assert_fail":
+    fields["expected"] = "pass"
+    fields["actual"] = status
+
+event = {
+    "schema": "ee.test_event.v1",
+    "ts": ts,
+    "test_id": test_id,
+    "kind": kind,
+    "fields": fields,
+}
+if duration_ms != "":
+    event["elapsed_ms"] = fields.get("duration_ms", 0.0)
+if stderr_tail:
+    event["stderr_excerpt"] = stderr_tail
+print(json.dumps(event, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
+PY
+}
+
+mesh_e2e_emit_note() {
+  local surface="${1:?surface required}"
+  local scenario="${2:?scenario required}"
+  local message="${3:?message required}"
+  local phase="${4:-setup}"
+  mesh_e2e_emit_event "note" "$surface" "$scenario" "$phase" "note" "" "" "" "$message"
+}
+
 mesh_e2e_emit_scheduled() {
   local surface="${1:?surface required}"
   local scenario="${2:?scenario required}"
   local command="${3:-}"
-  python3 - "$surface" "$scenario" "$command" <<'PY'
-import json
-import sys
-
-surface, scenario, command = sys.argv[1:]
-event = {
-    "schema": "ee.test_event.v1",
-    "surface": surface,
-    "phase": "assert",
-    "scenario": scenario,
-    "stage": "scheduled",
-}
-if command:
-    event["command"] = command
-print(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
-PY
+  mesh_e2e_emit_event "note" "$surface" "$scenario" "setup" "scheduled" "" "" "$command" "scheduled"
 }
 
 mesh_e2e_emit_outcome() {
@@ -31,27 +92,13 @@ mesh_e2e_emit_outcome() {
   local status="${3:?status required}"
   local duration_ms="${4:?duration_ms required}"
   local stderr_tail="${5:-}"
-  python3 - "$surface" "$scenario" "$status" "$duration_ms" "$stderr_tail" <<'PY'
-import json
-import sys
-
-surface, scenario, status, duration_ms, stderr_tail = sys.argv[1:]
-try:
-    duration = float(duration_ms)
-except ValueError:
-    duration = 0.0
-event = {
-    "schema": "ee.test_event.v1",
-    "surface": surface,
-    "phase": "outcome",
-    "scenario": scenario,
-    "status": status,
-    "ok": status == "pass",
-    "duration_ms": duration,
-    "stderr_tail": stderr_tail,
-}
-print(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
-PY
+  local kind="note"
+  case "$status" in
+    pass) kind="assert_ok" ;;
+    fail) kind="assert_fail" ;;
+    skipped) kind="note" ;;
+  esac
+  mesh_e2e_emit_event "$kind" "$surface" "$scenario" "outcome" "$status" "$duration_ms" "$stderr_tail"
 }
 
 mesh_e2e_emit_outcomes() {
@@ -136,6 +183,9 @@ mesh_e2e_run_with_outcomes() {
   fi
   ended="$(mesh_e2e_monotonic_ns)"
   duration_ms="$(mesh_e2e_duration_ms "$started" "$ended")"
+  if [ -n "${MESH_E2E_DURATION_MS_OVERRIDE:-}" ]; then
+    duration_ms="$MESH_E2E_DURATION_MS_OVERRIDE"
+  fi
   stderr_tail="$(mesh_e2e_stderr_tail_file "$stderr_file")"
   mesh_e2e_emit_outcomes "$surface" "$status" "$duration_ms" "$stderr_tail" "${scenarios[@]}"
   return "$rc"

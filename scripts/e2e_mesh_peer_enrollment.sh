@@ -14,7 +14,7 @@ scenarios=(
   unknown_peer
 )
 
-printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"peer enrollment fixture loaded"}\n' "$surface"
+mesh_e2e_emit_note "$surface" "matrix" "peer enrollment fixture loaded"
 for scenario in "${scenarios[@]}"; do
   case "$scenario" in
     pair) command='ee mesh peer add --profile body-allowed --yes --json' ;;
