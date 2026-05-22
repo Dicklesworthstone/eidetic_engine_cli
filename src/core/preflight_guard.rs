@@ -510,14 +510,7 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
             continue;
         }
         if word == "env" {
-            index += 1;
-            while segment
-                .get(index)
-                .is_some_and(|candidate| looks_like_env_assignment(candidate))
-            {
-                index += 1;
-            }
-            continue;
+            return env_wrapped_command_index(segment, index + 1);
         }
         if looks_like_env_assignment(word) {
             index += 1;
@@ -526,6 +519,67 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
         return Some(index);
     }
     None
+}
+
+fn env_wrapped_command_index(segment: &[String], mut index: usize) -> Option<usize> {
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            return segment.get(index + 1).map(|_| index + 1);
+        }
+        if looks_like_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if env_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if env_option_is_value_form(word) || env_option_is_flag(word) {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn env_option_takes_value(word: &str) -> bool {
+    matches!(
+        word,
+        "-u" | "--unset"
+            | "-C"
+            | "--chdir"
+            | "--block-signal"
+            | "--default-signal"
+            | "--ignore-signal"
+    )
+}
+
+fn env_option_is_value_form(word: &str) -> bool {
+    [
+        "--unset=",
+        "--chdir=",
+        "--block-signal=",
+        "--default-signal=",
+        "--ignore-signal=",
+    ]
+    .iter()
+    .any(|prefix| word.starts_with(prefix))
+}
+
+fn env_option_is_flag(word: &str) -> bool {
+    matches!(
+        word,
+        "-" | "-i" | "--ignore-environment" | "-0" | "--null" | "-v" | "--debug"
+    ) || env_short_flag_group(word)
+}
+
+fn env_short_flag_group(word: &str) -> bool {
+    word.starts_with('-')
+        && !word.starts_with("--")
+        && word.len() > 2
+        && word.chars().skip(1).all(|ch| matches!(ch, 'i' | '0' | 'v'))
 }
 
 fn matches_local_cargo_heavy_verification(command: &str) -> bool {
@@ -2586,6 +2640,11 @@ action = "explode"
             "sudo rm -fr /var/cache",
             "sudo -n rm -rf /var/cache",
             "env FOO=bar rm -r -f ~/scratch",
+            "env -i rm -rf /var/cache",
+            "env --ignore-environment rm -rf /var/cache",
+            "env -u PATH rm -rf /var/cache",
+            "env --unset=PATH rm -rf /var/cache",
+            "env --chdir /tmp rm -rf /var/cache",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
@@ -2644,6 +2703,9 @@ action = "explode"
             "cargo install --path .",
             "cargo rustc --lib",
             "env TMPDIR=/tmp cargo test --workspace --no-run",
+            "env -i TMPDIR=/tmp cargo test --workspace --no-run",
+            "env --ignore-environment cargo clippy --all-targets -- -D warnings",
+            "env -u CARGO_HOME cargo check --all-targets",
             "CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
             "cargo-clippy clippy --all-targets -- -D warnings",
             "bash -lc 'cargo check --lib --message-format=short 2>&1 | tail -20'",
@@ -2672,6 +2734,7 @@ action = "explode"
             "rustc src/main.rs",
             "rustdoc --test src/lib.rs",
             "env RCH_REQUIRE_REMOTE=1 rustc --crate-type lib src/lib.rs",
+            "env -i RCH_REQUIRE_REMOTE=1 rustdoc --test src/lib.rs",
             "bash -lc 'rustdoc --test src/lib.rs'",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
@@ -2721,7 +2784,7 @@ action = "explode"
         let registry = PreflightGuardRegistry::with_builtins();
         let report = run_preflight_guard(
             &registry,
-            &opts("env CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run"),
+            &opts("env -i CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run"),
         );
 
         let ids = report
