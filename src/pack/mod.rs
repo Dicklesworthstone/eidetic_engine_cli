@@ -4800,12 +4800,16 @@ fn assemble_mmr_draft(
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
-    let mut selected_signatures = Vec::new();
-    let mut items: Vec<PackDraftItem> = Vec::new();
-    let mut omitted = Vec::new();
-    let mut steps = Vec::new();
+    // bd-1i6np: pre-allocate hot-path accumulators to candidate_count. Each Vec
+    // grows to at most n entries through the selection loop, so allocating
+    // up-front avoids the geometric reallocation chain (~log(n) doublings)
+    // without changing observable output.
+    let mut selected_signatures = Vec::with_capacity(candidate_count);
+    let mut items: Vec<PackDraftItem> = Vec::with_capacity(candidate_count);
+    let mut omitted = Vec::with_capacity(candidate_count);
+    let mut steps = Vec::with_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
-    let mut coverage_fill_candidates = Vec::new();
+    let mut coverage_fill_candidates = Vec::with_capacity(candidate_count);
     let mut max_selected_similarities = vec![0.0_f32; candidates.len()];
 
     while !candidates.is_empty() {
@@ -5086,9 +5090,13 @@ fn assemble_facility_location_draft(
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
-    let mut items: Vec<PackDraftItem> = Vec::new();
-    let mut omitted = Vec::new();
-    let mut steps = Vec::new();
+    // bd-1i6np: pre-allocate hot-path accumulators to candidate_count. Each Vec
+    // grows to at most n entries through the selection loop, so allocating
+    // up-front avoids the geometric reallocation chain without changing
+    // observable output.
+    let mut items: Vec<PackDraftItem> = Vec::with_capacity(candidate_count);
+    let mut omitted = Vec::with_capacity(candidate_count);
+    let mut steps = Vec::with_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
 
     while remaining_count > 0 {
