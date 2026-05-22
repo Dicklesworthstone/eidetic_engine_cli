@@ -1572,6 +1572,91 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_classifies_nonzero_exit_with_stdout_as_degraded() -> Result<(), String> {
+        let dir = unique_test_dir("nonzero-stdout-degraded")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\nprintf '{\"ok\":false}\\n'\nprintf 'index stale\\n' >&2\nexit 7\n",
+            0o755,
+        )?;
+
+        let outcome = CassInvocation::new(binary, ["health", "--json"])
+            .run()
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.exit_code(), Some(7));
+        assert_eq!(outcome.class(), CassExitClass::Degraded);
+        assert!(!outcome.timed_out());
+        assert_eq!(outcome.stdout_utf8_lossy(), "{\"ok\":false}\n");
+        assert_eq!(outcome.stderr_utf8_lossy(), "index stale\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_classifies_nonzero_exit_without_stdout_as_failure() -> Result<(), String> {
+        let dir = unique_test_dir("nonzero-empty-stdout-failure")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\nprintf 'fatal cass failure\\n' >&2\nexit 42\n",
+            0o755,
+        )?;
+
+        let outcome = CassInvocation::new(binary, ["health", "--json"])
+            .run()
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outcome.exit_code(), Some(42));
+        assert_eq!(outcome.class(), CassExitClass::Failure);
+        assert!(!outcome.timed_out());
+        assert!(outcome.stdout_is_empty());
+        assert_eq!(outcome.stderr_utf8_lossy(), "fatal cass failure\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_stdout_lines_classifies_nonzero_exit_with_stdout_as_degraded() -> Result<(), String> {
+        let dir = unique_test_dir("stream-nonzero-stdout-degraded")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(
+            &binary,
+            "#!/bin/sh\nprintf 'line-one\\nline-two\\n'\nprintf 'stream degraded\\n' >&2\nexit 9\n",
+            0o755,
+        )?;
+
+        let inv = CassInvocation::new(binary, ["view", "--json"]);
+        let mut lines = Vec::new();
+        let outcome = inv
+            .run_stdout_lines::<_, std::convert::Infallible>(|line| {
+                lines.push(line);
+                Ok(())
+            })
+            .map_err(|error| match error {
+                super::CassStreamError::Cass(error) => error.to_string(),
+                super::CassStreamError::Handler(infallible) => match infallible {},
+            })?;
+
+        assert_eq!(lines, vec!["line-one".to_string(), "line-two".to_string()]);
+        assert_eq!(outcome.exit_code(), Some(9));
+        assert_eq!(outcome.class(), CassExitClass::Degraded);
+        assert_eq!(outcome.stdout_line_count(), 2);
+        assert_eq!(
+            outcome.stdout_bytes_seen(),
+            "line-one".len() + "line-two".len()
+        );
+        assert_eq!(outcome.peak_stdout_line_bytes(), "line-two".len());
+        assert_eq!(outcome.stderr_utf8_lossy(), "stream degraded\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_without_timeout_uses_capped_pipe_capture() -> Result<(), String> {
         let dir = unique_test_dir("plain-run-pipe-cap")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
