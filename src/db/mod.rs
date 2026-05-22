@@ -24617,6 +24617,89 @@ mod tests {
     }
 
     #[test]
+    fn search_index_rebuild_interrupted_running_job_recovers_to_failed_terminal_state() -> TestResult
+    {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let job_id = "sidx_crashrebuild00000000000000";
+        let input = super::CreateSearchIndexJobInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            job_type: super::SearchIndexJobType::FullRebuild,
+            document_source: None,
+            document_id: None,
+            documents_total: 0,
+        };
+
+        connection.insert_search_index_job(job_id, &input)?;
+        let started = connection.start_search_index_job(job_id)?;
+        ensure(started, "interrupted rebuild job starts")?;
+        let total_updated = connection.update_search_index_job_total(job_id, 12)?;
+        ensure(total_updated, "interrupted rebuild total updates")?;
+        let progress_updated = connection.update_search_index_job_progress(job_id, 3)?;
+        ensure(progress_updated, "interrupted rebuild progress updates")?;
+
+        let pending =
+            connection.list_pending_search_index_jobs("wsp_01234567890123456789012345", None)?;
+        ensure(pending.is_empty(), "running rebuild must not be re-queued")?;
+
+        let restarted = connection.start_search_index_job(job_id)?;
+        ensure(!restarted, "running rebuild must not restart")?;
+        let cancelled = connection.cancel_search_index_job(job_id)?;
+        ensure(
+            !cancelled,
+            "running rebuild must not cancel through pending path",
+        )?;
+
+        let failed = connection
+            .fail_search_index_job(job_id, "index rebuild interrupted after staging publish")?;
+        ensure(failed, "interrupted rebuild can be failed exactly once")?;
+
+        let job = connection
+            .get_search_index_job(job_id)?
+            .ok_or_else(|| TestFailure::new("interrupted rebuild job not found"))?;
+        ensure_equal(
+            &job.status_enum(),
+            &Some(super::SearchIndexJobStatus::Failed),
+            "interrupted rebuild status",
+        )?;
+        ensure_equal(&job.documents_total, &12, "interrupted rebuild total")?;
+        ensure_equal(
+            &job.documents_indexed,
+            &3,
+            "interrupted rebuild partial progress",
+        )?;
+        ensure_equal(
+            &job.error_message,
+            &Some("index rebuild interrupted after staging publish".to_string()),
+            "interrupted rebuild error message",
+        )?;
+        ensure(job.started_at.is_some(), "started_at remains set")?;
+        ensure(job.completed_at.is_some(), "failed rebuild is terminal")?;
+
+        let second_failure = connection.fail_search_index_job(job_id, "second failure")?;
+        ensure(!second_failure, "failed rebuild must not fail twice")?;
+        let completed = connection.complete_search_index_job(job_id, 12)?;
+        ensure(!completed, "failed rebuild must not complete")?;
+        let progress_after_failure = connection.update_search_index_job_progress(job_id, 12)?;
+        ensure(
+            !progress_after_failure,
+            "failed rebuild progress must not update",
+        )?;
+
+        let pending =
+            connection.list_pending_search_index_jobs("wsp_01234567890123456789012345", None)?;
+        ensure(
+            pending.is_empty(),
+            "terminal failed rebuild must stay out of pending queue",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn search_index_job_cancellation() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
