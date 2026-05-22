@@ -169,6 +169,14 @@ struct PoolState {
     ad_hoc_bypass_count: u64,
 }
 
+fn allocate_next_read_pool_id(next_id: &mut u64, id_name: &str) -> u64 {
+    let id = *next_id;
+    *next_id = id
+        .checked_add(1)
+        .unwrap_or_else(|| panic!("read-pool {id_name} id exhausted at u64::MAX"));
+    id
+}
+
 struct ActivePinRecord {
     slot_id: Option<u64>,
     metadata: SnapshotPinMetadata,
@@ -355,8 +363,7 @@ impl ReadConnectionPool {
             }
 
             if state.active.saturating_add(state.idle.len()) < max_size {
-                let slot_id = state.next_slot_id;
-                state.next_slot_id = state.next_slot_id.saturating_add(1);
+                let slot_id = allocate_next_read_pool_id(&mut state.next_slot_id, "slot");
                 state.active = state.active.saturating_add(1);
                 state.max_seen = state
                     .max_seen
@@ -648,8 +655,7 @@ impl ReadConnectionPool {
         max_pin_duration: Duration,
     ) -> (u64, Arc<AtomicBool>) {
         let mut state = self.lock_state();
-        let pin_id = state.next_pin_id;
-        state.next_pin_id = state.next_pin_id.saturating_add(1);
+        let pin_id = allocate_next_read_pool_id(&mut state.next_pin_id, "pin");
         let poisoned = Arc::new(AtomicBool::new(false));
         state.active_pins.insert(
             pin_id,
@@ -1111,6 +1117,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::fs;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -1292,6 +1299,59 @@ mod tests {
         }
 
         latencies
+    }
+
+    #[test]
+    fn read_pool_id_exhaustion_panics_instead_of_reusing_max() {
+        let mut next_id = u64::MAX - 1;
+
+        assert_eq!(
+            allocate_next_read_pool_id(&mut next_id, "test"),
+            u64::MAX - 1
+        );
+        assert_eq!(next_id, u64::MAX);
+
+        let overflow = catch_unwind(AssertUnwindSafe(|| {
+            let _ = allocate_next_read_pool_id(&mut next_id, "test");
+        }));
+
+        assert!(overflow.is_err());
+        assert_eq!(next_id, u64::MAX);
+
+        let slot_pool = memory_pool(1, Duration::from_secs(30));
+        {
+            let mut state = slot_pool.lock_state();
+            state.next_slot_id = u64::MAX;
+        }
+        let slot_overflow = catch_unwind(AssertUnwindSafe(|| {
+            let _ = slot_pool.acquire();
+        }));
+        assert!(slot_overflow.is_err());
+        {
+            let state = slot_pool.lock_state();
+            assert_eq!(state.next_slot_id, u64::MAX);
+            assert_eq!(state.active, 0);
+        }
+
+        let pin_pool = memory_pool(1, Duration::from_secs(30));
+        {
+            let mut state = pin_pool.lock_state();
+            state.next_pin_id = u64::MAX;
+        }
+        let pin_overflow = catch_unwind(AssertUnwindSafe(|| {
+            let _ = pin_pool.register_pin(
+                None,
+                SnapshotPinMetadata::default(),
+                Instant::now(),
+                Duration::from_secs(30),
+            );
+        }));
+        assert!(pin_overflow.is_err());
+        {
+            let state = pin_pool.lock_state();
+            assert_eq!(state.next_pin_id, u64::MAX);
+            assert!(state.active_pins.is_empty());
+        }
     }
 
     #[test]
