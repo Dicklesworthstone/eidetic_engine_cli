@@ -241,6 +241,13 @@ pub struct ServeAcceptedConnection {
     pub exchange: ServeConnectionExchange,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServeForegroundOnceReport {
+    pub bound_addr: SocketAddr,
+    pub listener_metadata: JsonValue,
+    pub accepted: ServeAcceptedConnection,
+}
+
 #[must_use]
 pub fn serve_startup_report_json(
     options: &ServeStartupOptions,
@@ -899,6 +906,37 @@ pub fn serve_accept_once(
             Err(error) => return Err(serve_transport_io_error("accept connection", error)),
         }
     }
+}
+
+pub fn serve_foreground_once<F>(
+    options: &ServeStartupOptions,
+    token: Option<&str>,
+    request_id: &str,
+    elapsed_ms: u64,
+    on_bound: F,
+) -> Result<ServeForegroundOnceReport, DomainError>
+where
+    F: FnOnce(&ServeListenerBinding) -> Result<(), DomainError>,
+{
+    let binding = bind_serve_listener(options, token)?;
+    let bound_addr = binding
+        .listener
+        .local_addr()
+        .map_err(|error| serve_transport_io_error("inspect listener local address", error))?;
+    let listener_metadata = binding.metadata.clone();
+    on_bound(&binding)?;
+    let accepted = serve_accept_once(
+        &binding.listener,
+        request_id,
+        &options.limits,
+        token,
+        elapsed_ms,
+    )?;
+    Ok(ServeForegroundOnceReport {
+        bound_addr,
+        listener_metadata,
+        accepted,
+    })
 }
 
 fn serve_request_complete_len(
@@ -2851,6 +2889,99 @@ mod tests {
             error.to_string().contains("Timed out waiting"),
             true,
             "accept timeout error",
+        )
+    }
+
+    #[test]
+    fn serve_foreground_once_binds_then_accepts_single_connection() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let server_token = token.to_owned();
+        let limits = ServeLimits {
+            connection_read_timeout_ms: 1_000,
+            ..ServeLimits::default()
+        };
+        let options = ServeStartupOptions {
+            port: 0,
+            limits,
+            ..ServeStartupOptions::default()
+        };
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || -> Result<ServeForegroundOnceReport, String> {
+            serve_foreground_once(
+                &options,
+                Some(server_token.as_str()),
+                "req-foreground-once",
+                21,
+                |binding| {
+                    let addr = binding.listener.local_addr().map_err(|error| {
+                        serve_transport_io_error("inspect test listener local address", error)
+                    })?;
+                    addr_tx
+                        .send(addr)
+                        .map_err(|error| DomainError::Configuration {
+                            message: format!(
+                                "Failed to share ee serve test bound address: {error}"
+                            ),
+                            repair: Some("Retry the serve foreground-once test.".to_owned()),
+                        })
+                },
+            )
+            .map_err(|error| error.to_string())
+        });
+
+        let addr = addr_rx
+            .recv_timeout(Duration::from_secs(1))
+            .map_err(|error| error.to_string())?;
+        let mut client = std::net::TcpStream::connect(addr).map_err(|error| error.to_string())?;
+        let request = format!(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .map_err(|error| error.to_string())?;
+        let report = server
+            .join()
+            .map_err(|_| "server thread panicked".to_owned())??;
+
+        ensure(report.bound_addr, addr, "foreground bound addr")?;
+        ensure(
+            report.listener_metadata["schema"].as_str(),
+            Some(SERVE_STARTUP_SCHEMA_V1),
+            "foreground listener schema",
+        )?;
+        ensure(
+            report.listener_metadata.to_string().contains(token),
+            false,
+            "foreground metadata does not expose token",
+        )?;
+        ensure(
+            report.accepted.peer_addr.ip().is_loopback(),
+            true,
+            "foreground peer loopback",
+        )?;
+        ensure(
+            report.accepted.exchange.response_status_line.as_str(),
+            "HTTP/1.1 200 OK",
+            "foreground status line",
+        )?;
+        let (_, body) = split_http_response(&response)?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["request"]["endpoint"].as_str(),
+            Some("status"),
+            "foreground endpoint",
+        )?;
+        ensure(
+            report.accepted.exchange.response_bytes,
+            response.len(),
+            "foreground response bytes",
         )
     }
 
