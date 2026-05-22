@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -232,6 +232,13 @@ pub struct ServeConnectionExchange {
     pub request_bytes: usize,
     pub response_bytes: usize,
     pub response_status_line: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeAcceptedConnection {
+    pub accept_attempts: usize,
+    pub peer_addr: SocketAddr,
+    pub exchange: ServeConnectionExchange,
 }
 
 #[must_use]
@@ -849,6 +856,51 @@ pub fn serve_single_connection_exchange(
     })
 }
 
+pub fn serve_accept_once(
+    listener: &TcpListener,
+    request_id: &str,
+    limits: &ServeLimits,
+    token: Option<&str>,
+    elapsed_ms: u64,
+) -> Result<ServeAcceptedConnection, DomainError> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| serve_transport_io_error("set listener nonblocking mode", error))?;
+    let timeout = Duration::from_millis(limits.connection_read_timeout_ms);
+    let deadline = Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(10);
+    let mut accept_attempts = 0_usize;
+
+    loop {
+        accept_attempts = accept_attempts.saturating_add(1);
+        match listener.accept() {
+            Ok((stream, peer_addr)) => {
+                let exchange = serve_single_connection_exchange(
+                    stream, request_id, limits, token, elapsed_ms,
+                )?;
+                return Ok(ServeAcceptedConnection {
+                    accept_attempts,
+                    peer_addr,
+                    exchange,
+                });
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(serve_transport_timeout_error(timeout));
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(if remaining < poll_interval {
+                    remaining
+                } else {
+                    poll_interval
+                });
+            }
+            Err(error) => return Err(serve_transport_io_error("accept connection", error)),
+        }
+    }
+}
+
 fn serve_request_complete_len(
     bytes: &[u8],
     limits: &ServeLimits,
@@ -1239,6 +1291,16 @@ fn serve_policy_error(
 fn serve_transport_io_error(action: &str, error: std::io::Error) -> DomainError {
     DomainError::Configuration {
         message: format!("Failed to {action} for ee serve connection: {error}"),
+        repair: Some("Retry `ee serve --foreground` or use direct CLI commands.".to_owned()),
+    }
+}
+
+fn serve_transport_timeout_error(timeout: Duration) -> DomainError {
+    DomainError::Configuration {
+        message: format!(
+            "Timed out waiting for ee serve connection after {} ms.",
+            timeout.as_millis()
+        ),
         repair: Some("Retry `ee serve --foreground` or use direct CLI commands.".to_owned()),
     }
 }
@@ -2676,6 +2738,119 @@ mod tests {
             exchange.response_bytes,
             response.len(),
             "exchange response bytes",
+        )
+    }
+
+    #[test]
+    fn serve_accept_once_round_trips_bound_listener_connection() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let server_token = token.to_owned();
+        let limits = ServeLimits {
+            connection_read_timeout_ms: 1_000,
+            ..ServeLimits::default()
+        };
+        let options = ServeStartupOptions {
+            port: 0,
+            limits: limits.clone(),
+            ..ServeStartupOptions::default()
+        };
+        let binding =
+            bind_serve_listener(&options, Some(token)).map_err(|error| error.to_string())?;
+        let addr = binding
+            .listener
+            .local_addr()
+            .map_err(|error| error.to_string())?;
+        let server = std::thread::spawn(move || -> Result<ServeAcceptedConnection, String> {
+            serve_accept_once(
+                &binding.listener,
+                "req-accept-once",
+                &limits,
+                Some(server_token.as_str()),
+                13,
+            )
+            .map_err(|error| error.to_string())
+        });
+
+        let mut client = std::net::TcpStream::connect(addr).map_err(|error| error.to_string())?;
+        let request = format!(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .map_err(|error| error.to_string())?;
+        let accepted = server
+            .join()
+            .map_err(|_| "server thread panicked".to_owned())??;
+
+        ensure(
+            accepted.peer_addr.ip().is_loopback(),
+            true,
+            "accepted peer loopback",
+        )?;
+        ensure(
+            accepted.accept_attempts >= 1,
+            true,
+            "accept attempts recorded",
+        )?;
+        ensure(
+            accepted.exchange.response_status_line.as_str(),
+            "HTTP/1.1 200 OK",
+            "accepted status line",
+        )?;
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Connection"),
+            Some("close"),
+            "accepted connection close",
+        )?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["request"]["endpoint"].as_str(),
+            Some("status"),
+            "accepted endpoint",
+        )?;
+        ensure(
+            accepted.exchange.response_bytes,
+            response.len(),
+            "accepted response bytes",
+        )
+    }
+
+    #[test]
+    fn serve_accept_once_times_out_without_pending_connection() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let limits = ServeLimits {
+            connection_read_timeout_ms: 0,
+            ..ServeLimits::default()
+        };
+        let options = ServeStartupOptions {
+            port: 0,
+            limits: limits.clone(),
+            ..ServeStartupOptions::default()
+        };
+        let binding =
+            bind_serve_listener(&options, Some(token)).map_err(|error| error.to_string())?;
+        let error =
+            match serve_accept_once(&binding.listener, "req-timeout", &limits, Some(token), 0) {
+                Ok(accepted) => {
+                    return Err(format!(
+                        "empty accept queue should time out, got {accepted:?}"
+                    ));
+                }
+                Err(error) => error,
+            };
+
+        ensure(
+            error.to_string().contains("Timed out waiting"),
+            true,
+            "accept timeout error",
         )
     }
 
