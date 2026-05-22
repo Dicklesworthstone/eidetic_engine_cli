@@ -25343,6 +25343,67 @@ mod tests {
             codes.contains(&"pack_omission_count_mismatch"),
             "pack omission count mismatch detected",
         )?;
+        let issue_contract: Vec<(&str, &str, &str, Option<&str>, Option<&str>, Option<&str>)> =
+            report
+                .issues
+                .iter()
+                .map(|issue| {
+                    (
+                        issue.scope.as_str(),
+                        issue.code.as_str(),
+                        issue.owner_id.as_str(),
+                        issue.referenced_id.as_deref(),
+                        issue.expected.as_deref(),
+                        issue.actual.as_deref(),
+                    )
+                })
+                .collect();
+        ensure_equal(
+            &issue_contract,
+            &vec![
+                (
+                    "memory_link",
+                    "cross_workspace_memory_link",
+                    "link_00000000000000000000000101",
+                    Some("mem_00000000000000000000000101->mem_00000000000000000000000102"),
+                    Some("wsp_01234567890123456789012345"),
+                    Some("wsp_98765432109876543210987654"),
+                ),
+                (
+                    "pack_item",
+                    "cross_workspace_pack_item",
+                    "pack_00000000000000000000000101",
+                    Some("mem_00000000000000000000000102"),
+                    Some("wsp_01234567890123456789012345"),
+                    Some("wsp_98765432109876543210987654"),
+                ),
+                (
+                    "pack_omission",
+                    "cross_workspace_pack_omission",
+                    "pack_00000000000000000000000101",
+                    Some("mem_00000000000000000000000102"),
+                    Some("wsp_01234567890123456789012345"),
+                    Some("wsp_98765432109876543210987654"),
+                ),
+                (
+                    "pack_record",
+                    "pack_item_count_mismatch",
+                    "pack_00000000000000000000000101",
+                    None,
+                    Some("2"),
+                    Some("1"),
+                ),
+                (
+                    "pack_record",
+                    "pack_omission_count_mismatch",
+                    "pack_00000000000000000000000101",
+                    None,
+                    Some("0"),
+                    Some("1"),
+                ),
+            ],
+            "reference integrity report field contract",
+        )?;
 
         let integrity = connection.integrity_report()?;
         ensure(
