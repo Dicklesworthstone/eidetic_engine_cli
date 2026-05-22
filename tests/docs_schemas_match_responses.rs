@@ -523,6 +523,145 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     Ok(())
 }
 
+struct MachineSurfaceConformanceCase {
+    surface: &'static str,
+    schema_id: &'static str,
+    schema_file: &'static str,
+    document: Value,
+    schema_pointer: Option<&'static str>,
+}
+
+impl MachineSurfaceConformanceCase {
+    fn new(
+        surface: &'static str,
+        schema_id: &'static str,
+        schema_file: &'static str,
+        document: Value,
+    ) -> Self {
+        Self {
+            surface,
+            schema_id,
+            schema_file,
+            document,
+            schema_pointer: Some("/schema"),
+        }
+    }
+
+    fn without_top_level_schema(mut self) -> Self {
+        self.schema_pointer = None;
+        self
+    }
+}
+
+#[test]
+fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult {
+    let cases = vec![
+        MachineSurfaceConformanceCase::new(
+            "status",
+            RESPONSE_SCHEMA_V2,
+            "ee.response.v2.json",
+            read_json(&fixture_path("golden/agent/status.json.golden"))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "doctor",
+            RESPONSE_SCHEMA_V2,
+            "ee.response.v2.json",
+            read_json(&fixture_path("golden/agent/doctor.json.golden"))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "capabilities",
+            RESPONSE_SCHEMA_V2,
+            "ee.response.v2.json",
+            read_json(&fixture_path(
+                "golden/capabilities/capabilities_json.golden",
+            ))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "context",
+            "ee.pack.v2",
+            "ee.pack.v2.json",
+            read_json(&fixture_path("golden/agent/context_pack.json.golden"))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "search",
+            "ee.search.document.v1",
+            "ee.search.document.v1.json",
+            search_document_conformance_sample(),
+        )
+        .without_top_level_schema(),
+        MachineSurfaceConformanceCase::new(
+            "why",
+            RESPONSE_SCHEMA_V2,
+            "ee.response.v2.json",
+            read_json(&fixture_path("golden/agent/why_selected.json.golden"))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "pack-stream",
+            "ee.pack.stream.v1",
+            "ee.pack.stream.v1.json",
+            pack_stream_header_conformance_sample(),
+        ),
+        MachineSurfaceConformanceCase::new(
+            "swarm",
+            "ee.swarm.brief.v1",
+            "swarm/ee.swarm.brief.v1.json",
+            swarm_brief_conformance_sample()?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "preflight",
+            "ee.preflight.guard.v1",
+            "ee.preflight.guard.v1.json",
+            preflight_guard_conformance_sample(),
+        ),
+        MachineSurfaceConformanceCase::new(
+            "eval",
+            "ee.eval.report.v1",
+            "ee.eval.report.v1.json",
+            read_json(&fixture_path(
+                "golden/eval/fx.release_failure.v1/report.json.golden",
+            ))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "perf",
+            "ee.perf.v1",
+            "ee.perf.v1.json",
+            read_json(&fixture_path(
+                "golden/perf_artifact/bench_envelope_v1.golden",
+            ))?,
+        ),
+        MachineSurfaceConformanceCase::new(
+            "test-event",
+            "ee.test_event.v1",
+            "test_event_v1.json",
+            test_event_conformance_sample(),
+        ),
+        MachineSurfaceConformanceCase::new(
+            "proof-check",
+            "ee.proof_check.v1",
+            "ee.proof_check.v1.json",
+            proof_check_conformance_sample(),
+        ),
+        MachineSurfaceConformanceCase::new(
+            "error",
+            "ee.error.v2",
+            "ee.error.v2.json",
+            domain_error_sample()?,
+        ),
+    ];
+
+    for case in cases {
+        let schema = read_json(&schema_path(case.schema_file))?;
+        if let Some(pointer) = case.schema_pointer {
+            ensure_json_str(&case.document, pointer, case.schema_id)
+                .map_err(|error| format!("{}: {error}", case.surface))?;
+        }
+        validate_json_schema(&case.document, &schema, &schema, "$")
+            .map_err(|error| format!("{} ({}): {error}", case.surface, case.schema_id))?;
+    }
+
+    Ok(())
+}
+
 #[test]
 fn swarm_next_action_golden_snapshots_match_schema() -> TestResult {
     let schema = schema_doc(SWARM_NEXT_ACTION_SCHEMA_V1)?;
@@ -543,6 +682,128 @@ fn swarm_next_action_golden_snapshots_match_schema() -> TestResult {
             .map_err(|error| format!("swarm next-action {fixture_name}: {error}"))?;
     }
     Ok(())
+}
+
+fn search_document_conformance_sample() -> Value {
+    json!({
+        "docId": "mem_search_document_schema",
+        "memoryId": "mem_search_document_schema",
+        "score": 0.91,
+        "scoreInterval": [0.72, 0.97],
+        "coverageGuarantee": 0.95,
+        "source": "hybrid",
+        "why": "Selected by hybrid retrieval with score 0.9100.",
+        "provenance": [
+            {
+                "kind": "provenance_uri",
+                "uri": "file://AGENTS.md#L42"
+            },
+            {
+                "kind": "search_document",
+                "docId": "mem_search_document_schema"
+            }
+        ],
+        "fastScore": 0.81,
+        "qualityScore": 0.93,
+        "lexicalScore": 0.72,
+        "metadata": {
+            "schema": "ee.search.document.v1",
+            "level": "procedural",
+            "kind": "rule"
+        },
+        "explanation": {
+            "summary": "Selected by hybrid retrieval with score 0.9100.",
+            "factors": [
+                {
+                    "name": "lexical",
+                    "value": 0.72,
+                    "contribution": "matched query terms",
+                    "sourceField": "lexicalScore",
+                    "formula": "bm25"
+                }
+            ]
+        }
+    })
+}
+
+fn pack_stream_header_conformance_sample() -> Value {
+    json!({
+        "schema": "ee.pack.stream.v1",
+        "kind": "header",
+        "packId": "pack_00000000000000000000000001",
+        "query": "prepare release",
+        "workspaceId": "ws_00000000000000000000000001",
+        "requestId": "req_00000000000000000000000001",
+        "profile": "compact",
+        "maxTokens": 4000,
+        "candidatePool": 10,
+        "memoryScope": "workspace",
+        "strictScope": false,
+        "startedAt": "2026-05-22T00:00:00Z",
+        "featureFlagsHash": null,
+        "canonicalKeyHash": null,
+        "degraded": []
+    })
+}
+
+fn test_event_conformance_sample() -> Value {
+    json!({
+        "schema": "ee.test_event.v1",
+        "ts": "2026-05-22T00:00:00Z",
+        "test_id": "bd-1wtsb.schema_gate",
+        "kind": "schema_gate",
+        "fields": {
+            "target_schema": "ee.response.v2",
+            "log_lines_checked": 1,
+            "kinds_observed": ["schema_gate"],
+            "orphans_in_schema": [],
+            "orphans_in_src": []
+        }
+    })
+}
+
+fn proof_check_conformance_sample() -> Value {
+    json!({
+        "schema": "ee.proof_check.v1",
+        "success": true,
+        "checks": [
+            {
+                "artifact": {
+                    "path": "proofs/lean4/pack_determinism.lean",
+                    "kind": "lean4",
+                    "invariants": ["pack_hash_determinism"]
+                },
+                "command": ["lean", "--run", "proofs/lean4/pack_determinism.lean"],
+                "durationMs": 0,
+                "status": "tool_missing",
+                "exitCode": null,
+                "stdout": "",
+                "stderr": "lean not installed"
+            }
+        ],
+        "degraded": ["degraded.proof_tool_missing"]
+    })
+}
+
+fn swarm_brief_conformance_sample() -> Result<Value, String> {
+    read_json(&fixture_path(
+        "golden/swarm/brief_contract_matrix.json.golden",
+    ))?
+    .pointer("/cases/0")
+    .cloned()
+    .ok_or_else(|| "swarm brief contract matrix missing cases[0]".to_string())
+}
+
+fn preflight_guard_conformance_sample() -> Value {
+    json!({
+        "schema": "ee.preflight.guard.v1",
+        "command": "git status --short",
+        "exitCode": 0,
+        "checkedAt": "2026-05-22T00:00:00Z",
+        "matches": [],
+        "matchedMemories": [],
+        "degraded": []
+    })
 }
 
 fn domain_error_sample() -> Result<Value, String> {

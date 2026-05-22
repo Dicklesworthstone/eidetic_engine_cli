@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.eval.report.v1.json",
+  "title": "ee.eval.report.v1",
+  "description": "Retrieval evaluation report emitted by eval fixtures.",
+  "type": "object",
+  "required": [
+    "schema",
+    "fixture_id",
+    "fixture_family",
+    "status",
+    "metrics",
+    "duration_ms",
+    "data_hash"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.eval.report.v1" },
+    "fixture_id": { "type": "string" },
+    "fixture_family": { "type": "string" },
+    "status": { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "fixture_id",
+        "queries_evaluated",
+        "mean_precision_at_1",
+        "mean_precision_at_3",
+        "mean_precision_at_5",
+        "mean_recall_at_5",
+        "mean_ndcg_at_5",
+        "mean_mrr",
+        "per_query"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "fixture_id": { "type": "string" },
+        "queries_evaluated": { "type": "integer", "minimum": 0 },
+        "mean_precision_at_1": { "type": "number", "minimum": 0 },
+        "mean_precision_at_3": { "type": "number", "minimum": 0 },
+        "mean_precision_at_5": { "type": "number", "minimum": 0 },
+        "mean_recall_at_5": { "type": "number", "minimum": 0 },
+        "mean_ndcg_at_5": { "type": "number", "minimum": 0 },
+        "mean_mrr": { "type": "number", "minimum": 0 },
+        "per_query": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/queryMetrics" }
+        }
+      }
+    },
+    "duration_ms": { "type": "number", "minimum": 0 },
+    "data_hash": { "type": "string" }
+  },
+  "field_presets": {
+    "minimal": ["schema", "fixture_id", "status"],
+    "summary": ["schema", "fixture_id", "fixture_family", "status", "metrics"],
+    "standard": [
+      "schema",
+      "fixture_id",
+      "fixture_family",
+      "status",
+      "metrics",
+      "duration_ms",
+      "data_hash"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "queryMetrics": {
+      "type": "object",
+      "required": [
+        "query",
+        "expected_ids",
+        "retrieved_ids",
+        "precision_at_1",
+        "precision_at_3",
+        "precision_at_5",
+        "recall_at_5",
+        "ndcg_at_5",
+        "mrr",
+        "first_relevant_rank"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "query": { "type": "string" },
+        "expected_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "retrieved_ids": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "precision_at_1": { "type": "number", "minimum": 0 },
+        "precision_at_3": { "type": "number", "minimum": 0 },
+        "precision_at_5": { "type": "number", "minimum": 0 },
+        "recall_at_5": { "type": "number", "minimum": 0 },
+        "ndcg_at_5": { "type": "number", "minimum": 0 },
+        "mrr": { "type": "number", "minimum": 0 },
+        "first_relevant_rank": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    }
+  }
+}

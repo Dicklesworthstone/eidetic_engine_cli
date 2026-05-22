@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.perf.v1.json",
+  "title": "ee.perf.v1",
+  "description": "Benchmark performance report emitted by the benchmark harness.",
+  "type": "object",
+  "required": [
+    "schema",
+    "profile",
+    "profile_class",
+    "timestamp",
+    "version",
+    "git_sha",
+    "target_dir",
+    "criterion_dir",
+    "artifact_dir",
+    "budget_mode",
+    "release_blocking",
+    "artifact_redaction",
+    "workload",
+    "operations",
+    "budgets_file",
+    "baseline_file"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "type": "string", "const": "ee.perf.v1" },
+    "profile": { "type": "string" },
+    "profile_class": { "type": "string" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "version": { "type": "string" },
+    "git_sha": { "type": "string" },
+    "target_dir": { "type": "string" },
+    "criterion_dir": { "type": "string" },
+    "artifact_dir": { "type": "string" },
+    "budget_mode": { "type": "string" },
+    "release_blocking": { "type": "boolean" },
+    "artifact_redaction": {
+      "type": "object",
+      "required": ["status", "raw_secret_material", "policy"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string" },
+        "raw_secret_material": { "type": "string" },
+        "policy": { "type": "string" }
+      }
+    },
+    "workload": {
+      "type": "object",
+      "required": ["schema", "manifest", "tier"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "type": "string", "const": "ee.perf.workload_ref.v1" },
+        "manifest": { "type": "string" },
+        "tier": { "type": "string" }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/operation" }
+    },
+    "budgets_file": { "type": "string" },
+    "baseline_file": { "type": "string" }
+  },
+  "field_presets": {
+    "minimal": ["schema", "profile", "operations"],
+    "summary": ["schema", "profile", "profile_class", "operations", "budget_mode"],
+    "standard": [
+      "schema",
+      "profile",
+      "profile_class",
+      "timestamp",
+      "operations",
+      "budgets_file",
+      "baseline_file"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "required": [
+        "status",
+        "profile",
+        "workload_tier",
+        "p50_ms",
+        "p99_ms",
+        "samples_count",
+        "regression_status",
+        "baseline_ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string" },
+        "profile": { "type": "string" },
+        "workload_tier": { "type": "string" },
+        "p50_ms": { "type": "number", "minimum": 0 },
+        "p95_ms": { "type": "number", "minimum": 0 },
+        "p99_ms": { "type": "number", "minimum": 0 },
+        "samples_count": { "type": "integer", "minimum": 0 },
+        "max_ms": { "type": ["number", "null"], "minimum": 0 },
+        "max_rss_kb": { "type": ["integer", "null"], "minimum": 0 },
+        "allocation_count": { "type": ["integer", "null"], "minimum": 0 },
+        "db_size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "index_size_bytes": { "type": ["integer", "null"], "minimum": 0 },
+        "rows_per_sec": { "type": ["number", "null"], "minimum": 0 },
+        "regression_status": { "type": "string" },
+        "baseline_ref": {
+          "type": "object",
+          "required": ["file", "operation"],
+          "additionalProperties": false,
+          "properties": {
+            "file": { "type": "string" },
+            "operation": { "type": "string" }
+          }
+        },
+        "budget_mode": { "type": "string" }
+      }
+    }
+  }
+}
