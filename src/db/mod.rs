@@ -16882,6 +16882,8 @@ impl DbConnection {
         input: &CreateGraphAlgorithmResultInput,
     ) -> Result<()> {
         let computed_at = Utc::now().to_rfc3339();
+        let ttl_seconds =
+            sqlite_u64_value("graph algorithm result ttl_seconds", input.ttl_seconds)?;
 
         self.execute_for(
             DbOperation::Execute,
@@ -16893,7 +16895,7 @@ impl DbConnection {
                 Value::Text(input.params_hash.clone()),
                 Value::Text(input.result_json.clone()),
                 Value::Text(computed_at),
-                Value::from_u64_clamped(input.ttl_seconds),
+                ttl_seconds,
             ],
         )?;
 
@@ -19087,6 +19089,66 @@ mod tests {
 
         let rows = connection.list_graph_algorithm_results(workspace_id, snapshot_id, None)?;
         ensure_equal(&rows.len(), &1, "upsert keeps one cache row")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_algorithm_result_ttl_above_sqlite_integer_range_is_rejected() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let workspace_id = "wsp_7123456789abcdef0123456789";
+        let snapshot_id = "gsnap_7123456789abcdef012345678";
+        let params_hash = "blake3:graph-result-ttl-overflow";
+
+        connection.insert_workspace(
+            workspace_id,
+            &CreateWorkspaceInput {
+                path: "/workspace/graph-result-ttl-overflow".to_string(),
+                name: Some("graph-result-ttl-overflow".to_string()),
+            },
+        )?;
+        connection.insert_graph_snapshot(
+            snapshot_id,
+            &CreateGraphSnapshotInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_version: 1,
+                schema_version: "ee.graph.snapshot.v1".to_string(),
+                graph_type: GraphSnapshotType::MemoryLinks,
+                node_count: 3,
+                edge_count: 2,
+                metrics_json: r#"{"nodes":[],"edges":[]}"#.to_string(),
+                content_hash: "blake3:graph-result-ttl-overflow".to_string(),
+                source_generation: 0,
+                expires_at: None,
+            },
+        )?;
+
+        let oversized_ttl = u64::try_from(i64::MAX)
+            .expect("i64 max fits in u64")
+            .checked_add(1)
+            .expect("one above i64 max fits in u64");
+
+        ensure_sqlite_integer_overflow(
+            connection.upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
+                workspace_id: workspace_id.to_string(),
+                snapshot_id: snapshot_id.to_string(),
+                algorithm: "pagerank".to_string(),
+                params_hash: params_hash.to_string(),
+                result_json: r#"{"scores":[["mem_a",0.75]]}"#.to_string(),
+                ttl_seconds: oversized_ttl,
+            }),
+            "graph algorithm result ttl_seconds",
+        )?;
+
+        let row = connection.get_graph_algorithm_result(
+            workspace_id,
+            snapshot_id,
+            "pagerank",
+            params_hash,
+        )?;
+        ensure(row.is_none(), "oversized graph result TTL must not persist")?;
 
         connection.close()?;
         Ok(())
