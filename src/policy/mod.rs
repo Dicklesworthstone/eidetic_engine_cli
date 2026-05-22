@@ -2253,6 +2253,8 @@ fn contains_secret_keyword(input: &str) -> bool {
         "access token",
         "account key",
         "account sid",
+        "account_sid",
+        "accountsid",
         "api key",
         "auth token",
         "credential",
@@ -2266,6 +2268,9 @@ fn contains_secret_keyword(input: &str) -> bool {
         "signing key",
         "token",
         "twilio",
+        "twilio account sid",
+        "twilio_account_sid",
+        "twilioaccountsid",
         "webhook secret",
         "accountkey",
         "connectionstring",
@@ -3384,6 +3389,28 @@ mod tests {
                 .contains(&"twilio_account_sid")
         );
         assert!(!secret_report.content.contains(&sid_like_artifact_id));
+
+        let env_key_report =
+            redact_secret_like_content(&format!("TWILIO_ACCOUNT_SID={sid_like_artifact_id}"));
+
+        assert!(env_key_report.redacted);
+        assert!(
+            env_key_report
+                .redacted_reasons
+                .contains(&"twilio_account_sid")
+        );
+        assert!(!env_key_report.content.contains(&sid_like_artifact_id));
+
+        let camel_key_report =
+            redact_secret_like_content(&format!("twilioAccountSid: {sid_like_artifact_id}"));
+
+        assert!(camel_key_report.redacted);
+        assert!(
+            camel_key_report
+                .redacted_reasons
+                .contains(&"twilio_account_sid")
+        );
+        assert!(!camel_key_report.content.contains(&sid_like_artifact_id));
     }
 
     #[test]
