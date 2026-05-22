@@ -1,4 +1,4 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 
 const DEFAULT_HASH_COUNT: usize = 7;
@@ -8,6 +8,7 @@ const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CountingBloomPrefilter {
     counters: Vec<u8>,
+    values: BTreeMap<String, usize>,
     hash_count: usize,
     inserted: usize,
 }
@@ -18,6 +19,7 @@ impl CountingBloomPrefilter {
         let bit_count = optimal_bit_count(expected_items, DEFAULT_FALSE_POSITIVE_RATE);
         Self {
             counters: vec![0; bit_count.max(1)],
+            values: BTreeMap::new(),
             hash_count: DEFAULT_HASH_COUNT,
             inserted: 0,
         }
@@ -29,16 +31,26 @@ impl CountingBloomPrefilter {
             let counter = &mut self.counters[index];
             *counter = counter.saturating_add(1);
         }
+        *self.values.entry(value.to_owned()).or_insert(0) += 1;
         self.inserted = self.inserted.saturating_add(1);
     }
 
-    pub fn remove(&mut self, value: &str) {
+    pub fn remove(&mut self, value: &str) -> bool {
+        let Some(count) = self.values.get_mut(value) else {
+            return false;
+        };
+        *count -= 1;
+        if *count == 0 {
+            self.values.remove(value);
+        }
+
         let indexes = self.indexes(value);
         for index in indexes {
             let counter = &mut self.counters[index];
             *counter = counter.saturating_sub(1);
         }
         self.inserted = self.inserted.saturating_sub(1);
+        true
     }
 
     #[must_use]
@@ -94,6 +106,8 @@ fn hash_with_seed(value: &str, seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::CountingBloomPrefilter;
 
     #[test]
@@ -113,8 +127,41 @@ mod tests {
     fn removed_values_become_absent_when_no_other_insert_remains() {
         let mut filter = CountingBloomPrefilter::with_capacity(16);
         filter.insert("archived");
-        filter.remove("archived");
+        assert!(filter.remove("archived"));
         assert!(filter.definitely_absent("archived"));
+    }
+
+    #[test]
+    fn removing_absent_value_does_not_corrupt_colliding_inserted_value() {
+        let mut filter = CountingBloomPrefilter::with_capacity(1);
+        filter.insert("archived");
+
+        let absent = first_absent_value_that_would_zero_inserted_counter(&filter, "archived");
+        assert!(
+            absent.is_some(),
+            "test fixture failed to find a colliding absent value"
+        );
+        let Some(absent) = absent else {
+            return;
+        };
+        assert!(!filter.remove(&absent));
+        assert!(
+            filter.might_contain("archived"),
+            "absent value {absent:?} must not create a false negative for an inserted value"
+        );
+    }
+
+    #[test]
+    fn duplicate_insert_requires_matching_number_of_removes() {
+        let mut filter = CountingBloomPrefilter::with_capacity(16);
+        filter.insert("archived");
+        filter.insert("archived");
+
+        assert!(filter.remove("archived"));
+        assert!(filter.might_contain("archived"));
+        assert!(filter.remove("archived"));
+        assert!(filter.definitely_absent("archived"));
+        assert!(!filter.remove("archived"));
     }
 
     #[test]
@@ -124,5 +171,43 @@ mod tests {
             filter.insert(&format!("tag-{index}"));
         }
         assert!(filter.estimated_false_positive_rate() <= 0.015);
+    }
+
+    fn first_absent_value_that_would_zero_inserted_counter(
+        filter: &CountingBloomPrefilter,
+        inserted: &str,
+    ) -> Option<String> {
+        for index in 0..10_000 {
+            let candidate = format!("absent-{index}");
+            if candidate == inserted {
+                continue;
+            }
+            if would_zero_inserted_counter(filter, inserted, &candidate) {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn would_zero_inserted_counter(
+        filter: &CountingBloomPrefilter,
+        inserted: &str,
+        absent: &str,
+    ) -> bool {
+        let inserted_counts = index_counts(filter.indexes(inserted));
+        let absent_counts = index_counts(filter.indexes(absent));
+        inserted_counts.iter().any(|(index, inserted_count)| {
+            absent_counts
+                .get(index)
+                .is_some_and(|absent_count| absent_count >= inserted_count)
+        })
+    }
+
+    fn index_counts(indexes: Vec<usize>) -> BTreeMap<usize, usize> {
+        let mut counts = BTreeMap::new();
+        for index in indexes {
+            *counts.entry(index).or_insert(0) += 1;
+        }
+        counts
     }
 }
