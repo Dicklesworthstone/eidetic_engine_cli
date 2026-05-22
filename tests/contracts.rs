@@ -318,3 +318,6 @@ mod context_delta_prior_unknown_repair_pinned;
 
 #[path = "contracts/mesh_serve_mcp_degraded_code_catalog.rs"]
 mod mesh_serve_mcp_degraded_code_catalog;
+
+#[path = "contracts/mesh_serve_mcp_envelope_mirror_guard.rs"]
+mod mesh_serve_mcp_envelope_mirror_guard;
