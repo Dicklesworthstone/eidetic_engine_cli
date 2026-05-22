@@ -694,6 +694,29 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
         Some("ee.error.v2") => "ee.error.v2",
         _ => "ee.response.v2",
     };
+    // bd-1zoiw: derive the outer envelope's degradedCodes from the inner
+    // wrapped payload's `degraded[]` codes so terminal SSE frames carrying
+    // ee.response.v2 / ee.error.v2 envelopes with non-empty degraded[]
+    // (pack-stream trailers, cancellation frames, error frames that pick
+    // up pack-pipeline degradations) surface those codes at the
+    // response-metadata level instead of forcing every consumer to drill
+    // into response.payload.degraded[] by convention. Mirrors the
+    // auth-failure envelope path that already populates degradedCodes
+    // with a real value.
+    let degraded_source = if payload_schema == "ee.error.v2" {
+        wrapped_payload.pointer("/error/degraded")
+    } else {
+        wrapped_payload.get("degraded")
+    };
+    let degraded_codes: Vec<&str> = degraded_source
+        .and_then(JsonValue::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
     let event_payload = json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
         "request": {
@@ -717,7 +740,7 @@ pub fn render_serve_sse_event(event_kind: &str, terminal: bool, payload: &JsonVa
             "payloadSchema": payload_schema,
             "payload": wrapped_payload,
             "elapsedMs": 0,
-            "degradedCodes": [],
+            "degradedCodes": degraded_codes,
             "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
         },
         "sse": {
@@ -2530,6 +2553,116 @@ mod tests {
             event["response"]["payload"]["data"]["ok"].as_bool(),
             Some(true),
             "sse wrapped data",
+        )
+    }
+
+    // bd-1zoiw: when the inner payload is a real ee.response.v2 envelope
+    // with non-empty `degraded[]` entries (the shape pack-stream trailers
+    // and cancellation frames will surface), the outer endpoint
+    // envelope's `response.degradedCodes` MUST mirror the inner codes
+    // instead of staying hard-coded to `[]`. Mirrors the auth-failure
+    // envelope path that already populates the field.
+    #[test]
+    fn serve_sse_event_mirrors_inner_response_v2_degraded_codes() -> TestResult {
+        let inner = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {"ok": true},
+            "degraded": [
+                {"code": "pack_assembly_slow", "severity": "low", "message": "synthetic"},
+                {"code": "deprecated_alias", "severity": "info", "message": "synthetic"}
+            ]
+        });
+        let frame = render_serve_sse_event("trailer", true, &inner);
+        let data_line = frame
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .ok_or_else(|| "missing data line".to_string())?;
+        let event: serde_json::Value = serde_json::from_str(&data_line["data: ".len()..])
+            .map_err(|error| error.to_string())?;
+        let codes = event["response"]["degradedCodes"]
+            .as_array()
+            .ok_or_else(|| "degradedCodes must be an array".to_string())?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .collect::<Vec<_>>();
+        ensure(codes.len(), 2, "mirror count")?;
+        ensure(
+            codes.contains(&"pack_assembly_slow"),
+            true,
+            "pack_assembly_slow mirrored",
+        )?;
+        ensure(
+            codes.contains(&"deprecated_alias"),
+            true,
+            "deprecated_alias mirrored",
+        )?;
+        // Statuscode stays 200 because the inner envelope is not an error.
+        ensure(
+            event["response"]["statusCode"].as_u64(),
+            Some(200),
+            "statusCode stays 200 for ee.response.v2 with degraded[]",
+        )
+    }
+
+    // bd-1zoiw: ee.error.v2 envelopes nest the degraded array under
+    // `error.degraded` rather than at the top level. The outer
+    // degradedCodes must follow that nesting so terminal error frames
+    // surface their codes too.
+    #[test]
+    fn serve_sse_event_mirrors_inner_error_v2_degraded_codes() -> TestResult {
+        let inner = json!({
+            "schema": "ee.error.v2",
+            "success": false,
+            "error": {
+                "code": "usage",
+                "severity": "low",
+                "message": "synthetic failure",
+                "degraded": [
+                    {"code": "synthetic_inner", "severity": "warning", "message": "x"}
+                ]
+            }
+        });
+        let frame = render_serve_sse_event("error", true, &inner);
+        let data_line = frame
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .ok_or_else(|| "missing data line".to_string())?;
+        let event: serde_json::Value = serde_json::from_str(&data_line["data: ".len()..])
+            .map_err(|error| error.to_string())?;
+        let codes = event["response"]["degradedCodes"]
+            .as_array()
+            .ok_or_else(|| "degradedCodes must be an array".to_string())?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .collect::<Vec<_>>();
+        ensure(codes, vec!["synthetic_inner"], "error.v2 mirror")?;
+        ensure(
+            event["response"]["statusCode"].as_u64(),
+            Some(500),
+            "statusCode flips to 500 for ee.error.v2",
+        )
+    }
+
+    // bd-1zoiw: sanity-pin the empty-degraded path so the mirror
+    // helper's fallback (no degraded[] in either ee.response.v2 or
+    // wrapped data payload) reliably yields `[]`. Without this pin
+    // the positive mirror assertions above could pass for the wrong
+    // reason (e.g. the helper accidentally falls back to the wrapped
+    // payload's data field instead of the degraded field).
+    #[test]
+    fn serve_sse_event_emits_empty_degraded_codes_when_inner_payload_has_none() -> TestResult {
+        let frame = render_serve_sse_event("complete", true, &json!({"ok": true}));
+        let data_line = frame
+            .lines()
+            .find(|line| line.starts_with("data: "))
+            .ok_or_else(|| "missing data line".to_string())?;
+        let event: serde_json::Value = serde_json::from_str(&data_line["data: ".len()..])
+            .map_err(|error| error.to_string())?;
+        ensure(
+            event["response"]["degradedCodes"].as_array().map(Vec::len),
+            Some(0),
+            "empty degradedCodes when no inner degraded entries",
         )
     }
 
