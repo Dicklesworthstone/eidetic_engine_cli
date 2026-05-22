@@ -142,6 +142,26 @@ fn search_document_v1_validator_rejects_unknown_result_fields() -> TestResult {
     }
 }
 
+#[test]
+fn search_document_v1_validator_rejects_missing_calibration_fields() -> TestResult {
+    let schema = read_schema()?;
+
+    for field in ["scoreInterval", "coverageGuarantee"] {
+        let mut document = full_emitted_search_document()?;
+        document
+            .as_object_mut()
+            .ok_or_else(|| "document is not an object".to_string())?
+            .remove(field);
+
+        match validate_json_schema(&document, &schema, "$") {
+            Ok(()) => return Err(format!("validator accepted document missing {field}")),
+            Err(_) => {}
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> TestResult {
     if let Some(options) = schema.get("oneOf").and_then(Value::as_array) {
         if options
