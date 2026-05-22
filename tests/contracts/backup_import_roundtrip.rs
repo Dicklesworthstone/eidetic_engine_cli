@@ -512,6 +512,18 @@ fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
             actual.len()
         ));
     }
+    if (
+        report.memory_count,
+        report.link_count,
+        report.tag_count,
+        report.audit_count,
+    ) != (4, 0, 8, 4)
+    {
+        return Err(format!(
+            "backup report counts drifted: memories={}, links={}, tags={}, audits={}",
+            report.memory_count, report.link_count, report.tag_count, report.audit_count
+        ));
+    }
     let expected = vec![
         "header|schema=ee.export.header.v1|formatVersion=1|scope=all|redaction=none|importSource=native|trustLevel=validated",
         "workspace|schema=ee.export.workspace.v1|hasName=true",
