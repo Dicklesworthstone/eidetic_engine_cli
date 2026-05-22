@@ -417,7 +417,7 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
 }
 
 fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> FilePermissionCheck {
-    let max_dir_mode = max_mode | 0o111;
+    let max_dir_mode = max_directory_permissions(max_mode);
 
     if let Some(check) = check_path_symlink_components(path, max_dir_mode, dir_type) {
         return check;
@@ -469,7 +469,7 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
                 path: path.display().to_string(),
                 exists: true,
                 current_mode: None,
-                max_allowed_mode: max_mode | 0o111,
+                max_allowed_mode: max_dir_mode,
                 passed: false,
                 issue: Some(format!("failed to read {} metadata: {}", dir_type, e)),
                 repair: None,
@@ -511,6 +511,10 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
             },
         }
     }
+}
+
+const fn max_directory_permissions(max_file_mode: u32) -> u32 {
+    max_file_mode | ((max_file_mode & 0o444) >> 2)
 }
 
 fn optional_directory_should_be_checked(path: &Path) -> bool {
@@ -862,6 +866,47 @@ mod tests {
                 .as_deref()
                 .is_some_and(|issue| issue.contains("not a directory"))
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_report_rejects_world_traversable_index_directory() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let index_dir = ee_dir.join("index");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&index_dir).map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&index_dir, std::fs::Permissions::from_mode(0o711))
+            .map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(!report.passed);
+        let index_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/index"))
+            .ok_or_else(|| "index directory check missing".to_owned())?;
+        assert!(!index_check.passed);
+        assert_eq!(index_check.current_mode, Some(0o711));
+        assert_eq!(index_check.max_allowed_mode, 0o700);
+        assert!(
+            index_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("disallowed bits 0011"))
+        );
+
+        std::fs::set_permissions(&index_dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| error.to_string())?;
+        let repaired_report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+
+        assert!(repaired_report.passed);
         Ok(())
     }
 
