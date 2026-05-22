@@ -309,3 +309,6 @@ mod tracing_paragraph_required;
 
 #[path = "contracts/context_delta_schema_v1.rs"]
 mod context_delta_schema_v1;
+
+#[path = "contracts/search_document_schema_v1.rs"]
+mod search_document_schema_v1;

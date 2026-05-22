@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.search.document.v1.json",
+  "title": "ee.search.document.v1",
+  "description": "One result document emitted in data.results[] by ee search JSON output. This schema pins the public search-result document contract separately from the enclosing ee.response.v2 command envelope.",
+  "type": "object",
+  "required": [
+    "docId",
+    "score",
+    "scoreInterval",
+    "coverageGuarantee",
+    "source",
+    "why",
+    "provenance"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "docId": {
+      "type": "string",
+      "description": "Stable search document identifier."
+    },
+    "memoryId": {
+      "type": "string",
+      "description": "Present when docId names an ee memory row."
+    },
+    "score": {
+      "type": "number"
+    },
+    "scoreInterval": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        {"type": "number"},
+        {"type": "number"}
+      ]
+    },
+    "coverageGuarantee": {
+      "type": "number"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "lexical",
+        "semantic_fast",
+        "semantic_quality",
+        "hybrid",
+        "reranked"
+      ]
+    },
+    "why": {
+      "type": "string"
+    },
+    "provenance": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "uri"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"type": "string", "const": "provenance_uri"},
+              "uri": {"type": "string"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "docId"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"type": "string", "const": "search_document"},
+              "docId": {"type": "string"}
+            }
+          }
+        ]
+      }
+    },
+    "fastScore": {"type": "number"},
+    "qualityScore": {"type": "number"},
+    "lexicalScore": {"type": "number"},
+    "rerankScore": {"type": "number"},
+    "metadata": {
+      "type": "object",
+      "description": "Public, redaction-filtered search metadata copied from the indexed document.",
+      "additionalProperties": true
+    },
+    "driftHint": {
+      "description": "Optional drift-hint payload copied from metadata when present."
+    },
+    "meshProvenance": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "meshTrustAdjustment": {
+      "description": "Optional trust-adjustment payload copied from mesh metadata when present."
+    },
+    "contentRedacted": {"type": "boolean"},
+    "redactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason", "placeholder"],
+        "additionalProperties": false,
+        "properties": {
+          "reason": {"type": "string"},
+          "placeholder": {"type": "string"}
+        }
+      }
+    },
+    "tombstoned": {"type": "boolean"},
+    "tombstonedAt": {"type": "string"},
+    "validFrom": {"type": "string"},
+    "validTo": {"type": "string"},
+    "validityStatus": {"type": "string"},
+    "validityWindowKind": {"type": "string"},
+    "explanation": {
+      "type": "object",
+      "required": ["summary", "factors"],
+      "additionalProperties": false,
+      "properties": {
+        "summary": {"type": "string"},
+        "factors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "value",
+              "contribution",
+              "sourceField",
+              "formula"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "value": {"type": "number"},
+              "contribution": {"type": "string"},
+              "sourceField": {"type": "string"},
+              "formula": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
