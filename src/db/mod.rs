@@ -28187,6 +28187,120 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_reader_during_write_sees_only_committed_rows() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("reader-during-write.db");
+        let setup =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        setup.migrate().map_err(TestFailure::from)?;
+        setup
+            .execute_for(
+                DbOperation::Execute,
+                "CREATE TABLE reader_write_probe (
+                    id INTEGER PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        setup
+            .execute_for(
+                DbOperation::Execute,
+                "INSERT INTO reader_write_probe (id, payload) VALUES (1, 'committed')",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        setup.close().map_err(TestFailure::from)?;
+
+        let read_rows =
+            |connection: &DbConnection| -> std::result::Result<Vec<(i64, String)>, TestFailure> {
+                let rows = connection
+                    .query(
+                        "SELECT id, payload FROM reader_write_probe ORDER BY id ASC",
+                        &[],
+                    )
+                    .map_err(TestFailure::from)?;
+                Ok(rows
+                    .iter()
+                    .map(|row| {
+                        let id = row.get(0).and_then(|value| value.as_i64()).unwrap_or(-1);
+                        let payload = row
+                            .get(1)
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        (id, payload)
+                    })
+                    .collect())
+            };
+
+        let reader =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        let (inserted_tx, inserted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer_path = db_path.clone();
+        let writer = thread::spawn(move || -> std::result::Result<(), String> {
+            let connection = DbConnection::open(DatabaseConfig::file(&writer_path))
+                .map_err(|error| format!("writer open shared database: {error}"))?;
+            connection
+                .with_transaction(|| {
+                    connection.execute_for(
+                        DbOperation::Execute,
+                        "INSERT INTO reader_write_probe (id, payload)
+                         VALUES (2, 'uncommitted-until-release')",
+                        &[],
+                    )?;
+                    inserted_tx
+                        .send(())
+                        .map_err(|error| DbError::MalformedRow {
+                            operation: DbOperation::Execute,
+                            message: format!("writer insert signal failed: {error}"),
+                        })?;
+                    release_rx.recv().map_err(|error| DbError::MalformedRow {
+                        operation: DbOperation::CommitTransaction,
+                        message: format!("writer release signal failed: {error}"),
+                    })?;
+                    Ok(())
+                })
+                .map_err(|error| format!("writer transaction: {error}"))?;
+            connection
+                .close()
+                .map_err(|error| format!("writer close: {error}"))
+        });
+
+        inserted_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|error| TestFailure::new(format!("writer did not reach insert: {error}")))?;
+
+        let during_write = read_rows(&reader)?;
+        ensure_equal(
+            &during_write,
+            &vec![(1, "committed".to_string())],
+            "reader must not observe uncommitted writer row",
+        )?;
+
+        release_tx
+            .send(())
+            .map_err(|error| TestFailure::new(format!("writer release failed: {error}")))?;
+        writer
+            .join()
+            .map_err(|_| TestFailure::new("writer thread panicked"))?
+            .map_err(TestFailure::new)?;
+
+        let after_commit = read_rows(&reader)?;
+        reader.close().map_err(TestFailure::from)?;
+
+        ensure_equal(
+            &after_commit,
+            &vec![
+                (1, "committed".to_string()),
+                (2, "uncommitted-until-release".to_string()),
+            ],
+            "reader sees writer row after transaction commit",
+        )
+    }
+
+    #[test]
     fn with_transaction_rollback_clears_write_owner_depth() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
         let db_path = tempdir.path().join("rollback.db");
