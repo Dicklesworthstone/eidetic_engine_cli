@@ -1467,6 +1467,7 @@ fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMa
         ("ghu_", "github_token", 36, false),
         ("ghr_", "github_token", 36, false),
         ("github_pat_", "github_token", 40, false),
+        ("glpat-", "personal_access_token", 20, false),
         ("AKIA", "aws_access_key", 16, false),
         ("ASIA", "aws_access_key", 16, false),
         ("sk_live_", "stripe_secret_key", 24, false),
@@ -1819,6 +1820,8 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
         ("ghr_", "github_token", 36, false),
         // GitHub fine-grained personal access tokens: github_pat_...
         ("github_pat_", "github_token", 40, false),
+        // GitLab personal access tokens: glpat-...
+        ("glpat-", "personal_access_token", 20, false),
         // AWS access key IDs: AKIA...
         ("AKIA", "aws_access_key", 16, false),
         // AWS temporary credentials: ASIA...
@@ -3278,6 +3281,21 @@ mod tests {
         assert!(!report.content.contains(&gho));
         assert!(!report.content.contains(&ghs));
         assert!(!report.content.contains(&github_pat));
+    }
+
+    #[test]
+    fn secret_redactor_masks_gitlab_personal_access_tokens() {
+        let glpat = synthetic_raw_value(&["g", "l", "p", "a", "t", "-"], 32);
+        let report = redact_secret_like_content(&format!("GitLab token: {glpat}."));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"personal_access_token"));
+        assert!(
+            report
+                .content
+                .contains(&redaction_placeholder("personal_access_token"))
+        );
+        assert!(!report.content.contains(&glpat));
     }
 
     #[test]
