@@ -890,16 +890,18 @@ fn parse_sessions_json(input: &[u8]) -> Result<Vec<CassSessionInfo>, CassImportE
             .get("workspace")
             .and_then(JsonValue::as_str)
             .map(str::to_string);
-        session.started_at = item
-            .get("started_at")
-            .or_else(|| item.get("started"))
-            .and_then(JsonValue::as_str)
-            .map(str::to_string);
-        session.ended_at = item
-            .get("ended_at")
-            .or_else(|| item.get("modified"))
-            .and_then(JsonValue::as_str)
-            .map(str::to_string);
+        session.started_at = optional_rfc3339_timestamp(
+            item,
+            &["started_at", "started"],
+            "sessions",
+            "session start timestamp",
+        )?;
+        session.ended_at = optional_rfc3339_timestamp(
+            item,
+            &["ended_at", "modified"],
+            "sessions",
+            "session end timestamp",
+        )?;
         session.message_count = optional_u32(item, "message_count", "sessions")?;
         session.token_count = optional_u32(item, "token_count", "sessions")?;
         if session.message_count.is_none() {
@@ -983,6 +985,45 @@ fn optional_u32(
         });
     };
     Ok(Some(value))
+}
+
+fn optional_rfc3339_timestamp(
+    item: &JsonValue,
+    fields: &[&'static str],
+    source: &'static str,
+    label: &'static str,
+) -> Result<Option<String>, CassImportError> {
+    for field in fields {
+        if item.get(field).is_some() {
+            return optional_rfc3339_timestamp_field(item, field, source, label);
+        }
+    }
+    Ok(None)
+}
+
+fn optional_rfc3339_timestamp_field(
+    item: &JsonValue,
+    field: &'static str,
+    source: &'static str,
+    label: &'static str,
+) -> Result<Option<String>, CassImportError> {
+    let Some(value) = item.get(field) else {
+        return Ok(None);
+    };
+    let Some(timestamp) = value
+        .as_str()
+        .filter(|timestamp| !timestamp.is_empty() && timestamp.trim().len() == timestamp.len())
+    else {
+        return Err(CassImportError::InvalidJson {
+            source,
+            message: format!("{field} must be a non-empty RFC3339 {label}"),
+        });
+    };
+    DateTime::parse_from_rfc3339(timestamp).map_err(|error| CassImportError::InvalidJson {
+        source,
+        message: format!("invalid {field} RFC3339 {label} `{timestamp}`: {error}"),
+    })?;
+    Ok(Some(timestamp.to_owned()))
 }
 
 fn millis_to_rfc3339(value: i64) -> Option<String> {
@@ -2085,6 +2126,39 @@ mod tests {
             error.contains("message_count must be a non-negative integer within u32 range"),
             format!("error should mention malformed message_count, got {error}"),
         )
+    }
+
+    #[test]
+    fn parse_sessions_rejects_invalid_optional_timestamps() -> TestResult {
+        for (field, value) in [
+            ("started_at", json!("not-a-timestamp")),
+            ("started", json!(" 2026-05-07T06:00:01Z")),
+            ("ended_at", json!(123)),
+            ("modified", json!("2026-99-99T99:99:99Z")),
+        ] {
+            let input = format!(
+                r#"{{
+                  "sessions": [
+                    {{
+                      "path": "/tmp/session.jsonl",
+                      "workspace": "/tmp/project",
+                      "agent": "codex",
+                      "{field}": {value}
+                    }}
+                  ]
+                }}"#
+            );
+
+            let error = match parse_sessions_json(input.as_bytes()) {
+                Ok(_) => return Err(format!("invalid {field} should fail")),
+                Err(error) => error.to_string(),
+            };
+            ensure(
+                error.contains(field) && error.contains("RFC3339"),
+                format!("error should mention {field} RFC3339 requirement, got {error}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
