@@ -11,7 +11,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -1314,10 +1314,14 @@ fn trace_router_event(
         workspace_id = status.workspace_id.as_deref().unwrap_or(""),
         shard_id = status.shard_id.as_deref().unwrap_or(""),
         request_id = request_id.unwrap_or(""),
-        elapsed_ms = started.elapsed().as_millis() as u64,
+        elapsed_ms = duration_millis_saturating(started.elapsed()),
         degraded_codes = %degraded_codes,
         "database shard router"
     );
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -1330,7 +1334,7 @@ mod tests {
         SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
         SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
         ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutPreserveSourceError,
-        ShardFanoutResolverInput, default_shards_dir_from_values,
+        ShardFanoutResolverInput, default_shards_dir_from_values, duration_millis_saturating,
         execute_peer_shard_read_attach_plan, normalize_shard_root, plan_peer_shard_attach,
         plan_shard_fanout_migration, preserve_shard_fanout_source_database,
         preserved_legacy_database_path, resolve_shard_fanout_status,
@@ -1338,6 +1342,7 @@ mod tests {
     };
     use crate::db::{DatabaseConfig, DbConnection};
     use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
     type TestResult = Result<(), String>;
 
@@ -1355,6 +1360,15 @@ mod tests {
         assert!(shard_fanout_enabled_from_env_value(Some("YES")));
         assert!(!shard_fanout_enabled_from_env_value(Some("0")));
         assert!(!shard_fanout_enabled_from_env_value(None));
+    }
+
+    #[test]
+    fn duration_millis_saturating_clamps_above_u64_max() {
+        assert_eq!(duration_millis_saturating(Duration::from_millis(42)), 42);
+        let oversized = Duration::from_millis(u64::MAX)
+            .checked_add(Duration::from_millis(1))
+            .expect("duration one millisecond above u64::MAX is representable");
+        assert_eq!(duration_millis_saturating(oversized), u64::MAX);
     }
 
     #[test]
