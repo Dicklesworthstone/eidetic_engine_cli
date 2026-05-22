@@ -65,7 +65,7 @@ pub fn fix_search_index_stale(workspace_root: &Path) -> FixerDispatch {
         path: workspace_root.join(".ee/indexes"),
         op: Op::RunIndexRebuild {
             steps: vec![
-                "ee search rebuild --workspace .".to_string(),
+                "ee index rebuild --workspace .".to_string(),
                 "Confirm `manifest.last_built_at` advances past the latest memories.updated_at."
                     .to_string(),
             ],
@@ -318,7 +318,10 @@ mod tests {
     fn search_index_stale_dispatches_run_index_rebuild() {
         let dispatch = fix_search_index_stale(&root());
         assert_eq!(dispatch.finding_code, "search_index_stale");
-        assert!(matches!(dispatch.op, Op::RunIndexRebuild { .. }));
+        let Op::RunIndexRebuild { steps } = &dispatch.op else {
+            panic!("expected RunIndexRebuild");
+        };
+        assert_eq!(steps[0], "ee index rebuild --workspace .");
         assert_eq!(dispatch.op.kind_str(), "run_index_rebuild");
         assert!(dispatch.op.is_advisory());
         assert!(!dispatch.op.is_writing());
