@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+use super::duration_millis_saturating;
+
 pub use crate::models::PROOF_CHECK_SCHEMA_V1;
 pub const PROOF_TOOL_MISSING_CODE: &str = "proof_tool_missing";
 pub const PROOF_VIOLATION_DETECTED_CODE: &str = "proof_violation_detected";
@@ -117,14 +119,14 @@ impl ProofCommandRunner for SystemProofCommandRunner {
         match output {
             Ok(output) => ProofCommandOutcome {
                 tool_available: true,
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: duration_millis_saturating(started.elapsed()),
                 exit_code: output.status.code(),
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             },
             Err(error) => ProofCommandOutcome {
                 tool_available: false,
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: duration_millis_saturating(started.elapsed()),
                 exit_code: None,
                 stdout: String::new(),
                 stderr: error.to_string(),

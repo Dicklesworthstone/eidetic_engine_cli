@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::build_info;
+use super::{build_info, duration_millis_saturating};
 use crate::db::{
     CreateAuditInput, CreateWorkspaceInput, DbConnection, WorkspaceScopeFields, audit_actions,
     generate_audit_id,
@@ -327,7 +327,7 @@ impl StepResult {
         Self {
             step,
             passed: true,
-            duration_ms: duration.as_millis() as u64,
+            duration_ms: duration_millis_saturating(duration),
             stdout,
             stderr,
             exit_code: Some(0),
@@ -346,7 +346,7 @@ impl StepResult {
         Self {
             step,
             passed: false,
-            duration_ms: duration.as_millis() as u64,
+            duration_ms: duration_millis_saturating(duration),
             stdout,
             stderr,
             exit_code,
@@ -1462,7 +1462,7 @@ pub fn run_verification(options: &VerifyOptions) -> VerifyReport {
         version,
         workspace_path,
         all_passed: failed_count == 0,
-        total_duration_ms: total_duration.as_millis() as u64,
+        total_duration_ms: duration_millis_saturating(total_duration),
         steps: results,
         failed_count,
         passed_count,

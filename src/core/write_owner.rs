@@ -53,6 +53,8 @@ use asupersync::cx::Cx;
 use crossbeam_queue::ArrayQueue;
 use serde::Serialize;
 
+use super::duration_millis_saturating;
+
 use crate::models::DomainError;
 
 /// Schema for write owner status response.
@@ -605,7 +607,7 @@ impl WriteOwner {
         F: FnMut(WriteOperation) -> WriteResult,
     {
         while let Ok(request) = self.rx.recv(cx).await {
-            let wait_ms = request.arrived_at.elapsed().as_millis() as u64;
+            let wait_ms = duration_millis_saturating(request.arrived_at.elapsed());
             self.stats.total_processed += 1;
             self.stats.total_wait_ms += wait_ms;
             if wait_ms > self.stats.max_wait_ms {

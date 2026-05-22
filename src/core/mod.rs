@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::time::Duration;
 
 use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
@@ -523,17 +524,24 @@ pub fn serialize_pretty_or_error<T: serde::Serialize>(value: &T) -> String {
     })
 }
 
+/// Convert a duration to milliseconds without wrapping on long-running processes.
+#[must_use]
+pub(crate) fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Debug;
+    use std::time::Duration;
 
     use asupersync::{LabConfig, LabRuntime};
 
     use super::{
         BUILD_TIMESTAMP_POLICY, RuntimeProfile, VERSION_PROVENANCE_SCHEMA_V1, VersionReport,
-        build_features, build_info, clean_build_metadata, db_migration_range, parse_build_bool,
-        run_cli_future, runtime_status, serialize_or_error, serialize_pretty_or_error,
-        supported_schemas,
+        build_features, build_info, clean_build_metadata, db_migration_range,
+        duration_millis_saturating, parse_build_bool, run_cli_future, runtime_status,
+        serialize_or_error, serialize_pretty_or_error, supported_schemas,
     };
 
     type TestResult = Result<(), String>;
@@ -840,5 +848,19 @@ mod tests {
         let data = TestData { value: 1 };
         let json = serialize_pretty_or_error(&data);
         ensure(json.contains('\n'), "pretty output should have newlines")
+    }
+
+    #[test]
+    fn duration_millis_saturating_caps_overflow() -> TestResult {
+        ensure_equal(
+            &duration_millis_saturating(Duration::from_millis(42)),
+            &42,
+            "ordinary millisecond duration",
+        )?;
+        ensure_equal(
+            &duration_millis_saturating(Duration::from_secs(u64::MAX)),
+            &u64::MAX,
+            "overflowing millisecond duration saturates",
+        )
     }
 }
