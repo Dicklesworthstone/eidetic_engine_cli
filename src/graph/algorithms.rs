@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use asupersync::Cx;
@@ -515,7 +515,14 @@ struct CachedComputation<R> {
 }
 
 static ALGORITHM_CACHE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
-static IN_MEMORY_ALGORITHM_RESULTS: OnceLock<Mutex<HashMap<String, InMemoryAlgorithmResult>>> =
+// bd-1nan9: RwLock (was Mutex) so cache-hit reads via
+// `load_in_memory_algorithm_result` can take `.read()` and run
+// concurrently. The lazy-TTL eviction that used to mutate the map
+// on every load is now deferred to the next mutating call path
+// (`store_in_memory_algorithm_result`'s periodic 64-store cleanup
+// and the natural HashMap::insert replacement). Mirrors the PPR
+// shared-lock refactor in bd-2lin9.
+static IN_MEMORY_ALGORITHM_RESULTS: OnceLock<RwLock<HashMap<String, InMemoryAlgorithmResult>>> =
     OnceLock::new();
 
 #[derive(Clone)]
@@ -693,20 +700,26 @@ fn load_in_memory_algorithm_result<R>(cache_key: &str) -> Option<R>
 where
     R: Clone + Send + Sync + 'static,
 {
-    let mut cache = IN_MEMORY_ALGORITHM_RESULTS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
+    // bd-1nan9: cache-hit hot path now takes RwLock::read() so
+    // concurrent algorithm reads against different cache keys
+    // parallelize. A TTL-expired entry is treated as a miss
+    // (safety-critical: never return a stale result); the actual
+    // removal is deferred to the next mutating call path
+    // (`store_in_memory_algorithm_result` runs a periodic GC every
+    // 64 stores and an `insert` for the same key naturally replaces
+    // the stale entry). The deferred `emit_cache_evict` event fires
+    // during the next eviction pass instead of on the load that
+    // first observed expiry — semantic shift in WHEN the event
+    // fires, but it still fires.
+    let cache = IN_MEMORY_ALGORITHM_RESULTS
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let entry = cache.get(cache_key)?;
     if entry
         .expires_at
         .is_some_and(|expires_at| expires_at <= Instant::now())
     {
-        cache.remove(cache_key);
-        emit_cache_evict(CacheEvictEvent {
-            reason: CacheEvictReason::TtlExpired,
-            count: 1,
-        });
         return None;
     }
     Arc::clone(&entry.result)
@@ -722,9 +735,12 @@ where
     static CLEANUP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     let expires_at = Instant::now().checked_add(Duration::from_secs(ttl_seconds));
+    // bd-1nan9: write lock; this path mutates (inserts the fresh
+    // entry and runs the periodic GC). Counterpart to the .read()
+    // path in `load_in_memory_algorithm_result`.
     let mut cache = IN_MEMORY_ALGORITHM_RESULTS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
+        .get_or_init(|| RwLock::new(HashMap::new()))
+        .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Periodic garbage collection of expired results
@@ -2151,24 +2167,53 @@ mod tests {
         connection.close().map_err(|error| error.to_string())
     }
 
+    // bd-1nan9: after the RwLock refactor `load_in_memory_algorithm
+    // _result` takes `.read()` and CANNOT emit-and-remove on the
+    // expiration-observed path. The safety-critical contract (None
+    // returned for expired entries — no stale data leaks) is
+    // preserved. The telemetry event is deferred: it fires during
+    // the next `store_in_memory_algorithm_result` GC pass that
+    // reclaims the slot.
     #[test]
-    fn expired_in_memory_cache_load_emits_cache_evict_telemetry() -> TestResult {
-        let cache_key = "expired_in_memory_cache_load_emits_cache_evict_telemetry";
+    fn expired_in_memory_cache_load_returns_none_with_deferred_evict_event() -> TestResult {
+        let cache_key = "expired_in_memory_cache_load_returns_none_with_deferred_evict_event";
         store_in_memory_algorithm_result(cache_key, &123_u64, 0);
 
+        // Read path: returns None, emits NO evict event (deferred).
         let mut loaded = Some(123_u64);
-        let events = capture_graph_events(|| {
+        let read_events = capture_graph_events(|| {
             loaded = load_in_memory_algorithm_result::<u64>(cache_key);
         });
-
         assert_eq!(loaded, None);
-        let evicts = events_with_target(&events, CACHE_EVICT_EVENT);
-        assert_eq!(evicts.len(), 1);
-        assert_eq!(
-            evicts[0].fields.get("reason").map(String::as_str),
-            Some("ttl_expired")
+        assert!(
+            events_with_target(&read_events, CACHE_EVICT_EVENT).is_empty(),
+            "read path must NOT emit evict events under deferred-eviction semantics"
         );
-        assert_eq!(evicts[0].fields.get("count").map(String::as_str), Some("1"));
+
+        // The deferred event fires on the next store for the same
+        // key, where `HashMap::insert` reclaims the stale slot via
+        // the natural overwrite. We force a GC cycle by running
+        // sentinel stores until the periodic CLEANUP_COUNTER
+        // crosses the 64-store boundary, then assert at least one
+        // ttl_expired evict was emitted at some point.
+        let mut all_evicts = Vec::new();
+        for sentinel in 0..96 {
+            let sentinel_key = format!(
+                "expired_in_memory_cache_load_returns_none_with_deferred_evict_event::sentinel::{sentinel}"
+            );
+            let events = capture_graph_events(|| {
+                store_in_memory_algorithm_result(&sentinel_key, &0_u64, 600);
+            });
+            for event in events_with_target(&events, CACHE_EVICT_EVENT) {
+                if event.fields.get("reason").map(String::as_str) == Some("ttl_expired") {
+                    all_evicts.push(event);
+                }
+            }
+        }
+        assert!(
+            !all_evicts.is_empty(),
+            "ttl_expired evict event must fire during a subsequent store's GC pass",
+        );
         Ok(())
     }
 
