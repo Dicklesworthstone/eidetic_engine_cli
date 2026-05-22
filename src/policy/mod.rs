@@ -1130,10 +1130,7 @@ fn is_feedback_event_id(value: &str) -> bool {
 fn is_audit_log_id(value: &str) -> bool {
     let bytes = value.as_bytes();
     let has_prefix = bytes.starts_with(b"audit_");
-    let payload_is_hex = bytes
-        .iter()
-        .skip(6)
-        .all(|byte| byte.is_ascii_hexdigit());
+    let payload_is_hex = bytes.iter().skip(6).all(|byte| byte.is_ascii_hexdigit());
 
     matches!(value.len(), 32 | 38) && has_prefix && payload_is_hex
 }
@@ -1460,38 +1457,38 @@ fn detect_pem_block_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>
 }
 
 fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMatch>) {
-    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize)] = &[
-        ("sk-ant-api03-", "anthropic_api_key", 40),
-        ("sk-proj-", "openai_api_key", 40),
-        ("sk-", "openai_api_key", 48),
-        ("ghp_", "github_token", 36),
-        ("gho_", "github_token", 36),
-        ("ghs_", "github_token", 36),
-        ("ghu_", "github_token", 36),
-        ("ghr_", "github_token", 36),
-        ("AKIA", "aws_access_key", 16),
-        ("ASIA", "aws_access_key", 16),
-        ("sk_live_", "stripe_secret_key", 24),
-        ("sk_test_", "stripe_secret_key", 24),
-        ("rk_live_", "stripe_restricted_key", 24),
-        ("rk_test_", "stripe_restricted_key", 24),
-        ("AIza", "gcp_api_key", 35),
-        ("xoxb-", "slack_token", 24),
-        ("xoxp-", "slack_token", 24),
-        ("xoxa-", "slack_token", 24),
-        ("xoxr-", "slack_token", 24),
-        ("npm_", "npm_token", 16),
-        ("hf_", "huggingface_token", 16),
-        ("pypi-", "pypi_token", 24),
-        ("AC", "twilio_account_sid", 32),
-        ("SG.", "sendgrid_api_key", 24),
-        ("sq0idp-", "square_token", 20),
-        ("sq0csp-", "square_token", 20),
-        ("key-", "mailgun_key", 24),
-        ("pubkey-", "mailgun_key", 24),
+    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
+        ("sk-ant-api03-", "anthropic_api_key", 40, false),
+        ("sk-proj-", "openai_api_key", 40, false),
+        ("sk-", "openai_api_key", 48, false),
+        ("ghp_", "github_token", 36, false),
+        ("gho_", "github_token", 36, false),
+        ("ghs_", "github_token", 36, false),
+        ("ghu_", "github_token", 36, false),
+        ("ghr_", "github_token", 36, false),
+        ("AKIA", "aws_access_key", 16, false),
+        ("ASIA", "aws_access_key", 16, false),
+        ("sk_live_", "stripe_secret_key", 24, false),
+        ("sk_test_", "stripe_secret_key", 24, false),
+        ("rk_live_", "stripe_restricted_key", 24, false),
+        ("rk_test_", "stripe_restricted_key", 24, false),
+        ("AIza", "gcp_api_key", 35, false),
+        ("xoxb-", "slack_token", 24, false),
+        ("xoxp-", "slack_token", 24, false),
+        ("xoxa-", "slack_token", 24, false),
+        ("xoxr-", "slack_token", 24, false),
+        ("npm_", "npm_token", 16, false),
+        ("hf_", "huggingface_token", 16, false),
+        ("pypi-", "pypi_token", 24, false),
+        ("AC", "twilio_account_sid", 32, true),
+        ("SG.", "sendgrid_api_key", 24, false),
+        ("sq0idp-", "square_token", 20, false),
+        ("sq0csp-", "square_token", 20, false),
+        ("key-", "mailgun_key", 24, false),
+        ("pubkey-", "mailgun_key", 24, false),
     ];
 
-    for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
+    for &(prefix, code, min_suffix_len, requires_context) in RAW_TOKEN_PATTERNS {
         let mut search_start = 0;
         loop {
             if search_start >= input.len() {
@@ -1516,7 +1513,9 @@ fn detect_raw_api_token_matches(input: &str, matches: &mut Vec<SecretRedactionMa
                 .unwrap_or(input.len());
             let actual_token_end = trim_raw_token_end(input, after_prefix, token_end);
             let suffix_len = actual_token_end - after_prefix;
-            if suffix_len >= min_suffix_len {
+            if suffix_len >= min_suffix_len
+                && raw_token_context_allows(input, token_start, actual_token_end, requires_context)
+            {
                 push_secret_match(matches, code, token_start, actual_token_end);
                 search_start = actual_token_end;
             } else {
@@ -1800,61 +1799,61 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
     let mut output = input.to_owned();
     let mut changed = false;
 
-    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize)] = &[
+    const RAW_TOKEN_PATTERNS: &[(&str, &str, usize, bool)] = &[
         // Anthropic API keys: sk-ant-api03-...
-        ("sk-ant-api03-", "anthropic_api_key", 40),
+        ("sk-ant-api03-", "anthropic_api_key", 40, false),
         // OpenAI project keys: sk-proj-...
-        ("sk-proj-", "openai_api_key", 40),
+        ("sk-proj-", "openai_api_key", 40, false),
         // OpenAI legacy keys: sk-... (48 chars after prefix)
-        ("sk-", "openai_api_key", 48),
+        ("sk-", "openai_api_key", 48, false),
         // GitHub personal access tokens: ghp_...
-        ("ghp_", "github_token", 36),
+        ("ghp_", "github_token", 36, false),
         // GitHub OAuth tokens: gho_...
-        ("gho_", "github_token", 36),
+        ("gho_", "github_token", 36, false),
         // GitHub server-to-server tokens: ghs_...
-        ("ghs_", "github_token", 36),
+        ("ghs_", "github_token", 36, false),
         // GitHub user-to-server tokens: ghu_...
-        ("ghu_", "github_token", 36),
+        ("ghu_", "github_token", 36, false),
         // GitHub refresh tokens: ghr_...
-        ("ghr_", "github_token", 36),
+        ("ghr_", "github_token", 36, false),
         // AWS access key IDs: AKIA...
-        ("AKIA", "aws_access_key", 16),
+        ("AKIA", "aws_access_key", 16, false),
         // AWS temporary credentials: ASIA...
-        ("ASIA", "aws_access_key", 16),
+        ("ASIA", "aws_access_key", 16, false),
         // Stripe live secret keys: sk_live_...
-        ("sk_live_", "stripe_secret_key", 24),
+        ("sk_live_", "stripe_secret_key", 24, false),
         // Stripe test secret keys: sk_test_...
-        ("sk_test_", "stripe_secret_key", 24),
+        ("sk_test_", "stripe_secret_key", 24, false),
         // Stripe live restricted keys: rk_live_...
-        ("rk_live_", "stripe_restricted_key", 24),
+        ("rk_live_", "stripe_restricted_key", 24, false),
         // Stripe test restricted keys: rk_test_...
-        ("rk_test_", "stripe_restricted_key", 24),
+        ("rk_test_", "stripe_restricted_key", 24, false),
         // GCP API keys: AIza...
-        ("AIza", "gcp_api_key", 35),
+        ("AIza", "gcp_api_key", 35, false),
         // Slack bot/user/app/refresh tokens: xoxb-..., xoxp-..., xoxa-..., xoxr-...
-        ("xoxb-", "slack_token", 24),
-        ("xoxp-", "slack_token", 24),
-        ("xoxa-", "slack_token", 24),
-        ("xoxr-", "slack_token", 24),
+        ("xoxb-", "slack_token", 24, false),
+        ("xoxp-", "slack_token", 24, false),
+        ("xoxa-", "slack_token", 24, false),
+        ("xoxr-", "slack_token", 24, false),
         // npm automation/access tokens: npm_...
-        ("npm_", "npm_token", 16),
+        ("npm_", "npm_token", 16, false),
         // Hugging Face tokens: hf_...
-        ("hf_", "huggingface_token", 16),
+        ("hf_", "huggingface_token", 16, false),
         // PyPI API tokens: pypi-...
-        ("pypi-", "pypi_token", 24),
+        ("pypi-", "pypi_token", 24, false),
         // Twilio account SIDs: AC + 32 characters.
-        ("AC", "twilio_account_sid", 32),
+        ("AC", "twilio_account_sid", 32, true),
         // SendGrid keys: SG.<id>.<token>
-        ("SG.", "sendgrid_api_key", 24),
+        ("SG.", "sendgrid_api_key", 24, false),
         // Square application and secret tokens.
-        ("sq0idp-", "square_token", 20),
-        ("sq0csp-", "square_token", 20),
+        ("sq0idp-", "square_token", 20, false),
+        ("sq0csp-", "square_token", 20, false),
         // Mailgun private and public API keys.
-        ("key-", "mailgun_key", 24),
-        ("pubkey-", "mailgun_key", 24),
+        ("key-", "mailgun_key", 24, false),
+        ("pubkey-", "mailgun_key", 24, false),
     ];
 
-    for &(prefix, code, min_suffix_len) in RAW_TOKEN_PATTERNS {
+    for &(prefix, code, min_suffix_len, requires_context) in RAW_TOKEN_PATTERNS {
         let mut search_start = 0;
         loop {
             if search_start >= output.len() {
@@ -1888,7 +1887,14 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
 
             let actual_token_end = trim_raw_token_end(&output, after_prefix, token_end);
             let suffix_len = actual_token_end - after_prefix;
-            if suffix_len >= min_suffix_len {
+            if suffix_len >= min_suffix_len
+                && raw_token_context_allows(
+                    &output,
+                    token_start,
+                    actual_token_end,
+                    requires_context,
+                )
+            {
                 let placeholder = redaction_placeholder(code);
                 output.replace_range(token_start..actual_token_end, &placeholder);
                 reasons.push(code);
@@ -1905,6 +1911,15 @@ fn redact_raw_api_tokens(input: &str, reasons: &mut Vec<&'static str>) -> (Strin
 
 fn is_raw_token_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
+fn raw_token_context_allows(
+    input: &str,
+    token_start: usize,
+    token_end: usize,
+    requires_context: bool,
+) -> bool {
+    !requires_context || has_nearby_secret_keyword(input, token_start, token_end)
 }
 
 fn trim_raw_token_end(input: &str, after_prefix: usize, mut token_end: usize) -> usize {
@@ -2237,6 +2252,7 @@ fn contains_secret_keyword(input: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "access token",
         "account key",
+        "account sid",
         "api key",
         "auth token",
         "credential",
@@ -2249,6 +2265,7 @@ fn contains_secret_keyword(input: &str) -> bool {
         "session token",
         "signing key",
         "token",
+        "twilio",
         "webhook secret",
         "accountkey",
         "connectionstring",
@@ -2866,19 +2883,23 @@ mod tests {
     fn trust_promotion_timing_invariant_structure() -> Result<(), &'static str> {
         // This test verifies the logic of validate_trust_promotion_evidence
         // after removal of unnecessary constant_time comparisons.
-        assert!(super::validate_trust_promotion_evidence(
-            "agent_validated",
-            "feedback_event",
-            "fb_01234567890123456789012345"
-        )
-        .is_ok());
+        assert!(
+            super::validate_trust_promotion_evidence(
+                "agent_validated",
+                "feedback_event",
+                "fb_01234567890123456789012345"
+            )
+            .is_ok()
+        );
 
-        assert!(super::validate_trust_promotion_evidence(
-            "human_explicit",
-            "human_request",
-            "audit_0123456789abcdef0123456789abcdef"
-        )
-        .is_ok());
+        assert!(
+            super::validate_trust_promotion_evidence(
+                "human_explicit",
+                "human_request",
+                "audit_0123456789abcdef0123456789abcdef"
+            )
+            .is_ok()
+        );
 
         Ok(())
     }
@@ -3302,7 +3323,8 @@ mod tests {
         let twilio = synthetic_raw_value(&["A", "C"], 32);
         let square = synthetic_raw_value(&["s", "q", "0", "c", "s", "p", "-"], 24);
         let report = redact_secret_like_content(&format!(
-            "Service tokens: {slack} {npm} {huggingface} {pypi} {twilio} {square}"
+            "Service tokens: {slack} {npm} {huggingface} {pypi} \
+             Twilio account SID: {twilio} {square}"
         ));
 
         assert!(report.redacted);
@@ -3315,6 +3337,33 @@ mod tests {
         for raw in [&slack, &npm, &huggingface, &pypi, &twilio, &square] {
             assert!(!report.content.contains(raw));
         }
+    }
+
+    #[test]
+    fn secret_redactor_requires_context_for_generic_twilio_account_sid_prefix() {
+        let sid_like_artifact_id = synthetic_raw_value(&["A", "C"], 32);
+        let benign_report = redact_secret_like_content(&format!(
+            "Build artifact {sid_like_artifact_id} was produced by the release job."
+        ));
+
+        assert!(!benign_report.redacted);
+        assert!(
+            !benign_report
+                .redacted_reasons
+                .contains(&"twilio_account_sid")
+        );
+        assert!(benign_report.content.contains(&sid_like_artifact_id));
+
+        let secret_report =
+            redact_secret_like_content(&format!("Twilio account SID: {sid_like_artifact_id}"));
+
+        assert!(secret_report.redacted);
+        assert!(
+            secret_report
+                .redacted_reasons
+                .contains(&"twilio_account_sid")
+        );
+        assert!(!secret_report.content.contains(&sid_like_artifact_id));
     }
 
     #[test]
