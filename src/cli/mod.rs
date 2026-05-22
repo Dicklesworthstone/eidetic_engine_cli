@@ -68,6 +68,11 @@ use crate::core::context::{
     ContextPackOutputOptions, ContextPackOutputProfile, attach_pack_dna_to_context_response,
     run_context_pack, run_context_pack_with_performance,
 };
+use crate::core::context_delta::{
+    CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+    ContextDeltaDegradation, ContextDeltaItemSnapshot, ContextDeltaOptions,
+    ContextDeltaPackSnapshot, compute_context_delta,
+};
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
@@ -2205,6 +2210,14 @@ pub struct ContextArgs {
     #[arg(long, action = ArgAction::SetTrue)]
     pub stream: bool,
 
+    /// Prior pack hash to delta against. Supported for JSON context responses.
+    #[arg(long, value_name = "PACK_HASH")]
+    pub since: Option<String>,
+
+    /// Maximum serialized context-delta bytes before falling back to the full pack.
+    #[arg(long = "max-delta-bytes", value_name = "BYTES")]
+    pub max_delta_bytes: Option<u64>,
+
     /// Disable the coverage-fill pass; accepts --no-coverage-fill=false to override a lean profile.
     #[arg(long = "no-coverage-fill", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_coverage_fill: Option<bool>,
@@ -2280,6 +2293,24 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+
+    /// bd-1es1m: Reuse a prior `ee context --json` response's
+    /// `data.pack.hash` to receive an `ee.context.delta.v1` envelope
+    /// describing the change set instead of a fresh full pack. JSON
+    /// renderer only; combining `--since` with markdown / TOON /
+    /// Mermaid / handoff / backup renderers returns the full rendered
+    /// output with a `context_delta_format_unsupported` degraded entry.
+    /// The prior-pack lookup + happy-path delta envelope emission is
+    /// tracked by bd-1zpmh.
+    #[arg(long = "since", value_name = "PACK_HASH")]
+    pub since: Option<String>,
+
+    /// bd-1es1m: Optional ceiling on the serialized delta size in bytes.
+    /// When the computed delta envelope would exceed this budget, `ee`
+    /// falls back to the full pack and emits
+    /// `context_delta_larger_than_full`. Ignored unless `--since` is set.
+    #[arg(long = "max-delta-bytes", value_name = "BYTES")]
+    pub max_delta_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -27971,7 +28002,35 @@ where
                     .degraded
                     .push(deprecated_context_alias_degradation());
             }
+            // bd-1es1m: --since requested with a non-JSON renderer. The delta
+            // envelope is JSON-only, so we emit the full rendered output and
+            // surface a context_delta_format_unsupported entry so agents know
+            // the optimization was skipped. The JSON-renderer happy-path
+            // (prior-pack lookup + envelope emission) lands in bd-1zpmh.
+            if args.since.is_some()
+                && !matches!(
+                    cli.context_renderer(),
+                    output::Renderer::Json | output::Renderer::Jsonl
+                )
+            {
+                response
+                    .data
+                    .degraded
+                    .push(context_delta_format_unsupported_degradation());
+            }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "context");
+            let render_options = output::ContextJsonRenderOptions::from(output_options);
+            if let Some(exit) = maybe_write_context_delta(
+                cli.context_renderer(),
+                cli.format,
+                args,
+                &workspace_path,
+                &mut response,
+                render_options,
+                stdout,
+            ) {
+                return exit;
+            }
             if args.stream {
                 return match write_context_stream_response(&response, &workspace_path, stdout) {
                     Ok(exit) => exit,
@@ -27992,7 +28051,7 @@ where
                 cli.format,
                 &response,
                 Some(&redaction),
-                output::ContextJsonRenderOptions::from(output_options),
+                render_options,
                 args.output.as_deref(),
                 stdout,
             )
@@ -28001,6 +28060,321 @@ where
             let domain_error = context_error_to_domain(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+const CONTEXT_DELTA_PRIOR_LOOKUP_LIMIT: u32 = 10_000;
+
+fn maybe_write_context_delta<W>(
+    renderer: output::Renderer,
+    requested_format: OutputFormat,
+    args: &ContextArgs,
+    workspace_path: &Path,
+    response: &mut ContextResponse,
+    render_options: output::ContextJsonRenderOptions,
+    stdout: &mut W,
+) -> Option<ProcessExitCode>
+where
+    W: Write,
+{
+    let prior_pack_hash = args.since.as_deref()?.trim();
+    if prior_pack_hash.is_empty() {
+        push_context_delta_degradation(
+            response,
+            CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+            ContextResponseSeverity::Low,
+            "Prior pack hash is empty; emitting the full pack instead.",
+            Some(
+                "Use a pack hash returned by `ee context --json` from the same workspace, or omit --since."
+                    .to_string(),
+            ),
+        );
+        return None;
+    }
+
+    if !context_delta_json_supported(renderer, requested_format, args) {
+        let format = if args.stream {
+            "stream"
+        } else {
+            context_format_name(renderer, requested_format)
+        };
+        push_context_delta_degradation(
+            response,
+            CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE,
+            ContextResponseSeverity::Info,
+            format!(
+                "`ee context --since` format {format} does not support context deltas; emitting \
+                 the full pack instead."
+            ),
+            Some(
+                "Use `ee context \"<task>\" --since <pack-hash> --json` for JSON context deltas, or omit --since."
+                    .to_string(),
+            ),
+        );
+        return None;
+    }
+
+    let database_path = args
+        .database
+        .clone()
+        .unwrap_or_else(|| workspace_path.join(".ee").join("ee.db"));
+    let prior = match load_context_delta_prior_snapshot(
+        &database_path,
+        workspace_path,
+        prior_pack_hash,
+    ) {
+        Ok(Some(prior)) => prior,
+        Ok(None) => {
+            push_context_delta_degradation(
+                response,
+                CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+                ContextResponseSeverity::Low,
+                format!(
+                    "Prior pack hash {prior_pack_hash:?} is not recognized in this workspace; \
+                     emitting the full pack instead."
+                ),
+                Some(
+                    "Use a pack hash returned by `ee context --json` from the same workspace, or omit --since."
+                        .to_string(),
+                ),
+            );
+            return None;
+        }
+        Err(error) => {
+            push_context_delta_degradation(
+                response,
+                CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+                ContextResponseSeverity::Low,
+                format!(
+                    "Prior pack hash {prior_pack_hash:?} could not be verified: {error}; emitting \
+                     the full pack instead."
+                ),
+                Some(
+                    "Run `ee doctor --json` to inspect the workspace database, or omit --since."
+                        .to_string(),
+                ),
+            );
+            return None;
+        }
+    };
+
+    let full_json = output::render_context_response_json_with_options(response, render_options);
+    let current = context_delta_snapshot_from_response(response, &full_json);
+    let delta = match compute_context_delta(
+        &prior,
+        &current,
+        ContextDeltaOptions::new(args.max_delta_bytes),
+    ) {
+        Ok(delta) => delta,
+        Err(error) => {
+            push_context_delta_degradation(
+                response,
+                CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context delta could not be computed: {error}; emitting the full pack instead."
+                ),
+                Some("Retry without --since to receive a full context pack.".to_string()),
+            );
+            return None;
+        }
+    };
+
+    if !delta.emits_delta() {
+        for degradation in &delta.degraded {
+            push_context_delta_kernel_degradation(response, degradation);
+        }
+        return None;
+    }
+
+    let rendered = serde_json::to_string(&delta).unwrap_or_else(|_| {
+        output::render_context_response_json_with_options(response, render_options)
+    });
+    Some(write_context_text(
+        stdout,
+        args.output.as_deref(),
+        &(rendered + "\n"),
+    ))
+}
+
+fn context_delta_json_supported(
+    renderer: output::Renderer,
+    requested_format: OutputFormat,
+    args: &ContextArgs,
+) -> bool {
+    !args.stream && renderer == output::Renderer::Json && requested_format != OutputFormat::Binary
+}
+
+fn load_context_delta_prior_snapshot(
+    database_path: &Path,
+    workspace_path: &Path,
+    prior_pack_hash: &str,
+) -> Result<Option<ContextDeltaPackSnapshot>, String> {
+    if !database_path.exists() {
+        return Ok(None);
+    }
+
+    let conn = DbConnection::open_schema_only(database_path)
+        .map_err(|error| format!("failed to open pack database: {error}"))?;
+    let workspace_id = workspace_core::stable_workspace_id(workspace_path);
+    let rows = conn
+        .list_recent_pack_items_for_workspace(&workspace_id, CONTEXT_DELTA_PRIOR_LOOKUP_LIMIT)
+        .map_err(|error| format!("failed to query prior pack records: {error}"))?;
+
+    let mut record = None;
+    let mut items = Vec::new();
+    for (candidate_record, item) in rows {
+        if candidate_record.pack_hash != prior_pack_hash {
+            if record.is_some() {
+                break;
+            }
+            continue;
+        }
+
+        if let Some(existing) = &record
+            && existing.id != candidate_record.id
+        {
+            break;
+        }
+        if record.is_none() {
+            record = Some(candidate_record);
+        }
+        items.push(context_delta_item_snapshot_from_stored_pack_item(&item));
+    }
+
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let full_bytes = record
+        .ledger_json
+        .as_ref()
+        .map_or(0, |ledger| ledger.len() as u64);
+    Ok(Some(ContextDeltaPackSnapshot::new(
+        record.pack_hash,
+        0,
+        full_bytes,
+        record.used_tokens,
+        items,
+    )))
+}
+
+fn context_delta_snapshot_from_response(
+    response: &ContextResponse,
+    full_json: &str,
+) -> ContextDeltaPackSnapshot {
+    let pack_hash = response
+        .data
+        .pack
+        .hash
+        .clone()
+        .unwrap_or_else(|| "absent".to_string());
+    let items = response
+        .data
+        .pack
+        .items
+        .iter()
+        .map(context_delta_item_snapshot_from_pack_item)
+        .collect();
+    ContextDeltaPackSnapshot::new(
+        pack_hash,
+        0,
+        full_json.len() as u64,
+        response.data.pack.used_tokens,
+        items,
+    )
+}
+
+fn context_delta_item_snapshot_from_pack_item(
+    item: &crate::pack::PackDraftItem,
+) -> ContextDeltaItemSnapshot {
+    let provenance = serde_json::from_str::<serde_json::Value>(
+        &crate::pack::pack_item_provenance_json(&item.provenance),
+    )
+    .unwrap_or(serde_json::Value::Null);
+    ContextDeltaItemSnapshot::new(item.memory_id.to_string())
+        .with_field("rank", serde_json::json!(item.rank))
+        .with_field("section", serde_json::json!(item.section.as_str()))
+        .with_field("estimatedTokens", serde_json::json!(item.estimated_tokens))
+        .with_field("relevance", serde_json::json!(item.relevance.into_inner()))
+        .with_field("utility", serde_json::json!(item.utility.into_inner()))
+        .with_field("why", serde_json::json!(&item.why))
+        .with_field(
+            "diversityKey",
+            serde_json::json!(item.diversity_key.as_deref()),
+        )
+        .with_field("provenance", provenance)
+        .with_field("trustClass", serde_json::json!(item.trust.class.as_str()))
+        .with_field(
+            "trustSubclass",
+            serde_json::json!(item.trust.subclass.as_deref()),
+        )
+}
+
+fn context_delta_item_snapshot_from_stored_pack_item(
+    item: &crate::db::StoredPackItem,
+) -> ContextDeltaItemSnapshot {
+    let provenance =
+        serde_json::from_str::<serde_json::Value>(&item.provenance_json).unwrap_or_default();
+    ContextDeltaItemSnapshot::new(&item.memory_id)
+        .with_field("rank", serde_json::json!(item.rank))
+        .with_field("section", serde_json::json!(&item.section))
+        .with_field("estimatedTokens", serde_json::json!(item.estimated_tokens))
+        .with_field("relevance", serde_json::json!(item.relevance))
+        .with_field("utility", serde_json::json!(item.utility))
+        .with_field("why", serde_json::json!(&item.why))
+        .with_field(
+            "diversityKey",
+            serde_json::json!(item.diversity_key.as_deref()),
+        )
+        .with_field("provenance", provenance)
+        .with_field("trustClass", serde_json::json!(&item.trust_class))
+        .with_field(
+            "trustSubclass",
+            serde_json::json!(item.trust_subclass.as_deref()),
+        )
+}
+
+fn push_context_delta_kernel_degradation(
+    response: &mut ContextResponse,
+    degradation: &ContextDeltaDegradation,
+) {
+    push_context_delta_degradation(
+        response,
+        &degradation.code,
+        context_delta_severity(&degradation.severity),
+        &degradation.message,
+        degradation.repair.clone(),
+    );
+}
+
+fn push_context_delta_degradation(
+    response: &mut ContextResponse,
+    code: impl Into<String>,
+    severity: ContextResponseSeverity,
+    message: impl Into<String>,
+    repair: Option<String>,
+) {
+    response.cached_json = None;
+    let code = code.into();
+    let message = message.into();
+    let entry = ContextResponseDegradation::new(code.clone(), severity, message.clone(), repair)
+        .unwrap_or(ContextResponseDegradation {
+            code,
+            severity,
+            message,
+            repair: None,
+        });
+    response.data.degraded.push(entry);
+}
+
+fn context_delta_severity(severity: &str) -> ContextResponseSeverity {
+    match severity {
+        "info" => ContextResponseSeverity::Info,
+        "low" => ContextResponseSeverity::Low,
+        "warning" => ContextResponseSeverity::Warning,
+        "medium" => ContextResponseSeverity::Medium,
+        "high" => ContextResponseSeverity::High,
+        _ => ContextResponseSeverity::Info,
     }
 }
 
@@ -30511,6 +30885,11 @@ where
             strict_scope: false,
             coordination_snapshot: args.coordination_snapshot.clone(),
             coordination_stale_after_ms: args.coordination_stale_after_ms,
+            // bd-1es1m: --since / --max-delta-bytes are only meaningful for
+            // `ee context`; the `ee pack` shim passes None through and the
+            // delta path stays inert.
+            since: None,
+            max_delta_bytes: None,
         };
         return handle_context_with_alias_notice(cli, &context_args, stdout, stderr, false);
     }
@@ -51921,6 +52300,87 @@ mod tests {
             }
             _ => Err("expected Context command".to_string()),
         }
+    }
+
+    #[test]
+    fn context_command_accepts_delta_since_flags() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "context",
+            "test",
+            "--since",
+            "blake3:prior-pack",
+            "--max-delta-bytes",
+            "512",
+        ])
+        .map_err(|error| format!("failed to parse context delta args: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Context(ref args)) => {
+                ensure_equal(
+                    &args.since,
+                    &Some("blake3:prior-pack".to_string()),
+                    "context since",
+                )?;
+                ensure_equal(&args.max_delta_bytes, &Some(512), "context max delta bytes")
+            }
+            _ => Err("expected Context command".to_string()),
+        }
+    }
+
+    #[test]
+    fn context_delta_transport_is_batch_json_only() -> TestResult {
+        for args in [
+            ["ee", "--json", "context", "test", "--since", "hash"].as_slice(),
+            [
+                "ee", "--format", "json", "context", "test", "--since", "hash",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).map_err(|error| {
+                format!("failed to parse delta args {args:?}: {:?}", error.kind())
+            })?;
+            match &cli.command {
+                Some(Command::Context(context_args)) => ensure(
+                    super::context_delta_json_supported(
+                        cli.context_renderer(),
+                        cli.format,
+                        context_args,
+                    ),
+                    "json context delta transport should be supported",
+                )?,
+                _ => return Err("expected Context command".to_string()),
+            }
+        }
+
+        for args in [
+            ["ee", "context", "test", "--since", "hash"].as_slice(),
+            [
+                "ee", "--format", "markdown", "context", "test", "--since", "hash",
+            ]
+            .as_slice(),
+            [
+                "ee", "--format", "json", "context", "test", "--since", "hash", "--stream",
+            ]
+            .as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).map_err(|error| {
+                format!("failed to parse delta args {args:?}: {:?}", error.kind())
+            })?;
+            match &cli.command {
+                Some(Command::Context(context_args)) => ensure(
+                    !super::context_delta_json_supported(
+                        cli.context_renderer(),
+                        cli.format,
+                        context_args,
+                    ),
+                    "non-json or streaming context delta transport should fall back",
+                )?,
+                _ => return Err("expected Context command".to_string()),
+            }
+        }
+        Ok(())
     }
 
     #[test]
