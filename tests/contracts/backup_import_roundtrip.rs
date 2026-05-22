@@ -24,14 +24,25 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ee::core::backup::{BackupCreateOptions, create_backup};
+use ee::core::backup::{
+    BackupCreateOptions, BackupInspectOptions, BackupVerifyOptions, create_backup, inspect_backup,
+    verify_backup,
+};
+use ee::core::handoff::{
+    CapsuleProfile, CreateOptions as HandoffCreateOptions, HANDOFF_CAPSULE_SCHEMA_V1,
+    HANDOFF_CREATE_SCHEMA_V1, HANDOFF_INSPECT_SCHEMA_V1, HANDOFF_RESUME_SCHEMA_V1,
+    InspectOptions as HandoffInspectOptions, ResumeOptions as HandoffResumeOptions, create_handoff,
+    inspect_handoff, resume_handoff,
+};
 use ee::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
 use ee::models::{
+    BACKUP_CREATE_SCHEMA_V1, BACKUP_INSPECT_SCHEMA_V1, BACKUP_VERIFY_SCHEMA_V1,
     EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1,
     EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, RedactionLevel,
 };
+use ee::output::jsonl_export::REDACTED_PATH_PLACEHOLDER;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -642,6 +653,318 @@ fn backup_report_artifacts_match_written_files() -> TestResult {
         ));
     }
 
+    Ok(())
+}
+
+#[test]
+fn handoff_create_inspect_resume_preserve_integrity_contract() -> TestResult {
+    let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
+    let src_workspace = src_dir.path().to_path_buf();
+    let src_db = src_workspace.join(".ee").join("ee.db");
+    build_source_workspace(&src_workspace, &src_db)?;
+
+    let handoff_dir = tempfile::tempdir().map_err(|error| format!("handoff tempdir: {error}"))?;
+    let capsule_path = handoff_dir.path().join("capsule.json");
+    let create_report = create_handoff(&HandoffCreateOptions {
+        workspace: src_workspace.clone(),
+        output: capsule_path.clone(),
+        profile: CapsuleProfile::Resume,
+        since: None,
+        dry_run: false,
+        task_frame_id: None,
+        bind_to_machine: false,
+        machine_salt_path: None,
+        redaction_level: RedactionLevel::Standard,
+    })
+    .map_err(|error| format!("handoff create: {error:?}"))?;
+    if create_report.schema != HANDOFF_CREATE_SCHEMA_V1 {
+        return Err(format!(
+            "handoff create schema drifted: {}",
+            create_report.schema
+        ));
+    }
+    if create_report.canonical_content_hash.len() != 16
+        || !create_report
+            .canonical_content_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(format!(
+            "handoff canonical hash must be a 16-char hex prefix, got {}",
+            create_report.canonical_content_hash
+        ));
+    }
+
+    let create_json: Value =
+        serde_json::from_str(&create_report.to_json()).map_err(|error| error.to_string())?;
+    for field in [
+        "secrets_redacted",
+        "paths_redacted",
+        "ids_redacted",
+        "categories",
+    ] {
+        if create_json
+            .pointer(&format!("/redaction_summary/{field}"))
+            .is_none()
+        {
+            return Err(format!(
+                "handoff create redaction_summary missing `{field}`"
+            ));
+        }
+    }
+
+    let capsule_text =
+        fs::read_to_string(&capsule_path).map_err(|error| format!("read capsule: {error}"))?;
+    let capsule: Value =
+        serde_json::from_str(&capsule_text).map_err(|error| format!("parse capsule: {error}"))?;
+    if capsule.get("schema").and_then(Value::as_str) != Some(HANDOFF_CAPSULE_SCHEMA_V1) {
+        return Err(format!("handoff capsule schema drifted: {capsule}"));
+    }
+    let integrity = capsule
+        .get("integrity")
+        .ok_or_else(|| "handoff capsule missing integrity block".to_owned())?;
+    let hmac = json_str(integrity, "hmac")?.to_owned();
+    let hmac_prefix = json_str(integrity, "hmacPrefix")?;
+    if !hmac
+        .strip_prefix("base64url:")
+        .is_some_and(|encoded| encoded.starts_with(hmac_prefix))
+    {
+        return Err(format!(
+            "handoff hmacPrefix must prefix encoded hmac: prefix={hmac_prefix}, hmac={hmac}"
+        ));
+    }
+
+    let inspect_report = inspect_handoff(&HandoffInspectOptions {
+        path: capsule_path.clone(),
+        verify_hash: true,
+        check_evidence: true,
+    })
+    .map_err(|error| format!("handoff inspect: {error:?}"))?;
+    if inspect_report.schema != HANDOFF_INSPECT_SCHEMA_V1 || !inspect_report.hash_valid {
+        return Err(format!(
+            "handoff inspect drifted: schema={}, hash_valid={}",
+            inspect_report.schema, inspect_report.hash_valid
+        ));
+    }
+
+    for run in 0..2 {
+        let resume_report = resume_handoff(&HandoffResumeOptions {
+            path: capsule_path.clone(),
+            use_latest: false,
+            workspace: src_workspace.clone(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: true,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        })
+        .map_err(|error| format!("handoff resume run {run}: {error:?}"))?;
+        if resume_report.schema != HANDOFF_RESUME_SCHEMA_V1 {
+            return Err(format!(
+                "handoff resume schema drifted: {}",
+                resume_report.schema
+            ));
+        }
+        if resume_report
+            .degradations
+            .iter()
+            .any(|degradation| degradation.code == "handoff_hmac_skipped")
+        {
+            return Err("handoff resume unexpectedly skipped HMAC verification".to_owned());
+        }
+        let capsule_after_resume: Value = serde_json::from_str(
+            &fs::read_to_string(&capsule_path)
+                .map_err(|error| format!("read capsule after resume {run}: {error}"))?,
+        )
+        .map_err(|error| format!("parse capsule after resume {run}: {error}"))?;
+        let after_hmac = capsule_after_resume
+            .pointer("/integrity/hmac")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("capsule missing hmac after resume run {run}"))?;
+        if after_hmac != hmac.as_str() {
+            return Err(format!(
+                "handoff hmac changed across resume run {run}: before={hmac}, after={after_hmac}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_inspect_and_verify_reports_are_content_addressed() -> TestResult {
+    let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
+    let src_workspace = src_dir.path().to_path_buf();
+    let src_db = src_workspace.join(".ee").join("ee.db");
+    build_source_workspace(&src_workspace, &src_db)?;
+    let sensitive_path = "/data/projects/private/customer-release-plan.md";
+    let redaction_fixture = format!("Never export raw customer path {sensitive_path}.");
+    remember_memory(&RememberMemoryOptions {
+        workspace_path: &src_workspace,
+        database_path: Some(&src_db),
+        content: &redaction_fixture,
+        workflow_id: None,
+        level: "semantic",
+        kind: "fact",
+        tags: Some("privacy,export"),
+        confidence: 0.9,
+        source: None,
+        allow_secret_mention: false,
+        valid_from: None,
+        valid_to: None,
+        dry_run: false,
+        auto_link: true,
+        propose_candidates: false,
+    })
+    .map_err(|error| format!("remember redaction fixture: {error:?}"))?;
+
+    let backup_dir = tempfile::tempdir().map_err(|error| format!("backup tempdir: {error}"))?;
+    let create_report = create_backup(&BackupCreateOptions {
+        workspace_path: src_workspace,
+        database_path: Some(src_db),
+        output_dir: Some(backup_dir.path().to_path_buf()),
+        label: Some("inspect-verify-content-addressed".to_owned()),
+        redaction_level: RedactionLevel::Standard,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| format!("backup: {error:?}"))?;
+    if create_report.schema != BACKUP_CREATE_SCHEMA_V1 {
+        return Err(format!(
+            "backup create schema drifted: {}",
+            create_report.schema
+        ));
+    }
+
+    let records_path = Path::new(&create_report.records_path);
+    let manifest_path = Path::new(&create_report.manifest_path);
+    let expected_records_hash = file_blake3_hash(records_path)?;
+    let expected_records_len = file_len(records_path)?;
+    let expected_manifest_hash = file_blake3_hash(manifest_path)?;
+    let expected_manifest_len = file_len(manifest_path)?;
+    let backup_path = PathBuf::from(&create_report.backup_path);
+    let records_text = fs::read_to_string(records_path)
+        .map_err(|error| format!("read records {}: {error}", records_path.display()))?;
+    if records_text.contains(sensitive_path) {
+        return Err("backup export leaked a raw sensitive path".to_owned());
+    }
+    if !records_text.contains(REDACTED_PATH_PLACEHOLDER) {
+        return Err("backup export did not keep an explicit path redaction marker".to_owned());
+    }
+    let record_schemas = canonicalized_records_jsonl(records_path)?
+        .iter()
+        .map(|record| json_str(record, "schema").map(str::to_owned))
+        .collect::<Result<Vec<_>, _>>()?;
+    for expected_schema in [
+        EXPORT_HEADER_SCHEMA_V1,
+        EXPORT_MEMORY_SCHEMA_V1,
+        EXPORT_TAG_SCHEMA_V1,
+        EXPORT_AUDIT_SCHEMA_V1,
+        EXPORT_FOOTER_SCHEMA_V1,
+    ] {
+        if !record_schemas
+            .iter()
+            .any(|schema| schema == expected_schema)
+        {
+            return Err(format!("backup export records missing {expected_schema}"));
+        }
+    }
+
+    let inspect_report = inspect_backup(&BackupInspectOptions {
+        backup_path: backup_path.clone(),
+    })
+    .map_err(|error| format!("inspect: {error:?}"))?;
+    if inspect_report.schema != BACKUP_INSPECT_SCHEMA_V1 {
+        return Err(format!(
+            "backup inspect schema drifted: {}",
+            inspect_report.schema
+        ));
+    }
+    if inspect_report.backup_id != create_report.backup_id {
+        return Err(format!(
+            "inspect backupId drifted: create={}, inspect={}",
+            create_report.backup_id, inspect_report.backup_id
+        ));
+    }
+    if inspect_report.manifest_hash != expected_manifest_hash {
+        return Err(format!(
+            "inspect manifest hash mismatch: expected={expected_manifest_hash}, got={}",
+            inspect_report.manifest_hash
+        ));
+    }
+    if inspect_report.redaction_level.as_deref() != Some(RedactionLevel::Standard.as_str()) {
+        return Err(format!(
+            "inspect redaction level drifted: {:?}",
+            inspect_report.redaction_level
+        ));
+    }
+    if inspect_report.counts.memory_count != create_report.memory_count
+        || inspect_report.counts.tag_count != create_report.tag_count
+        || inspect_report.counts.audit_count != create_report.audit_count
+    {
+        return Err(format!(
+            "inspect count summary drifted: inspect={:?}, create=(memories={}, tags={}, audits={})",
+            inspect_report.counts,
+            create_report.memory_count,
+            create_report.tag_count,
+            create_report.audit_count
+        ));
+    }
+
+    let verify_report = verify_backup(&BackupVerifyOptions { backup_path })
+        .map_err(|error| format!("verify: {error:?}"))?;
+    if verify_report.schema != BACKUP_VERIFY_SCHEMA_V1 {
+        return Err(format!(
+            "backup verify schema drifted: {}",
+            verify_report.schema
+        ));
+    }
+    if verify_report.status != "verified" {
+        return Err(format!(
+            "verify status drifted: status={}, issues={:?}",
+            verify_report.status, verify_report.issues
+        ));
+    }
+    if verify_report.manifest_hash != expected_manifest_hash {
+        return Err(format!(
+            "verify manifest hash mismatch: expected={expected_manifest_hash}, got={}",
+            verify_report.manifest_hash
+        ));
+    }
+
+    let mut checked_artifacts = verify_report
+        .checked_artifacts
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                artifact.path,
+                artifact.kind,
+                artifact.hash.as_deref().unwrap_or("[missing-hash]"),
+                artifact.size_bytes.unwrap_or(0),
+                artifact.required
+            )
+        })
+        .collect::<Vec<_>>();
+    checked_artifacts.sort();
+    let expected = vec![
+        format!(
+            "manifest.json|manifest|{}|{}|true",
+            expected_manifest_hash, expected_manifest_len
+        ),
+        format!(
+            "records.jsonl|jsonl_export|{}|{}|true",
+            expected_records_hash, expected_records_len
+        ),
+    ];
+    if checked_artifacts != expected {
+        return Err(format!(
+            "verify checked artifact projection drifted:\nexpected: {expected:#?}\nactual:   {checked_artifacts:#?}"
+        ));
+    }
     Ok(())
 }
 
