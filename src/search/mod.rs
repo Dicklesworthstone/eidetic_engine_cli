@@ -689,30 +689,37 @@ fn is_search_path_hard_delimiter(character: char) -> bool {
 
 fn whitespace_starts_search_path_continuation(input: &str, cursor: usize) -> bool {
     let mut offset = cursor;
+    let mut consumed_horizontal_space = false;
     while offset < input.len() {
         let next = input[offset..].chars().next().unwrap_or('\0');
-        if !next.is_whitespace() {
+        if !is_horizontal_search_path_space(next) {
             break;
         }
+        consumed_horizontal_space = true;
         offset += next.len_utf8();
     }
+    if !consumed_horizontal_space {
+        return false;
+    }
 
-    let mut saw_path_separator = false;
+    let mut saw_component_character = false;
     while offset < input.len() {
         let next = input[offset..].chars().next().unwrap_or('\0');
-        if next == '=' {
-            return false;
-        }
-        if next == '/' || next == '\\' {
-            saw_path_separator = true;
-        }
         if next.is_whitespace() || is_search_path_hard_delimiter(next) {
             break;
         }
+        if next == '=' {
+            return false;
+        }
+        saw_component_character = true;
         offset += next.len_utf8();
     }
 
-    saw_path_separator
+    saw_component_character
+}
+
+fn is_horizontal_search_path_space(character: char) -> bool {
+    matches!(character, ' ' | '\t')
 }
 
 impl Default for ArtifactDocumentBuilder {
@@ -3215,6 +3222,42 @@ mod tests {
                 "search projection redaction leaked {leaked}: {redacted}"
             );
         }
+    }
+
+    #[test]
+    fn search_projection_redacts_terminal_path_components_with_spaces() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"source=/Users/alice/My Project label=/data/private/Release Notes win=C:\Users\alice\Draft Folder note=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"source=[REDACTED_PATH] label=[REDACTED_PATH] win=[REDACTED_PATH] note=done"#
+        );
+        for leaked in [
+            "/Users/alice",
+            "My Project",
+            "/data/private/Release Notes",
+            r#"C:\Users\alice\Draft Folder"#,
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked terminal component {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_does_not_cross_line_boundaries_after_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            "source=/Users/alice/My Project\nAgent: cod-search",
+        );
+
+        assert_eq!(redacted, "source=[REDACTED_PATH]\nAgent: cod-search");
+        assert!(
+            !redacted.contains("My Project"),
+            "search projection leaked terminal component across newline: {redacted}"
+        );
     }
 
     #[test]

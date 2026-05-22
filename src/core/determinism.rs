@@ -1,10 +1,11 @@
 //! Core determinism label registry.
 //!
-//! Child-seed labels are part of the deterministic output contract: changing a
-//! label changes every derived child seed. Keep this registry in sync with
-//! `docs/determinism_seed_labels.md`.
+//! Seed-derivation labels are part of the deterministic output contract:
+//! changing a label changes every derived child seed. Keep this registry in
+//! sync with `docs/determinism_seed_labels.md`.
 
-/// Canonical labels used to derive child seeds via `Deterministic::child()`.
+/// Canonical labels used to derive seeds via `Deterministic::child()` and
+/// `Deterministic::shared_child()`.
 ///
 /// Adding a new label requires:
 /// 1. Adding it here.
@@ -26,7 +27,7 @@ pub const SEED_LABELS: &[&str] = &[
     "lab.replay",
 ];
 
-/// Human-auditable metadata for a registered child-seed label.
+/// Human-auditable metadata for a registered seed-derivation label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SeedLabelDefinition {
     pub label: &'static str,
@@ -49,7 +50,7 @@ impl SeedLabelDefinition {
     }
 }
 
-/// Canonical child-seed label registry with call-site intent.
+/// Canonical seed-derivation label registry with call-site intent.
 pub const SEED_LABEL_REGISTRY: &[SeedLabelDefinition] = &[
     SeedLabelDefinition::new(
         "pack.mmr_tiebreak",
@@ -226,7 +227,7 @@ pub const THREADING_SURFACE_REGISTRY: &[ThreadingSurfaceDefinition] = &[
     ),
 ];
 
-/// Return true when `label` is registered for deterministic child-seed use.
+/// Return true when `label` is registered for deterministic seed derivation.
 #[must_use]
 pub fn is_label_registered(label: &str) -> bool {
     SEED_LABELS.contains(&label)
@@ -247,6 +248,6 @@ pub fn seed_label_definition(label: &str) -> Option<&'static SeedLabelDefinition
 pub fn assert_label_registered(label: &str) {
     assert!(
         is_label_registered(label),
-        "unregistered deterministic child-seed label `{label}`"
+        "unregistered deterministic seed-derivation label `{label}`"
     );
 }

@@ -1,9 +1,9 @@
 # Determinism Seed Labels
 
-Child-seed labels are part of the deterministic output contract. A call to
-`Deterministic::child(label)` derives a new seed from the parent seed and the
-label string, so changing a label changes the emitted IDs, tie-breaks, and any
-other token-derived output for that scope.
+Seed-derivation labels are part of the deterministic output contract. A call to
+`Deterministic::child(label)` or `Deterministic::shared_child(label)` derives a
+new seed from the parent seed and the label string, so changing a label changes
+the emitted IDs, tie-breaks, and any other token-derived output for that scope.
 
 Every production label must appear in both this document and
 `src/core/determinism.rs`.
@@ -30,6 +30,7 @@ Every production label must appear in both this document and
    `SEED_LABEL_REGISTRY`.
 2. Add the same label to the table above with the production call site and the
    consuming behavior.
-3. Use literal labels at `.child("...")` call sites. Dynamic labels are reserved
-   for scoped suffixes that are explicitly registered by a base label.
+3. Use literal labels at `.child("...")` and `.shared_child("...")` call sites.
+   Dynamic labels are reserved for scoped suffixes that are explicitly
+   registered by a base label.
 4. Run `cargo test --test seed_labels_consistency_test`.
