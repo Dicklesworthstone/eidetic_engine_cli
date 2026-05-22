@@ -2293,24 +2293,6 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
-
-    /// bd-1es1m: Reuse a prior `ee context --json` response's
-    /// `data.pack.hash` to receive an `ee.context.delta.v1` envelope
-    /// describing the change set instead of a fresh full pack. JSON
-    /// renderer only; combining `--since` with markdown / TOON /
-    /// Mermaid / handoff / backup renderers returns the full rendered
-    /// output with a `context_delta_format_unsupported` degraded entry.
-    /// The prior-pack lookup + happy-path delta envelope emission is
-    /// tracked by bd-1zpmh.
-    #[arg(long = "since", value_name = "PACK_HASH")]
-    pub since: Option<String>,
-
-    /// bd-1es1m: Optional ceiling on the serialized delta size in bytes.
-    /// When the computed delta envelope would exceed this budget, `ee`
-    /// falls back to the full pack and emits
-    /// `context_delta_larger_than_full`. Ignored unless `--since` is set.
-    #[arg(long = "max-delta-bytes", value_name = "BYTES")]
-    pub max_delta_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -28002,22 +27984,6 @@ where
                     .degraded
                     .push(deprecated_context_alias_degradation());
             }
-            // bd-1es1m: --since requested with a non-JSON renderer. The delta
-            // envelope is JSON-only, so we emit the full rendered output and
-            // surface a context_delta_format_unsupported entry so agents know
-            // the optimization was skipped. The JSON-renderer happy-path
-            // (prior-pack lookup + envelope emission) lands in bd-1zpmh.
-            if args.since.is_some()
-                && !matches!(
-                    cli.context_renderer(),
-                    output::Renderer::Json | output::Renderer::Jsonl
-                )
-            {
-                response
-                    .data
-                    .degraded
-                    .push(context_delta_format_unsupported_degradation());
-            }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "context");
             let render_options = output::ContextJsonRenderOptions::from(output_options);
             if let Some(exit) = maybe_write_context_delta(
@@ -53183,6 +53149,62 @@ mod tests {
         ensure_contains(&entry.message, "ee context", "context alias message")?;
         let repair = entry.repair.as_deref().unwrap_or_default();
         ensure_contains(repair, "ee pack", "context alias repair")
+    }
+
+    // bd-1es1m: --since and --max-delta-bytes must round-trip through clap so
+    // `ee context "task" --since <pack-hash> --max-delta-bytes 4096 --json`
+    // no longer fails with an unknown-flag usage error.
+    #[test]
+    fn context_args_accept_since_and_max_delta_bytes() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "context",
+            "delta plumbing smoke",
+            "--since",
+            "deadbeef",
+            "--max-delta-bytes",
+            "4096",
+            "--json",
+        ])
+        .map_err(|error| {
+            format!(
+                "clap rejected --since/--max-delta-bytes: {:?}",
+                error.kind()
+            )
+        })?;
+        let Some(Command::Context(args)) = parsed.command else {
+            return Err("expected Command::Context".into());
+        };
+        ensure_equal(
+            &args.since,
+            &Some("deadbeef".to_string()),
+            "since round-trip",
+        )?;
+        ensure_equal(
+            &args.max_delta_bytes,
+            &Some(4096_u64),
+            "max-delta-bytes round-trip",
+        )?;
+        ensure_equal(&parsed.json, &true, "--json honored alongside --since")
+    }
+
+    // bd-1es1m: omitting both flags must leave them as None — they are pure
+    // opt-in extensions to the context surface.
+    #[test]
+    fn context_args_default_to_no_delta_request() -> TestResult {
+        let parsed =
+            Cli::try_parse_from(["ee", "context", "no delta requested"]).map_err(|error| {
+                format!("clap rejected base context invocation: {:?}", error.kind())
+            })?;
+        let Some(Command::Context(args)) = parsed.command else {
+            return Err("expected Command::Context".into());
+        };
+        ensure_equal(&args.since, &None, "since defaults to None")?;
+        ensure_equal(
+            &args.max_delta_bytes,
+            &None,
+            "max-delta-bytes defaults to None",
+        )
     }
 
     #[test]
