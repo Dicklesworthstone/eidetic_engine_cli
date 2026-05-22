@@ -19,12 +19,14 @@
 //! exercise downstream logic without spawning a process.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,7 @@ const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
 const TIMEOUT_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SPAWN_RETRY_ATTEMPTS: usize = 6;
+pub(crate) const CASS_STDOUT_LINE_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CassSpawnTarget {
@@ -110,6 +113,89 @@ impl CassExitClass {
             Self::Degraded => "degraded",
             Self::Failure => "failure",
         }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CassStreamError<E> {
+    Cass(CassError),
+    Handler(E),
+}
+
+impl<E> CassStreamError<E> {
+    fn from_cass(error: std::io::Error) -> Self {
+        Self::Cass(CassError::from(error))
+    }
+}
+
+/// Captured result of running a CASS invocation with streamed stdout.
+#[derive(Clone, Debug)]
+pub(crate) struct CassStreamOutcome {
+    stderr: Vec<u8>,
+    exit_code: Option<i32>,
+    class: CassExitClass,
+    stdout_line_count: usize,
+    stdout_bytes_seen: usize,
+    peak_stdout_line_bytes: usize,
+}
+
+impl CassStreamOutcome {
+    fn new(
+        stderr: Vec<u8>,
+        exit_code: Option<i32>,
+        timed_out: bool,
+        stdout_line_count: usize,
+        stdout_bytes_seen: usize,
+        peak_stdout_line_bytes: usize,
+    ) -> Self {
+        let class = if timed_out {
+            CassExitClass::Failure
+        } else {
+            CassExitClass::classify(exit_code, stdout_bytes_seen)
+        };
+        Self {
+            stderr,
+            exit_code,
+            class,
+            stdout_line_count,
+            stdout_bytes_seen,
+            peak_stdout_line_bytes,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn stderr_utf8_lossy(&self) -> std::borrow::Cow<'_, str> {
+        String::from_utf8_lossy(self.stderr.as_slice())
+    }
+
+    #[must_use]
+    pub(crate) const fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    #[must_use]
+    pub(crate) const fn class(&self) -> CassExitClass {
+        self.class
+    }
+
+    #[must_use]
+    pub(crate) const fn stdout_line_count(&self) -> usize {
+        self.stdout_line_count
+    }
+
+    #[must_use]
+    pub(crate) const fn stdout_bytes_seen(&self) -> usize {
+        self.stdout_bytes_seen
+    }
+
+    #[must_use]
+    pub(crate) const fn peak_stdout_line_bytes(&self) -> usize {
+        self.peak_stdout_line_bytes
+    }
+
+    #[must_use]
+    pub(crate) const fn stdout_is_empty(&self) -> bool {
+        self.stdout_bytes_seen == 0
     }
 }
 
@@ -245,6 +331,181 @@ impl CassInvocation {
             elapsed,
             false,
         ))
+    }
+
+    /// Spawn the subprocess and stream stdout one UTF-8 line at a time.
+    ///
+    /// This is for CASS surfaces that can emit JSONL. Unlike [`Self::run`],
+    /// stdout is never retained as one contiguous byte buffer. Each line is
+    /// rejected if it exceeds [`CASS_STDOUT_LINE_MAX_BYTES`].
+    pub(crate) fn run_stdout_lines<F, E>(
+        &self,
+        mut handle_line: F,
+    ) -> Result<CassStreamOutcome, CassStreamError<E>>
+    where
+        F: FnMut(String) -> Result<(), E>,
+    {
+        let spawn_target = self
+            .validated_spawn_target()
+            .map_err(CassStreamError::Cass)?;
+        let started = Instant::now();
+        let mut command = spawn_target.command();
+        command.args(&self.args);
+        if let Some(cwd) = &self.cwd {
+            command.current_dir(cwd);
+        }
+        for (key, value) in &self.env_overrides {
+            command.env(key, value);
+        }
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+
+        let mut child = retry_cass_spawn(|| command.spawn())
+            .map_err(|error| CassStreamError::Cass(cass_spawn_error(self, error)))?;
+        #[cfg(unix)]
+        let child_group = Pid::from_child(&child);
+
+        let stdout = child.stdout.take().ok_or_else(|| {
+            CassStreamError::Cass(CassError::Io {
+                message: "cass subprocess stdout pipe was not available".to_owned(),
+            })
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            CassStreamError::Cass(CassError::Io {
+                message: "cass subprocess stderr pipe was not available".to_owned(),
+            })
+        })?;
+
+        let (stdout_rx, mut stdout_thread) = spawn_stdout_line_reader(stdout);
+        let stderr_thread = thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            (&mut stderr)
+                .take(100 * 1024 * 1024)
+                .read_to_end(&mut buf)?;
+            Ok(buf)
+        });
+
+        let mut child_status: Option<ExitStatus> = None;
+        let mut stderr_thread = Some(stderr_thread);
+        let mut stderr_bytes = None;
+        let mut stdout_done = false;
+        let mut stdout_line_count = 0_usize;
+        let mut stdout_bytes_seen = 0_usize;
+        let mut peak_stdout_line_bytes = 0_usize;
+        let mut stream_error = None;
+        let mut handler_error = None;
+
+        loop {
+            drain_available_stdout_lines(
+                &stdout_rx,
+                &mut stdout_done,
+                &mut stdout_line_count,
+                &mut stdout_bytes_seen,
+                &mut peak_stdout_line_bytes,
+                &mut stream_error,
+                &mut handler_error,
+                &mut handle_line,
+            );
+
+            if (stream_error.is_some() || handler_error.is_some()) && child_status.is_none() {
+                #[cfg(unix)]
+                terminate_cass_process_group(child_group);
+                if let Err(kill_error) = child.kill() {
+                    if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                        tracing::debug!(
+                            "cass subprocess kill failed after stream handler error: {kill_error}"
+                        );
+                    }
+                }
+                child_status = Some(child.wait().map_err(CassStreamError::from_cass)?);
+            }
+
+            if child_status.is_none() {
+                child_status = child.try_wait().map_err(CassStreamError::from_cass)?;
+            }
+            collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)
+                .map_err(CassStreamError::Cass)?;
+            if stdout_done {
+                collect_finished_stdout_line_reader(&mut stdout_thread)
+                    .map_err(CassStreamError::Cass)?;
+            }
+
+            if let Some(status) = child_status {
+                if stdout_done && stderr_bytes.is_some() && stdout_thread.is_none() {
+                    if let Some(error) = stream_error {
+                        return Err(CassStreamError::Cass(error));
+                    }
+                    if let Some(error) = handler_error {
+                        return Err(CassStreamError::Handler(error));
+                    }
+                    return Ok(CassStreamOutcome::new(
+                        stderr_bytes.take().unwrap_or_default(),
+                        status.code(),
+                        false,
+                        stdout_line_count,
+                        stdout_bytes_seen,
+                        peak_stdout_line_bytes,
+                    ));
+                }
+            }
+
+            let elapsed = started.elapsed();
+            if let Some(timeout) = self.timeout {
+                if elapsed >= timeout {
+                    #[cfg(unix)]
+                    terminate_cass_process_group(child_group);
+                    if child_status.is_none() {
+                        if let Err(kill_error) = child.kill() {
+                            if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                                tracing::debug!(
+                                    "cass subprocess kill failed (child may have already exited): {kill_error}"
+                                );
+                            }
+                        }
+                        child_status = Some(child.wait().map_err(CassStreamError::from_cass)?);
+                    }
+                    drain_stdout_line_reader_after_stop(
+                        &stdout_rx,
+                        &mut stdout_done,
+                        &mut stdout_line_count,
+                        &mut stdout_bytes_seen,
+                        &mut peak_stdout_line_bytes,
+                    );
+                    join_stdout_line_reader(&mut stdout_thread).map_err(CassStreamError::Cass)?;
+                    let mut absent_stdout_thread = None;
+                    let mut empty_stdout_bytes = Some(Vec::new());
+                    let (_stdout_bytes, stderr_bytes_after_timeout) =
+                        drain_pipe_readers_after_timeout(
+                            &mut absent_stdout_thread,
+                            &mut stderr_thread,
+                            &mut empty_stdout_bytes,
+                            &mut stderr_bytes,
+                        )
+                        .map_err(CassStreamError::Cass)?;
+                    let Some(status) = child_status.take() else {
+                        return Err(CassStreamError::Cass(CassError::Io {
+                            message: "cass subprocess status was unavailable after timeout"
+                                .to_owned(),
+                        }));
+                    };
+                    return Ok(CassStreamOutcome::new(
+                        stderr_bytes_after_timeout,
+                        status.code(),
+                        true,
+                        stdout_line_count,
+                        stdout_bytes_seen,
+                        peak_stdout_line_bytes,
+                    ));
+                }
+            }
+
+            let sleep_for = self.timeout.map_or(TIMEOUT_POLL_INTERVAL, |timeout| {
+                timeout.saturating_sub(elapsed).min(TIMEOUT_POLL_INTERVAL)
+            });
+            thread::sleep(sleep_for);
+        }
     }
 
     fn run_with_timeout(
@@ -427,6 +688,130 @@ fn cass_spawn_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
+fn spawn_stdout_line_reader(
+    stdout: std::process::ChildStdout,
+) -> (
+    Receiver<Result<String, CassError>>,
+    thread::JoinHandle<Result<(), CassError>>,
+) {
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(line) => line,
+                Err(error) => {
+                    let _ = sender.send(Err(CassError::Io {
+                        message: format!("cass subprocess stdout line read failed: {error}"),
+                    }));
+                    return Ok(());
+                }
+            };
+            if line.len() > CASS_STDOUT_LINE_MAX_BYTES {
+                let _ = sender.send(Err(CassError::Io {
+                    message: format!(
+                        "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
+                    ),
+                }));
+                return Ok(());
+            }
+            if sender.send(Ok(line)).is_err() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    });
+    (receiver, handle)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_available_stdout_lines<F, E>(
+    receiver: &Receiver<Result<String, CassError>>,
+    stdout_done: &mut bool,
+    stdout_line_count: &mut usize,
+    stdout_bytes_seen: &mut usize,
+    peak_stdout_line_bytes: &mut usize,
+    stream_error: &mut Option<CassError>,
+    handler_error: &mut Option<E>,
+    handle_line: &mut F,
+) where
+    F: FnMut(String) -> Result<(), E>,
+{
+    loop {
+        match receiver.try_recv() {
+            Ok(Ok(line)) => {
+                record_stdout_line_stats(
+                    &line,
+                    stdout_line_count,
+                    stdout_bytes_seen,
+                    peak_stdout_line_bytes,
+                );
+                if stream_error.is_none()
+                    && handler_error.is_none()
+                    && let Err(error) = handle_line(line)
+                {
+                    *handler_error = Some(error);
+                }
+            }
+            Ok(Err(error)) => {
+                *stream_error = Some(error);
+            }
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => {
+                *stdout_done = true;
+                break;
+            }
+        }
+    }
+}
+
+fn drain_stdout_line_reader_after_stop(
+    receiver: &Receiver<Result<String, CassError>>,
+    stdout_done: &mut bool,
+    stdout_line_count: &mut usize,
+    stdout_bytes_seen: &mut usize,
+    peak_stdout_line_bytes: &mut usize,
+) {
+    let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let remaining = deadline
+            .checked_duration_since(now)
+            .unwrap_or(Duration::ZERO)
+            .min(TIMEOUT_POLL_INTERVAL);
+        match receiver.recv_timeout(remaining) {
+            Ok(Ok(line)) => record_stdout_line_stats(
+                &line,
+                stdout_line_count,
+                stdout_bytes_seen,
+                peak_stdout_line_bytes,
+            ),
+            Ok(Err(_error)) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                *stdout_done = true;
+                break;
+            }
+        }
+    }
+}
+
+fn record_stdout_line_stats(
+    line: &str,
+    stdout_line_count: &mut usize,
+    stdout_bytes_seen: &mut usize,
+    peak_stdout_line_bytes: &mut usize,
+) {
+    *stdout_line_count = stdout_line_count.saturating_add(1);
+    *stdout_bytes_seen = stdout_bytes_seen
+        .saturating_add(line.len())
+        .saturating_add(1);
+    *peak_stdout_line_bytes = (*peak_stdout_line_bytes).max(line.len());
+}
+
 fn join_pipe_reader(
     handle: thread::JoinHandle<Result<Vec<u8>, std::io::Error>>,
 ) -> Result<Vec<u8>, CassError> {
@@ -439,6 +824,33 @@ fn join_pipe_reader(
             message: "cass subprocess pipe reader thread panicked".to_owned(),
         }),
     }
+}
+
+fn join_stdout_line_reader(
+    handle: &mut Option<thread::JoinHandle<Result<(), CassError>>>,
+) -> Result<(), CassError> {
+    let Some(reader) = handle.take() else {
+        return Ok(());
+    };
+    match reader.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_panic) => Err(CassError::Io {
+            message: "cass subprocess stdout line reader thread panicked".to_owned(),
+        }),
+    }
+}
+
+fn collect_finished_stdout_line_reader(
+    handle: &mut Option<thread::JoinHandle<Result<(), CassError>>>,
+) -> Result<(), CassError> {
+    let Some(reader) = handle else {
+        return Ok(());
+    };
+    if reader.is_finished() {
+        join_stdout_line_reader(handle)?;
+    }
+    Ok(())
 }
 
 fn take_completed_subprocess(

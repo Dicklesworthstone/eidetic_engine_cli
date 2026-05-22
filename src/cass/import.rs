@@ -16,6 +16,7 @@ use serde_json::{Value as JsonValue, json};
 use sqlmodel_core::IsolationLevel;
 use uuid::Uuid;
 
+use super::process::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError};
 use super::{
     CassAgent, CassClient, CassError, CassExitClass, CassRole, CassSessionInfo, CassSpanKind,
     ImportCursor,
@@ -35,6 +36,12 @@ const DEFAULT_VIEW_CONTEXT: u32 = 4;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
+#[cfg(test)]
+const CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES: usize = 10 * 1024 * 1024;
+
+#[cfg(test)]
+static CASS_VIEW_STREAM_PEAK_SAMPLE_BYTES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Options for one `ee import cass` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -800,13 +807,43 @@ fn view_session_spans(
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
     let invocation = client.import_view_invocation(source_path, 1, DEFAULT_VIEW_CONTEXT)?;
-    let outcome = client.run(&invocation)?;
-    ensure_successful_outcome(&outcome, "cass view")?;
-    parse_view_json(outcome.stdout_bytes(), source_path)
+    let mut collector = CassViewLineCollector::new(source_path);
+    let outcome = match invocation.run_stdout_lines(|line| collector.accept_line(&line)) {
+        Ok(outcome) => outcome,
+        Err(CassStreamError::Cass(error)) => return Err(CassImportError::Cass(error)),
+        Err(CassStreamError::Handler(error)) => return Err(error),
+    };
+    tracing::debug!(
+        command = "cass view",
+        stdout_lines = outcome.stdout_line_count(),
+        stdout_bytes_seen = outcome.stdout_bytes_seen(),
+        peak_stdout_line_bytes = outcome.peak_stdout_line_bytes(),
+        "streamed CASS view stdout"
+    );
+    ensure_successful_stream_outcome(&outcome, "cass view")?;
+    Ok(collector.into_spans())
 }
 
 fn ensure_successful_outcome(
     outcome: &super::CassOutcome,
+    command: &str,
+) -> Result<(), CassImportError> {
+    if matches!(
+        outcome.class(),
+        CassExitClass::Success | CassExitClass::Degraded
+    ) && !outcome.stdout_is_empty()
+    {
+        return Ok(());
+    }
+    Err(CassImportError::CassCommand {
+        command: command.to_string(),
+        exit_code: outcome.exit_code(),
+        stderr: outcome.stderr_utf8_lossy().trim().to_string(),
+    })
+}
+
+fn ensure_successful_stream_outcome(
+    outcome: &super::process::CassStreamOutcome,
     command: &str,
 ) -> Result<(), CassImportError> {
     if matches!(
@@ -990,53 +1027,178 @@ fn parse_view_json(
     input: &[u8],
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
-    let value: JsonValue =
-        serde_json::from_slice(input).map_err(|error| CassImportError::InvalidJson {
-            source: "view",
-            message: error.to_string(),
-        })?;
-    let lines = value
-        .get("lines")
-        .and_then(JsonValue::as_array)
+    if let Ok(value) = serde_json::from_slice::<JsonValue>(input) {
+        if let Some(lines) = value.get("lines").and_then(JsonValue::as_array) {
+            let mut collector = CassViewLineCollector::new(source_path);
+            for line in lines {
+                collector.accept_value(line)?;
+            }
+            return Ok(collector.into_spans());
+        }
+    }
+
+    let text = std::str::from_utf8(input).map_err(|error| CassImportError::InvalidJson {
+        source: "view",
+        message: error.to_string(),
+    })?;
+    parse_view_json_lines(text, source_path)
+}
+
+fn parse_view_json_lines(
+    input: &str,
+    source_path: &str,
+) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
+    let mut collector = CassViewLineCollector::new(source_path);
+    for line in input.lines() {
+        collector.accept_line(line)?;
+    }
+    Ok(collector.into_spans())
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CassViewStreamMemorySample {
+    retained_span_bytes: usize,
+    peak_sampled_bytes: usize,
+}
+
+impl CassViewStreamMemorySample {
+    fn record_line(&mut self, line_bytes: usize) {
+        self.peak_sampled_bytes = self
+            .peak_sampled_bytes
+            .max(self.retained_span_bytes.saturating_add(line_bytes));
+        record_cass_view_stream_peak_sample(self.peak_sampled_bytes);
+    }
+
+    fn record_span(&mut self, span: &CassViewSpanForImport) {
+        self.retained_span_bytes = self
+            .retained_span_bytes
+            .saturating_add(estimated_span_retained_bytes(span));
+        self.peak_sampled_bytes = self.peak_sampled_bytes.max(self.retained_span_bytes);
+        record_cass_view_stream_peak_sample(self.peak_sampled_bytes);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CassViewLineCollector {
+    source_path: String,
+    spans: Vec<CassViewSpanForImport>,
+    memory_sample: CassViewStreamMemorySample,
+}
+
+impl CassViewLineCollector {
+    fn new(source_path: &str) -> Self {
+        Self {
+            source_path: source_path.to_string(),
+            spans: Vec::new(),
+            memory_sample: CassViewStreamMemorySample::default(),
+        }
+    }
+
+    fn accept_line(&mut self, line: &str) -> Result<(), CassImportError> {
+        if line.trim().is_empty() {
+            return Ok(());
+        }
+        if line.len() > CASS_STDOUT_LINE_MAX_BYTES {
+            return Err(CassImportError::InvalidJson {
+                source: "view",
+                message: format!("view JSON line exceeds {CASS_STDOUT_LINE_MAX_BYTES} byte limit"),
+            });
+        }
+        self.memory_sample.record_line(line.len());
+        let value: JsonValue =
+            serde_json::from_str(line).map_err(|error| CassImportError::InvalidJson {
+                source: "view",
+                message: error.to_string(),
+            })?;
+        self.accept_value(&value)
+    }
+
+    fn accept_value(&mut self, value: &JsonValue) -> Result<(), CassImportError> {
+        let span = parse_view_line_value(value, &self.source_path)?;
+        self.memory_sample.record_span(&span);
+        self.spans.push(span);
+        Ok(())
+    }
+
+    fn into_spans(self) -> Vec<CassViewSpanForImport> {
+        self.spans
+    }
+}
+
+fn parse_view_line_value(
+    line: &JsonValue,
+    source_path: &str,
+) -> Result<CassViewSpanForImport, CassImportError> {
+    let line_number = line
+        .get("line")
+        .and_then(JsonValue::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| CassImportError::InvalidJson {
             source: "view",
-            message: "missing lines array".to_string(),
+            message: "line entry missing numeric line".to_string(),
         })?;
+    let content = required_string(line, "content", "view")?;
+    let (span_kind, role) = classify_line(&content);
+    let raw_excerpt = truncate_excerpt(&content, 65_536);
+    let redaction = crate::policy::redact_secret_like_content(&raw_excerpt);
+    let redacted = redaction.redacted;
+    let redacted_reasons = redaction
+        .redacted_reasons
+        .iter()
+        .map(|reason| (*reason).to_string())
+        .collect();
+    let excerpt = redaction.content;
+    Ok(CassViewSpanForImport {
+        cass_span_id: format!("{source_path}:{line_number}"),
+        span_kind,
+        start_line: line_number,
+        end_line: line_number,
+        role,
+        content_hash: blake3_hex(&excerpt),
+        excerpt,
+        redacted,
+        redacted_reasons,
+    })
+}
 
-    let mut spans = Vec::with_capacity(lines.len());
-    for line in lines {
-        let line_number = line
-            .get("line")
-            .and_then(JsonValue::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| CassImportError::InvalidJson {
-                source: "view",
-                message: "line entry missing numeric line".to_string(),
-            })?;
-        let content = required_string(line, "content", "view")?;
-        let (span_kind, role) = classify_line(&content);
-        let raw_excerpt = truncate_excerpt(&content, 65_536);
-        let redaction = crate::policy::redact_secret_like_content(&raw_excerpt);
-        let redacted = redaction.redacted;
-        let redacted_reasons = redaction
-            .redacted_reasons
-            .iter()
-            .map(|reason| (*reason).to_string())
-            .collect();
-        let excerpt = redaction.content;
-        spans.push(CassViewSpanForImport {
-            cass_span_id: format!("{source_path}:{line_number}"),
-            span_kind,
-            start_line: line_number,
-            end_line: line_number,
-            role,
-            content_hash: blake3_hex(&excerpt),
-            excerpt,
-            redacted,
-            redacted_reasons,
-        });
+fn estimated_span_retained_bytes(span: &CassViewSpanForImport) -> usize {
+    span.cass_span_id
+        .len()
+        .saturating_add(span.excerpt.len())
+        .saturating_add(span.content_hash.len())
+        .saturating_add(span.redacted_reasons.iter().map(String::len).sum::<usize>())
+        .saturating_add(std::mem::size_of::<CassViewSpanForImport>())
+}
+
+#[cfg(test)]
+fn record_cass_view_stream_peak_sample(bytes: usize) {
+    use std::sync::atomic::Ordering;
+
+    let mut current = CASS_VIEW_STREAM_PEAK_SAMPLE_BYTES.load(Ordering::Relaxed);
+    while bytes > current {
+        match CASS_VIEW_STREAM_PEAK_SAMPLE_BYTES.compare_exchange_weak(
+            current,
+            bytes,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
     }
-    Ok(spans)
+}
+
+#[cfg(not(test))]
+fn record_cass_view_stream_peak_sample(_bytes: usize) {}
+
+#[cfg(test)]
+fn reset_cass_view_stream_peak_sample() {
+    CASS_VIEW_STREAM_PEAK_SAMPLE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn cass_view_stream_peak_sample_bytes() -> usize {
+    CASS_VIEW_STREAM_PEAK_SAMPLE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn classify_line(content: &str) -> (CassSpanKind, Option<CassRole>) {
@@ -1672,6 +1834,16 @@ mod tests {
         workspace_path: &Path,
         session_path: &Path,
     ) -> TestResult {
+        write_fake_cass_binary_with_view_lines(path, workspace_path, session_path, 1)
+    }
+
+    #[cfg(unix)]
+    fn write_fake_cass_binary_with_view_lines(
+        path: &Path,
+        workspace_path: &Path,
+        session_path: &Path,
+        view_line_count: u32,
+    ) -> TestResult {
         let sessions = json!({
             "sessions": [{
                 "path": session_path.to_string_lossy(),
@@ -1682,15 +1854,26 @@ mod tests {
                 "token_count": 8
             }]
         });
-        let view = json!({
-            "path": session_path.to_string_lossy(),
-            "lines": [{
-                "line": 1,
-                "content": "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"index me\"}}"
-            }]
-        });
+        let mut view = String::new();
+        for line_number in 1..=view_line_count {
+            let content = json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": format!("index me {line_number}"),
+                }
+            });
+            view.push_str(
+                &json!({
+                    "line": line_number,
+                    "content": content.to_string(),
+                })
+                .to_string(),
+            );
+            view.push('\n');
+        }
         let script = format!(
-            "#!/bin/sh\ncase \"$1\" in\n  sessions) printf '%s\\n' '{}';;\n  view) printf '%s\\n' '{}';;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
+            "#!/bin/sh\ncase \"$1\" in\n  sessions) cat <<'EE_CASS_SESSIONS'\n{}\nEE_CASS_SESSIONS\n;;\n  view) cat <<'EE_CASS_VIEW'\n{}EE_CASS_VIEW\n;;\n  *) printf 'unexpected cass command: %s\\n' \"$1\" >&2; exit 2;;\nesac\n",
             sessions, view
         );
         fs::write(path, script).map_err(|error| error.to_string())?;
@@ -2060,6 +2243,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_view_jsonl_rejects_oversized_lines() -> TestResult {
+        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let input = json!({
+            "line": 1,
+            "content": oversized_content,
+        })
+        .to_string();
+
+        let error = match parse_view_json(input.as_bytes(), "/tmp/session.jsonl") {
+            Ok(_) => return Err("oversized CASS view JSONL line should fail".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("line exceeds"),
+            format!("error should mention line limit, got {error}"),
+        )
+    }
+
+    #[test]
     fn dry_run_report_has_no_side_effect_targets() -> TestResult {
         let sessions = vec![CassSessionInfo::new("/tmp/a.jsonl")];
         let report = dry_run_report(
@@ -2296,6 +2498,65 @@ mod tests {
             &Some(session_id),
             "job document",
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn import_streams_synthetic_1000_doc_view_under_memory_budget() -> TestResult {
+        reset_cass_view_stream_peak_sample();
+        let root = unique_test_dir("stream-1000-view-lines")?;
+        let bin_dir = root.join("bin");
+        let workspace_path = root.join("workspace");
+        let session_path = root.join("session.jsonl");
+        fs::create_dir_all(&bin_dir).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&workspace_path).map_err(|error| error.to_string())?;
+        fs::write(&session_path, "{}\n").map_err(|error| error.to_string())?;
+        let mut bin_permissions = fs::metadata(&bin_dir)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        bin_permissions.set_mode(0o755);
+        fs::set_permissions(&bin_dir, bin_permissions).map_err(|error| error.to_string())?;
+
+        let cass_binary = bin_dir.join("cass");
+        write_fake_cass_binary_with_view_lines(&cass_binary, &workspace_path, &session_path, 1000)?;
+        let database_path = root.join("ee.db");
+        let client = CassClient::with_binary(cass_binary).with_timeout(Duration::from_secs(5));
+        let options = CassImportOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            limit: 1,
+            since: None,
+            dry_run: false,
+            include_spans: true,
+        };
+
+        let report = import_cass_sessions(&client, &options).map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.sessions_imported, &1, "sessions imported")?;
+        ensure_equal(&report.spans_imported, &1000, "spans imported")?;
+        let peak_sample = cass_view_stream_peak_sample_bytes();
+        ensure(
+            peak_sample < CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES,
+            format!(
+                "streamed CASS view import sampled {peak_sample} bytes, budget {CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES}"
+            ),
+        )?;
+        let imported_session = report
+            .sessions
+            .first()
+            .ok_or_else(|| "import report should include imported session".to_string())?;
+        let session_id = imported_session
+            .session_id
+            .as_deref()
+            .ok_or_else(|| "imported session should include id".to_string())?;
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let spans = connection
+            .list_evidence_spans_for_session(session_id)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&spans.len(), &1000, "stored evidence spans")?;
+        ensure_equal(&spans[0].start_line, &1, "first stored line")?;
+        ensure_equal(&spans[999].end_line, &1000, "last stored line")
     }
 
     #[cfg(unix)]
