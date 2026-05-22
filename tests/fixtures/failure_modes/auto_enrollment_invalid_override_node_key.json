@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_invalid_override_node_key",
+  "introduced_by": {
+    "bead": "bd-2e4xa",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "SRR6.46.3 auto-enrollment received an --include or --exclude override whose value does not parse as a Tailscale node key (missing the `nodekey:` prefix, wrong length, malformed hex). The override is ignored when no matching tailnet peer exists; the operator is told their override was rejected rather than silently dropped.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --include 'not-a-node-key' --json"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --include 'not-a-node-key' --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_invalid_override_node_key",
+    "severity": "warning",
+    "message_contains": [
+      "node key",
+      "Tailscale"
+    ],
+    "repair_contains": "nodekey:"
+  }
+}

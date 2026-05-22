@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_already_complete",
+  "introduced_by": {
+    "bead": "bd-2e4xa",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "SRR6.46.3 auto-enrollment ran against a workspace that already carries a materialized peer group for the current tailnet. The pre-flight idempotency check refuses to re-materialize over an existing matching set; the code surfaces so the operator sees the no-op was intentional rather than a silent skip.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --json   # first run materializes the peer group",
+      "ee mesh auto-enroll --workspace . --json   # this run reports already-complete"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_already_complete",
+    "severity": "info",
+    "message_contains": [
+      "already",
+      "complete"
+    ],
+    "repair_contains": "ee mesh"
+  }
+}

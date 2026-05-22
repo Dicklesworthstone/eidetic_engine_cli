@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_audit_failed",
+  "introduced_by": {
+    "bead": "bd-2e4xa",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "SRR6.46.46 auto-enrollment safety layer attempted to record the materialization audit-log entry but the write failed (disk full, permission denied, audit lane shut down, or sibling agent holds the audit-log lock past the timeout). SRR6.46.46.3 forces an abort with `auto_enrollment_audit_failed` rather than silently materializing the peer group without a durable audit record.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "# force the audit-log path to be unwritable (chmod -w .ee/audit/ or fill disk)",
+      "ee mesh auto-enroll --workspace . --json"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_audit_failed",
+    "severity": "high",
+    "message_contains": [
+      "audit"
+    ],
+    "repair_contains": "audit"
+  }
+}

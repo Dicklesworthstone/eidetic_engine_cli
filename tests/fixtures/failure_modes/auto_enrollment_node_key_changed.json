@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_node_key_changed",
+  "introduced_by": {
+    "bead": "bd-2e4xa",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll",
+    "mesh status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The SRR6.46.46.8 identity-change guard observed that one of the materialized peers in the workspace's mesh group is now backed by a different Tailscale nodeKey than the one captured at materialization time (peer machine was reinstalled, key was rotated, or a stale lock attached the slot to a foreign key). The guard refuses to silently bind the same peer slot to a new identity; auto-enrollment surfaces the mismatch so the operator can confirm the rotation rather than discover it after the fact.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --json   # captures node keys",
+      "# rotate the Tailscale node key on one materialized peer",
+      "ee mesh auto-enroll --workspace . --json   # this run trips the guard"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_node_key_changed",
+    "severity": "medium",
+    "message_contains": [
+      "node key",
+      "changed"
+    ],
+    "repair_contains": "ee mesh"
+  }
+}
