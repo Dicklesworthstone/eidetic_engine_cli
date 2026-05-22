@@ -333,3 +333,6 @@ mod graph_surfaces_conformance_v1;
 
 #[path = "contracts/swarm_brief_conformance_v1.rs"]
 mod swarm_brief_conformance_v1;
+
+#[path = "contracts/curate_outcome_audit_schema_contract.rs"]
+mod curate_outcome_audit_schema_contract;
