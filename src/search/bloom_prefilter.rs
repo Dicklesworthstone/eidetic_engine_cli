@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 
 const DEFAULT_HASH_COUNT: usize = 7;
 const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
+const MAX_BLOOM_COUNTERS: usize = 1 << 20;
 
 /// Counting Bloom filter used by the SRR4 negation prefilter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,9 +17,10 @@ pub struct CountingBloomPrefilter {
 impl CountingBloomPrefilter {
     #[must_use]
     pub fn with_capacity(expected_items: usize) -> Self {
-        let bit_count = optimal_bit_count(expected_items, DEFAULT_FALSE_POSITIVE_RATE);
+        let bit_count = optimal_bit_count(expected_items, DEFAULT_FALSE_POSITIVE_RATE)
+            .clamp(1, MAX_BLOOM_COUNTERS);
         Self {
-            counters: vec![0; bit_count.max(1)],
+            counters: vec![0; bit_count],
             values: BTreeMap::new(),
             hash_count: DEFAULT_HASH_COUNT,
             inserted: 0,
@@ -112,7 +114,7 @@ fn hash_with_seed(value: &str, seed: u64) -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::CountingBloomPrefilter;
+    use super::{CountingBloomPrefilter, MAX_BLOOM_COUNTERS};
 
     #[test]
     fn empty_filter_reports_absent() {
@@ -194,6 +196,14 @@ mod tests {
             filter.insert(&format!("tag-{index}"));
         }
         assert!(filter.estimated_false_positive_rate() <= 0.015);
+    }
+
+    #[test]
+    fn extreme_capacity_is_clamped_before_allocation() {
+        let filter = CountingBloomPrefilter::with_capacity(usize::MAX);
+
+        assert_eq!(filter.counters.len(), MAX_BLOOM_COUNTERS);
+        assert!(filter.definitely_absent("never-inserted"));
     }
 
     fn first_absent_value_that_would_zero_inserted_counter(
