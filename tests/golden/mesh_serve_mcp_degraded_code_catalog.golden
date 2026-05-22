@@ -5,7 +5,7 @@
 #   mesh_serve_mcp_degraded_code_catalog -- --exact; review the diff.
 #
 # Total codes:                51
-# With failure-mode fixture:  19
+# With failure-mode fixture:  21
 # In docs/degraded_code_taxonomy.md: 22
 # In docs/degraded_codes.md (## header): 19
 #
@@ -23,8 +23,8 @@ auto_enrollment_node_key_changed                     ·         ·          ·  
 auto_enrollment_partial_failure                      ·         ·          ·      AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE :: src/mesh/auto_enrollment.rs
 auto_enrollment_sync_once_failed                     ·         ·          ·      AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE :: src/mesh/auto_enrollment.rs
 auto_enrollment_tailnet_changed                      ·         ·          ·      AUTO_ENROLLMENT_TAILNET_CHANGED_CODE :: src/mesh/auto_enrollment.rs
-discovery_cache_invalidated_tailnet_changed          ·         ✓          ·      DISCOVERY_CACHE_TAILNET_CHANGED_CODE :: src/mesh/discovery_cache.rs
-discovery_cache_stale_due_to_workspace_mismatch      ·         ✓          ·      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
+discovery_cache_invalidated_tailnet_changed          ✓         ✓          ·      DISCOVERY_CACHE_TAILNET_CHANGED_CODE :: src/mesh/discovery_cache.rs
+discovery_cache_stale_due_to_workspace_mismatch      ✓         ✓          ·      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
 discovery_policy_empty_allowlist                     ✓         ✓          ✓      DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE :: src/mesh/discovery_policy.rs
 discovery_policy_no_ee_mesh_tag                      ✓         ✓          ✓      DISCOVERY_POLICY_NO_EE_MESH_TAG_CODE :: src/mesh/discovery_policy.rs
 drift_grace_soft_stale_peer_count_high               ·         ✓          ·      DRIFT_GRACE_SOFT_STALE_PEER_COUNT_HIGH_CODE :: src/mesh/peer_state.rs

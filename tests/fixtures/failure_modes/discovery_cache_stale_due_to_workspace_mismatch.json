@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "discovery_cache_stale_due_to_workspace_mismatch",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.13",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh status",
+    "mesh sync --once"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace_id observed on lookup differs from the workspace_id captured in the persisted SRR6.46.13 discovery-cache entry (e.g. the operator pointed the same .ee/ directory at a different workspace registration, restored a backup taken under a different workspace identity, or the cache was copied across workspace roots). evaluate_discovery_cache returns DiscoveryCacheRefreshReason::WorkspaceMismatch at src/mesh/discovery_cache.rs:189-191, surfacing discovery_cache_stale_due_to_workspace_mismatch so callers know the cached peer set must not be trusted for the current workspace and a fresh probe will run.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json   # populates the SRR6.46.13 discovery cache against wsp_alpha",
+      "ee workspace reregister --workspace . --new-id wsp_beta   # or restore .ee/ from a different workspace's backup"
+    ],
+    "invocation": "ee mesh status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "discovery_cache_stale_due_to_workspace_mismatch",
+    "severity": "info",
+    "message_contains": [
+      "workspace",
+      "mismatch",
+      "discovery cache"
+    ],
+    "repair_contains": "ee mesh sync --once"
+  }
+}
