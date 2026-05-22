@@ -52,6 +52,10 @@ fn hygiene_beads_state_source_file() -> PathBuf {
     src_dir().join("core").join("hygiene_beads_state.rs")
 }
 
+fn doctor_dependency_source_file() -> PathBuf {
+    src_dir().join("core").join("doctor.rs")
+}
+
 fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs")
 }
@@ -254,6 +258,19 @@ fn collect_workspace_hygiene_codes() -> Result<Vec<String>, String> {
     Ok(codes.into_iter().collect())
 }
 
+fn collect_doctor_dependency_degraded_codes() -> Result<Vec<String>, String> {
+    let doctor_path = doctor_dependency_source_file();
+    let doctor_source = fs::read_to_string(&doctor_path)
+        .map_err(|error| format!("read {}: {error}", doctor_path.display()))?;
+    let dependency_code_regex = Regex::new(r#"degradation_code:\s*"([^"]+)""#)
+        .map_err(|error| format!("compile doctor dependency-code regex: {error}"))?;
+    let codes: BTreeSet<String> = dependency_code_regex
+        .captures_iter(&doctor_source)
+        .filter_map(|captures| captures.get(1).map(|match_| match_.as_str().to_owned()))
+        .collect();
+    Ok(codes.into_iter().collect())
+}
+
 fn read_fixture(path: &Path) -> Result<Value, String> {
     let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
@@ -328,9 +345,21 @@ fn taxonomy_has_code_with_severity(taxonomy: &str, code: &str, severity: &str) -
     })
 }
 
+fn taxonomy_has_code(taxonomy: &str, code: &str) -> bool {
+    taxonomy
+        .lines()
+        .any(|line| line.contains(&format!("| `{code}` |")))
+}
+
 fn generated_docs_has_fixture_link(docs: &str, code: &str) -> bool {
     docs.contains(&format!("## `{code}`"))
         && docs.contains(&format!("tests/fixtures/failure_modes/{code}.json"))
+}
+
+fn fixture_readme_has_code(readme: &str, code: &str) -> bool {
+    readme
+        .lines()
+        .any(|line| line.contains(&format!("| `{code}` |")))
 }
 
 #[test]
@@ -394,6 +423,103 @@ fn failure_mode_catalog_has_schema_and_readme() -> TestResult {
         format!("{}: README.md must exist", readme.display()),
     )?;
     Ok(())
+}
+
+#[test]
+fn doctor_dependency_degraded_codes_have_fixture_taxonomy_and_docs() -> TestResult {
+    let codes = collect_doctor_dependency_degraded_codes()?;
+    ensure(
+        !codes.is_empty(),
+        format!(
+            "{}: expected at least one dependency degradation code",
+            doctor_dependency_source_file().display()
+        ),
+    )?;
+
+    let taxonomy_path = docs_dir().join("degraded_code_taxonomy.md");
+    let generated_docs_path = docs_dir().join("degraded_codes.md");
+    let readme_path = fixtures_dir().join("README.md");
+    let taxonomy = fs::read_to_string(&taxonomy_path)
+        .map_err(|error| format!("read {}: {error}", taxonomy_path.display()))?;
+    let generated_docs = fs::read_to_string(&generated_docs_path)
+        .map_err(|error| format!("read {}: {error}", generated_docs_path.display()))?;
+    let readme = fs::read_to_string(&readme_path)
+        .map_err(|error| format!("read {}: {error}", readme_path.display()))?;
+
+    let mut errors = Vec::new();
+    for code in codes {
+        let fixture_path = fixtures_dir().join(format!("{code}.json"));
+        if !fixture_path.exists() {
+            errors.push(format!(
+                "{}: missing doctor dependency degraded-code fixture for `{code}`",
+                fixture_path.display()
+            ));
+            continue;
+        }
+
+        let fixture = match read_fixture(&fixture_path) {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let ctx = fixture_path.display().to_string();
+
+        let fixture_code = fixture.pointer("/code").and_then(Value::as_str);
+        if fixture_code != Some(code.as_str()) {
+            errors.push(format!(
+                "{ctx}: fixture code {:?} must match doctor dependency code `{code}`",
+                fixture_code
+            ));
+        }
+
+        let surfaces = fixture
+            .pointer("/surfaces")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let has_dependency_surface = surfaces
+            .iter()
+            .any(|surface| surface.as_str() == Some("dependency contract"));
+        let has_doctor_surface = surfaces
+            .iter()
+            .any(|surface| surface.as_str() == Some("doctor"));
+        if !has_dependency_surface && !has_doctor_surface {
+            errors.push(format!(
+                "{ctx}: surfaces[] must include `dependency contract` or `doctor` for `{code}`"
+            ));
+        }
+
+        if !taxonomy_has_code(&taxonomy, &code) {
+            errors.push(format!(
+                "{}: missing taxonomy row for `{code}`",
+                taxonomy_path.display()
+            ));
+        }
+        if !fixture_readme_has_code(&readme, &code) {
+            errors.push(format!(
+                "{}: missing failure-mode README row for `{code}`",
+                readme_path.display()
+            ));
+        }
+        if !generated_docs_has_fixture_link(&generated_docs, &code) {
+            errors.push(format!(
+                "{}: generated degraded-code docs must include heading and fixture link for `{code}`",
+                generated_docs_path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} doctor dependency degraded catalog error(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
 }
 
 #[test]
