@@ -1734,36 +1734,36 @@ mod tests {
     }
 
     #[test]
-    fn join_pipe_reader_returns_bytes_on_success() {
+    fn join_pipe_reader_returns_bytes_on_success() -> Result<(), String> {
         use super::join_pipe_reader;
         use std::thread;
 
         let handle = thread::spawn(|| Ok(b"hello".to_vec()));
-        let result = join_pipe_reader(handle);
-        let bytes = result.unwrap_or_else(|e| panic!("expected success but got: {e}")); // ubs:ignore
+        let bytes = join_pipe_reader(handle)
+            .map_err(|error| format!("expected success but got: {error}"))?;
         assert_eq!(bytes, b"hello");
+        Ok(())
     }
 
     #[test]
-    fn join_pipe_reader_surfaces_read_error() {
+    fn join_pipe_reader_surfaces_read_error() -> Result<(), String> {
         use super::join_pipe_reader;
         use std::io;
         use std::thread;
 
         let handle = thread::spawn(|| Err(io::Error::new(io::ErrorKind::BrokenPipe, "pipe broke")));
         let result = join_pipe_reader(handle);
-        let err = match result {
-            // ubs:ignore
-            Ok(_) => panic!("expected join_pipe_reader to return Err for read failure"),
-            Err(e) => e,
-        };
+        let err = result.err().ok_or_else(|| {
+            "expected join_pipe_reader to return Err for read failure".to_string()
+        })?;
         assert_eq!(err.kind_str(), "io");
         assert!(err.to_string().contains("pipe read failed"));
         assert!(err.to_string().contains("pipe broke"));
+        Ok(())
     }
 
     #[test]
-    fn join_pipe_reader_surfaces_thread_panic() {
+    fn join_pipe_reader_surfaces_thread_panic() -> Result<(), String> {
         use super::join_pipe_reader;
         use std::thread;
 
@@ -1773,13 +1773,12 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
 
         let result = join_pipe_reader(handle);
-        let err = match result {
-            // ubs:ignore
-            Ok(_) => panic!("expected join_pipe_reader to return Err for thread panic"),
-            Err(e) => e,
-        };
+        let err = result.err().ok_or_else(|| {
+            "expected join_pipe_reader to return Err for thread panic".to_string()
+        })?;
         assert_eq!(err.kind_str(), "io");
         assert!(err.to_string().contains("panicked"));
+        Ok(())
     }
 
     #[test]
