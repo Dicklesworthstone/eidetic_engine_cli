@@ -334,7 +334,7 @@ impl SearchScoreComponents {
     ) -> SearchScoreComponents {
         let base = finite_nonnegative(signals.base_score);
         let recency = recency_multiplier(signals.age_days, config.recency_tau_days);
-        let confidence = finite_unit(signals.confidence).max(config.confidence_floor);
+        let confidence = finite_unit(signals.confidence).max(finite_unit(config.confidence_floor));
         let utility = lerp(
             config.utility_floor,
             1.0,
@@ -347,13 +347,13 @@ impl SearchScoreComponents {
             config.harmful_penalty_floor,
         );
         let scope_match = if signals.scope_match {
-            config.scope_match_bonus.max(0.0)
+            finite_nonnegative(config.scope_match_bonus)
         } else {
             1.0
         };
         let graph_centrality = 1.0
             + finite_unit(signals.graph_centrality.unwrap_or(0.0))
-                * config.graph_centrality_weight.max(0.0);
+                * finite_nonnegative(config.graph_centrality_weight);
         let redundancy = redundancy_multiplier(signals.redundancy, config.redundancy_lambda);
         let multiplicative_score = base
             * recency
@@ -364,11 +364,10 @@ impl SearchScoreComponents {
             * scope_match
             * graph_centrality
             * redundancy;
-        let bead_affinity = finite_signed(signals.bead_affinity.unwrap_or(0.0)).clamp(
-            -config.bead_affinity_bias_cap.abs(),
-            config.bead_affinity_bias_cap.abs(),
-        );
-        let final_score = (multiplicative_score + bead_affinity).max(0.0);
+        let bead_affinity_cap = finite_nonnegative(config.bead_affinity_bias_cap.abs());
+        let bead_affinity = finite_signed(signals.bead_affinity.unwrap_or(0.0))
+            .clamp(-bead_affinity_cap, bead_affinity_cap);
+        let final_score = finite_nonnegative(multiplicative_score + bead_affinity);
 
         SearchScoreComponents {
             base,
@@ -682,6 +681,49 @@ mod tests {
         assert_close(components.scope_match, 0.0);
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
+        assert_close(components.final_score, 0.0);
+    }
+
+    #[test]
+    fn non_finite_config_values_fail_closed_without_panicking() {
+        let config = SearchScoringConfig {
+            recency_tau_days: f32::NAN,
+            confidence_floor: f32::INFINITY,
+            utility_floor: f32::INFINITY,
+            harmful_penalty_per_hit: f32::NEG_INFINITY,
+            harmful_penalty_floor: f32::INFINITY,
+            scope_match_bonus: f32::INFINITY,
+            graph_centrality_weight: f32::INFINITY,
+            redundancy_lambda: f32::NEG_INFINITY,
+            bead_affinity_bias_cap: f32::NAN,
+        };
+        let components = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                base_score: 1.0,
+                age_days: Some(10.0),
+                confidence: 1.0,
+                utility_score: 1.0,
+                maturity: RetrievalMaturity::Semantic,
+                harmful_count: 1,
+                scope_match: true,
+                graph_centrality: Some(1.0),
+                redundancy: Some(1.0),
+                bead_affinity: Some(DEFAULT_BEAD_AFFINITY_BIAS_CAP),
+            },
+            config,
+        );
+
+        assert_close(components.confidence, 1.0);
+        assert_close(components.utility, 1.0);
+        assert_close(components.harmful_penalty, 1.0);
+        assert_close(components.scope_match, 0.0);
+        assert_close(components.graph_centrality, 1.0);
+        assert_close(components.redundancy, 1.0);
+        assert_close(components.bead_affinity, 0.0);
+        assert!(
+            components.final_score.is_finite(),
+            "final score must stay finite for malformed scoring config"
+        );
         assert_close(components.final_score, 0.0);
     }
 
