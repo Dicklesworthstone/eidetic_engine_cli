@@ -28126,7 +28126,7 @@ where
 
     let full_json = output::render_context_response_json_with_options(response, render_options);
     let current = context_delta_snapshot_from_response(response, &full_json);
-    let delta = match compute_context_delta(
+    let mut delta = match compute_context_delta(
         &prior,
         &current,
         ContextDeltaOptions::new(args.max_delta_bytes),
@@ -28151,6 +28151,22 @@ where
             push_context_delta_kernel_degradation(response, degradation);
         }
         return None;
+    }
+
+    // bd-270ep: project response-side degradations (the `deprecated_alias`
+    // every `ee context` invocation carries, plus any pack-assembly
+    // degradations attached upstream by run_context_pack) onto the
+    // agent-visible delta envelope. The kernel envelope's `degraded[]`
+    // only carries kernel-internal entries (oversized fallback, etc.), so
+    // without this merge the happy-path silently drops every
+    // pack-pipeline signal an agent would normally see on `ee context`.
+    for entry in &response.data.degraded {
+        delta.append_response_degradation(
+            entry.code.clone(),
+            entry.severity.as_str(),
+            entry.message.clone(),
+            entry.repair.clone(),
+        );
     }
 
     let rendered = serde_json::to_string(&delta).unwrap_or_else(|_| {

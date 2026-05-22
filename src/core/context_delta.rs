@@ -95,6 +95,33 @@ impl ContextDeltaEnvelope {
     pub fn emits_delta(&self) -> bool {
         self.data.server_decision.fallback_reason.is_none()
     }
+
+    /// bd-270ep: project a pack-side `ContextResponseDegradation` onto the
+    /// agent-visible delta envelope. The kernel constructs `degraded[]`
+    /// from its own oversized/fallback bookkeeping only and has no view of
+    /// the surrounding `ContextResponse`, so without this projection the
+    /// `--since` happy-path silently drops the `deprecated_alias` every
+    /// `ee context` invocation carries plus any pack-assembly
+    /// degradations (BM25-only fallback, scope-strict miss, slow pack
+    /// assembly, RPC fallback, …) that `run_context_pack` attached
+    /// upstream. This is the symmetric counterpart of
+    /// `push_context_delta_kernel_degradation` (which runs in the other
+    /// direction on the fallback path).
+    pub fn append_response_degradation(
+        &mut self,
+        code: impl Into<String>,
+        severity: impl Into<String>,
+        message: impl Into<String>,
+        repair: Option<String>,
+    ) {
+        self.degraded.push(ContextDeltaDegradation {
+            code: code.into(),
+            severity: severity.into(),
+            message: message.into(),
+            repair,
+            details: None,
+        });
+    }
 }
 
 /// The `data` payload of `ee.context.delta.v1`. Field set is closed
