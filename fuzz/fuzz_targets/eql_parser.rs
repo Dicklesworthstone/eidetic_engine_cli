@@ -4,6 +4,7 @@ use libfuzzer_sys::fuzz_target;
 use serde_json::Value;
 
 const MAX_INPUT_BYTES: usize = 131_072;
+const SEARCH_CONFIG_BYTES: &[u8] = b"eql_parser_fuzz_default_search_config_v1";
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_INPUT_BYTES {
@@ -22,6 +23,8 @@ fuzz_target!(|data: &[u8]| {
     };
 
     assert!(query.limit > 0);
+    exercise_plan_cache(&value, &query, data);
+
     let metadata = serde_json::json!({
         "workspace": "workspace-a",
         "level": "procedural",
@@ -51,3 +54,45 @@ fuzz_target!(|data: &[u8]| {
     let selected = query.execute_metadata(candidates.iter());
     assert!(selected.len() <= candidates.len());
 });
+
+fn exercise_plan_cache(value: &Value, query: &ee::models::query::EqlQuery, data: &[u8]) {
+    let Ok(canonical_request) = serde_json::to_vec(value) else {
+        return;
+    };
+
+    let key = ee::search::plan_cache::PlanCacheKey::new(
+        ee::search::plan_cache::compute_eql_hash(&canonical_request),
+        manifest_version_from(data),
+        ee::search::plan_cache::compute_search_config_hash(SEARCH_CONFIG_BYTES),
+    );
+    let plan = ee::search::plan_cache::CompiledPlan::from_query(query.clone());
+    let plan_tree_hash = ee::search::plan_cache::compute_plan_tree_hash(&key, &plan);
+    assert!(plan_tree_hash.starts_with("blake3:"));
+    assert_eq!(
+        ee::search::plan_cache::compute_plan_tree_hash(&key, &plan),
+        plan_tree_hash
+    );
+
+    let mut cache = ee::search::plan_cache::PlanCache::new(2);
+    let inserted = cache.insert(key, plan.clone());
+    assert_eq!(inserted.plan_tree_hash, plan_tree_hash);
+
+    let hit = cache.get(&key);
+    assert!(hit.is_some());
+    if let Some(hit) = hit {
+        assert_eq!(hit.plan, plan);
+        assert_eq!(hit.plan_tree_hash, plan_tree_hash);
+    }
+    let stats = cache.stats();
+    assert_eq!(stats.current_size, 1);
+    assert_eq!(stats.inserts, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+fn manifest_version_from(data: &[u8]) -> u64 {
+    let mut bytes = [0_u8; 8];
+    for (target, source) in bytes.iter_mut().zip(data.iter().copied()) {
+        *target = source;
+    }
+    u64::from_le_bytes(bytes)
+}
