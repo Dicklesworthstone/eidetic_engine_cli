@@ -255,4 +255,64 @@ mod tests {
         );
         assert_eq!(query.to_string(), "alpha beta");
     }
+
+    #[test]
+    fn search_query_parser_treats_unbalanced_groups_and_brackets_as_literals() {
+        let query = parse_search_query(r#"title:[release TO beta) (dangling [open] -scope:(bad]"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("title:[release".to_string()),
+                SearchQueryClause::Term("TO".to_string()),
+                SearchQueryClause::Term("beta)".to_string()),
+                SearchQueryClause::Term("(dangling".to_string()),
+                SearchQueryClause::Term("[open]".to_string()),
+                SearchQueryClause::ExcludedTerm("scope:(bad]".to_string()),
+            ]
+        );
+        assert_eq!(
+            query.to_string(),
+            r#"title:[release TO beta) (dangling [open] -scope:(bad]"#
+        );
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_unescapes_bracket_like_characters_only_inside_phrases() {
+        let query = parse_search_query(r#""escaped \[brackets\] and \(group\)" path:\[literal\]"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Phrase("escaped [brackets] and (group)".to_string()),
+                SearchQueryClause::Term(r#"path:\[literal\]"#.to_string()),
+            ]
+        );
+        assert_eq!(
+            query.to_string(),
+            r#""escaped [brackets] and (group)" path:\[literal\]"#
+        );
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_preserves_unicode_format_controls_and_replacement_chars() {
+        let query =
+            parse_search_query("field\u{200d}:value bad\u{fffd}field -\"zero\u{200d} width\"");
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("field\u{200d}:value".to_string()),
+                SearchQueryClause::Term("bad\u{fffd}field".to_string()),
+                SearchQueryClause::ExcludedPhrase("zero\u{200d} width".to_string()),
+            ]
+        );
+        assert_eq!(
+            query.to_string(),
+            "field\u{200d}:value bad\u{fffd}field -\"zero\u{200d} width\""
+        );
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
 }
