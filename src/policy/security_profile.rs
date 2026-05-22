@@ -356,7 +356,7 @@ fn check_file_permissions(path: &Path, max_mode: u32, file_type: &str) -> FilePe
                             "{} has mode {:04o}, has disallowed bits {:04o} (max {:04o})",
                             file_type, mode, excess_bits, max_mode
                         ),
-                        format!("chmod {:04o} {}", max_mode, path.display()),
+                        format!("chmod {:04o} {}", max_mode, shell_quote_path(path)),
                     )
                 }
             }
@@ -453,7 +453,7 @@ fn check_directory_permissions(path: &Path, max_mode: u32, dir_type: &str) -> Fi
                             "{} has mode {:04o}, has disallowed bits {:04o} (max {:04o})",
                             dir_type, mode, excess_bits, max_dir_mode
                         ),
-                        format!("chmod {:04o} {}", max_dir_mode, path.display()),
+                        format!("chmod {:04o} {}", max_dir_mode, shell_quote_path(path)),
                     )
                 }
             }
@@ -522,6 +522,26 @@ fn optional_directory_should_be_checked(path: &Path) -> bool {
         Ok(Some(_)) | Err(_) => true,
         Ok(None) => std::fs::symlink_metadata(path).is_ok(),
     }
+}
+
+#[cfg(unix)]
+fn shell_quote_path(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn check_path_symlink_components(
@@ -604,6 +624,7 @@ mod tests {
 
     use super::{
         FilePermissionCheck, FilePermissionReport, SecurityProfile, check_workspace_permissions,
+        shell_quote_path,
     };
 
     type TestResult = Result<(), String>;
@@ -907,6 +928,42 @@ mod tests {
         let repaired_report = check_workspace_permissions(&workspace, SecurityProfile::Default);
 
         assert!(repaired_report.passed);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_permission_repair_quotes_shell_sensitive_paths() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace with ' quote");
+        let ee_dir = workspace.join(".ee");
+        let db_path = ee_dir.join("ee.db");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&db_path, b"db").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+        let db_check = report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/ee.db"))
+            .ok_or_else(|| "database check missing".to_owned())?;
+
+        assert!(!db_check.passed);
+        let expected_repair = format!("chmod 0600 {}", shell_quote_path(&db_path));
+        assert_eq!(db_check.repair.as_deref(), Some(expected_repair.as_str()));
+        assert!(
+            db_check
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("'\\''")),
+            "repair command must escape embedded single quotes: {:?}",
+            db_check.repair
+        );
         Ok(())
     }
 
