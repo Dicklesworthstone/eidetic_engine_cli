@@ -17,6 +17,7 @@ fuzz_target!(|data: &[u8]| {
     exercise_cass_json_envelopes(data);
     exercise_malformed_utf8_boundaries(data);
     exercise_parse_recovery_paths(data);
+    exercise_embedded_nul_boundaries();
 
     if data.starts_with(b"CASS_CAP_LINE") {
         exercise_cap_sized_line();
@@ -29,6 +30,9 @@ fuzz_target!(|data: &[u8]| {
     }
     if data.starts_with(b"CASS_VIEW_CAP") {
         exercise_oversized_view_envelope_line();
+    }
+    if data.starts_with(b"CASS_TRUNC") {
+        exercise_oversized_field_truncation();
     }
 });
 
@@ -188,6 +192,44 @@ fn exercise_parse_recovery_paths(data: &[u8]) {
     let sessions_summary = ee::cass::parse_sessions_json_summary(sessions_legacy.as_bytes())
         .expect("legacy hits must recover as sessions when sessions array is absent");
     assert_eq!(sessions_summary.accepted_items, 1);
+}
+
+fn exercise_embedded_nul_boundaries() {
+    let embedded_nul_content = "prefix\0middle\0suffix";
+    let content_json =
+        serde_json::to_string(embedded_nul_content).expect("NUL content JSON encoding succeeds");
+    let view_envelope = format!(r#"{{"lines":[{{"line":23,"content":{content_json}}}]}}"#);
+    let view_summary = ee::cass::parse_view_json_summary(
+        view_envelope.as_bytes(),
+        "/tmp/cass-envelope-fuzz.jsonl",
+    )
+    .expect("embedded NUL content should parse as valid view content");
+    assert_eq!(view_summary.accepted_items, 1);
+    assert_eq!(view_summary.max_line, 23);
+    assert_eq!(view_summary.max_excerpt_bytes, embedded_nul_content.len());
+
+    assert_err_contains(
+        ee::cass::parse_sessions_json_summary(
+            b"{\"sessions\":[{\"path\":\"/tmp/cass\\u0000session.jsonl\",\"agent\":\"codex\"}]}",
+        ),
+        "session paths containing embedded NUL must be rejected",
+        "must not contain NUL bytes",
+    );
+}
+
+fn exercise_oversized_field_truncation() {
+    let oversized_content = "x".repeat(MAX_EXCERPT_BYTES + 4096);
+    let content_json =
+        serde_json::to_string(&oversized_content).expect("oversized string JSON encoding succeeds");
+    let view_envelope = format!(r#"{{"lines":[{{"line":24,"content":{content_json}}}]}}"#);
+    let view_summary = ee::cass::parse_view_json_summary(
+        view_envelope.as_bytes(),
+        "/tmp/cass-envelope-fuzz.jsonl",
+    )
+    .expect("oversized content below line cap should parse and truncate excerpt");
+    assert_eq!(view_summary.accepted_items, 1);
+    assert_eq!(view_summary.max_line, 24);
+    assert_eq!(view_summary.max_excerpt_bytes, MAX_EXCERPT_BYTES);
 }
 
 fn assert_err_contains<T, E>(result: Result<T, E>, context: &str, expected: &str)
