@@ -2,16 +2,16 @@ use std::collections::BTreeSet;
 
 use fnx_algorithms::k_truss;
 use fnx_classes::Graph;
-use fnx_generators::GraphGenerator;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 
+#[path = "support/graph_generator.rs"]
+mod graph_generator;
+
+use graph_generator::deterministic_graph;
+
 fn generated_graph(node_count: usize, density_percent: u8, seed: u64) -> Result<Graph, String> {
-    let mut generator = GraphGenerator::strict();
-    generator
-        .gnp_random_graph(node_count, f64::from(density_percent) / 100.0, seed)
-        .map(|report| report.graph)
-        .map_err(|error| error.to_string())
+    deterministic_graph(node_count, f64::from(density_percent) / 100.0, seed)
 }
 
 fn nodes_at_k(graph: &Graph, k: usize) -> BTreeSet<String> {

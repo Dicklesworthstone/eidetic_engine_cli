@@ -84,10 +84,15 @@ class FrankenPublishStatusScriptTest(unittest.TestCase):
             ],
         )
 
-    def test_fnx_publish_order_requires_generators_after_algorithms(self) -> None:
+    def test_fnx_publish_order_excludes_unpublished_generators_helper(self) -> None:
         expected = self.mod.GROUPS["fnx"]["expected_publish_order"]
-        self.assertIn("fnx-generators", expected)
-        self.assertLess(expected.index("fnx-algorithms"), expected.index("fnx-generators"))
+        self.assertIn("fnx-algorithms", expected)
+        self.assertNotIn("fnx-generators", expected)
+
+    def test_eidetic_root_no_longer_requires_fnx_generators(self) -> None:
+        cargo_toml = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        self.assertNotIn('fnx-generators = "0.1.0"', cargo_toml)
+        self.assertNotIn("/crates/fnx-generators", cargo_toml)
 
     def test_publish_token_fails_closed_rejects_successful_skip(self) -> None:
         skip_success = """
@@ -190,10 +195,10 @@ jobs:
             {
                 "all_required_crates_ready": False,
                 "available_count": 0,
-                "blocked_count": 7,
-                "crate_count": 7,
+                "blocked_count": 6,
+                "crate_count": 6,
                 "group_count": 1,
-                "missing_count": 7,
+                "missing_count": 6,
                 "network_unavailable_count": 0,
                 "ready_count": 0,
                 "wrong_version_count": 0,
@@ -201,13 +206,10 @@ jobs:
         )
         group = report["groups"][0]
         self.assertTrue(group["workflow"]["token_missing_fails_closed"])
-        self.assertIn("fnx-generators", group["workflow"]["missing_from_publish_order"])
-        generator = next(crate for crate in group["crates"] if crate["crate_name"] == "fnx-generators")
-        self.assertEqual(generator["local_manifest"]["status"], "ok")
-        self.assertEqual(generator["local_manifest"]["version"], "0.1.0")
-        self.assertEqual(generator["crates_io"]["status"], "missing")
-        self.assertIn("crates_io_missing", generator["blocking_reasons"])
-        self.assertIn("workflow_missing_publish_crate", generator["blocking_reasons"])
+        self.assertEqual(group["workflow"]["missing_from_publish_order"], [])
+        self.assertTrue(group["workflow"]["dependency_order_ok"])
+        crate_names = [crate["crate_name"] for crate in group["crates"]]
+        self.assertNotIn("fnx-generators", crate_names)
 
     def test_markdown_summary_is_beads_ready_and_redaction_safe(self) -> None:
         # Run script with format arg
@@ -230,9 +232,9 @@ jobs:
             text=True,
         )
         self.assertIn("franken_networkx", output)
-        self.assertIn("Aggregate: `0/7` crates ready; `7` blocked", output)
+        self.assertIn("Aggregate: `0/6` crates ready; `6` blocked", output)
         self.assertIn(
-            "`0` available on crates.io; `7` missing, `0` wrong-version, `0` network-unavailable",
+            "`0` available on crates.io; `6` missing, `0` wrong-version, `0` network-unavailable",
             output,
         )
         self.assertIn("token_missing_fails_closed=true", output)

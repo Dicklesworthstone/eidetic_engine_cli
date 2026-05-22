@@ -80,15 +80,16 @@ The initial target is `fnx`, but the schema and CLI also cover `sqlmodel`,
 
 ## fnx-generators decision
 
-`eidetic_engine_cli` uses `fnx-generators = "0.1.0"` as a dev-dependency for
-all-targets and release-readiness checks. The release decision for
-`bd-3usjw.11.1.35` is to publish `fnx-generators` with the rest of
-`franken_networkx`, not to hide or remove the ee dev-dependency.
+`bd-3usjw.11.1.35` deliberately removed the `eidetic_engine_cli`
+dev-dependency on `fnx-generators = "0.1.0"` instead of keeping ordinary
+all-targets and release-readiness checks blocked on an unpublished upstream
+helper crate. The property tests and Criterion benches that previously used
+`fnx-generators` now use an in-tree deterministic graph helper under
+`tests/support/graph_generator.rs`.
 
-The publish-status checker therefore treats `fnx-generators` as a required fnx
-crate. It must appear in the fnx crate list, have local publish metadata, resolve
-from crates.io at the required version, and appear in the release workflow after
-the core/runtime crates. If the workflow omits it, the report emits
-`workflow_missing_publish_crate`; if crates.io returns 404, the report emits
-`crates_io_missing`. This keeps `bd-3usjw.11.1.33` from closing while the
-generator crate needed by ee dev verification is still unpublished.
+The publish-status checker therefore tracks only the fnx crates required by the
+ordinary release path: `fnx-runtime`, `fnx-cgse`, `fnx-classes`,
+`fnx-dispatch`, `fnx-convert`, and `fnx-algorithms`. Upstream
+`franken_networkx` may still publish `fnx-generators` later, but that helper is
+no longer part of this repo's dependency-resolution or release-readiness
+contract.

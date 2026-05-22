@@ -33,7 +33,6 @@ FNX_PUBLISH_ORDER = [
     "fnx-dispatch",
     "fnx-convert",
     "fnx-algorithms",
-    "fnx-generators",
 ]
 
 GROUPS: dict[str, dict[str, Any]] = {

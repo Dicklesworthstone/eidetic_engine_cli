@@ -1,17 +1,17 @@
 use fnx_algorithms::edge_connectivity_edmonds_karp;
 use fnx_classes::Graph;
-use fnx_generators::GraphGenerator;
 use proptest::prelude::*;
 use proptest::test_runner::Config as ProptestConfig;
 
 use ee::graph::gomory_hu::{GOMORY_HU_WEIGHT_ATTR, build_gomory_hu_tree, query_min_cut};
 
+#[path = "support/graph_generator.rs"]
+mod graph_generator;
+
+use graph_generator::deterministic_graph;
+
 fn generated_graph(node_count: usize, density_percent: u8, seed: u64) -> Result<Graph, String> {
-    let mut generator = GraphGenerator::strict();
-    generator
-        .gnp_random_graph(node_count, f64::from(density_percent) / 100.0, seed)
-        .map(|report| report.graph)
-        .map_err(|error| error.to_string())
+    deterministic_graph(node_count, f64::from(density_percent) / 100.0, seed)
 }
 
 proptest! {

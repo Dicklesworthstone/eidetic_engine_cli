@@ -1127,7 +1127,6 @@ dependencies = [
  "determinism",
  "fnx-algorithms",
  "fnx-classes",
- "fnx-generators",
  "fnx-runtime",
  "franken-agent-detection",
  "frankensearch",
@@ -1303,16 +1302,6 @@ dependencies = [
  "fnx-runtime",
  "indexmap",
  "serde",
-]
-
-[[package]]
-name = "fnx-generators"
-version = "0.1.0"
-dependencies = [
- "fnx-classes",
- "fnx-runtime",
- "mt19937",
- "rand 0.10.1",
 ]
 
 [[package]]

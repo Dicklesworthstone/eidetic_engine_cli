@@ -9,7 +9,11 @@ use std::time::Instant;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use ee::graph::hits::compute_hits;
 use fnx_classes::digraph::DiGraph;
-use fnx_generators::GraphGenerator;
+
+#[path = "../tests/support/graph_generator.rs"]
+mod graph_generator;
+
+use graph_generator::deterministic_digraph;
 
 const BENCH_GROUP_NAME: &str = "graph_hits";
 const BUDGET_P50_MS: f64 = 100.0;
@@ -25,12 +29,8 @@ struct QuickStats {
 }
 
 fn seeded_graph(node_count: usize) -> DiGraph {
-    let mut generator = GraphGenerator::strict();
     let density = 0.02_f64.max(12.0 / node_count.max(1) as f64).min(1.0);
-    generator
-        .fast_gnp_random_digraph(node_count, density, 59)
-        .expect("hits benchmark graph should generate")
-        .graph
+    deterministic_digraph(node_count, density, 59).expect("hits benchmark graph should generate")
 }
 
 fn run_once(node_count: usize) -> f64 {
