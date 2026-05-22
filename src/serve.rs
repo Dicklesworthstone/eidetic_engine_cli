@@ -1118,6 +1118,26 @@ fn serve_dispatch_exchange_envelope(
     payload: &JsonValue,
     elapsed_ms: u64,
 ) -> JsonValue {
+    // bd-2eiwy: surface the inner ee.response.v2 payload's `degraded[]`
+    // codes at the response-metadata level so /v1/status (and any
+    // future endpoint whose payload carries degradations from the
+    // wrapped subsystem) doesn't return an outer envelope where
+    // `response.degradedCodes` is empty while
+    // `response.payload.degraded[]` is non-empty. Mirrors the bd-1zoiw
+    // fix for the SSE path (render_serve_sse_event) and the
+    // auth-failure envelope at the top of this file. Sibling
+    // serve_error_exchange_envelope below already populates the field
+    // from `error.code()`.
+    let degraded_codes: Vec<&str> = payload
+        .get("degraded")
+        .and_then(JsonValue::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("code").and_then(JsonValue::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
     json!({
         "schema": SERVE_ENDPOINT_SCHEMA_V1,
         "request": serve_request_metadata_json(request_id, request, auth_state),
@@ -1126,7 +1146,7 @@ fn serve_dispatch_exchange_envelope(
             "payloadSchema": "ee.response.v2",
             "payload": payload,
             "elapsedMs": elapsed_ms,
-            "degradedCodes": [],
+            "degradedCodes": degraded_codes,
             "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
         }
     })
@@ -2663,6 +2683,124 @@ mod tests {
             event["response"]["degradedCodes"].as_array().map(Vec::len),
             Some(0),
             "empty degradedCodes when no inner degraded entries",
+        )
+    }
+
+    // bd-2eiwy: the non-SSE dispatch envelope for /v1/status (and any
+    // future endpoint whose ee.response.v2 payload carries degradations)
+    // MUST surface inner `degraded[]` codes at the outer
+    // `response.degradedCodes` level. The /v1/status caller chain runs
+    // through serve_dispatch_payload_for_plan → serve_status_payload_json
+    // → render_status_json which can produce a real status report with
+    // codes like `index_stale`, `embed_model_unavailable`,
+    // `search_index_stale`, etc. Before this fix the outer envelope
+    // hard-coded `degradedCodes: []` so operators triaging /v1/status by
+    // reading the response-metadata field saw zero signal.
+    #[test]
+    fn serve_dispatch_exchange_envelope_mirrors_inner_payload_degraded_codes() -> TestResult {
+        let request = parse_serve_http_request(
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let payload = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "schema": "ee.status.v1",
+                "ok": true
+            },
+            "degraded": [
+                {"code": "index_stale", "severity": "medium", "message": "synthetic"},
+                {"code": "embed_model_unavailable", "severity": "warning", "message": "synthetic"}
+            ]
+        });
+        let envelope = serve_dispatch_exchange_envelope(
+            "req-bd-2eiwy",
+            &request,
+            "not_required",
+            200,
+            &payload,
+            42,
+        );
+        let codes = envelope["response"]["degradedCodes"]
+            .as_array()
+            .ok_or_else(|| "degradedCodes must be an array".to_string())?
+            .iter()
+            .filter_map(|entry| entry.as_str())
+            .collect::<Vec<_>>();
+        ensure(codes.len(), 2, "mirror count")?;
+        ensure(codes.contains(&"index_stale"), true, "index_stale surfaced")?;
+        ensure(
+            codes.contains(&"embed_model_unavailable"),
+            true,
+            "embed_model_unavailable surfaced",
+        )?;
+        ensure(
+            envelope["response"]["statusCode"].as_u64(),
+            Some(200),
+            "statusCode unchanged by mirror",
+        )?;
+        ensure(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.response.v2"),
+            "payloadSchema unchanged",
+        )
+    }
+
+    // bd-2eiwy: empty-input sanity-pin — when the inner payload has no
+    // `degraded[]` array (or an empty one), the outer envelope's
+    // degradedCodes must be `[]`. Without this pin, a future drift in
+    // the mirror helper that incorrectly fell back to `data` or another
+    // field would not be caught by the positive test above.
+    #[test]
+    fn serve_dispatch_exchange_envelope_emits_empty_degraded_codes_when_inner_empty() -> TestResult
+    {
+        let request = parse_serve_http_request(
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let payload_with_empty = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {"ok": true},
+            "degraded": []
+        });
+        let envelope_a = serve_dispatch_exchange_envelope(
+            "req-empty-arr",
+            &request,
+            "not_required",
+            200,
+            &payload_with_empty,
+            7,
+        );
+        ensure(
+            envelope_a["response"]["degradedCodes"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "empty `degraded: []` propagates to empty degradedCodes",
+        )?;
+        let payload_without_degraded = json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {"ok": true}
+        });
+        let envelope_b = serve_dispatch_exchange_envelope(
+            "req-missing-field",
+            &request,
+            "not_required",
+            200,
+            &payload_without_degraded,
+            7,
+        );
+        ensure(
+            envelope_b["response"]["degradedCodes"]
+                .as_array()
+                .map(Vec::len),
+            Some(0),
+            "missing `degraded` field yields empty degradedCodes",
         )
     }
 
