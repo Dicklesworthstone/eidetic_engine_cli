@@ -259,3 +259,106 @@ mesh_e2e_run_with_outcomes mesh_replay_convergence "${scenarios[@]}" -- true
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// bd-18bue: MESH_E2E_DURATION_MS_OVERRIDE must not poison the emitted JSON
+// with non-strict Infinity/NaN literals. Python's float() accepts "inf",
+// "-inf", "Infinity", and "nan"; json.dumps would then emit literal
+// Infinity/-Infinity/NaN, which jq and every strict JSON parser
+// (including assert_test_event_shape above) reject. The fix coerces
+// non-finite or negative duration_ms to 0.0 inside mesh_e2e_emit_event.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mesh_e2e_emit_event_coerces_non_finite_duration_override_to_zero() -> TestResult {
+    let fixture = r#"
+set -euo pipefail
+source scripts/lib/mesh_e2e_outcomes.sh
+export MESH_E2E_EVENT_TS=2026-05-22T00:00:00.000000Z
+mesh_e2e_emit_outcome mesh_replay_convergence positive_infinity pass inf ''
+mesh_e2e_emit_outcome mesh_replay_convergence negative_infinity pass -inf ''
+mesh_e2e_emit_outcome mesh_replay_convergence not_a_number pass nan ''
+mesh_e2e_emit_outcome mesh_replay_convergence negative_finite pass -12.5 ''
+"#;
+    let stdout = run_bash(fixture)?;
+    // jq via serde_json::from_str is the strict-JSON gate: if the
+    // helper ever emits Infinity/-Infinity/NaN literals again,
+    // parse_json_lines will fail here with a structured error.
+    let events = parse_json_lines(&stdout)?;
+    if events.len() != 4 {
+        return Err(format!(
+            "expected 4 events for the four non-finite/negative cases, got {}",
+            events.len()
+        ));
+    }
+    for (index, event) in events.iter().enumerate() {
+        assert_test_event_shape(event, &format!("non-finite override event {}", index + 1))?;
+        let duration = event
+            .pointer("/fields/duration_ms")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                format!(
+                    "event {} missing finite duration_ms after coercion: {event}",
+                    index + 1,
+                )
+            })?;
+        if !duration.is_finite() {
+            return Err(format!(
+                "event {} duration_ms must be finite, got {duration}: {event}",
+                index + 1,
+            ));
+        }
+        if duration != 0.0 {
+            return Err(format!(
+                "event {} duration_ms must be coerced to 0.0, got {duration}: {event}",
+                index + 1,
+            ));
+        }
+        let elapsed = event
+            .pointer("/elapsed_ms")
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                format!(
+                    "event {} missing finite elapsed_ms after coercion: {event}",
+                    index + 1,
+                )
+            })?;
+        if !elapsed.is_finite() || elapsed != 0.0 {
+            return Err(format!(
+                "event {} elapsed_ms must mirror coerced duration: got {elapsed}: {event}",
+                index + 1,
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn mesh_e2e_emit_event_preserves_normal_finite_duration() -> TestResult {
+    // Guard against an over-eager coercion: a real positive finite
+    // duration must pass through untouched. If this test ever starts
+    // failing alongside the non-finite test, the coercion regressed
+    // to clobbering valid values.
+    let fixture = r#"
+set -euo pipefail
+source scripts/lib/mesh_e2e_outcomes.sh
+export MESH_E2E_EVENT_TS=2026-05-22T00:00:00.000000Z
+mesh_e2e_emit_outcome mesh_replay_convergence ok_case pass 17.25 ''
+"#;
+    let stdout = run_bash(fixture)?;
+    let events = parse_json_lines(&stdout)?;
+    if events.len() != 1 {
+        return Err(format!("expected 1 event, got {}", events.len()));
+    }
+    let duration = events[0]
+        .pointer("/fields/duration_ms")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| format!("missing duration_ms: {}", events[0]))?;
+    if (duration - 17.25).abs() > f64::EPSILON {
+        return Err(format!(
+            "finite duration must round-trip; expected 17.25 got {duration}: {}",
+            events[0],
+        ));
+    }
+    Ok(())
+}

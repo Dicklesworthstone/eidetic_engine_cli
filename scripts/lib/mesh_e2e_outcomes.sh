@@ -27,6 +27,7 @@ mesh_e2e_emit_event() {
   local message="${9:-}"
   python3 - "$kind" "$surface" "$scenario" "$phase" "$status" "$duration_ms" "$stderr_tail" "$command" "$message" "$(mesh_e2e_event_ts)" <<'PY'
 import json
+import math
 import sys
 
 kind, surface, scenario, phase, status, duration_ms, stderr_tail, command, message, ts = sys.argv[1:]
@@ -44,6 +45,18 @@ if duration_ms != "":
     try:
         duration = float(duration_ms)
     except ValueError:
+        duration = 0.0
+    # bd-18bue: Python's float() happily parses "inf", "Infinity",
+    # "-inf", and "nan" — and json.dumps then emits them as the
+    # non-strict JSON literals Infinity/-Infinity/NaN, which jq and
+    # every strict JSON consumer (including the
+    # mesh_outcome_helper_emits_schema_valid_event_shape contract
+    # test) reject. The MESH_E2E_DURATION_MS_OVERRIDE escape hatch
+    # makes those values reachable from agent harnesses. Coerce any
+    # non-finite or negative duration to 0.0 so emitted events are
+    # always strict JSON — matching the existing ValueError fallback
+    # semantics rather than introducing a separate error path.
+    if not math.isfinite(duration) or duration < 0.0:
         duration = 0.0
     fields["duration_ms"] = duration
 if stderr_tail:
