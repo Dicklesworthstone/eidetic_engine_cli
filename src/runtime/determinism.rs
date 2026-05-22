@@ -282,10 +282,11 @@ impl<S> Deterministic<S> {
         let mut bytes = [0_u8; 8];
         bytes.copy_from_slice(&digest.as_bytes()[..8]);
         let child_seed = Seed::new(u64::from_be_bytes(bytes));
+        let scope_label = escape_scope_label(label);
         Deterministic::from_parts(
             child_seed,
             SeedSource::Child,
-            format!("{}::{label}#{ordinal}", self.scope),
+            format!("{}::{scope_label}#{ordinal}", self.scope),
         )
     }
 
@@ -305,10 +306,11 @@ impl<S> Deterministic<S> {
         let digest = hasher.finalize();
         let mut bytes = [0_u8; 8];
         bytes.copy_from_slice(&digest.as_bytes()[..8]);
+        let scope_label = escape_scope_label(label);
         Deterministic::from_parts(
             Seed::new(u64::from_be_bytes(bytes)),
             SeedSource::Child,
-            format!("{}::{label}", self.scope),
+            format!("{}::{scope_label}", self.scope),
         )
     }
 
@@ -435,6 +437,27 @@ fn splitmix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+fn escape_scope_label(label: &str) -> String {
+    if !label
+        .as_bytes()
+        .iter()
+        .any(|byte| matches!(byte, b'%' | b':' | b'#'))
+    {
+        return label.to_owned();
+    }
+
+    let mut escaped = String::with_capacity(label.len());
+    for character in label.chars() {
+        match character {
+            '%' => escaped.push_str("%25"),
+            ':' => escaped.push_str("%3A"),
+            '#' => escaped.push_str("%23"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(chars);
@@ -449,4 +472,85 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
         output.push(HEX[(byte & 0x0F) as usize] as char);
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Deterministic, SeedSource, escape_scope_label};
+
+    type TestResult = Result<(), String>;
+
+    fn ensure_equal<T>(actual: &T, expected: &T, context: &str) -> TestResult
+    where
+        T: std::fmt::Debug + PartialEq,
+    {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn ensure_not_equal<T>(left: &T, right: &T, context: &str) -> TestResult
+    where
+        T: std::fmt::Debug + PartialEq,
+    {
+        if left != right {
+            Ok(())
+        } else {
+            Err(format!("{context}: both sides were {left:?}"))
+        }
+    }
+
+    #[test]
+    fn ordinary_child_scope_labels_remain_unchanged() -> TestResult {
+        let mut token = Deterministic::from_seed(7);
+
+        let child = token.child("retrieval");
+        let shared = token.shared_child("pack");
+
+        ensure_equal(&child.scope(), &"root::retrieval#0", "child scope")?;
+        ensure_equal(&shared.scope(), &"root::pack", "shared child scope")?;
+        ensure_equal(&child.source(), &SeedSource::Child, "child seed source")
+    }
+
+    #[test]
+    fn child_scope_labels_escape_path_delimiters() -> TestResult {
+        let mut direct_root = Deterministic::from_seed(7);
+        let direct = direct_root.child("a#0::b");
+
+        let mut nested_root = Deterministic::from_seed(7);
+        let mut parent = nested_root.child("a");
+        let nested = parent.child("b");
+
+        ensure_equal(
+            &direct.scope(),
+            &"root::a%230%3A%3Ab#0",
+            "escaped direct child scope",
+        )?;
+        ensure_equal(&nested.scope(), &"root::a#0::b#0", "nested child scope")?;
+        ensure_not_equal(&direct.scope(), &nested.scope(), "scopes must not collide")
+    }
+
+    #[test]
+    fn shared_child_scope_labels_escape_path_delimiters() -> TestResult {
+        let token = Deterministic::from_seed(7);
+
+        let shared = token.shared_child("a#0::b%tail");
+
+        ensure_equal(
+            &shared.scope(),
+            &"root::a%230%3A%3Ab%25tail",
+            "escaped shared child scope",
+        )
+    }
+
+    #[test]
+    fn scope_label_escape_is_stable_for_mixed_delimiters() -> TestResult {
+        ensure_equal(
+            &escape_scope_label("scope:%#tail"),
+            &"scope%3A%25%23tail".to_owned(),
+            "escaped mixed delimiter label",
+        )
+    }
 }
