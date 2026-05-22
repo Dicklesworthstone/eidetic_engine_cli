@@ -306,3 +306,6 @@ mod perf_live_schema;
 
 #[path = "contracts/tracing_paragraph_required.rs"]
 mod tracing_paragraph_required;
+
+#[path = "contracts/context_delta_schema_v1.rs"]
+mod context_delta_schema_v1;
