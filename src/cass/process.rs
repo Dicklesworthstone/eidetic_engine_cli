@@ -41,6 +41,7 @@ const ALLOWLISTED_CASS_EXECUTABLE: &str = "cass";
 const TIMEOUT_PIPE_DRAIN_GRACE: Duration = Duration::from_millis(250);
 const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SPAWN_RETRY_ATTEMPTS: usize = 6;
+const CASS_PIPE_CAPTURE_MAX_BYTES: usize = 100 * 1024 * 1024;
 pub(crate) const CASS_STDOUT_LINE_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,12 +419,7 @@ impl CassInvocation {
             spawn_stdout_line_reader(stdout, Arc::clone(&peak_stdout_buffer_probe));
         let mut stdout_thread = Some(stdout_thread);
         let stderr_thread = thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            (&mut stderr)
-                .take(100 * 1024 * 1024)
-                .read_to_end(&mut buf)?;
-            Ok(buf)
+            read_capped_pipe(&mut stderr, "stderr", CASS_PIPE_CAPTURE_MAX_BYTES)
         });
 
         let mut child_status: Option<ExitStatus> = None;
@@ -572,21 +568,11 @@ impl CassInvocation {
         })?;
 
         let stdout_thread = thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            (&mut stdout)
-                .take(100 * 1024 * 1024)
-                .read_to_end(&mut buf)?;
-            Ok(buf)
+            read_capped_pipe(&mut stdout, "stdout", CASS_PIPE_CAPTURE_MAX_BYTES)
         });
 
         let stderr_thread = thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            (&mut stderr)
-                .take(100 * 1024 * 1024)
-                .read_to_end(&mut buf)?;
-            Ok(buf)
+            read_capped_pipe(&mut stderr, "stderr", CASS_PIPE_CAPTURE_MAX_BYTES)
         });
 
         let mut child_status: Option<ExitStatus> = None;
@@ -940,6 +926,29 @@ fn record_stdout_line_stats(
         .saturating_add(line.len())
         .saturating_add(1);
     *peak_stdout_line_bytes = (*peak_stdout_line_bytes).max(line.len());
+}
+
+fn read_capped_pipe<R: Read>(
+    reader: R,
+    stream_name: &'static str,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    let limit = max_bytes.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("cass subprocess {stream_name} capture limit overflowed"),
+        )
+    })?;
+    let mut buf = Vec::new();
+    let mut limited = reader.take(limit as u64);
+    limited.read_to_end(&mut buf)?;
+    if buf.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cass subprocess {stream_name} exceeded {max_bytes} byte capture limit"),
+        ));
+    }
+    Ok(buf)
 }
 
 fn join_pipe_reader(
@@ -1662,6 +1671,32 @@ mod tests {
         };
         assert_eq!(err.kind_str(), "io");
         assert!(err.to_string().contains("panicked"));
+    }
+
+    #[test]
+    fn read_capped_pipe_accepts_exact_limit_payload() {
+        use super::read_capped_pipe;
+        use std::io::Cursor;
+
+        let bytes = read_capped_pipe(Cursor::new(vec![b'x'; 8]), "stdout", 8)
+            .expect("cap-sized pipe payload should decode");
+
+        assert_eq!(bytes.len(), 8);
+    }
+
+    #[test]
+    fn read_capped_pipe_rejects_payload_over_limit() {
+        use super::read_capped_pipe;
+        use std::io::{Cursor, ErrorKind};
+
+        let error = read_capped_pipe(Cursor::new(vec![b'x'; 9]), "stderr", 8)
+            .expect_err("oversized pipe payload should fail before silent truncation");
+
+        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("stderr exceeded 8 byte"),
+            "unexpected error: {error}",
+        );
     }
 
     /// bd-352wc regression: a single line larger than the 1 MiB cap
