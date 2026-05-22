@@ -324,3 +324,6 @@ mod mesh_serve_mcp_envelope_mirror_guard;
 
 #[path = "contracts/pack_stream_conformance_v1.rs"]
 mod pack_stream_conformance_v1;
+
+#[path = "contracts/pack_quality_report_conformance_v1.rs"]
+mod pack_quality_report_conformance_v1;
