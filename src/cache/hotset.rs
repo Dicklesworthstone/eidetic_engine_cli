@@ -69,6 +69,13 @@ pub const PREWARM_NO_SIGNAL_CODE: &str = "hotset_prewarm_no_signals";
 /// query-shape keys; the plan itself exposes hashes and source classes.
 pub const PREWARM_REDACTION_STATUS: &str = "query_hashes_only";
 
+/// Schema id for the pure memory tier policy report. The first slice is a
+/// side-effect-free model only; retrieval and storage admission stay unchanged.
+pub const MEMORY_TIER_POLICY_SCHEMA: &str = "ee.memory_tier.policy.v1";
+
+/// Version string recorded on every tier assignment for audit metadata.
+pub const MEMORY_TIER_POLICY_VERSION: &str = "memory-tier-policy-v1";
+
 /// Generation gate the manifest evaluates entries against. Entries whose
 /// `generation` is strictly less than the active workspace generation or the
 /// index generation that produced them are classified as stale-rejected.
@@ -143,6 +150,320 @@ impl HotsetBudget {
             "currentEntries": self.current_entries,
             "currentBytes": self.current_bytes,
         })
+    }
+}
+
+/// Advisory storage tier for memory recall hot paths.
+///
+/// This is not an eligibility decision. A cold item can still be required
+/// retrieval evidence when it is an explicit query match, mandatory provenance,
+/// or safety/failure evidence.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MemoryStorageTier {
+    Hot,
+    Warm,
+    Cold,
+}
+
+impl MemoryStorageTier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hot => "hot",
+            Self::Warm => "warm",
+            Self::Cold => "cold",
+        }
+    }
+}
+
+/// Explicit policy knobs for pure hot/warm/cold assignment.
+///
+/// Scores are in basis points (`0..=1000`) to keep the policy deterministic
+/// across platforms and independent of wall-clock time. Callers may use
+/// [`MemoryTierInput::from_normalized_scores`] to quantize ordinary `0.0..=1.0`
+/// scores at the boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryTierPolicyConfig {
+    pub hot_budget: usize,
+    pub warm_budget: usize,
+    pub hot_score_floor: u16,
+}
+
+impl MemoryTierPolicyConfig {
+    #[must_use]
+    pub const fn new(hot_budget: usize, warm_budget: usize, hot_score_floor: u16) -> Self {
+        Self {
+            hot_budget,
+            warm_budget,
+            hot_score_floor,
+        }
+    }
+
+    #[must_use]
+    pub const fn default_swarm() -> Self {
+        Self {
+            hot_budget: 128,
+            warm_budget: 512,
+            hot_score_floor: 700,
+        }
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "hotBudget": self.hot_budget,
+            "warmBudget": self.warm_budget,
+            "hotScoreFloor": self.hot_score_floor,
+        })
+    }
+}
+
+/// Stable input to the memory tier policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierInput {
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub confidence: u16,
+    pub utility: u16,
+    pub importance: u16,
+    pub freshness: u16,
+    pub access_count: u64,
+    pub reuse_count: u64,
+    pub trust_class: String,
+    pub explicit_query_match: bool,
+    pub mandatory_provenance: bool,
+    pub safety_or_failure_evidence: bool,
+}
+
+impl MemoryTierInput {
+    #[must_use]
+    pub fn new(memory_id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
+        Self {
+            memory_id: memory_id.into(),
+            workspace_id: workspace_id.into(),
+            confidence: 0,
+            utility: 0,
+            importance: 0,
+            freshness: 0,
+            access_count: 0,
+            reuse_count: 0,
+            trust_class: "agent_assertion".to_owned(),
+            explicit_query_match: false,
+            mandatory_provenance: false,
+            safety_or_failure_evidence: false,
+        }
+    }
+
+    #[must_use]
+    pub fn from_normalized_scores(
+        memory_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        confidence: f64,
+        utility: f64,
+        importance: f64,
+        freshness: f64,
+    ) -> Self {
+        Self {
+            memory_id: memory_id.into(),
+            workspace_id: workspace_id.into(),
+            confidence: score_basis_points(confidence),
+            utility: score_basis_points(utility),
+            importance: score_basis_points(importance),
+            freshness: score_basis_points(freshness),
+            access_count: 0,
+            reuse_count: 0,
+            trust_class: "agent_assertion".to_owned(),
+            explicit_query_match: false,
+            mandatory_provenance: false,
+            safety_or_failure_evidence: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_access(mut self, access_count: u64, reuse_count: u64) -> Self {
+        self.access_count = access_count;
+        self.reuse_count = reuse_count;
+        self
+    }
+
+    #[must_use]
+    pub fn with_trust_class(mut self, trust_class: impl Into<String>) -> Self {
+        self.trust_class = trust_class.into();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_explicit_query_match(mut self, explicit_query_match: bool) -> Self {
+        self.explicit_query_match = explicit_query_match;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_mandatory_provenance(mut self, mandatory_provenance: bool) -> Self {
+        self.mandatory_provenance = mandatory_provenance;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_safety_or_failure_evidence(
+        mut self,
+        safety_or_failure_evidence: bool,
+    ) -> Self {
+        self.safety_or_failure_evidence = safety_or_failure_evidence;
+        self
+    }
+
+    #[must_use]
+    pub fn required_evidence(&self) -> bool {
+        self.explicit_query_match || self.mandatory_provenance || self.safety_or_failure_evidence
+    }
+
+    #[must_use]
+    pub fn deterministic_tie_break_key(&self) -> String {
+        format!("{}:{}", self.workspace_id, self.memory_id)
+    }
+}
+
+/// Result of pure tier assignment for one memory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierAssignment {
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub tier: MemoryStorageTier,
+    pub tier_score: u16,
+    pub tier_assignment_reason: &'static str,
+    pub deterministic_tie_break_key: String,
+    pub policy_version: &'static str,
+    pub required_evidence_preserved: bool,
+}
+
+impl MemoryTierAssignment {
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "memoryId": self.memory_id,
+            "workspaceId": self.workspace_id,
+            "tier": self.tier.as_str(),
+            "tierScore": self.tier_score,
+            "tierAssignmentReason": self.tier_assignment_reason,
+            "deterministicTieBreakKey": self.deterministic_tie_break_key,
+            "policyVersion": self.policy_version,
+            "requiredEvidencePreserved": self.required_evidence_preserved,
+        })
+    }
+}
+
+/// Assign advisory storage tiers from stable inputs.
+///
+/// The function is pure: it does not read config, inspect wall-clock time,
+/// mutate cache state, or filter candidates. Sorting is by descending score and
+/// then by a deterministic workspace/memory key.
+#[must_use]
+pub fn assign_memory_storage_tiers(
+    inputs: impl IntoIterator<Item = MemoryTierInput>,
+    config: MemoryTierPolicyConfig,
+) -> Vec<MemoryTierAssignment> {
+    let mut scored = inputs
+        .into_iter()
+        .map(|input| {
+            let tier_score = memory_tier_score(&input);
+            let key = input.deterministic_tie_break_key();
+            (input, tier_score, key)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+
+    scored
+        .into_iter()
+        .enumerate()
+        .map(|(rank, (input, tier_score, key))| {
+            let tier = if rank < config.hot_budget && tier_score >= config.hot_score_floor {
+                MemoryStorageTier::Hot
+            } else if rank < config.hot_budget.saturating_add(config.warm_budget) {
+                MemoryStorageTier::Warm
+            } else {
+                MemoryStorageTier::Cold
+            };
+            let required_evidence_preserved = input.required_evidence();
+            MemoryTierAssignment {
+                memory_id: input.memory_id,
+                workspace_id: input.workspace_id,
+                tier,
+                tier_score,
+                tier_assignment_reason: tier_assignment_reason(tier, required_evidence_preserved),
+                deterministic_tie_break_key: key,
+                policy_version: MEMORY_TIER_POLICY_VERSION,
+                required_evidence_preserved,
+            }
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn memory_storage_tier_policy_json(
+    inputs: impl IntoIterator<Item = MemoryTierInput>,
+    config: MemoryTierPolicyConfig,
+) -> Value {
+    let assignments = assign_memory_storage_tiers(inputs, config);
+    json!({
+        "schema": MEMORY_TIER_POLICY_SCHEMA,
+        "policyVersion": MEMORY_TIER_POLICY_VERSION,
+        "advisoryOnly": true,
+        "config": config.to_json(),
+        "assignmentCount": assignments.len(),
+        "assignments": assignments
+            .iter()
+            .map(MemoryTierAssignment::to_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn tier_assignment_reason(
+    tier: MemoryStorageTier,
+    required_evidence_preserved: bool,
+) -> &'static str {
+    match (tier, required_evidence_preserved) {
+        (MemoryStorageTier::Hot, true) => "hot_required_evidence_preserved",
+        (MemoryStorageTier::Hot, false) => "hot_high_reuse_score",
+        (MemoryStorageTier::Warm, true) => "warm_required_evidence_preserved",
+        (MemoryStorageTier::Warm, false) => "warm_budget_admission",
+        (MemoryStorageTier::Cold, true) => "cold_required_evidence_preserved",
+        (MemoryStorageTier::Cold, false) => "cold_budget_overflow",
+    }
+}
+
+fn memory_tier_score(input: &MemoryTierInput) -> u16 {
+    let reuse = reuse_basis_points(input.access_count, input.reuse_count);
+    let trust = trust_class_basis_points(&input.trust_class);
+    let score = u64::from(input.confidence).saturating_mul(25)
+        + u64::from(input.utility).saturating_mul(25)
+        + u64::from(input.importance).saturating_mul(20)
+        + u64::from(input.freshness).saturating_mul(10)
+        + u64::from(trust).saturating_mul(10)
+        + u64::from(reuse).saturating_mul(10);
+    u16::try_from((score / 100).min(1000)).unwrap_or(1000)
+}
+
+fn score_basis_points(value: f64) -> u16 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let clamped = value.clamp(0.0, 1.0);
+    u16::try_from((clamped * 1000.0).floor() as u64).unwrap_or(1000)
+}
+
+fn reuse_basis_points(access_count: u64, reuse_count: u64) -> u16 {
+    let weighted = access_count.saturating_add(reuse_count.saturating_mul(3));
+    u16::try_from(weighted.min(100).saturating_mul(10)).unwrap_or(1000)
+}
+
+fn trust_class_basis_points(trust_class: &str) -> u16 {
+    match trust_class {
+        "human_explicit" => 1000,
+        "agent_validated" => 800,
+        "cass_evidence" => 650,
+        "agent_assertion" => 500,
+        "legacy_import" => 300,
+        _ => 400,
     }
 }
 
@@ -1540,6 +1861,116 @@ mod tests {
         assert_eq!(json["memoryBudget"]["maxBytes"], 8 * 1024);
         assert_eq!(json["memoryBudget"]["currentEntries"], 7);
         assert_eq!(json["memoryBudget"]["currentBytes"], 512);
+    }
+
+    fn tier_input(memory_id: &str, score: f64) -> MemoryTierInput {
+        MemoryTierInput::from_normalized_scores(memory_id, "ws-tier", score, score, score, score)
+            .with_access(20, 10)
+            .with_trust_class("agent_validated")
+    }
+
+    #[test]
+    fn memory_tier_policy_is_deterministic_for_same_inputs() -> TestResult {
+        let config = MemoryTierPolicyConfig::new(1, 2, 700);
+        let inputs = [
+            tier_input("mem_b", 0.8),
+            tier_input("mem_a", 0.8),
+            tier_input("mem_c", 0.4),
+        ];
+        let reversed = [
+            tier_input("mem_c", 0.4),
+            tier_input("mem_a", 0.8),
+            tier_input("mem_b", 0.8),
+        ];
+
+        let first = memory_storage_tier_policy_json(inputs, config);
+        let second = memory_storage_tier_policy_json(reversed, config);
+        let s1 = serde_json::to_string(&first).map_err(|err| err.to_string())?;
+        let s2 = serde_json::to_string(&second).map_err(|err| err.to_string())?;
+
+        assert_eq!(s1, s2, "tier policy output must be deterministic");
+        assert_eq!(first["schema"], MEMORY_TIER_POLICY_SCHEMA);
+        assert_eq!(first["assignments"][0]["memoryId"], "mem_a");
+        assert_eq!(first["assignments"][0]["tier"], "hot");
+        Ok(())
+    }
+
+    #[test]
+    fn memory_tier_policy_respects_hot_floor_and_warm_budget() {
+        let below_floor = assign_memory_storage_tiers(
+            [tier_input("mem_high", 0.95), tier_input("mem_mid", 0.60)],
+            MemoryTierPolicyConfig::new(2, 1, 850),
+        );
+
+        assert_eq!(below_floor[0].tier, MemoryStorageTier::Hot);
+        assert_eq!(
+            below_floor[1].tier,
+            MemoryStorageTier::Warm,
+            "below-floor candidate should not become hot even inside hot budget"
+        );
+
+        let capped = assign_memory_storage_tiers(
+            [
+                tier_input("mem_high", 0.95),
+                tier_input("mem_mid", 0.60),
+                tier_input("mem_low", 0.10),
+            ],
+            MemoryTierPolicyConfig::new(1, 1, 700),
+        );
+        assert_eq!(capped[0].tier, MemoryStorageTier::Hot);
+        assert_eq!(capped[1].tier, MemoryStorageTier::Warm);
+        assert_eq!(capped[2].tier, MemoryStorageTier::Cold);
+    }
+
+    #[test]
+    fn memory_tier_policy_marks_required_evidence_preserved_even_when_cold() {
+        let required = MemoryTierInput::from_normalized_scores(
+            "mem_required_failure",
+            "ws-tier",
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+        )
+        .with_safety_or_failure_evidence(true);
+        let assignments = assign_memory_storage_tiers(
+            [tier_input("mem_hot", 0.95), required],
+            MemoryTierPolicyConfig::new(1, 0, 700),
+        );
+
+        let required = assignments
+            .iter()
+            .find(|assignment| assignment.memory_id == "mem_required_failure")
+            .expect("required evidence assignment");
+        assert_eq!(required.tier, MemoryStorageTier::Cold);
+        assert!(required.required_evidence_preserved);
+        assert_eq!(
+            required.tier_assignment_reason,
+            "cold_required_evidence_preserved"
+        );
+    }
+
+    #[test]
+    fn memory_tier_policy_quantizes_invalid_and_out_of_range_scores() {
+        let input = MemoryTierInput::from_normalized_scores(
+            "mem_quantized",
+            "ws-tier",
+            f64::NAN,
+            -1.0,
+            2.0,
+            f64::INFINITY,
+        )
+        .with_access(u64::MAX, u64::MAX)
+        .with_trust_class("human_explicit");
+        let assignments =
+            assign_memory_storage_tiers([input], MemoryTierPolicyConfig::new(1, 0, 0));
+
+        assert_eq!(assignments.len(), 1);
+        assert!(
+            assignments[0].tier_score <= 1000,
+            "score must stay in basis-point range"
+        );
+        assert_eq!(assignments[0].policy_version, MEMORY_TIER_POLICY_VERSION);
     }
 
     fn bead_signal(id: &str, summary: &str) -> PrewarmSignal {
