@@ -312,3 +312,6 @@ mod context_delta_schema_v1;
 
 #[path = "contracts/search_document_schema_v1.rs"]
 mod search_document_schema_v1;
+
+#[path = "contracts/context_delta_prior_unknown_repair_pinned.rs"]
+mod context_delta_prior_unknown_repair_pinned;

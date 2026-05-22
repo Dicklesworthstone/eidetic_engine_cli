@@ -9,6 +9,17 @@ pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown"
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 pub const CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE: &str = "context_delta_format_unsupported";
 
+/// bd-n0vkg: pinned repair string for `context_delta_prior_unknown`.
+/// MUST stay byte-identical to
+/// `tests/fixtures/failure_modes/context_delta_prior_unknown.json`'s
+/// `expected_emission.repair_string`. Every CLI emission site for this
+/// code routes through this const, and
+/// `tests/contracts/context_delta_prior_unknown_repair_pinned.rs`
+/// enforces the equality at every `cargo test --test contracts`
+/// invocation so the J6 catalog's pinned-repair contract stays a real
+/// guarantee instead of documentation drift.
+pub const CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR: &str = "Run ee context without --since, or pass a pack hash from a prior ee context --json response in the same workspace while the pack record is still retained.";
+
 const CONTEXT_DELTA_FORMAT_JSON: &str = "json";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

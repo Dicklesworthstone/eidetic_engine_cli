@@ -70,8 +70,8 @@ use crate::core::context::{
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
-    ContextDeltaDegradation, ContextDeltaItemSnapshot, ContextDeltaOptions,
-    ContextDeltaPackSnapshot, compute_context_delta,
+    CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR, ContextDeltaDegradation, ContextDeltaItemSnapshot,
+    ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
@@ -28050,10 +28050,10 @@ where
             CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
             ContextResponseSeverity::Low,
             "Prior pack hash is empty; emitting the full pack instead.",
-            Some(
-                "Use a pack hash returned by `ee context --json` from the same workspace, or omit --since."
-                    .to_string(),
-            ),
+            // bd-n0vkg: route every context_delta_prior_unknown emission
+            // through the fixture-pinned repair string. See
+            // tests/contracts/context_delta_prior_unknown_repair_pinned.rs.
+            Some(CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR.to_string()),
         );
         return None;
     }
@@ -28099,10 +28099,8 @@ where
                     "Prior pack hash {prior_pack_hash:?} is not recognized in this workspace; \
                      emitting the full pack instead."
                 ),
-                Some(
-                    "Use a pack hash returned by `ee context --json` from the same workspace, or omit --since."
-                        .to_string(),
-                ),
+                // bd-n0vkg: see comment above on the empty-hash branch.
+                Some(CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR.to_string()),
             );
             return None;
         }
@@ -28115,10 +28113,13 @@ where
                     "Prior pack hash {prior_pack_hash:?} could not be verified: {error}; emitting \
                      the full pack instead."
                 ),
-                Some(
-                    "Run `ee doctor --json` to inspect the workspace database, or omit --since."
-                        .to_string(),
-                ),
+                // bd-n0vkg: the DB-error sub-reason still emits the
+                // canonical context_delta_prior_unknown code, so it must
+                // share the same fixture-pinned repair — one code, one
+                // repair. Operators needing a `ee doctor --json`-style
+                // recovery hint will see the underlying error text in the
+                // degraded entry's `message` field above.
+                Some(CONTEXT_DELTA_PRIOR_UNKNOWN_REPAIR.to_string()),
             );
             return None;
         }
