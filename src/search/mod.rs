@@ -2150,12 +2150,16 @@ impl SearchHotset {
 
     #[must_use]
     pub fn total_estimated_bytes(&self) -> usize {
-        self.entries.iter().map(|entry| entry.estimated_bytes).sum()
+        self.entries.iter().fold(0usize, |total, entry| {
+            total.saturating_add(entry.estimated_bytes)
+        })
     }
 
     #[must_use]
     pub fn total_hit_count(&self) -> u64 {
-        self.entries.iter().map(|entry| entry.hit_count).sum()
+        self.entries
+            .iter()
+            .fold(0u64, |total, entry| total.saturating_add(entry.hit_count))
     }
 }
 
@@ -2380,7 +2384,9 @@ fn search_cache_report(
     total_hit_count: u64,
     fallback_reason: Option<&'static str>,
 ) -> SearchCachePrewarmReport {
-    let admitted_hit_count = admitted.iter().map(|entry| entry.hit_count).sum::<u64>();
+    let admitted_hit_count = admitted
+        .iter()
+        .fold(0u64, |total, entry| total.saturating_add(entry.hit_count));
     let hit_rate = if total_hit_count == 0 {
         0.0
     } else {
@@ -2394,7 +2400,9 @@ fn search_cache_report(
         requested_entries,
         admitted_entries,
         rejected_entries: requested_entries.saturating_sub(admitted_entries),
-        estimated_bytes: admitted.iter().map(|entry| entry.estimated_bytes).sum(),
+        estimated_bytes: admitted.iter().fold(0usize, |total, entry| {
+            total.saturating_add(entry.estimated_bytes)
+        }),
         budget_max_entries: governor.budget.max_entries,
         budget_max_bytes: governor.budget.max_bytes,
         memory_pressure: governor.pressure(),
@@ -4388,6 +4396,40 @@ mod tests {
         assert_eq!(report.memory_pressure, MemoryPressure::Critical);
         assert_eq!(report.fallback_reason, Some("memory_pressure_critical"));
         assert_eq!(report.admitted_entries, 0);
+    }
+
+    #[test]
+    fn search_cache_hotset_aggregate_totals_saturate() {
+        let hotset = SearchHotset::new(vec![
+            SearchHotsetEntry {
+                key: "key-a".to_string(),
+                kind: SearchHotsetEntryKind::Memory,
+                generation: 7,
+                estimated_bytes: usize::MAX,
+                hit_count: u64::MAX,
+                redaction_status: "content_not_stored",
+            },
+            SearchHotsetEntry {
+                key: "key-b".to_string(),
+                kind: SearchHotsetEntryKind::QueryShape,
+                generation: 7,
+                estimated_bytes: 1,
+                hit_count: 1,
+                redaction_status: "content_not_stored",
+            },
+        ]);
+
+        assert_eq!(hotset.total_estimated_bytes(), usize::MAX);
+        assert_eq!(hotset.total_hit_count(), u64::MAX);
+
+        let report = prewarm_search_hotset(
+            &hotset,
+            SearchCacheGovernor::new(7, CacheBudget::new(4, usize::MAX)),
+        );
+
+        assert_eq!(report.status, SearchCacheStatus::Warm);
+        assert_eq!(report.estimated_bytes, usize::MAX);
+        assert_eq!(report.hit_rate, 1.0);
     }
 
     #[test]
