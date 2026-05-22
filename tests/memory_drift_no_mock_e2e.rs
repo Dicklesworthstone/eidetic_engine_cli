@@ -118,10 +118,17 @@ fn hash_text(text: &str) -> String {
     format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
 }
 
-fn hash_json_value(name: &str, value: &Value) -> Result<String, String> {
+fn hash_json_serializable<T>(name: &str, value: &T) -> Result<String, String>
+where
+    T: Serialize + ?Sized,
+{
     let serialized = serde_json::to_string(value)
         .map_err(|error| format!("{name} serialization failed before hashing: {error}"))?;
     Ok(hash_text(&serialized))
+}
+
+fn hash_json_value(name: &str, value: &Value) -> Result<String, String> {
+    hash_json_serializable(name, value)
 }
 
 fn memory_drift_json_artifact_error(
@@ -163,6 +170,28 @@ fn hash_json_artifact_reader(name: &str, mut reader: impl Read) -> Result<String
     hash_json_value(name, &value).map_err(|error| {
         memory_drift_json_artifact_error("memory_drift_json_hash_failed", name, "hashing", error)
     })
+}
+
+fn hash_json_artifact_serializable<T>(name: &str, value: &T) -> Result<String, DomainError>
+where
+    T: Serialize + ?Sized,
+{
+    hash_json_serializable(name, value).map_err(|error| {
+        memory_drift_json_artifact_error("memory_drift_json_hash_failed", name, "hashing", error)
+    })
+}
+
+struct SerializationFailure;
+
+impl Serialize for SerializationFailure {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom(
+            "forced memory-drift hash serialization failure",
+        ))
+    }
 }
 
 fn hash_file(path: &Path) -> Result<String, String> {
@@ -265,6 +294,58 @@ fn memory_drift_hashing_emits_error_envelope_for_malformed_json_artifact() -> Te
     ensure(
         !message.contains("blake3:"),
         format!("malformed JSON must fail before producing a hash, got: {message}"),
+    )
+}
+
+#[test]
+fn memory_drift_hashing_emits_error_envelope_for_json_hash_serialization_failure() -> TestResult {
+    let error = hash_json_artifact_serializable("changedReport", &SerializationFailure)
+        .expect_err("serialization failure must fail in the hashing stage");
+    let envelope_text = error_response_json(&error);
+    let envelope: Value = serde_json::from_str(&envelope_text).map_err(|error| {
+        format!(
+            "serialization failure error envelope must be JSON: {error}; envelope={envelope_text}"
+        )
+    })?;
+    ensure_equal(
+        envelope.pointer("/schema").and_then(Value::as_str),
+        Some("ee.error.v2"),
+        "serialization failure error envelope schema",
+    )?;
+    ensure_equal(
+        envelope.pointer("/error/code").and_then(Value::as_str),
+        Some("memory_drift_json_hash_failed"),
+        "serialization failure error code",
+    )?;
+    ensure_equal(
+        envelope
+            .pointer("/error/details/artifact")
+            .and_then(Value::as_str),
+        Some("changedReport"),
+        "serialization failure artifact detail",
+    )?;
+    ensure_equal(
+        envelope
+            .pointer("/error/details/stage")
+            .and_then(Value::as_str),
+        Some("hashing"),
+        "serialization failure stage detail",
+    )?;
+    let message = envelope
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("serialization failure envelope missing message: {envelope}"))?;
+    ensure(
+        message.contains("changedReport serialization failed before hashing"),
+        format!("serialization failure error should name the hash path, got: {message}"),
+    )?;
+    ensure(
+        message.contains("forced memory-drift hash serialization failure"),
+        format!("serialization failure error should preserve the serializer error, got: {message}"),
+    )?;
+    ensure(
+        !message.contains("blake3:"),
+        format!("serialization failure must fail before producing a hash, got: {message}"),
     )
 }
 
