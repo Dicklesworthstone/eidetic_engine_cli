@@ -444,7 +444,7 @@ pub fn confirm_cosine_similarity(
     candidate_embedding: &[f32],
     floor: f32,
 ) -> Option<CosineConfirmation> {
-    if !floor.is_finite() {
+    if !floor.is_finite() || !(0.0..=1.0).contains(&floor) {
         return None;
     }
     let similarity = cosine_similarity(query_embedding, candidate_embedding)?;
@@ -1013,5 +1013,11 @@ mod tests {
     #[test]
     fn cosine_confirmation_non_finite_floor_is_not_confirmable() {
         assert_eq!(confirm_cosine_similarity(&[1.0], &[1.0], f32::NAN), None);
+    }
+
+    #[test]
+    fn cosine_confirmation_out_of_range_floor_is_not_confirmable() {
+        assert_eq!(confirm_cosine_similarity(&[1.0], &[-1.0], -1.0), None);
+        assert_eq!(confirm_cosine_similarity(&[1.0], &[1.0], 1.01), None);
     }
 }
