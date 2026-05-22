@@ -101,7 +101,7 @@ pub fn fix_wal_checkpoint_pending(workspace_root: &Path) -> FixerDispatch {
         op: Op::RunWalCheckpoint {
             mode: "truncate".to_string(),
             steps: vec![
-                "ee db checkpoint --mode truncate".to_string(),
+                "ee maintenance wal-checkpoint --workspace . --mode truncate --json".to_string(),
                 "Verify `.ee/ee.db-wal` shrinks back to the truncation floor.".to_string(),
             ],
         },
@@ -110,7 +110,7 @@ pub fn fix_wal_checkpoint_pending(workspace_root: &Path) -> FixerDispatch {
 
 /// FM-SM-01: schema_migrations table reports a version below the binary's
 /// canonical target. Auto-fix dispatches a pending-migration plan; the
-/// existing `ee db migrate` command performs the actual mutation under
+/// existing `ee migrate run` command performs the actual mutation under
 /// the schema-version actor.
 #[must_use]
 pub fn fix_schema_migration_pending(
@@ -124,7 +124,7 @@ pub fn fix_schema_migration_pending(
         op: Op::RunMigration {
             target_version: target_version.into(),
             steps: vec![
-                "ee db migrate".to_string(),
+                "ee migrate run --workspace . --json".to_string(),
                 "Confirm schema_migrations.version matches the binary's MIGRATIONS::TARGET."
                     .to_string(),
             ],
@@ -337,10 +337,18 @@ mod tests {
     #[test]
     fn wal_checkpoint_pending_dispatches_run_wal_checkpoint() {
         let dispatch = fix_wal_checkpoint_pending(&root());
-        let Op::RunWalCheckpoint { ref mode, .. } = dispatch.op else {
+        let Op::RunWalCheckpoint {
+            ref mode,
+            ref steps,
+        } = dispatch.op
+        else {
             panic!("expected RunWalCheckpoint");
         };
         assert_eq!(mode, "truncate");
+        assert_eq!(
+            steps[0],
+            "ee maintenance wal-checkpoint --workspace . --mode truncate --json"
+        );
         assert_eq!(dispatch.op.kind_str(), "run_wal_checkpoint");
     }
 
@@ -348,12 +356,14 @@ mod tests {
     fn schema_migration_pending_dispatches_run_migration() {
         let dispatch = fix_schema_migration_pending(&root(), "V099");
         let Op::RunMigration {
-            ref target_version, ..
+            ref target_version,
+            ref steps,
         } = dispatch.op
         else {
             panic!("expected RunMigration");
         };
         assert_eq!(target_version, "V099");
+        assert_eq!(steps[0], "ee migrate run --workspace . --json");
         assert_eq!(dispatch.severity, "error");
     }
 
