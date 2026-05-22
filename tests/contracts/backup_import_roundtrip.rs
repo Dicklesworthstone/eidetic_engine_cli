@@ -216,6 +216,80 @@ fn records_contract_projection(records_path: &Path) -> Result<Vec<String>, Strin
         .collect()
 }
 
+fn expected_memory_projection(
+    redaction_level: RedactionLevel,
+    level: &str,
+    kind: &str,
+    content: &str,
+) -> String {
+    let exported_content = if redaction_level == RedactionLevel::Paranoid {
+        "[REDACTED]"
+    } else {
+        content
+    };
+    format!(
+        "memory|level={level}|kind={kind}|content={exported_content}|trustClass=human_explicit|redacted={}",
+        redaction_level != RedactionLevel::None
+    )
+}
+
+fn expected_tag_projection(redaction_level: RedactionLevel, tag: &str) -> String {
+    let exported_tag = if redaction_level == RedactionLevel::Paranoid {
+        let digest = blake3::hash(tag.as_bytes()).to_hex().to_string();
+        format!("tag_{}", &digest[..16])
+    } else {
+        tag.to_string()
+    };
+    format!("tag|tag={exported_tag}")
+}
+
+fn expected_db_domain_records_projection(redaction_level: RedactionLevel) -> Vec<String> {
+    vec![
+        format!(
+            "header|schema=ee.export.header.v1|formatVersion=1|scope=all|redaction={}|importSource=native|trustLevel=validated",
+            redaction_level.as_str()
+        ),
+        "workspace|schema=ee.export.workspace.v1|hasName=true".to_string(),
+        expected_memory_projection(
+            redaction_level,
+            "procedural",
+            "rule",
+            "Run cargo fmt --check before cutting a release.",
+        ),
+        expected_tag_projection(redaction_level, "formatting"),
+        expected_tag_projection(redaction_level, "release"),
+        expected_memory_projection(
+            redaction_level,
+            "semantic",
+            "decision",
+            "Adopt asupersync as the runtime substrate.",
+        ),
+        expected_tag_projection(redaction_level, "adr"),
+        expected_tag_projection(redaction_level, "runtime"),
+        expected_memory_projection(
+            redaction_level,
+            "episodic",
+            "failure",
+            "Release blocked when cargo test was skipped before tagging.",
+        ),
+        expected_tag_projection(redaction_level, "incident"),
+        expected_tag_projection(redaction_level, "release"),
+        expected_memory_projection(
+            redaction_level,
+            "semantic",
+            "fact",
+            "Memory ranking uses BLAKE3 of canonical content for dedupe.",
+        ),
+        expected_tag_projection(redaction_level, "blake3"),
+        expected_tag_projection(redaction_level, "dedupe"),
+        "audit|operation=memory.create|targetType=memory".to_string(),
+        "audit|operation=memory.create|targetType=memory".to_string(),
+        "audit|operation=memory.create|targetType=memory".to_string(),
+        "audit|operation=memory.create|targetType=memory".to_string(),
+        "footer|totalRecords=18|memoryRecords=4|linkRecords=0|tagRecords=8|auditRecords=4|success=true".to_string(),
+    ]
+}
+
 struct RoundtripFixture {
     _src_dir: TempDir,
     _dst_dir: TempDir,
@@ -572,6 +646,39 @@ fn backup_report_artifacts_match_written_files() -> TestResult {
 }
 
 #[test]
+fn backup_records_jsonl_golden_shape_covers_all_redaction_levels() -> TestResult {
+    let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
+    let src_workspace = src_dir.path().to_path_buf();
+    let src_db = src_workspace.join(".ee").join("ee.db");
+    build_source_workspace(&src_workspace, &src_db)?;
+
+    for redaction_level in RedactionLevel::all() {
+        let backup_dir = tempfile::tempdir()
+            .map_err(|error| format!("backup tempdir for `{redaction_level}`: {error}"))?;
+        let report = create_backup(&BackupCreateOptions {
+            workspace_path: src_workspace.clone(),
+            database_path: Some(src_db.clone()),
+            output_dir: Some(backup_dir.path().to_path_buf()),
+            label: Some(format!("golden-shape-{redaction_level}")),
+            redaction_level: *redaction_level,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        })
+        .map_err(|error| format!("backup for `{redaction_level}`: {error:?}"))?;
+
+        let actual = records_contract_projection(Path::new(&report.records_path))?;
+        let expected = expected_db_domain_records_projection(*redaction_level);
+        if actual != expected {
+            return Err(format!(
+                "backup records.jsonl golden projection drifted for `{redaction_level}`:\nexpected: {expected:#?}\nactual:   {actual:#?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
     let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
     let src_workspace = src_dir.path().to_path_buf();
@@ -611,27 +718,7 @@ fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
             report.memory_count, report.link_count, report.tag_count, report.audit_count
         ));
     }
-    let expected = vec![
-        "header|schema=ee.export.header.v1|formatVersion=1|scope=all|redaction=none|importSource=native|trustLevel=validated",
-        "workspace|schema=ee.export.workspace.v1|hasName=true",
-        "memory|level=procedural|kind=rule|content=Run cargo fmt --check before cutting a release.|trustClass=human_explicit|redacted=false",
-        "tag|tag=formatting",
-        "tag|tag=release",
-        "memory|level=semantic|kind=decision|content=Adopt asupersync as the runtime substrate.|trustClass=human_explicit|redacted=false",
-        "tag|tag=adr",
-        "tag|tag=runtime",
-        "memory|level=episodic|kind=failure|content=Release blocked when cargo test was skipped before tagging.|trustClass=human_explicit|redacted=false",
-        "tag|tag=incident",
-        "tag|tag=release",
-        "memory|level=semantic|kind=fact|content=Memory ranking uses BLAKE3 of canonical content for dedupe.|trustClass=human_explicit|redacted=false",
-        "tag|tag=blake3",
-        "tag|tag=dedupe",
-        "audit|operation=memory.create|targetType=memory",
-        "audit|operation=memory.create|targetType=memory",
-        "audit|operation=memory.create|targetType=memory",
-        "audit|operation=memory.create|targetType=memory",
-        "footer|totalRecords=18|memoryRecords=4|linkRecords=0|tagRecords=8|auditRecords=4|success=true",
-    ];
+    let expected = expected_db_domain_records_projection(RedactionLevel::None);
     if actual != expected {
         return Err(format!(
             "backup records.jsonl golden projection drifted:\nexpected: {expected:#?}\nactual:   {actual:#?}"
