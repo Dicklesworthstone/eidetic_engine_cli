@@ -1783,14 +1783,15 @@ mod tests {
     }
 
     #[test]
-    fn read_capped_pipe_accepts_exact_limit_payload() {
+    fn read_capped_pipe_accepts_exact_limit_payload() -> Result<(), String> {
         use super::read_capped_pipe;
         use std::io::Cursor;
 
         let bytes = read_capped_pipe(Cursor::new(vec![b'x'; 8]), "stdout", 8)
-            .expect("cap-sized pipe payload should decode");
+            .map_err(|error| format!("cap-sized pipe payload should decode: {error}"))?;
 
         assert_eq!(bytes.len(), 8);
+        Ok(())
     }
 
     #[test]
