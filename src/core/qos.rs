@@ -277,7 +277,7 @@ impl QosLaneRecord {
             .budget_label
             .and_then(non_empty)
             .map(ToOwned::to_owned);
-        let deadline_epoch_ms = input.started_at_epoch_ms.saturating_add(input.ttl_ms);
+        let deadline_epoch_ms = qos_deadline_epoch_ms(input.started_at_epoch_ms, input.ttl_ms);
         let record_id = record_id(
             &workspace_hash,
             input.lane,
@@ -306,6 +306,13 @@ impl QosLaneRecord {
     #[must_use]
     pub const fn is_stale_at(&self, now_epoch_ms: u64) -> bool {
         self.deadline_epoch_ms <= now_epoch_ms
+    }
+}
+
+const fn qos_deadline_epoch_ms(started_at_epoch_ms: u64, ttl_ms: u64) -> u64 {
+    match started_at_epoch_ms.checked_add(ttl_ms) {
+        Some(deadline) => deadline,
+        None => started_at_epoch_ms,
     }
 }
 
@@ -884,6 +891,31 @@ mod tests {
         assert!(json.contains("\"requestHash\""));
         assert!(json.contains("\"workspaceHash\""));
         assert_eq!(record.deadline_epoch_ms, 1_100);
+        Ok(())
+    }
+
+    #[test]
+    fn lane_record_deadline_overflow_expires_immediately() -> TestResult {
+        let mut input = record_input(
+            QosLane::ForegroundRead,
+            "context",
+            "overflowing foreground lane",
+            u64::MAX - 5,
+        );
+        input.ttl_ms = 10;
+
+        let record = QosLaneRecord::from_input(&input);
+        assert_eq!(record.deadline_epoch_ms, input.started_at_epoch_ms);
+        assert!(record.is_stale_at(input.started_at_epoch_ms));
+
+        let summary = summarize_qos_records(
+            "workspace-hash".to_owned(),
+            vec![record],
+            input.started_at_epoch_ms,
+        );
+        assert_eq!(summary.active_records.len(), 0);
+        assert_eq!(summary.foreground_active_count, 0);
+        assert_eq!(summary.stale_ignored_count, 1);
         Ok(())
     }
 
