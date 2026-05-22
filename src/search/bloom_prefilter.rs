@@ -7,7 +7,7 @@ const DEFAULT_FALSE_POSITIVE_RATE: f64 = 0.01;
 /// Counting Bloom filter used by the SRR4 negation prefilter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CountingBloomPrefilter {
-    counters: Vec<u8>,
+    counters: Vec<usize>,
     values: BTreeMap<String, usize>,
     hash_count: usize,
     inserted: usize,
@@ -26,12 +26,16 @@ impl CountingBloomPrefilter {
     }
 
     pub fn insert(&mut self, value: &str) {
+        let count = self.values.entry(value.to_owned()).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count > 1 {
+            return;
+        }
+
         let indexes = self.indexes(value);
         for index in indexes {
-            let counter = &mut self.counters[index];
-            *counter = counter.saturating_add(1);
+            self.counters[index] = self.counters[index].saturating_add(1);
         }
-        *self.values.entry(value.to_owned()).or_insert(0) += 1;
         self.inserted = self.inserted.saturating_add(1);
     }
 
@@ -40,14 +44,14 @@ impl CountingBloomPrefilter {
             return false;
         };
         *count -= 1;
-        if *count == 0 {
-            self.values.remove(value);
+        if *count > 0 {
+            return true;
         }
+        self.values.remove(value);
 
         let indexes = self.indexes(value);
         for index in indexes {
-            let counter = &mut self.counters[index];
-            *counter = counter.saturating_sub(1);
+            self.counters[index] = self.counters[index].saturating_sub(1);
         }
         self.inserted = self.inserted.saturating_sub(1);
         true
@@ -162,6 +166,25 @@ mod tests {
         assert!(filter.remove("archived"));
         assert!(filter.definitely_absent("archived"));
         assert!(!filter.remove("archived"));
+    }
+
+    #[test]
+    fn duplicate_insert_does_not_saturate_counters_into_false_negative() {
+        let mut filter = CountingBloomPrefilter::with_capacity(1);
+        for _ in 0..300 {
+            filter.insert("archived");
+        }
+
+        for _ in 0..299 {
+            assert!(filter.remove("archived"));
+        }
+        assert!(
+            filter.might_contain("archived"),
+            "logical duplicate still present after all but one remove"
+        );
+
+        assert!(filter.remove("archived"));
+        assert!(filter.definitely_absent("archived"));
     }
 
     #[test]
