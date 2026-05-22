@@ -3,7 +3,9 @@
 //! This test runs the real `ee` binary against an isolated workspace, writes
 //! every command result to structured JSONL, and asserts that the durable
 //! FrankenSQLite database plus Frankensearch-derived index can support
-//! init -> remember -> search -> context -> why without mocks.
+//! init -> remember -> search -> context -> why -> outcome -> workflow close
+//! without mocks, plus a real CASS subprocess import path driven by an
+//! absolute stub `cass` binary.
 
 use serde::Serialize;
 use serde_json::{Value as JsonValue, json};
@@ -77,10 +79,35 @@ struct SummaryEvent {
     index_metadata_path: String,
     rule_memory_id: String,
     failure_memory_id: String,
+    outcome_event_id: String,
+    workflow_id: String,
+    workflow_audit_ids: Vec<String>,
+    test_event_log_path: String,
     pack_hash: String,
     pack_ledger_hashes: Vec<String>,
     pack_ledger_pack_ids: Vec<String>,
     context_item_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestEvent {
+    schema: &'static str,
+    ts: String,
+    test_id: &'static str,
+    kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stdout_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stderr_excerpt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ms: Option<f64>,
+    fields: JsonValue,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +179,112 @@ where
         .map_err(|error| format!("failed to serialize JSONL event: {error}"))?;
     file.write_all(b"\n")
         .map_err(|error| format!("failed to write JSONL newline: {error}"))
+}
+
+fn test_event_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn blake3_hash_field(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
+}
+
+fn write_test_event_log_from_command_events(
+    source_log_path: &Path,
+    test_log_path: &Path,
+    scenario_id: &'static str,
+    command_count: usize,
+) -> TestResult {
+    let source_text = fs::read_to_string(source_log_path).map_err(|error| {
+        format!(
+            "failed to read command JSONL log {}: {error}",
+            source_log_path.display()
+        )
+    })?;
+    let command_lines = source_text.lines().take(command_count).collect::<Vec<_>>();
+    ensure_equal(
+        &command_lines.len(),
+        &command_count,
+        "command event source count for ee.test_event.v1 log",
+    )?;
+    for (index, line) in command_lines.iter().enumerate() {
+        let event: JsonValue = serde_json::from_str(line).map_err(|error| {
+            format!("command event {index} must parse before ee.test_event.v1 conversion: {error}")
+        })?;
+        let stdout = event
+            .get("stdout")
+            .and_then(JsonValue::as_str)
+            .unwrap_or_default();
+        let stderr_excerpt = event
+            .get("stderr")
+            .and_then(JsonValue::as_str)
+            .map(|stderr| redact_secret_like_content(stderr).content)
+            .unwrap_or_default();
+        let args = event
+            .get("args")
+            .and_then(JsonValue::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(JsonValue::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let test_event = TestEvent {
+            schema: "ee.test_event.v1",
+            ts: test_event_timestamp(),
+            test_id: scenario_id,
+            kind: "command_end",
+            command: Some("ee".to_owned()),
+            args: Some(args),
+            stdout_hash: Some(blake3_hash_field(stdout.as_bytes())),
+            stderr_excerpt: Some(stderr_excerpt),
+            exit_code: event
+                .get("exitCode")
+                .and_then(JsonValue::as_i64)
+                .and_then(|code| i32::try_from(code).ok()),
+            elapsed_ms: event.get("elapsedMs").and_then(JsonValue::as_f64),
+            fields: json!({
+                "step": event.get("step").cloned().unwrap_or(JsonValue::Null),
+                "workspace": event.get("workspace").cloned().unwrap_or(JsonValue::Null),
+                "stdout_artifact_path": event
+                    .get("stdoutArtifactPath")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null),
+                "stderr_artifact_path": event
+                    .get("stderrArtifactPath")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null),
+                "stdout_schema": event.get("stdoutSchema").cloned().unwrap_or(JsonValue::Null),
+                "schema_validation_status": event
+                    .get("schemaValidationStatus")
+                    .cloned()
+                    .unwrap_or(JsonValue::Null),
+                "first_failure": event.get("firstFailure").cloned().unwrap_or(JsonValue::Null),
+            }),
+        };
+        append_jsonl(test_log_path, &test_event)?;
+    }
+    append_jsonl(
+        test_log_path,
+        &TestEvent {
+            schema: "ee.test_event.v1",
+            ts: test_event_timestamp(),
+            test_id: scenario_id,
+            kind: "note",
+            command: None,
+            args: None,
+            stdout_hash: None,
+            stderr_excerpt: None,
+            exit_code: None,
+            elapsed_ms: None,
+            fields: json!({
+                "message": "phase3_no_mocks_memory_loop_complete",
+                "command_count": command_count,
+            }),
+        },
+    )
 }
 
 fn sanitize_step_name(name: &str) -> String {
@@ -1357,34 +1490,6 @@ fn run_swarm_brief_case(
 }
 
 #[cfg(unix)]
-fn real_cass_binary_path() -> Result<PathBuf, String> {
-    if let Some(path) = env::var_os("EE_CASS_BINARY") {
-        let path = PathBuf::from(path);
-        ensure(
-            path.is_absolute(),
-            format!("EE_CASS_BINARY must be absolute for no-mocks CASS e2e: {path:?}"),
-        )?;
-        ensure(
-            path.file_name().and_then(|name| name.to_str()) == Some("cass"),
-            format!("EE_CASS_BINARY must point to a real cass executable: {path:?}"),
-        )?;
-        ensure(path.is_file(), format!("cass binary not found: {path:?}"))?;
-        return path.canonicalize().map_err(|error| error.to_string());
-    }
-
-    if let Some(path) = env::var_os("PATH") {
-        for dir in env::split_paths(&path) {
-            let candidate = dir.join("cass");
-            if candidate.is_file() {
-                return candidate.canonicalize().map_err(|error| error.to_string());
-            }
-        }
-    }
-
-    Err("real cass binary not found on PATH".to_owned())
-}
-
-#[cfg(unix)]
 fn path_with_binary_parent(binary: &Path) -> Result<OsString, String> {
     let parent = binary
         .parent()
@@ -1456,6 +1561,97 @@ fn write_codex_cass_fixture_session(
     }
     write_text(&session_path, &jsonl)?;
     Ok(session_path)
+}
+
+#[cfg(unix)]
+struct StubCassPaths {
+    binary: PathBuf,
+    sessions_json: PathBuf,
+    view_jsonl: PathBuf,
+    invocation_log: PathBuf,
+}
+
+#[cfg(unix)]
+fn write_stub_cass_binary(
+    binary_dir: &Path,
+    payload_dir: &Path,
+    session_path: &Path,
+    workspace: &Path,
+) -> Result<StubCassPaths, String> {
+    fs::create_dir_all(binary_dir).map_err(|error| error.to_string())?;
+    fs::set_permissions(binary_dir, fs::Permissions::from_mode(0o755))
+        .map_err(|error| format!("failed to set stub cass dir permissions: {error}"))?;
+    fs::create_dir_all(payload_dir).map_err(|error| error.to_string())?;
+
+    let sessions_json = payload_dir.join("cass-sessions.json");
+    let view_jsonl = payload_dir.join("cass-view.jsonl");
+    let invocation_log = payload_dir.join("cass-invocations.log");
+    let session_arg = session_path.display().to_string();
+    let workspace_arg = workspace.display().to_string();
+    let sessions_payload = json!({
+        "sessions": [{
+            "path": session_arg,
+            "agent": "codex",
+            "workspace": workspace_arg,
+            "started_at": "2026-05-06T03:40:00Z",
+            "ended_at": "2026-05-06T03:40:02Z",
+            "message_count": 3,
+            "token_count": 42
+        }]
+    });
+    write_text(
+        &sessions_json,
+        &(serde_json::to_string(&sessions_payload).map_err(|error| error.to_string())? + "\n"),
+    )?;
+
+    let session_text = fs::read_to_string(session_path)
+        .map_err(|error| format!("failed to read fixture session: {error}"))?;
+    let mut view_payload = String::new();
+    for (index, content) in session_text.lines().enumerate() {
+        let line = json!({
+            "line": index + 1,
+            "content": content,
+        });
+        view_payload.push_str(&serde_json::to_string(&line).map_err(|error| error.to_string())?);
+        view_payload.push('\n');
+    }
+    write_text(&view_jsonl, &view_payload)?;
+
+    let binary = binary_dir.join("cass");
+    write_text(
+        &binary,
+        r#"#!/bin/sh
+if [ -n "${CASS_STUB_INVOCATION_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$CASS_STUB_INVOCATION_LOG"
+fi
+case "${1:-}" in
+  index)
+    printf '{"success":true,"conversations":1}\n'
+    ;;
+  sessions)
+    cat "$CASS_STUB_SESSIONS_JSON"
+    ;;
+  view)
+    cat "$CASS_STUB_VIEW_JSONL"
+    ;;
+  *)
+    printf 'unexpected cass stub command: %s\n' "$*" >&2
+    exit 64
+    ;;
+esac
+"#,
+    )?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o555))
+        .map_err(|error| format!("failed to set stub cass executable permissions: {error}"))?;
+
+    Ok(StubCassPaths {
+        binary: binary
+            .canonicalize()
+            .map_err(|error| format!("failed to canonicalize stub cass binary: {error}"))?,
+        sessions_json,
+        view_jsonl,
+        invocation_log,
+    })
 }
 
 #[cfg(unix)]
@@ -2317,9 +2513,19 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
     fs::create_dir_all(&codex_home).map_err(|error| error.to_string())?;
     fs::create_dir_all(&cass_data_dir).map_err(|error| error.to_string())?;
 
-    let cass_binary = real_cass_binary_path()?;
-    let cass_path = path_with_binary_parent(&cass_binary)?;
     let session_path = write_codex_cass_fixture_session(&codex_home, &workspace)?;
+    let cass_stub_dir = tempfile::Builder::new()
+        .prefix("ee-cass-stub-bin-")
+        .tempdir()
+        .map_err(|error| format!("failed to create CASS stub dir: {error}"))?;
+    let stub_cass = write_stub_cass_binary(
+        cass_stub_dir.path(),
+        &log_dir.join("cass-stub-payloads"),
+        &session_path,
+        &workspace,
+    )?;
+    let cass_binary = stub_cass.binary.clone();
+    let cass_path = path_with_binary_parent(&cass_binary)?;
     let workspace_arg = workspace.display().to_string();
     let database_path = workspace.join(".ee").join("ee.db");
     let database_arg = database_path.display().to_string();
@@ -2334,6 +2540,18 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
         ("CASS_INDEX_NO_PROGRESS_EVENTS", OsString::from("1")),
         ("NO_COLOR", OsString::from("1")),
         ("EE_CASS_BINARY", cass_binary.as_os_str().to_owned()),
+        (
+            "CASS_STUB_SESSIONS_JSON",
+            stub_cass.sessions_json.as_os_str().to_owned(),
+        ),
+        (
+            "CASS_STUB_VIEW_JSONL",
+            stub_cass.view_jsonl.as_os_str().to_owned(),
+        ),
+        (
+            "CASS_STUB_INVOCATION_LOG",
+            stub_cass.invocation_log.as_os_str().to_owned(),
+        ),
         ("PATH", cass_path),
     ];
 
@@ -2562,6 +2780,20 @@ fn no_mocks_import_cass_fixture_sessions_stores_spans_and_searches() -> TestResu
                 .is_some_and(|doc_id| doc_id.eq(stored_session_id.as_str()))
         }),
         "search must retrieve the imported CASS session document",
+    )?;
+    let stub_invocations =
+        fs::read_to_string(&stub_cass.invocation_log).map_err(|error| error.to_string())?;
+    ensure(
+        stub_invocations
+            .lines()
+            .any(|line| line.starts_with("sessions ")),
+        "CASS stub must be invoked for sessions through a real subprocess",
+    )?;
+    ensure(
+        stub_invocations
+            .lines()
+            .any(|line| line.starts_with("view ")),
+        "CASS stub must be invoked for view through a real subprocess",
     )?;
 
     Ok(())
@@ -4231,13 +4463,15 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
 }
 
 #[test]
-fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> TestResult {
+fn no_mocks_init_remember_search_context_why_outcome_close_with_jsonl_command_events() -> TestResult
+{
     let scenario_id = "phase3_no_mocks_memory_loop";
     let log_dir = unique_log_dir(scenario_id)?;
     let artifact_dir = log_dir.join("artifacts");
     fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("failed to create artifact dir: {error}"))?;
     let events_path = log_dir.join("commands.jsonl");
+    let test_events_path = log_dir.join("ee-test-events.jsonl");
 
     let workspace_temp = tempfile::Builder::new()
         .prefix("ee-no-mocks-workspace-")
@@ -4247,6 +4481,8 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
     let workspace_arg = workspace.display().to_string();
     let database_path = workspace.join(".ee").join("ee.db");
     let index_metadata_path = workspace.join(".ee").join("index").join("meta.json");
+    let workflow_id = "wf-phase3-no-mocks-memory-loop";
+    let outcome_event_id = "fb_00000000000000000000000001";
 
     let mut command_count = 0_usize;
 
@@ -4287,9 +4523,11 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
                 "--json".to_owned(),
                 "remember".to_owned(),
                 "--level".to_owned(),
-                "procedural".to_owned(),
+                "working".to_owned(),
                 "--kind".to_owned(),
                 "rule".to_owned(),
+                "--workflow".to_owned(),
+                workflow_id.to_owned(),
                 "--tags".to_owned(),
                 "release,verification".to_owned(),
                 "--source".to_owned(),
@@ -4515,6 +4753,142 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
         "why must explain retrieval confidence",
     )?;
 
+    let (_outcome_event, outcome_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "09_outcome",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "outcome".to_owned(),
+                rule_memory_id.clone(),
+                "--target-type".to_owned(),
+                "memory".to_owned(),
+                "--signal".to_owned(),
+                "helpful".to_owned(),
+                "--source-type".to_owned(),
+                "outcome_observed".to_owned(),
+                "--source-id".to_owned(),
+                "bd-jg063-no-mocks-loop".to_owned(),
+                "--reason".to_owned(),
+                "The remembered release rule guided the no-mocks E2E loop.".to_owned(),
+                "--event-id".to_owned(),
+                outcome_event_id.to_owned(),
+                "--actor".to_owned(),
+                "cod-core".to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_equal(
+        &outcome_json.pointer("/data/status"),
+        &Some(&json!("recorded")),
+        "outcome should record helpful feedback",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/target/id"),
+        &Some(&JsonValue::String(rule_memory_id.clone())),
+        "outcome should target the remembered rule",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/event/id"),
+        &Some(&json!(outcome_event_id)),
+        "outcome should persist the explicit feedback event id",
+    )?;
+    ensure_equal(
+        &outcome_json.pointer("/data/feedback/totalCount"),
+        &Some(&json!(1)),
+        "outcome should update durable feedback totals",
+    )?;
+
+    let (_workflow_close_event, workflow_close_json) = run_step(
+        scenario_id,
+        &events_path,
+        &artifact_dir,
+        &workspace,
+        StepSpec {
+            name: "10_workflow_close",
+            args: vec![
+                "--workspace".to_owned(),
+                workspace_arg.clone(),
+                "--json".to_owned(),
+                "workflow".to_owned(),
+                "close".to_owned(),
+                workflow_id.to_owned(),
+            ],
+            expected_exit_code: 0,
+            expected_schema: "ee.response.v2",
+            expect_clean_stderr: true,
+        },
+    )?;
+    command_count += 1;
+    ensure_equal(
+        &workflow_close_json.pointer("/data/workflow_id"),
+        &Some(&json!(workflow_id)),
+        "workflow close should echo workflow id",
+    )?;
+    ensure_equal(
+        &workflow_close_json.pointer("/data/promoted_count"),
+        &Some(&json!(1)),
+        "workflow close should promote the working rule",
+    )?;
+    ensure_equal(
+        &workflow_close_json.pointer("/data/promoted_memory_ids"),
+        &Some(&json!([rule_memory_id.clone()])),
+        "workflow close should report the promoted rule",
+    )?;
+    let workflow_audit_ids = json_string_vec(
+        &workflow_close_json,
+        "/data/audit_ids",
+        "workflow close audit ids",
+    )?;
+    ensure_equal(
+        &workflow_audit_ids.len(),
+        &1_usize,
+        "workflow close should persist one audit id",
+    )?;
+
+    write_test_event_log_from_command_events(
+        &events_path,
+        &test_events_path,
+        scenario_id,
+        command_count,
+    )?;
+    let test_events_text = fs::read_to_string(&test_events_path).map_err(|error| {
+        format!(
+            "failed to read ee.test_event.v1 log {}: {error}",
+            test_events_path.display()
+        )
+    })?;
+    let test_event_lines = test_events_text.lines().collect::<Vec<_>>();
+    ensure_equal(
+        &test_event_lines.len(),
+        &(command_count + 1),
+        "ee.test_event.v1 log count includes commands plus completion note",
+    )?;
+    for (index, line) in test_event_lines.iter().enumerate() {
+        let event: JsonValue = serde_json::from_str(line)
+            .map_err(|error| format!("ee.test_event.v1 event {index} must parse: {error}"))?;
+        ensure_equal(
+            &event.pointer("/schema"),
+            &Some(&json!("ee.test_event.v1")),
+            "structured test event schema",
+        )?;
+        ensure(
+            event.pointer("/ts").is_some()
+                && event.pointer("/test_id") == Some(&json!(scenario_id))
+                && event.pointer("/kind").is_some(),
+            "structured test event must include ts, test_id, and kind",
+        )?;
+    }
+
     append_jsonl(
         &events_path,
         &SummaryEvent {
@@ -4527,6 +4901,10 @@ fn no_mocks_init_remember_search_context_why_with_jsonl_command_events() -> Test
             index_metadata_path: index_metadata_path.display().to_string(),
             rule_memory_id,
             failure_memory_id,
+            outcome_event_id: outcome_event_id.to_owned(),
+            workflow_id: workflow_id.to_owned(),
+            workflow_audit_ids,
+            test_event_log_path: test_events_path.display().to_string(),
             pack_hash: first_pack_hash,
             pack_ledger_hashes,
             pack_ledger_pack_ids,

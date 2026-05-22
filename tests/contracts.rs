@@ -321,3 +321,6 @@ mod mesh_serve_mcp_degraded_code_catalog;
 
 #[path = "contracts/mesh_serve_mcp_envelope_mirror_guard.rs"]
 mod mesh_serve_mcp_envelope_mirror_guard;
+
+#[path = "contracts/pack_stream_conformance_v1.rs"]
+mod pack_stream_conformance_v1;
