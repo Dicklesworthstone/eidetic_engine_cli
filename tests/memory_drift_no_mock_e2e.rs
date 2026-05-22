@@ -7,12 +7,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use ee::db::{DbConnection, StoredMemory};
+use ee::models::DomainError;
+use ee::output::error_response_json;
 use ee::policy::redact_secret_like_content;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -122,6 +124,47 @@ fn hash_json_value(name: &str, value: &Value) -> Result<String, String> {
     Ok(hash_text(&serialized))
 }
 
+fn memory_drift_json_artifact_error(
+    code: &'static str,
+    name: &str,
+    stage: &'static str,
+    message: String,
+) -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code,
+        message,
+        repair: Some("Regenerate the memory drift JSON artifact before hashing it.".to_owned()),
+        details_json: json!({
+            "artifact": name,
+            "stage": stage,
+        })
+        .to_string(),
+    }
+}
+
+fn hash_json_artifact_reader(name: &str, mut reader: impl Read) -> Result<String, DomainError> {
+    let mut text = String::new();
+    reader.read_to_string(&mut text).map_err(|error| {
+        memory_drift_json_artifact_error(
+            "memory_drift_json_read_failed",
+            name,
+            "before_hashing",
+            format!("{name} JSON read failed before hashing: {error}"),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        memory_drift_json_artifact_error(
+            "memory_drift_malformed_json",
+            name,
+            "before_hashing",
+            format!("{name} JSON parse failed before hashing: {error}"),
+        )
+    })?;
+    hash_json_value(name, &value).map_err(|error| {
+        memory_drift_json_artifact_error("memory_drift_json_hash_failed", name, "hashing", error)
+    })
+}
+
 fn hash_file(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -172,6 +215,57 @@ fn run_ee(
         elapsed_ms,
         exit_code,
     })
+}
+
+#[test]
+fn memory_drift_hashing_emits_error_envelope_for_malformed_json_artifact() -> TestResult {
+    let malformed = br#"{"schema":"ee.memory_drift.report.v1","data":{"items":[}"#;
+    let error = hash_json_artifact_reader("changedReport", &malformed[..])
+        .expect_err("malformed JSON must fail before hashing");
+    let envelope_text = error_response_json(&error);
+    let envelope: Value = serde_json::from_str(&envelope_text).map_err(|error| {
+        format!("malformed JSON error envelope must be JSON: {error}; envelope={envelope_text}")
+    })?;
+    ensure_equal(
+        envelope.pointer("/schema").and_then(Value::as_str),
+        Some("ee.error.v2"),
+        "malformed JSON error envelope schema",
+    )?;
+    ensure_equal(
+        envelope.pointer("/error/code").and_then(Value::as_str),
+        Some("memory_drift_malformed_json"),
+        "malformed JSON error code",
+    )?;
+    ensure_equal(
+        envelope
+            .pointer("/error/details/artifact")
+            .and_then(Value::as_str),
+        Some("changedReport"),
+        "malformed JSON artifact detail",
+    )?;
+    ensure_equal(
+        envelope
+            .pointer("/error/details/stage")
+            .and_then(Value::as_str),
+        Some("before_hashing"),
+        "malformed JSON stage detail",
+    )?;
+    let message = envelope
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("malformed JSON envelope missing message: {envelope}"))?;
+    ensure(
+        message.contains("changedReport JSON parse failed before hashing"),
+        format!("malformed JSON error should name the fail-loud path, got: {message}"),
+    )?;
+    ensure(
+        message.contains("expected") || message.contains("line"),
+        format!("malformed JSON error should include parser context, got: {message}"),
+    )?;
+    ensure(
+        !message.contains("blake3:"),
+        format!("malformed JSON must fail before producing a hash, got: {message}"),
+    )
 }
 
 fn string_at(value: &Value, pointer: &str, context: &str) -> Result<String, String> {
