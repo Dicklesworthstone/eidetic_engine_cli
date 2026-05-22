@@ -25448,9 +25448,39 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.ensure_migration_table()?;
 
+        ensure(
+            connection.check_reference_integrity().is_err(),
+            "direct reference integrity check requires migrated reference tables",
+        )?;
         let report = connection.integrity_report()?;
         ensure(!report.is_healthy(), "database needs migration")?;
         ensure(report.needs_migration, "migration needed")?;
+        ensure(
+            report.integrity_check.passed,
+            "physical integrity still runs while migration is pending",
+        )?;
+        ensure(
+            report.foreign_key_check.passed,
+            "foreign key check still runs while migration is pending",
+        )?;
+        ensure(
+            report.reference_check.is_clean(),
+            "logical reference check is skipped while migration is pending",
+        )?;
+        ensure(
+            report.reference_check.issues.is_empty(),
+            "pending migration report has no logical reference issues",
+        )?;
+        ensure_equal(
+            &report.reference_check.issue_count,
+            &0,
+            "pending migration reference issue count",
+        )?;
+        ensure_equal(
+            &report.schema_version,
+            &None,
+            "pending migration schema version is absent until a migration is recorded",
+        )?;
 
         connection.close()?;
         Ok(())
