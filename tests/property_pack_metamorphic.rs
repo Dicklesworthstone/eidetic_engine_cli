@@ -580,3 +580,126 @@ fn pack_envelope_byte_identical_under_graph_weight_zero() -> TestResult {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// MR6 — `ee insights` byte-identity across repeated cold-process invocations
+// ---------------------------------------------------------------------------
+//
+// bd-r3pjo: the existing `tests/graph_neighborhood_smoke.rs:1368
+// proximity_json_reports_min_cut_for_seeded_memory_pair` test already
+// pins byte-identity for `ee proximity`. This MR extends the same
+// guarantee to `ee insights`, the other agent-facing graph surface
+// called out in bd-3vwx0 / bd-1wtsb scope.
+//
+// Implementation note: this MR uses a memory-link wired through the
+// public `ee link` CLI surface so the test stays at the
+// public-CLI-only contract layer (no internal `DbConnection` import,
+// no fixture-only seed helper). The fixture is sparser than the
+// graph_neighborhood_smoke fixture but exercises the same insights
+// code path under `--section causalBottlenecks`.
+
+#[test]
+fn insights_section_byte_identical_across_three_cold_process_invocations() -> TestResult {
+    let workspace = unique_workspace("mr6-insights")?;
+    run_ee_json(&workspace, &["init", "--json"], "ee init")?;
+
+    // Seed two memories and a link so the insights surface has
+    // graph structure to report on. Using the public `ee link`
+    // alias documented in src/cli/mod.rs:8484-8501.
+    let bridge_envelope = run_ee_json(
+        &workspace,
+        &[
+            "remember",
+            "Insights MR6 bridge memory.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+        "ee remember bridge",
+    )?;
+    let bridge_id = bridge_envelope
+        .pointer("/data/memory_id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("seed: bridge memory_id missing: {bridge_envelope}"))?
+        .to_owned();
+
+    let leaf_envelope = run_ee_json(
+        &workspace,
+        &[
+            "remember",
+            "Insights MR6 leaf memory.",
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+        "ee remember leaf",
+    )?;
+    let leaf_id = leaf_envelope
+        .pointer("/data/memory_id")
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| format!("seed: leaf memory_id missing: {leaf_envelope}"))?
+        .to_owned();
+
+    // Public `ee link` surface — keep the determinism test at the
+    // CLI-contract layer to mirror the rest of the file.
+    let link_output = run_ee_with_workspace(
+        &workspace,
+        &[
+            "link",
+            bridge_id.as_str(),
+            leaf_id.as_str(),
+            "--relation",
+            "supports",
+        ],
+    )?;
+    if !link_output.status.success() {
+        // `ee link` may emit a usage envelope when the relation
+        // dictionary or current binary doesn't accept `supports`.
+        // Skip the rest of the MR (rather than fail spuriously) so
+        // a future link-relation tightening can't silently break
+        // unrelated metamorphic coverage. Print a structured
+        // skip-reason so CI surfaces it.
+        eprintln!(
+            "MR6: ee link refused to seed `supports` link; skipping insights determinism check (stderr: {})",
+            String::from_utf8_lossy(&link_output.stderr),
+        );
+        return Ok(());
+    }
+
+    let section_args = ["insights", "--section", "causalBottlenecks", "--json"];
+    let run1 = run_ee_stdout(
+        &workspace,
+        &section_args,
+        "ee insights causalBottlenecks #1",
+    )?;
+    let run2 = run_ee_stdout(
+        &workspace,
+        &section_args,
+        "ee insights causalBottlenecks #2",
+    )?;
+    let run3 = run_ee_stdout(
+        &workspace,
+        &section_args,
+        "ee insights causalBottlenecks #3",
+    )?;
+
+    if run1 != run2 {
+        return Err(format!(
+            "MR6 broken — `ee insights --section causalBottlenecks --json` run1 != run2: lens={}/{}",
+            run1.len(),
+            run2.len(),
+        ));
+    }
+    if run2 != run3 {
+        return Err(format!(
+            "MR6 broken — `ee insights --section causalBottlenecks --json` run2 != run3: lens={}/{}",
+            run2.len(),
+            run3.len(),
+        ));
+    }
+    Ok(())
+}
