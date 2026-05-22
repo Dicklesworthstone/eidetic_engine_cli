@@ -856,6 +856,89 @@ impl CommandEffect {
         }
     }
 
+    /// Create the schema-migration effect entry.
+    #[must_use]
+    pub fn schema_migration_run() -> Self {
+        Self {
+            command_path: "migrate run",
+            default_effect: EffectClass::DurableMemoryWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::Idempotent,
+            write_surfaces: WriteSurfaces {
+                db_tables: vec![
+                    "ee_schema_migrations",
+                    "memories",
+                    "search_index_jobs",
+                    "audit_log",
+                ],
+                derived_paths: vec![".ee/index/"],
+                workspace_files: Vec::new(),
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::AuditedMutation,
+                transaction_scope: Some(
+                    "ordered schema migrations plus post-migration backfill/index audit",
+                ),
+                idempotency_key: Some("database path plus compiled migration checksums"),
+                audit_surface: Some("ee_schema_migrations and audit_log"),
+                db_generation_effect: "advances schema migration state and any migration-owned rows on commit",
+                index_generation_effect: "post-migration index rebuild may refresh derived index generation",
+                dry_run_behavior: Some(
+                    "--dry-run reports pending migrations and backfill/index plans without mutation",
+                ),
+                recovery_behavior: "migration transaction rollback leaves unapplied versions pending for retry",
+                no_overwrite_behavior: None,
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::transactional(),
+            requires_read_snapshot: false,
+            requires_audit: true,
+            description: "Apply pending schema migrations and post-migration repair work",
+        }
+    }
+
+    /// Create the shard fan-out migration effect entry.
+    #[must_use]
+    pub fn shard_fanout_migration() -> Self {
+        Self {
+            command_path: "migrate shard-fanout",
+            default_effect: EffectClass::WorkspaceFileWrite,
+            dry_run_effect: Some(EffectClass::ReadOnly),
+            idempotency: IdempotencyClass::DryRunAvailable,
+            write_surfaces: WriteSurfaces {
+                db_tables: vec!["shard catalog", "workspace shard databases", "audit_log"],
+                derived_paths: Vec::new(),
+                workspace_files: vec![
+                    "<shards-dir>/catalog.db",
+                    "<shards-dir>/<workspace-shard>.db",
+                    "<source-db>.pre-shard-fanout",
+                ],
+            },
+            mutation_contract: CommandMutationContract {
+                side_effect_class: SideEffectClass::AuditedMutation,
+                transaction_scope: Some(
+                    "preserve source database, copy workspace rows, then write shard catalog",
+                ),
+                idempotency_key: Some("source database hash plus shard fan-out plan"),
+                audit_surface: Some("shard migration audit rows"),
+                db_generation_effect: "source DB generation is preserved; shard catalog and workspace shard DBs advance",
+                index_generation_effect: "none",
+                dry_run_behavior: Some(
+                    "--dry-run reports the shard plan and blockers without writing shard files",
+                ),
+                recovery_behavior: "preserved source copy and shard hashes let reruns detect already-applied work",
+                no_overwrite_behavior: Some(
+                    "no-overwrite/no-delete: source database is preserved before copy and existing incompatible shard/catalog hashes block apply",
+                ),
+                degraded_code: None,
+            },
+            runtime_contract: CommandRuntimeContract::side_path_artifact(),
+            requires_read_snapshot: false,
+            requires_audit: true,
+            description: "Migrate a monolithic workspace database into per-workspace shard files",
+        }
+    }
+
     /// Create a degraded/unavailable read-only effect entry.
     #[must_use]
     pub const fn degraded_unavailable(
@@ -1145,6 +1228,7 @@ impl EffectManifest {
                 "maintenance status",
                 "Report maintenance job availability",
             ),
+            CommandEffect::read_only_db("migrate status", "Report pending schema migrations"),
             CommandEffect::read_only("mcp manifest", "Inspect optional MCP adapter manifest"),
             CommandEffect::read_only_db("memory drift", "Report read-only memory provenance drift"),
             CommandEffect::read_only_db("memory history", "Show memory revision history"),
@@ -1661,6 +1745,7 @@ impl EffectManifest {
                 "tripwire check event store",
                 "Evaluate a persisted tripwire and record the check event unless --dry-run is used",
             ),
+            CommandEffect::schema_migration_run(),
         ]
     }
 
@@ -1701,6 +1786,7 @@ impl EffectManifest {
 
     fn workspace_file_write_commands() -> Vec<CommandEffect> {
         vec![
+            CommandEffect::shard_fanout_migration(),
             CommandEffect::workspace_file_write(
                 "backup create",
                 vec![".ee/backups/<backup-id>/"],
@@ -2327,6 +2413,83 @@ mod tests {
             decay_sweep.map(|e| e.runtime_contract.runtime_class),
             Some(RuntimeClass::Supervised),
             "daemon decay sweep runtime",
+        )
+    }
+
+    #[test]
+    fn manifest_classifies_migrate_command_paths() -> TestResult {
+        let manifest = EffectManifest::build();
+
+        let status = manifest
+            .get("migrate status")
+            .ok_or_else(|| "migrate status not found".to_owned())?;
+        ensure(
+            status.default_effect,
+            EffectClass::ReadOnly,
+            "migrate status is read-only",
+        )?;
+        ensure(
+            status.read_snapshot(),
+            true,
+            "migrate status reads through a DB snapshot",
+        )?;
+
+        let run = manifest
+            .get("migrate run")
+            .ok_or_else(|| "migrate run not found".to_owned())?;
+        ensure(
+            run.default_effect,
+            EffectClass::DurableMemoryWrite,
+            "migrate run writes durable schema state",
+        )?;
+        ensure(
+            run.dry_run_effect,
+            Some(EffectClass::ReadOnly),
+            "migrate run dry-run is read-only",
+        )?;
+        ensure(
+            run.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            "migrate run has audited mutation contract",
+        )?;
+        ensure(
+            run.write_surfaces
+                .db_tables
+                .contains(&"ee_schema_migrations"),
+            true,
+            "migrate run names schema migration table",
+        )?;
+        ensure(
+            run.write_surfaces.derived_paths.contains(&".ee/index/"),
+            true,
+            "migrate run names post-migration index rebuild",
+        )?;
+
+        let shard = manifest
+            .get("migrate shard-fanout")
+            .ok_or_else(|| "migrate shard-fanout not found".to_owned())?;
+        ensure(
+            shard.default_effect,
+            EffectClass::WorkspaceFileWrite,
+            "migrate shard-fanout writes shard files",
+        )?;
+        ensure(
+            shard.dry_run_effect,
+            Some(EffectClass::ReadOnly),
+            "migrate shard-fanout dry-run is read-only",
+        )?;
+        ensure(
+            shard.mutation_contract.side_effect_class,
+            SideEffectClass::AuditedMutation,
+            "migrate shard-fanout has audited mutation contract",
+        )?;
+        ensure(
+            shard
+                .write_surfaces
+                .workspace_files
+                .contains(&"<shards-dir>/catalog.db"),
+            true,
+            "migrate shard-fanout names shard catalog file",
         )
     }
 
