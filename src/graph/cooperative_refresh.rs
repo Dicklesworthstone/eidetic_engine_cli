@@ -1,5 +1,6 @@
 //! Cooperative centrality refresh execution for memory-link graph snapshots.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,15 +12,15 @@ use crate::graph::algorithms::{
 };
 use crate::graph::{
     CentralityRefreshReport, CentralityRefreshStatus, GraphError, GraphResult,
-    MemoryGraphProjection, betweenness_centrality_directed, merge_centrality_scores,
+    MemoryCentralityScore, MemoryGraphProjection, betweenness_centrality_directed,
     sort_scores_by_metric_desc_then_memory_id,
 };
 
 const COOPERATIVE_ALGORITHM_COUNT: u32 = 3;
 
-struct TimedResult<T> {
+struct TimedAlgorithmResult<T> {
     elapsed_ms: f64,
-    result: T,
+    result: GraphResult<T>,
 }
 
 pub fn refresh_centrality_cooperative(
@@ -31,6 +32,24 @@ pub fn refresh_centrality_cooperative(
     check_cancelled(cx, "cooperative_centrality")?;
 
     let sub_budget = cooperative_sub_budget(budget);
+    refresh_centrality_cooperative_with_budgets(
+        cx,
+        projection,
+        total_start,
+        sub_budget,
+        sub_budget,
+        sub_budget,
+    )
+}
+
+fn refresh_centrality_cooperative_with_budgets(
+    cx: &Cx,
+    projection: &MemoryGraphProjection,
+    total_start: Instant,
+    pagerank_budget: Duration,
+    betweenness_budget: Duration,
+    hits_budget: Duration,
+) -> GraphResult<CentralityRefreshReport> {
     let pagerank_graph = projection.graph.clone();
     let betweenness_graph = projection.graph.clone();
     let hits_graph = projection.graph.clone();
@@ -41,13 +60,13 @@ pub fn refresh_centrality_cooperative(
     let (pagerank, betweenness, hits) = thread::scope(|scope| {
         let pagerank_handle = scope.spawn(move || {
             let started = Instant::now();
-            let result = run_with_budget(&pagerank_cx, "pagerank", sub_budget, move || {
+            let result = run_with_budget(&pagerank_cx, "pagerank", pagerank_budget, move || {
                 run_pagerank_with_policy(&pagerank_graph, PprPolicy::default())
-            })?;
-            Ok(TimedResult {
+            });
+            TimedAlgorithmResult {
                 elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                 result,
-            })
+            }
         });
 
         let betweenness_handle = scope.spawn(move || {
@@ -55,39 +74,59 @@ pub fn refresh_centrality_cooperative(
             let result = run_with_budget(
                 &betweenness_cx,
                 "betweenness_centrality",
-                sub_budget,
+                betweenness_budget,
                 move || betweenness_centrality_directed(&betweenness_graph),
-            )?;
-            Ok(TimedResult {
+            );
+            TimedAlgorithmResult {
                 elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                 result,
-            })
+            }
         });
 
         let hits_handle = scope.spawn(move || {
             let started = Instant::now();
             let result =
-                crate::graph::hits::compute_hits_with_budget(&hits_cx, &hits_graph, sub_budget)?;
-            Ok(TimedResult {
+                crate::graph::hits::compute_hits_with_budget(&hits_cx, &hits_graph, hits_budget);
+            TimedAlgorithmResult {
                 elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                 result,
-            })
+            }
         });
 
-        Ok((
-            join_algorithm("pagerank", pagerank_handle)?,
-            join_algorithm("betweenness_centrality", betweenness_handle)?,
-            join_algorithm("hits", hits_handle)?,
-        ))
-    })?;
+        (
+            join_algorithm("pagerank", pagerank_handle),
+            join_algorithm("betweenness_centrality", betweenness_handle),
+            join_algorithm("hits", hits_handle),
+        )
+    });
 
     check_cancelled(cx, "cooperative_centrality")?;
 
-    let mut scores = merge_centrality_scores(
-        &pagerank.result.scores,
-        &betweenness.result.scores,
-        &hits.result,
-    );
+    let success_count =
+        algorithm_success_count(&pagerank.result, &betweenness.result, &hits.result);
+    if success_count == 0 {
+        return Err(first_algorithm_error(
+            pagerank.result,
+            betweenness.result,
+            hits.result,
+        ));
+    }
+
+    let empty_hits = crate::graph::hits::HitsScores::default();
+    let pagerank_scores = pagerank
+        .result
+        .as_ref()
+        .map(|result| result.scores.as_slice())
+        .unwrap_or_default();
+    let betweenness_scores = betweenness
+        .result
+        .as_ref()
+        .map(|result| result.scores.as_slice())
+        .unwrap_or_default();
+    let hits_scores = hits.result.as_ref().unwrap_or(&empty_hits);
+
+    let mut scores =
+        merge_partial_centrality_scores(pagerank_scores, betweenness_scores, hits_scores);
     sort_scores_by_metric_desc_then_memory_id(&mut scores, |score| score.pagerank);
 
     let mut top_pagerank = scores.clone();
@@ -105,7 +144,17 @@ pub fn refresh_centrality_cooperative(
     sort_scores_by_metric_desc_then_memory_id(&mut top_authorities, |score| score.authority);
     top_authorities.truncate(10);
 
-    emit_cooperative_centrality_trace(pagerank.elapsed_ms, betweenness.elapsed_ms, hits.elapsed_ms);
+    let failure_count = COOPERATIVE_ALGORITHM_COUNT - success_count;
+    let degraded_codes =
+        algorithm_degraded_codes(&pagerank.result, &betweenness.result, &hits.result);
+    emit_cooperative_centrality_trace(
+        pagerank.elapsed_ms,
+        betweenness.elapsed_ms,
+        hits.elapsed_ms,
+        success_count,
+        failure_count,
+        degraded_codes.as_str(),
+    );
 
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -141,12 +190,110 @@ fn cooperative_sub_budget(budget: Duration) -> Duration {
 
 fn join_algorithm<'scope, T>(
     algorithm: &'static str,
-    handle: thread::ScopedJoinHandle<'scope, GraphResult<TimedResult<T>>>,
-) -> GraphResult<TimedResult<T>> {
-    handle.join().map_err(|panic| GraphError::GraphEngine {
-        operation: "join cooperative centrality worker",
-        source: format!("{algorithm}: {}", panic_payload_to_string(panic)),
-    })?
+    handle: thread::ScopedJoinHandle<'scope, TimedAlgorithmResult<T>>,
+) -> TimedAlgorithmResult<T> {
+    handle.join().unwrap_or_else(|panic| TimedAlgorithmResult {
+        elapsed_ms: 0.0,
+        result: Err(GraphError::GraphEngine {
+            operation: "join cooperative centrality worker",
+            source: format!("{algorithm}: {}", panic_payload_to_string(panic)),
+        }),
+    })
+}
+
+fn algorithm_success_count<T, U, V>(
+    pagerank: &GraphResult<T>,
+    betweenness: &GraphResult<U>,
+    hits: &GraphResult<V>,
+) -> u32 {
+    let mut count = 0;
+    if pagerank.is_ok() {
+        count += 1;
+    }
+    if betweenness.is_ok() {
+        count += 1;
+    }
+    if hits.is_ok() {
+        count += 1;
+    }
+    count
+}
+
+fn first_algorithm_error<T, U, V>(
+    pagerank: GraphResult<T>,
+    betweenness: GraphResult<U>,
+    hits: GraphResult<V>,
+) -> GraphError {
+    match pagerank {
+        Err(error) => return error,
+        Ok(_) => {}
+    }
+    match betweenness {
+        Err(error) => return error,
+        Ok(_) => {}
+    }
+    match hits {
+        Err(error) => error,
+        Ok(_) => GraphError::GraphEngine {
+            operation: "cooperative centrality failure aggregation",
+            source: "all algorithms succeeded while success_count was zero".to_owned(),
+        },
+    }
+}
+
+fn algorithm_degraded_codes<T, U, V>(
+    pagerank: &GraphResult<T>,
+    betweenness: &GraphResult<U>,
+    hits: &GraphResult<V>,
+) -> String {
+    let mut codes = BTreeSet::new();
+    if let Err(error) = pagerank {
+        codes.insert(error.kind_str());
+    }
+    if let Err(error) = betweenness {
+        codes.insert(error.kind_str());
+    }
+    if let Err(error) = hits {
+        codes.insert(error.kind_str());
+    }
+    codes.into_iter().collect::<Vec<_>>().join(",")
+}
+
+fn merge_partial_centrality_scores(
+    pagerank_scores: &[fnx_algorithms::CentralityScore],
+    betweenness_scores: &[fnx_algorithms::CentralityScore],
+    hits: &crate::graph::hits::HitsScores,
+) -> Vec<MemoryCentralityScore> {
+    let mut nodes = BTreeSet::new();
+    let mut pagerank_by_node = BTreeMap::new();
+    let mut betweenness_by_node = BTreeMap::new();
+
+    for score in pagerank_scores {
+        nodes.insert(score.node.clone());
+        pagerank_by_node
+            .entry(score.node.clone())
+            .or_insert(score.score);
+    }
+    for score in betweenness_scores {
+        nodes.insert(score.node.clone());
+        betweenness_by_node
+            .entry(score.node.clone())
+            .or_insert(score.score);
+    }
+    for node in hits.hubs.keys().chain(hits.authorities.keys()) {
+        nodes.insert(node.clone());
+    }
+
+    nodes
+        .into_iter()
+        .map(|memory_id| MemoryCentralityScore {
+            pagerank: pagerank_by_node.get(&memory_id).copied().unwrap_or(0.0),
+            betweenness: betweenness_by_node.get(&memory_id).copied().unwrap_or(0.0),
+            hub: hits.hubs.get(&memory_id).copied().unwrap_or(0.0),
+            authority: hits.authorities.get(&memory_id).copied().unwrap_or(0.0),
+            memory_id,
+        })
+        .collect()
 }
 
 fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
@@ -160,7 +307,14 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> 
     }
 }
 
-fn emit_cooperative_centrality_trace(pagerank_ms: f64, betweenness_ms: f64, hits_ms: f64) {
+fn emit_cooperative_centrality_trace(
+    pagerank_ms: f64,
+    betweenness_ms: f64,
+    hits_ms: f64,
+    success_count: u32,
+    failure_count: u32,
+    degraded_codes: &str,
+) {
     let max_subtask_elapsed_ms = pagerank_ms.max(betweenness_ms).max(hits_ms);
     tracing::info!(
         target: "ee::graph",
@@ -170,12 +324,12 @@ fn emit_cooperative_centrality_trace(pagerank_ms: f64, betweenness_ms: f64, hits
         surface = "cooperative_centrality",
         phase = "response",
         elapsed_ms = max_subtask_elapsed_ms.round() as u64,
-        degraded_codes = "",
+        degraded_codes = degraded_codes,
         algorithm_count = COOPERATIVE_ALGORITHM_COUNT,
         max_subtask_elapsed_ms = max_subtask_elapsed_ms.round() as u64,
         supervisor_overhead_ms = 0_u64,
-        partial_results_count = 0_u64,
-        cancelled_algorithms = 0_u64,
+        partial_results_count = if failure_count == 0 { 0 } else { success_count },
+        cancelled_algorithms = failure_count,
         "cooperative centrality refresh completed"
     );
 }
@@ -357,6 +511,49 @@ mod tests {
 
         assert_eq!(score_tuples(&first.scores), score_tuples(&second.scores));
         assert_eq!(score_tuples(&second.scores), score_tuples(&third.scores));
+        Ok(())
+    }
+
+    #[test]
+    fn cooperative_refresh_preserves_successful_siblings_when_hits_times_out() -> TestResult {
+        let links = [
+            stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa07", MEMORY_A, MEMORY_B),
+            stored_memory_link("link_aaaaaaaaaaaaaaaaaaaaaaaaaaaa08", MEMORY_B, MEMORY_C),
+        ];
+        let projection = graph_result(crate::graph::build_memory_graph_from_links(&links, 0))?;
+
+        let report = graph_result(refresh_centrality_cooperative_with_budgets(
+            &Cx::for_testing(),
+            &projection,
+            Instant::now(),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::ZERO,
+        ))?;
+
+        assert_eq!(report.status, CentralityRefreshStatus::Refreshed);
+        let score_ids = memory_ids(&report.scores);
+        assert_eq!(score_ids.len(), 3);
+        assert!(score_ids.iter().any(|id| id == MEMORY_A));
+        assert!(score_ids.iter().any(|id| id == MEMORY_B));
+        assert!(score_ids.iter().any(|id| id == MEMORY_C));
+        assert!(
+            report.scores.iter().any(|score| score.pagerank > 0.0),
+            "PageRank scores should survive a sibling HITS timeout"
+        );
+        assert!(
+            report.scores.iter().any(|score| score.betweenness > 0.0),
+            "betweenness scores should survive a sibling HITS timeout"
+        );
+        assert!(
+            report
+                .scores
+                .iter()
+                .all(|score| score.hub == 0.0 && score.authority == 0.0),
+            "timed-out HITS should not fabricate hub or authority scores"
+        );
+        assert_eq!(report.top_pagerank.len(), 3);
+        assert_eq!(report.top_betweenness.len(), 3);
         Ok(())
     }
 
