@@ -6,7 +6,7 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -306,22 +306,45 @@ enum WriteOwnerKey {
     File(PathBuf),
 }
 
-static FILE_WRITE_OWNER_GATES: OnceLock<Mutex<BTreeMap<WriteOwnerKey, &'static Mutex<()>>>> =
+// bd-3mr0x: RwLock (was Mutex) so the keyed-gate lookup hot path
+// takes `.read()` for cache-hit reads of an existing per-key
+// `&'static Mutex<()>` ownership gate. Sibling to bd-8tsi5 /
+// bd-1nan9 / bd-2lin9 / bd-25yao / bd-2r38i. The gates are
+// Box::leak'd, so the bounded set of distinct WriteOwnerKey values
+// (small N — finite db paths a process opens) persists for the
+// process lifetime; no TTL or GC needed.
+static FILE_WRITE_OWNER_GATES: OnceLock<RwLock<BTreeMap<WriteOwnerKey, &'static Mutex<()>>>> =
     OnceLock::new();
 
-fn file_write_owner_gates() -> &'static Mutex<BTreeMap<WriteOwnerKey, &'static Mutex<()>>> {
-    FILE_WRITE_OWNER_GATES.get_or_init(|| Mutex::new(BTreeMap::new()))
+fn file_write_owner_gates() -> &'static RwLock<BTreeMap<WriteOwnerKey, &'static Mutex<()>>> {
+    FILE_WRITE_OWNER_GATES.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 fn file_write_owner_gate(key: &WriteOwnerKey) -> &'static Mutex<()> {
-    let mut gates = file_write_owner_gates()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(gate) = gates.get(key) {
-        return gate;
+    let gates = file_write_owner_gates();
+    // bd-3mr0x: fast path — shared `.read()` lock for the cache-hit
+    // lookup. Concurrent writers against DIFFERENT db files
+    // parallelize at this layer; each takes its own per-key
+    // `&'static Mutex<()>` from the returned reference.
+    {
+        let read_guard = gates
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(gate) = read_guard.get(key) {
+            return *gate;
+        }
     }
-    let gate = Box::leak(Box::new(Mutex::new(())));
-    gates.insert(key.clone(), gate);
+    // Slow path: key not present, take the write lock to insert.
+    // Re-check after acquiring the write lock so a concurrent
+    // inserter's leak is honored (no double-leak for the same key).
+    let mut write_guard = gates
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(gate) = write_guard.get(key) {
+        return *gate;
+    }
+    let gate: &'static Mutex<()> = Box::leak(Box::new(Mutex::new(())));
+    write_guard.insert(key.clone(), gate);
     gate
 }
 
