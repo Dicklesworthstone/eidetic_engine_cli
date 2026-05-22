@@ -14,6 +14,8 @@ use crate::db::{
 };
 use crate::policy::{DecayConfig, SourceTrustState, TrustAdvisory, TrustDecayCalculator};
 
+const MIGRATE_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
+
 /// Report summarizing quarantine state across all tracked sources.
 #[derive(Clone, Debug)]
 pub struct QuarantineReport {
@@ -247,7 +249,7 @@ impl QuarantineReport {
                 code: "quarantine_feedback_events_unreadable",
                 severity: "medium",
                 message: format!("Failed to read feedback events: {error}."),
-                repair: "ee db migrate --workspace .",
+                repair: MIGRATE_REPAIR_COMMAND,
             }),
         }
 
@@ -261,7 +263,7 @@ impl QuarantineReport {
                 code: "quarantine_rows_unreadable",
                 severity: "medium",
                 message: format!("Failed to read feedback quarantine rows: {error}."),
-                repair: "ee db migrate --workspace .",
+                repair: MIGRATE_REPAIR_COMMAND,
             }),
         }
 
@@ -275,7 +277,7 @@ impl QuarantineReport {
                 code: "trust_quarantine_rows_unreadable",
                 severity: "medium",
                 message: format!("Failed to read source trust quarantine rows: {error}."),
-                repair: "ee db migrate --workspace .",
+                repair: MIGRATE_REPAIR_COMMAND,
             }),
         }
 
@@ -783,6 +785,42 @@ mod tests {
             report.blocked_sources[0].source_id.as_str(),
             "cass://bad-source",
             "blocked source id",
+        )
+    }
+
+    #[test]
+    fn gather_for_workspace_schema_errors_use_current_migrate_repair() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = dir.path().join("workspace");
+        let metadata = workspace.join(".ee");
+        fs::create_dir_all(&metadata).map_err(|error| error.to_string())?;
+        fs::write(metadata.join("ee.db"), b"").map_err(|error| error.to_string())?;
+
+        let report = QuarantineReport::gather_for_workspace(&workspace);
+
+        ensure(
+            report.storage_status,
+            QuarantineStorageStatus::Unavailable,
+            "storage status",
+        )?;
+        for code in [
+            "quarantine_feedback_events_unreadable",
+            "quarantine_rows_unreadable",
+            "trust_quarantine_rows_unreadable",
+        ] {
+            let degraded = report
+                .degraded
+                .iter()
+                .find(|degraded| degraded.code == code)
+                .ok_or_else(|| format!("missing degradation {code}"))?;
+            ensure(degraded.repair, MIGRATE_REPAIR_COMMAND, code)?;
+        }
+        ensure(
+            !report
+                .degraded
+                .iter()
+                .any(|degraded| degraded.repair.contains("ee db migrate")),
+            "schema degradations must not suggest legacy migration commands",
         )
     }
 

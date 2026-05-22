@@ -40,6 +40,8 @@ const DEFAULT_BACKUP_DIR: &str = "backups";
 const DEFAULT_RESTORE_DIR: &str = "restores";
 const RECORDS_FILE: &str = "records.jsonl";
 const MANIFEST_FILE: &str = "manifest.json";
+const INIT_AND_MIGRATE_REPAIR_COMMAND: &str =
+    "ee init --workspace . && ee migrate run --workspace . --json";
 
 /// Options for one `ee backup create` operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -800,7 +802,7 @@ pub fn create_backup(options: &BackupCreateOptions) -> Result<BackupCreateReport
         DbConnection::open(DatabaseConfig::file(database_path.clone())).map_err(|error| {
             DomainError::Storage {
                 message: error.to_string(),
-                repair: Some("ee init --workspace . && ee db migrate --workspace .".to_owned()),
+                repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
             }
         })?;
     let workspace = load_workspace(&connection, &workspace_path)?;
@@ -2443,7 +2445,7 @@ fn load_workspace(
         .get_workspace_by_path(&path)
         .map_err(|error| DomainError::Storage {
             message: error.to_string(),
-            repair: Some("ee init --workspace . && ee db migrate --workspace .".to_owned()),
+            repair: Some(INIT_AND_MIGRATE_REPAIR_COMMAND.to_owned()),
         })?
         .ok_or_else(|| DomainError::NotFound {
             resource: "workspace".to_owned(),
@@ -5214,6 +5216,35 @@ mod tests {
                 )?;
                 ensure_equal(repair.as_deref(), Some("ee init --workspace ."), "repair")
             }
+            other => Err(format!("expected storage error, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn unreadable_database_repair_uses_current_migrate_command() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        let database = tempdir.path().join("empty.db");
+        File::create(&database).map_err(|error| error.to_string())?;
+
+        let result = create_backup(&BackupCreateOptions {
+            workspace_path: workspace,
+            database_path: Some(database),
+            output_dir: None,
+            label: None,
+            redaction_level: RedactionLevel::Standard,
+            include_derived: false,
+            include_graph_cache: false,
+            dry_run: false,
+        });
+
+        match result {
+            Err(DomainError::Storage { repair, .. }) => ensure_equal(
+                repair.as_deref(),
+                Some(INIT_AND_MIGRATE_REPAIR_COMMAND),
+                "repair",
+            ),
             other => Err(format!("expected storage error, got {other:?}")),
         }
     }
