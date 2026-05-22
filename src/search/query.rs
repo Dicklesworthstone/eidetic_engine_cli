@@ -128,7 +128,7 @@ fn skip_whitespace(chars: &mut Peekable<Chars<'_>>) {
 fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
     let mut value = String::new();
     while let Some(next) = chars.peek().copied() {
-        if next.is_whitespace() {
+        if next.is_whitespace() || next == '"' {
             break;
         }
         value.push(next);
@@ -215,6 +215,36 @@ mod tests {
     #[test]
     fn search_query_parser_still_drops_empty_quoted_clauses() {
         let query = parse_search_query(r#"alpha "" -"" beta"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "alpha beta");
+    }
+
+    #[test]
+    fn search_query_parser_splits_adjacent_bare_and_quoted_clauses() {
+        let query = parse_search_query(r#"alpha"quoted value"beta"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Phrase("quoted value".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), r#"alpha "quoted value" beta"#);
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_drops_dangling_quote_without_raw_quote_in_term() {
+        let query = parse_search_query(r#"alpha" beta"#);
 
         assert_eq!(
             query.clauses(),
