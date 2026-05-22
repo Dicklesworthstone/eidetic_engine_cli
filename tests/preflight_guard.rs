@@ -385,6 +385,10 @@ fn rm_rf_builtin_matches_command_positions_and_wrappers() {
         "sudo --user=root --group=wheel rm -rf /var/cache",
         "sudo --preserve-env=PATH rm -rf /var/cache",
         "env FOO=bar rm -r -f ~/scratch",
+        "env FOO=bar sudo -u root rm -rf /var/cache",
+        "env -i sudo --user root --group wheel rm -rf /var/cache",
+        "env --unset=PATH sudo --preserve-env=PATH rm -rf /var/cache",
+        "env -- sudo -E -u root rm -rf /var/cache",
         "rm --recursive --force -- /var/cache",
     ] {
         let report = run_preflight_guard(&registry, &opts(command));

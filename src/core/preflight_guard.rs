@@ -504,7 +504,8 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
             continue;
         }
         if word == "env" {
-            return env_wrapped_command_index(segment, index + 1);
+            index = env_wrapped_command_index(segment, index + 1)?;
+            continue;
         }
         if looks_like_env_assignment(word) {
             index += 1;
@@ -2778,6 +2779,10 @@ action = "explode"
             "env -u PATH rm -rf /var/cache",
             "env --unset=PATH rm -rf /var/cache",
             "env --chdir /tmp rm -rf /var/cache",
+            "env FOO=bar sudo -u root rm -rf /var/cache",
+            "env -i sudo --user root --group wheel rm -rf /var/cache",
+            "env --unset=PATH sudo --preserve-env=PATH rm -rf /var/cache",
+            "env -- sudo -E -u root rm -rf /var/cache",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
