@@ -34,6 +34,7 @@
 //! in those beads.
 
 use std::collections::BTreeSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fs, io};
@@ -51,6 +52,18 @@ pub const DISCOVERY_POLICY_SCHEMA_V1: &str = "ee.mesh.discovery_policy.v1";
 /// `tag:ee-mesh` via `tailscale up --advertise-tags=tag:ee-mesh` to
 /// signal that it is an ee participant willing to be discovered.
 pub const EE_MESH_SERVICE_TAG: &str = "tag:ee-mesh";
+
+/// Cap on the byte size of an operator-supplied node-key allowlist or
+/// denylist TOML file before refusing to read it.
+///
+/// Node-key list files carry trimmed hex-style Tailscale nodeKey strings
+/// (~70 bytes each plus TOML scaffolding); even a 10,000-entry list
+/// stays well under 1 MiB. The cap bounds the allocation an operator
+/// accidentally aiming the discovery-policy reader at a log file or
+/// adversarial archive can demand. bd-3gmzf / bd-1icct multi-pass-bug-
+/// hunting follow-up (mirrors the MESH_CONFIG_MAX_BYTES cap in 5b725c82
+/// and the 8 MiB AGENT_MAIL_SNAPSHOT_MAX_BYTES precedent in bd-1sdr5).
+pub const NODE_KEY_LIST_MAX_BYTES: usize = 1024 * 1024;
 
 /// Degraded code emitted when `respondMode=service_tag` is set but the
 /// host does not advertise `tag:ee-mesh`. Nobody on the tailnet will be
@@ -470,7 +483,7 @@ pub fn load_node_key_list(path: &Path) -> Result<BTreeSet<String>, LoadListError
     if !node_key_list_path_is_regular(path)? {
         return Ok(BTreeSet::new());
     }
-    let body = match fs::read_to_string(path) {
+    let body = match read_node_key_list_bounded(path) {
         Ok(body) => body,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
         Err(error) => return Err(LoadListError::Read(error)),
@@ -531,6 +544,35 @@ fn is_valid_node_key(value: &str) -> bool {
         && body
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// Read `path` into a string while refusing payloads above
+/// [`NODE_KEY_LIST_MAX_BYTES`]. Uses `File::open + Read::take(cap+1) +
+/// read_to_end`; an over-cap read returns `io::ErrorKind::InvalidData`
+/// naming the cap, which the caller folds into `LoadListError::Read`.
+/// Mirrors the bounded-read pattern in
+/// `src/cli/mesh.rs::read_mesh_text_bounded` (bd-3l1cy, 5b725c82).
+/// bd-3gmzf.
+fn read_node_key_list_bounded(path: &Path) -> io::Result<String> {
+    let read_limit = NODE_KEY_LIST_MAX_BYTES.checked_add(1).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "node-key list read cap overflowed usize",
+        )
+    })?;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > NODE_KEY_LIST_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Discovery list '{}' exceeds the {NODE_KEY_LIST_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn node_key_list_path_is_regular(path: &Path) -> Result<bool, LoadListError> {
@@ -677,6 +719,53 @@ pub struct PolicyDegradation {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn load_node_key_list_refuses_oversized_payload() {
+        // bd-3gmzf: an operator-supplied .ee/<allowlist|denylist>.toml
+        // larger than NODE_KEY_LIST_MAX_BYTES (1 MiB) must be refused
+        // with LoadListError::Read(io::Error{kind: InvalidData})
+        // before we materialize it. Mirrors the bd-3l1cy / bd-1sdr5
+        // regression for the same defect class.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("oversized_allowlist.toml");
+        std::fs::write(&path, vec![b'x'; NODE_KEY_LIST_MAX_BYTES + 1]).expect("write oversized");
+
+        let error = load_node_key_list(&path).expect_err("oversized read must error");
+        match error {
+            LoadListError::Read(io_error) => {
+                assert_eq!(io_error.kind(), io::ErrorKind::InvalidData);
+                let message = format!("{io_error}");
+                assert!(
+                    message.contains("exceeds") && message.contains("byte cap"),
+                    "expected over-cap diagnostic; got {message}"
+                );
+            }
+            other => panic!("expected LoadListError::Read with InvalidData; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_node_key_list_passes_payload_at_cap() {
+        // bd-3gmzf: at-the-cap reads must succeed; only over-cap reads
+        // are refused. The contents intentionally do not contain a
+        // `node_keys` array, so we expect the helper to read the body
+        // and then the parser to fall through to the "missing field is
+        // empty" branch — proving the read itself accepted the file.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("at_cap_allowlist.toml");
+        // Construct a TOML body padded with whitespace up to the cap.
+        let mut bytes = b"# at-cap fixture\n".to_vec();
+        bytes.resize(NODE_KEY_LIST_MAX_BYTES, b' ');
+        assert_eq!(bytes.len(), NODE_KEY_LIST_MAX_BYTES);
+        std::fs::write(&path, &bytes).expect("write at-cap");
+
+        let set = load_node_key_list(&path).expect("at-cap read must succeed");
+        assert!(
+            set.is_empty(),
+            "fixture omits node_keys array; expected empty set"
+        );
+    }
 
     const NODE_KEY_A: &str =
         "nodekey:0000000000000000000000000000000000000000000000000000000000000001";

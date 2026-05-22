@@ -5,7 +5,7 @@
 //! cache rows, audit evidence, or other source-of-truth data.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -16,6 +16,17 @@ use crate::config::MeshCommandMode;
 pub const MESH_EMERGENCY_DISABLE_SCHEMA_V1: &str = "ee.mesh.emergency_disable.v1";
 pub const MESH_EMERGENCY_STATUS_SCHEMA_V1: &str = "ee.mesh.emergency_status.v1";
 pub const MESH_EMERGENCY_REENABLE_SCHEMA_V1: &str = "ee.mesh.emergency_reenable.v1";
+
+/// Cap on the byte size of the workspace `.ee/config.toml` file that
+/// `write_mesh_config` reads before mutating for a mesh emergency
+/// containment event. Workspace config files carry a handful of mesh
+/// flags plus a few related sections; 1 MiB is many orders of
+/// magnitude above any realistic config while bounding the allocation
+/// an accidentally-pointed-at-a-log-file or adversarial path can
+/// demand. bd-3gmzf / bd-1icct multi-pass-bug-hunting follow-up
+/// (mirrors MESH_CONFIG_MAX_BYTES in 5b725c82 and the 8 MiB
+/// AGENT_MAIL_SNAPSHOT_MAX_BYTES precedent in bd-1sdr5).
+const MESH_EMERGENCY_CONFIG_MAX_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MeshEmergencyDisableInput {
@@ -357,7 +368,7 @@ fn write_mesh_config(
     source_schema: &str,
 ) -> Result<(), MeshEmergencyError> {
     let config_path = workspace_path.join(".ee").join("config.toml");
-    let input = match fs::read_to_string(&config_path) {
+    let input = match read_mesh_emergency_config_bounded(&config_path) {
         Ok(contents) => contents,
         Err(error)
             if matches!(
@@ -424,19 +435,98 @@ fn write_mesh_config(
     })
 }
 
+/// Read `path` into a string while refusing payloads above
+/// [`MESH_EMERGENCY_CONFIG_MAX_BYTES`]. Uses `File::open + Read::take
+/// (cap+1) + read_to_end`; an over-cap read returns
+/// `io::ErrorKind::InvalidData` naming the cap, which the caller folds
+/// into `MeshEmergencyError::ReadConfig`. Mirrors the bounded-read
+/// pattern in `src/cli/mesh.rs::read_mesh_text_bounded` (bd-3l1cy,
+/// 5b725c82). bd-3gmzf.
+fn read_mesh_emergency_config_bounded(path: &Path) -> io::Result<String> {
+    let read_limit = MESH_EMERGENCY_CONFIG_MAX_BYTES
+        .checked_add(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mesh emergency config read cap overflowed usize",
+            )
+        })?;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > MESH_EMERGENCY_CONFIG_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Mesh emergency config '{}' exceeds the {MESH_EMERGENCY_CONFIG_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        MeshEmergencyDisableInput, MeshEmergencyReenableInput, apply_emergency_disable,
-        apply_emergency_reenable, plan_emergency_disable, plan_emergency_reenable,
+        MESH_EMERGENCY_CONFIG_MAX_BYTES, MeshEmergencyDisableInput, MeshEmergencyError,
+        MeshEmergencyReenableInput, apply_emergency_disable, apply_emergency_reenable,
+        plan_emergency_disable, plan_emergency_reenable,
     };
     use crate::config::{ConfigFile, MeshCommandMode};
     use std::fs;
+    use std::io;
 
     type TestResult = Result<(), String>;
 
     fn temp_workspace() -> Result<tempfile::TempDir, String> {
         tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))
+    }
+
+    #[test]
+    fn emergency_disable_refuses_oversized_workspace_config() -> TestResult {
+        // bd-3gmzf: a workspace .ee/config.toml larger than
+        // MESH_EMERGENCY_CONFIG_MAX_BYTES (1 MiB) must be refused
+        // with MeshEmergencyError::ReadConfig wrapping an
+        // io::ErrorKind::InvalidData before we attempt to parse or
+        // mutate it. Mirrors the bd-3l1cy / bd-1sdr5 regression for
+        // the same defect class.
+        let workspace = temp_workspace()?;
+        let ee_dir = workspace.path().join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee: {error}"))?;
+        let config_path = ee_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            vec![b'x'; MESH_EMERGENCY_CONFIG_MAX_BYTES + 1],
+        )
+        .map_err(|error| format!("write oversized config: {error}"))?;
+
+        let input = MeshEmergencyDisableInput {
+            workspace_path: workspace.path().to_path_buf(),
+            all_workspaces: false,
+            dry_run: false,
+            reason: Some("oversized config probe".to_owned()),
+            peer_id: None,
+            temporary_for: None,
+            mesh_enabled_before: true,
+            command_mode_before: MeshCommandMode::Blocking,
+        };
+
+        let error = apply_emergency_disable(&input).expect_err("oversized config read must error");
+        match error {
+            MeshEmergencyError::ReadConfig { source, .. } => {
+                assert_eq!(source.kind(), io::ErrorKind::InvalidData);
+                let message = format!("{source}");
+                assert!(
+                    message.contains("exceeds") && message.contains("byte cap"),
+                    "expected over-cap diagnostic; got {message}"
+                );
+            }
+            other => {
+                panic!("expected MeshEmergencyError::ReadConfig with InvalidData; got {other:?}")
+            }
+        }
+        Ok(())
     }
 
     #[test]
