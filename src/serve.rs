@@ -760,7 +760,12 @@ pub fn render_serve_transport_exchange(
     };
 
     let auth_state = serve_auth_state(&request, token);
-    if auth_state != "accepted" {
+    // bd-da9h1: endpoints that do not require auth (e.g. `Unknown` for
+    // any unsupported /v1/* path) must reach the dispatch table so the
+    // 404/not-found branch can answer them. Without this gate, every
+    // unknown path returned 401 even when the bearer token was correct,
+    // hiding endpoint-discovery errors behind an auth failure.
+    if request.endpoint.auth_required() && auth_state != "accepted" {
         return render_serve_http_json_response(
             401,
             &serve_auth_failure_envelope(request_id, &request, auth_state, elapsed_ms),
@@ -2730,6 +2735,68 @@ mod tests {
             unknown_envelope["response"]["payload"]["schema"].as_str(),
             Some("ee.error.v2"),
             "unknown wrapped error",
+        )
+    }
+
+    // bd-da9h1: unsupported /v1/* paths must answer 404 regardless of auth
+    // posture — the previous gate routed every Unknown request through 401
+    // because serve_auth_state returns "not_required" for endpoints that
+    // declare auth_required()=false, but the gate only accepted "accepted".
+    #[test]
+    fn serve_transport_exchange_unknown_endpoint_returns_404_without_auth() -> TestResult {
+        let raw_no_token_no_header = "GET /v1/nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_owned();
+        let response_no_token = render_serve_transport_exchange(
+            "req-unknown-noauth",
+            raw_no_token_no_header.as_bytes(),
+            &ServeLimits::default(),
+            None,
+            3,
+        );
+        ensure(
+            response_no_token.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            true,
+            "unknown endpoint must 404 when server has no token configured",
+        )?;
+        let (_, body_no_token) = split_http_response(&response_no_token)?;
+        let envelope_no_token: JsonValue =
+            serde_json::from_str(body_no_token).map_err(|error| error.to_string())?;
+        ensure(
+            envelope_no_token["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "unknown 404 envelope schema (no server token)",
+        )?;
+        ensure(
+            envelope_no_token["request"]["endpoint"].as_str(),
+            Some("unknown"),
+            "unknown 404 endpoint metadata (no server token)",
+        )?;
+        ensure(
+            envelope_no_token["response"]["payload"]["schema"].as_str(),
+            Some("ee.error.v2"),
+            "unknown 404 wraps error envelope (no server token)",
+        )?;
+
+        let token = "01234567890123456789012345678901";
+        let raw_token_no_header = "GET /v1/nope HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_owned();
+        let response_no_header = render_serve_transport_exchange(
+            "req-unknown-no-header",
+            raw_token_no_header.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            4,
+        );
+        ensure(
+            response_no_header.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            true,
+            "unknown endpoint must 404 when server has token but client sends no header",
+        )?;
+        let (_, body_no_header) = split_http_response(&response_no_header)?;
+        let envelope_no_header: JsonValue =
+            serde_json::from_str(body_no_header).map_err(|error| error.to_string())?;
+        ensure(
+            envelope_no_header["request"]["endpoint"].as_str(),
+            Some("unknown"),
+            "unknown 404 endpoint metadata (server token, no client header)",
         )
     }
 
