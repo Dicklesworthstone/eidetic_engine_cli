@@ -8,6 +8,9 @@ agent-generated input should produce structured errors, never panics.
 - `eql_parser` drives arbitrary JSON through the EQL parser, metadata
   filtering, and the search plan-cache key/hash/cache path. CI sweeps should
   run for 600 seconds.
+- `search_query_parser` drives arbitrary text through the agent-facing search
+  query parser and checks fixed-point display plus outside-quote separator
+  canonicalization. CI sweeps should run for 600 seconds.
 - `jsonl_header_parser` drives arbitrary UTF-8 and lossy byte input through
   the JSONL export-header parser.
 - `cass_import_jsonl` exercises CASS sessions/view JSON envelope decoders.
