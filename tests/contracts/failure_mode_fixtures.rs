@@ -30,6 +30,8 @@ use regex_lite::Regex;
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
+const CURRENT_MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
+const LEGACY_MIGRATION_REPAIR_COMMAND: &str = "ee db migrate";
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -185,6 +187,7 @@ fn validate_fixture(path: &Path) -> TestResult {
         ),
     )?;
     let _msg_contains = ensure_array_field(&value, "/expected_emission/message_contains", &ctx)?;
+    ensure_current_migration_repair_surface(&value, &ctx)?;
 
     // (3) filename stem matches code.
     let stem = path
@@ -279,6 +282,33 @@ fn repair_strings_are_pinned(expected: &Value) -> bool {
             .get("repair_strings")
             .and_then(Value::as_array)
             .is_some_and(|items| !items.is_empty() && items.iter().all(Value::is_string))
+}
+
+fn ensure_current_migration_repair_surface(fixture: &Value, ctx: &str) -> TestResult {
+    let expected = fixture
+        .pointer("/expected_emission")
+        .ok_or_else(|| format!("{ctx}: missing expected_emission"))?;
+    for field in ["repair_contains", "repair_string"] {
+        if let Some(value) = expected.get(field).and_then(Value::as_str)
+            && value.contains(LEGACY_MIGRATION_REPAIR_COMMAND)
+        {
+            return Err(format!(
+                "{ctx}: expected_emission.{field} uses legacy migration repair `{LEGACY_MIGRATION_REPAIR_COMMAND}`; use `{CURRENT_MIGRATION_REPAIR_COMMAND}`"
+            ));
+        }
+    }
+    if let Some(values) = expected.get("repair_strings").and_then(Value::as_array) {
+        for (idx, value) in values.iter().enumerate() {
+            if let Some(text) = value.as_str()
+                && text.contains(LEGACY_MIGRATION_REPAIR_COMMAND)
+            {
+                return Err(format!(
+                    "{ctx}: expected_emission.repair_strings[{idx}] uses legacy migration repair `{LEGACY_MIGRATION_REPAIR_COMMAND}`; use `{CURRENT_MIGRATION_REPAIR_COMMAND}`"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn fixture_only_rationale(code: &str) -> Option<&'static str> {

@@ -26,8 +26,8 @@
       "pack",
       "selection"
     ],
-    "repair_contains": "ee db migrate",
-    "repair_string": "ee db migrate",
+    "repair_contains": "ee migrate run",
+    "repair_string": "ee migrate run --workspace . --json",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

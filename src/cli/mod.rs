@@ -281,6 +281,8 @@ mod insights;
 mod mesh;
 mod share;
 
+const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
+
 /// Top-level `before_help` prelude rendered by clap above the standard
 /// USAGE / OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without
 /// this, `ee --help` prints 40+ subcommands alphabetically and an agent
@@ -20571,7 +20573,7 @@ where
     if let Err(e) = conn.insert_rationale_trace_audited(&audit_input) {
         let domain_error = DomainError::Storage {
             message: format!("Failed to store rationale trace: {e}"),
-            repair: Some("ee db migrate".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -20662,7 +20664,7 @@ where
         Err(e) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to query rationale trace: {e}"),
-                repair: Some("ee db migrate".to_string()),
+                repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
@@ -20738,7 +20740,7 @@ where
         Err(e) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to list rationale traces: {e}"),
-                repair: Some("ee db migrate".to_string()),
+                repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
             };
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
@@ -21849,7 +21851,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate advisory lock diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -21984,7 +21986,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate causal diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -22191,7 +22193,7 @@ where
     if let Err(error) = source_conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate source database before diagnostic skew: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -22332,7 +22334,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate graph diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -22507,7 +22509,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate memory-validity diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -22695,7 +22697,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate model registry diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -22886,7 +22888,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate tripwire diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -23013,7 +23015,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate pack diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -23150,7 +23152,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate pack diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -23378,7 +23380,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate curation diagnostic database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -23719,7 +23721,7 @@ where
             return write_domain_error(
                 &DomainError::Storage {
                     message: format!("Failed to query quarantine state: {error}"),
-                    repair: Some("ee db migrate --workspace .".to_owned()),
+                    repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
                 },
                 cli.wants_json(),
                 stdout,
@@ -26039,7 +26041,7 @@ where
     if let Err(error) = conn.migrate() {
         let domain_error = DomainError::MigrationRequired {
             message: format!("Failed to migrate graph database: {error}"),
-            repair: Some("ee db migrate --workspace .".to_string()),
+            repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
         };
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
@@ -44591,10 +44593,10 @@ mod tests {
         ContextPackProfile, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand,
         DomainError, EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LearnCommand,
-        LearnExperimentCommand, MaintenanceCommand, MaintenanceWalCheckpointArgs,
-        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
-        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand, ShadowMode,
-        SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
+        LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
+        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand,
+        ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
         TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         hook_git_readiness_response_json, mesh, parse_completion_audit_evidence_input,
@@ -44925,6 +44927,16 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn migration_repair_hint_uses_current_public_surface() -> TestResult {
+        ensure_equal(
+            &MIGRATION_REPAIR_COMMAND,
+            &"ee migrate run --workspace . --json",
+            "migration repair command",
+        )?;
+        ensure_repair_command_parses(MIGRATION_REPAIR_COMMAND, "migration repair command")
     }
 
     #[test]

@@ -25,7 +25,7 @@
     "message_contains": [
       "references missing TTL policy"
     ],
-    "repair_contains": "ee db migrate",
-    "repair_string": "Run ee db migrate --json or recreate the curation policy table."
+    "repair_contains": "ee migrate run",
+    "repair_string": "Run `ee migrate run --workspace . --json`, or recreate the curation policy table."
   }
 }

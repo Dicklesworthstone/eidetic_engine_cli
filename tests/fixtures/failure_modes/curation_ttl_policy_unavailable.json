@@ -25,8 +25,8 @@
       "Curation TTL policy rows",
       "could not be read"
     ],
-    "repair_contains": "ee db migrate",
-    "repair_string": "Run `ee db migrate --workspace .`.",
+    "repair_contains": "ee migrate run",
+    "repair_string": "Run `ee migrate run --workspace . --json`.",
     "repair_command_regex": "Run `(?<cmd>[^`]+)`"
   }
 }
