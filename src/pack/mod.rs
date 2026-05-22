@@ -5635,6 +5635,37 @@ fn content_overlap_similarity_terms(
     }
 }
 
+/// Sorted+deduped invariant predicate paired with the doc on
+/// [`content_overlap_similarity_terms`]. Used inside `debug_assert!` so
+/// it has zero release-mode cost.
+fn is_sorted_and_deduped(terms: &[String]) -> bool {
+    terms.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+/// Two-pointer intersection-count over two sorted+deduped term slices.
+/// Caller MUST ensure the precondition holds (see
+/// [`content_overlap_similarity_terms`] doc / bd-1t2oz); if either
+/// input is unsorted the count silently undershoots.
+fn sorted_term_intersection_count(left_terms: &[String], right_terms: &[String]) -> usize {
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    let mut intersection = 0usize;
+
+    while left_index < left_terms.len() && right_index < right_terms.len() {
+        match left_terms[left_index].cmp(&right_terms[right_index]) {
+            Ordering::Less => left_index += 1,
+            Ordering::Equal => {
+                intersection += 1;
+                left_index += 1;
+                right_index += 1;
+            }
+            Ordering::Greater => right_index += 1,
+        }
+    }
+
+    intersection
+}
+
 #[cfg(test)]
 thread_local! {
     static NORMALIZED_TERMS_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
