@@ -28061,6 +28061,102 @@ mod tests {
     }
 
     #[test]
+    fn with_transaction_serializes_parallel_file_writers() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("parallel-writers.db");
+        let setup =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        setup.migrate().map_err(TestFailure::from)?;
+        setup
+            .execute_for(
+                DbOperation::Execute,
+                "CREATE TABLE concurrent_write_probe (
+                    writer_id INTEGER PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        setup.close().map_err(TestFailure::from)?;
+
+        const WRITER_COUNT: usize = 4;
+        let start = Arc::new(Barrier::new(WRITER_COUNT));
+        let mut handles = Vec::with_capacity(WRITER_COUNT);
+
+        for index in 0..WRITER_COUNT {
+            let db_path = db_path.clone();
+            let start = Arc::clone(&start);
+            handles.push(thread::spawn(move || -> std::result::Result<(), String> {
+                start.wait();
+                let connection = DbConnection::open(DatabaseConfig::file(&db_path))
+                    .map_err(|error| format!("writer {index} open shared database: {error}"))?;
+                let writer_id =
+                    i32::try_from(index).map_err(|error| format!("writer id overflow: {error}"))?;
+                connection
+                    .with_transaction(|| {
+                        connection.execute_for(
+                            DbOperation::Execute,
+                            "INSERT INTO concurrent_write_probe (writer_id, payload)
+                             VALUES (?1, ?2)",
+                            &[
+                                Value::Int(writer_id),
+                                Value::Text(format!("writer-{index}")),
+                            ],
+                        )?;
+                        Ok(())
+                    })
+                    .map_err(|error| format!("writer {index} transaction: {error}"))?;
+                connection
+                    .close()
+                    .map_err(|error| format!("writer {index} close: {error}"))
+            }));
+        }
+
+        for handle in handles {
+            handle
+                .join()
+                .map_err(|_| TestFailure::new("parallel file writer thread panicked"))?
+                .map_err(TestFailure::new)?;
+        }
+
+        let verify =
+            DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        let rows = verify
+            .query(
+                "SELECT writer_id, payload
+                 FROM concurrent_write_probe
+                 ORDER BY writer_id ASC",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        let actual: Vec<(i64, String)> = rows
+            .iter()
+            .map(|row| {
+                let writer_id = row.get(0).and_then(|value| value.as_i64()).unwrap_or(-1);
+                let payload = row
+                    .get(1)
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                (writer_id, payload)
+            })
+            .collect();
+        let expected = vec![
+            (0, "writer-0".to_string()),
+            (1, "writer-1".to_string()),
+            (2, "writer-2".to_string()),
+            (3, "writer-3".to_string()),
+        ];
+        verify.close().map_err(TestFailure::from)?;
+
+        ensure_equal(
+            &actual,
+            &expected,
+            "parallel file-backed writers serialize and persist every row",
+        )
+    }
+
+    #[test]
     fn with_transaction_rollback_clears_write_owner_depth() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
         let db_path = tempdir.path().join("rollback.db");
