@@ -5547,7 +5547,10 @@ fn content_overlap_similarity_terms(
         return 0.0;
     }
     let intersection = left_terms.intersection(right_terms).count();
-    let union = left_terms.union(right_terms).count();
+    let union = left_terms
+        .len()
+        .saturating_add(right_terms.len())
+        .saturating_sub(intersection);
     if union == 0 {
         0.0
     } else {
@@ -9072,6 +9075,20 @@ mod tests {
         ensure(
             similarity < FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR,
             format!("non-matching diversity_keys must not trigger the floor, got {similarity}"),
+        )
+    }
+
+    #[test]
+    fn content_overlap_similarity_uses_jaccard_cardinality() -> TestResult {
+        let left = super::normalized_terms("cargo fmt release workflow");
+        let right = super::normalized_terms("cargo clippy release workflow");
+
+        let similarity = super::content_overlap_similarity_terms(&left, &right);
+        let expected = 3.0_f32 / 5.0_f32;
+
+        ensure(
+            (similarity - expected).abs() < f32::EPSILON,
+            format!("Jaccard similarity should be {expected}, got {similarity}"),
         )
     }
 
