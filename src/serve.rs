@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{IpAddr, TcpListener};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -224,6 +225,13 @@ impl ServeDispatchPlan {
 pub struct ServeListenerBinding {
     pub listener: TcpListener,
     pub metadata: JsonValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServeConnectionExchange {
+    pub request_bytes: usize,
+    pub response_bytes: usize,
+    pub response_status_line: String,
 }
 
 #[must_use]
@@ -782,6 +790,119 @@ pub fn render_serve_transport_exchange(
     )
 }
 
+pub fn serve_single_connection_exchange(
+    mut stream: TcpStream,
+    request_id: &str,
+    limits: &ServeLimits,
+    token: Option<&str>,
+    elapsed_ms: u64,
+) -> Result<ServeConnectionExchange, DomainError> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(
+            limits.connection_read_timeout_ms,
+        )))
+        .map_err(|error| serve_transport_io_error("set read timeout", error))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(
+            limits.response_write_timeout_ms,
+        )))
+        .map_err(|error| serve_transport_io_error("set write timeout", error))?;
+
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    let total_read_limit = limits
+        .max_header_bytes
+        .saturating_add(4)
+        .saturating_add(limits.max_body_bytes);
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|error| serve_transport_io_error("read request", error))?;
+        if read == 0 {
+            break;
+        }
+        request_bytes.extend_from_slice(&buffer[..read]);
+        if request_bytes.len() > total_read_limit {
+            return Err(serve_usage_error(format!(
+                "HTTP request exceeds the {total_read_limit} byte total read limit."
+            )));
+        }
+        if serve_request_complete_len(&request_bytes, limits)?.is_some() {
+            break;
+        }
+    }
+
+    let response =
+        render_serve_transport_exchange(request_id, &request_bytes, limits, token, elapsed_ms);
+    stream
+        .write_all(response.as_bytes())
+        .map_err(|error| serve_transport_io_error("write response", error))?;
+    stream
+        .flush()
+        .map_err(|error| serve_transport_io_error("flush response", error))?;
+    let _ = stream.shutdown(Shutdown::Both);
+
+    Ok(ServeConnectionExchange {
+        request_bytes: request_bytes.len(),
+        response_bytes: response.len(),
+        response_status_line: response.lines().next().unwrap_or_default().to_owned(),
+    })
+}
+
+fn serve_request_complete_len(
+    bytes: &[u8],
+    limits: &ServeLimits,
+) -> Result<Option<usize>, DomainError> {
+    let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+        if bytes.len() > limits.max_header_bytes {
+            return Err(serve_usage_error(format!(
+                "HTTP request headers exceed the {} byte limit.",
+                limits.max_header_bytes
+            )));
+        }
+        return Ok(None);
+    };
+    if header_end > limits.max_header_bytes {
+        return Err(serve_usage_error(format!(
+            "HTTP request headers exceed the {} byte limit.",
+            limits.max_header_bytes
+        )));
+    }
+
+    let header_text = std::str::from_utf8(&bytes[..header_end])
+        .map_err(|_| serve_usage_error("HTTP request headers must be valid UTF-8."))?;
+    let mut content_length = 0_usize;
+    for line in header_text.split("\r\n").skip(1) {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            content_length = value
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| serve_usage_error("Content-Length must be a non-negative integer."))?;
+        }
+    }
+    if content_length > limits.max_body_bytes {
+        return Err(serve_usage_error(format!(
+            "HTTP request body exceeds the {} byte limit.",
+            limits.max_body_bytes
+        )));
+    }
+
+    let complete_len = header_end.saturating_add(4).saturating_add(content_length);
+    if bytes.len() > complete_len {
+        return Err(serve_usage_error(
+            "HTTP request body contains bytes beyond Content-Length; keepalive is not supported.",
+        ));
+    }
+    if bytes.len() == complete_len {
+        Ok(Some(complete_len))
+    } else {
+        Ok(None)
+    }
+}
+
 fn render_serve_http_response(
     status_code: u16,
     content_type: &str,
@@ -1112,6 +1233,13 @@ fn serve_policy_error(
             "serve": details
         })
         .to_string(),
+    }
+}
+
+fn serve_transport_io_error(action: &str, error: std::io::Error) -> DomainError {
+    DomainError::Configuration {
+        message: format!("Failed to {action} for ee serve connection: {error}"),
+        repair: Some("Retry `ee serve --foreground` or use direct CLI commands.".to_owned()),
     }
 }
 
@@ -2462,6 +2590,92 @@ mod tests {
             event["response"]["payload"]["data"]["dispatchPlan"]["endpoint"].as_str(),
             Some("events"),
             "events dispatch plan",
+        )
+    }
+
+    #[test]
+    fn serve_single_connection_exchange_round_trips_real_loopback_stream() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let server_token = token.to_owned();
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let addr = listener.local_addr().map_err(|error| error.to_string())?;
+        let server = std::thread::spawn(move || -> Result<ServeConnectionExchange, String> {
+            let (stream, _) = listener.accept().map_err(|error| error.to_string())?;
+            serve_single_connection_exchange(
+                stream,
+                "req-loopback",
+                &ServeLimits::default(),
+                Some(server_token.as_str()),
+                7,
+            )
+            .map_err(|error| error.to_string())
+        });
+
+        let mut client = std::net::TcpStream::connect(addr).map_err(|error| error.to_string())?;
+        let request = format!(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        client
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .map_err(|error| error.to_string())?;
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .map_err(|error| error.to_string())?;
+        let exchange = server
+            .join()
+            .map_err(|_| "server thread panicked".to_owned())??;
+
+        ensure(
+            exchange.response_status_line.as_str(),
+            "HTTP/1.1 200 OK",
+            "exchange status line",
+        )?;
+        ensure(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            "client status line",
+        )?;
+        ensure(
+            response.contains(token),
+            false,
+            "single connection response must not expose token",
+        )?;
+        let (headers, body) = split_http_response(&response)?;
+        ensure(
+            header_value(headers, "Connection"),
+            Some("close"),
+            "connection close",
+        )?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "connection envelope schema",
+        )?;
+        ensure(
+            envelope["request"]["endpoint"].as_str(),
+            Some("status"),
+            "connection endpoint",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["businessLogicExecuted"].as_bool(),
+            Some(false),
+            "connection execution boundary",
+        )?;
+        ensure(
+            exchange.request_bytes,
+            request.len(),
+            "exchange request bytes",
+        )?;
+        ensure(
+            exchange.response_bytes,
+            response.len(),
+            "exchange response bytes",
         )
     }
 
