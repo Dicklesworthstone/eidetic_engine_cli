@@ -798,9 +798,22 @@ pub fn render_serve_transport_exchange(
         return render_serve_http_sse_response(&frame);
     }
 
+    let payload = match serve_dispatch_payload_for_plan(&plan) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return render_serve_http_json_response(
+                500,
+                &serve_error_exchange_envelope(
+                    request_id, &request, auth_state, 500, &error, elapsed_ms,
+                ),
+            );
+        }
+    };
     render_serve_http_json_response(
         200,
-        &serve_dispatch_exchange_envelope(request_id, &request, auth_state, 200, &plan, elapsed_ms),
+        &serve_dispatch_exchange_envelope(
+            request_id, &request, auth_state, 200, &payload, elapsed_ms,
+        ),
     )
 }
 
@@ -1074,7 +1087,7 @@ fn serve_dispatch_exchange_envelope(
     request: &ServeHttpRequest,
     auth_state: &'static str,
     status_code: u16,
-    plan: &ServeDispatchPlan,
+    payload: &JsonValue,
     elapsed_ms: u64,
 ) -> JsonValue {
     json!({
@@ -1083,7 +1096,7 @@ fn serve_dispatch_exchange_envelope(
         "response": {
             "statusCode": status_code,
             "payloadSchema": "ee.response.v2",
-            "payload": serve_dispatch_payload_json(plan, "not_started"),
+            "payload": payload,
             "elapsedMs": elapsed_ms,
             "degradedCodes": [],
             "volatileTransportFields": ["request.requestId", "response.elapsedMs"]
@@ -1124,6 +1137,23 @@ fn serve_dispatch_payload_json(plan: &ServeDispatchPlan, execution: &'static str
             "dispatchPlan": plan.to_json()
         },
         "degraded": []
+    })
+}
+
+fn serve_dispatch_payload_for_plan(plan: &ServeDispatchPlan) -> Result<JsonValue, DomainError> {
+    match plan.endpoint {
+        ServeEndpoint::Status => serve_status_payload_json(),
+        _ => Ok(serve_dispatch_payload_json(plan, "not_started")),
+    }
+}
+
+fn serve_status_payload_json() -> Result<JsonValue, DomainError> {
+    let report = crate::core::status::StatusReport::gather();
+    serde_json::from_str(&crate::output::render_status_json(&report)).map_err(|error| {
+        DomainError::Storage {
+            message: format!("Failed to serialize ee serve status endpoint payload: {error}"),
+            repair: Some("Retry `ee status --json` or use direct CLI commands.".to_owned()),
+        }
     })
 }
 
@@ -2562,6 +2592,59 @@ mod tests {
     }
 
     #[test]
+    fn serve_transport_exchange_executes_status_endpoint_payload() -> TestResult {
+        let token = "01234567890123456789012345678901";
+        let raw = format!(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let response = render_serve_transport_exchange(
+            "req-status-exec",
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            17,
+        );
+
+        ensure(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            true,
+            "status endpoint status line",
+        )?;
+        ensure(
+            response.contains(token),
+            false,
+            "status endpoint response must not expose token",
+        )?;
+        let (_, body) = split_http_response(&response)?;
+        let envelope: JsonValue = serde_json::from_str(body).map_err(|error| error.to_string())?;
+        ensure(
+            envelope["schema"].as_str(),
+            Some(SERVE_ENDPOINT_SCHEMA_V1),
+            "status transport envelope schema",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["schema"].as_str(),
+            Some("ee.response.v2"),
+            "status payload schema",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["success"].as_bool(),
+            Some(true),
+            "status payload success",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["command"].as_str(),
+            Some("status"),
+            "status payload command",
+        )?;
+        ensure(
+            envelope["response"]["payload"]["data"]["runtime"]["engine"].as_str(),
+            Some("asupersync"),
+            "status runtime engine",
+        )
+    }
+
+    #[test]
     fn serve_transport_exchange_rejects_missing_auth_before_dispatch() -> TestResult {
         let token = "01234567890123456789012345678901";
         let response = render_serve_transport_exchange(
@@ -2763,9 +2846,9 @@ mod tests {
             "connection endpoint",
         )?;
         ensure(
-            envelope["response"]["payload"]["data"]["businessLogicExecuted"].as_bool(),
-            Some(false),
-            "connection execution boundary",
+            envelope["response"]["payload"]["data"]["command"].as_str(),
+            Some("status"),
+            "connection status payload",
         )?;
         ensure(
             exchange.request_bytes,
