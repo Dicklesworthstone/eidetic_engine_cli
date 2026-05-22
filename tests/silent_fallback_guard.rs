@@ -33,6 +33,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::fs;
 use std::process::Command;
 
 /// Allowlisted occurrences with justification.
@@ -231,6 +232,27 @@ fn guard_detects_synthetic_violation() {
     assert!(
         !is_allowlisted,
         "Synthetic violation at line 9999 should not be allowlisted"
+    );
+}
+
+#[test]
+fn memory_drift_no_mock_e2e_hashes_have_no_silent_json_fallbacks() {
+    let path = "tests/memory_drift_no_mock_e2e.rs";
+    let source = fs::read_to_string(format!("{}/{}", env!("CARGO_MANIFEST_DIR"), path))
+        .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
+    let violations = source
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            (line.contains("serde_json::to_string") && line.contains("unwrap_or_default()"))
+                .then_some(format!("{path}:{}", index + 1))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        violations.is_empty(),
+        "memory_drift_no_mock_e2e.rs must fail structurally on JSON serialization errors; found silent fallback(s): {}",
+        violations.join(", ")
     );
 }
 

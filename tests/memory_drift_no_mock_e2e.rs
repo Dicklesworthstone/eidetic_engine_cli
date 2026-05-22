@@ -116,6 +116,12 @@ fn hash_text(text: &str) -> String {
     format!("blake3:{}", blake3::hash(text.as_bytes()).to_hex())
 }
 
+fn hash_json_value(name: &str, value: &Value) -> Result<String, String> {
+    let serialized = serde_json::to_string(value)
+        .map_err(|error| format!("{name} serialization failed before hashing: {error}"))?;
+    Ok(hash_text(&serialized))
+}
+
 fn hash_file(path: &Path) -> Result<String, String> {
     let bytes =
         fs::read(path).map_err(|error| format!("failed to read {}: {error}", path.display()))?;
@@ -757,7 +763,7 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
         map_of(&[
             (
                 "baselineGolden",
-                hash_text(&serde_json::to_string(&baseline_golden).unwrap_or_default()),
+                hash_json_value("baselineGolden", &baseline_golden)?,
             ),
             ("changedSource", changed_before_hash.clone()),
             ("stableSource", stable_hash.clone()),
@@ -848,7 +854,7 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
         map_of(&[("driftReport", hash_text(&changed_report.stdout))]),
         map_of(&[(
             "changedReport",
-            hash_text(&serde_json::to_string(&normalized_changed_report).unwrap_or_default()),
+            hash_json_value("changedReport", &normalized_changed_report)?,
         )]),
         memory_drift_codes(&changed_report.json),
         "passed",
@@ -930,7 +936,7 @@ fn memory_drift_no_mock_replay_surfaces_changed_source_without_mutation() -> Tes
         map_of(&[("search", hash_text(&changed_search.stdout))]),
         map_of(&[(
             "changedGolden",
-            hash_text(&serde_json::to_string(&changed_golden).unwrap_or_default()),
+            hash_json_value("changedGolden", &changed_golden)?,
         )]),
         degraded_codes(&changed_search.json),
         "passed",
