@@ -331,7 +331,10 @@ impl<S> Deterministic<S> {
 
     fn next_counter(&mut self) -> u64 {
         let current = self.counter;
-        self.counter = self.counter.saturating_add(1);
+        self.counter = self
+            .counter
+            .checked_add(1)
+            .expect("deterministic token counter exhausted");
         current
     }
 
@@ -552,5 +555,33 @@ mod tests {
             &"scope%3A%25%23tail".to_owned(),
             "escaped mixed delimiter label",
         )
+    }
+
+    #[test]
+    fn counter_boundary_advances_without_silent_saturation() -> TestResult {
+        let mut token = Deterministic::from_seed(7);
+        token.counter = u64::MAX - 1;
+
+        let child = token.child("last");
+
+        ensure_equal(
+            &child.scope(),
+            &format!("root::last#{}", u64::MAX - 1),
+            "last representable child scope before exhaustion",
+        )?;
+        ensure_equal(
+            &token.counter,
+            &u64::MAX,
+            "parent counter reaches terminal sentinel",
+        )
+    }
+
+    #[test]
+    #[should_panic(expected = "deterministic token counter exhausted")]
+    fn counter_exhaustion_panics_instead_of_reusing_scope_ordinals() {
+        let mut token = Deterministic::from_seed(7);
+        token.counter = u64::MAX;
+
+        let _ = token.child("collision");
     }
 }
