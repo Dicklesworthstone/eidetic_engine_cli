@@ -163,7 +163,23 @@ impl ContextDeltaEnvelope {
         &mut self,
         max_delta_bytes: Option<u64>,
     ) -> Result<u64, ContextDeltaError> {
-        let measured = stable_serialized_len(self)?;
+        self.finalize_with_budget_and_transport_overhead(max_delta_bytes, 0)
+    }
+
+    /// bd-2pgex: same contract as [`finalize_with_budget`], but the
+    /// caller declares how many extra transport bytes will be appended
+    /// to the serialized envelope (e.g. the CLI appends a single
+    /// trailing `\n` for NDJSON-style line termination). Those bytes
+    /// are folded into both the budget check and
+    /// `tokenSavings.deltaBytes` so the number the agent is billed
+    /// for is the number this method measures, and the budget cannot
+    /// be silently exceeded by 1 byte at the boundary.
+    pub fn finalize_with_budget_and_transport_overhead(
+        &mut self,
+        max_delta_bytes: Option<u64>,
+        transport_overhead_bytes: u64,
+    ) -> Result<u64, ContextDeltaError> {
+        let measured = measured_total(stable_serialized_len(self)?, transport_overhead_bytes);
         let token_count = self.data.token_savings.net_pack_tokens;
         let full_bytes = self.data.token_savings.full_bytes;
         self.data.token_savings = token_savings(full_bytes, measured, token_count);
@@ -180,20 +196,29 @@ impl ContextDeltaEnvelope {
                 .iter()
                 .any(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE);
             if !already_marked {
+                // bd-2pgex drift-1: do NOT interpolate the pre-marker
+                // measurement into this message. The marker itself adds
+                // bytes to the envelope, and the re-measure below brings
+                // `tokenSavings.deltaBytes` up to the post-marker size —
+                // so the previous `Delta envelope is {measured} bytes`
+                // text disagreed with the machine-readable transport
+                // budget. Point agents at `data.tokenSavings.deltaBytes`
+                // as the single source of truth instead.
                 self.degraded.push(ContextDeltaDegradation {
                     code: CONTEXT_DELTA_OVERSIZED_CODE.to_string(),
                     severity: "info".to_string(),
                     message: format!(
-                        "Delta envelope is {measured} bytes after merging response \
-                         degradations, above the configured {budget} byte limit; \
-                         emit the full pack instead."
+                        "Delta envelope exceeded the configured {budget} byte limit after \
+                         merging response degradations; see data.tokenSavings.deltaBytes for the \
+                         actual emission size. Emit the full pack instead."
                     ),
                     repair: None,
                     details: None,
                 });
                 // The new degraded entry adds bytes; re-measure so
                 // tokenSavings.deltaBytes still matches the emission.
-                let remeasured = stable_serialized_len(self)?;
+                let remeasured =
+                    measured_total(stable_serialized_len(self)?, transport_overhead_bytes);
                 self.data.token_savings = token_savings(full_bytes, remeasured, token_count);
                 return Ok(remeasured);
             }
@@ -201,6 +226,10 @@ impl ContextDeltaEnvelope {
 
         Ok(measured)
     }
+}
+
+fn measured_total(serialized_len: u64, transport_overhead_bytes: u64) -> u64 {
+    serialized_len.saturating_add(transport_overhead_bytes)
 }
 
 /// The `data` payload of `ee.context.delta.v1`. Field set is closed

@@ -28179,7 +28179,11 @@ where
     // kernel's pre-merge measurement leaked through and the configured
     // byte budget could be silently exceeded by deprecated_alias +
     // pack-pipeline degradations.
-    match delta.finalize_with_budget(args.max_delta_bytes) {
+    // bd-2pgex: the CLI appends `\n` to the rendered envelope below, so
+    // declare a 1-byte transport overhead. Without this the boundary
+    // case where the rendered envelope exactly fits the budget would
+    // overshoot stdout by one byte (the trailing newline).
+    match delta.finalize_with_budget_and_transport_overhead(args.max_delta_bytes, 1) {
         Ok(_) => {}
         Err(error) => {
             push_context_delta_degradation(
