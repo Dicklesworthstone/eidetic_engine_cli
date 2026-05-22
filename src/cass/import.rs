@@ -1028,21 +1028,47 @@ fn parse_view_json(
     input: &[u8],
     source_path: &str,
 ) -> Result<Vec<CassViewSpanForImport>, CassImportError> {
+    let text = std::str::from_utf8(input).map_err(|error| CassImportError::InvalidJson {
+        source: "view",
+        message: error.to_string(),
+    })?;
+
+    match parse_view_json_lines(text, source_path) {
+        Ok(spans) => Ok(spans),
+        Err(error) if cass_view_line_error_is_size_limit(&error) => Err(error),
+        Err(line_error) => {
+            if let Some(spans) = parse_view_json_envelope(input, source_path)? {
+                Ok(spans)
+            } else {
+                Err(line_error)
+            }
+        }
+    }
+}
+
+fn cass_view_line_error_is_size_limit(error: &CassImportError) -> bool {
+    matches!(
+        error,
+        CassImportError::InvalidJson { source: "view", message }
+            if message.starts_with("view JSON line exceeds ")
+    )
+}
+
+fn parse_view_json_envelope(
+    input: &[u8],
+    source_path: &str,
+) -> Result<Option<Vec<CassViewSpanForImport>>, CassImportError> {
     if let Ok(value) = serde_json::from_slice::<JsonValue>(input) {
         if let Some(lines) = value.get("lines").and_then(JsonValue::as_array) {
             let mut collector = CassViewLineCollector::new(source_path);
             for line in lines {
                 collector.accept_value(line)?;
             }
-            return Ok(collector.into_spans());
+            return Ok(Some(collector.into_spans()));
         }
     }
 
-    let text = std::str::from_utf8(input).map_err(|error| CassImportError::InvalidJson {
-        source: "view",
-        message: error.to_string(),
-    })?;
-    parse_view_json_lines(text, source_path)
+    Ok(None)
 }
 
 fn parse_view_json_lines(
@@ -2254,6 +2280,31 @@ mod tests {
 
         let error = match parse_view_json(input.as_bytes(), "/tmp/session.jsonl") {
             Ok(_) => return Err("oversized CASS view JSONL line should fail".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("line exceeds"),
+            format!("error should mention line limit, got {error}"),
+        )
+    }
+
+    #[test]
+    fn parse_view_json_rejects_single_line_envelope_over_line_cap() -> TestResult {
+        let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+        let input = json!({
+            "lines": [{
+                "line": 1,
+                "content": oversized_content,
+            }],
+        })
+        .to_string();
+
+        let error = match parse_view_json(input.as_bytes(), "/tmp/session.jsonl") {
+            Ok(_) => {
+                return Err(
+                    "single-line CASS view envelope over the line cap should fail".to_string(),
+                );
+            }
             Err(error) => error.to_string(),
         };
         ensure(
