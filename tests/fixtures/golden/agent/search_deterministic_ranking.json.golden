@@ -9,6 +9,11 @@
       {
         "docId": "mem_00000000000000000000010001",
         "score": 0.032786883413791656,
+        "scoreInterval": [
+          0.0,
+          1.0
+        ],
+        "coverageGuarantee": 0.95,
         "source": "hybrid",
         "why": "Score 0.0328 via RRF fusion of 2 signals",
         "provenance": [
@@ -50,6 +55,11 @@
       {
         "docId": "mem_00000000000000000000010002",
         "score": 0.0320020467042923,
+        "scoreInterval": [
+          0.0,
+          1.0
+        ],
+        "coverageGuarantee": 0.95,
         "source": "hybrid",
         "why": "Score 0.0320 via RRF fusion of 2 signals",
         "provenance": [
@@ -91,6 +101,11 @@
       {
         "docId": "mem_00000000000000000000010003",
         "score": 0.0320020467042923,
+        "scoreInterval": [
+          0.0,
+          1.0
+        ],
+        "coverageGuarantee": 0.95,
         "source": "hybrid",
         "why": "Score 0.0320 via RRF fusion of 2 signals",
         "provenance": [

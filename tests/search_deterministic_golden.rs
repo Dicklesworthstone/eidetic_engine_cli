@@ -583,8 +583,37 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
             format!("search result score must be numeric: {result:?}"),
         )?;
         ensure(
+            result["scoreInterval"]
+                .as_array()
+                .is_some_and(|interval| interval.len() == 2),
+            format!("search result must include two-point scoreInterval: {result:?}"),
+        )?;
+        ensure_json_number_close(
+            &result["scoreInterval"][0],
+            &serde_json::json!(0.0),
+            0.000_001,
+            "search result scoreInterval lower bound",
+        )?;
+        ensure_json_number_close(
+            &result["scoreInterval"][1],
+            &serde_json::json!(1.0),
+            0.000_001,
+            "search result scoreInterval upper bound",
+        )?;
+        ensure_json_number_close(
+            &result["coverageGuarantee"],
+            &serde_json::json!(0.95),
+            0.000_001,
+            "search result coverage guarantee",
+        )?;
+        ensure(
             result["source"].is_string(),
             format!("search result source must be a string: {result:?}"),
+        )?;
+        ensure_equal(
+            &result["metadata"]["schema"],
+            &serde_json::json!("ee.search.document.v1"),
+            "search result metadata schema",
         )?;
         ensure(
             result["explanation"]["factors"].is_array(),
