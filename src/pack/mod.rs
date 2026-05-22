@@ -5064,7 +5064,17 @@ fn assemble_facility_location_draft(
             FacilityCandidateProfile::from_candidate(candidate, options.output_redaction_enabled)
         })
         .collect();
-    let mut remaining_indices: Vec<usize> = (0..candidates.len()).collect();
+    // bd-30bfs: an `active` bool mask replaces the previous `Vec<usize>` of
+    // remaining indices. The mask gives O(1) "is this candidate still in play"
+    // checks and O(1) deactivation, where the prior shape needed an O(n)
+    // `position()` scan + O(n) `Vec::remove` tail-shift on every selection
+    // round. The companion drain at end-of-loop iterates `active.iter()
+    // .enumerate()` in ascending profile_index order, matching the order the
+    // previous `Vec::remove`-based bookkeeping produced (`Vec::remove` preserves
+    // tail order, so the drain saw 0..n in ascending order). Omission order in
+    // the resulting `omitted` Vec is therefore bit-stable.
+    let mut active: Vec<bool> = vec![true; candidates.len()];
+    let mut remaining_count = candidates.len();
     let mut current_coverages = vec![0.0_f32; candidates.len()];
     let similarity_cache = FacilitySimilarityCache::new(&candidates);
     let mut selector =
@@ -5081,7 +5091,7 @@ fn assemble_facility_location_draft(
     let mut steps = Vec::new();
     let mut objective_value = 0.0_f32;
 
-    while !remaining_indices.is_empty() {
+    while remaining_count > 0 {
         let Some((profile_index, marginal_gain)) = selector.select(
             &candidates,
             &current_coverages,
@@ -5091,42 +5101,56 @@ fn assemble_facility_location_draft(
             &quotas,
             &section_usage,
         ) else {
-            omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
-                let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                Some(PackOmission::from_candidate(
-                    candidate,
-                    PackOmissionReason::TokenBudgetExceeded,
-                    Some(minimal_budget_for_candidate(
-                        profile,
-                        used_tokens,
-                        section_usage.tokens_for(candidate.section),
-                        candidate.section,
-                        candidate.estimated_tokens,
-                    )),
-                ))
-            }));
+            omitted.extend(
+                active
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(profile_index, &is_active)| {
+                        if !is_active {
+                            return None;
+                        }
+                        let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                        Some(PackOmission::from_candidate(
+                            candidate,
+                            PackOmissionReason::TokenBudgetExceeded,
+                            Some(minimal_budget_for_candidate(
+                                profile,
+                                used_tokens,
+                                section_usage.tokens_for(candidate.section),
+                                candidate.section,
+                                candidate.estimated_tokens,
+                            )),
+                        ))
+                    }),
+            );
             break;
         };
 
         if marginal_gain <= FACILITY_LOCATION_EPSILON {
-            omitted.extend(remaining_indices.drain(..).filter_map(|profile_index| {
-                let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                Some(PackOmission::from_candidate(
-                    candidate,
-                    PackOmissionReason::RedundantCandidate,
-                    None,
-                ))
-            }));
+            omitted.extend(
+                active
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(profile_index, &is_active)| {
+                        if !is_active {
+                            return None;
+                        }
+                        let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                        Some(PackOmission::from_candidate(
+                            candidate,
+                            PackOmissionReason::RedundantCandidate,
+                            None,
+                        ))
+                    }),
+            );
             break;
         }
 
-        let Some(candidate_index) = remaining_indices
-            .iter()
-            .position(|&remaining_index| remaining_index == profile_index)
-        else {
+        if !active.get(profile_index).copied().unwrap_or(false) {
             continue;
-        };
-        remaining_indices.remove(candidate_index);
+        }
+        active[profile_index] = false;
+        remaining_count = remaining_count.saturating_sub(1);
         let Some(profile) = candidates.get_mut(profile_index) else {
             continue;
         };
