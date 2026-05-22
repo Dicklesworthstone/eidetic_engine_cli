@@ -3,6 +3,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/mesh_e2e_outcomes.sh
+source "$SCRIPT_DIR/lib/mesh_e2e_outcomes.sh"
+
 surface="mesh_remote_evidence"
 scenarios=(
   cass_session_reference_indexed_without_body_copy
@@ -15,7 +19,7 @@ scenarios=(
 
 printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"remote evidence materialization fixture loaded"}\n' "$surface"
 for scenario in "${scenarios[@]}"; do
-  printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"assert","scenario":"%s","stage":"scheduled"}\n' "$surface" "$scenario"
+  mesh_e2e_emit_scheduled "$surface" "$scenario"
 done
 
 required_terms=(
@@ -31,11 +35,16 @@ required_terms=(
   "redacted placeholder"
 )
 
+missing_terms=()
 for required in "${required_terms[@]}"; do
   if ! grep -Fq "$required" docs/mesh/remote_evidence.md tests/mesh_remote_evidence.rs; then
-    printf 'mesh remote evidence proof missing required term: %s\n' "$required" >&2
-    exit 1
+    missing_terms+=("$required")
   fi
 done
+if [ "${#missing_terms[@]}" -gt 0 ]; then
+  mesh_e2e_emit_failed "$surface" "mesh remote evidence proof missing required terms: ${missing_terms[*]}" "${scenarios[@]}"
+  exit 1
+fi
 
+mesh_e2e_emit_outcomes "$surface" "pass" "0.0" "" "${scenarios[@]}"
 printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"complete","scenario":"matrix","message":"remote evidence materialization static proof passed"}\n' "$surface"

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/mesh_e2e_outcomes.sh
+source "$SCRIPT_DIR/lib/mesh_e2e_outcomes.sh"
+
 surface="mesh_cache_retention"
 scenarios=(
   peer_body_sync_until_global_quota
@@ -14,9 +18,10 @@ scenarios=(
 
 printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"mesh cache retention fixture loaded"}\n' "$surface"
 for scenario in "${scenarios[@]}"; do
-  printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"assert","scenario":"%s","stage":"scheduled"}\n' "$surface" "$scenario"
+  mesh_e2e_emit_scheduled "$surface" "$scenario"
 done
 
+missing_terms=()
 for required in \
   derived_peer_cache \
   local_source_truth \
@@ -26,15 +31,19 @@ for required in \
   mesh.cache.evict
 do
   if ! grep -Fq "$required" docs/mesh/cache_retention.md; then
-    printf 'mesh cache retention docs missing required term: %s\n' "$required" >&2
-    exit 1
+    missing_terms+=("$required")
   fi
 done
+if [ "${#missing_terms[@]}" -gt 0 ]; then
+  mesh_e2e_emit_failed "$surface" "mesh cache retention docs missing required terms: ${missing_terms[*]}" "${scenarios[@]}"
+  exit 1
+fi
 
 rch_bin="${RCH_BIN:-rch}"
 if ! command -v "$rch_bin" >/dev/null 2>&1; then
-  printf 'RCH binary not found; refusing to run mesh cache retention cargo test locally\n' >&2
+  mesh_e2e_emit_skipped "$surface" "RCH binary not found; refusing to run mesh cache retention cargo test locally" "${scenarios[@]}"
   exit 2
 fi
 
-RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --test mesh_cache -- --nocapture
+mesh_e2e_run_with_outcomes "$surface" "${scenarios[@]}" -- \
+  env RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --test mesh_cache -- --nocapture

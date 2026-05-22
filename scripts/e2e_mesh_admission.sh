@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/mesh_e2e_outcomes.sh
+source "$SCRIPT_DIR/lib/mesh_e2e_outcomes.sh"
+
 surface="mesh_admission_control"
 scenarios=(
   peer_throttled
@@ -12,13 +16,14 @@ scenarios=(
 
 printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"setup","scenario":"matrix","message":"admission fixture loaded"}\n' "$surface"
 for scenario in "${scenarios[@]}"; do
-  printf '{"schema":"ee.test_event.v1","surface":"%s","phase":"assert","scenario":"%s","stage":"scheduled"}\n' "$surface" "$scenario"
+  mesh_e2e_emit_scheduled "$surface" "$scenario"
 done
 
 rch_bin="${RCH_BIN:-rch}"
 if ! command -v "$rch_bin" >/dev/null 2>&1; then
-  printf 'RCH binary not found; refusing to run mesh admission cargo test locally\n' >&2
+  mesh_e2e_emit_skipped "$surface" "RCH binary not found; refusing to run mesh admission cargo test locally" "${scenarios[@]}"
   exit 2
 fi
 
-RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --lib mesh::admission -- --nocapture
+mesh_e2e_run_with_outcomes "$surface" "${scenarios[@]}" -- \
+  env RCH_REQUIRE_REMOTE=1 "$rch_bin" exec -- cargo test --lib mesh::admission -- --nocapture

@@ -183,6 +183,22 @@ not allowed. Retained workspaces and manifests are verification evidence. Do not
 remove them during an agent session unless the user explicitly authorizes the
 exact deletion.
 
+### Mesh E2E Outcome Events
+
+Mesh shell drivers may emit `stage=scheduled` records as a scenario manifest,
+but scheduled records are not verification evidence. Every scheduled mesh
+scenario must also emit a post-run `phase=outcome` event with `status` set to
+`pass`, `fail`, or `skipped`, plus `duration_ms` and `stderr_tail`. Use
+`scripts/lib/mesh_e2e_outcomes.sh` for root-level `scripts/e2e_mesh_*.sh`
+drivers. The helper preserves the existing RCH-only command path while making
+the JSONL log identify which scenario matrix was covered by the command result.
+
+For command-backed mesh checks, `mesh_e2e_run_with_outcomes` is the canonical
+shape: emit scheduled events, run the RCH command once, capture elapsed time and
+stderr tail, then emit one outcome event per scenario. For pure static-proof
+checks, emit `pass` outcomes only after all required static assertions pass; if
+a preflight dependency is missing, emit `skipped` outcomes before exiting.
+
 ### Fake Tailscale Harness
 
 SRR6.46 auto-enrollment tests must use the shared fake Tailscale harness instead
