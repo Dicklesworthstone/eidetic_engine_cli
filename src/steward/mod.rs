@@ -26,6 +26,7 @@ use rustix::io::Errno;
 use serde_json::{Value as JsonValue, json};
 
 use crate::core::graph_telemetry::{CacheEvictEvent, CacheEvictReason, emit_cache_evict};
+use crate::curate::{CandidateSource, CandidateType};
 use crate::db::{
     AcquireLockResult, AdvisoryLockId, ApplyMemoryDecayDemotionInput, ApplyMemoryScoreUpdateInput,
     CreateCurationCandidateInput, DbConnection, FeedbackCounts, GraphSnapshotPruneCandidate,
@@ -4051,10 +4052,12 @@ impl ManualRunner {
 
         let mut inserted = 0_u64;
         let mut already_pending = 0_u64;
+        let candidate_type = CandidateType::Consolidate.as_str();
+        let source_type = CandidateSource::RuleEngine.as_str();
         for candidate in &selection.candidates {
             let existing = match opened.connection.list_curation_candidates(
                 &opened.workspace_id,
-                Some("consolidation"),
+                Some(candidate_type),
                 Some("pending"),
                 Some(&candidate.target_memory_id),
             ) {
@@ -4079,12 +4082,12 @@ impl ManualRunner {
 
             let input = CreateCurationCandidateInput {
                 workspace_id: opened.workspace_id.clone(),
-                candidate_type: "consolidation".to_owned(),
+                candidate_type: candidate_type.to_owned(),
                 target_memory_id: candidate.target_memory_id.clone(),
                 proposed_content: Some(candidate.proposed_content.clone()),
                 proposed_confidence: Some(candidate.proposed_confidence),
                 proposed_trust_class: None,
-                source_type: "steward.consolidation_pass".to_owned(),
+                source_type: source_type.to_owned(),
                 source_id: Some(candidate.source_memory_id.clone()),
                 reason: candidate.reason.clone(),
                 confidence: 0.82,
@@ -6894,6 +6897,37 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
+    fn insert_consolidation_memory(
+        connection: &DbConnection,
+        memory_id: &str,
+        content: &str,
+        confidence: f32,
+        utility: f32,
+        importance: f32,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: SCORE_WORKSPACE_ID.to_owned(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence,
+                    utility,
+                    importance,
+                    provenance_uri: Some("test://consolidation-pass".to_owned()),
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["consolidation".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
     fn set_score_memory_timestamp(
         connection: &DbConnection,
         memory_id: &str,
@@ -8297,6 +8331,121 @@ mod tests {
             memory.confidence < 0.8,
             true,
             "runner applied confidence decay",
+        )
+    }
+
+    #[test]
+    fn manual_runner_consolidation_pass_inserts_canonical_candidate_metadata() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let database_path = temp.path().join("ee.db");
+        {
+            let connection =
+                DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+            connection.migrate().map_err(|error| error.to_string())?;
+            connection
+                .insert_workspace(
+                    SCORE_WORKSPACE_ID,
+                    &CreateWorkspaceInput {
+                        path: temp.path().to_string_lossy().into_owned(),
+                        name: Some("consolidation-pass-runner".to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            insert_consolidation_memory(
+                &connection,
+                "mem_consolpass0000000000000001",
+                "Run rustfmt before commit.",
+                0.92,
+                0.80,
+                0.70,
+            )?;
+            insert_consolidation_memory(
+                &connection,
+                "mem_consolpass0000000000000002",
+                " run   rustfmt   before   commit. ",
+                0.41,
+                0.20,
+                0.10,
+            )?;
+            connection.close().map_err(|error| error.to_string())?;
+        }
+
+        let opts = RunnerOptions::new()
+            .with_database_path(database_path.clone())
+            .with_workspace_id(SCORE_WORKSPACE_ID)
+            .with_as_of("2026-05-22T00:00:00Z");
+        let mut runner = ManualRunner::new(opts);
+        let first = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("canonical curation metadata".to_owned()),
+        );
+
+        ensure(first.outcome, RunOutcome::Success, "first outcome")?;
+        ensure(first.items_processed, Some(1), "first planned candidates")?;
+        let first_details = first
+            .details
+            .as_ref()
+            .ok_or_else(|| "first consolidation details missing".to_owned())?;
+        ensure(
+            first_details["insertedCandidates"].as_u64(),
+            Some(1),
+            "first inserted candidates",
+        )?;
+        ensure(
+            first_details["alreadyPendingCandidates"].as_u64(),
+            Some(0),
+            "first pending candidates",
+        )?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let candidates = connection
+            .list_curation_candidates(
+                SCORE_WORKSPACE_ID,
+                Some(CandidateType::Consolidate.as_str()),
+                Some("pending"),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure(candidates.len(), 1, "canonical candidate count")?;
+        let candidate = candidates
+            .first()
+            .ok_or_else(|| "missing curation candidate".to_owned())?;
+        ensure(
+            candidate.candidate_type.as_str(),
+            CandidateType::Consolidate.as_str(),
+            "candidate type",
+        )?;
+        ensure(
+            candidate.source_type.as_str(),
+            CandidateSource::RuleEngine.as_str(),
+            "candidate source type",
+        )?;
+        ensure(
+            candidate.source_id.as_deref(),
+            Some("mem_consolpass0000000000000001"),
+            "candidate source id",
+        )?;
+        drop(connection);
+
+        let second = runner.run_job_type(
+            JobType::ConsolidationPass,
+            Some("dedupe existing consolidation candidate".to_owned()),
+        );
+        ensure(second.outcome, RunOutcome::Success, "second outcome")?;
+        let second_details = second
+            .details
+            .as_ref()
+            .ok_or_else(|| "second consolidation details missing".to_owned())?;
+        ensure(
+            second_details["insertedCandidates"].as_u64(),
+            Some(0),
+            "second inserted candidates",
+        )?;
+        ensure(
+            second_details["alreadyPendingCandidates"].as_u64(),
+            Some(1),
+            "second pending candidates",
         )
     }
 
