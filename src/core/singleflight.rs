@@ -1029,6 +1029,9 @@ fn burst_centrality_report(
     crate::graph::CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: crate::graph::CentralityRefreshStatus::Refreshed,
+        pagerank_status: crate::graph::CentralityAlgorithmStatus::Computed,
+        betweenness_status: crate::graph::CentralityAlgorithmStatus::Computed,
+        hits_status: crate::graph::CentralityAlgorithmStatus::Computed,
         dry_run: false,
         node_count,
         edge_count: node_count.saturating_mul(2),
@@ -1550,6 +1553,9 @@ mod tests {
         CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::Refreshed,
+            pagerank_status: crate::graph::CentralityAlgorithmStatus::Computed,
+            betweenness_status: crate::graph::CentralityAlgorithmStatus::Computed,
+            hits_status: crate::graph::CentralityAlgorithmStatus::Computed,
             dry_run: false,
             node_count: scores.len(),
             edge_count: 1,

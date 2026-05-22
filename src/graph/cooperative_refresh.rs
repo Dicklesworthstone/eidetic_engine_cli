@@ -11,8 +11,8 @@ use crate::graph::algorithms::{
     run_with_budget,
 };
 use crate::graph::{
-    CentralityRefreshReport, CentralityRefreshStatus, GraphError, GraphResult,
-    MemoryCentralityScore, MemoryGraphProjection, betweenness_centrality_directed,
+    CentralityAlgorithmStatus, CentralityRefreshReport, CentralityRefreshStatus, GraphError,
+    GraphResult, MemoryCentralityScore, MemoryGraphProjection, betweenness_centrality_directed,
     sort_scores_by_metric_desc_then_memory_id,
 };
 
@@ -111,6 +111,9 @@ fn refresh_centrality_cooperative_with_budgets(
             hits.result,
         ));
     }
+    let pagerank_status = CentralityAlgorithmStatus::from_graph_result(&pagerank.result);
+    let betweenness_status = CentralityAlgorithmStatus::from_graph_result(&betweenness.result);
+    let hits_status = CentralityAlgorithmStatus::from_graph_result(&hits.result);
 
     let empty_hits = crate::graph::hits::HitsScores::default();
     let pagerank_scores = pagerank
@@ -129,20 +132,44 @@ fn refresh_centrality_cooperative_with_budgets(
         merge_partial_centrality_scores(pagerank_scores, betweenness_scores, hits_scores);
     sort_scores_by_metric_desc_then_memory_id(&mut scores, |score| score.pagerank);
 
-    let mut top_pagerank = scores.clone();
-    top_pagerank.truncate(10);
+    let mut top_pagerank = if pagerank_status == CentralityAlgorithmStatus::Computed {
+        scores.clone()
+    } else {
+        Vec::new()
+    };
+    if pagerank_status == CentralityAlgorithmStatus::Computed {
+        top_pagerank.truncate(10);
+    }
 
-    let mut top_betweenness = scores.clone();
-    sort_scores_by_metric_desc_then_memory_id(&mut top_betweenness, |score| score.betweenness);
-    top_betweenness.truncate(10);
+    let mut top_betweenness = if betweenness_status == CentralityAlgorithmStatus::Computed {
+        scores.clone()
+    } else {
+        Vec::new()
+    };
+    if betweenness_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metric_desc_then_memory_id(&mut top_betweenness, |score| score.betweenness);
+        top_betweenness.truncate(10);
+    }
 
-    let mut top_hubs = scores.clone();
-    sort_scores_by_metric_desc_then_memory_id(&mut top_hubs, |score| score.hub);
-    top_hubs.truncate(10);
+    let mut top_hubs = if hits_status == CentralityAlgorithmStatus::Computed {
+        scores.clone()
+    } else {
+        Vec::new()
+    };
+    if hits_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metric_desc_then_memory_id(&mut top_hubs, |score| score.hub);
+        top_hubs.truncate(10);
+    }
 
-    let mut top_authorities = scores.clone();
-    sort_scores_by_metric_desc_then_memory_id(&mut top_authorities, |score| score.authority);
-    top_authorities.truncate(10);
+    let mut top_authorities = if hits_status == CentralityAlgorithmStatus::Computed {
+        scores.clone()
+    } else {
+        Vec::new()
+    };
+    if hits_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metric_desc_then_memory_id(&mut top_authorities, |score| score.authority);
+        top_authorities.truncate(10);
+    }
 
     let failure_count = COOPERATIVE_ALGORITHM_COUNT - success_count;
     let degraded_codes =
@@ -159,6 +186,9 @@ fn refresh_centrality_cooperative_with_budgets(
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::Refreshed,
+        pagerank_status,
+        betweenness_status,
+        hits_status,
         dry_run: false,
         node_count: projection.node_count,
         edge_count: projection.edge_count,
@@ -528,10 +558,25 @@ mod tests {
             Instant::now(),
             Duration::from_secs(1),
             Duration::from_secs(1),
-            Duration::ZERO,
+            Duration::from_millis(1),
         ))?;
 
         assert_eq!(report.status, CentralityRefreshStatus::Refreshed);
+        assert_eq!(
+            report.pagerank_status,
+            CentralityAlgorithmStatus::Computed,
+            "PageRank should be marked computed when it lands in a partial refresh"
+        );
+        assert_eq!(
+            report.betweenness_status,
+            CentralityAlgorithmStatus::Computed,
+            "betweenness should be marked computed when it lands in a partial refresh"
+        );
+        assert_eq!(
+            report.hits_status,
+            CentralityAlgorithmStatus::TimedOut,
+            "a 1ms HITS budget must be visible to callers instead of hidden behind zero scores"
+        );
         let score_ids = memory_ids(&report.scores);
         assert_eq!(score_ids.len(), 3);
         assert!(score_ids.iter().any(|id| id == MEMORY_A));
@@ -554,6 +599,20 @@ mod tests {
         );
         assert_eq!(report.top_pagerank.len(), 3);
         assert_eq!(report.top_betweenness.len(), 3);
+        assert!(
+            report.top_hubs.is_empty(),
+            "timed-out HITS must not emit fake zero-ranked hub leaders"
+        );
+        assert!(
+            report.top_authorities.is_empty(),
+            "timed-out HITS must not emit fake zero-ranked authority leaders"
+        );
+        let data = report.data_json();
+        assert_eq!(data["algorithmStatus"]["pagerank"], "computed");
+        assert_eq!(data["algorithmStatus"]["betweenness"], "computed");
+        assert_eq!(data["algorithmStatus"]["hits"], "timed_out");
+        assert_eq!(data["scores"][0]["metricStatus"]["hub"], "timed_out");
+        assert_eq!(data["scores"][0]["metricStatus"]["authority"], "timed_out");
         Ok(())
     }
 

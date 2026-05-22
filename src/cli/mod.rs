@@ -25766,6 +25766,9 @@ where
                 let centrality = crate::graph::CentralityRefreshReport {
                     version: env!("CARGO_PKG_VERSION"),
                     status: crate::graph::CentralityRefreshStatus::DryRun,
+                    pagerank_status: crate::graph::CentralityAlgorithmStatus::Skipped,
+                    betweenness_status: crate::graph::CentralityAlgorithmStatus::Skipped,
+                    hits_status: crate::graph::CentralityAlgorithmStatus::Skipped,
                     dry_run: true,
                     node_count: 0,
                     edge_count: 0,

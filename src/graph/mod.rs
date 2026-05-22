@@ -2284,6 +2284,67 @@ impl CentralityRefreshStatus {
     }
 }
 
+/// Per-algorithm outcome for a centrality refresh.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CentralityAlgorithmStatus {
+    /// Algorithm ran and produced metrics.
+    Computed,
+    /// Algorithm was intentionally skipped before execution.
+    Skipped,
+    /// Algorithm exceeded its caller-supplied budget.
+    TimedOut,
+    /// Algorithm observed cancellation before producing metrics.
+    Cancelled,
+    /// Algorithm failed for a non-timeout, non-cancellation reason.
+    Failed,
+}
+
+impl CentralityAlgorithmStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Computed => "computed",
+            Self::Skipped => "skipped",
+            Self::TimedOut => "timed_out",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn from_refresh_status(status: CentralityRefreshStatus) -> Self {
+        match status {
+            CentralityRefreshStatus::Refreshed => Self::Computed,
+            CentralityRefreshStatus::EmptyGraph
+            | CentralityRefreshStatus::MemoryBudgetRefused
+            | CentralityRefreshStatus::DryRun
+            | CentralityRefreshStatus::GraphFeatureDisabled => Self::Skipped,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn from_graph_result<T>(result: &GraphResult<T>) -> Self {
+        match result {
+            Ok(_) => Self::Computed,
+            Err(GraphError::AlgorithmTimeout { .. }) => Self::TimedOut,
+            Err(GraphError::AlgorithmCancelled { .. }) => Self::Cancelled,
+            Err(_) => Self::Failed,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "computed" => Some(Self::Computed),
+            "skipped" => Some(Self::Skipped),
+            "timed_out" => Some(Self::TimedOut),
+            "cancelled" => Some(Self::Cancelled),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
 /// Options for centrality refresh operation.
 #[derive(Clone, Debug, Default)]
 pub struct CentralityRefreshOptions {
@@ -2316,6 +2377,9 @@ pub struct MemoryCentralityScore {
 pub struct CentralityRefreshReport {
     pub version: &'static str,
     pub status: CentralityRefreshStatus,
+    pub pagerank_status: CentralityAlgorithmStatus,
+    pub betweenness_status: CentralityAlgorithmStatus,
+    pub hits_status: CentralityAlgorithmStatus,
     pub dry_run: bool,
     pub node_count: usize,
     pub edge_count: usize,
@@ -2388,6 +2452,12 @@ impl CentralityRefreshReport {
             self.pagerank_ms,
             self.betweenness_ms,
             self.hits_ms
+        ));
+        output.push_str(&format!(
+            "  Algorithms: pagerank={}, betweenness={}, hits={}\n",
+            self.pagerank_status.as_str(),
+            self.betweenness_status.as_str(),
+            self.hits_status.as_str()
         ));
 
         if !self.top_pagerank.is_empty() {
@@ -2464,6 +2534,12 @@ impl CentralityRefreshReport {
                     "betweenness": score_json(s.betweenness),
                     "hub": score_json(s.hub),
                     "authority": score_json(s.authority),
+                    "metricStatus": {
+                        "pagerank": self.pagerank_status.as_str(),
+                        "betweenness": self.betweenness_status.as_str(),
+                        "hub": self.hits_status.as_str(),
+                        "authority": self.hits_status.as_str(),
+                    },
                 })
             })
             .collect();
@@ -2520,6 +2596,7 @@ impl CentralityRefreshReport {
             "command": "graph centrality refresh",
             "version": self.version,
             "status": self.status.as_str(),
+            "algorithmStatus": self.algorithm_status_json(),
             "dryRun": self.dry_run,
             "graph": {
                 "nodeCount": self.node_count,
@@ -2550,6 +2627,15 @@ impl CentralityRefreshReport {
         }
 
         data
+    }
+
+    #[must_use]
+    fn algorithm_status_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "pagerank": self.pagerank_status.as_str(),
+            "betweenness": self.betweenness_status.as_str(),
+            "hits": self.hits_status.as_str(),
+        })
     }
 }
 
@@ -2765,9 +2851,13 @@ fn refresh_typed_graph_snapshot_with_owner(
     } else {
         CentralityRefreshStatus::Refreshed
     };
+    let algorithm_status = CentralityAlgorithmStatus::from_refresh_status(status);
     let centrality = CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status,
+        pagerank_status: algorithm_status,
+        betweenness_status: algorithm_status,
+        hits_status: algorithm_status,
         dry_run: options.dry_run,
         node_count: topology.node_count,
         edge_count: topology.edge_count,
@@ -3334,6 +3424,9 @@ fn refresh_centrality_from_links(
         return Ok(CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::DryRun,
+            pagerank_status: CentralityAlgorithmStatus::Skipped,
+            betweenness_status: CentralityAlgorithmStatus::Skipped,
+            hits_status: CentralityAlgorithmStatus::Skipped,
             dry_run: true,
             node_count: budget_preflight.node_count,
             edge_count: budget_preflight.edge_count,
@@ -3356,6 +3449,9 @@ fn refresh_centrality_from_links(
         return Ok(CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: CentralityRefreshStatus::EmptyGraph,
+            pagerank_status: CentralityAlgorithmStatus::Skipped,
+            betweenness_status: CentralityAlgorithmStatus::Skipped,
+            hits_status: CentralityAlgorithmStatus::Skipped,
             dry_run: false,
             node_count: 0,
             edge_count: 0,
@@ -3417,6 +3513,9 @@ fn refresh_centrality_from_links(
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::Refreshed,
+        pagerank_status: CentralityAlgorithmStatus::Computed,
+        betweenness_status: CentralityAlgorithmStatus::Computed,
+        hits_status: CentralityAlgorithmStatus::Computed,
         dry_run: false,
         node_count: projection.node_count,
         edge_count: projection.edge_count,
@@ -3498,6 +3597,9 @@ fn memory_budget_refused_centrality_report(
     CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::MemoryBudgetRefused,
+        pagerank_status: CentralityAlgorithmStatus::Skipped,
+        betweenness_status: CentralityAlgorithmStatus::Skipped,
+        hits_status: CentralityAlgorithmStatus::Skipped,
         dry_run,
         node_count: preflight.node_count,
         edge_count: preflight.edge_count,
@@ -3592,6 +3694,12 @@ fn graph_snapshot_metrics_json(
                 "betweenness": score_json(score.betweenness),
                 "hub": score_json(score.hub),
                 "authority": score_json(score.authority),
+                "metricStatus": {
+                    "pagerank": centrality.pagerank_status.as_str(),
+                    "betweenness": centrality.betweenness_status.as_str(),
+                    "hub": centrality.hits_status.as_str(),
+                    "authority": centrality.hits_status.as_str(),
+                },
             })
         })
         .collect();
@@ -3631,6 +3739,7 @@ fn graph_snapshot_metrics_json(
         "remoteGraph": remote_graph,
         "centrality": {
             "status": centrality.status.as_str(),
+            "algorithmStatus": centrality.algorithm_status_json(),
             "topPagerank": centrality
                 .top_pagerank
                 .iter()
@@ -4396,35 +4505,57 @@ pub fn graph_snapshot_centrality_report(
     );
 
     let mut top_pagerank = scores.clone();
-    top_pagerank.truncate(10);
+    let pagerank_status = centrality_algorithm_status_from_metrics(&value, "pagerank");
+    if pagerank_status == CentralityAlgorithmStatus::Computed {
+        top_pagerank.truncate(10);
+    } else {
+        top_pagerank.clear();
+    }
 
     let mut top_betweenness = scores.clone();
-    sort_scores_by_metrics_desc_then_memory_id(
-        &mut top_betweenness,
-        |score| score.betweenness,
-        |score| score.pagerank,
-    );
-    top_betweenness.truncate(10);
+    let betweenness_status = centrality_algorithm_status_from_metrics(&value, "betweenness");
+    if betweenness_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metrics_desc_then_memory_id(
+            &mut top_betweenness,
+            |score| score.betweenness,
+            |score| score.pagerank,
+        );
+        top_betweenness.truncate(10);
+    } else {
+        top_betweenness.clear();
+    }
 
     let mut top_hubs = scores.clone();
-    sort_scores_by_metrics_desc_then_memory_id(
-        &mut top_hubs,
-        |score| score.hub,
-        |score| score.pagerank,
-    );
-    top_hubs.truncate(10);
+    let hits_status = centrality_algorithm_status_from_metrics(&value, "hits");
+    if hits_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metrics_desc_then_memory_id(
+            &mut top_hubs,
+            |score| score.hub,
+            |score| score.pagerank,
+        );
+        top_hubs.truncate(10);
+    } else {
+        top_hubs.clear();
+    }
 
     let mut top_authorities = scores.clone();
-    sort_scores_by_metrics_desc_then_memory_id(
-        &mut top_authorities,
-        |score| score.authority,
-        |score| score.pagerank,
-    );
-    top_authorities.truncate(10);
+    if hits_status == CentralityAlgorithmStatus::Computed {
+        sort_scores_by_metrics_desc_then_memory_id(
+            &mut top_authorities,
+            |score| score.authority,
+            |score| score.pagerank,
+        );
+        top_authorities.truncate(10);
+    } else {
+        top_authorities.clear();
+    }
 
     Ok(CentralityRefreshReport {
         version: env!("CARGO_PKG_VERSION"),
         status: CentralityRefreshStatus::Refreshed,
+        pagerank_status,
+        betweenness_status,
+        hits_status,
         dry_run: false,
         node_count: snapshot.node_count as usize,
         edge_count: snapshot.edge_count as usize,
@@ -4439,6 +4570,18 @@ pub fn graph_snapshot_centrality_report(
         top_hubs,
         top_authorities,
     })
+}
+
+fn centrality_algorithm_status_from_metrics(
+    value: &serde_json::Value,
+    algorithm: &str,
+) -> CentralityAlgorithmStatus {
+    value
+        .pointer("/centrality/algorithmStatus")
+        .and_then(|statuses| statuses.get(algorithm))
+        .and_then(serde_json::Value::as_str)
+        .and_then(CentralityAlgorithmStatus::from_str)
+        .unwrap_or(CentralityAlgorithmStatus::Computed)
 }
 
 fn enriched_feature_for_score(
@@ -7926,6 +8069,9 @@ mod tests {
         super::CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status,
+            pagerank_status: super::CentralityAlgorithmStatus::from_refresh_status(status),
+            betweenness_status: super::CentralityAlgorithmStatus::from_refresh_status(status),
+            hits_status: super::CentralityAlgorithmStatus::from_refresh_status(status),
             dry_run: status == super::CentralityRefreshStatus::DryRun,
             node_count: scores.len(),
             edge_count: scores.len().saturating_sub(1),
@@ -8082,6 +8228,9 @@ mod tests {
         let centrality = super::CentralityRefreshReport {
             version: env!("CARGO_PKG_VERSION"),
             status: super::CentralityRefreshStatus::Refreshed,
+            pagerank_status: super::CentralityAlgorithmStatus::Computed,
+            betweenness_status: super::CentralityAlgorithmStatus::Computed,
+            hits_status: super::CentralityAlgorithmStatus::Computed,
             dry_run: false,
             node_count: 2,
             edge_count: 1,
@@ -8142,6 +8291,89 @@ mod tests {
             value["edges"][0]["origin"]["provenance"],
             "mesh://peer_builder_one/mesh_link_123"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn graph_snapshot_metrics_round_trip_algorithm_statuses() -> TestResult {
+        let link = stored_memory_link("link_algorithm_status", MEMORY_A, MEMORY_B);
+        let centrality = super::CentralityRefreshReport {
+            version: env!("CARGO_PKG_VERSION"),
+            status: super::CentralityRefreshStatus::Refreshed,
+            pagerank_status: super::CentralityAlgorithmStatus::Computed,
+            betweenness_status: super::CentralityAlgorithmStatus::Computed,
+            hits_status: super::CentralityAlgorithmStatus::TimedOut,
+            dry_run: false,
+            node_count: 2,
+            edge_count: 1,
+            projection_ms: 0.0,
+            pagerank_ms: 0.0,
+            betweenness_ms: 0.0,
+            hits_ms: 1.0,
+            total_ms: 1.0,
+            scores: vec![
+                super::MemoryCentralityScore {
+                    memory_id: MEMORY_A.to_owned(),
+                    pagerank: 0.6,
+                    betweenness: 0.4,
+                    hub: 0.0,
+                    authority: 0.0,
+                },
+                super::MemoryCentralityScore {
+                    memory_id: MEMORY_B.to_owned(),
+                    pagerank: 0.4,
+                    betweenness: 0.6,
+                    hub: 0.0,
+                    authority: 0.0,
+                },
+            ],
+            top_pagerank: Vec::new(),
+            top_betweenness: Vec::new(),
+            top_hubs: Vec::new(),
+            top_authorities: Vec::new(),
+        };
+
+        let metrics_json = graph_result(super::graph_snapshot_metrics_json(
+            GraphSnapshotType::MemoryLinks,
+            &centrality,
+            &[link],
+        ))?;
+        let value: serde_json::Value =
+            serde_json::from_str(&metrics_json).map_err(|error| error.to_string())?;
+        assert_eq!(
+            value["centrality"]["algorithmStatus"]["pagerank"],
+            "computed"
+        );
+        assert_eq!(
+            value["centrality"]["algorithmStatus"]["betweenness"],
+            "computed"
+        );
+        assert_eq!(value["centrality"]["algorithmStatus"]["hits"], "timed_out");
+        assert_eq!(value["nodes"][0]["metricStatus"]["hub"], "timed_out");
+        assert_eq!(value["nodes"][0]["metricStatus"]["authority"], "timed_out");
+
+        let snapshot = StoredGraphSnapshot {
+            id: "gsnap_0000000000000000000000888".to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            snapshot_version: 1,
+            schema_version: "ee.graph.snapshot.v1".to_owned(),
+            graph_type: GraphSnapshotType::MemoryLinks,
+            node_count: 2,
+            edge_count: 1,
+            metrics_json,
+            content_hash: "blake3:algorithm-status".to_owned(),
+            source_generation: 1,
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            expires_at: None,
+            status: GraphSnapshotStatus::Valid,
+        };
+        let report = graph_result(super::graph_snapshot_centrality_report(&snapshot))?;
+        assert_eq!(
+            report.hits_status,
+            super::CentralityAlgorithmStatus::TimedOut
+        );
+        assert!(report.top_hubs.is_empty());
+        assert!(report.top_authorities.is_empty());
         Ok(())
     }
 
@@ -9383,6 +9615,9 @@ mod tests {
         let json = report.data_json();
         assert_eq!(json["command"], "graph centrality refresh");
         assert_eq!(json["status"], "refreshed");
+        assert_eq!(json["algorithmStatus"]["pagerank"], "computed");
+        assert_eq!(json["algorithmStatus"]["betweenness"], "computed");
+        assert_eq!(json["algorithmStatus"]["hits"], "computed");
         assert_eq!(json["graph"]["nodeCount"], 2);
         assert_eq!(json["graph"]["edgeCount"], 1);
         assert!(json["timing"]["totalMs"].as_f64().is_some());
@@ -9394,6 +9629,8 @@ mod tests {
             .ok_or_else(|| "centrality score should be present".to_owned())?;
         assert!(first_score["hub"].as_f64().is_some());
         assert!(first_score["authority"].as_f64().is_some());
+        assert_eq!(first_score["metricStatus"]["hub"], "computed");
+        assert_eq!(first_score["metricStatus"]["authority"], "computed");
         assert!(json["topPagerank"].as_array().is_some());
         assert!(json["topBetweenness"].as_array().is_some());
         assert!(json["topHubs"].as_array().is_some());
