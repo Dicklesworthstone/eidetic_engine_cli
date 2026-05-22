@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -40,6 +40,19 @@ pub const SWARM_INCIDENT_SUMMARY_REDACTION_STATUS: &str =
 pub const SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1: &str =
     "ee.swarm.verification_broker_summary.v1";
 pub const MAX_SWARM_INCIDENT_SUMMARY_BYTES: usize = 8192;
+
+/// Cap on the byte size of the operator-supplied
+/// `--agent-mail-snapshot` JSON file before refusing to read it.
+///
+/// Redacted Agent Mail snapshots carry paths, counts, and subjects
+/// only (per the `paths_counts_subjects_only_no_content` redaction
+/// invariant the bd-3nbbe contract pins); they are not full mailbox
+/// dumps. 8 MiB is well above any reasonable redacted snapshot
+/// (which sits in the kilobytes-to-low-megabytes range) while
+/// bounding the allocation an accidentally-aimed-at-a-log-file or
+/// adversarial path can demand. bd-1sdr5 / bd-1icct multi-pass-bug-
+/// hunting audit pass.
+pub const AGENT_MAIL_SNAPSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
@@ -1542,7 +1555,33 @@ fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {
             ),
         ));
     }
-    fs::read_to_string(path)
+    // bd-1sdr5: bounded read. Open + take(LIMIT+1) so an oversized
+    // file reads LIMIT+1 bytes and we detect the overrun without
+    // ever materializing more than ~8 MiB. Mirrors the
+    // DEMO_OUTPUT_VERIFY_MAX_BYTES posture in src/cli/mod.rs (commit
+    // 06a53349) so the two adversarial-path read sites share a
+    // single defensive pattern.
+    let read_limit = AGENT_MAIL_SNAPSHOT_MAX_BYTES
+        .checked_add(1)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Agent Mail snapshot read cap overflowed usize",
+            )
+        })?;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' exceeds the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn first_existing_snapshot_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -8565,6 +8604,43 @@ mod tests {
                 .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE
                     && item.message.contains("symlink")),
             "expected symlink parent degradation, got {:?}",
+            output.snapshot.degraded
+        );
+        assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        Ok(())
+    }
+
+    #[test]
+    fn agent_mail_snapshot_adapter_refuses_oversized_snapshot_file() -> Result<(), String> {
+        // bd-1sdr5: regression — an operator-supplied snapshot path
+        // larger than AGENT_MAIL_SNAPSHOT_MAX_BYTES (8 MiB) must
+        // degrade rather than allocate the whole file. Mirrors the
+        // symlink-refusal posture above.
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let snapshot_path = tempdir.path().join("agent-mail.json");
+
+        // Write AGENT_MAIL_SNAPSHOT_MAX_BYTES + 1 bytes so the cap
+        // trips with a deterministic single-byte overrun. Content
+        // doesn't matter — the cap fires before any parse path.
+        let mut oversized = vec![b'x'; AGENT_MAIL_SNAPSHOT_MAX_BYTES + 1];
+        oversized[0] = b'{';
+        oversized[oversized.len() - 1] = b'}';
+        fs::write(&snapshot_path, &oversized).map_err(|error| error.to_string())?;
+
+        let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());
+        options.agent_mail_snapshot_path = Some(snapshot_path);
+        let output = AgentMailSnapshotFileAdapter.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|item| item.code == AGENT_MAIL_UNAVAILABLE_CODE
+                    && item.message.contains("exceeds")
+                    && item.message.contains("byte cap")),
+            "expected byte-cap degradation, got {:?}",
             output.snapshot.degraded
         );
         assert!(matches!(output.contribution, SwarmBriefContribution::None));
