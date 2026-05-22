@@ -243,8 +243,16 @@ fn ppr_prefetch_cache_capacity() -> usize {
 }
 
 fn load_ppr_prefetch_result(key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheResultHit> {
-    let mut cache = ppr_prefetch_cache()
-        .write()
+    // bd-2lin9: the read path now takes a shared lock so concurrent
+    // cache-hit lookups against different keys (and against the same
+    // hot key in daemon-mode multi-agent scenarios) can run in
+    // parallel. The LRU touch in `PprPrefetchCache::get_result`
+    // is implemented via atomic store on the entry's
+    // `last_used_sequence`, so it does not require a write lock.
+    // Eviction (`evict_to_capacity` + friends) still runs under the
+    // outer write lock via `store_ppr_prefetch_result` below.
+    let cache = ppr_prefetch_cache()
+        .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let hit = cache.get_result(key);
     tracing::debug!(

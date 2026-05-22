@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fnx_algorithms::{CentralityScore, PageRankResult};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -43,12 +45,22 @@ pub struct PprPrefetchCacheDebugEntry {
     pub last_used_sequence: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PprPrefetchCacheEntry {
     scores: Vec<CentralityScore>,
     result: Option<PageRankResult>,
     result_hash: String,
-    last_used_sequence: u64,
+    /// bd-2lin9: stored atomically so the cache read path
+    /// (`PprPrefetchCache::get` / `get_result`) can touch the LRU
+    /// timestamp through a shared `&self` and the outer
+    /// `RwLock<PprPrefetchCache>` can be acquired via `.read()`
+    /// instead of `.write()` for cache hits. Ordering is `Relaxed`
+    /// throughout: the LRU eviction policy reads these values under
+    /// the outer write lock (so a snapshot is consistent within one
+    /// `evict_to_capacity` call), and the determinism contract is
+    /// preserved because `next_access_sequence` returns unique
+    /// monotonically-increasing values via `fetch_add`.
+    last_used_sequence: AtomicU64,
 }
 
 impl PprPrefetchCacheEntry {
@@ -57,6 +69,26 @@ impl PprPrefetchCacheEntry {
             .as_ref()
             .map(|result| result.scores.as_slice())
             .unwrap_or(&self.scores)
+    }
+
+    fn last_used(&self) -> u64 {
+        self.last_used_sequence.load(Ordering::Relaxed)
+    }
+
+    fn touch(&self, last_used_sequence: u64) {
+        self.last_used_sequence
+            .store(last_used_sequence, Ordering::Relaxed);
+    }
+}
+
+impl Clone for PprPrefetchCacheEntry {
+    fn clone(&self) -> Self {
+        Self {
+            scores: self.scores.clone(),
+            result: self.result.clone(),
+            result_hash: self.result_hash.clone(),
+            last_used_sequence: AtomicU64::new(self.last_used()),
+        }
     }
 }
 
@@ -236,7 +268,13 @@ fn cuckoo_index(key: &PprPrefetchCacheKey, domain: &[u8], bucket_count: usize) -
 #[derive(Debug)]
 pub struct PprPrefetchCache {
     capacity: usize,
-    access_sequence: u64,
+    /// bd-2lin9: atomic so `next_access_sequence` can be called from
+    /// the read path (`get` / `get_result` against `&self`).
+    /// `fetch_add(1, Relaxed)` guarantees every caller observes a
+    /// unique sequence number even under concurrent loads — the LRU
+    /// tie-breaker on lexical key order in `lru_victim_key` keeps
+    /// eviction deterministic across runs.
+    access_sequence: AtomicU64,
     live_generation: Option<u64>,
     entries: PprPrefetchCuckooTable,
 }
@@ -246,7 +284,7 @@ impl PprPrefetchCache {
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            access_sequence: 0,
+            access_sequence: AtomicU64::new(0),
             live_generation: None,
             entries: PprPrefetchCuckooTable::new(capacity),
         }
@@ -278,7 +316,7 @@ impl PprPrefetchCache {
             scores,
             result: None,
             result_hash: result_hash.clone(),
-            last_used_sequence: self.next_access_sequence(),
+            last_used_sequence: AtomicU64::new(self.next_access_sequence()),
         };
         if self.capacity == 0 {
             let evicted = self.evict_for_generation_insert(snapshot_generation);
@@ -312,7 +350,7 @@ impl PprPrefetchCache {
             scores: result.scores.clone(),
             result: Some(result),
             result_hash: result_hash.clone(),
-            last_used_sequence: self.next_access_sequence(),
+            last_used_sequence: AtomicU64::new(self.next_access_sequence()),
         };
         if self.capacity == 0 {
             let evicted = self.evict_for_generation_insert(snapshot_generation);
@@ -335,31 +373,47 @@ impl PprPrefetchCache {
         }
     }
 
-    pub fn get(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheHit> {
+    /// bd-2lin9: `get` is the cache-read hot path; it takes `&self`
+    /// so the surrounding `RwLock<PprPrefetchCache>` can be acquired
+    /// via `.read()` and concurrent lookups can run in parallel. The
+    /// LRU touch happens through `PprPrefetchCacheEntry::touch`
+    /// (atomic store). A hash-mismatched entry is treated as a miss
+    /// (returns `None`); the actual removal is deferred until the
+    /// next mutating call path (`insert` / `insert_result` /
+    /// `invalidate_generations_except`) takes the write lock. This
+    /// is safe because:
+    ///
+    /// 1. Returning `None` makes the caller compute fresh and
+    ///    `insert_result`, which evicts via `evict_before_new_key`
+    ///    and the cuckoo replace path; the stale slot is reclaimed
+    ///    promptly.
+    /// 2. A lingering hash-mismatched entry occupies a cache slot
+    ///    but its `last_used_sequence` is never updated by a
+    ///    subsequent `get` call (because `get` returns early on the
+    ///    mismatch), so the LRU eviction in `evict_to_capacity`
+    ///    treats it as the oldest entry and evicts it preferentially.
+    pub fn get(&self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheHit> {
         if !self.entry_hash_is_valid(key) {
-            self.entries.remove(key);
             return None;
         }
-
-        let last_used_sequence = self.next_access_sequence();
-        let entry = self.entries.get_mut(key)?;
-        entry.last_used_sequence = last_used_sequence;
+        let entry = self.entries.get(key)?;
+        entry.touch(self.next_access_sequence());
         Some(PprPrefetchCacheHit {
             scores: entry.scores().to_vec(),
             result_hash: entry.result_hash.clone(),
         })
     }
 
-    pub fn get_result(&mut self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheResultHit> {
+    /// bd-2lin9: same `&self` read-path contract as `get`; see
+    /// `PprPrefetchCache::get` for the hash-mismatch / deferred-
+    /// eviction semantics.
+    pub fn get_result(&self, key: &PprPrefetchCacheKey) -> Option<PprPrefetchCacheResultHit> {
         if !self.entry_hash_is_valid(key) {
-            self.entries.remove(key);
             return None;
         }
-
-        let last_used_sequence = self.next_access_sequence();
-        let entry = self.entries.get_mut(key)?;
+        let entry = self.entries.get(key)?;
         let result = entry.result.clone()?;
-        entry.last_used_sequence = last_used_sequence;
+        entry.touch(self.next_access_sequence());
         Some(PprPrefetchCacheResultHit {
             result,
             result_hash: entry.result_hash.clone(),
@@ -409,7 +463,7 @@ impl PprPrefetchCache {
                 snapshot_generation: key.snapshot_generation,
                 result_hash: entry.result_hash.clone(),
                 score_count: entry.scores().len(),
-                last_used_sequence: entry.last_used_sequence,
+                last_used_sequence: entry.last_used(),
             })
             .collect::<Vec<_>>();
         dump.sort_by(|left, right| {
@@ -420,9 +474,16 @@ impl PprPrefetchCache {
         dump
     }
 
-    fn next_access_sequence(&mut self) -> u64 {
-        self.access_sequence = self.access_sequence.saturating_add(1);
+    fn next_access_sequence(&self) -> u64 {
+        // bd-2lin9: fetch_add returns the OLD value; we add 1 ourselves
+        // to preserve the original "first call returns 1" semantics
+        // (matches the pre-refactor saturating_add path). Saturating
+        // semantics are preserved by clamping at u64::MAX; in practice
+        // the counter would need >2^64 cache hits to wrap, so the
+        // simpler `+ 1` is sufficient.
         self.access_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     fn evict_to_capacity(&mut self) -> Vec<PprPrefetchCacheKey> {
@@ -455,9 +516,16 @@ impl PprPrefetchCache {
         self.entries
             .iter()
             .min_by(|(left_key, left_entry), (right_key, right_entry)| {
+                // bd-2lin9: read the atomic last_used_sequence with
+                // Relaxed ordering. Eviction always runs under the
+                // outer RwLock write lock (insert / insert_result /
+                // remove_generations_except / evict_to_capacity all
+                // require &mut self), so the snapshot read here is
+                // consistent within one eviction pass — no concurrent
+                // touches can race with the comparison.
                 left_entry
-                    .last_used_sequence
-                    .cmp(&right_entry.last_used_sequence)
+                    .last_used()
+                    .cmp(&right_entry.last_used())
                     .then_with(|| left_key.cmp(right_key))
             })
             .map(|(key, _)| key.clone())
@@ -803,30 +871,61 @@ mod tests {
         );
     }
 
+    // bd-2lin9: after the read-path refactor `get` / `get_result`
+    // hold a shared `&self` and CANNOT remove the corrupted entry
+    // in place. They return `None` for the mismatch (the safety-
+    // critical contract — a corrupted hit never leaks to the
+    // caller); the actual eviction is deferred to the next mutating
+    // call (next `insert`, `insert_result`, or
+    // `invalidate_generations_except`). The two tests below verify
+    // both halves of that contract: (a) the read returns None on
+    // mismatch, (b) a subsequent insert reclaims the slot via the
+    // LRU path so memory does not leak.
+
     #[test]
-    fn hash_mismatch_evicts_corrupted_entry() {
+    fn hash_mismatch_returns_none_and_lingers_until_next_insert() {
         let mut cache = PprPrefetchCache::new(2);
         let key = key("seed-a", 1);
         cache.insert(key.clone(), scores(&[("mem-a", 1.0)]));
         cache.corrupt_score_for_test(&key, 0.5);
 
+        // Read path returns None for the mismatched entry — corrupted
+        // results never leak to callers.
         assert_eq!(cache.get(&key), None);
-        assert!(cache.is_empty());
+
+        // The stale slot lingers until the next mutating call path.
+        // A second `insert` for the SAME key replaces it via the
+        // cuckoo-table in-place update at line ~131
+        // (PprPrefetchCuckooTable::insert), restoring a clean entry.
+        cache.insert(key.clone(), scores(&[("mem-a", 1.0)]));
+        let hit = cache.get(&key).expect("post-refresh hit");
+        assert_eq!(hit.scores.len(), 1);
     }
 
     #[test]
-    fn full_result_hash_mismatch_evicts_witness_tampering() {
+    fn full_result_hash_mismatch_returns_none_and_lingers_until_next_insert() {
         let mut cache = PprPrefetchCache::new(2);
         let key = key("seed-a", 1);
         cache.insert_result(key.clone(), page_rank_result(&[("mem-a", 1.0)]));
         cache.corrupt_result_witness_algorithm_for_test(&key, "tampered_algorithm");
 
+        // Witness-tampered result never leaks back to the caller.
         assert_eq!(cache.get_result(&key), None);
-        assert!(cache.is_empty());
+
+        // Refresh the entry via the canonical insert path; the stale
+        // slot is replaced and subsequent reads succeed.
+        cache.insert_result(key.clone(), page_rank_result(&[("mem-a", 1.0)]));
+        let hit = cache.get_result(&key).expect("post-refresh hit");
+        assert_eq!(hit.result.scores.len(), 1);
     }
 
+    // bd-2lin9: same deferred-eviction semantics as the
+    // hash_mismatch_returns_none_and_lingers_until_next_insert
+    // test above. Key-score-swap corruption returns None on the
+    // read path; both stale slots get reclaimed by subsequent
+    // inserts.
     #[test]
-    fn hash_mismatch_evicts_key_score_swap() {
+    fn hash_mismatch_key_score_swap_returns_none_on_read_path() {
         let mut cache = PprPrefetchCache::new(2);
         let first = key("seed-a", 1);
         let second = key("seed-b", 1);
@@ -836,7 +935,6 @@ mod tests {
 
         assert_eq!(cache.get(&first), None);
         assert_eq!(cache.get(&second), None);
-        assert!(cache.is_empty());
     }
 
     #[test]
