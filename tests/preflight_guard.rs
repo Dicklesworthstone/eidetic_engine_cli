@@ -379,6 +379,11 @@ fn rm_rf_builtin_matches_command_positions_and_wrappers() {
         "cd /tmp && rm -rf /var/cache",
         "sudo rm -fr /var/cache",
         "sudo -n rm -rf /var/cache",
+        "sudo -u root rm -rf /var/cache",
+        "sudo -E -u root -g wheel rm -rf /var/cache",
+        "sudo --user root --group wheel rm -rf /var/cache",
+        "sudo --user=root --group=wheel rm -rf /var/cache",
+        "sudo --preserve-env=PATH rm -rf /var/cache",
         "env FOO=bar rm -r -f ~/scratch",
         "rm --recursive --force -- /var/cache",
     ] {

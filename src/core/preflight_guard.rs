@@ -496,13 +496,7 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
     while index < segment.len() {
         let word = &segment[index];
         if word == "sudo" {
-            index += 1;
-            while segment
-                .get(index)
-                .is_some_and(|candidate| candidate.starts_with('-'))
-            {
-                index += 1;
-            }
+            index = sudo_wrapped_command_index(segment, index + 1)?;
             continue;
         }
         if word == "command" || word == "builtin" {
@@ -519,6 +513,140 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
         return Some(index);
     }
     None
+}
+
+fn sudo_wrapped_command_index(segment: &[String], mut index: usize) -> Option<usize> {
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            return segment.get(index + 1).map(|_| index + 1);
+        }
+        if sudo_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if sudo_option_is_value_form(word) || sudo_option_is_flag(word) {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+fn sudo_option_takes_value(word: &str) -> bool {
+    matches!(
+        word,
+        "-C" | "-D"
+            | "-g"
+            | "-h"
+            | "-p"
+            | "-r"
+            | "-t"
+            | "-T"
+            | "-U"
+            | "-u"
+            | "--chdir"
+            | "--close-from"
+            | "--command-timeout"
+            | "--group"
+            | "--host"
+            | "--login-class"
+            | "--prompt"
+            | "--role"
+            | "--type"
+            | "--user"
+    )
+}
+
+fn sudo_option_is_value_form(word: &str) -> bool {
+    [
+        "--chdir=",
+        "--close-from=",
+        "--command-timeout=",
+        "--group=",
+        "--host=",
+        "--login-class=",
+        "--prompt=",
+        "--preserve-env=",
+        "--role=",
+        "--type=",
+        "--user=",
+    ]
+    .iter()
+    .any(|prefix| word.starts_with(prefix))
+        || sudo_short_option_has_attached_value(word)
+}
+
+fn sudo_short_option_has_attached_value(word: &str) -> bool {
+    word.len() > 2
+        && matches!(
+            word.as_bytes().get(1).copied(),
+            Some(b'C' | b'D' | b'g' | b'h' | b'p' | b'r' | b't' | b'T' | b'U' | b'u')
+        )
+}
+
+fn sudo_option_is_flag(word: &str) -> bool {
+    matches!(
+        word,
+        "-" | "-A"
+            | "-B"
+            | "-b"
+            | "-E"
+            | "-e"
+            | "-H"
+            | "-i"
+            | "-K"
+            | "-k"
+            | "-l"
+            | "-n"
+            | "-P"
+            | "-S"
+            | "-s"
+            | "-V"
+            | "-v"
+            | "--askpass"
+            | "--background"
+            | "--bell"
+            | "--edit"
+            | "--help"
+            | "--list"
+            | "--login"
+            | "--non-interactive"
+            | "--preserve-env"
+            | "--reset-timestamp"
+            | "--remove-timestamp"
+            | "--set-home"
+            | "--stdin"
+            | "--validate"
+            | "--version"
+    ) || sudo_short_flag_group(word)
+}
+
+fn sudo_short_flag_group(word: &str) -> bool {
+    word.starts_with('-')
+        && !word.starts_with("--")
+        && word.len() > 2
+        && word.chars().skip(1).all(|ch| {
+            matches!(
+                ch,
+                'A' | 'B'
+                    | 'b'
+                    | 'E'
+                    | 'e'
+                    | 'H'
+                    | 'i'
+                    | 'K'
+                    | 'k'
+                    | 'l'
+                    | 'n'
+                    | 'P'
+                    | 'S'
+                    | 's'
+                    | 'V'
+                    | 'v'
+            )
+        })
 }
 
 fn env_wrapped_command_index(segment: &[String], mut index: usize) -> Option<usize> {
@@ -2639,6 +2767,11 @@ action = "explode"
             "cd /tmp && rm -rf /var/cache",
             "sudo rm -fr /var/cache",
             "sudo -n rm -rf /var/cache",
+            "sudo -u root rm -rf /var/cache",
+            "sudo -E -u root -g wheel rm -rf /var/cache",
+            "sudo --user root --group wheel rm -rf /var/cache",
+            "sudo --user=root --group=wheel rm -rf /var/cache",
+            "sudo --preserve-env=PATH rm -rf /var/cache",
             "env FOO=bar rm -r -f ~/scratch",
             "env -i rm -rf /var/cache",
             "env --ignore-environment rm -rf /var/cache",
