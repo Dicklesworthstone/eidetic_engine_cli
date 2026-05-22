@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Utc};
@@ -88,8 +88,17 @@ const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
+// bd-2r38i: RwLock (was Mutex) so cache-hit reads via the
+// fingerprint-keyed lookup at `load_search_score_calibration_jsonl`
+// can take `.read()` and run concurrently. This is the simplest
+// member of the read-takes-write family: there is no LRU touch and
+// no TTL eviction on the read path, so no atomic refactor is
+// required — only `.lock()` → `.read()` on the read site and
+// `.lock()` → `.write()` on the two write sites. Mirrors bd-2lin9
+// (PPR), bd-1nan9 (algorithm result cache), and bd-25yao (plan
+// cache).
 static SEARCH_SCORE_CALIBRATION_JSONL_CACHE: OnceLock<
-    Mutex<HashMap<PathBuf, CachedSearchScoreCalibrationJsonl>>,
+    RwLock<HashMap<PathBuf, CachedSearchScoreCalibrationJsonl>>,
 > = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2239,8 +2248,8 @@ fn load_search_score_calibration_jsonl(path: &Path) -> SearchScoreCalibrationJso
         modified: metadata.modified().ok(),
     };
 
-    let cache = SEARCH_SCORE_CALIBRATION_JSONL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache_guard) = cache.lock()
+    let cache = SEARCH_SCORE_CALIBRATION_JSONL_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.read()
         && let Some(cached) = cache_guard.get(path)
         && cached.fingerprint == fingerprint
     {
@@ -2265,7 +2274,7 @@ fn load_search_score_calibration_jsonl(path: &Path) -> SearchScoreCalibrationJso
         stream_search_score_calibration_jsonl(path, metadata.len())
     };
 
-    if let Ok(mut cache_guard) = cache.lock() {
+    if let Ok(mut cache_guard) = cache.write() {
         cache_guard.insert(
             path.to_path_buf(),
             CachedSearchScoreCalibrationJsonl {
@@ -2665,7 +2674,7 @@ pub fn recalibrate_search_score_calibration(
     })?;
 
     if let Some(cache) = SEARCH_SCORE_CALIBRATION_JSONL_CACHE.get()
-        && let Ok(mut cache_guard) = cache.lock()
+        && let Ok(mut cache_guard) = cache.write()
     {
         cache_guard.remove(&calibration_path);
     }
