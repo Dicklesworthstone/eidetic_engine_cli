@@ -495,7 +495,7 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
     let mut index = 0;
     while index < segment.len() {
         let word = &segment[index];
-        if word == "sudo" {
+        if command_basename(word) == "sudo" {
             index = sudo_wrapped_command_index(segment, index + 1)?;
             continue;
         }
@@ -503,7 +503,7 @@ fn shell_segment_command_index(segment: &[String]) -> Option<usize> {
             index += 1;
             continue;
         }
-        if word == "env" {
+        if command_basename(word) == "env" {
             index = env_wrapped_command_index(segment, index + 1)?;
             continue;
         }
@@ -1499,6 +1499,10 @@ fn is_block_device_path(path: &str) -> bool {
 }
 
 fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
+    expand_env_split_string_segments(parse_shell_command_segments(command), 0)
+}
+
+fn parse_shell_command_segments(command: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut current_segment = Vec::new();
     let mut current_word = String::new();
@@ -1540,6 +1544,124 @@ fn shell_command_segments(command: &str) -> Vec<Vec<String>> {
     finish_shell_word(&mut current_word, &mut current_segment);
     finish_shell_segment(&mut current_segment, &mut segments);
     segments
+}
+
+const MAX_ENV_SPLIT_STRING_DEPTH: usize = 4;
+
+fn expand_env_split_string_segments(segments: Vec<Vec<String>>, depth: usize) -> Vec<Vec<String>> {
+    let mut expanded = Vec::new();
+
+    for segment in segments {
+        let split_bodies = env_split_string_bodies(&segment);
+        expanded.push(segment);
+
+        if depth >= MAX_ENV_SPLIT_STRING_DEPTH {
+            continue;
+        }
+
+        for body in split_bodies {
+            expanded.extend(expand_env_split_string_segments(
+                parse_shell_command_segments(&body),
+                depth + 1,
+            ));
+        }
+    }
+
+    expanded
+}
+
+fn env_split_string_bodies(segment: &[String]) -> Vec<String> {
+    let Some(env_index) = env_command_index(segment) else {
+        return Vec::new();
+    };
+    let mut bodies = Vec::new();
+    let mut index = env_index + 1;
+
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            break;
+        }
+        if looks_like_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if word == "-S" || word == "--split-string" {
+            if let Some(body) = segment.get(index + 1) {
+                bodies.push(env_split_body_with_trailing(
+                    body,
+                    segment.get(index + 2..).unwrap_or_default(),
+                ));
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(body) = word.strip_prefix("--split-string=") {
+            bodies.push(env_split_body_with_trailing(
+                body,
+                segment.get(index + 1..).unwrap_or_default(),
+            ));
+            index += 1;
+            continue;
+        }
+        if let Some(body) = word.strip_prefix("-S") {
+            if !body.is_empty() {
+                bodies.push(env_split_body_with_trailing(
+                    body,
+                    segment.get(index + 1..).unwrap_or_default(),
+                ));
+                index += 1;
+                continue;
+            }
+        }
+        if env_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if env_option_is_value_form(word) || env_option_is_flag(word) {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+
+    bodies
+}
+
+fn env_split_body_with_trailing(body: &str, trailing: &[String]) -> String {
+    if trailing.is_empty() {
+        return body.to_owned();
+    }
+    let mut combined = body.to_owned();
+    for word in trailing {
+        combined.push(' ');
+        combined.push_str(word);
+    }
+    combined
+}
+
+fn env_command_index(segment: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while index < segment.len() {
+        let word = &segment[index];
+        if command_basename(word) == "sudo" {
+            index = sudo_wrapped_command_index(segment, index + 1)?;
+            continue;
+        }
+        if word == "command" || word == "builtin" {
+            index += 1;
+            continue;
+        }
+        if looks_like_env_assignment(word) {
+            index += 1;
+            continue;
+        }
+        if command_basename(word) == "env" {
+            return Some(index);
+        }
+        return None;
+    }
+    None
 }
 
 fn finish_shell_word(current_word: &mut String, current_segment: &mut Vec<String>) {
@@ -2773,6 +2895,7 @@ action = "explode"
             "sudo --user root --group wheel rm -rf /var/cache",
             "sudo --user=root --group=wheel rm -rf /var/cache",
             "sudo --preserve-env=PATH rm -rf /var/cache",
+            "/usr/bin/sudo rm -rf /var/cache",
             "env FOO=bar rm -r -f ~/scratch",
             "env -i rm -rf /var/cache",
             "env --ignore-environment rm -rf /var/cache",
@@ -2783,6 +2906,8 @@ action = "explode"
             "env -i sudo --user root --group wheel rm -rf /var/cache",
             "env --unset=PATH sudo --preserve-env=PATH rm -rf /var/cache",
             "env -- sudo -E -u root rm -rf /var/cache",
+            "/usr/bin/env rm -rf /var/cache",
+            "sudo /usr/bin/env -i rm -rf /var/cache",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
@@ -2805,6 +2930,12 @@ action = "explode"
             "tcsh -c 'rm -rf /'",
             "RM=rm $RM -rf /",
             "env RM=rm bash -c \"$RM -rf /\"",
+            "env -S 'rm -rf /'",
+            "env --split-string='rm -rf /'",
+            "env -S rm -rf /",
+            "env --split-string rm -rf /",
+            "/usr/bin/env -i -S 'rm -rf /'",
+            "sudo /usr/bin/env --split-string='bash -c \"rm -rf /\"'",
             "$(rm -rf /)",
             "`rm -rf /`",
             "eval 'rm -rf /'",
