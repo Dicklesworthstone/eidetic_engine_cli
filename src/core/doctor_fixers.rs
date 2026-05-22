@@ -249,6 +249,10 @@ pub fn fix_policy_safety_inconsistent(workspace_root: &Path) -> FixerDispatch {
 #[must_use]
 pub fn fix_snapshot_backup_owed(workspace_root: &Path, label: impl Into<String>) -> FixerDispatch {
     let label = label.into();
+    let backup_command = format!(
+        "ee backup create --workspace . --label {} --json",
+        shell_quote_arg(&label)
+    );
     FixerDispatch {
         finding_code: "snapshot_backup_owed",
         severity: "warning",
@@ -256,11 +260,25 @@ pub fn fix_snapshot_backup_owed(workspace_root: &Path, label: impl Into<String>)
         op: Op::SnapshotBackup {
             label: label.clone(),
             steps: vec![
-                format!("ee backup create --label {label}"),
+                backup_command,
                 "Verify the backup manifest hash matches the pre-mutation source.".to_string(),
             ],
         },
     }
+}
+
+fn shell_quote_arg(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for ch in value.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// FM-SF-04: state file permission drift (a sensitive file is
@@ -423,11 +441,23 @@ mod tests {
 
     #[test]
     fn snapshot_backup_owed_dispatches_snapshot_backup() {
-        let dispatch = fix_snapshot_backup_owed(&root(), "doctor-pre-migration");
+        let dispatch = fix_snapshot_backup_owed(&root(), "doctor pre ' migration");
         let Op::SnapshotBackup { ref label, .. } = dispatch.op else {
             panic!("expected SnapshotBackup");
         };
-        assert_eq!(label, "doctor-pre-migration");
+        assert_eq!(label, "doctor pre ' migration");
+    }
+
+    #[test]
+    fn snapshot_backup_owed_uses_workspace_json_command_and_quotes_label() {
+        let dispatch = fix_snapshot_backup_owed(&root(), "doctor pre ' migration");
+        let Op::SnapshotBackup { ref steps, .. } = dispatch.op else {
+            panic!("expected SnapshotBackup");
+        };
+        assert_eq!(
+            steps[0],
+            "ee backup create --workspace . --label 'doctor pre '\\'' migration' --json"
+        );
     }
 
     #[test]
