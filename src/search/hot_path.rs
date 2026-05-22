@@ -1,4 +1,3 @@
-use super::bloom_prefilter::CountingBloomPrefilter;
 use super::tag_bitmaps::{TagBitmapIndex, TagBitmapQuery};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14,7 +13,7 @@ impl SearchHotPathDiagnostics {
     pub const fn scalar(candidate_count: usize) -> Self {
         Self {
             tags: "bitmap",
-            negation_prefilter: "bloom",
+            negation_prefilter: "none",
             scoring: "fixed_point_scalar",
             candidate_count,
         }
@@ -31,17 +30,7 @@ pub struct SearchHotPathResult {
 pub fn filter_candidates(
     tag_index: &TagBitmapIndex,
     query: &TagBitmapQuery,
-    forbidden_tags: &[String],
 ) -> SearchHotPathResult {
-    let mut prefilter = CountingBloomPrefilter::with_capacity(forbidden_tags.len());
-    for tag in forbidden_tags {
-        prefilter.insert(tag);
-    }
-
-    let _negation_known_to_prefilter = query
-        .excludes()
-        .iter()
-        .any(|tag| !prefilter.definitely_absent(tag));
     let candidate_ids = tag_index.matching(query);
 
     SearchHotPathResult {
@@ -63,9 +52,9 @@ mod tests {
             (3, vec!["rust", "search"]),
         ]);
         let query = TagBitmapQuery::new(["rust"], ["archived"]);
-        let result = filter_candidates(&index, &query, &["archived".to_string()]);
+        let result = filter_candidates(&index, &query);
         assert_eq!(result.candidate_ids, vec![1, 3]);
         assert_eq!(result.diagnostics.tags, "bitmap");
-        assert_eq!(result.diagnostics.negation_prefilter, "bloom");
+        assert_eq!(result.diagnostics.negation_prefilter, "none");
     }
 }
