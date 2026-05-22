@@ -21,6 +21,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use ee::core::backup::{BackupCreateOptions, create_backup};
@@ -134,6 +135,17 @@ fn canonicalized_records_jsonl(records_path: &Path) -> Result<Vec<Value>, String
         records.push(value);
     }
     Ok(records)
+}
+
+fn file_blake3_hash(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(format!("blake3:{}", blake3::hash(&bytes).to_hex()))
+}
+
+fn file_len(path: &Path) -> Result<u64, String> {
+    Ok(fs::metadata(path)
+        .map_err(|error| format!("metadata {}: {error}", path.display()))?
+        .len())
 }
 
 fn json_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -481,6 +493,81 @@ fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
              b: {records_b:#?}"
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn backup_report_artifacts_match_written_files() -> TestResult {
+    let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
+    let src_workspace = src_dir.path().to_path_buf();
+    let src_db = src_workspace.join(".ee").join("ee.db");
+    build_source_workspace(&src_workspace, &src_db)?;
+
+    let backup_dir = tempfile::tempdir().map_err(|error| format!("backup tempdir: {error}"))?;
+    let report = create_backup(&BackupCreateOptions {
+        workspace_path: src_workspace,
+        database_path: Some(src_db),
+        output_dir: Some(backup_dir.path().to_path_buf()),
+        label: Some("artifact-hashes".to_owned()),
+        redaction_level: RedactionLevel::None,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| format!("backup: {error:?}"))?;
+
+    let records_path = Path::new(&report.records_path);
+    let manifest_path = Path::new(&report.manifest_path);
+    let expected_records_hash = file_blake3_hash(records_path)?;
+    let expected_manifest_hash = file_blake3_hash(manifest_path)?;
+
+    if report.records_hash.as_deref() != Some(expected_records_hash.as_str()) {
+        return Err(format!(
+            "records hash mismatch: report={:?}, actual={expected_records_hash}",
+            report.records_hash
+        ));
+    }
+    if report.manifest_hash.as_deref() != Some(expected_manifest_hash.as_str()) {
+        return Err(format!(
+            "manifest hash mismatch: report={:?}, actual={expected_manifest_hash}",
+            report.manifest_hash
+        ));
+    }
+
+    let mut artifact_projection = report
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                artifact.path,
+                artifact.kind,
+                artifact.hash.as_deref().unwrap_or("[missing-hash]"),
+                artifact.size_bytes.unwrap_or(0),
+                artifact.required
+            )
+        })
+        .collect::<Vec<_>>();
+    artifact_projection.sort();
+
+    let expected = vec![
+        format!(
+            "manifest.json|manifest|{}|{}|true",
+            expected_manifest_hash,
+            file_len(manifest_path)?
+        ),
+        format!(
+            "records.jsonl|jsonl_export|{}|{}|true",
+            expected_records_hash,
+            file_len(records_path)?
+        ),
+    ];
+    if artifact_projection != expected {
+        return Err(format!(
+            "backup artifact projection drifted:\nexpected: {expected:#?}\nactual:   {artifact_projection:#?}"
+        ));
+    }
+
     Ok(())
 }
 
