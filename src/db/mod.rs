@@ -17159,13 +17159,14 @@ impl DbConnection {
         input: &CreateRecorderEventInput,
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let sequence = recorder_event_sequence_value(input.sequence)?;
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO recorder_events (event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             &[
                 Value::Text(event_id.to_string()),
                 Value::Text(input.run_id.clone()),
-                Value::from_u64_clamped(input.sequence),
+                sequence,
                 Value::Text(input.event_type.clone()),
                 Value::Text(input.timestamp.clone()),
                 input.payload_hash.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
@@ -17266,6 +17267,14 @@ impl DbConnection {
     }
 }
 
+fn recorder_event_sequence_value(sequence: u64) -> Result<Value> {
+    let sequence = i64::try_from(sequence).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("recorder event sequence {sequence} exceeds SQLite integer storage"),
+    })?;
+    Ok(Value::BigInt(sequence))
+}
+
 fn stored_recorder_run_from_row(row: &Row) -> Result<StoredRecorderRun> {
     Ok(StoredRecorderRun {
         run_id: required_text(row, 0, DbOperation::Query, "run_id")?.to_string(),
@@ -17326,12 +17335,12 @@ mod tests {
     use super::{
         CreateArtifactInput, CreateArtifactLinkInput, CreateGraphAlgorithmResultInput,
         CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateProceduralRuleInput,
-        CreateTaskEpisodeInput, CreateWorkspaceInput, DatabaseConfig, DatabaseLocation,
-        DatabaseOpenMode, DbConnection, DbError, DbOperation, GraphSnapshotStatus,
-        GraphSnapshotType, MIGRATION_TABLE_NAME, Migration, MigrationRecord, MigrationTableColumn,
-        StoredEpisodeAction, UpdateProceduralRuleLifecycleInput, WalCheckpointMode,
-        file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
-        lock_file_write_owner_gate, subsystem_name,
+        CreateRecorderEventInput, CreateRecorderRunInput, CreateTaskEpisodeInput,
+        CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
+        DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
+        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction,
+        UpdateProceduralRuleLifecycleInput, WalCheckpointMode, file_write_owner_depth_for_test,
+        file_write_owner_gate_address_for_test, lock_file_write_owner_gate, subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
@@ -17660,6 +17669,72 @@ mod tests {
                 "database disk image is malformed: page 30 is corrupt"
             )
         );
+    }
+
+    #[test]
+    fn recorder_event_sequence_above_sqlite_integer_range_is_rejected() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.insert_recorder_run(
+            "run_sequence_overflow",
+            &CreateRecorderRunInput {
+                workspace_id: None,
+                agent_id: "agent_sequence_overflow".to_string(),
+                session_id: None,
+                source_type: "synthetic".to_string(),
+                source_id: Some("fixture://sequence-overflow".to_string()),
+                status: "imported".to_string(),
+                started_at: "2026-05-22T00:00:00Z".to_string(),
+                ended_at: None,
+                event_count: 1,
+                redacted_count: 0,
+                payload_bytes: 0,
+                chain_complete: false,
+            },
+        )?;
+
+        let oversized_sequence = u64::try_from(i64::MAX).expect("i64 max fits u64") + 1;
+        let result = connection.insert_recorder_event(
+            "evt_sequence_overflow",
+            &CreateRecorderEventInput {
+                run_id: "run_sequence_overflow".to_string(),
+                sequence: oversized_sequence,
+                event_type: "tool_call".to_string(),
+                timestamp: "2026-05-22T00:00:01Z".to_string(),
+                payload_hash: None,
+                payload_bytes: 0,
+                redaction_status: "clean".to_string(),
+                redacted_bytes: 0,
+                previous_event_hash: None,
+                event_hash: "blake3:sequence-overflow".to_string(),
+                chain_status: "root".to_string(),
+                source_span_id: None,
+                source_line_start: None,
+                source_line_end: None,
+            },
+        );
+
+        match result {
+            Ok(()) => Err(TestFailure::new(
+                "oversized recorder event sequence unexpectedly inserted",
+            )),
+            Err(DbError::MalformedRow { operation, message }) => {
+                ensure_equal(
+                    &operation,
+                    &DbOperation::Execute,
+                    "sequence overflow operation",
+                )?;
+                ensure(
+                    message.contains("recorder event sequence")
+                        && message.contains("SQLite integer storage"),
+                    format!("unexpected sequence overflow message: {message}"),
+                )?;
+                let stored = connection.list_recorder_events("run_sequence_overflow")?;
+                ensure(stored.is_empty(), "oversized sequence should not persist")
+            }
+            Err(error) => Err(TestFailure::new(format!(
+                "expected malformed-row overflow error, got {error:?}"
+            ))),
+        }
     }
 
     #[test]
