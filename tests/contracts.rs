@@ -327,3 +327,6 @@ mod pack_stream_conformance_v1;
 
 #[path = "contracts/pack_quality_report_conformance_v1.rs"]
 mod pack_quality_report_conformance_v1;
+
+#[path = "contracts/graph_surfaces_conformance_v1.rs"]
+mod graph_surfaces_conformance_v1;
