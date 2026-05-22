@@ -1,9 +1,14 @@
 //! Static contract tests for the first context-delta documentation slice.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
+
+use eidetic_engine_cli::core::context_delta::{
+    ContextDeltaItemSnapshot, ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
+};
 
 type TestResult = Result<(), String>;
 
@@ -114,6 +119,135 @@ fn context_delta_schema_pins_item_diff_and_token_budget_contract() -> TestResult
         }
     }
 
+    Ok(())
+}
+
+/// Returns the JSON-Pointer-style key names a schema permits on a
+/// closed `additionalProperties: false` object at the given pointer.
+fn schema_property_names(schema: &Value, properties_pointer: &str) -> Result<Vec<String>, String> {
+    schema
+        .pointer(properties_pointer)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("missing properties at {properties_pointer}"))?
+        .keys()
+        .map(|name| Ok::<_, String>(name.clone()))
+        .collect()
+}
+
+/// Builds a representative envelope using only the public compute API,
+/// then asserts every serialized key matches the v1 schema's closed
+/// property set. This is the contract test the original review finding
+/// said was missing: it would have caught the prior `{schema, …}` flat
+/// envelope, the missing `serverDecision`, and the `{old, new}` object
+/// field-change shape immediately.
+#[test]
+fn context_delta_rust_envelope_matches_schema_property_set() -> TestResult {
+    let schema_text = read_repo_file("docs/schemas/ee.context.delta.v1.json")?;
+    let schema: Value =
+        serde_json::from_str(&schema_text).map_err(|error| format!("schema parse: {error}"))?;
+
+    let prior_item = ContextDeltaItemSnapshot::new("mem_a")
+        .with_field("contentHash", Value::String("old".to_string()))
+        .with_field("estimatedTokens", serde_json::json!(10));
+    let new_item = ContextDeltaItemSnapshot::new("mem_a")
+        .with_field("contentHash", Value::String("new".to_string()))
+        .with_field("estimatedTokens", serde_json::json!(12));
+    let prior = ContextDeltaPackSnapshot::new("h1", 1, 1024, 320, vec![prior_item]);
+    let new = ContextDeltaPackSnapshot::new("h2", 2, 1100, 360, vec![new_item]);
+    let envelope = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+        .map_err(|error| format!("compute_context_delta: {error}"))?;
+    let serialized =
+        serde_json::to_value(&envelope).map_err(|error| format!("serialize envelope: {error}"))?;
+
+    let envelope_object = serialized
+        .as_object()
+        .ok_or_else(|| "envelope must serialize as a JSON object".to_string())?;
+    let envelope_keys = envelope_object
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let allowed_envelope = schema_property_names(&schema, "/properties")?;
+    for key in &envelope_keys {
+        if !allowed_envelope.iter().any(|allowed| allowed == key) {
+            return Err(format!(
+                "envelope key `{key}` is not in the v1 schema property set ({allowed_envelope:?})"
+            ));
+        }
+    }
+    for required in ["schema", "success", "data", "degraded"] {
+        if !envelope_keys.contains(required) {
+            return Err(format!("envelope missing required key `{required}`"));
+        }
+    }
+
+    let data_object = serialized
+        .pointer("/data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "data must be an object".to_string())?;
+    let data_keys = data_object
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let allowed_data = schema_property_names(&schema, "/$defs/contextDelta/properties")?;
+    for key in &data_keys {
+        if !allowed_data.iter().any(|allowed| allowed == key) {
+            return Err(format!(
+                "data key `{key}` is not in the v1 contextDelta property set ({allowed_data:?})"
+            ));
+        }
+    }
+    for required in [
+        "priorPackHash",
+        "newPackHash",
+        "items",
+        "tokenSavings",
+        "serverDecision",
+    ] {
+        if !data_keys.contains(required) {
+            return Err(format!("data missing required key `{required}`"));
+        }
+    }
+
+    let server_decision = serialized
+        .pointer("/data/serverDecision")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "serverDecision must be an object".to_string())?;
+    let server_keys = server_decision
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let allowed_server = schema_property_names(
+        &schema,
+        "/$defs/contextDelta/properties/serverDecision/properties",
+    )?;
+    for key in &server_keys {
+        if !allowed_server.iter().any(|allowed| allowed == key) {
+            return Err(format!(
+                "serverDecision key `{key}` is not in the v1 schema property set ({allowed_server:?})"
+            ));
+        }
+    }
+    for required in [
+        "computedFromServerVerifiedPackRecord",
+        "deltaChained",
+        "format",
+    ] {
+        if !server_keys.contains(required) {
+            return Err(format!("serverDecision missing required key `{required}`"));
+        }
+    }
+
+    let field_change = serialized
+        .pointer("/data/items/modified/0/fieldChanges/contentHash")
+        .ok_or_else(|| "modified item field change missing".to_string())?;
+    let pair = field_change.as_array().ok_or_else(|| {
+        format!("ordinary field change must serialize as a JSON array, got {field_change}")
+    })?;
+    if pair.len() != 2 {
+        return Err(format!(
+            "ordinary field change must be a two-element [old, new] array; got {pair:?}"
+        ));
+    }
     Ok(())
 }
 

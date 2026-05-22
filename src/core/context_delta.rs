@@ -9,6 +9,8 @@ pub const CONTEXT_DELTA_PRIOR_UNKNOWN_CODE: &str = "context_delta_prior_unknown"
 pub const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 pub const CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE: &str = "context_delta_format_unsupported";
 
+const CONTEXT_DELTA_FORMAT_JSON: &str = "json";
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextDeltaPackSnapshot {
@@ -73,24 +75,88 @@ impl ContextDeltaOptions {
     }
 }
 
+/// Top-level envelope matching `ee.context.delta.v1` (see
+/// `docs/schemas/ee.context.delta.v1.json`). Always serializes as
+/// `{schema, success, data, degraded}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextDeltaEnvelope {
     pub schema: &'static str,
-    pub prior_pack_hash: String,
-    pub new_pack_hash: String,
-    pub base_db_generation: u64,
-    pub new_db_generation: u64,
-    pub items: ContextDeltaItems,
-    pub token_savings: ContextDeltaTokenSavings,
-    pub fallback: Option<ContextDeltaFallback>,
+    pub success: bool,
+    pub data: ContextDeltaPayload,
+    pub degraded: Vec<ContextDeltaDegradation>,
 }
 
 impl ContextDeltaEnvelope {
+    /// Returns true when this envelope carried a real item-scoped delta.
+    /// False when the server fell back to emitting a full pack (the
+    /// fallback reason is then carried on `data.server_decision`).
     #[must_use]
     pub fn emits_delta(&self) -> bool {
-        self.fallback.is_none()
+        self.data.server_decision.fallback_reason.is_none()
     }
+}
+
+/// The `data` payload of `ee.context.delta.v1`. Field set is closed
+/// (`additionalProperties: false`); add new fields only after bumping
+/// the schema to v2.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextDeltaPayload {
+    pub prior_pack_hash: String,
+    pub new_pack_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_db_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_db_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prior_feature_flag_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_feature_flag_set_hash: Option<String>,
+    pub items: ContextDeltaItems,
+    pub token_savings: ContextDeltaTokenSavings,
+    pub server_decision: ContextDeltaServerDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<BTreeMap<String, JsonValue>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextDeltaServerDecision {
+    pub computed_from_server_verified_pack_record: bool,
+    pub delta_chained: bool,
+    pub format: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<ContextDeltaFallbackReason>,
+}
+
+/// Closed enum mirroring `serverDecision.fallbackReason` in the v1
+/// schema. Wire form is snake_case strings.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextDeltaFallbackReason {
+    PriorUnknown,
+    DeltaLargerThanFull,
+    RedactionDrift,
+    ComputeBudgetExceeded,
+    EnvelopeOversized,
+    PriorCorrupted,
+    FormatUnsupported,
+    FeatureFlagDrift,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextDeltaDegradation {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repair: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<BTreeMap<String, JsonValue>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -108,11 +174,49 @@ pub struct ContextDeltaModifiedItem {
     pub field_changes: BTreeMap<String, ContextDeltaFieldChange>,
 }
 
+/// Field-level change shape. Matches the `fieldChange` `oneOf` in
+/// the v1 schema: ordinary changes serialize as a two-element
+/// `[old, new]` array; redaction-safe changes serialize as a struct
+/// with `newValue`, `oldValueOmitted`, and `reason`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ContextDeltaFieldChange {
+    Pair([JsonValue; 2]),
+    Redacted(ContextDeltaFieldChangeRedaction),
+}
+
+impl ContextDeltaFieldChange {
+    #[must_use]
+    pub fn pair(old: Option<JsonValue>, new: Option<JsonValue>) -> Self {
+        Self::Pair([
+            old.unwrap_or(JsonValue::Null),
+            new.unwrap_or(JsonValue::Null),
+        ])
+    }
+
+    #[must_use]
+    pub fn redacted(new_value: JsonValue, reason: ContextDeltaRedactionReason) -> Self {
+        Self::Redacted(ContextDeltaFieldChangeRedaction {
+            new_value,
+            old_value_omitted: true,
+            reason,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ContextDeltaFieldChange {
-    pub old: Option<JsonValue>,
-    pub new: Option<JsonValue>,
+pub struct ContextDeltaFieldChangeRedaction {
+    pub new_value: JsonValue,
+    pub old_value_omitted: bool,
+    pub reason: ContextDeltaRedactionReason,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextDeltaRedactionReason {
+    RedactionDrift,
+    PolicyRestricted,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -123,13 +227,6 @@ pub struct ContextDeltaTokenSavings {
     pub saved_bytes: i64,
     pub saved_percent: f64,
     pub net_pack_tokens: u32,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextDeltaFallback {
-    pub code: &'static str,
-    pub reason: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,28 +258,46 @@ pub fn compute_context_delta(
     let items = diff_items(&prior.items, &new.items);
     let mut envelope = ContextDeltaEnvelope {
         schema: CONTEXT_DELTA_SCHEMA_V1,
-        prior_pack_hash: prior.pack_hash.clone(),
-        new_pack_hash: new.pack_hash.clone(),
-        base_db_generation: prior.db_generation,
-        new_db_generation: new.db_generation,
-        items,
-        token_savings: token_savings(new.full_bytes, 0, new.net_pack_tokens),
-        fallback: None,
+        success: true,
+        data: ContextDeltaPayload {
+            prior_pack_hash: prior.pack_hash.clone(),
+            new_pack_hash: new.pack_hash.clone(),
+            workspace_id: None,
+            base_db_generation: Some(prior.db_generation),
+            new_db_generation: Some(new.db_generation),
+            prior_feature_flag_set_hash: None,
+            new_feature_flag_set_hash: None,
+            items,
+            token_savings: token_savings(new.full_bytes, 0, new.net_pack_tokens),
+            server_decision: ContextDeltaServerDecision {
+                computed_from_server_verified_pack_record: true,
+                delta_chained: false,
+                format: CONTEXT_DELTA_FORMAT_JSON,
+                fallback_reason: None,
+            },
+            trace: None,
+        },
+        degraded: Vec::new(),
     };
 
     let candidate_delta_bytes = stable_serialized_len(&mut envelope)?;
-    envelope.token_savings =
+    envelope.data.token_savings =
         token_savings(new.full_bytes, candidate_delta_bytes, new.net_pack_tokens);
 
     if let Some(max_delta_bytes) = options.max_delta_bytes
         && candidate_delta_bytes > max_delta_bytes
     {
-        envelope.fallback = Some(ContextDeltaFallback {
-            code: CONTEXT_DELTA_OVERSIZED_CODE,
-            reason: format!(
+        envelope.data.server_decision.fallback_reason =
+            Some(ContextDeltaFallbackReason::DeltaLargerThanFull);
+        envelope.degraded.push(ContextDeltaDegradation {
+            code: CONTEXT_DELTA_OVERSIZED_CODE.to_string(),
+            severity: "info".to_string(),
+            message: format!(
                 "Delta envelope is {candidate_delta_bytes} bytes, above the configured \
                  {max_delta_bytes} byte limit; emit the full pack instead."
             ),
+            repair: None,
+            details: None,
         });
     }
 
@@ -247,10 +362,7 @@ fn diff_item_fields(
         if old != new_value {
             field_changes.insert(
                 field_name.clone(),
-                ContextDeltaFieldChange {
-                    old: old.cloned(),
-                    new: new_value.cloned(),
-                },
+                ContextDeltaFieldChange::pair(old.cloned(), new_value.cloned()),
             );
         }
     }
@@ -264,10 +376,10 @@ fn diff_item_fields(
 fn stable_serialized_len(envelope: &mut ContextDeltaEnvelope) -> Result<u64, ContextDeltaError> {
     let mut delta_bytes = 0;
     for _ in 0..8 {
-        envelope.token_savings = token_savings(
-            envelope.token_savings.full_bytes,
+        envelope.data.token_savings = token_savings(
+            envelope.data.token_savings.full_bytes,
             delta_bytes,
-            envelope.token_savings.net_pack_tokens,
+            envelope.data.token_savings.net_pack_tokens,
         );
         let serialized = serde_json::to_vec(envelope)
             .map_err(|error| ContextDeltaError::serialize("context delta envelope", error))?;
@@ -307,7 +419,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CONTEXT_DELTA_OVERSIZED_CODE, ContextDeltaItemSnapshot, ContextDeltaOptions,
+        CONTEXT_DELTA_OVERSIZED_CODE, CONTEXT_DELTA_SCHEMA_V1, ContextDeltaFallbackReason,
+        ContextDeltaFieldChange, ContextDeltaItemSnapshot, ContextDeltaOptions,
         ContextDeltaPackSnapshot, compute_context_delta,
     };
 
@@ -337,9 +450,12 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         assert!(delta.emits_delta());
-        assert!(delta.items.added.is_empty());
-        assert!(delta.items.removed.is_empty());
-        assert!(delta.items.modified.is_empty());
+        assert_eq!(delta.schema, CONTEXT_DELTA_SCHEMA_V1);
+        assert!(delta.success);
+        assert!(delta.degraded.is_empty());
+        assert!(delta.data.items.added.is_empty());
+        assert!(delta.data.items.removed.is_empty());
+        assert!(delta.data.items.modified.is_empty());
         Ok(())
     }
 
@@ -381,6 +497,7 @@ mod tests {
 
         assert_eq!(
             delta
+                .data
                 .items
                 .added
                 .iter()
@@ -388,7 +505,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["mem_b"]
         );
-        assert_eq!(delta.items.removed, vec!["mem_a".to_string()]);
+        assert_eq!(delta.data.items.removed, vec!["mem_a".to_string()]);
         Ok(())
     }
 
@@ -399,25 +516,54 @@ mod tests {
         let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .map_err(|error| error.to_string())?;
 
-        assert_eq!(delta.items.modified.len(), 1);
-        let modified = &delta.items.modified[0];
+        assert_eq!(delta.data.items.modified.len(), 1);
+        let modified = &delta.data.items.modified[0];
         assert_eq!(modified.id, "mem_a");
+        match &modified.field_changes["contentHash"] {
+            ContextDeltaFieldChange::Pair([old, new]) => {
+                assert_eq!(*old, json!("old"));
+                assert_eq!(*new, json!("new"));
+            }
+            ContextDeltaFieldChange::Redacted(_) => {
+                return Err("contentHash change should be an ordinary pair, not redacted".into());
+            }
+        }
+        match &modified.field_changes["estimatedTokens"] {
+            ContextDeltaFieldChange::Pair([old, new]) => {
+                assert_eq!(*old, json!(10));
+                assert_eq!(*new, json!(12));
+            }
+            ContextDeltaFieldChange::Redacted(_) => {
+                return Err(
+                    "estimatedTokens change should be an ordinary pair, not redacted".into(),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn modified_field_change_serializes_as_two_item_array() -> TestResult {
+        let prior = snapshot("h1", 1, 1000, vec![item("mem_a", "old", 10)]);
+        let new = snapshot("h2", 2, 1000, vec![item("mem_a", "new", 12)]);
+        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        let serialized =
+            serde_json::to_value(&delta).map_err(|error| format!("serialize delta: {error}"))?;
+
+        let field_changes = serialized
+            .pointer("/data/items/modified/0/fieldChanges/contentHash")
+            .ok_or_else(|| "missing fieldChanges entry".to_string())?;
+        let pair = field_changes
+            .as_array()
+            .ok_or_else(|| "fieldChange must serialize as a JSON array".to_string())?;
         assert_eq!(
-            modified.field_changes["contentHash"].old,
-            Some(json!("old"))
+            pair.len(),
+            2,
+            "fieldChange pair must have exactly two elements"
         );
-        assert_eq!(
-            modified.field_changes["contentHash"].new,
-            Some(json!("new"))
-        );
-        assert_eq!(
-            modified.field_changes["estimatedTokens"].old,
-            Some(json!(10))
-        );
-        assert_eq!(
-            modified.field_changes["estimatedTokens"].new,
-            Some(json!(12))
-        );
+        assert_eq!(pair[0], json!("old"));
+        assert_eq!(pair[1], json!("new"));
         Ok(())
     }
 
@@ -428,8 +574,8 @@ mod tests {
         let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .map_err(|error| error.to_string())?;
 
-        assert_eq!(delta.items.added.len(), 1);
-        assert!(delta.items.removed.is_empty());
+        assert_eq!(delta.data.items.added.len(), 1);
+        assert!(delta.data.items.removed.is_empty());
         Ok(())
     }
 
@@ -440,8 +586,8 @@ mod tests {
         let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .map_err(|error| error.to_string())?;
 
-        assert!(delta.items.added.is_empty());
-        assert_eq!(delta.items.removed, vec!["mem_a".to_string()]);
+        assert!(delta.data.items.added.is_empty());
+        assert_eq!(delta.data.items.removed, vec!["mem_a".to_string()]);
         Ok(())
     }
 
@@ -454,9 +600,11 @@ mod tests {
 
         assert!(!delta.emits_delta());
         assert_eq!(
-            delta.fallback.as_ref().map(|fallback| fallback.code),
-            Some(CONTEXT_DELTA_OVERSIZED_CODE)
+            delta.data.server_decision.fallback_reason,
+            Some(ContextDeltaFallbackReason::DeltaLargerThanFull)
         );
+        assert_eq!(delta.degraded.len(), 1);
+        assert_eq!(delta.degraded[0].code, CONTEXT_DELTA_OVERSIZED_CODE);
         Ok(())
     }
 
@@ -469,14 +617,14 @@ mod tests {
         let bounded = compute_context_delta(
             &prior,
             &new,
-            ContextDeltaOptions::new(Some(baseline.token_savings.delta_bytes)),
+            ContextDeltaOptions::new(Some(baseline.data.token_savings.delta_bytes)),
         )
         .map_err(|error| error.to_string())?;
 
         assert!(bounded.emits_delta());
         assert_eq!(
-            bounded.token_savings.delta_bytes,
-            baseline.token_savings.delta_bytes
+            bounded.data.token_savings.delta_bytes,
+            baseline.data.token_savings.delta_bytes
         );
         Ok(())
     }
@@ -495,12 +643,52 @@ mod tests {
         let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
             .map_err(|error| error.to_string())?;
 
-        assert_eq!(delta.token_savings.full_bytes, 1200);
-        assert_eq!(delta.token_savings.net_pack_tokens, 654);
+        assert_eq!(delta.data.token_savings.full_bytes, 1200);
+        assert_eq!(delta.data.token_savings.net_pack_tokens, 654);
         assert!(
-            delta.token_savings.delta_bytes > 0,
+            delta.data.token_savings.delta_bytes > 0,
             "delta byte accounting should be finalized after serialization"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn envelope_has_required_top_level_keys() -> TestResult {
+        let prior = snapshot("h1", 1, 1000, vec![item("mem_a", "a", 10)]);
+        let new = snapshot("h2", 2, 1000, vec![item("mem_a", "b", 11)]);
+        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        let serialized =
+            serde_json::to_value(&delta).map_err(|error| format!("serialize delta: {error}"))?;
+        let object = serialized
+            .as_object()
+            .ok_or_else(|| "envelope must serialize as a JSON object".to_string())?;
+
+        let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["data", "degraded", "schema", "success"]);
+        assert_eq!(object["schema"], json!(CONTEXT_DELTA_SCHEMA_V1));
+        assert_eq!(object["success"], json!(true));
+        Ok(())
+    }
+
+    #[test]
+    fn server_decision_present_on_every_envelope() -> TestResult {
+        let prior = snapshot("h1", 1, 1000, vec![item("mem_a", "a", 10)]);
+        let new = snapshot("h2", 2, 1000, vec![item("mem_a", "b", 11)]);
+        let delta = compute_context_delta(&prior, &new, ContextDeltaOptions::new(None))
+            .map_err(|error| error.to_string())?;
+        let serialized =
+            serde_json::to_value(&delta).map_err(|error| format!("serialize delta: {error}"))?;
+
+        let server = serialized
+            .pointer("/data/serverDecision")
+            .ok_or_else(|| "serverDecision missing".to_string())?
+            .as_object()
+            .ok_or_else(|| "serverDecision must be an object".to_string())?;
+        assert_eq!(server["computedFromServerVerifiedPackRecord"], json!(true));
+        assert_eq!(server["deltaChained"], json!(false));
+        assert_eq!(server["format"], json!("json"));
         Ok(())
     }
 
