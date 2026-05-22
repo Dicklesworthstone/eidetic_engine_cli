@@ -569,13 +569,28 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "oauth_access_token",
+        key: "accesstoken",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "oauth_refresh_token",
         key: "refresh_token",
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "oauth_refresh_token",
+        key: "refreshtoken",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "oidc_id_token",
         key: "id_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "oidc_id_token",
+        key: "idtoken",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -594,13 +609,28 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "oauth_token",
+        key: "oauthtoken",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "oauth_secret",
         key: "oauth_secret",
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "oauth_secret",
+        key: "oauthsecret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "bearer_token",
         key: "bearer_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "bearer_token",
+        key: "bearertoken",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -614,8 +644,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "client_secret",
+        key: "clientsecret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "connection_string",
         key: "connection_string",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "connection_string",
+        key: "connectionstring",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -624,8 +664,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "webhook_secret",
+        key: "webhooksecret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "signing_key",
         key: "signing_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "signing_key",
+        key: "signingkey",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -634,8 +684,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "signing_secret",
+        key: "signingsecret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "master_key",
         key: "master_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "master_key",
+        key: "masterkey",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -644,8 +704,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "encryption_key",
+        key: "encryptionkey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "session_token",
         key: "session_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "session_token",
+        key: "sessiontoken",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -654,8 +724,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "session_secret",
+        key: "sessionsecret",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "aws_secret_access_key",
         key: "aws_secret_access_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "aws_secret_access_key",
+        key: "awssecretaccesskey",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -664,8 +744,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "aws_access_key_id",
+        key: "awsaccesskeyid",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "personal_access_token",
         key: "personal_access_token",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "personal_access_token",
+        key: "personalaccesstoken",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -679,8 +769,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "service_account_key",
+        key: "serviceaccountkey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "service_account_json",
         key: "service_account_json",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "service_account_json",
+        key: "serviceaccountjson",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -700,12 +800,27 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
     },
     SecretKeyPattern {
         code: "sas_token",
+        key: "sastoken",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "sas_token",
         key: "shared_access_signature",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "sas_token",
+        key: "sharedaccesssignature",
         whitespace_value: false,
     },
     SecretKeyPattern {
         code: "database_url",
         key: "database_url",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "database_url",
+        key: "databaseurl",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -724,6 +839,11 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "private_key",
+        key: "privatekey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "secret",
         key: "secret",
         whitespace_value: false,
@@ -734,8 +854,18 @@ const SECRET_KEY_PATTERNS: &[SecretKeyPattern] = &[
         whitespace_value: false,
     },
     SecretKeyPattern {
+        code: "secret_key",
+        key: "secretkey",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
         code: "ssh_key",
         key: "ssh_key",
+        whitespace_value: false,
+    },
+    SecretKeyPattern {
+        code: "ssh_key",
+        key: "sshkey",
         whitespace_value: false,
     },
     SecretKeyPattern {
@@ -3208,6 +3338,50 @@ mod tests {
         assert!(report.redacted_reasons.contains(&"api_key"));
         assert!(report.content.contains(&redaction_placeholder("api_key")));
         assert!(!report.content.contains(raw_value));
+    }
+
+    #[test]
+    fn secret_redactor_masks_camel_case_key_value_patterns() {
+        let cases = [
+            ("accessToken", "oauth_access_token", "access-token-value"),
+            ("refreshToken", "oauth_refresh_token", "refresh-token-value"),
+            ("idToken", "oidc_id_token", "id-token-value"),
+            ("clientSecret", "client_secret", "client-secret-value"),
+            ("sessionToken", "session_token", "session-token-value"),
+            ("sessionSecret", "session_secret", "session-secret-value"),
+            ("privateKey", "private_key", "private-key-value"),
+            (
+                "serviceAccountJson",
+                "service_account_json",
+                "service-account-json-value",
+            ),
+            ("databaseUrl", "database_url", "database-url-value"),
+        ];
+        let input = cases
+            .iter()
+            .map(|(key, _, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let report = redact_secret_like_content(&input);
+
+        assert!(report.redacted);
+        for (_, reason, value) in cases {
+            assert!(
+                report.redacted_reasons.contains(&reason),
+                "missing redaction reason {reason}; got {:?}",
+                report.redacted_reasons
+            );
+            assert!(
+                report.content.contains(&redaction_placeholder(reason)),
+                "missing placeholder for {reason}: {}",
+                report.content
+            );
+            assert!(
+                !report.content.contains(value),
+                "redacted output leaked raw value {value}: {}",
+                report.content
+            );
+        }
     }
 
     #[test]
