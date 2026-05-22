@@ -194,6 +194,7 @@ fn write_test_event_log_from_command_events(
     test_log_path: &Path,
     scenario_id: &'static str,
     command_count: usize,
+    completion_message: &'static str,
 ) -> TestResult {
     let source_text = fs::read_to_string(source_log_path).map_err(|error| {
         format!(
@@ -280,7 +281,7 @@ fn write_test_event_log_from_command_events(
             exit_code: None,
             elapsed_ms: None,
             fields: json!({
-                "message": "phase3_no_mocks_memory_loop_complete",
+                "message": completion_message,
                 "command_count": command_count,
             }),
         },
@@ -3899,6 +3900,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
     fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("failed to create artifact dir: {error}"))?;
     let events_path = log_dir.join("commands.jsonl");
+    let test_events_path = log_dir.join("ee-test-events.jsonl");
 
     let workspace_temp = tempfile::Builder::new()
         .prefix("ee-mccc-pack-quality-workspace-")
@@ -4350,6 +4352,7 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
             "schemaValidationStatus": "passed",
             "goldenValidationStatus": "not_applicable",
             "redactionStatus": "passed",
+            "testEventLogPath": test_events_path.display().to_string(),
             "degradationCodes": degradation_codes,
             "firstFailure": null,
             "firstFailureDiagnosis": failing_failure_reasons.first(),
@@ -4372,6 +4375,52 @@ fn no_mocks_pack_quality_sentinel_scenarios_are_logged() -> TestResult {
                 }
             }
         }),
+    )?;
+
+    write_test_event_log_from_command_events(
+        &events_path,
+        &test_events_path,
+        scenario_id,
+        command_count,
+        "mccc_pack_quality_no_mocks_complete",
+    )?;
+    let test_events_text = fs::read_to_string(&test_events_path).map_err(|error| {
+        format!(
+            "failed to read mccc ee.test_event.v1 log {}: {error}",
+            test_events_path.display()
+        )
+    })?;
+    let test_event_lines = test_events_text.lines().collect::<Vec<_>>();
+    ensure_equal(
+        &test_event_lines.len(),
+        &(command_count + 1),
+        "mccc ee.test_event.v1 log count includes commands plus completion note",
+    )?;
+    for (index, line) in test_event_lines.iter().enumerate() {
+        let event: JsonValue = serde_json::from_str(line)
+            .map_err(|error| format!("mccc ee.test_event.v1 event {index} must parse: {error}"))?;
+        ensure_equal(
+            &event.pointer("/schema"),
+            &Some(&json!("ee.test_event.v1")),
+            "mccc structured test event schema",
+        )?;
+        ensure(
+            event.pointer("/ts").is_some()
+                && event.pointer("/test_id") == Some(&json!(scenario_id))
+                && event.pointer("/kind").is_some(),
+            "mccc structured test event must include ts, test_id, and kind",
+        )?;
+    }
+    let completion_event: JsonValue = serde_json::from_str(
+        test_event_lines
+            .last()
+            .ok_or_else(|| "mccc ee.test_event.v1 log missing completion event".to_owned())?,
+    )
+    .map_err(|error| format!("mccc completion event must parse: {error}"))?;
+    ensure_equal(
+        &completion_event.pointer("/fields/message"),
+        &Some(&json!("mccc_pack_quality_no_mocks_complete")),
+        "mccc completion event message",
     )?;
 
     let events_text = fs::read_to_string(&events_path).map_err(|error| {
@@ -4860,6 +4909,7 @@ fn no_mocks_init_remember_search_context_why_outcome_close_with_jsonl_command_ev
         &test_events_path,
         scenario_id,
         command_count,
+        "phase3_no_mocks_memory_loop_complete",
     )?;
     let test_events_text = fs::read_to_string(&test_events_path).map_err(|error| {
         format!(
