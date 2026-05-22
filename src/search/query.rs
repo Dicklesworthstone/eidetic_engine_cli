@@ -75,7 +75,7 @@ pub fn parse_search_query(input: &str) -> ParsedSearchQuery {
     let mut clauses = Vec::new();
 
     while chars.peek().is_some() {
-        skip_whitespace(&mut chars);
+        skip_separators(&mut chars);
         if chars.peek().is_none() {
             break;
         }
@@ -119,8 +119,8 @@ fn parse_clause(chars: &mut Peekable<Chars<'_>>) -> Option<SearchQueryClause> {
     }
 }
 
-fn skip_whitespace(chars: &mut Peekable<Chars<'_>>) {
-    while matches!(chars.peek(), Some(value) if value.is_whitespace()) {
+fn skip_separators(chars: &mut Peekable<Chars<'_>>) {
+    while matches!(chars.peek(), Some(value) if is_query_separator(*value)) {
         chars.next();
     }
 }
@@ -128,7 +128,7 @@ fn skip_whitespace(chars: &mut Peekable<Chars<'_>>) {
 fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
     let mut value = String::new();
     while let Some(next) = chars.peek().copied() {
-        if next.is_whitespace() || next == '"' {
+        if is_query_separator(next) || next == '"' {
             break;
         }
         value.push(next);
@@ -139,17 +139,40 @@ fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
 
 fn parse_quoted(chars: &mut Peekable<Chars<'_>>) -> String {
     let mut value = String::new();
+    let mut last_was_normalized_space = false;
     while let Some(next) = chars.next() {
         match next {
             '"' => break,
             '\\' => match chars.next() {
-                Some(escaped) => value.push(escaped),
+                Some(escaped) => {
+                    push_quoted_printable(&mut value, escaped, &mut last_was_normalized_space)
+                }
                 None => value.push('\\'),
             },
-            other => value.push(other),
+            other => push_quoted_printable(&mut value, other, &mut last_was_normalized_space),
         }
     }
     value
+}
+
+fn is_query_separator(character: char) -> bool {
+    character.is_whitespace() || character.is_control()
+}
+
+fn push_quoted_printable(
+    value: &mut String,
+    character: char,
+    last_was_normalized_space: &mut bool,
+) {
+    if character.is_control() {
+        if !*last_was_normalized_space {
+            value.push(' ');
+            *last_was_normalized_space = true;
+        }
+    } else {
+        value.push(character);
+        *last_was_normalized_space = false;
+    }
 }
 
 fn write_quoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -312,6 +335,29 @@ mod tests {
         assert_eq!(
             query.to_string(),
             "field\u{200d}:value bad\u{fffd}field -\"zero\u{200d} width\""
+        );
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_normalizes_ascii_controls_to_printable_form() {
+        let query =
+            parse_search_query("alpha\u{0000}beta \"line\u{0007}\nfeed\" -gamma\u{001f}delta");
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+                SearchQueryClause::Phrase("line feed".to_string()),
+                SearchQueryClause::ExcludedTerm("gamma".to_string()),
+                SearchQueryClause::Term("delta".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), r#"alpha beta "line feed" -gamma delta"#);
+        assert!(
+            !query.to_string().chars().any(char::is_control),
+            "canonical query form must not emit raw control characters"
         );
         assert_eq!(parse_search_query(&query.to_string()), query);
     }
