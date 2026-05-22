@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use asupersync::{Cx, Outcome};
@@ -71,6 +71,66 @@ use super::{Cli, write_domain_error, write_stdout};
 const MESH_CLI_INIT_SCHEMA_V1: &str = "ee.mesh.cli.init.v1";
 const DISCOVERY_POLICY_CONFIG_FILE: &str = "discovery_policy.toml";
 const AUTO_ENROLL_OVERRIDES_FILE: &str = "auto_enroll_overrides.toml";
+
+/// Cap on the byte size of operator-supplied mesh discovery-policy and
+/// auto-enroll-override TOML config files before refusing to read them.
+///
+/// These config files carry a handful of policy modes plus a bounded set
+/// of node-key allow/deny lists; in operational use they sit in the
+/// hundreds-of-bytes-to-low-kilobytes range. 1 MiB is several orders of
+/// magnitude above any realistic config while bounding the allocation an
+/// accidentally-aimed-at-a-log-file or adversarial path can demand.
+/// bd-3l1cy / bd-1icct multi-pass-bug-hunting follow-ups (mirrors the
+/// 8 MiB AGENT_MAIL_SNAPSHOT_MAX_BYTES posture in bd-1sdr5).
+const MESH_CONFIG_MAX_BYTES: usize = 1024 * 1024;
+
+/// Cap on the byte size of an operator-supplied mesh import artifact
+/// (`ee mesh import --file <path>`) before refusing to read it.
+///
+/// Mesh export artifacts carry peers, cursors, and bounded per-event JSON
+/// rows for a single workspace. 8 MiB matches the swarm-brief
+/// `AGENT_MAIL_SNAPSHOT_MAX_BYTES` precedent (bd-1sdr5) and is sized for
+/// operational workspace exports while bounding adversarial allocation;
+/// operators with larger payloads can chunk imports. bd-3l1cy /
+/// bd-1icct multi-pass-bug-hunting follow-up.
+const MESH_IMPORT_ARTIFACT_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read `path` into a string while refusing payloads above `max_bytes`.
+///
+/// Opens the file and consumes at most `max_bytes + 1` bytes via
+/// `Read::take`; if the read fills the +1 sentinel slot, the file is
+/// over-cap and we return `io::ErrorKind::InvalidData` naming the cap
+/// and the offending path. Mirrors the bounded-read pattern in
+/// `src/core/swarm_brief.rs::read_agent_mail_snapshot_file` (bd-1sdr5,
+/// commit bc642162). `kind_label` flows into the error message so the
+/// caller's `DomainError::Storage` adapter can surface a precise
+/// diagnostic. bd-3l1cy.
+fn read_mesh_text_bounded(
+    path: &Path,
+    max_bytes: usize,
+    kind_label: &str,
+) -> std::io::Result<String> {
+    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Mesh config read cap overflowed usize",
+        )
+    })?;
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(read_limit as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Mesh {kind_label} '{}' exceeds the {max_bytes}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
 
 /// Subcommands for foreground `ee mesh` operations.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -2190,7 +2250,8 @@ fn optional_env_discovery_mode(variable: EnvVar) -> Result<Option<DiscoveryMode>
 
 fn load_workspace_policy_modes(workspace_path: &Path) -> Result<WorkspacePolicyModes, DomainError> {
     let path = discovery_policy_config_path(workspace_path);
-    let body = match fs::read_to_string(&path) {
+    let body = match read_mesh_text_bounded(&path, MESH_CONFIG_MAX_BYTES, "discovery policy config")
+    {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(WorkspacePolicyModes::default());
@@ -2263,7 +2324,7 @@ fn write_workspace_policy_modes(
         })?;
     }
     let mut document = if path.is_file() {
-        fs::read_to_string(path)
+        read_mesh_text_bounded(path, MESH_CONFIG_MAX_BYTES, "discovery policy config")
             .map_err(|error| DomainError::Storage {
                 message: format!(
                     "Failed to read mesh discovery policy config {}: {error}",
@@ -2620,7 +2681,7 @@ fn write_auto_enroll_overrides_file(
         })?;
     }
     let mut document = if path.is_file() {
-        fs::read_to_string(&path)
+        read_mesh_text_bounded(&path, MESH_CONFIG_MAX_BYTES, "auto-enroll override config")
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to read {}: {error}", path.display()),
                 repair: Some("Check workspace .ee directory permissions.".to_owned()),
@@ -2866,15 +2927,16 @@ fn parse_env_mesh_mode(variable: EnvVar, value: &str) -> Result<MeshCommandMode,
 }
 
 fn read_mesh_export_artifact(path: &Path) -> Result<MeshExportArtifact, DomainError> {
-    let contents = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Failed to read mesh import artifact {}: {error}",
-            path.display()
-        ),
-        repair: Some(
-            "Pass a readable artifact path with `ee mesh import --file <path>`.".to_owned(),
-        ),
-    })?;
+    let contents = read_mesh_text_bounded(path, MESH_IMPORT_ARTIFACT_MAX_BYTES, "import artifact")
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read mesh import artifact {}: {error}",
+                path.display()
+            ),
+            repair: Some(
+                "Pass a readable artifact path with `ee mesh import --file <path>`.".to_owned(),
+            ),
+        })?;
     let artifact = serde_json::from_str::<MeshExportArtifact>(&contents).map_err(|error| {
         DomainError::Usage {
             message: format!(
@@ -3625,6 +3687,60 @@ fn append_degradations(output: &mut String, degraded: &[MeshCliDegradation]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_mesh_text_bounded_refuses_oversized_payload() {
+        // bd-3l1cy: a mesh discovery-policy / auto-enroll / import-artifact
+        // path larger than the per-context cap must be refused with
+        // io::ErrorKind::InvalidData before we materialize it. Mirrors the
+        // swarm-brief bd-1sdr5 regression for the same defect class.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("oversized.toml");
+        let cap: usize = 1024;
+        std::fs::write(&path, vec![b'x'; cap + 1]).expect("write oversized");
+
+        let error = read_mesh_text_bounded(&path, cap, "discovery policy config")
+            .expect_err("oversized read must error");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        let message = format!("{error}");
+        assert!(
+            message.contains("exceeds") && message.contains("byte cap"),
+            "expected over-cap diagnostic; got {message}"
+        );
+        assert!(
+            message.contains("discovery policy config"),
+            "expected kind label in diagnostic; got {message}"
+        );
+    }
+
+    #[test]
+    fn read_mesh_text_bounded_passes_payload_at_cap() {
+        // bd-3l1cy: at-the-cap reads must succeed; only over-cap reads
+        // are refused. Otherwise legitimate configs that happen to size
+        // exactly to the cap would be wrongly rejected.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("at_cap.toml");
+        let cap: usize = 64;
+        std::fs::write(&path, vec![b'y'; cap]).expect("write at-cap");
+
+        let body = read_mesh_text_bounded(&path, cap, "auto-enroll override config")
+            .expect("at-cap read must succeed");
+        assert_eq!(body.len(), cap);
+    }
+
+    #[test]
+    fn read_mesh_text_bounded_propagates_not_found() {
+        // bd-3l1cy: the load_workspace_policy_modes adapter discriminates
+        // on ErrorKind::NotFound to return the default empty policy
+        // without surfacing a DomainError::Storage. The bounded-read
+        // helper must preserve that distinction.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("does_not_exist.toml");
+        let error =
+            read_mesh_text_bounded(&missing, MESH_CONFIG_MAX_BYTES, "discovery policy config")
+                .expect_err("missing path must error");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
 
     #[test]
     fn env_bool_accepts_documented_forms() {
