@@ -315,3 +315,6 @@ mod search_document_schema_v1;
 
 #[path = "contracts/context_delta_prior_unknown_repair_pinned.rs"]
 mod context_delta_prior_unknown_repair_pinned;
+
+#[path = "contracts/mesh_serve_mcp_degraded_code_catalog.rs"]
+mod mesh_serve_mcp_degraded_code_catalog;
