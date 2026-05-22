@@ -1163,7 +1163,13 @@ mod tests {
                     action: action.to_owned(),
                     target_type: Some(target_type.to_owned()),
                     target_id: Some(target_id.to_owned()),
-                    details: Some(format!(r#"{{"action":"{action}","target":"{target_id}"}}"#)),
+                    details: Some(
+                        serde_json::json!({
+                            "action": action,
+                            "target": target_id,
+                        })
+                        .to_string(),
+                    ),
                 },
             )
             .map_err(|error| error.to_string())

@@ -78,6 +78,23 @@ const MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 const MI_DEDUP_MAX_MEMORIES: usize = 400;
 const MI_DEDUP_CANDIDATE_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
+fn serialization_failed_report(schema: &str, command: &str, status_field: &str) -> String {
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "schema".to_owned(),
+        serde_json::Value::String(schema.to_owned()),
+    );
+    payload.insert(
+        "command".to_owned(),
+        serde_json::Value::String(command.to_owned()),
+    );
+    payload.insert(
+        status_field.to_owned(),
+        serde_json::Value::String("serialization_failed".to_owned()),
+    );
+    serde_json::Value::Object(payload).to_string()
+}
+
 /// Options for listing curation candidates through `ee curate candidates`.
 #[derive(Clone, Debug)]
 pub struct CurateCandidatesOptions<'a> {
@@ -860,10 +877,7 @@ impl CurateReviewReport {
     #[must_use]
     pub fn data_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            format!(
-                r#"{{"schema":"{}","command":"{}","status":"serialization_failed"}}"#,
-                CURATE_REVIEW_SCHEMA_V1, self.command
-            )
+            serialization_failed_report(CURATE_REVIEW_SCHEMA_V1, self.command, "status")
         })
     }
 
@@ -10186,6 +10200,22 @@ mod tests {
         settings.bind(|| {
             insta::assert_json_snapshot!("curation_structural_adjustments_block", snapshot);
         });
+        Ok(())
+    }
+
+    #[test]
+    fn serialization_failed_report_escapes_dynamic_command_text() -> TestResult {
+        let rendered = super::serialization_failed_report(
+            CURATE_REVIEW_SCHEMA_V1,
+            "curate \"accept\"\nnow",
+            "status",
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["schema"], CURATE_REVIEW_SCHEMA_V1);
+        assert_eq!(parsed["command"], "curate \"accept\"\nnow");
+        assert_eq!(parsed["status"], "serialization_failed");
         Ok(())
     }
 
