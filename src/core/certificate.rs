@@ -1426,12 +1426,12 @@ fn attestation_digest(domain: &str, signer: &str, payload_hash: &str) -> String 
 fn constant_time_str_eq(left: &str, right: &str) -> bool {
     let left = left.as_bytes();
     let right = right.as_bytes();
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut diff = 0_u8;
-    for (left_byte, right_byte) in left.iter().zip(right.iter()) {
-        diff |= left_byte ^ right_byte;
+    let mut diff = left.len() ^ right.len();
+    let max_len = left.len().max(right.len());
+    for index in 0..max_len {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        diff |= usize::from(left_byte ^ right_byte);
     }
     std::hint::black_box(diff) == 0
 }
@@ -2896,6 +2896,26 @@ mod tests {
                 .iter()
                 .any(|code| code == "attestation_mismatch"),
             "attestation mismatch code",
+        )
+    }
+
+    #[test]
+    fn constant_time_str_eq_preserves_equality_for_length_edges() -> TestResult {
+        ensure(
+            constant_time_str_eq("sha256:abcdef", "sha256:abcdef"),
+            "equal attestations should match",
+        )?;
+        ensure(
+            !constant_time_str_eq("sha256:abcdef", "sha256:abcdeg"),
+            "same-length mismatch should fail",
+        )?;
+        ensure(
+            !constant_time_str_eq("sha256:abcdef", "sha256:abcdef0"),
+            "longer right mismatch should fail",
+        )?;
+        ensure(
+            !constant_time_str_eq("sha256:abcdef0", "sha256:abcdef"),
+            "longer left mismatch should fail",
         )
     }
 
