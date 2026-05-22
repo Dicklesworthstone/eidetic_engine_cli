@@ -103,7 +103,8 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!(
                 "remember response missing memory id: {}",
-                serde_json::to_string(&parsed).unwrap_or_default()
+                serde_json::to_string(&parsed)
+                    .expect("remember response JSON serialization should not fail")
             )
         })
 }
@@ -134,7 +135,8 @@ fn revise_memory(workspace_arg: &str, source_id: &str, content: &str) -> Result<
         .ok_or_else(|| {
             format!(
                 "memory revise response missing new_id: {}",
-                serde_json::to_string(&parsed).unwrap_or_default()
+                serde_json::to_string(&parsed)
+                    .expect("memory revise response JSON serialization should not fail")
             )
         })
 }

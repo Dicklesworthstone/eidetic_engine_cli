@@ -174,7 +174,8 @@ fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!(
                 "remember response missing memory id: {}",
-                serde_json::to_string(&parsed).unwrap_or_default()
+                serde_json::to_string(&parsed)
+                    .expect("remember response JSON serialization should not fail")
             )
         })
 }

@@ -81,10 +81,9 @@ fn persist_artifact(name: &str, output: &Output) {
 fn persist_json_artifact(name: &str, value: &serde_json::Value) {
     let dir = artifact_dir();
     let path = dir.join(format!("{name}.json"));
-    let _ = fs::write(
-        &path,
-        serde_json::to_string_pretty(value).unwrap_or_default(),
-    );
+    let serialized =
+        serde_json::to_string_pretty(value).expect("artifact JSON serialization should not fail");
+    let _ = fs::write(&path, serialized);
 }
 
 // ============================================================================

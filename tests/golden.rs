@@ -3808,7 +3808,8 @@ mod tests {
             "codes": codes,
         });
 
-        let mut json = serde_json::to_string_pretty(&matrix).unwrap_or_default();
+        let mut json = serde_json::to_string_pretty(&matrix)
+            .expect("degradation matrix JSON serialization should not fail");
         json.push('\n');
         json
     }

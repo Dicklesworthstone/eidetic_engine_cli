@@ -39,10 +39,101 @@ use std::process::Command;
 /// Allowlisted occurrences with justification.
 /// Format: (file_path_suffix, line_number, reason)
 const ALLOWLIST: &[(&str, u32, &str)] = &[
+    // === Existing production inventory entries ===
+    (
+        "src/cli/mesh.rs",
+        769,
+        "PENDING-FIX: Mesh response JSON serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        27844,
+        "PENDING-FIX: CLI error envelope serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        28682,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        29007,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        29386,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        29709,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        29955,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        30400,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        30486,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        30599,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/cli/mod.rs",
+        30728,
+        "PENDING-FIX: CLI JSON response serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/context.rs",
+        4336,
+        "PENDING-FIX: Coordination fallback serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/context.rs",
+        4351,
+        "PENDING-FIX: Coordination fallback serialization tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/rehearse.rs",
+        1404,
+        "PENDING-FIX: Captured stderr thread join tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/swarm_brief.rs",
+        1013,
+        "PENDING-FIX: Captured stdout thread join tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/swarm_brief.rs",
+        1014,
+        "PENDING-FIX: Captured stderr thread join tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/verify.rs",
+        1588,
+        "PENDING-FIX: Captured stdout thread join tracked by no-silent-fallback inventory",
+    ),
+    (
+        "src/core/verify.rs",
+        1589,
+        "PENDING-FIX: Captured stderr thread join tracked by no-silent-fallback inventory",
+    ),
     // === Mutation model Display impls ===
-    ("src/models/mutation.rs", 382, "Display impl for logging"),
-    ("src/models/mutation.rs", 387, "Display impl for logging"),
-    ("src/models/mutation.rs", 477, "Display impl for logging"),
+    ("src/models/mutation.rs", 416, "Display impl for logging"),
+    ("src/models/mutation.rs", 421, "Display impl for logging"),
+    ("src/models/mutation.rs", 511, "Display impl for logging"),
     // === Progress model Display ===
     (
         "src/models/progress.rs",
@@ -103,35 +194,43 @@ const ALLOWLIST: &[(&str, u32, &str)] = &[
     ),
 ];
 
-/// Files/directories to exclude from scanning (test code, generated code).
+const SCAN_ROOTS: &[&str] = &["src/", "tests/"];
+
+const SILENT_FALLBACK_PATTERNS: &[&str] = &[
+    r#"serde_json::to_string.*\.unwrap_or_default\(\)"#,
+    r#"serde_json::to_string_pretty.*\.unwrap_or_default\(\)"#,
+    r#"\.join\(\)\.unwrap_or_default\(\)"#,
+    r#"let _ = .*read_to_end"#,
+];
+
+/// Files/directories to exclude from scanning (generated code and guard fixtures).
 const EXCLUDE_PATHS: &[&str] = &[
-    "/tests/",
     "/target/",
     "#[cfg(test)]",
     "mod tests",
-    "_test.rs",
-    ".test.",
+    "tests/contracts/no_silent_fallback.rs",
+    "tests/no_silent_fallback_inventory.rs",
+    "tests/silent_fallback_guard.rs",
 ];
 
-#[test]
-fn no_unallowlisted_silent_fallbacks() {
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ScanClassification {
+    violations: Vec<String>,
+    allowlisted_count: usize,
+}
+
+fn scan_silent_fallbacks() -> String {
+    let mut args = vec!["--no-heading", "--line-number", "--with-filename"];
+    for pattern in SILENT_FALLBACK_PATTERNS {
+        args.push("-e");
+        args.push(pattern);
+    }
+    args.push("--type");
+    args.push("rust");
+    args.extend(SCAN_ROOTS);
+
     let output = Command::new("rg")
-        .args([
-            "--no-heading",
-            "--line-number",
-            "--with-filename",
-            "-e",
-            r#"serde_json::to_string.*\.unwrap_or_default\(\)"#,
-            "-e",
-            r#"serde_json::to_string_pretty.*\.unwrap_or_default\(\)"#,
-            "-e",
-            r#"\.join\(\)\.unwrap_or_default\(\)"#,
-            "-e",
-            r#"let _ = .*read_to_end"#,
-            "--type",
-            "rust",
-            "src/",
-        ])
+        .args(args)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output();
 
@@ -140,13 +239,14 @@ fn no_unallowlisted_silent_fallbacks() {
         Err(e) => panic!("Failed to execute ripgrep: {e}"),
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
 
-    let mut violations = Vec::new();
-    let mut allowlisted_count = 0;
+fn classify_silent_fallback_scan(stdout: &str) -> ScanClassification {
+    let mut result = ScanClassification::default();
 
     for line in stdout.lines() {
-        // Skip test code
+        // Skip generated code and policy fixtures; tests are otherwise scanned.
         if EXCLUDE_PATHS.iter().any(|ex| line.contains(ex)) {
             continue;
         }
@@ -169,13 +269,23 @@ fn no_unallowlisted_silent_fallbacks() {
             .any(|(path, allowed_line, _)| file_path.ends_with(path) && line_num == *allowed_line);
 
         if is_allowlisted {
-            allowlisted_count += 1;
+            result.allowlisted_count += 1;
         } else {
-            violations.push(format!("{}:{}", file_path, line_num));
+            result
+                .violations
+                .push(format!("{}:{}", file_path, line_num));
         }
     }
 
-    if !violations.is_empty() {
+    result
+}
+
+#[test]
+fn no_unallowlisted_silent_fallbacks() {
+    let stdout = scan_silent_fallbacks();
+    let classification = classify_silent_fallback_scan(&stdout);
+
+    if !classification.violations.is_empty() {
         panic!(
             "\n\
             ╔══════════════════════════════════════════════════════════════════╗\n\
@@ -192,8 +302,9 @@ fn no_unallowlisted_silent_fallbacks() {
             ║                                                                  \n\
             ║  See docs/silent-fallback-inventory.md for policy details.       \n\
             ╚══════════════════════════════════════════════════════════════════╝\n",
-            violations.len(),
-            violations
+            classification.violations.len(),
+            classification
+                .violations
                 .iter()
                 .map(|v| format!("║    - {}\n", v))
                 .collect::<String>()
@@ -203,7 +314,7 @@ fn no_unallowlisted_silent_fallbacks() {
     // Report success with stats
     eprintln!(
         "silent_fallback_guard: PASS ({} allowlisted, 0 violations)",
-        allowlisted_count
+        classification.allowlisted_count
     );
 }
 
@@ -213,25 +324,24 @@ fn guard_detects_synthetic_violation() {
     // We test the detection logic directly without needing a real violation.
 
     let test_line = "src/output/mod.rs:9999:serde_json::to_string(&x).unwrap_or_default()";
+    let classification = classify_silent_fallback_scan(test_line);
 
-    // Parse like the real guard does
-    let parts: Vec<&str> = test_line.splitn(3, ':').collect();
-    assert_eq!(parts.len(), 3);
+    assert_eq!(
+        classification.violations,
+        vec!["src/output/mod.rs:9999"],
+        "synthetic violation should not be allowlisted"
+    );
+}
 
-    let file_path = parts[0];
-    let line_num: u32 = match parts[1].parse() {
-        Ok(n) => n,
-        Err(_) => panic!("test setup: invalid line number"),
-    };
+#[test]
+fn guard_detects_synthetic_tests_resident_violation() {
+    let fixture = include_str!("fixtures/silent_fallback_guard/tests_scope_violation.fixture");
+    let classification = classify_silent_fallback_scan(fixture);
 
-    // This synthetic line should NOT be in the allowlist
-    let is_allowlisted = ALLOWLIST
-        .iter()
-        .any(|(path, allowed_line, _)| file_path.ends_with(path) && line_num == *allowed_line);
-
-    assert!(
-        !is_allowlisted,
-        "Synthetic violation at line 9999 should not be allowlisted"
+    assert_eq!(
+        classification.violations,
+        vec!["tests/synthetic_silent_fallback_scope.rs:7"],
+        "tests/ resident silent fallback patterns must be visible to the guard"
     );
 }
 
