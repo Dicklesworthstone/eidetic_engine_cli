@@ -1823,7 +1823,34 @@ pub(crate) fn local_cargo_tripwire_process_scan_json(workspace: &Path) -> Value 
     let script = workspace
         .join("scripts")
         .join("check-local-cargo-tripwire.sh");
-    if !script.is_file() {
+    // bd-hwowj: gate Command::new behind a strict "regular file at
+    // the literal path" check. The prior `is_file()` followed
+    // symlinks, so a malicious workspace could plant
+    // `scripts/check-local-cargo-tripwire.sh -> /bin/sh` (or any
+    // other binary inside or outside the workspace) and gain command
+    // execution as soon as a user ran `ee support bundle` or the
+    // completion-audit pathway against that workspace. fs::
+    // symlink_metadata inspects the link itself; refusing
+    // file_type().is_symlink() before `Command::new` closes the
+    // attack without affecting workspaces that ship the real
+    // regular file at the documented path.
+    let metadata = match fs::symlink_metadata(&script) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return unavailable_local_cargo_process_scan_json("tripwire_script_missing", None);
+        }
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return unavailable_local_cargo_process_scan_json(
+            "tripwire_script_symlink_refused",
+            Some(
+                "Refusing to execute scripts/check-local-cargo-tripwire.sh because the path is \
+                 a symlink; replace it with a regular file to enable the process scan.",
+            ),
+        );
+    }
+    if !file_type.is_file() {
         return unavailable_local_cargo_process_scan_json("tripwire_script_missing", None);
     }
 
@@ -5726,5 +5753,72 @@ mod tests {
             std::process::id(),
             uuid::Uuid::now_v7()
         ))
+    }
+
+    // bd-hwowj: pin the symlink-gate on the workspace-script that
+    // `local_cargo_tripwire_process_scan_json` would otherwise have
+    // executed via Command::new. A malicious workspace that plants
+    // a symlink at `scripts/check-local-cargo-tripwire.sh` must
+    // fail closed BEFORE the spawn, surfacing the
+    // `tripwire_script_symlink_refused` reason for downstream
+    // visibility.
+    //
+    // The benign-workspace case is already covered by
+    // `local_cargo_tripwire_process_scan_detects_live_bypass_without_running_cargo`
+    // above, which exercises the real `CARGO_MANIFEST_DIR` workspace
+    // (regular file at the documented path) and continues to pass
+    // through the new gate untouched.
+    #[cfg(unix)]
+    #[test]
+    fn local_cargo_tripwire_process_scan_refuses_symlinked_script() -> TestResult {
+        let workspace = unique_test_path("local-tripwire-symlink-attack");
+        let scripts_dir = workspace.join("scripts");
+        fs::create_dir_all(&scripts_dir)
+            .map_err(|error| format!("failed to create workspace scripts dir: {error}"))?;
+
+        let attack_target = unique_test_path("local-tripwire-symlink-target");
+        fs::write(
+            &attack_target,
+            "#!/bin/sh\necho 'attacker-controlled output'\n",
+        )
+        .map_err(|error| format!("failed to write attack target: {error}"))?;
+
+        let link = scripts_dir.join("check-local-cargo-tripwire.sh");
+        std::os::unix::fs::symlink(&attack_target, &link)
+            .map_err(|error| format!("failed to create symlink: {error}"))?;
+
+        let value = local_cargo_tripwire_process_scan_json(&workspace);
+
+        // (a) symlink-attack workspace must fail closed.
+        assert_eq!(
+            value.pointer("/status"),
+            Some(&json!("unavailable")),
+            "symlink-attack workspace must report status=unavailable; got: {value}",
+        );
+        assert_eq!(
+            value.pointer("/reason"),
+            Some(&json!("tripwire_script_symlink_refused")),
+            "symlink-attack workspace must surface the specific refusal reason; got: {value}",
+        );
+        assert_eq!(
+            value.pointer("/schema"),
+            Some(&json!("ee.rch_local_cargo_tripwire.v1")),
+            "refusal envelope must keep the stable schema for downstream consumers; got: {value}",
+        );
+        // The detail string should point the operator at the fix
+        // path (replace symlink with a regular file).
+        assert!(
+            value
+                .pointer("/detail")
+                .and_then(Value::as_str)
+                .is_some_and(|detail| detail.contains("symlink")),
+            "refusal envelope must explain the symlink refusal; got: {value}",
+        );
+
+        let _ = fs::remove_file(&link);
+        let _ = fs::remove_file(&attack_target);
+        let _ = fs::remove_dir(&scripts_dir);
+        let _ = fs::remove_dir(&workspace);
+        Ok(())
     }
 }
