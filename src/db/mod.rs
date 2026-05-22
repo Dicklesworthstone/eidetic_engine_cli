@@ -17129,6 +17129,9 @@ impl DbConnection {
     /// Insert a recorder run record.
     pub fn insert_recorder_run(&self, run_id: &str, input: &CreateRecorderRunInput) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        let event_count = sqlite_u64_value("recorder run event_count", input.event_count)?;
+        let redacted_count = sqlite_u64_value("recorder run redacted_count", input.redacted_count)?;
+        let payload_bytes = sqlite_u64_value("recorder run payload_bytes", input.payload_bytes)?;
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO recorder_runs (run_id, workspace_id, agent_id, session_id, source_type, source_id, status, started_at, ended_at, event_count, redacted_count, payload_bytes, chain_complete, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
@@ -17142,9 +17145,9 @@ impl DbConnection {
                 Value::Text(input.status.clone()),
                 Value::Text(input.started_at.clone()),
                 input.ended_at.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
-                Value::from_u64_clamped(input.event_count),
-                Value::from_u64_clamped(input.redacted_count),
-                Value::from_u64_clamped(input.payload_bytes),
+                event_count,
+                redacted_count,
+                payload_bytes,
                 Value::BigInt(i64::from(input.chain_complete)),
                 Value::Text(now),
             ],
@@ -17160,6 +17163,9 @@ impl DbConnection {
     ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let sequence = recorder_event_sequence_value(input.sequence)?;
+        let payload_bytes = sqlite_u64_value("recorder event payload_bytes", input.payload_bytes)?;
+        let redacted_bytes =
+            sqlite_u64_value("recorder event redacted_bytes", input.redacted_bytes)?;
         self.execute_for(
             DbOperation::Execute,
             "INSERT INTO recorder_events (event_id, run_id, sequence, event_type, timestamp, payload_hash, payload_bytes, redaction_status, redacted_bytes, previous_event_hash, event_hash, chain_status, source_span_id, source_line_start, source_line_end, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
@@ -17170,9 +17176,9 @@ impl DbConnection {
                 Value::Text(input.event_type.clone()),
                 Value::Text(input.timestamp.clone()),
                 input.payload_hash.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
-                Value::from_u64_clamped(input.payload_bytes),
+                payload_bytes,
                 Value::Text(input.redaction_status.clone()),
-                Value::from_u64_clamped(input.redacted_bytes),
+                redacted_bytes,
                 input.previous_event_hash.as_ref().map_or(Value::Null, |v| Value::Text(v.clone())),
                 Value::Text(input.event_hash.clone()),
                 Value::Text(input.chain_status.clone()),
@@ -17268,11 +17274,15 @@ impl DbConnection {
 }
 
 fn recorder_event_sequence_value(sequence: u64) -> Result<Value> {
-    let sequence = i64::try_from(sequence).map_err(|_| DbError::MalformedRow {
+    sqlite_u64_value("recorder event sequence", sequence)
+}
+
+fn sqlite_u64_value(field: &str, value: u64) -> Result<Value> {
+    let value = i64::try_from(value).map_err(|_| DbError::MalformedRow {
         operation: DbOperation::Execute,
-        message: format!("recorder event sequence {sequence} exceeds SQLite integer storage"),
+        message: format!("{field} {value} exceeds SQLite integer storage"),
     })?;
-    Ok(Value::BigInt(sequence))
+    Ok(Value::BigInt(value))
 }
 
 fn stored_recorder_run_from_row(row: &Row) -> Result<StoredRecorderRun> {
@@ -17478,6 +17488,28 @@ mod tests {
             }
             other => Err(TestFailure::new(format!(
                 "{context}: expected MigrationDrift, got {other:?}"
+            ))),
+        }
+    }
+
+    fn ensure_sqlite_integer_overflow<T>(result: super::Result<T>, field: &str) -> TestResult {
+        match result {
+            Ok(_) => Err(TestFailure::new(format!(
+                "{field}: expected SQLite integer overflow error"
+            ))),
+            Err(DbError::MalformedRow { operation, message }) => {
+                ensure_equal(
+                    &operation,
+                    &DbOperation::Execute,
+                    "SQLite integer overflow operation",
+                )?;
+                ensure(
+                    message.contains(field) && message.contains("SQLite integer storage"),
+                    format!("{field}: unexpected overflow message: {message}"),
+                )
+            }
+            Err(error) => Err(TestFailure::new(format!(
+                "{field}: expected malformed-row overflow error, got {error:?}"
             ))),
         }
     }
@@ -17735,6 +17767,116 @@ mod tests {
                 "expected malformed-row overflow error, got {error:?}"
             ))),
         }
+    }
+
+    #[test]
+    fn recorder_count_and_byte_fields_above_sqlite_integer_range_are_rejected() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        let oversized = u64::try_from(i64::MAX).expect("i64 max fits u64") + 1;
+        let base_run = CreateRecorderRunInput {
+            workspace_id: None,
+            agent_id: "agent_counter_overflow".to_string(),
+            session_id: None,
+            source_type: "synthetic".to_string(),
+            source_id: Some("fixture://counter-overflow".to_string()),
+            status: "imported".to_string(),
+            started_at: "2026-05-22T00:00:00Z".to_string(),
+            ended_at: None,
+            event_count: 1,
+            redacted_count: 0,
+            payload_bytes: 0,
+            chain_complete: false,
+        };
+
+        for (index, field, input) in [
+            (
+                0,
+                "recorder run event_count",
+                CreateRecorderRunInput {
+                    event_count: oversized,
+                    ..base_run.clone()
+                },
+            ),
+            (
+                1,
+                "recorder run redacted_count",
+                CreateRecorderRunInput {
+                    redacted_count: oversized,
+                    ..base_run.clone()
+                },
+            ),
+            (
+                2,
+                "recorder run payload_bytes",
+                CreateRecorderRunInput {
+                    payload_bytes: oversized,
+                    ..base_run.clone()
+                },
+            ),
+        ] {
+            let run_id = format!("run_counter_overflow_{index}");
+            ensure_sqlite_integer_overflow(connection.insert_recorder_run(&run_id, &input), field)?;
+            ensure(
+                connection.get_recorder_run(&run_id)?.is_none(),
+                format!("{field}: oversized run metadata should not persist"),
+            )?;
+        }
+
+        connection.insert_recorder_run("run_event_bytes_overflow", &base_run)?;
+        for (index, field, input) in [
+            (
+                0,
+                "recorder event payload_bytes",
+                CreateRecorderEventInput {
+                    run_id: "run_event_bytes_overflow".to_string(),
+                    sequence: 1,
+                    event_type: "tool_call".to_string(),
+                    timestamp: "2026-05-22T00:00:01Z".to_string(),
+                    payload_hash: None,
+                    payload_bytes: oversized,
+                    redaction_status: "clean".to_string(),
+                    redacted_bytes: 0,
+                    previous_event_hash: None,
+                    event_hash: "blake3:event-payload-overflow".to_string(),
+                    chain_status: "root".to_string(),
+                    source_span_id: None,
+                    source_line_start: None,
+                    source_line_end: None,
+                },
+            ),
+            (
+                1,
+                "recorder event redacted_bytes",
+                CreateRecorderEventInput {
+                    run_id: "run_event_bytes_overflow".to_string(),
+                    sequence: 2,
+                    event_type: "tool_call".to_string(),
+                    timestamp: "2026-05-22T00:00:02Z".to_string(),
+                    payload_hash: None,
+                    payload_bytes: 0,
+                    redaction_status: "redacted".to_string(),
+                    redacted_bytes: oversized,
+                    previous_event_hash: None,
+                    event_hash: "blake3:event-redacted-overflow".to_string(),
+                    chain_status: "root".to_string(),
+                    source_span_id: None,
+                    source_line_start: None,
+                    source_line_end: None,
+                },
+            ),
+        ] {
+            let event_id = format!("evt_counter_overflow_{index}");
+            ensure_sqlite_integer_overflow(
+                connection.insert_recorder_event(&event_id, &input),
+                field,
+            )?;
+        }
+
+        let stored = connection.list_recorder_events("run_event_bytes_overflow")?;
+        ensure(
+            stored.is_empty(),
+            "oversized event metadata should not persist",
+        )
     }
 
     #[test]
