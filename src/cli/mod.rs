@@ -38462,6 +38462,7 @@ const DEMO_RUN_SIDE_EFFECT: &str =
 const DEMO_SHOW_SIDE_EFFECT: &str = "read-only audit ledger inspection; no demo mutation";
 const DEMO_VERIFY_SIDE_EFFECT: &str =
     "read-only artifact verification; no command execution or artifact write";
+const DEMO_OUTPUT_VERIFY_MAX_BYTES: usize = 1024 * 1024;
 
 fn demo_workspace_path(cli: &Cli) -> PathBuf {
     cli.resolve_workspace()
@@ -38852,10 +38853,43 @@ fn stderr_verified(command: &crate::models::DemoCommand, stderr: &str) -> bool {
     )
 }
 
-fn read_text_lossy(path: &Path) -> String {
-    fs::read(path)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_default()
+fn read_demo_output_lossy(path: &Path, stream_name: &'static str) -> Result<String, DomainError> {
+    let file = fs::File::open(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read demo {stream_name} artifact {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+    })?;
+    let limit =
+        DEMO_OUTPUT_VERIFY_MAX_BYTES
+            .checked_add(1)
+            .ok_or_else(|| DomainError::Storage {
+                message: format!("Demo {stream_name} verification cap overflowed."),
+                repair: Some("Use a smaller verification cap.".to_owned()),
+            })?;
+    let mut bytes = Vec::new();
+    file.take(limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read demo {stream_name} artifact {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check permissions for the demo evidence directory.".to_owned()),
+        })?;
+    if bytes.len() > DEMO_OUTPUT_VERIFY_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Demo {stream_name} output exceeded {DEMO_OUTPUT_VERIFY_MAX_BYTES} byte verification cap at {}.",
+                path.display()
+            ),
+            repair: Some(
+                "Reduce demo output or write large payloads as declared artifacts.".to_owned(),
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn file_blake3(path: &Path) -> Option<String> {
@@ -39012,8 +39046,8 @@ fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecut
     };
     let elapsed_ms = started.elapsed().as_millis();
     let exit_code = status.code().unwrap_or(-1);
-    let stdout_text = read_text_lossy(&stdout_path);
-    let stderr_text = read_text_lossy(&stderr_path);
+    let stdout_text = read_demo_output_lossy(&stdout_path, "stdout")?;
+    let stderr_text = read_demo_output_lossy(&stderr_path, "stderr")?;
     let stdout_ok = stdout_verified(ctx.command, &stdout_text);
     let stderr_ok = stderr_verified(ctx.command, &stderr_text);
     let exit_matched = !timed_out && exit_code == ctx.command.expected_exit_code;
@@ -44957,6 +44991,40 @@ mod tests {
             &after,
             &(true, Some(Command::Status(StatusArgs::default()))),
             "--json after status parse",
+        )
+    }
+
+    #[test]
+    fn demo_output_reader_accepts_exact_verification_cap() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = tempdir.path().join("stdout.txt");
+        fs::write(&path, vec![b'x'; super::DEMO_OUTPUT_VERIFY_MAX_BYTES])
+            .map_err(|error| error.to_string())?;
+
+        let text =
+            super::read_demo_output_lossy(&path, "stdout").map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &text.len(),
+            &super::DEMO_OUTPUT_VERIFY_MAX_BYTES,
+            "exact cap",
+        )
+    }
+
+    #[test]
+    fn demo_output_reader_rejects_oversized_verification_buffer() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = tempdir.path().join("stderr.txt");
+        fs::write(&path, vec![b'x'; super::DEMO_OUTPUT_VERIFY_MAX_BYTES + 1])
+            .map_err(|error| error.to_string())?;
+
+        let error = super::read_demo_output_lossy(&path, "stderr")
+            .expect_err("oversized demo stderr should fail before unbounded allocation");
+
+        ensure_contains(
+            &error.to_string(),
+            "stderr output exceeded",
+            "oversized stderr error",
         )
     }
 
