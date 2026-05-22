@@ -4907,11 +4907,36 @@ fn assemble_mmr_draft(
                 continue;
             }
             if coverage_fill_count >= coverage_fill_limit {
-                omitted.push(PackOmission::from_candidate(
-                    &selection.candidate,
-                    PackOmissionReason::RedundantCandidate,
-                    None,
-                ));
+                // bd-26k9t: `coverage_fill_limit = items.len()` is set
+                // before the loop. When the MMR phase selected zero
+                // items, this limit is 0 and every coverage-fill
+                // candidate trips this branch — but `RedundantCandidate`
+                // is the wrong rationale because there's nothing for
+                // them to be redundant *with*. They were squeezed out
+                // by the prior phase's budget posture; the honest
+                // omission reason is `TokenBudgetExceeded` with the
+                // minimal-budget hint, matching the upstream
+                // `facility_candidate_is_feasible` rejection path.
+                if coverage_fill_limit == 0 {
+                    let section_used = section_usage.tokens_for(selection.candidate.section);
+                    omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                } else {
+                    omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::RedundantCandidate,
+                        None,
+                    ));
+                }
                 continue;
             }
 
