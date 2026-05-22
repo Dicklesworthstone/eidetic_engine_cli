@@ -1879,6 +1879,19 @@ pub struct ServeArgs {
     /// Request the foreground localhost adapter.
     #[arg(long, action = ArgAction::SetTrue)]
     pub foreground: bool,
+    /// Host/IP address to bind for the localhost adapter.
+    #[arg(long, default_value_t = default_serve_host(), value_name = "IP")]
+    pub host: String,
+    /// TCP port to bind for the localhost adapter.
+    #[arg(long, default_value_t = crate::serve::DEFAULT_SERVE_PORT, value_name = "PORT")]
+    pub port: u16,
+    /// Permit binding to non-loopback addresses.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub allow_non_loopback: bool,
+}
+
+fn default_serve_host() -> String {
+    crate::serve::DEFAULT_SERVE_HOST.to_owned()
 }
 
 /// Memory maintenance commands.
@@ -39565,7 +39578,8 @@ where
 {
     if args.foreground && cli.wants_json() {
         let token = read(EnvVar::ServeToken);
-        return match serve_startup_response_json(token.as_deref()) {
+        let options = serve_startup_options_from_args(args);
+        return match serve_startup_response_json(&options, token.as_deref()) {
             Ok(response) => write_stdout(stdout, &(response + "\n")),
             Err(error) => write_domain_error(&error, true, stdout, stderr),
         };
@@ -39575,11 +39589,20 @@ where
     write_domain_error(&error, cli.wants_json(), stdout, stderr)
 }
 
-fn serve_startup_response_json(token: Option<&str>) -> Result<String, DomainError> {
-    let data = crate::serve::serve_startup_report_json(
-        &crate::serve::ServeStartupOptions::default(),
-        token,
-    )?;
+fn serve_startup_options_from_args(args: &ServeArgs) -> crate::serve::ServeStartupOptions {
+    crate::serve::ServeStartupOptions {
+        host: args.host.clone(),
+        port: args.port,
+        allow_non_loopback: args.allow_non_loopback,
+        ..crate::serve::ServeStartupOptions::default()
+    }
+}
+
+fn serve_startup_response_json(
+    options: &crate::serve::ServeStartupOptions,
+    token: Option<&str>,
+) -> Result<String, DomainError> {
+    let data = crate::serve::serve_startup_report_json(options, token)?;
     let degraded = data
         .get("degraded")
         .and_then(serde_json::Value::as_array)
@@ -51314,14 +51337,32 @@ mod tests {
 
         ensure(parsed.wants_json(), "serve foreground honors json global")?;
         match parsed.command {
-            Some(Command::Serve(args)) => ensure_equal(&args.foreground, &true, "foreground flag"),
+            Some(Command::Serve(args)) => {
+                ensure_equal(&args.foreground, &true, "foreground flag")?;
+                ensure_equal(
+                    &args.host,
+                    &crate::serve::DEFAULT_SERVE_HOST.to_owned(),
+                    "default host",
+                )?;
+                ensure_equal(
+                    &args.port,
+                    &crate::serve::DEFAULT_SERVE_PORT,
+                    "default port",
+                )?;
+                ensure_equal(
+                    &args.allow_non_loopback,
+                    &false,
+                    "default non-loopback opt-in",
+                )
+            }
             other => Err(format!("expected serve command, got {other:?}")),
         }
     }
 
     #[test]
     fn serve_startup_response_json_reports_policy_denied_without_token_material() -> TestResult {
-        let response = super::serve_startup_response_json(None)
+        let options = crate::serve::ServeStartupOptions::default();
+        let response = super::serve_startup_response_json(&options, None)
             .map_err(|error| format!("serve startup response failed: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&response)
             .map_err(|error| format!("failed to parse serve startup response: {error}"))?;
@@ -51366,6 +51407,61 @@ mod tests {
                 entry.get("code").and_then(serde_json::Value::as_str) == Some("serve_token_missing")
             }),
             "missing token degradation should bubble to response envelope",
+        )
+    }
+
+    #[test]
+    fn serve_startup_response_json_honors_cli_bind_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "serve",
+            "--foreground",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9876",
+            "--allow-non-loopback",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse serve bind options: {:?}", e.kind()))?;
+        let args = match parsed.command {
+            Some(Command::Serve(args)) => args,
+            other => return Err(format!("expected serve command, got {other:?}")),
+        };
+        let options = super::serve_startup_options_from_args(&args);
+        let response =
+            super::serve_startup_response_json(&options, Some("01234567890123456789012345678901"))
+                .map_err(|error| format!("serve startup response failed: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|error| format!("failed to parse serve startup response: {error}"))?;
+
+        ensure_equal(
+            &value
+                .pointer("/data/bind/host")
+                .and_then(serde_json::Value::as_str),
+            &Some("0.0.0.0"),
+            "bind host",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/bind/port")
+                .and_then(serde_json::Value::as_u64),
+            &Some(9876),
+            "bind port",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/bind/allowNonLoopback")
+                .and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "allow non-loopback",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/readiness/state")
+                .and_then(serde_json::Value::as_str),
+            &Some("ready"),
+            "ready state",
         )
     }
 
