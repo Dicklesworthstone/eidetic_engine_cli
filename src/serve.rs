@@ -865,10 +865,7 @@ pub fn serve_single_connection_exchange(
 
     let mut request_bytes = Vec::new();
     let mut buffer = [0_u8; 4096];
-    let total_read_limit = limits
-        .max_header_bytes
-        .saturating_add(4)
-        .saturating_add(limits.max_body_bytes);
+    let total_read_limit = serve_total_read_limit(limits)?;
     loop {
         let read = stream
             .read(&mut buffer)
@@ -1021,7 +1018,7 @@ fn serve_request_complete_len(
         )));
     }
 
-    let complete_len = header_end.saturating_add(4).saturating_add(content_length);
+    let complete_len = serve_complete_request_len(header_end, content_length)?;
     if bytes.len() > complete_len {
         return Err(serve_usage_error(
             "HTTP request body contains bytes beyond Content-Length; keepalive is not supported.",
@@ -1032,6 +1029,24 @@ fn serve_request_complete_len(
     } else {
         Ok(None)
     }
+}
+
+fn serve_total_read_limit(limits: &ServeLimits) -> Result<usize, DomainError> {
+    serve_complete_request_len(limits.max_header_bytes, limits.max_body_bytes)
+}
+
+fn serve_complete_request_len(
+    header_end: usize,
+    content_length: usize,
+) -> Result<usize, DomainError> {
+    header_end
+        .checked_add(4)
+        .and_then(|header_bytes| header_bytes.checked_add(content_length))
+        .ok_or_else(|| {
+            serve_usage_error(
+                "HTTP request size limit overflows usize; reduce serve header/body limits.",
+            )
+        })
 }
 
 fn render_serve_http_response(
@@ -3302,6 +3317,39 @@ mod tests {
             exchange.response_bytes,
             response.len(),
             "exchange response bytes",
+        )
+    }
+
+    #[test]
+    fn serve_total_read_limit_overflow_fails_closed() -> TestResult {
+        let limits = ServeLimits {
+            max_header_bytes: usize::MAX,
+            max_body_bytes: 1,
+            ..ServeLimits::default()
+        };
+        let error = serve_total_read_limit(&limits).expect_err("overflow must fail closed");
+
+        ensure(
+            error.to_string().contains("overflows usize"),
+            true,
+            "overflow error text",
+        )
+    }
+
+    #[test]
+    fn serve_request_complete_len_overflow_fails_closed() -> TestResult {
+        let request = b"POST /v1/status HTTP/1.1\r\nContent-Length: 18446744073709551615\r\n\r\n";
+        let limits = ServeLimits {
+            max_body_bytes: usize::MAX,
+            ..ServeLimits::default()
+        };
+        let error = serve_request_complete_len(request, &limits)
+            .expect_err("overflowing complete length must fail closed");
+
+        ensure(
+            error.to_string().contains("overflows usize"),
+            true,
+            "overflow error text",
         )
     }
 
