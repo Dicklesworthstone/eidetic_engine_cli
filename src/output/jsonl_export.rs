@@ -132,10 +132,25 @@ fn redact_paths_in_content(content: &str) -> String {
                             if remaining.starts_with(prefix) {
                                 output.push_str(REDACTED_PATH_PLACEHOLDER);
                                 cursor += prefix.len();
+                                let mut saw_separator_after_prefix = false;
                                 while cursor < line.len() {
                                     let next = line[cursor..].chars().next().unwrap_or('\0');
-                                    if path_redaction_boundary(next) {
+                                    if is_horizontal_path_space(next) {
+                                        if whitespace_starts_path_continuation(
+                                            line,
+                                            cursor,
+                                            saw_separator_after_prefix,
+                                        ) {
+                                            cursor += next.len_utf8();
+                                            continue;
+                                        }
                                         break;
+                                    }
+                                    if next.is_whitespace() || path_redaction_hard_boundary(next) {
+                                        break;
+                                    }
+                                    if next == '/' || next == '\\' {
+                                        saw_separator_after_prefix = true;
                                     }
                                     cursor += next.len_utf8();
                                 }
@@ -225,8 +240,51 @@ fn starts_with_sensitive_path_prefix(value: &str) -> bool {
         .any(|prefix| value.starts_with(prefix))
 }
 
-fn path_redaction_boundary(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
+fn is_horizontal_path_space(character: char) -> bool {
+    matches!(character, ' ' | '\t')
+}
+
+fn whitespace_starts_path_continuation(
+    line: &str,
+    cursor: usize,
+    saw_separator_after_prefix: bool,
+) -> bool {
+    let mut offset = cursor;
+    let mut consumed_horizontal_space = false;
+    while offset < line.len() {
+        let next = line[offset..].chars().next().unwrap_or('\0');
+        if !is_horizontal_path_space(next) {
+            break;
+        }
+        consumed_horizontal_space = true;
+        offset += next.len_utf8();
+    }
+    if !consumed_horizontal_space {
+        return false;
+    }
+
+    let mut saw_component_character = false;
+    let mut saw_following_separator = false;
+    while offset < line.len() {
+        let next = line[offset..].chars().next().unwrap_or('\0');
+        if next.is_whitespace() || path_redaction_hard_boundary(next) {
+            break;
+        }
+        if next == '=' {
+            return false;
+        }
+        if next == '/' || next == '\\' {
+            saw_following_separator = true;
+        }
+        saw_component_character = true;
+        offset += next.len_utf8();
+    }
+
+    saw_component_character && (saw_separator_after_prefix || saw_following_separator)
+}
+
+fn path_redaction_hard_boundary(c: char) -> bool {
+    matches!(c, '?' | '#' | '"' | '\'' | ')' | ']' | '}' | ',' | ';')
 }
 
 /// Redact a path string.
@@ -1045,9 +1103,31 @@ mod tests {
             "standard redacts URI-wrapped home paths without losing query text",
         )?;
         ensure(
+            redact_path(
+                "file:///Users/alice/My Project/model.bin?download=1",
+                RedactionLevel::Standard,
+            ),
+            format!("file://{REDACTED_PATH_PLACEHOLDER}?download=1"),
+            "standard redacts URI-wrapped paths with spaces without leaking suffixes",
+        )?;
+        ensure(
             redact_path("/usr/local/bin", RedactionLevel::Standard),
             "/usr/local/bin".to_owned(),
             "standard preserves system paths",
+        )
+    }
+
+    #[test]
+    fn redact_content_standard_redacts_paths_with_spaces() -> TestResult {
+        ensure(
+            redact_content(
+                r#"source=/Users/alice/My Project label=/data/private/Release Notes win=C:\Users\alice\Draft Folder note=done"#,
+                RedactionLevel::Standard,
+            ),
+            format!(
+                "source={REDACTED_PATH_PLACEHOLDER} label={REDACTED_PATH_PLACEHOLDER} win={REDACTED_PATH_PLACEHOLDER} note=done"
+            ),
+            "standard redacts path components with spaces without crossing key fields",
         )
     }
 
@@ -1057,6 +1137,18 @@ mod tests {
             redact_content("open /Users/a now", RedactionLevel::Standard),
             format!("open {REDACTED_PATH_PLACEHOLDER} now"),
             "standard redacts short paths without losing trailing text",
+        )
+    }
+
+    #[test]
+    fn redact_content_standard_does_not_cross_line_boundaries_after_paths() -> TestResult {
+        ensure(
+            redact_content(
+                "source=/Users/alice/My Project\nAgent: cod-search",
+                RedactionLevel::Standard,
+            ),
+            format!("source={REDACTED_PATH_PLACEHOLDER}\nAgent: cod-search"),
+            "standard redacts terminal component but keeps the next line",
         )
     }
 
