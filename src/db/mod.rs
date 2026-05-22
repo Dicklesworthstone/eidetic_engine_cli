@@ -28228,4 +28228,87 @@ mod tests {
 
         ensure_equal(&count, &0i64, "rolled-back table was not committed")
     }
+
+    #[test]
+    fn with_transaction_panic_rolls_back_mid_write_and_releases_owner() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| TestFailure::new(error.to_string()))?;
+        let db_path = tempdir.path().join("panic-mid-write.db");
+        let location = DatabaseLocation::File(db_path.clone());
+
+        let conn = DbConnection::open(DatabaseConfig::file(&db_path)).map_err(TestFailure::from)?;
+        conn.migrate().map_err(TestFailure::from)?;
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _: std::result::Result<(), DbError> = conn.with_transaction(|| {
+                conn.execute_for(
+                    DbOperation::Execute,
+                    "CREATE TABLE panic_owner (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+                    &[],
+                )?;
+                conn.execute_for(
+                    DbOperation::Execute,
+                    "INSERT INTO panic_owner (id, value) VALUES (1, 'partial')",
+                    &[],
+                )?;
+                panic!("intentional panic after partial write");
+            });
+        }));
+
+        ensure(
+            panic_result.is_err(),
+            "transaction closure panic is surfaced to caller",
+        )?;
+        ensure_equal(
+            &file_write_owner_depth_for_test(&location),
+            &0usize,
+            "write-owner depth is cleared after panic rollback",
+        )?;
+
+        let rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'panic_owner'",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        let table_count = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(-1);
+        ensure_equal(
+            &table_count,
+            &0i64,
+            "panic-mid-write transaction rolled back table creation",
+        )?;
+
+        conn.with_transaction(|| {
+            conn.execute_for(
+                DbOperation::Execute,
+                "CREATE TABLE panic_recovery (id INTEGER PRIMARY KEY)",
+                &[],
+            )?;
+            Ok(())
+        })
+        .map_err(TestFailure::from)?;
+
+        let rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'panic_recovery'",
+                &[],
+            )
+            .map_err(TestFailure::from)?;
+        let recovery_count = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(-1);
+
+        ensure_equal(
+            &recovery_count,
+            &1i64,
+            "follow-up transaction succeeds after panic rollback",
+        )?;
+
+        conn.close().map_err(TestFailure::from)
+    }
 }
