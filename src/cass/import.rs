@@ -5,6 +5,7 @@
 //! rows, capture first-line evidence spans, and update the resumable
 //! import ledger.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -1109,6 +1110,7 @@ impl CassViewStreamMemorySample {
 struct CassViewLineCollector {
     source_path: String,
     spans: Vec<CassViewSpanForImport>,
+    seen_lines: BTreeSet<u32>,
     memory_sample: CassViewStreamMemorySample,
 }
 
@@ -1117,6 +1119,7 @@ impl CassViewLineCollector {
         Self {
             source_path: source_path.to_string(),
             spans: Vec::new(),
+            seen_lines: BTreeSet::new(),
             memory_sample: CassViewStreamMemorySample::default(),
         }
     }
@@ -1142,6 +1145,12 @@ impl CassViewLineCollector {
 
     fn accept_value(&mut self, value: &JsonValue) -> Result<(), CassImportError> {
         let span = parse_view_line_value(value, &self.source_path)?;
+        if !self.seen_lines.insert(span.start_line) {
+            return Err(CassImportError::InvalidJson {
+                source: "view",
+                message: format!("duplicate line {}", span.start_line),
+            });
+        }
         self.memory_sample.record_span(&span);
         self.spans.push(span);
         Ok(())
@@ -1160,9 +1169,10 @@ fn parse_view_line_value(
         .get("line")
         .and_then(JsonValue::as_u64)
         .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
         .ok_or_else(|| CassImportError::InvalidJson {
             source: "view",
-            message: "line entry missing numeric line".to_string(),
+            message: "line entry missing positive numeric line".to_string(),
         })?;
     let content = required_string(line, "content", "view")?;
     let (span_kind, role) = classify_line(&content);
@@ -2267,6 +2277,40 @@ mod tests {
         )?;
         ensure_equal(&spans[0].role, &Some(CassRole::Assistant), "tool call role")?;
         ensure_equal(&spans[1].role, &Some(CassRole::Tool), "tool result role")
+    }
+
+    #[test]
+    fn parse_view_json_rejects_zero_line_numbers() -> TestResult {
+        let input = br#"{"line": 0, "content": "zero"}"#;
+
+        let error = match parse_view_json(input, "/tmp/session.jsonl") {
+            Ok(_) => return Err("line 0 should fail before span construction".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("positive numeric line"),
+            format!("error should mention positive line numbers, got {error}"),
+        )
+    }
+
+    #[test]
+    fn parse_view_json_rejects_duplicate_line_numbers() -> TestResult {
+        let input = br#"{
+          "path": "/tmp/session.jsonl",
+          "lines": [
+            {"line": 3, "content": "first"},
+            {"line": 3, "content": "second"}
+          ]
+        }"#;
+
+        let error = match parse_view_json(input, "/tmp/session.jsonl") {
+            Ok(_) => return Err("duplicate line numbers should fail".to_string()),
+            Err(error) => error.to_string(),
+        };
+        ensure(
+            error.contains("duplicate line 3"),
+            format!("error should mention duplicate line, got {error}"),
+        )
     }
 
     #[test]
