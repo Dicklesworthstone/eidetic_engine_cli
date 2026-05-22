@@ -5104,7 +5104,17 @@ fn assemble_facility_location_draft(
         next_rank = next_rank
             .checked_add(1)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
-        used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
+        // bd-1f8l8: mirror the MMR path (assemble_mmr_draft) which uses
+        // `checked_add` here. `FacilitySelectionQueue::select` already
+        // gates by `facility_candidate_is_feasible` against the absolute
+        // budget, so a hit on this overflow path means the feasibility
+        // pre-check disagreed with the post-selection accounting — that
+        // is a programmer error worth surfacing as
+        // `CandidateRankOverflow` rather than silently saturating at
+        // u32::MAX.
+        used_tokens = used_tokens
+            .checked_add(candidate.estimated_tokens)
+            .ok_or(PackValidationError::CandidateRankOverflow)?;
         section_usage.add_candidate(&candidate);
         update_facility_coverages(&mut current_coverages, &candidates, profile_index);
         selector.advance_round();
