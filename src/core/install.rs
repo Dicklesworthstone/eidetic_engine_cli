@@ -1163,12 +1163,23 @@ fn publish_extracted_binary(extracted_binary: &Path, install_path: &Path) -> Res
     let temp_path = install_temp_path(install_path)?;
     ensure_install_temp_path_absent(&temp_path)?;
 
-    let mut source_file = fs::File::open(extracted_binary).map_err(|error| {
+    let source_file = fs::File::open(extracted_binary).map_err(|error| {
         format!(
             "failed to open extracted binary '{}': {error}",
             extracted_binary.display()
         )
     })?;
+    publish_extracted_binary_from_reader(source_file, install_path)
+}
+
+fn publish_extracted_binary_from_reader(
+    mut source: impl io::Read,
+    install_path: &Path,
+) -> Result<(), String> {
+    ensure_install_target_path_is_regular_or_missing(install_path)?;
+    let temp_path = install_temp_path(install_path)?;
+    ensure_install_temp_path_absent(&temp_path)?;
+
     let mut temp_file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1179,21 +1190,40 @@ fn publish_extracted_binary(extracted_binary: &Path, install_path: &Path) -> Res
                 temp_path.display()
             )
         })?;
-    io::copy(&mut source_file, &mut temp_file).map_err(|error| {
-        format!(
-            "failed to copy extracted binary to temporary install path '{}': {error}",
-            temp_path.display()
-        )
-    })?;
-    temp_file.sync_all().map_err(|error| {
-        format!(
-            "failed to sync temporary install binary '{}': {error}",
-            temp_path.display()
-        )
-    })?;
+    if let Err(error) = io::copy(&mut source, &mut temp_file) {
+        drop(temp_file);
+        return Err(cleanup_created_install_temp_after_error(
+            &temp_path,
+            format!(
+                "failed to copy extracted binary to temporary install path '{}': {error}",
+                temp_path.display()
+            ),
+        ));
+    }
+    if let Err(error) = temp_file.sync_all() {
+        drop(temp_file);
+        return Err(cleanup_created_install_temp_after_error(
+            &temp_path,
+            format!(
+                "failed to sync temporary install binary '{}': {error}",
+                temp_path.display()
+            ),
+        ));
+    }
     drop(temp_file);
 
     publish_install_temp_binary(&temp_path, install_path)
+}
+
+fn cleanup_created_install_temp_after_error(temp_path: &Path, error_message: String) -> String {
+    match fs::remove_file(temp_path) {
+        Ok(()) => error_message,
+        Err(cleanup_error) if cleanup_error.kind() == io::ErrorKind::NotFound => error_message,
+        Err(cleanup_error) => format!(
+            "{error_message}; additionally failed to remove temporary install binary '{}': {cleanup_error}",
+            temp_path.display()
+        ),
+    }
 }
 
 fn publish_install_temp_binary(temp_path: &Path, install_path: &Path) -> Result<(), String> {
@@ -2390,6 +2420,56 @@ mod tests {
         ensure(
             !install_path.exists(),
             "final install path must not be published when temp exists",
+        )
+    }
+
+    struct FailingBinaryRead {
+        wrote_prefix: bool,
+    }
+
+    impl io::Read for FailingBinaryRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.wrote_prefix {
+                return Err(io::Error::other("planned install copy failure"));
+            }
+            let prefix = b"partial";
+            buffer[..prefix.len()].copy_from_slice(prefix);
+            self.wrote_prefix = true;
+            Ok(prefix.len())
+        }
+    }
+
+    #[test]
+    fn publish_extracted_binary_removes_created_temp_after_copy_failure() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let install_path = tempdir.path().join("bin").join("ee");
+        let temp_path = install_temp_path(&install_path)?;
+        fs::create_dir_all(install_path.parent().expect("install parent"))
+            .map_err(|error| error.to_string())?;
+
+        let error = publish_extracted_binary_from_reader(
+            FailingBinaryRead {
+                wrote_prefix: false,
+            },
+            &install_path,
+        )
+        .expect_err("copy failure should reject publish");
+
+        ensure(
+            error.contains("failed to copy extracted binary"),
+            "copy failure should mention copy stage",
+        )?;
+        ensure(
+            error.contains("planned install copy failure"),
+            "copy failure should preserve source error",
+        )?;
+        ensure(
+            !temp_path.exists(),
+            "created temp install binary should be removed after copy failure",
+        )?;
+        ensure(
+            !install_path.exists(),
+            "final install path must not be published after copy failure",
         )
     }
 
