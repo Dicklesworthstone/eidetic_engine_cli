@@ -28170,6 +28170,35 @@ where
         );
     }
 
+    // bd-xm5qz: re-measure after the merge so tokenSavings.deltaBytes
+    // reports the bytes the agent actually receives AND so max_delta_bytes
+    // is enforced against the post-merge size. Without this step the
+    // kernel's pre-merge measurement leaked through and the configured
+    // byte budget could be silently exceeded by deprecated_alias +
+    // pack-pipeline degradations.
+    match delta.finalize_with_budget(args.max_delta_bytes) {
+        Ok(_) => {}
+        Err(error) => {
+            push_context_delta_degradation(
+                response,
+                CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
+                ContextResponseSeverity::Low,
+                format!(
+                    "Context delta envelope could not be re-measured after merging response \
+                     degradations: {error}; emitting the full pack instead."
+                ),
+                Some("Retry without --since to receive a full context pack.".to_string()),
+            );
+            return None;
+        }
+    }
+    if !delta.emits_delta() {
+        for degradation in &delta.degraded {
+            push_context_delta_kernel_degradation(response, degradation);
+        }
+        return None;
+    }
+
     let rendered = serde_json::to_string(&delta).unwrap_or_else(|_| {
         output::render_context_response_json_with_options(response, render_options)
     });
@@ -28204,7 +28233,7 @@ fn load_context_delta_prior_snapshot(
         .list_recent_pack_items_for_workspace(&workspace_id, CONTEXT_DELTA_PRIOR_LOOKUP_LIMIT)
         .map_err(|error| format!("failed to query prior pack records: {error}"))?;
 
-    let mut record = None;
+    let mut record: Option<crate::db::StoredPackRecord> = None;
     let mut items = Vec::new();
     for (candidate_record, item) in rows {
         if candidate_record.pack_hash != prior_pack_hash {

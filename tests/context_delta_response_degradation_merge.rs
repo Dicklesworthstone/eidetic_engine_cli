@@ -213,3 +213,182 @@ fn append_response_degradation_preserves_existing_kernel_degraded_entries() -> T
     assert_eq!(envelope.degraded[1].code, "deprecated_alias");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// bd-xm5qz: post-merge budget + tokenSavings re-measurement
+// ---------------------------------------------------------------------------
+
+const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
+
+fn merge_realistic_response_degradations(
+    envelope: &mut ee::core::context_delta::ContextDeltaEnvelope,
+) {
+    // Three entries roughly mirror the worst common case: deprecated_alias
+    // every `ee context` carries plus two pack-pipeline signals
+    // (BM25-only fallback, slow pack assembly) that run_context_pack
+    // routinely attaches when search or assembly degrades.
+    envelope.append_response_degradation(
+        "deprecated_alias",
+        "info",
+        "`ee context` is a compatibility alias for the promoted triad command.",
+        Some("Use `ee pack \"<task>\"`.".to_string()),
+    );
+    envelope.append_response_degradation(
+        "search_lexical_only",
+        "low",
+        "Semantic search was unavailable; ranking used BM25 only.",
+        Some("Run `ee doctor --json` to inspect the embedding tier.".to_string()),
+    );
+    envelope.append_response_degradation(
+        "pack_assembly_slow",
+        "low",
+        "Pack assembly exceeded the standard SLO budget.",
+        Some("Retry with --resource-profile lean or expand the budget.".to_string()),
+    );
+}
+
+#[test]
+fn finalize_after_merge_updates_token_savings_to_post_merge_bytes() -> TestResult {
+    // No budget configured — we just want to prove tokenSavings.deltaBytes
+    // matches the bytes the agent actually receives once the merged
+    // degradations are accounted for.
+    let mut envelope = happy_path_envelope_with_one_modified_item()?;
+    let kernel_bytes = envelope.data.token_savings.delta_bytes;
+    let kernel_saved = envelope.data.token_savings.saved_bytes;
+
+    merge_realistic_response_degradations(&mut envelope);
+
+    let final_bytes = envelope
+        .finalize_with_budget(None)
+        .map_err(|error| format!("finalize_with_budget failed: {error}"))?;
+
+    let serialized =
+        serde_json::to_vec(&envelope).map_err(|error| format!("serialize envelope: {error}"))?;
+    let emitted_bytes = serialized.len() as u64;
+    assert_eq!(
+        final_bytes, emitted_bytes,
+        "finalize_with_budget must return the actual emission size"
+    );
+    assert_eq!(
+        envelope.data.token_savings.delta_bytes, emitted_bytes,
+        "tokenSavings.deltaBytes must report the post-merge emission size, not the pre-merge kernel measurement",
+    );
+    assert!(
+        envelope.data.token_savings.delta_bytes > kernel_bytes,
+        "post-merge bytes ({}) must exceed the kernel's pre-merge measurement ({})",
+        envelope.data.token_savings.delta_bytes,
+        kernel_bytes,
+    );
+    assert_eq!(
+        envelope.data.token_savings.saved_bytes,
+        envelope.data.token_savings.full_bytes as i64 - emitted_bytes as i64,
+        "savedBytes must reflect the post-merge emission",
+    );
+    assert!(
+        envelope.data.token_savings.saved_bytes < kernel_saved,
+        "post-merge savedBytes ({}) must be smaller than the pre-merge value ({}) because the emission grew",
+        envelope.data.token_savings.saved_bytes,
+        kernel_saved,
+    );
+    assert!(
+        envelope.emits_delta(),
+        "without a budget the envelope must still emit a delta",
+    );
+    Ok(())
+}
+
+#[test]
+fn finalize_after_merge_respects_tight_max_delta_bytes_budget() -> TestResult {
+    // Construct an envelope whose kernel-measured size fits under the
+    // configured budget but whose post-merge size does NOT, then prove
+    // finalize_with_budget flips to the oversize fallback path so the
+    // CLI can fall through to the full pack instead of silently emitting
+    // bytes above the agent's stated budget.
+    let mut envelope = happy_path_envelope_with_one_modified_item()?;
+    let kernel_bytes = envelope.data.token_savings.delta_bytes;
+
+    merge_realistic_response_degradations(&mut envelope);
+
+    let post_merge_bytes = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("serialize envelope: {error}"))?
+        .len() as u64;
+    assert!(
+        post_merge_bytes > kernel_bytes,
+        "test precondition: merge must enlarge the envelope ({kernel_bytes} -> {post_merge_bytes})",
+    );
+
+    // Budget sits between the kernel's pre-merge size and the post-merge
+    // size — the kernel would have accepted it; the merge pushes it
+    // over.
+    let budget = (kernel_bytes + post_merge_bytes) / 2;
+    assert!(budget > kernel_bytes && budget < post_merge_bytes);
+
+    let final_bytes = envelope
+        .finalize_with_budget(Some(budget))
+        .map_err(|error| format!("finalize_with_budget failed: {error}"))?;
+
+    assert!(
+        !envelope.emits_delta(),
+        "envelope must flip to fallback when post-merge size exceeds the budget",
+    );
+    assert_eq!(
+        envelope.data.server_decision.fallback_reason,
+        Some(ee::core::context_delta::ContextDeltaFallbackReason::DeltaLargerThanFull),
+        "fallbackReason must be DeltaLargerThanFull",
+    );
+    let oversized_count = envelope
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE)
+        .count();
+    assert_eq!(
+        oversized_count, 1,
+        "exactly one CONTEXT_DELTA_OVERSIZED_CODE entry must be present after finalize",
+    );
+    let serialized =
+        serde_json::to_vec(&envelope).map_err(|error| format!("serialize envelope: {error}"))?;
+    assert_eq!(
+        final_bytes,
+        serialized.len() as u64,
+        "finalize_with_budget must return the size of the emission it produced",
+    );
+    assert_eq!(
+        envelope.data.token_savings.delta_bytes,
+        serialized.len() as u64,
+        "tokenSavings.deltaBytes must report the bytes the agent actually receives, including the oversize-marker entry the finalize step pushed",
+    );
+    Ok(())
+}
+
+#[test]
+fn finalize_with_budget_is_idempotent_when_called_twice() -> TestResult {
+    // Guards against a future change where finalize_with_budget gets
+    // called more than once (e.g. an additional merge stage) — the
+    // CONTEXT_DELTA_OVERSIZED_CODE marker must not duplicate and the
+    // serialized size must converge.
+    let mut envelope = happy_path_envelope_with_one_modified_item()?;
+    merge_realistic_response_degradations(&mut envelope);
+    let post_merge_bytes = serde_json::to_vec(&envelope)
+        .map_err(|error| format!("serialize envelope: {error}"))?
+        .len() as u64;
+    let kernel_bytes = envelope.data.token_savings.delta_bytes;
+    let budget = (kernel_bytes + post_merge_bytes) / 2;
+
+    let first = envelope
+        .finalize_with_budget(Some(budget))
+        .map_err(|error| format!("finalize_with_budget pass 1 failed: {error}"))?;
+    let second = envelope
+        .finalize_with_budget(Some(budget))
+        .map_err(|error| format!("finalize_with_budget pass 2 failed: {error}"))?;
+    assert_eq!(first, second, "finalize_with_budget must converge");
+    let oversized_count = envelope
+        .degraded
+        .iter()
+        .filter(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE)
+        .count();
+    assert_eq!(
+        oversized_count, 1,
+        "double-call must not duplicate the oversize marker",
+    );
+    Ok(())
+}

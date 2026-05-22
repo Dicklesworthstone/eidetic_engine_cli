@@ -133,6 +133,74 @@ impl ContextDeltaEnvelope {
             details: None,
         });
     }
+
+    /// bd-xm5qz: re-measure the envelope after the CLI's response-side
+    /// degradation merge, recompute `tokenSavings.deltaBytes` so it
+    /// reports the bytes the agent actually receives, and re-enforce
+    /// `max_delta_bytes` against the post-merge size.
+    ///
+    /// Without this step, `compute_context_delta` measured the envelope
+    /// with `degraded[]` still empty and the CLI then appended
+    /// `deprecated_alias` plus any pack-pipeline degradations directly
+    /// into `degraded[]` — so two contracts broke at once: the
+    /// configured byte budget could be silently exceeded, and
+    /// `tokenSavings.deltaBytes` (used by agents to budget the
+    /// transport) reported a smaller number than the actual emission.
+    ///
+    /// On overflow this method flips `serverDecision.fallbackReason` to
+    /// `DeltaLargerThanFull` and pushes `CONTEXT_DELTA_OVERSIZED_CODE`
+    /// onto `degraded[]` (if not already present) so `emits_delta()`
+    /// returns `false` and the caller falls back to the full-pack
+    /// emission. Callers can therefore use a single
+    /// `envelope.emits_delta()` branch for both the kernel oversize and
+    /// the post-merge oversize paths.
+    ///
+    /// Returns the post-merge serialized byte count on success. Idempotent
+    /// — calling it twice without modifying the envelope re-emits the
+    /// same size and does not duplicate the `CONTEXT_DELTA_OVERSIZED_CODE`
+    /// entry.
+    pub fn finalize_with_budget(
+        &mut self,
+        max_delta_bytes: Option<u64>,
+    ) -> Result<u64, ContextDeltaError> {
+        let measured = stable_serialized_len(self)?;
+        let token_count = self.data.token_savings.net_pack_tokens;
+        let full_bytes = self.data.token_savings.full_bytes;
+        self.data.token_savings = token_savings(full_bytes, measured, token_count);
+
+        if let Some(budget) = max_delta_bytes
+            && measured > budget
+        {
+            if self.data.server_decision.fallback_reason.is_none() {
+                self.data.server_decision.fallback_reason =
+                    Some(ContextDeltaFallbackReason::DeltaLargerThanFull);
+            }
+            let already_marked = self
+                .degraded
+                .iter()
+                .any(|entry| entry.code == CONTEXT_DELTA_OVERSIZED_CODE);
+            if !already_marked {
+                self.degraded.push(ContextDeltaDegradation {
+                    code: CONTEXT_DELTA_OVERSIZED_CODE.to_string(),
+                    severity: "info".to_string(),
+                    message: format!(
+                        "Delta envelope is {measured} bytes after merging response \
+                         degradations, above the configured {budget} byte limit; \
+                         emit the full pack instead."
+                    ),
+                    repair: None,
+                    details: None,
+                });
+                // The new degraded entry adds bytes; re-measure so
+                // tokenSavings.deltaBytes still matches the emission.
+                let remeasured = stable_serialized_len(self)?;
+                self.data.token_savings = token_savings(full_bytes, remeasured, token_count);
+                return Ok(remeasured);
+            }
+        }
+
+        Ok(measured)
+    }
 }
 
 /// The `data` payload of `ee.context.delta.v1`. Field set is closed
