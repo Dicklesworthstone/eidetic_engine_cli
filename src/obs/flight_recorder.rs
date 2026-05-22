@@ -18,7 +18,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -27,6 +27,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 /// Public schema identifier, matching the title of
 /// `docs/schemas/ee.agent_workload_trace.v1.json`.
 pub const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
+
+/// Default replay read cap. This mirrors the flight-recorder status default and
+/// keeps ad-hoc replay from loading arbitrarily large trace files.
+pub const DEFAULT_FLIGHT_RECORDER_REPLAY_MAX_BYTES: u64 = 268_435_456;
 
 /// Default redaction posture for the recorder. The schema only allows
 /// `strict` or `audit`; `strict` is the default. Both levels omit raw
@@ -513,10 +517,14 @@ pub fn append_workload_trace(
 pub fn replay_workload_trace(
     trace_path: &Path,
 ) -> Result<FlightRecorderReplayReport, FlightRecorderError> {
-    let body = fs::read_to_string(trace_path).map_err(|error| FlightRecorderError::Io {
-        path: trace_path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    replay_workload_trace_with_max_bytes(trace_path, DEFAULT_FLIGHT_RECORDER_REPLAY_MAX_BYTES)
+}
+
+fn replay_workload_trace_with_max_bytes(
+    trace_path: &Path,
+    max_bytes: u64,
+) -> Result<FlightRecorderReplayReport, FlightRecorderError> {
+    let body = read_trace_body(trace_path, max_bytes)?;
     let trace_hash = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
     let mut command_counts = BTreeMap::<String, usize>::new();
     let mut degraded_code_counts = BTreeMap::<String, usize>::new();
@@ -586,6 +594,51 @@ pub fn replay_workload_trace(
         response_token_estimate_total,
         memory_reference_count,
         replay_hash,
+    })
+}
+
+fn read_trace_body(trace_path: &Path, max_bytes: u64) -> Result<String, FlightRecorderError> {
+    if max_bytes == 0 {
+        return fs::read_to_string(trace_path).map_err(|error| FlightRecorderError::Io {
+            path: trace_path.to_path_buf(),
+            message: error.to_string(),
+        });
+    }
+
+    let metadata = fs::metadata(trace_path).map_err(|error| FlightRecorderError::Io {
+        path: trace_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    if metadata.len() > max_bytes {
+        return Err(FlightRecorderError::QuotaExceeded {
+            projected_bytes: metadata.len(),
+            max_bytes,
+        });
+    }
+
+    let file = fs::File::open(trace_path).map_err(|error| FlightRecorderError::Io {
+        path: trace_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let mut bytes = Vec::new();
+    let mut limited = file.take(max_bytes.saturating_add(1));
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| FlightRecorderError::Io {
+            path: trace_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    let bytes_read = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if bytes_read > max_bytes {
+        return Err(FlightRecorderError::QuotaExceeded {
+            projected_bytes: bytes_read,
+            max_bytes,
+        });
+    }
+
+    String::from_utf8(bytes).map_err(|error| FlightRecorderError::Io {
+        path: trace_path.to_path_buf(),
+        message: error.to_string(),
     })
 }
 
@@ -1044,6 +1097,22 @@ mod tests {
         let err = append_workload_trace(&options, &trace).expect_err("quota exceeded");
         assert!(matches!(err, FlightRecorderError::QuotaExceeded { .. }));
         assert!(!options.trace_path().exists());
+    }
+
+    #[test]
+    fn replay_trace_enforces_max_bytes_before_parsing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let trace_path = temp.path().join("agent-workload-trace.jsonl");
+        std::fs::write(&trace_path, b"{\"schema\":\"not-jsonl-yet\"")
+            .expect("oversized malformed trace");
+        let err = replay_workload_trace_with_max_bytes(&trace_path, 8).expect_err("quota exceeded");
+        assert!(matches!(
+            err,
+            FlightRecorderError::QuotaExceeded {
+                projected_bytes,
+                max_bytes: 8
+            } if projected_bytes > 8
+        ));
     }
 
     #[test]
