@@ -657,23 +657,14 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
             cursor += prefix.len();
             while cursor < input.len() {
                 let next = input[cursor..].chars().next().unwrap_or('\0');
-                if next.is_whitespace()
-                    || matches!(
-                        next,
-                        '"' | '\''
-                            | '`'
-                            | '<'
-                            | '>'
-                            | ')'
-                            | ']'
-                            | '}'
-                            | ','
-                            | ';'
-                            | '|'
-                            | '?'
-                            | '#'
-                    )
-                {
+                if next.is_whitespace() {
+                    if whitespace_starts_search_path_continuation(input, cursor) {
+                        cursor += next.len_utf8();
+                        continue;
+                    }
+                    break;
+                }
+                if is_search_path_hard_delimiter(next) {
                     break;
                 }
                 cursor += next.len_utf8();
@@ -687,6 +678,41 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     }
 
     output
+}
+
+fn is_search_path_hard_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        '"' | '\'' | '`' | '<' | '>' | ')' | ']' | '}' | ',' | ';' | '|' | '?' | '#'
+    )
+}
+
+fn whitespace_starts_search_path_continuation(input: &str, cursor: usize) -> bool {
+    let mut offset = cursor;
+    while offset < input.len() {
+        let next = input[offset..].chars().next().unwrap_or('\0');
+        if !next.is_whitespace() {
+            break;
+        }
+        offset += next.len_utf8();
+    }
+
+    let mut saw_path_separator = false;
+    while offset < input.len() {
+        let next = input[offset..].chars().next().unwrap_or('\0');
+        if next == '=' {
+            return false;
+        }
+        if next == '/' || next == '\\' {
+            saw_path_separator = true;
+        }
+        if next.is_whitespace() || is_search_path_hard_delimiter(next) {
+            break;
+        }
+        offset += next.len_utf8();
+    }
+
+    saw_path_separator
 }
 
 impl Default for ArtifactDocumentBuilder {
@@ -3160,6 +3186,29 @@ mod tests {
             "private/session.jsonl",
             "/data/projects/ee",
             r#"C:\Users\alice\secret"#,
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_redacts_path_segments_with_spaces() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"source=file:///Users/alice/My Project/session.jsonl label=/workspace/Plain Path/log.txt win=C:\Users\alice\My Project\session.jsonl note=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"source=file://[REDACTED_PATH] label=[REDACTED_PATH] win=[REDACTED_PATH] note=done"#
+        );
+        for leaked in [
+            "/Users/alice",
+            "My Project/session.jsonl",
+            "/workspace/Plain Path/log.txt",
+            r#"C:\Users\alice\My Project\session.jsonl"#,
         ] {
             assert!(
                 !redacted.contains(leaked),
