@@ -3,6 +3,7 @@ use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
 
+// bd-2bw8m: endpoint-level regression coverage for serve query percent decoding.
 fn split_http_response(response: &str) -> Result<(&str, &str), String> {
     response
         .split_once("\r\n\r\n")
