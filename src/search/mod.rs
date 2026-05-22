@@ -3146,6 +3146,29 @@ mod tests {
     }
 
     #[test]
+    fn search_projection_redacts_malformed_delimited_path_segments() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"source=file:///Users/alice/private/session.jsonl]; other=/data/projects/ee); win=C:\Users\alice\secret?next"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"source=file://[REDACTED_PATH]]; other=[REDACTED_PATH]); win=[REDACTED_PATH]?next"#
+        );
+        for leaked in [
+            "/Users/alice",
+            "private/session.jsonl",
+            "/data/projects/ee",
+            r#"C:\Users\alice\secret"#,
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
     fn session_document_builder_redacts_sensitive_metadata_json() {
         let mut session = make_test_session();
         session.metadata_json = Some(
