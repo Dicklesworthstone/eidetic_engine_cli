@@ -490,7 +490,8 @@ impl CassInvocation {
                         &mut stdout_line_count,
                         &mut stdout_bytes_seen,
                         &mut peak_stdout_line_bytes,
-                    );
+                    )
+                    .map_err(CassStreamError::Cass)?;
                     join_stdout_line_reader(&mut stdout_thread).map_err(CassStreamError::Cass)?;
                     let mut absent_stdout_thread = None;
                     let mut empty_stdout_bytes = Some(Vec::new());
@@ -811,8 +812,8 @@ pub fn fuzz_decode_cass_stdout_stream(
     let mut peak_line_bytes = 0_usize;
 
     while let Some(line) = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)? {
-        line_count = line_count.saturating_add(1);
-        bytes_seen = bytes_seen.saturating_add(line.len());
+        line_count = checked_stdout_stat_add(line_count, 1, "fuzz line count")?;
+        bytes_seen = checked_stdout_stat_add(bytes_seen, line.len(), "fuzz byte count")?;
         peak_line_bytes = peak_line_bytes.max(line.len());
     }
 
@@ -840,12 +841,15 @@ fn drain_available_stdout_lines<F, E>(
     loop {
         match receiver.try_recv() {
             Ok(Ok(line)) => {
-                record_stdout_line_stats(
+                if let Err(error) = record_stdout_line_stats(
                     &line,
                     stdout_line_count,
                     stdout_bytes_seen,
                     peak_stdout_line_bytes,
-                );
+                ) {
+                    *stream_error = Some(error);
+                    continue;
+                }
                 if stream_error.is_none()
                     && handler_error.is_none()
                     && let Err(error) = handle_line(line)
@@ -871,12 +875,12 @@ fn drain_stdout_line_reader_after_stop(
     stdout_line_count: &mut usize,
     stdout_bytes_seen: &mut usize,
     peak_stdout_line_bytes: &mut usize,
-) {
+) -> Result<(), CassError> {
     let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;
     loop {
         let now = Instant::now();
         if now >= deadline {
-            break;
+            break Ok(());
         }
         let remaining = deadline
             .checked_duration_since(now)
@@ -888,12 +892,12 @@ fn drain_stdout_line_reader_after_stop(
                 stdout_line_count,
                 stdout_bytes_seen,
                 peak_stdout_line_bytes,
-            ),
+            )?,
             Ok(Err(_error)) => {}
-            Err(mpsc::RecvTimeoutError::Timeout) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => break Ok(()),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 *stdout_done = true;
-                break;
+                break Ok(());
             }
         }
     }
@@ -904,12 +908,25 @@ fn record_stdout_line_stats(
     stdout_line_count: &mut usize,
     stdout_bytes_seen: &mut usize,
     peak_stdout_line_bytes: &mut usize,
-) {
-    *stdout_line_count = stdout_line_count.saturating_add(1);
-    *stdout_bytes_seen = stdout_bytes_seen
-        .saturating_add(line.len())
-        .saturating_add(1);
+) -> Result<(), CassError> {
+    let next_line_count = checked_stdout_stat_add(*stdout_line_count, 1, "line count")?;
+    let line_bytes_with_delimiter = checked_stdout_stat_add(line.len(), 1, "byte count")?;
+    let next_bytes_seen =
+        checked_stdout_stat_add(*stdout_bytes_seen, line_bytes_with_delimiter, "byte count")?;
+    *stdout_line_count = next_line_count;
+    *stdout_bytes_seen = next_bytes_seen;
     *peak_stdout_line_bytes = (*peak_stdout_line_bytes).max(line.len());
+    Ok(())
+}
+
+fn checked_stdout_stat_add(
+    current: usize,
+    increment: usize,
+    stat_name: &'static str,
+) -> Result<usize, CassError> {
+    current.checked_add(increment).ok_or_else(|| CassError::Io {
+        message: format!("cass subprocess stdout {stat_name} overflowed"),
+    })
 }
 
 fn read_capped_pipe<R: Read>(
@@ -1648,7 +1665,7 @@ mod tests {
         assert_eq!(outcome.stdout_line_count(), 2);
         assert_eq!(
             outcome.stdout_bytes_seen(),
-            "line-one".len() + "line-two".len()
+            "line-one\n".len() + "line-two\n".len()
         );
         assert_eq!(outcome.peak_stdout_line_bytes(), "line-two".len());
         assert_eq!(outcome.stderr_utf8_lossy(), "stream degraded\n");
@@ -1789,6 +1806,48 @@ mod tests {
             error.to_string().contains("stderr exceeded 8 byte"),
             "unexpected error: {error}",
         );
+    }
+
+    #[test]
+    fn stdout_line_stats_reject_line_count_overflow() {
+        use super::record_stdout_line_stats;
+
+        let mut line_count = usize::MAX;
+        let mut bytes_seen = 0_usize;
+        let mut peak_line_bytes = 0_usize;
+
+        let error =
+            record_stdout_line_stats("", &mut line_count, &mut bytes_seen, &mut peak_line_bytes)
+                .expect_err("line count overflow should fail explicitly");
+
+        assert!(
+            error.to_string().contains("line count overflowed"),
+            "unexpected error: {error}",
+        );
+        assert_eq!(line_count, usize::MAX);
+        assert_eq!(bytes_seen, 0);
+        assert_eq!(peak_line_bytes, 0);
+    }
+
+    #[test]
+    fn stdout_line_stats_reject_byte_count_overflow_without_partial_update() {
+        use super::record_stdout_line_stats;
+
+        let mut line_count = 7_usize;
+        let mut bytes_seen = usize::MAX;
+        let mut peak_line_bytes = 3_usize;
+
+        let error =
+            record_stdout_line_stats("", &mut line_count, &mut bytes_seen, &mut peak_line_bytes)
+                .expect_err("byte count overflow should fail explicitly");
+
+        assert!(
+            error.to_string().contains("byte count overflowed"),
+            "unexpected error: {error}",
+        );
+        assert_eq!(line_count, 7);
+        assert_eq!(bytes_seen, usize::MAX);
+        assert_eq!(peak_line_bytes, 3);
     }
 
     /// bd-352wc regression: a single line larger than the 1 MiB cap
