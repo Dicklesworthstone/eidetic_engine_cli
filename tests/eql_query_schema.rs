@@ -1,6 +1,6 @@
 //! Contract coverage for the section 13.5 EQL-inspired JSON query shape.
 
-use ee::models::query::{EqlQueryError, EqlSpeedMode, EqlTagsMode, parse_eql_query};
+use ee::models::query::{EqlQueryError, EqlSpeedMode, EqlTagsMode, parse_eql_query, parse_filters};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -182,4 +182,75 @@ fn eql_parser_rejects_unknown_or_invalid_fields() -> TestResult {
         "invalid confidence bounds should fail",
     )?;
     ensure(invalid_confidence.field == "confidence", "confidence path")
+}
+
+#[test]
+fn eql_parser_rejects_unicode_trick_fields_and_modes() -> TestResult {
+    let zwj_top_level = parse_error(
+        json!({"q": "release", "q\u{200d}": "shadow release"}),
+        "ZWJ top-level field should fail",
+    )?;
+    ensure(
+        zwj_top_level.field == "q\u{200d}",
+        "ZWJ top-level field path",
+    )?;
+
+    let zwj_graph_field = parse_error(
+        json!({"q": "release", "graph": {"center": "mem_root", "hops\u{200d}": 2}}),
+        "ZWJ nested graph field should fail",
+    )?;
+    ensure(
+        zwj_graph_field.field == "graph.hops\u{200d}",
+        "ZWJ graph field path",
+    )?;
+
+    let zwj_tags_mode = parse_error(
+        json!({"q": "release", "tags_mode": "a\u{200d}ny"}),
+        "ZWJ tags_mode should not normalize to any",
+    )?;
+    ensure(zwj_tags_mode.field == "tags_mode", "ZWJ tags_mode path")?;
+
+    let homoglyph_speed = parse_error(
+        json!({"q": "release", "speed": "qual\u{0456}ty"}),
+        "Cyrillic i speed should not normalize to quality",
+    )?;
+    ensure(homoglyph_speed.field == "speed", "homoglyph speed path")
+}
+
+#[test]
+fn eql_filters_treat_unicode_field_names_as_exact_literals() -> TestResult {
+    let filters = parse_filters(&json!({
+        "source.author\u{200d}": {"eq": "cod-search"},
+        "content": {"contains": "release\u{200d}"}
+    }))
+    .ok_or_else(|| "unicode literal filters should parse".to_owned())?;
+
+    let matching_metadata = json!({
+        "source": {
+            "author": "other",
+            "author\u{200d}": "cod-search"
+        },
+        "content": "ship release\u{200d} evidence"
+    });
+    ensure(
+        filters.matches(Some(&matching_metadata)),
+        "ZWJ field and content literals should match exactly",
+    )?;
+
+    let normalized_metadata = json!({
+        "source": {"author": "cod-search"},
+        "content": "ship release evidence"
+    });
+    ensure(
+        !filters.matches(Some(&normalized_metadata)),
+        "normal-looking field and content should not match ZWJ literals",
+    )?;
+
+    ensure(
+        parse_filters(&json!({
+            "content": {"conta\u{200d}ins": "release"}
+        }))
+        .is_none(),
+        "ZWJ operator should not normalize to contains",
+    )
 }
