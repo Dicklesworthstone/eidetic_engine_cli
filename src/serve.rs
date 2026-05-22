@@ -1296,13 +1296,18 @@ fn parse_serve_target(
 }
 
 fn percent_decode_query_component(value: &str) -> Result<String, DomainError> {
-    let mut output = String::with_capacity(value.len());
+    // bd-2ysyd: accumulate raw bytes and validate the result as UTF-8 in one
+    // shot. The prior implementation pushed each decoded byte through
+    // `char::from`, which interprets the byte as a Latin-1 code point and
+    // mangles multi-byte UTF-8 sequences (e.g. `%E2%9C%93` → three Latin-1
+    // chars instead of `✓`).
+    let mut output = Vec::with_capacity(value.len());
     let bytes = value.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
         match bytes[index] {
             b'+' => {
-                output.push(' ');
+                output.push(b' ');
                 index += 1;
             }
             b'%' => {
@@ -1311,16 +1316,17 @@ fn percent_decode_query_component(value: &str) -> Result<String, DomainError> {
                 }
                 let hi = hex_digit(bytes[index + 1])?;
                 let lo = hex_digit(bytes[index + 2])?;
-                output.push(char::from((hi << 4) | lo));
+                output.push((hi << 4) | lo);
                 index += 3;
             }
             byte => {
-                output.push(char::from(byte));
+                output.push(byte);
                 index += 1;
             }
         }
     }
-    Ok(output)
+    String::from_utf8(output)
+        .map_err(|_| serve_usage_error("Percent-decoded query value is not valid UTF-8."))
 }
 
 fn hex_digit(byte: u8) -> Result<u8, DomainError> {
@@ -2225,6 +2231,51 @@ mod tests {
             serve_auth_state(&request, Some(token)),
             "accepted",
             "bearer auth state",
+        )
+    }
+
+    // bd-2ysyd: percent-decoded query values must round-trip multi-byte UTF-8.
+    // The prior decoder pushed each decoded byte through `char::from`, which
+    // mangled `%E2%9C%93` to three Latin-1 chars instead of `✓`.
+    #[test]
+    fn serve_http_parser_decodes_utf8_percent_escapes() -> TestResult {
+        let request = parse_serve_http_request(
+            "GET /v1/search?q=%E2%9C%93&tag=caf%C3%A9 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                .as_bytes(),
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure(
+            request.query.get("q").cloned(),
+            Some(vec!["✓".to_owned()]),
+            "decoded single-codepoint utf-8 query",
+        )?;
+        ensure(
+            request.query.get("tag").cloned(),
+            Some(vec!["café".to_owned()]),
+            "decoded mixed ascii/utf-8 query",
+        )?;
+
+        let context = parse_serve_http_request(
+            "GET /v1/context?task=na%C3%AFve+plan HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".as_bytes(),
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            context.query.get("task").cloned(),
+            Some(vec!["naïve plan".to_owned()]),
+            "decoded utf-8 with space",
+        )?;
+
+        let bad_utf8 = parse_serve_http_request(
+            "GET /v1/search?q=%FF%FE HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".as_bytes(),
+            &ServeLimits::default(),
+        );
+        ensure(
+            bad_utf8.is_err(),
+            true,
+            "invalid utf-8 percent sequence must be rejected",
         )
     }
 
