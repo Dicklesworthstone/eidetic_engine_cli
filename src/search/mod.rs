@@ -1101,9 +1101,10 @@ impl SearchScoreExplanation {
     #[must_use]
     pub fn from_scored_result(result: &ScoredResult) -> Self {
         let mut components = Vec::with_capacity(5);
+        let final_score = finite_explanation_score(result.score);
         components.push(SearchScoreComponent::new(
             "primary_score",
-            result.score,
+            final_score,
             ScoreComponentSource::Structural,
         ));
         push_optional_score_component(
@@ -1134,7 +1135,7 @@ impl SearchScoreExplanation {
         Self {
             doc_id: result.doc_id.clone(),
             source: score_source_name(result.source),
-            final_score: result.score,
+            final_score,
             components,
             frankensearch_explanation_available: result.explanation.is_some(),
             metadata_available: result.metadata.is_some(),
@@ -1193,7 +1194,19 @@ fn push_optional_score_component(
     source: ScoreComponentSource,
 ) {
     if let Some(value) = value {
-        components.push(SearchScoreComponent::new(name, value, source));
+        components.push(SearchScoreComponent::new(
+            name,
+            finite_explanation_score(value),
+            source,
+        ));
+    }
+}
+
+fn finite_explanation_score(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
     }
 }
 
@@ -2697,6 +2710,47 @@ mod tests {
         assert_eq!(component_sources, vec!["structural"]);
         assert!(!explanation.frankensearch_explanation_available);
         assert!(!explanation.metadata_available);
+    }
+
+    #[test]
+    fn scored_result_explanation_normalizes_non_finite_scores() {
+        let result = ScoredResult {
+            doc_id: "mem-non-finite-score".to_owned(),
+            score: f32::NAN,
+            source: ScoreSource::Hybrid,
+            index: None,
+            fast_score: Some(f32::INFINITY),
+            quality_score: Some(-1.0),
+            lexical_score: Some(f32::NEG_INFINITY),
+            rerank_score: Some(0.25),
+            explanation: None,
+            metadata: None,
+        };
+
+        let explanation = explain_scored_result(&result);
+        let components: Vec<(&str, f32)> = explanation
+            .components
+            .iter()
+            .map(|component| (component.name, component.value))
+            .collect();
+
+        assert_eq!(explanation.final_score, 0.0);
+        assert_eq!(
+            components,
+            vec![
+                ("primary_score", 0.0),
+                ("lexical_score", 0.0),
+                ("semantic_fast_score", 0.0),
+                ("semantic_quality_score", 0.0),
+                ("rerank_score", 0.25),
+            ]
+        );
+        assert!(
+            explanation
+                .components
+                .iter()
+                .all(|component| component.value.is_finite() && component.value >= 0.0)
+        );
     }
 
     #[test]
