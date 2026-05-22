@@ -514,7 +514,11 @@ struct CachedComputation<R> {
     cache_hit: bool,
 }
 
-static ALGORITHM_CACHE_LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+// bd-8tsi5: RwLock (was Mutex) so the keyed-lock lookup hot path
+// takes `.read()` for cache-hit reads of an existing per-key entry.
+// Sibling to bd-1nan9 / bd-2lin9 / bd-25yao / bd-2r38i; serializes
+// only on the slow path (key-not-present insert + periodic GC).
+static ALGORITHM_CACHE_LOCKS: OnceLock<RwLock<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
 // bd-1nan9: RwLock (was Mutex) so cache-hit reads via
 // `load_in_memory_algorithm_result` can take `.read()` and run
 // concurrently. The lazy-TTL eviction that used to mutate the map
@@ -643,18 +647,42 @@ where
 
 fn algorithm_cache_lock(cache_key: &str) -> Arc<Mutex<()>> {
     static CLEANUP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let locks = ALGORITHM_CACHE_LOCKS.get_or_init(|| RwLock::new(HashMap::new()));
 
-    let mut locks = ALGORITHM_CACHE_LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-    // Periodically clean up unreferenced locks to prevent memory leaks
-    if CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 64 == 0 {
-        locks.retain(|_, v| Arc::strong_count(v) > 1);
+    // bd-8tsi5: fast path takes `.read()` for cache-hit reads of an
+    // existing per-key entry. Concurrent callers with distinct
+    // cache_keys parallelize at this layer. Still increment
+    // CLEANUP_COUNTER on the read path so the GC trigger cadence on
+    // the next write tracks total call volume, not just write volume.
+    let counter_tick = CLEANUP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    {
+        let read_guard = locks
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = read_guard.get(cache_key) {
+            return Arc::clone(existing);
+        }
     }
 
-    locks
+    // Slow path: key missing, take the write lock to insert. The
+    // read-then-write window means another thread may have inserted
+    // the same key in between; `or_insert_with` handles that race
+    // by returning the existing entry's Arc.
+    let mut write_guard = locks
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    // Periodic GC of unreferenced inner mutexes runs only on the
+    // write path now (bd-8tsi5). Reading paths no longer take the
+    // exclusive lock so GC cannot piggyback there. Counter cadence
+    // is still incremented on every call so the trigger fires
+    // close to its original 1-in-64 frequency once a write does
+    // happen.
+    if counter_tick % 64 == 0 {
+        write_guard.retain(|_, v| Arc::strong_count(v) > 1);
+    }
+
+    write_guard
         .entry(cache_key.to_owned())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
@@ -2214,6 +2242,56 @@ mod tests {
             !all_evicts.is_empty(),
             "ttl_expired evict event must fire during a subsequent store's GC pass",
         );
+        Ok(())
+    }
+
+    // bd-8tsi5: concurrent algorithm_cache_lock calls against
+    // DISTINCT cache_keys must not deadlock and must give each
+    // caller a distinct per-key Arc<Mutex<()>>. The fast path
+    // takes RwLock::read() so this should parallelize, but the
+    // test only asserts the safety contract (no deadlock + correct
+    // per-key identity), not the parallelism property.
+    #[test]
+    fn algorithm_cache_lock_concurrent_distinct_keys_return_distinct_inner_mutexes() -> TestResult {
+        use std::thread;
+        const THREAD_COUNT: usize = 8;
+
+        let prefix = "bd_8tsi5_distinct";
+        let handles: Vec<_> = (0..THREAD_COUNT)
+            .map(|tid| {
+                let key = format!("{prefix}::{tid}");
+                thread::spawn(move || (tid, key.clone(), algorithm_cache_lock(&key)))
+            })
+            .collect();
+
+        let mut observed: Vec<(usize, String, Arc<Mutex<()>>)> = Vec::new();
+        for handle in handles {
+            let result = handle.join().map_err(|_| "thread panicked".to_owned())?;
+            observed.push(result);
+        }
+        assert_eq!(observed.len(), THREAD_COUNT, "all threads must complete");
+
+        // Each distinct cache_key must produce a distinct inner
+        // Arc<Mutex<()>> by pointer identity. Same cache_key MUST
+        // produce the SAME Arc — verified by re-calling each key
+        // and comparing pointer-equality.
+        for (_, key, first_arc) in &observed {
+            let second_arc = algorithm_cache_lock(key);
+            assert!(
+                Arc::ptr_eq(first_arc, &second_arc),
+                "algorithm_cache_lock for the same key must return the same Arc<Mutex<()>>",
+            );
+        }
+        for i in 0..observed.len() {
+            for j in (i + 1)..observed.len() {
+                assert!(
+                    !Arc::ptr_eq(&observed[i].2, &observed[j].2),
+                    "algorithm_cache_lock for DISTINCT keys must return DISTINCT Arc<Mutex<()>>: key_i={}, key_j={}",
+                    observed[i].1,
+                    observed[j].1,
+                );
+            }
+        }
         Ok(())
     }
 
