@@ -103,6 +103,10 @@ fn parse_clause(chars: &mut Peekable<Chars<'_>>) -> Option<SearchQueryClause> {
         parse_bare(chars)
     };
 
+    if excluded && !quoted && value.is_empty() {
+        return Some(SearchQueryClause::Term("-".to_string()));
+    }
+
     if value.is_empty() {
         return None;
     }
@@ -189,5 +193,36 @@ mod tests {
         let printed = query.to_string();
 
         assert_eq!(parse_search_query(&printed), query);
+    }
+
+    #[test]
+    fn search_query_parser_preserves_dangling_exclusion_marker() {
+        let query = parse_search_query("alpha - beta -");
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("-".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+                SearchQueryClause::Term("-".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "alpha - beta -");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_still_drops_empty_quoted_clauses() {
+        let query = parse_search_query(r#"alpha "" -"" beta"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "alpha beta");
     }
 }
