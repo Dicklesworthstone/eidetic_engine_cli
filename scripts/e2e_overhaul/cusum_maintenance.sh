@@ -59,8 +59,9 @@ assert_jq "$FINAL_EVENT" '.cusum_positive > .threshold_h' "true" "cusum_event_cr
 e2e_log_note "cusum_regime_change_detected maintenance scheduled by steward adapter"
 DAEMON_JSON="$(ee_workspace daemon --foreground --once --interval-ms 0 --job decay_sweep --job curation_review --dry-run --json 2>/dev/null || true)"
 if printf '%s' "$DAEMON_JSON" | jq . >/dev/null 2>&1; then
-    assert_jq "$DAEMON_JSON" '.schema // empty' "ee.response.v1" "cusum_daemon_envelope_schema"
+    assert_jq "$DAEMON_JSON" '.schema // empty' "ee.response.v2" "cusum_daemon_envelope_schema"
     assert_jq "$DAEMON_JSON" '.success // false' "true" "cusum_daemon_success"
+    assert_jq "$DAEMON_JSON" '.degraded | length' "0" "cusum_daemon_degraded_empty"
     assert_jq "$DAEMON_JSON" '.data.schema // empty' "ee.steward.daemon_foreground.v1" "cusum_daemon_schema"
     assert_jq "$DAEMON_JSON" '.data.summary.jobsRun // 0' "2" "cusum_daemon_jobs_run"
     assert_jq "$DAEMON_JSON" '(.data.jobTypes | index("decay_sweep") != null)' "true" "cusum_daemon_decay_sweep"

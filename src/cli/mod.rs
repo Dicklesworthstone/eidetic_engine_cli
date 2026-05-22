@@ -39689,10 +39689,17 @@ where
     W: Write,
 {
     let success = report.failed_count() == 0;
+    let data = report.data_json();
+    let degraded = data
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": success,
-        "data": report.data_json(),
+        "data": data,
+        "degraded": degraded,
     });
 
     match cli.renderer() {
