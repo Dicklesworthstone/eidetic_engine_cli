@@ -130,7 +130,10 @@ fn writer_spool_simulated_swarm_load_batches_all_agent_writes() -> TestResult {
     assert_eq!(guard.status(1_000).queue_depth, TOTAL_WRITES);
 
     let mut batches = 0usize;
-    while let Some(batch) = guard.next_batch() {
+    loop {
+        let Some(batch) = guard.next_batch().map_err(|error| error.to_string())? else {
+            break;
+        };
         if batch.row_count() > 8 {
             return Err(format!(
                 "batch exceeded configured size: {}",

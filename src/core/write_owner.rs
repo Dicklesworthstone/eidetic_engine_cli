@@ -989,6 +989,8 @@ pub enum WriteSpoolBackpressureReason {
     PendingBytes,
     /// Oldest queued write exceeded age budget.
     QueueTimeout,
+    /// Monotonic request or batch identifier space is exhausted.
+    IdentifierExhausted,
 }
 
 impl WriteSpoolBackpressureReason {
@@ -999,6 +1001,7 @@ impl WriteSpoolBackpressureReason {
             Self::QueueDepth => "queue_depth",
             Self::PendingBytes => "pending_bytes",
             Self::QueueTimeout => "queue_timeout",
+            Self::IdentifierExhausted => "identifier_exhausted",
         }
     }
 }
@@ -1051,6 +1054,9 @@ impl WriteSpoolBackpressureError {
                 status.oldest_queued_age_ms.unwrap_or(0),
                 config.max_queue_age_ms
             ),
+            WriteSpoolBackpressureReason::IdentifierExhausted => {
+                "Write spool exhausted its monotonic identifier space; refusing writes before IDs can be reused.".to_string()
+            }
         };
 
         Self {
@@ -1230,7 +1236,9 @@ impl<T> WriteHotPathQueue<T> {
 
     /// Try to enqueue without blocking. Returns the payload if full.
     pub fn try_enqueue(&self, payload: T) -> Result<u64, T> {
-        let sequence = self.next_sequence.fetch_add(1, Ordering::AcqRel);
+        let Some(sequence) = self.try_reserve_sequence() else {
+            return Err(payload);
+        };
         let entry = WriteHotPathQueueEntry { sequence, payload };
         self.queue
             .push(entry)
@@ -1269,6 +1277,22 @@ impl<T> WriteHotPathQueue<T> {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.queue.capacity()
+    }
+
+    fn try_reserve_sequence(&self) -> Option<u64> {
+        let mut current = self.next_sequence.load(Ordering::Acquire);
+        loop {
+            let next = current.checked_add(1)?;
+            match self.next_sequence.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(current),
+                Err(observed) => current = observed,
+            }
+        }
     }
 }
 
@@ -1411,9 +1435,10 @@ impl WriteSpool {
         let mut next_batch_id = 1u64;
 
         for record in &records {
-            next_request_id = next_request_id.max(record.request_id.saturating_add(1));
+            next_request_id =
+                next_request_id.max(record.request_id.checked_add(1).unwrap_or(u64::MAX));
             if let Some(batch_id) = record.batch_id {
-                next_batch_id = next_batch_id.max(batch_id.saturating_add(1));
+                next_batch_id = next_batch_id.max(batch_id.checked_add(1).unwrap_or(u64::MAX));
             }
             idempotency.insert(record.idempotency_key.clone(), record.request_id);
 
@@ -1482,7 +1507,10 @@ impl WriteSpool {
         self.ensure_accepting(intent.payload_bytes, now_ms)?;
 
         let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.saturating_add(1);
+        let Some(next_request_id) = self.next_request_id.checked_add(1) else {
+            return Err(self.identifier_exhausted_error(now_ms));
+        };
+        self.next_request_id = next_request_id;
 
         let record = WriteSpoolRecord::from_intent(request_id, intent, now_ms);
         self.pending_bytes = self.pending_bytes.saturating_add(record.payload_bytes);
@@ -1502,10 +1530,14 @@ impl WriteSpool {
     }
 
     /// Drain the next FIFO-compatible batch.
-    #[must_use]
-    pub fn next_batch(&mut self) -> Option<WriteSpoolBatch> {
+    pub fn next_batch(&mut self) -> WriteSpoolBackpressureResult<Option<WriteSpoolBatch>> {
+        if self.next_batch_id == u64::MAX {
+            return Err(self.identifier_exhausted_error(self.started_at_ms));
+        }
         let (first_id, first) = loop {
-            let first_id = self.pending_order.pop_front()?;
+            let Some(first_id) = self.pending_order.pop_front() else {
+                return Ok(None);
+            };
             if let Some(record) = self.record(first_id) {
                 break (first_id, record.clone());
             }
@@ -1530,7 +1562,10 @@ impl WriteSpool {
         }
 
         let batch_id = self.next_batch_id;
-        self.next_batch_id = self.next_batch_id.saturating_add(1);
+        let Some(next_batch_id) = self.next_batch_id.checked_add(1) else {
+            return Err(self.identifier_exhausted_error(self.started_at_ms));
+        };
+        self.next_batch_id = next_batch_id;
 
         let mut audit_subjects = Vec::with_capacity(selected.len());
         let mut request_ids = Vec::with_capacity(selected.len());
@@ -1547,7 +1582,7 @@ impl WriteSpool {
             audit_subjects.push(audit_subject);
         }
         if request_ids.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         self.stats.total_batches = self.stats.total_batches.saturating_add(1);
@@ -1555,7 +1590,7 @@ impl WriteSpool {
         self.stats.max_batch_size_observed =
             self.stats.max_batch_size_observed.max(request_ids.len());
 
-        Some(WriteSpoolBatch {
+        Ok(Some(WriteSpoolBatch {
             batch_id,
             workspace_id: key.workspace_id,
             kind: key.kind,
@@ -1564,7 +1599,7 @@ impl WriteSpool {
             audit_subjects,
             audit_row_id: format!("audit_batch_{batch_id:016}"),
             job_row_id: format!("job_batch_{batch_id:016}"),
-        })
+        }))
     }
 
     /// Mark every pending record in the batch committed.
@@ -1701,7 +1736,14 @@ impl WriteSpool {
                 &self.config,
             )));
         }
-        if self.pending_bytes.saturating_add(additional_bytes) > self.config.max_pending_bytes {
+        let Some(next_pending_bytes) = self.pending_bytes.checked_add(additional_bytes) else {
+            return Err(Box::new(WriteSpoolBackpressureError::new(
+                WriteSpoolBackpressureReason::PendingBytes,
+                &status,
+                &self.config,
+            )));
+        };
+        if next_pending_bytes > self.config.max_pending_bytes {
             return Err(Box::new(WriteSpoolBackpressureError::new(
                 WriteSpoolBackpressureReason::PendingBytes,
                 &status,
@@ -1719,6 +1761,14 @@ impl WriteSpool {
             )));
         }
         Ok(())
+    }
+
+    fn identifier_exhausted_error(&self, now_ms: u64) -> Box<WriteSpoolBackpressureError> {
+        Box::new(WriteSpoolBackpressureError::new(
+            WriteSpoolBackpressureReason::IdentifierExhausted,
+            &self.status(now_ms),
+            &self.config,
+        ))
     }
 
     fn oldest_queued_age_ms(&self, now_ms: u64) -> Option<u64> {
@@ -2199,7 +2249,10 @@ mod tests {
         let mut published_snapshots = Vec::<u64>::new();
         let mut snapshot_generation = 0_u64;
 
-        while let Some(batch) = spool.next_batch() {
+        while let Some(batch) = spool
+            .next_batch()
+            .expect("generated SRR3 schedule should not exhaust batch identifiers")
+        {
             for request_id in &batch.request_ids {
                 if metadata.get(request_id).is_some_and(|metadata| {
                     metadata.cancellation_point == Srr3CancellationPoint::DuringBatchAssembly
@@ -2534,7 +2587,13 @@ mod tests {
         let mut snapshot_generations = Vec::<u64>::new();
         let mut snapshot_generation = 0_u64;
 
-        while let Some(batch) = spool.next_batch() {
+        loop {
+            let Some(batch) = spool
+                .next_batch()
+                .map_err(|error| TestCaseError::fail(error.to_string()))?
+            else {
+                break;
+            };
             let mut sorted_request_ids = batch.request_ids.clone();
             sorted_request_ids.sort_unstable();
             prop_assert_eq!(
@@ -2821,6 +2880,26 @@ mod tests {
                 .all(|window| { window[0].sequence < window[1].sequence })
         );
         Ok(())
+    }
+
+    #[test]
+    fn write_hot_path_queue_refuses_sequence_exhaustion_without_wrapping() {
+        let queue = WriteHotPathQueue::new(2);
+        queue
+            .next_sequence
+            .store(u64::MAX, std::sync::atomic::Ordering::Release);
+
+        assert_eq!(
+            queue.try_enqueue("after-exhaustion"),
+            Err("after-exhaustion")
+        );
+        assert!(queue.is_empty());
+        assert_eq!(
+            queue
+                .next_sequence
+                .load(std::sync::atomic::Ordering::Acquire),
+            u64::MAX
+        );
     }
 
     #[test]
@@ -3265,6 +3344,7 @@ mod tests {
 
         let remember_batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected remember batch".to_string())?;
         assert_eq!(remember_batch.kind, WriteSpoolIntentKind::Remember);
         assert_eq!(remember_batch.durability, WriteSpoolDurability::Batched);
@@ -3274,6 +3354,7 @@ mod tests {
 
         let import_batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected immediate import batch".to_string())?;
         assert_eq!(import_batch.request_ids, vec![import.request_id]);
         assert_eq!(import_batch.kind, WriteSpoolIntentKind::Import);
@@ -3316,6 +3397,104 @@ mod tests {
     }
 
     #[test]
+    fn write_spool_refuses_request_id_exhaustion_without_reuse() {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 4, 4096, 30_000), 0);
+        spool.next_request_id = u64::MAX;
+
+        let err = spool
+            .enqueue(
+                WriteSpoolIntent::new(
+                    WriteSpoolIntentKind::Remember,
+                    "workspace",
+                    "after-exhaustion",
+                    10,
+                ),
+                1,
+            )
+            .expect_err("exhausted request identifiers must refuse new writes");
+
+        assert_eq!(
+            err.reason,
+            WriteSpoolBackpressureReason::IdentifierExhausted
+        );
+        assert_eq!(spool.status(1).queue_depth, 0);
+        assert!(spool.recovery_records().is_empty());
+        assert_eq!(spool.next_request_id, u64::MAX);
+    }
+
+    #[test]
+    fn write_spool_refuses_batch_id_exhaustion_without_dequeueing() -> Result<(), String> {
+        let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 4, 4096, 30_000), 0);
+        let ticket = spool
+            .enqueue(
+                WriteSpoolIntent::new(WriteSpoolIntentKind::Remember, "workspace", "queued", 10),
+                1,
+            )
+            .map_err(|error| error.to_string())?;
+        spool.next_batch_id = u64::MAX;
+
+        let err = spool
+            .next_batch()
+            .expect_err("exhausted batch identifiers must refuse draining");
+
+        assert_eq!(
+            err.reason,
+            WriteSpoolBackpressureReason::IdentifierExhausted
+        );
+        assert_eq!(spool.status(2).queue_depth, 1);
+        assert_eq!(
+            spool
+                .record(ticket.request_id)
+                .and_then(|record| record.batch_id),
+            None
+        );
+        assert_eq!(spool.next_batch_id, u64::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn write_spool_recovery_exhausted_request_id_fails_closed() {
+        let recovered = WriteSpool::from_recovery_records(
+            WriteSpoolConfig::new(8, 4, 4096, 30_000),
+            0,
+            vec![WriteSpoolRecord {
+                request_id: u64::MAX,
+                idempotency_key: "legacy-max-id".to_string(),
+                workspace_id: "workspace".to_string(),
+                kind: WriteSpoolIntentKind::Remember,
+                durability: WriteSpoolDurability::Batched,
+                status: WriteSpoolRecordStatus::Committed,
+                batch_id: Some(1),
+                enqueued_at_ms: 1,
+                terminal_at_ms: Some(2),
+                payload_bytes: 10,
+                audit_subject: "legacy-max-id".to_string(),
+                failure: None,
+            }],
+        );
+
+        let mut spool = recovered;
+        let err = spool
+            .enqueue(
+                WriteSpoolIntent::new(
+                    WriteSpoolIntentKind::Remember,
+                    "workspace",
+                    "after-recovery",
+                    10,
+                ),
+                3,
+            )
+            .expect_err("recovered max request ID must not be reused");
+
+        assert_eq!(
+            err.reason,
+            WriteSpoolBackpressureReason::IdentifierExhausted
+        );
+        assert!(spool.record(u64::MAX).is_some());
+        assert!(spool.record(0).is_none());
+    }
+
+    #[test]
     fn write_spool_recovery_distinguishes_pending_committed_cancelled_failed() -> Result<(), String>
     {
         let mut spool = WriteSpool::new(WriteSpoolConfig::new(8, 2, 4096, 30_000), 0);
@@ -3348,17 +3527,20 @@ mod tests {
 
         let first_batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected first batch".to_string())?;
         assert_eq!(first_batch.request_ids, vec![pending.request_id]);
 
         let committed_batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected committed batch".to_string())?;
         assert_eq!(committed_batch.request_ids, vec![committed.request_id]);
         assert_eq!(spool.mark_batch_committed(committed_batch.batch_id, 5), 1);
 
         let failed_batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected failed batch".to_string())?;
         assert_eq!(failed_batch.request_ids, vec![failed.request_id]);
         assert_eq!(
@@ -3409,6 +3591,7 @@ mod tests {
         }
         let batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected metrics batch".to_string())?;
         assert_eq!(spool.mark_batch_committed(batch.batch_id, 2_000), 4);
 
@@ -3520,6 +3703,7 @@ mod tests {
 
         let batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected a single writer batch".to_string())?;
         assert_eq!(batch.request_ids, request_ids);
         assert_eq!(batch.audit_row_id, "audit_batch_0000000000000001");
@@ -3540,6 +3724,7 @@ mod tests {
 
         let batch = spool
             .next_batch()
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "expected fsync-failure batch".to_string())?;
         assert_eq!(
             spool.mark_batch_failed(batch.batch_id, 5, "simulated fsync failure"),
