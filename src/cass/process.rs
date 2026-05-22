@@ -19,13 +19,15 @@
 //! exercise downstream logic without spawning a process.
 
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -137,6 +139,7 @@ pub(crate) struct CassStreamOutcome {
     stdout_line_count: usize,
     stdout_bytes_seen: usize,
     peak_stdout_line_bytes: usize,
+    peak_stdout_buffer_bytes: usize,
 }
 
 impl CassStreamOutcome {
@@ -147,6 +150,7 @@ impl CassStreamOutcome {
         stdout_line_count: usize,
         stdout_bytes_seen: usize,
         peak_stdout_line_bytes: usize,
+        peak_stdout_buffer_bytes: usize,
     ) -> Self {
         let class = if timed_out {
             CassExitClass::Failure
@@ -160,6 +164,7 @@ impl CassStreamOutcome {
             stdout_line_count,
             stdout_bytes_seen,
             peak_stdout_line_bytes,
+            peak_stdout_buffer_bytes,
         }
     }
 
@@ -191,6 +196,19 @@ impl CassStreamOutcome {
     #[must_use]
     pub(crate) const fn peak_stdout_line_bytes(&self) -> usize {
         self.peak_stdout_line_bytes
+    }
+
+    /// High-water mark of the reader thread's internal byte buffer.
+    ///
+    /// Distinct from [`Self::peak_stdout_line_bytes`], which tracks the
+    /// largest *delivered* line: this field reports the peak size of the
+    /// raw read buffer including any line that overshot the size cap and
+    /// was rejected. The reader bounds this at
+    /// [`CASS_STDOUT_LINE_MAX_BYTES`] + 1; a higher value here would mean
+    /// the streaming bound has regressed.
+    #[must_use]
+    pub(crate) const fn peak_stdout_buffer_bytes(&self) -> usize {
+        self.peak_stdout_buffer_bytes
     }
 
     #[must_use]
@@ -336,11 +354,30 @@ impl CassInvocation {
     /// Spawn the subprocess and stream stdout one UTF-8 line at a time.
     ///
     /// This is for CASS surfaces that can emit JSONL. Unlike [`Self::run`],
-    /// stdout is never retained as one contiguous byte buffer. Each line is
-    /// rejected if it exceeds [`CASS_STDOUT_LINE_MAX_BYTES`].
+    /// stdout is never retained as one contiguous byte buffer, and the
+    /// per-line read buffer is bounded at [`CASS_STDOUT_LINE_MAX_BYTES`]
+    /// + 1 bytes — overshoot is rejected *before* the bytes are realized
+    /// into a [`String`], not after.
     pub(crate) fn run_stdout_lines<F, E>(
         &self,
+        handle_line: F,
+    ) -> Result<CassStreamOutcome, CassStreamError<E>>
+    where
+        F: FnMut(String) -> Result<(), E>,
+    {
+        let probe = Arc::new(AtomicUsize::new(0));
+        self.run_stdout_lines_with_buffer_probe(handle_line, probe)
+    }
+
+    /// Same as [`Self::run_stdout_lines`] but the caller supplies the
+    /// `Arc<AtomicUsize>` used to track the reader thread's peak byte
+    /// buffer size. Tests can inspect the probe after the call returns
+    /// (including on the error path, where the [`CassStreamOutcome`] is
+    /// not surfaced).
+    fn run_stdout_lines_with_buffer_probe<F, E>(
+        &self,
         mut handle_line: F,
+        peak_stdout_buffer_probe: Arc<AtomicUsize>,
     ) -> Result<CassStreamOutcome, CassStreamError<E>>
     where
         F: FnMut(String) -> Result<(), E>,
@@ -377,7 +414,9 @@ impl CassInvocation {
             })
         })?;
 
-        let (stdout_rx, mut stdout_thread) = spawn_stdout_line_reader(stdout);
+        let (stdout_rx, stdout_thread) =
+            spawn_stdout_line_reader(stdout, Arc::clone(&peak_stdout_buffer_probe));
+        let mut stdout_thread = Some(stdout_thread);
         let stderr_thread = thread::spawn(move || {
             use std::io::Read;
             let mut buf = Vec::new();
@@ -447,6 +486,7 @@ impl CassInvocation {
                         stdout_line_count,
                         stdout_bytes_seen,
                         peak_stdout_line_bytes,
+                        peak_stdout_buffer_probe.load(Ordering::Relaxed),
                     ));
                 }
             }
@@ -497,6 +537,7 @@ impl CassInvocation {
                         stdout_line_count,
                         stdout_bytes_seen,
                         peak_stdout_line_bytes,
+                        peak_stdout_buffer_probe.load(Ordering::Relaxed),
                     ));
                 }
             }
@@ -690,16 +731,38 @@ fn cass_spawn_retry_delay(attempt: usize) -> Duration {
 
 fn spawn_stdout_line_reader(
     stdout: std::process::ChildStdout,
+    peak_buffer_bytes: Arc<AtomicUsize>,
 ) -> (
     Receiver<Result<String, CassError>>,
     thread::JoinHandle<Result<(), CassError>>,
 ) {
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line_result in reader.lines() {
-            let line = match line_result {
-                Ok(line) => line,
+        let mut reader = BufReader::new(stdout);
+        // Pre-reserve the buffer at the line cap + 1 byte so that even
+        // an adversarial single-pathological-line input (one line with
+        // no '\n' for many megabytes) cannot push the reader's
+        // allocation past the cap. `Vec::clear` keeps this capacity for
+        // every subsequent line.
+        let mut buf: Vec<u8> = Vec::with_capacity(CASS_STDOUT_LINE_MAX_BYTES + 1);
+        loop {
+            buf.clear();
+            // `take((CAP + 1) as u64).read_until(b'\n', ...)` reads at
+            // most CAP + 1 bytes and stops the moment either a newline
+            // is observed, EOF is reached, or the Take limit is
+            // exhausted. The pre-yield cap check below fires *before*
+            // the bytes are ever realized into a `String`, fixing the
+            // bd-352wc reactive-cap regression (BufReader::lines fully
+            // realized the line into memory before the post-yield
+            // size check).
+            let read_result = reader
+                .by_ref()
+                .take((CASS_STDOUT_LINE_MAX_BYTES + 1) as u64)
+                .read_until(b'\n', &mut buf);
+            peak_buffer_bytes.fetch_max(buf.len(), Ordering::Relaxed);
+            let bytes_read = match read_result {
+                Ok(0) => return Ok(()),
+                Ok(n) => n,
                 Err(error) => {
                     let _ = sender.send(Err(CassError::Io {
                         message: format!("cass subprocess stdout line read failed: {error}"),
@@ -707,7 +770,8 @@ fn spawn_stdout_line_reader(
                     return Ok(());
                 }
             };
-            if line.len() > CASS_STDOUT_LINE_MAX_BYTES {
+            let has_newline = buf.last() == Some(&b'\n');
+            if !has_newline && bytes_read > CASS_STDOUT_LINE_MAX_BYTES {
                 let _ = sender.send(Err(CassError::Io {
                     message: format!(
                         "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
@@ -715,11 +779,31 @@ fn spawn_stdout_line_reader(
                 }));
                 return Ok(());
             }
+            // Strip trailing '\n' (and a preceding '\r' for CRLF input)
+            // to match the byte-stripping behavior of
+            // `BufRead::read_line` / `BufRead::lines`.
+            let mut line_bytes: &[u8] = buf.as_slice();
+            if has_newline {
+                line_bytes = &line_bytes[..line_bytes.len() - 1];
+                if line_bytes.last() == Some(&b'\r') {
+                    line_bytes = &line_bytes[..line_bytes.len() - 1];
+                }
+            }
+            let line = match std::str::from_utf8(line_bytes) {
+                Ok(s) => s.to_owned(),
+                Err(error) => {
+                    let _ = sender.send(Err(CassError::Io {
+                        message: format!(
+                            "cass subprocess stdout line was not valid UTF-8: {error}"
+                        ),
+                    }));
+                    return Ok(());
+                }
+            };
             if sender.send(Ok(line)).is_err() {
                 return Ok(());
             }
         }
-        Ok(())
     });
     (receiver, handle)
 }
@@ -1532,5 +1616,149 @@ mod tests {
         };
         assert_eq!(err.kind_str(), "io");
         assert!(err.to_string().contains("panicked"));
+    }
+
+    /// bd-352wc regression: a single line larger than the 1 MiB cap
+    /// must be rejected *before* its bytes are fully realized into the
+    /// reader's buffer. Pre-fix, `BufReader::lines()` allocated the
+    /// entire line into a `String` (e.g. 2 MiB for the input below)
+    /// before the post-yield length check fired — so the cap was
+    /// reactive, not preventive. This test feeds a 2 MiB single-line
+    /// blob with no newline and asserts both that the line-cap error
+    /// fires *and* that the reader's peak byte buffer stayed well
+    /// under 2 MiB (i.e. ≤ CASS_STDOUT_LINE_MAX_BYTES + 1).
+    #[cfg(unix)]
+    #[test]
+    fn run_stdout_lines_bounds_buffer_below_oversize_single_line() -> Result<(), String> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError, spawn_stdout_line_reader};
+
+        let dir = unique_test_dir("stdout-line-cap-bounded")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        // Emit exactly 2 MiB of 'x' with no newline, then exit.
+        // /dev/zero + tr is portable across macOS and Linux and avoids
+        // arithmetic on `seq` (which is slow for millions of items).
+        let script = "#!/bin/sh\nhead -c 2097152 /dev/zero | tr '\\0' x\n";
+        write_executable_script(&binary, script, 0o755)?;
+
+        // Subprocess timeout is a backstop — the bounded reader must
+        // fire the cap error long before this fires.
+        let inv =
+            CassInvocation::new(binary, ["view", "--json"]).with_timeout(Duration::from_secs(5));
+
+        let probe = Arc::new(AtomicUsize::new(0));
+        let started = Instant::now();
+        let stream_result = inv.run_stdout_lines_with_buffer_probe::<_, std::convert::Infallible>(
+            |_line| Ok(()),
+            Arc::clone(&probe),
+        );
+        let elapsed = started.elapsed();
+
+        let stream_err = match stream_result {
+            Ok(outcome) => {
+                return Err(format!(
+                    "oversize single-line input must reject with a line-cap error, got \
+                     outcome with peak_buffer={peak} class={class:?}",
+                    peak = outcome.peak_stdout_buffer_bytes(),
+                    class = outcome.class(),
+                ));
+            }
+            Err(error) => error,
+        };
+        let cass_err = match stream_err {
+            CassStreamError::Cass(err) => err,
+            CassStreamError::Handler(_) => {
+                return Err("handler error variant should be impossible for this test".to_string());
+            }
+        };
+        let cass_err_message = cass_err.to_string();
+        if !cass_err_message.contains("stdout line exceeded") {
+            return Err(format!("expected line-cap error, got: {cass_err_message}"));
+        }
+
+        let peak_buffer_bytes = probe.load(Ordering::Relaxed);
+        let cap_plus_one = CASS_STDOUT_LINE_MAX_BYTES + 1;
+        if peak_buffer_bytes > cap_plus_one {
+            return Err(format!(
+                "reader buffer overshot the cap: peak={peak_buffer_bytes} bytes \
+                 (cap+1 = {cap_plus_one}); the cap is reactive, not preventive — \
+                 see bd-352wc"
+            ));
+        }
+
+        // Sanity: the reader must have actually read at least the cap
+        // before deciding it had overshot. A peak < CAP would mean the
+        // test stub never produced enough bytes, which would be a
+        // setup bug rather than a regression signal.
+        if peak_buffer_bytes < CASS_STDOUT_LINE_MAX_BYTES {
+            return Err(format!(
+                "reader peak buffer ({peak_buffer_bytes}) is below the cap \
+                 ({CASS_STDOUT_LINE_MAX_BYTES}); the stub did not deliver \
+                 enough bytes for this test to be meaningful"
+            ));
+        }
+
+        // And: the function returned long before the subprocess timeout
+        // backstop. A subprocess-timeout return would still surface the
+        // line-cap error after the cap-reactive code path ran, but it
+        // would do so only after blocking on `read_line` for the full
+        // subprocess budget. The fix-only path returns within
+        // milliseconds; we leave generous slack for slow CI hosts.
+        if elapsed >= Duration::from_secs(3) {
+            return Err(format!(
+                "run_stdout_lines should return promptly once the cap is \
+                 tripped; elapsed was {elapsed:?}"
+            ));
+        }
+
+        // Also drive the public spawn helper directly to confirm the
+        // reader can be constructed and rejects oversize input in
+        // isolation. This guards against the function-level wrapper
+        // accidentally being the only thing enforcing the cap.
+        let (probe_direct, dir_direct) = (
+            Arc::new(AtomicUsize::new(0)),
+            unique_test_dir("stdout-line-cap-direct")?,
+        );
+        fs::create_dir_all(&dir_direct).map_err(|error| error.to_string())?;
+        let binary_direct = dir_direct.join("cass");
+        write_executable_script(&binary_direct, script, 0o755)?;
+        let mut child = std::process::Command::new(&binary_direct)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        let child_stdout = child.stdout.take().ok_or("missing stdout pipe")?;
+        let (rx, handle) = spawn_stdout_line_reader(child_stdout, Arc::clone(&probe_direct));
+        // Drain until disconnect or first error.
+        let mut saw_cap_error = false;
+        while let Ok(item) = rx.recv() {
+            match item {
+                Ok(_line) => {}
+                Err(err) => {
+                    let msg = err.to_string();
+                    if msg.contains("stdout line exceeded") {
+                        saw_cap_error = true;
+                    }
+                }
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = handle.join();
+        if !saw_cap_error {
+            return Err(
+                "direct spawn_stdout_line_reader did not surface the line-cap error".to_string(),
+            );
+        }
+        let peak_direct = probe_direct.load(Ordering::Relaxed);
+        if peak_direct > cap_plus_one {
+            return Err(format!(
+                "direct reader buffer overshot the cap: peak={peak_direct} bytes \
+                 (cap+1 = {cap_plus_one})"
+            ));
+        }
+        Ok(())
     }
 }

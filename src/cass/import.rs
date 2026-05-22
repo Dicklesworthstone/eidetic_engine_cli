@@ -818,6 +818,7 @@ fn view_session_spans(
         stdout_lines = outcome.stdout_line_count(),
         stdout_bytes_seen = outcome.stdout_bytes_seen(),
         peak_stdout_line_bytes = outcome.peak_stdout_line_bytes(),
+        peak_stdout_buffer_bytes = outcome.peak_stdout_buffer_bytes(),
         "streamed CASS view stdout"
     );
     ensure_successful_stream_outcome(&outcome, "cass view")?;
