@@ -893,21 +893,48 @@ impl SectionQuota {
         }
     }
 
+    /// Create a quota that disables the section entirely (zero capacity).
+    ///
+    /// The `{min_tokens:1, max_tokens:0}` shape is the disabled sentinel
+    /// — bit-distinct from [`Self::unlimited`]'s `{0, 0}`, so consumers
+    /// that branch on `max_tokens == 0` for the unlimited case can no
+    /// longer collide with a `quota_for_basis_points(_, 0)` result
+    /// (bd-2s2mv).
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self {
+            min_tokens: 1,
+            max_tokens: 0,
+        }
+    }
+
     /// True if this quota has no constraints.
     #[must_use]
     pub const fn is_unlimited(self) -> bool {
         self.min_tokens == 0 && self.max_tokens == 0
     }
 
+    /// True if this quota explicitly disables the section.
+    #[must_use]
+    pub const fn is_disabled(self) -> bool {
+        self.min_tokens > 0 && self.max_tokens == 0
+    }
+
     /// Check if a token count exceeds this quota's maximum.
     #[must_use]
     pub const fn exceeds_max(self, tokens: u32) -> bool {
+        if self.is_disabled() {
+            return tokens > 0;
+        }
         self.max_tokens > 0 && tokens > self.max_tokens
     }
 
     /// Calculate remaining tokens allowed by this quota.
     #[must_use]
     pub const fn remaining(self, used: u32) -> u32 {
+        if self.is_disabled() {
+            return 0;
+        }
         if self.max_tokens == 0 {
             u32::MAX
         } else {
@@ -1037,7 +1064,10 @@ impl SectionQuotas {
     #[must_use]
     pub const fn has_room(&self, section: PackSection, used: u32, candidate_tokens: u32) -> bool {
         let quota = self.get(section);
-        if quota.max_tokens == 0 {
+        if quota.is_disabled() {
+            return false;
+        }
+        if quota.is_unlimited() {
             return true;
         }
         match used.checked_add(candidate_tokens) {
@@ -1060,8 +1090,20 @@ impl Default for SectionQuotas {
 }
 
 fn quota_for_basis_points(total_budget: u32, basis_points: u16) -> SectionQuota {
+    if basis_points == 0 {
+        // bd-2s2mv: 0 basis_points means "section disabled" — matches
+        // `minimal_budget_for_section`'s u32::MAX sentinel for the same
+        // input. Without this branch, `capped(0)` would collide with
+        // `unlimited()` and silently admit every candidate in this
+        // section up to the overall budget.
+        return SectionQuota::disabled();
+    }
     let product = u64::from(total_budget) * u64::from(basis_points);
-    let tokens = product.div_ceil(10_000).min(u64::from(u32::MAX));
+    // `.max(1)` defends the same disambiguation: if `total_budget` and
+    // `basis_points` are both small enough that the integer ceiling
+    // collapses to zero, we want to keep at least one token of capacity
+    // rather than tip back into the unlimited sentinel.
+    let tokens = product.div_ceil(10_000).min(u64::from(u32::MAX)).max(1);
     SectionQuota::capped(tokens as u32)
 }
 
@@ -7492,6 +7534,52 @@ mod tests {
         let quota = SectionQuota::new(10, 100);
         ensure_equal(&quota.min_tokens, &10, "min tokens")?;
         ensure_equal(&quota.max_tokens, &100, "max tokens")
+    }
+
+    /// bd-2s2mv: a 0-basis-point section must reject candidates instead
+    /// of silently becoming unlimited via the `capped(0)`/`unlimited()`
+    /// max_tokens-sentinel collision. Build a section mix that disables
+    /// every section but ProceduralRules and assert that only the
+    /// procedural section reports room.
+    #[test]
+    fn section_quotas_from_zero_basis_points_disables_section() -> TestResult {
+        let quota = super::SectionQuota::disabled();
+        ensure(quota.is_disabled(), "disabled() should report as disabled")?;
+        ensure(
+            !quota.is_unlimited(),
+            "disabled quota must not look unlimited (bd-2s2mv)",
+        )?;
+        ensure(quota.exceeds_max(1), "1 token should exceed disabled quota")?;
+        ensure_equal(&quota.remaining(0), &0, "disabled remaining must be 0")?;
+        ensure_equal(
+            &quota.remaining(123),
+            &0,
+            "disabled remaining must stay 0 regardless of used",
+        )?;
+
+        let mix = super::ContextProfileSectionMix::new(10_000, 0, 0, 0, 0);
+        let quotas = super::SectionQuotas::from_section_mix(mix, 1_000);
+
+        ensure(
+            quotas.has_room(PackSection::ProceduralRules, 0, 500),
+            "procedural_rules (10_000 bp) must admit candidates",
+        )?;
+        for section in [
+            PackSection::Decisions,
+            PackSection::Failures,
+            PackSection::Evidence,
+            PackSection::Artifacts,
+        ] {
+            ensure(
+                !quotas.has_room(section, 0, 1),
+                format!("{section} has 0 basis points and must reject candidates (bd-2s2mv)"),
+            )?;
+            ensure(
+                quotas.get(section).is_disabled(),
+                format!("{section} quota must report disabled"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

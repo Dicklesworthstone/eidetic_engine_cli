@@ -505,6 +505,13 @@ fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
     .map_err(|error| format!("backup: {error:?}"))?;
 
     let actual = records_contract_projection(Path::new(&report.records_path))?;
+    if report.total_records != actual.len() as u64 {
+        return Err(format!(
+            "backup report total_records disagrees with records.jsonl line count: report={}, lines={}",
+            report.total_records,
+            actual.len()
+        ));
+    }
     let expected = vec![
         "header|schema=ee.export.header.v1|formatVersion=1|scope=all|redaction=none|importSource=native|trustLevel=validated",
         "workspace|schema=ee.export.workspace.v1|hasName=true",
