@@ -3477,9 +3477,10 @@ fn swarm_brief_summary_recommendations(report: &SwarmBriefReport) -> Vec<Value> 
 
 fn recommendation_severity_rank(severity: &str) -> u8 {
     match severity {
-        "critical" => 4,
-        "high" => 3,
-        "medium" => 2,
+        "critical" => 5,
+        "high" => 4,
+        "medium" => 3,
+        "warning" => 2,
         "low" => 1,
         _ => 0,
     }
@@ -7885,6 +7886,50 @@ mod tests {
         assert!(
             ids.windows(2)
                 .all(|window| window[0].as_str() <= window[1].as_str())
+        );
+    }
+
+    #[test]
+    fn summary_recommendations_follow_canonical_severity_order() {
+        let mut report = report_with_ready_sources();
+        report.recommendations = ["info", "low", "warning", "medium", "high", "critical"]
+            .into_iter()
+            .map(|severity| SwarmBriefRecommendation {
+                id: format!("rec.severity.{severity}"),
+                kind: "severity_order".to_string(),
+                confidence: "high".to_string(),
+                severity: severity.to_string(),
+                reason_codes: vec![format!("severity_{severity}")],
+                evidence: Vec::new(),
+                suggested_commands: Vec::new(),
+                must_not_do: Vec::new(),
+            })
+            .collect();
+
+        let summary = summarize_swarm_brief_report(&report);
+        let ids = summary
+            .pointer("/topRecommendations")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("topRecommendations must be an array"))
+            .iter()
+            .map(|entry| {
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("recommendation entry must have an id"))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec![
+                "rec.severity.critical",
+                "rec.severity.high",
+                "rec.severity.medium",
+                "rec.severity.warning",
+                "rec.severity.low",
+                "rec.severity.info",
+            ],
         );
     }
 
