@@ -4810,8 +4810,14 @@ fn assemble_mmr_draft(
 
     while !candidates.is_empty() {
         let candidate_index = select_next_candidate_index(&candidates, &max_selected_similarities);
-        let selected_max_similarity = max_selected_similarities.remove(candidate_index);
-        let selection = candidates.remove(candidate_index);
+        // bd-1igvf: swap_remove is O(1) where Vec::remove is O(n); selection order
+        // is determined by score with a memory_id tiebreaker in
+        // [`select_next_candidate_index`], so vec position does not influence which
+        // candidate is picked next, and the parallel relationship between
+        // candidates[i] and max_selected_similarities[i] is preserved by matching
+        // swap_remove on both.
+        let selected_max_similarity = max_selected_similarities.swap_remove(candidate_index);
+        let selection = candidates.swap_remove(candidate_index);
         let marginal_gain =
             strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
         if marginal_gain <= 0.0 {
