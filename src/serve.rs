@@ -1188,7 +1188,7 @@ fn require_single_query_value(
     endpoint_path: &str,
 ) -> Result<String, DomainError> {
     match request.query.get(name).map(Vec::as_slice) {
-        Some([value]) if !value.trim().is_empty() => Ok(value.clone()),
+        Some([value]) if !is_effectively_empty_query_value(value) => Ok(value.clone()),
         Some([_]) => Err(serve_usage_error(format!(
             "{endpoint_path} requires a non-empty `{name}` query parameter."
         ))),
@@ -1199,6 +1199,16 @@ fn require_single_query_value(
             "{endpoint_path} requires a `{name}` query parameter."
         ))),
     }
+}
+
+/// bd-2f09u: post-percent-decode emptiness check that treats control
+/// bytes (NUL through 0x1F sans the whitespace subset already covered
+/// by `char::is_whitespace`) as effectively empty. The prior
+/// `value.trim().is_empty()` check only stripped `char::is_whitespace`,
+/// so a client could submit `?q=%00`, `?q=%01%02`, or `?q=%00%20` and
+/// pass the non-emptiness arm with a semantically-empty string.
+fn is_effectively_empty_query_value(value: &str) -> bool {
+    value.chars().all(|c| c.is_whitespace() || c.is_control())
 }
 
 fn serve_endpoint_catalog_json() -> Vec<JsonValue> {
@@ -2279,6 +2289,50 @@ mod tests {
         )
     }
 
+    // bd-2f09u: query values that decode to only NUL / control bytes must
+    // be treated as empty by require_single_query_value so an attacker
+    // cannot bypass the empty-query rejection by submitting `?q=%00`,
+    // `?q=%01%02`, or `?q=%00%20`. The decoder itself still accepts the
+    // raw bytes (UTF-8 round-trip stays unchanged for legitimate
+    // values); the emptiness check at the dispatch layer is what tightens.
+    #[test]
+    fn serve_dispatch_rejects_control_byte_only_query_value_as_empty() -> TestResult {
+        let baseline_empty = plan_request("GET /v1/search?q= HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .err()
+            .ok_or_else(|| "baseline empty `q` should be rejected".to_string())?;
+
+        for raw in [
+            "GET /v1/search?q=%00 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/search?q=%01%02 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/search?q=%00%20 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            "GET /v1/search?q=%09%0A%0D HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        ] {
+            let error = plan_request(raw)
+                .err()
+                .ok_or_else(|| format!("control-byte-only query `{raw}` should be rejected"))?;
+            ensure(
+                error.as_str(),
+                baseline_empty.as_str(),
+                "control-byte-only query must produce the same error as a literal empty `q=`",
+            )?;
+        }
+
+        // Legitimate UTF-8 with embedded whitespace should still go
+        // through unchanged — guard against the predicate over-rejecting.
+        let healthy =
+            plan_request("GET /v1/search?q=release+ci HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
+        ensure(
+            healthy.handler_surface,
+            "cli.search",
+            "legitimate non-empty query must still dispatch",
+        )?;
+        ensure(
+            healthy.cli_argv,
+            argv(&["ee", "search", "release ci", "--json"]),
+            "legitimate non-empty query argv",
+        )
+    }
+
     #[test]
     fn serve_dispatch_plan_maps_read_only_cli_surfaces() -> TestResult {
         let status = plan_request("GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")?;
@@ -2313,7 +2367,7 @@ mod tests {
         )?;
         ensure(why.handler_surface, "cli.why", "why handler")?;
         ensure(
-            why.cli_argv,
+            why.cli_argv.clone(),
             argv(&["ee", "why", "mem_00000000000000000000000001", "--json"]),
             "why argv",
         )?;
