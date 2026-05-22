@@ -336,7 +336,7 @@ impl SearchScoreComponents {
         let recency = recency_multiplier(signals.age_days, config.recency_tau_days);
         let confidence = finite_unit(signals.confidence).max(finite_unit(config.confidence_floor));
         let utility = lerp(
-            config.utility_floor,
+            finite_unit(config.utility_floor),
             1.0,
             finite_unit(signals.utility_score),
         );
@@ -682,6 +682,26 @@ mod tests {
         assert_close(components.graph_centrality, 1.0);
         assert_close(components.redundancy, 1.0);
         assert_close(components.final_score, 0.0);
+    }
+
+    #[test]
+    fn finite_utility_floor_above_one_is_clamped_to_one() {
+        let config = SearchScoringConfig {
+            utility_floor: 2.0,
+            ..SearchScoringConfig::default()
+        };
+        let components = SearchScoreComponents::from_signals(
+            SearchScoringSignals {
+                base_score: 1.0,
+                utility_score: 0.0,
+                maturity: RetrievalMaturity::Semantic,
+                ..SearchScoringSignals::new(1.0, RetrievalMaturity::Semantic)
+            },
+            config,
+        );
+
+        assert_close(components.utility, 1.0);
+        assert_close(components.final_score, 1.0);
     }
 
     #[test]
