@@ -181,6 +181,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "preflight_command_parser"
+path = "fuzz_targets/preflight_command_parser.rs"
+test = false
+doc = false
+bench = false
+
 [patch.crates-io]
 asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
