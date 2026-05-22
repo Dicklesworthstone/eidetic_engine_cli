@@ -66,7 +66,8 @@ pub fn refresh_centrality_cooperative(
 
         let hits_handle = scope.spawn(move || {
             let started = Instant::now();
-            let result = crate::graph::hits::compute_hits_with_cx(&hits_cx, &hits_graph)?;
+            let result =
+                crate::graph::hits::compute_hits_with_budget(&hits_cx, &hits_graph, sub_budget)?;
             Ok(TimedResult {
                 elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                 result,
@@ -383,6 +384,19 @@ mod tests {
             }
             other => return Err(format!("expected cancellation, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn cooperative_sub_budget_splits_total_budget_across_algorithms() -> TestResult {
+        let sub_budget = cooperative_sub_budget(Duration::from_millis(30));
+        assert_eq!(sub_budget, Duration::from_millis(11));
+        assert!(sub_budget < DEFAULT_BACKGROUND_BUDGET);
+        assert!(sub_budget < Duration::from_millis(30));
+        assert_eq!(
+            cooperative_sub_budget(Duration::ZERO),
+            DEFAULT_BACKGROUND_BUDGET
+        );
         Ok(())
     }
 

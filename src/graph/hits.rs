@@ -20,6 +20,7 @@
 //! `HitsScores` shape.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use asupersync::Cx;
 use fnx_algorithms::{HitsCentralityResult, hits_centrality_directed};
@@ -102,8 +103,12 @@ pub fn compute_hits(graph: &DiGraph) -> GraphResult<HitsScores> {
     compute_hits_result(graph).map(hits_scores_from_result)
 }
 
-pub(crate) fn compute_hits_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<HitsScores> {
-    compute_hits_result_with_cx(cx, graph).map(hits_scores_from_result)
+pub(crate) fn compute_hits_with_budget(
+    cx: &Cx,
+    graph: &DiGraph,
+    budget: Duration,
+) -> GraphResult<HitsScores> {
+    compute_hits_result_with_budget(cx, graph, budget).map(hits_scores_from_result)
 }
 
 pub fn compute_hits_report(graph: &DiGraph) -> GraphResult<HitsReport> {
@@ -122,13 +127,18 @@ fn compute_hits_result(graph: &DiGraph) -> GraphResult<HitsCentralityResult> {
 }
 
 fn compute_hits_result_with_cx(cx: &Cx, graph: &DiGraph) -> GraphResult<HitsCentralityResult> {
+    compute_hits_result_with_budget(cx, graph, DEFAULT_BACKGROUND_BUDGET)
+}
+
+fn compute_hits_result_with_budget(
+    cx: &Cx,
+    graph: &DiGraph,
+    budget: Duration,
+) -> GraphResult<HitsCentralityResult> {
     let graph = graph.clone();
-    run_with_budget(
-        cx,
-        "hits_centrality",
-        DEFAULT_BACKGROUND_BUDGET,
-        move || hits_centrality_directed(&graph),
-    )
+    run_with_budget(cx, "hits_centrality", budget, move || {
+        hits_centrality_directed(&graph)
+    })
 }
 
 fn hits_scores_from_result(result: HitsCentralityResult) -> HitsScores {
@@ -474,6 +484,26 @@ mod tests {
             max - min > 1.0e-6,
             "deterministic-run fixture should produce non-uniform hubs (range {min}..={max})"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn hits_budget_helper_honors_caller_timeout() -> TestResult {
+        let graph = empty_digraph();
+
+        let error = compute_hits_with_budget(&Cx::for_testing(), &graph, Duration::ZERO)
+            .expect_err("zero caller budget should time out before HITS runs");
+
+        match error {
+            crate::graph::GraphError::AlgorithmTimeout {
+                algorithm,
+                timeout_ms,
+            } => {
+                assert_eq!(algorithm, "hits_centrality");
+                assert_eq!(timeout_ms, 0);
+            }
+            other => return Err(format!("expected HITS timeout, got {other:?}")),
+        }
         Ok(())
     }
 
