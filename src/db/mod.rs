@@ -19424,6 +19424,79 @@ mod tests {
     }
 
     #[test]
+    fn migrate_file_database_is_idempotent_under_concurrent_callers() -> TestResult {
+        const CALLER_COUNT: usize = 2;
+
+        let temp_dir =
+            tempfile::tempdir().map_err(|error| TestFailure::new(format!("tempdir: {error}")))?;
+        let db_path = temp_dir.path().join("concurrent-migrate.ee.db");
+        let barrier = Arc::new(Barrier::new(CALLER_COUNT));
+        let mut handles = Vec::new();
+
+        for caller_index in 0..CALLER_COUNT {
+            let db_path = db_path.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(thread::spawn(
+                move || -> std::result::Result<Vec<u32>, String> {
+                    let connection = DbConnection::open_file(&db_path)
+                        .map_err(|error| format!("caller {caller_index} open: {error}"))?;
+                    barrier.wait();
+                    let result = connection
+                        .migrate()
+                        .map_err(|error| format!("caller {caller_index} migrate: {error}"))?;
+                    connection
+                        .close()
+                        .map_err(|error| format!("caller {caller_index} close: {error}"))?;
+                    Ok(result.applied().to_vec())
+                },
+            ));
+        }
+
+        let mut applied_versions = Vec::new();
+        for handle in handles {
+            let caller_applied = handle
+                .join()
+                .map_err(|_| TestFailure::new("concurrent migration caller panicked"))?
+                .map_err(TestFailure::new)?;
+            applied_versions.extend(caller_applied);
+        }
+        applied_versions.sort_unstable();
+
+        let expected_versions = migration_versions();
+        ensure_equal(
+            &applied_versions,
+            &expected_versions,
+            "concurrent callers must apply each migration exactly once",
+        )?;
+
+        let connection = DbConnection::open_file(&db_path)?;
+        let stored = connection.applied_migrations()?;
+        ensure_equal(
+            &stored.len(),
+            &expected_versions.len(),
+            "stored migration count after concurrent migrate",
+        )?;
+        let stored_versions: Vec<u32> = stored.iter().map(MigrationRecord::version).collect();
+        ensure_equal(
+            &stored_versions,
+            &expected_versions,
+            "stored migration versions after concurrent migrate",
+        )?;
+        ensure_equal(
+            &connection.pending_migrations()?.len(),
+            &0,
+            "pending migrations after concurrent migrate",
+        )?;
+        ensure(
+            !connection.needs_migration()?,
+            "concurrently migrated database must not need migration",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn artifact_registry_upserts_lists_and_links_rows() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
