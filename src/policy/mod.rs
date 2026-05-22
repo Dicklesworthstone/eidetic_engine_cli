@@ -42,12 +42,12 @@ pub const SUBSYSTEM: &str = "policy";
 /// the first differing byte.
 #[inline(never)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut result = 0_u8;
-    for (byte_a, byte_b) in a.iter().zip(b.iter()) {
-        result |= byte_a ^ byte_b;
+    let mut result = a.len() ^ b.len();
+    let max_len = a.len().max(b.len());
+    for index in 0..max_len {
+        let byte_a = a.get(index).copied().unwrap_or(0);
+        let byte_b = b.get(index).copied().unwrap_or(0);
+        result |= usize::from(byte_a ^ byte_b);
     }
 
     std::hint::black_box(result) == 0
@@ -2877,6 +2877,26 @@ mod tests {
         ] {
             assert_eq!(super::parse_trust_class_constant_time(near_miss), None);
         }
+    }
+
+    #[test]
+    fn constant_time_eq_preserves_slice_equality_semantics_for_length_edges() {
+        assert!(super::constant_time_eq(
+            b"agent_validated",
+            b"agent_validated"
+        ));
+        assert!(!super::constant_time_eq(
+            b"agent_validated",
+            b"agent_validatex"
+        ));
+        assert!(!super::constant_time_eq(
+            b"agent_validated",
+            b"agent_validatedx"
+        ));
+        assert!(!super::constant_time_eq(
+            b"agent_validated\0",
+            b"agent_validated"
+        ));
     }
 
     #[test]
