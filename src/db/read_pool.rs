@@ -2096,6 +2096,47 @@ mod tests {
     }
 
     #[test]
+    fn force_poison_reports_active_pins_in_stable_order() {
+        let (_tempdir, _database_path, pool) = file_pool(3);
+        let first_pin = must(pool.pin_snapshot(), "first snapshot pin opens");
+        let second_pin = must(pool.pin_snapshot(), "second snapshot pin opens");
+        let third_pin = must(pool.pin_snapshot(), "third snapshot pin opens");
+
+        let expected: Vec<(u64, Option<u64>)> = pool
+            .active_snapshot_pins()
+            .iter()
+            .map(|pin| (pin.pin_id, pin.slot_id))
+            .collect();
+        assert_eq!(
+            expected,
+            vec![
+                (1, first_pin.slot_id()),
+                (2, second_pin.slot_id()),
+                (3, third_pin.slot_id()),
+            ]
+        );
+
+        let poisoned = pool.force_poison_active_pins();
+        let actual: Vec<(u64, Option<u64>)> = poisoned
+            .iter()
+            .map(|pin| (pin.pin_id, pin.slot_id))
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert!(pool.force_poison_active_pins().is_empty());
+        assert!(first_pin.is_poisoned());
+        assert!(second_pin.is_poisoned());
+        assert!(third_pin.is_poisoned());
+        assert_eq!(pool.stats().expired_pins, 3);
+
+        drop(first_pin);
+        drop(second_pin);
+        drop(third_pin);
+        assert_eq!(pool.stats().active_pins, 0);
+        assert_eq!(pool.stats().expired_pins, 0);
+    }
+
+    #[test]
     fn poisoned_snapshot_pin_checked_connection_returns_clean_error() {
         let (_tempdir, _database_path, pool) = file_pool(1);
         let pin = must(pool.pin_snapshot(), "snapshot pin opens");
