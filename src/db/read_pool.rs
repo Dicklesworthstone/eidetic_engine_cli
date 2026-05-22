@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use super::{DatabaseConfig, DbConnection, DbError, DbOperation, Result};
@@ -147,7 +147,14 @@ pub struct ReadConnectionPool {
     state: Mutex<PoolState>,
 }
 
-static PROCESS_READ_POOL_REGISTRY: OnceLock<Mutex<BTreeMap<String, Weak<ReadConnectionPool>>>> =
+// bd-fv0yn: RwLock (was Mutex) so cache-hit reads via
+// `process_read_pool_for_database` and `registered_process_read_pool`'s
+// Weak-upgrade fast path take `.read()` and run concurrently. Stale-
+// Weak removal (formerly on the read path) is deferred to the next
+// `registered_process_read_pool` write-path's opportunistic retain.
+// Sibling to bd-1nan9 / bd-2lin9 / bd-25yao / bd-2r38i / bd-8tsi5 /
+// bd-3mr0x.
+static PROCESS_READ_POOL_REGISTRY: OnceLock<RwLock<BTreeMap<String, Weak<ReadConnectionPool>>>> =
     OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -694,15 +701,36 @@ pub fn registered_process_read_pool(
     config: PoolConfig,
 ) -> Arc<ReadConnectionPool> {
     let key = process_read_pool_registry_key(&database);
-    let mut registry = process_read_pool_registry()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(pool) = registry.get(&key).and_then(Weak::upgrade) {
-        return pool;
+    let registry = process_read_pool_registry();
+
+    // bd-fv0yn: fast path — shared `.read()` lock for the cache-hit
+    // upgrade. Concurrent callers against DIFFERENT database keys
+    // parallelize at this layer.
+    {
+        let read_guard = registry
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pool) = read_guard.get(&key).and_then(Weak::upgrade) {
+            return pool;
+        }
     }
 
+    // Slow path: key missing or stale Weak. Take the write lock to
+    // insert. Re-check after acquiring the write lock so a concurrent
+    // creator's pool is honored (no double-construction for the same
+    // key). The insert naturally overwrites any stale Weak for the
+    // same key; opportunistically reap other stale Weaks here so the
+    // map stays bounded by live pools, not by distinct-keys-ever-
+    // observed.
+    let mut write_guard = registry
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(pool) = write_guard.get(&key).and_then(Weak::upgrade) {
+        return pool;
+    }
+    write_guard.retain(|_, weak| weak.upgrade().is_some());
     let pool = Arc::new(ReadConnectionPool::new(database, config));
-    registry.insert(key, Arc::downgrade(&pool));
+    write_guard.insert(key, Arc::downgrade(&pool));
     pool
 }
 
@@ -740,18 +768,19 @@ pub fn note_process_checkpoint_outcome(
 
 fn process_read_pool_for_database(database: &DatabaseConfig) -> Option<Arc<ReadConnectionPool>> {
     let key = process_read_pool_registry_key(database);
-    let mut registry = process_read_pool_registry()
-        .lock()
+    // bd-fv0yn: pure read path — shared `.read()` lock; stale-Weak
+    // removal is deferred to the next `registered_process_read_pool`
+    // write-path retain rather than mutating the registry on every
+    // observation.
+    let registry = process_read_pool_registry()
+        .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let pool = registry.get(&key).and_then(Weak::upgrade);
-    if pool.is_none() {
-        registry.remove(&key);
-    }
     pool
 }
 
-fn process_read_pool_registry() -> &'static Mutex<BTreeMap<String, Weak<ReadConnectionPool>>> {
-    PROCESS_READ_POOL_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+fn process_read_pool_registry() -> &'static RwLock<BTreeMap<String, Weak<ReadConnectionPool>>> {
+    PROCESS_READ_POOL_REGISTRY.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
 fn process_read_pool_registry_key(database: &DatabaseConfig) -> String {
