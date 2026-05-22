@@ -497,6 +497,11 @@ memory bodies in `sources[]`.
 |------|----------|------|
 | `discovery_policy_no_ee_mesh_tag` | info | bd-36bbk.1.7 |
 | `discovery_policy_empty_allowlist` | info | bd-36bbk.1.7 |
+| `auto_enrollment_no_eligible_peers` | info | bd-36bbk.1.3 |
+| `auto_enrollment_partial_failure` | warning | bd-36bbk.1.3 |
+| `auto_enrollment_tailnet_changed` | medium | bd-36bbk.1.3 |
+| `auto_enrollment_manual_config_present` | medium | bd-36bbk.1.3 |
+| `auto_enrollment_manual_migration_unmatched_peer_set` | info | bd-36bbk.1.3 |
 | `mesh_peer_policy_denied` | high | (TBD) |
 | `mesh_body_fetch_denied_by_policy` | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | medium | bd-nw0v3.2 (SRR6.16) |

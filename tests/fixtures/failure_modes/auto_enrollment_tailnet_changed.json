@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_tailnet_changed",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.3",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll",
+    "mesh status"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "The workspace already carries a materialized SRR6.46.3 peer group bound to one tailscale tailnetId, but the current SRR6.46.46.8 identity-change guard detects a different tailnet on the local Tailscale probe. Auto-enrollment refuses to overwrite the existing materialization onto a foreign tailnet; the operator must explicitly disable mesh before re-running on the new tailnet so the prior peer group is not silently rebound to keys that never belonged to it.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --json   # populates peer group against tailnet-alpha",
+      "tailscale up --login-server <other-coordinator>   # or migrate to tailnet-beta",
+      "ee mesh auto-enroll --workspace . --json   # this run trips the guard"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_tailnet_changed",
+    "severity": "medium",
+    "message_contains": [
+      "existing mesh materialization",
+      "different tailnet"
+    ],
+    "repair_contains": "ee mesh disable"
+  }
+}

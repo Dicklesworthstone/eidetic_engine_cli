@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_partial_failure",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.3",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll",
+    "mesh status"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "SRR6.46.3 auto-enrollment ran without evidence of a fresh local Tailscale probe in the current invocation (the caller did not pass a populated `fresh_probe_invocations` count). Materialization requires fresh probe evidence to avoid acting on stale autodiscovery state; the auto-enrollment outcome surfaces this code so the caller knows their probe pipeline is the gap, not the discovery itself.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --json   # without first running the SRR6.46.1 probe end-to-end"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_partial_failure",
+    "severity": "warning",
+    "message_contains": [
+      "auto-enrollment",
+      "evidence",
+      "fresh Tailscale probe"
+    ],
+    "repair_contains": "ee mesh auto-enroll"
+  }
+}

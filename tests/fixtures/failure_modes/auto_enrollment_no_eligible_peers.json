@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "auto_enrollment_no_eligible_peers",
+  "introduced_by": {
+    "bead": "bd-36bbk.1.3",
+    "epic_letter": "SRR6.46"
+  },
+  "surfaces": [
+    "mesh auto-enroll",
+    "mesh status"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "SRR6.46.3 auto-enrollment ran against the SRR6.46.2 autodiscovery candidate set and found zero ee-capable peers on the tailnet (no peers carry the `ee-mesh` tag, all candidates failed the capability handshake, or the discovery policy filtered them all out). The auto-enrollment outcome stays unmaterialized; this code surfaces so an operator knows the absence is observed, not a silent skip.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee mesh enable --workspace . --json",
+      "ee mesh auto-enroll --workspace . --json   # against a tailnet with no other ee-mesh-tagged peers"
+    ],
+    "invocation": "ee mesh auto-enroll --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "auto_enrollment_no_eligible_peers",
+    "severity": "info",
+    "message_contains": [
+      "no eligible",
+      "ee-capable Tailscale peers",
+      "discovered"
+    ],
+    "repair_contains": "ee with mesh enabled on another Tailscale machine"
+  }
+}
