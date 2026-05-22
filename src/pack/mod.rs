@@ -5060,7 +5060,9 @@ fn assemble_facility_location_draft(
         .collect();
     let mut remaining_indices: Vec<usize> = (0..candidates.len()).collect();
     let mut current_coverages = vec![0.0_f32; candidates.len()];
-    let mut selector = FacilitySelectionQueue::new(&candidates, &current_coverages);
+    let similarity_cache = FacilitySimilarityCache::new(&candidates);
+    let mut selector =
+        FacilitySelectionQueue::new(&candidates, &current_coverages, &similarity_cache);
     let candidate_count = candidates.len();
 
     let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
@@ -5077,6 +5079,7 @@ fn assemble_facility_location_draft(
         let Some((profile_index, marginal_gain)) = selector.select(
             &candidates,
             &current_coverages,
+            &similarity_cache,
             used_tokens,
             budget,
             &quotas,
@@ -5141,7 +5144,7 @@ fn assemble_facility_location_draft(
             .checked_add(candidate.estimated_tokens)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         section_usage.add_candidate(&candidate);
-        update_facility_coverages(&mut current_coverages, &candidates, profile_index);
+        update_facility_coverages_cached(&mut current_coverages, &similarity_cache, profile_index);
         selector.advance_round();
         objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
         let covered_features = certificate_features(&candidate);
@@ -5205,7 +5208,7 @@ pub(crate) struct CandidateSignature {
     memory_id: MemoryId,
     diversity_key: Option<String>,
     normalized_content: String,
-    content_terms: BTreeSet<String>,
+    content_terms: Vec<String>,
 }
 
 impl From<&PackCandidate> for CandidateSignature {
@@ -5318,17 +5321,61 @@ impl PartialOrd for FacilityQueueEntry {
 }
 
 #[derive(Clone, Debug)]
+struct FacilitySimilarityCache {
+    width: usize,
+    values: Vec<f32>,
+}
+
+impl FacilitySimilarityCache {
+    fn new(universe: &[FacilityCandidateProfile]) -> Self {
+        let width = universe.len();
+        let mut values = vec![0.0_f32; width.saturating_mul(width)];
+        for left_index in 0..width {
+            values[left_index * width + left_index] = 1.0;
+            for right_index in (left_index + 1)..width {
+                let similarity = facility_signature_similarity(
+                    &universe[left_index].signature,
+                    &universe[right_index].signature,
+                );
+                values[left_index * width + right_index] = similarity;
+                values[right_index * width + left_index] = similarity;
+            }
+        }
+        Self { width, values }
+    }
+
+    fn similarity(&self, universe_index: usize, selected_index: usize) -> f32 {
+        let Some(offset) = universe_index
+            .checked_mul(self.width)
+            .and_then(|base| base.checked_add(selected_index))
+        else {
+            return 0.0;
+        };
+        self.values.get(offset).copied().unwrap_or(0.0)
+    }
+}
+
+#[derive(Clone, Debug)]
 struct FacilitySelectionQueue {
     heap: BinaryHeap<FacilityQueueEntry>,
     generation: u32,
 }
 
 impl FacilitySelectionQueue {
-    fn new(universe: &[FacilityCandidateProfile], current_coverages: &[f32]) -> Self {
+    fn new(
+        universe: &[FacilityCandidateProfile],
+        current_coverages: &[f32],
+        similarity_cache: &FacilitySimilarityCache,
+    ) -> Self {
         let mut heap = BinaryHeap::with_capacity(universe.len());
         for profile_index in 0..universe.len() {
-            if let Some(entry) = facility_queue_entry(profile_index, universe, current_coverages, 0)
-            {
+            if let Some(entry) = facility_queue_entry(
+                profile_index,
+                universe,
+                current_coverages,
+                similarity_cache,
+                0,
+            ) {
                 heap.push(entry);
             }
         }
@@ -5346,6 +5393,7 @@ impl FacilitySelectionQueue {
         &mut self,
         universe: &[FacilityCandidateProfile],
         current_coverages: &[f32],
+        similarity_cache: &FacilitySimilarityCache,
         used_tokens: u32,
         budget: TokenBudget,
         quotas: &SectionQuotas,
@@ -5371,9 +5419,13 @@ impl FacilitySelectionQueue {
             if entry.generation == self.generation {
                 return Some((profile_index, entry.marginal_gain));
             }
-            if let Some(refreshed) =
-                facility_queue_entry(profile_index, universe, current_coverages, self.generation)
-            {
+            if let Some(refreshed) = facility_queue_entry(
+                profile_index,
+                universe,
+                current_coverages,
+                similarity_cache,
+                self.generation,
+            ) {
                 self.heap.push(refreshed);
             }
         }
@@ -5445,6 +5497,7 @@ fn facility_queue_entry(
     profile_index: usize,
     universe: &[FacilityCandidateProfile],
     current_coverages: &[f32],
+    similarity_cache: &FacilitySimilarityCache,
     generation: u32,
 ) -> Option<FacilityQueueEntry> {
     let profile = universe.get(profile_index)?;
@@ -5452,7 +5505,8 @@ fn facility_queue_entry(
     if candidate.estimated_tokens == 0 {
         return None;
     }
-    let marginal_gain = facility_marginal_gain(profile, universe, current_coverages);
+    let marginal_gain =
+        facility_marginal_gain_cached(profile_index, universe, current_coverages, similarity_cache);
     Some(FacilityQueueEntry {
         profile_index,
         marginal_gain,
@@ -5495,6 +5549,7 @@ fn facility_candidate_is_feasible(
     quotas.has_room(candidate.section, section_used, candidate.estimated_tokens)
 }
 
+#[cfg(test)]
 fn facility_marginal_gain(
     profile: &FacilityCandidateProfile,
     universe: &[FacilityCandidateProfile],
@@ -5517,17 +5572,36 @@ fn facility_marginal_gain(
         .sum()
 }
 
-fn update_facility_coverages(
-    current_coverages: &mut [f32],
+fn facility_marginal_gain_cached(
+    profile_index: usize,
     universe: &[FacilityCandidateProfile],
+    current_coverages: &[f32],
+    similarity_cache: &FacilitySimilarityCache,
+) -> f32 {
+    #[cfg(test)]
+    FACILITY_MARGINAL_GAIN_EVALUATIONS
+        .with(|evaluations| evaluations.set(evaluations.get().saturating_add(1)));
+
+    universe
+        .iter()
+        .zip(current_coverages.iter())
+        .enumerate()
+        .map(|(universe_index, (universe_profile, &current_coverage))| {
+            let candidate_sim = similarity_cache.similarity(universe_index, profile_index);
+            let new_coverage = current_coverage.max(candidate_sim);
+            let gain = new_coverage - current_coverage;
+            universe_profile.weight * gain
+        })
+        .sum()
+}
+
+fn update_facility_coverages_cached(
+    current_coverages: &mut [f32],
+    similarity_cache: &FacilitySimilarityCache,
     selected_index: usize,
 ) {
-    let Some(selected) = universe.get(selected_index) else {
-        return;
-    };
-    for (current_coverage, universe_profile) in current_coverages.iter_mut().zip(universe.iter()) {
-        let selected_coverage =
-            facility_signature_similarity(&universe_profile.signature, &selected.signature);
+    for (universe_index, current_coverage) in current_coverages.iter_mut().enumerate() {
+        let selected_coverage = similarity_cache.similarity(universe_index, selected_index);
         *current_coverage = (*current_coverage).max(selected_coverage);
     }
 }
@@ -5616,14 +5690,31 @@ fn facility_signature_similarity(
     ))
 }
 
-fn content_overlap_similarity_terms(
-    left_terms: &BTreeSet<String>,
-    right_terms: &BTreeSet<String>,
-) -> f32 {
+/// Compute the Jaccard similarity (`|A ∩ B| / |A ∪ B|`) between two
+/// term lists.
+///
+/// **Precondition (bd-1t2oz).** Both `left_terms` and `right_terms` MUST
+/// be sorted ascending and deduplicated. The intersection step uses a
+/// merge-style two-pointer scan that silently undercounts matches if
+/// either input is unsorted, and the `|A| + |B| - |intersection|` union
+/// formula only equals the true set-union size when both sides are
+/// deduped. The only writer in tree (`normalized_terms`) does both
+/// (`sort_unstable` + `dedup`) before storing into
+/// `CandidateSignature.content_terms`; any future writer must preserve
+/// this invariant or the similarity score silently drifts.
+fn content_overlap_similarity_terms(left_terms: &[String], right_terms: &[String]) -> f32 {
+    debug_assert!(
+        is_sorted_and_deduped(left_terms),
+        "content_overlap_similarity_terms: left_terms must be sorted+deduped (bd-1t2oz)"
+    );
+    debug_assert!(
+        is_sorted_and_deduped(right_terms),
+        "content_overlap_similarity_terms: right_terms must be sorted+deduped (bd-1t2oz)"
+    );
     if left_terms.is_empty() || right_terms.is_empty() {
         return 0.0;
     }
-    let intersection = left_terms.intersection(right_terms).count();
+    let intersection = sorted_term_intersection_count(left_terms, right_terms);
     let union = left_terms
         .len()
         .saturating_add(right_terms.len())
@@ -5692,18 +5783,21 @@ fn facility_marginal_gain_evaluation_count() -> usize {
     FACILITY_MARGINAL_GAIN_EVALUATIONS.with(std::cell::Cell::get)
 }
 
-fn normalized_terms(content: &str) -> BTreeSet<String> {
+fn normalized_terms(content: &str) -> Vec<String> {
     #[cfg(test)]
     NORMALIZED_TERMS_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
 
-    content
+    let mut terms = content
         .split_whitespace()
         .map(|term| {
             term.trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
                 .to_ascii_lowercase()
         })
         .filter(|term| !term.is_empty())
-        .collect()
+        .collect::<Vec<_>>();
+    terms.sort_unstable();
+    terms.dedup();
+    terms
 }
 
 fn certificate_features(candidate: &PackCandidate) -> Vec<String> {
@@ -7045,6 +7139,7 @@ mod tests {
             .collect();
         let mut remaining_indices: Vec<usize> = (0..universe.len()).collect();
         let mut current_coverages = vec![0.0_f32; universe.len()];
+        let similarity_cache = super::FacilitySimilarityCache::new(&universe);
         let quotas =
             SectionQuotas::for_profile(ContextPackProfile::Submodular, budget.max_tokens());
         let mut used_tokens = 0_u32;
@@ -7076,7 +7171,11 @@ mod tests {
             used_tokens = used_tokens.saturating_add(candidate.estimated_tokens);
             section_usage.add_candidate(&candidate);
             selected.push(candidate.memory_id);
-            super::update_facility_coverages(&mut current_coverages, &universe, profile_index);
+            super::update_facility_coverages_cached(
+                &mut current_coverages,
+                &similarity_cache,
+                profile_index,
+            );
         }
 
         Ok(selected)
@@ -9257,11 +9356,14 @@ mod tests {
         let quotas = super::SectionQuotas::for_profile(ContextPackProfile::Submodular, 100);
         let universe = vec![super::FacilityCandidateProfile::from(zero_token_candidate)];
         let current_coverages = vec![0.0_f32];
-        let mut selector = super::FacilitySelectionQueue::new(&universe, &current_coverages);
+        let similarity_cache = super::FacilitySimilarityCache::new(&universe);
+        let mut selector =
+            super::FacilitySelectionQueue::new(&universe, &current_coverages, &similarity_cache);
 
         let selection = selector.select(
             &universe,
             &current_coverages,
+            &similarity_cache,
             0,
             budget,
             &quotas,
