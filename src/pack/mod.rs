@@ -5625,7 +5625,13 @@ fn facility_marginal_gain_cached(
         .zip(current_coverages.iter())
         .enumerate()
         .map(|(universe_index, (universe_profile, &current_coverage))| {
-            let candidate_sim = similarity_cache.similarity(universe_index, profile_index);
+            // bd-q68j3: swap args from (universe_index, profile_index) to
+            // (profile_index, universe_index). similarity_cache is symmetric, so
+            // the f32 returned is identical, but the access pattern walks row
+            // `profile_index` contiguously (stride 1) instead of striding by
+            // `width` down a column. For the 128-candidate benchmark this turns
+            // an L1-evicting column walk into a sequential read of one row.
+            let candidate_sim = similarity_cache.similarity(profile_index, universe_index);
             let new_coverage = current_coverage.max(candidate_sim);
             let gain = new_coverage - current_coverage;
             universe_profile.weight * gain
@@ -5639,7 +5645,10 @@ fn update_facility_coverages_cached(
     selected_index: usize,
 ) {
     for (universe_index, current_coverage) in current_coverages.iter_mut().enumerate() {
-        let selected_coverage = similarity_cache.similarity(universe_index, selected_index);
+        // bd-q68j3: swap args; symmetric cache makes the f32 identical, but
+        // `similarity(selected_index, universe_index)` walks row `selected_index`
+        // contiguously instead of striding by `width` down column `selected_index`.
+        let selected_coverage = similarity_cache.similarity(selected_index, universe_index);
         *current_coverage = (*current_coverage).max(selected_coverage);
     }
 }
