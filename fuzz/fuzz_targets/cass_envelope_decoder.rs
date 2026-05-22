@@ -15,6 +15,7 @@ fuzz_target!(|data: &[u8]| {
 
     exercise_stream_decoder(data);
     exercise_cass_json_envelopes(data);
+    exercise_malformed_utf8_boundaries(data);
 
     if data.starts_with(b"CASS_CAP_LINE") {
         exercise_cap_sized_line();
@@ -70,6 +71,82 @@ fn exercise_cass_json_envelopes(data: &[u8]) {
         r#"{{"sessions":[{{"path":"/tmp/cass-envelope-fuzz.jsonl","agent":"codex","message_count":{line_number},"token_count":{line_number}}}]}}"#
     );
     let _ = ee::cass::parse_sessions_json_summary(sessions_json.as_bytes());
+}
+
+fn exercise_malformed_utf8_boundaries(data: &[u8]) {
+    assert_err_contains(
+        fuzz_decode_cass_stdout_stream(b"\x80\n"),
+        "malformed UTF-8 stdout line must be rejected",
+        "not valid UTF-8",
+    );
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(
+            b"{\"lines\":[{\"line\":1,\"content\":\"\xFF\"}]}",
+            "/tmp/cass-envelope-fuzz.jsonl",
+        ),
+        "malformed UTF-8 view envelope must be rejected",
+        "invalid CASS view JSON",
+    );
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(
+            b"{\"line\":1,\"content\":\"{}\"}\n\xF0\x28\x8C\x28\n",
+            "/tmp/cass-envelope-fuzz.jsonl",
+        ),
+        "malformed UTF-8 view JSONL stream must be rejected",
+        "invalid CASS view JSON",
+    );
+    assert_err_contains(
+        ee::cass::parse_sessions_json_summary(
+            b"{\"sessions\":[{\"path\":\"/tmp/\xC3\x28.jsonl\",\"agent\":\"codex\"}]}",
+        ),
+        "malformed UTF-8 sessions envelope must be rejected",
+        "invalid CASS sessions JSON",
+    );
+
+    if data.len() > MAX_ENVELOPE_TEXT_BYTES {
+        return;
+    }
+
+    let mut stdout_line = Vec::with_capacity(data.len() + 2);
+    stdout_line.extend_from_slice(data);
+    stdout_line.push(0xFF);
+    stdout_line.push(b'\n');
+    assert_err_contains(
+        fuzz_decode_cass_stdout_stream(&stdout_line),
+        "mutated malformed UTF-8 stdout line must be rejected",
+        "not valid UTF-8",
+    );
+
+    let mut view_json = br#"{"lines":[{"line":1,"content":""#.to_vec();
+    view_json.extend_from_slice(data);
+    view_json.extend_from_slice(b"\xFF\"}]}");
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(&view_json, "/tmp/cass-envelope-fuzz.jsonl"),
+        "mutated malformed UTF-8 view envelope must be rejected",
+        "invalid CASS view JSON",
+    );
+
+    let mut sessions_json = br#"{"sessions":[{"path":"/tmp/"#.to_vec();
+    sessions_json.extend_from_slice(data);
+    sessions_json.extend_from_slice(b"\xFF.jsonl\",\"agent\":\"codex\"}]}");
+    assert_err_contains(
+        ee::cass::parse_sessions_json_summary(&sessions_json),
+        "mutated malformed UTF-8 sessions envelope must be rejected",
+        "invalid CASS sessions JSON",
+    );
+}
+
+fn assert_err_contains<T, E>(result: Result<T, E>, context: &str, expected: &str)
+where
+    T: std::fmt::Debug,
+    E: ToString,
+{
+    let error = result.expect_err(context);
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(expected),
+        "{context}: expected error containing {expected:?}, got {rendered:?}"
+    );
 }
 
 fn exercise_cap_sized_line() {
