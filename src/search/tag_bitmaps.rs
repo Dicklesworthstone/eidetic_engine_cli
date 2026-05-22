@@ -32,6 +32,9 @@ impl TagBitmapIndex {
         T: IntoIterator,
         T::Item: AsRef<str>,
     {
+        if self.all_documents.contains(&document_id) {
+            self.remove_document_tag_memberships(document_id);
+        }
         self.all_documents.insert(document_id);
         for tag in tags {
             let tag = normalize_tag(tag.as_ref());
@@ -78,6 +81,13 @@ impl TagBitmapIndex {
         }
 
         candidates.into_iter().collect()
+    }
+
+    fn remove_document_tag_memberships(&mut self, document_id: u64) {
+        self.by_tag.retain(|_, ids| {
+            ids.remove(&document_id);
+            !ids.is_empty()
+        });
     }
 }
 
@@ -175,6 +185,27 @@ mod tests {
         ]);
         let query = TagBitmapQuery::new(["rust"], ["archived"]);
         assert_eq!(index.matching(&query), vec![1, 3]);
+    }
+
+    #[test]
+    fn reinserting_document_replaces_stale_tag_memberships() {
+        let mut index = TagBitmapIndex::from_documents([
+            (1, vec!["rust", "archived"]),
+            (2, vec!["rust", "search"]),
+        ]);
+
+        index.insert(1, ["rust", "fresh"]);
+
+        assert_eq!(index.document_count(), 2);
+        assert_eq!(index.cardinality("archived"), 0);
+        assert_eq!(
+            index.matching(&TagBitmapQuery::new(["rust"], ["archived"])),
+            vec![1, 2]
+        );
+        assert_eq!(
+            index.matching(&TagBitmapQuery::new(["fresh"], std::iter::empty::<&str>())),
+            vec![1]
+        );
     }
 
     #[test]
