@@ -336,3 +336,6 @@ mod swarm_brief_conformance_v1;
 
 #[path = "contracts/curate_outcome_audit_schema_contract.rs"]
 mod curate_outcome_audit_schema_contract;
+
+#[path = "contracts/obs_log_envelope_schema_contract.rs"]
+mod obs_log_envelope_schema_contract;
