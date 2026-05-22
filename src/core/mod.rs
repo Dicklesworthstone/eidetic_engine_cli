@@ -499,21 +499,27 @@ where
 /// rather than an empty string. For machine-facing APIs, prefer returning `Result`.
 #[must_use]
 pub fn serialize_or_error<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|e| format!(r#"{{"error":"serialization_failed","message":"{}"}}"#, e))
+    serde_json::to_string(value).unwrap_or_else(|error| {
+        serde_json::json!({
+            "error": "serialization_failed",
+            "message": error.to_string(),
+        })
+        .to_string()
+    })
 }
 
 /// Serialize a value to pretty JSON, returning a stable error envelope on failure.
 #[must_use]
 pub fn serialize_pretty_or_error<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-        format!(
-            r#"{{
-  "error": "serialization_failed",
-  "message": "{}"
-}}"#,
-            e
-        )
+    serde_json::to_string_pretty(value).unwrap_or_else(|error| {
+        serde_json::to_string_pretty(&serde_json::json!({
+            "error": "serialization_failed",
+            "message": error.to_string(),
+        }))
+        .unwrap_or_else(|_| {
+            r#"{"error":"serialization_failed","message":"serialization fallback failed"}"#
+                .to_owned()
+        })
     })
 }
 
@@ -774,9 +780,54 @@ mod tests {
         let mut map: HashMap<Vec<u8>, String> = HashMap::new();
         map.insert(vec![0xFF], "invalid key".to_string());
         let json = serialize_or_error(&map);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
         ensure(
-            json.contains("serialization_failed"),
-            "should contain error marker",
+            parsed.get("error").and_then(serde_json::Value::as_str) == Some("serialization_failed"),
+            "should contain error marker in valid JSON",
+        )
+    }
+
+    #[test]
+    fn serialization_error_fallback_escapes_error_messages() -> TestResult {
+        use serde::ser::{Error as _, Serialize, Serializer};
+
+        struct FailsWithQuotedMessage;
+
+        impl Serialize for FailsWithQuotedMessage {
+            fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                Err(S::Error::custom("bad \"quoted\" serializer\nmessage"))
+            }
+        }
+
+        let compact = serialize_or_error(&FailsWithQuotedMessage);
+        let compact_json: serde_json::Value =
+            serde_json::from_str(&compact).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &compact_json
+                .get("error")
+                .and_then(serde_json::Value::as_str),
+            &Some("serialization_failed"),
+            "compact fallback error code",
+        )?;
+        ensure(
+            compact_json
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|message| message.contains("\"quoted\"")),
+            "compact fallback preserves quoted error text",
+        )?;
+
+        let pretty = serialize_pretty_or_error(&FailsWithQuotedMessage);
+        let pretty_json: serde_json::Value =
+            serde_json::from_str(&pretty).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &pretty_json.get("error").and_then(serde_json::Value::as_str),
+            &Some("serialization_failed"),
+            "pretty fallback error code",
         )
     }
 
