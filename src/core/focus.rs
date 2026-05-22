@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
 
 use chrono::Utc;
@@ -36,10 +36,16 @@ struct FocusCacheEntry {
     state: FocusState,
 }
 
-static FOCUS_CACHE: OnceLock<Mutex<Option<FocusCacheEntry>>> = OnceLock::new();
+// bd-11l80: RwLock (was Mutex) so the cache-hit read path takes
+// `.read()` and runs concurrently. Single-slot (path, mtime)-keyed
+// cache — no GC, no race re-check needed: last-writer-wins on the
+// refill / post-publish-refresh paths. Sibling to bd-2r38i (the
+// simplest member of the family); also bd-1nan9 / bd-2lin9 /
+// bd-25yao / bd-8tsi5 / bd-3mr0x / bd-fv0yn.
+static FOCUS_CACHE: OnceLock<RwLock<Option<FocusCacheEntry>>> = OnceLock::new();
 
-fn get_focus_cache() -> &'static Mutex<Option<FocusCacheEntry>> {
-    FOCUS_CACHE.get_or_init(|| Mutex::new(None))
+fn get_focus_cache() -> &'static RwLock<Option<FocusCacheEntry>> {
+    FOCUS_CACHE.get_or_init(|| RwLock::new(None))
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -686,7 +692,10 @@ pub fn read_active_focus_state(workspace_path: &Path) -> Result<Option<FocusStat
     let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
     let cache = get_focus_cache();
-    if let Ok(guard) = cache.lock() {
+    // bd-11l80: fast path — shared `.read()` lock for the cache-hit
+    // lookup. Concurrent `ee context` callers against the same
+    // workspace parallelize here.
+    if let Ok(guard) = cache.read() {
         if let Some(entry) = guard.as_ref() {
             if entry.path == storage_path && entry.mtime == mtime {
                 return Ok(Some(entry.state.clone()));
@@ -696,7 +705,10 @@ pub fn read_active_focus_state(workspace_path: &Path) -> Result<Option<FocusStat
 
     let state = read_focus_state(&storage_path)?;
 
-    if let Ok(mut guard) = cache.lock() {
+    // bd-11l80: refill path takes `.write()`. Last-writer-wins is
+    // fine — the (path, mtime) keying handles staleness on the next
+    // read.
+    if let Ok(mut guard) = cache.write() {
         *guard = Some(FocusCacheEntry {
             path: storage_path,
             mtime,
@@ -867,9 +879,10 @@ fn write_focus_state(path: &Path, state: &FocusState) -> Result<(), DomainError>
     write_focus_state_temp_file(&temp_path, &body)?;
     publish_focus_state_temp_file(path, &temp_path)?;
 
-    // Update cache with new state to avoid stale reads
+    // Update cache with new state to avoid stale reads.
+    // bd-11l80: write-after-publish refresh takes `.write()`.
     if let Ok(mtime) = fs::symlink_metadata(path).and_then(|m| m.modified()) {
-        if let Ok(mut guard) = get_focus_cache().lock() {
+        if let Ok(mut guard) = get_focus_cache().write() {
             *guard = Some(FocusCacheEntry {
                 path: path.to_path_buf(),
                 mtime,
