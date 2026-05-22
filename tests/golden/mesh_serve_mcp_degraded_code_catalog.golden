@@ -22,7 +22,7 @@ auto_enrollment_no_eligible_peers                    ·         ·          ·  
 auto_enrollment_node_key_changed                     ·         ·          ·      AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE :: src/mesh/identity_change_guard.rs
 auto_enrollment_partial_failure                      ·         ·          ·      AUTO_ENROLLMENT_PARTIAL_FAILURE_CODE :: src/mesh/auto_enrollment.rs
 auto_enrollment_sync_once_failed                     ·         ·          ·      AUTO_ENROLLMENT_SYNC_ONCE_FAILED_CODE :: src/mesh/auto_enrollment.rs
-auto_enrollment_tailnet_changed                      ·         ·          ·      AUTO_ENROLLMENT_TAILNET_CHANGED_CODE :: src/mesh/auto_enrollment.rs | src/mesh/identity_change_guard.rs
+auto_enrollment_tailnet_changed                      ·         ·          ·      AUTO_ENROLLMENT_TAILNET_CHANGED_CODE :: src/mesh/auto_enrollment.rs
 discovery_cache_invalidated_tailnet_changed          ·         ✓          ·      DISCOVERY_CACHE_TAILNET_CHANGED_CODE :: src/mesh/discovery_cache.rs
 discovery_cache_stale_due_to_workspace_mismatch      ·         ✓          ·      DISCOVERY_CACHE_WORKSPACE_MISMATCH_CODE :: src/mesh/discovery_cache.rs
 discovery_policy_empty_allowlist                     ✓         ✓          ✓      DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE :: src/mesh/discovery_policy.rs

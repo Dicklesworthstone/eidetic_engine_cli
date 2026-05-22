@@ -33,7 +33,16 @@ use serde::{Deserialize, Serialize};
 /// SRR6.46.3 auto-enrollment refuses to materialize when this fires.
 /// Symmetric on the SRR6.46.4 status surface and the SRR6.46.14
 /// steward drift reconciliation.
-pub const AUTO_ENROLLMENT_TAILNET_CHANGED_CODE: &str = "auto_enrollment_tailnet_changed";
+///
+/// bd-3e6fq: re-exported from `super::auto_enrollment` (the canonical
+/// declaration site that matches the const's `AUTO_ENROLLMENT_*`
+/// prefix). Two byte-identical `pub const` declarations previously
+/// existed here and in `auto_enrollment.rs`; consolidating to a
+/// single source-of-truth eliminates a silent drift hazard (a future
+/// rename or value tweak on one site that the other doesn't pick up
+/// would have looked like one constant emitting two different code
+/// strings).
+pub use super::auto_enrollment::AUTO_ENROLLMENT_TAILNET_CHANGED_CODE;
 
 /// Degraded code emitted on node-key mismatch (backup-restored-to-different-
 /// machine class). Severity: `medium`. Same caller semantics as the tailnet
