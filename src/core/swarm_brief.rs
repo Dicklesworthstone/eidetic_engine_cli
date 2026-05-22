@@ -61,6 +61,8 @@ const MAX_SWARM_INCIDENT_DEGRADED_CODES: usize = 8;
 const MAX_SWARM_INCIDENT_RECOVERY_ACTIONS: usize = 4;
 const MAX_SWARM_INCIDENT_ARTIFACT_REFS: usize = 8;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
+const SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+const SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES: usize = 8192;
 
 /// Options used by the internal source collection layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -964,21 +966,17 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
         })?;
 
         let stdout_thread = thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = (&mut stdout_handle)
-                .take(10 * 1024 * 1024)
-                .read_to_end(&mut buf);
-            buf
+            read_swarm_brief_pipe_limited(
+                &mut stdout_handle,
+                SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES,
+            )
         });
 
         let stderr_thread = thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            let _ = (&mut stderr_handle)
-                .take(10 * 1024 * 1024)
-                .read_to_end(&mut buf);
-            buf
+            read_swarm_brief_pipe_limited(
+                &mut stderr_handle,
+                SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES,
+            )
         });
 
         let started_at = Instant::now();
@@ -1027,6 +1025,23 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
             })
         }
     }
+}
+
+fn read_swarm_brief_pipe_limited<R: io::Read>(reader: &mut R, limit: usize) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut buffer = [0_u8; SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES];
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        let remaining = limit.saturating_sub(output.len());
+        if remaining > 0 {
+            output.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+    output
 }
 
 /// Output from one source adapter.
@@ -6723,8 +6738,9 @@ fn redact_path_label_with_home(path: &Path, home: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeMap;
+    use std::rc::Rc;
 
     use super::*;
 
@@ -6800,6 +6816,40 @@ mod tests {
             Some(value) => value,
             None => panic!("{context}"),
         }
+    }
+
+    struct DrainCountingReader {
+        remaining: usize,
+        chunk_size: usize,
+        consumed: Rc<Cell<usize>>,
+    }
+
+    impl io::Read for DrainCountingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Ok(0);
+            }
+            let read = self.remaining.min(self.chunk_size).min(buf.len());
+            buf[..read].fill(b'x');
+            self.remaining -= read;
+            self.consumed.set(self.consumed.get() + read);
+            Ok(read)
+        }
+    }
+
+    #[test]
+    fn swarm_brief_pipe_limit_drains_after_retained_cap() {
+        let consumed = Rc::new(Cell::new(0));
+        let mut reader = DrainCountingReader {
+            remaining: 32,
+            chunk_size: 5,
+            consumed: Rc::clone(&consumed),
+        };
+
+        let output = read_swarm_brief_pipe_limited(&mut reader, 7);
+
+        assert_eq!(output, b"xxxxxxx");
+        assert_eq!(consumed.get(), 32);
     }
 
     fn bead(id: &str, title: &str, source_bucket: &str) -> SwarmBriefBead {
