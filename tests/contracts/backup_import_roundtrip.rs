@@ -27,7 +27,10 @@ use ee::core::backup::{BackupCreateOptions, create_backup};
 use ee::core::jsonl_import::{JsonlImportOptions, import_jsonl_records};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::DbConnection;
-use ee::models::{EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1, RedactionLevel};
+use ee::models::{
+    EXPORT_AUDIT_SCHEMA_V1, EXPORT_FOOTER_SCHEMA_V1, EXPORT_HEADER_SCHEMA_V1,
+    EXPORT_MEMORY_SCHEMA_V1, EXPORT_TAG_SCHEMA_V1, EXPORT_WORKSPACE_SCHEMA_V1, RedactionLevel,
+};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -131,6 +134,74 @@ fn canonicalized_records_jsonl(records_path: &Path) -> Result<Vec<Value>, String
         records.push(value);
     }
     Ok(records)
+}
+
+fn json_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("record missing string field `{key}`: {value}"))
+}
+
+fn json_u64(value: &Value, key: &str) -> Result<u64, String> {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("record missing integer field `{key}`: {value}"))
+}
+
+fn json_bool(value: &Value, key: &str) -> Result<bool, String> {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("record missing bool field `{key}`: {value}"))
+}
+
+fn records_contract_projection(records_path: &Path) -> Result<Vec<String>, String> {
+    canonicalized_records_jsonl(records_path)?
+        .iter()
+        .map(|record| {
+            let schema = json_str(record, "schema")?;
+            match schema {
+                EXPORT_HEADER_SCHEMA_V1 => Ok(format!(
+                    "header|schema={schema}|formatVersion={}|scope={}|redaction={}|importSource={}|trustLevel={}",
+                    json_u64(record, "format_version")?,
+                    json_str(record, "export_scope")?,
+                    json_str(record, "redaction_level")?,
+                    json_str(record, "import_source")?,
+                    json_str(record, "trust_level")?,
+                )),
+                EXPORT_WORKSPACE_SCHEMA_V1 => Ok(format!(
+                    "workspace|schema={schema}|hasName={}",
+                    record.get("name").and_then(Value::as_str).is_some(),
+                )),
+                EXPORT_MEMORY_SCHEMA_V1 => Ok(format!(
+                    "memory|level={}|kind={}|content={}|trustClass={}|redacted={}",
+                    json_str(record, "level")?,
+                    json_str(record, "kind")?,
+                    json_str(record, "content")?,
+                    json_str(record, "trust_class")?,
+                    json_bool(record, "redacted")?,
+                )),
+                EXPORT_TAG_SCHEMA_V1 => Ok(format!("tag|tag={}", json_str(record, "tag")?)),
+                EXPORT_AUDIT_SCHEMA_V1 => Ok(format!(
+                    "audit|operation={}|targetType={}",
+                    json_str(record, "operation")?,
+                    json_str(record, "target_type")?,
+                )),
+                EXPORT_FOOTER_SCHEMA_V1 => Ok(format!(
+                    "footer|totalRecords={}|memoryRecords={}|linkRecords={}|tagRecords={}|auditRecords={}|success={}",
+                    json_u64(record, "total_records")?,
+                    json_u64(record, "memory_count")?,
+                    json_u64(record, "link_count")?,
+                    json_u64(record, "tag_count")?,
+                    json_u64(record, "audit_count")?,
+                    json_bool(record, "success")?,
+                )),
+                _ => Ok(format!("unknown|schema={schema}")),
+            }
+        })
+        .collect()
 }
 
 struct RoundtripFixture {
@@ -408,6 +479,56 @@ fn backup_records_jsonl_is_deterministic_across_two_exports() -> TestResult {
             "canonical records.jsonl diverged across two exports of the same workspace:\n\
              a: {records_a:#?}\n\
              b: {records_b:#?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn backup_records_jsonl_matches_db_domain_golden_shape() -> TestResult {
+    let src_dir = tempfile::tempdir().map_err(|error| format!("src tempdir: {error}"))?;
+    let src_workspace = src_dir.path().to_path_buf();
+    let src_db = src_workspace.join(".ee").join("ee.db");
+    build_source_workspace(&src_workspace, &src_db)?;
+
+    let backup_dir = tempfile::tempdir().map_err(|error| format!("backup tempdir: {error}"))?;
+    let report = create_backup(&BackupCreateOptions {
+        workspace_path: src_workspace,
+        database_path: Some(src_db),
+        output_dir: Some(backup_dir.path().to_path_buf()),
+        label: Some("golden-shape".to_owned()),
+        redaction_level: RedactionLevel::None,
+        include_derived: false,
+        include_graph_cache: false,
+        dry_run: false,
+    })
+    .map_err(|error| format!("backup: {error:?}"))?;
+
+    let actual = records_contract_projection(Path::new(&report.records_path))?;
+    let expected = vec![
+        "header|schema=ee.export.header.v1|formatVersion=1|scope=all|redaction=none|importSource=native|trustLevel=validated",
+        "workspace|schema=ee.export.workspace.v1|hasName=true",
+        "memory|level=procedural|kind=rule|content=Run cargo fmt --check before cutting a release.|trustClass=human_explicit|redacted=false",
+        "tag|tag=formatting",
+        "tag|tag=release",
+        "memory|level=semantic|kind=decision|content=Adopt asupersync as the runtime substrate.|trustClass=human_explicit|redacted=false",
+        "tag|tag=adr",
+        "tag|tag=runtime",
+        "memory|level=episodic|kind=failure|content=Release blocked when cargo test was skipped before tagging.|trustClass=human_explicit|redacted=false",
+        "tag|tag=incident",
+        "tag|tag=release",
+        "memory|level=semantic|kind=fact|content=Memory ranking uses BLAKE3 of canonical content for dedupe.|trustClass=human_explicit|redacted=false",
+        "tag|tag=blake3",
+        "tag|tag=dedupe",
+        "audit|operation=memory.create|targetType=memory",
+        "audit|operation=memory.create|targetType=memory",
+        "audit|operation=memory.create|targetType=memory",
+        "audit|operation=memory.create|targetType=memory",
+        "footer|totalRecords=18|memoryRecords=4|linkRecords=0|tagRecords=8|auditRecords=4|success=true",
+    ];
+    if actual != expected {
+        return Err(format!(
+            "backup records.jsonl golden projection drifted:\nexpected: {expected:#?}\nactual:   {actual:#?}"
         ));
     }
     Ok(())
