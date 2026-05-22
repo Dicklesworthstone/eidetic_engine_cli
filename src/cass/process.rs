@@ -331,25 +331,7 @@ impl CassInvocation {
         for (key, value) in &self.env_overrides {
             command.env(key, value);
         }
-        if let Some(timeout) = self.timeout {
-            return self.run_with_timeout(command, started, timeout);
-        }
-
-        let output =
-            retry_cass_spawn(|| command.output()).map_err(|error| cass_spawn_error(self, error))?;
-        std::thread::sleep(TIMEOUT_POLL_INTERVAL);
-        let elapsed = started.elapsed();
-        let exit_code = output.status.code();
-        let stdout = output.stdout;
-        let stderr = output.stderr;
-        Ok(CassOutcome::new(
-            self.clone(),
-            stdout,
-            stderr,
-            exit_code,
-            elapsed,
-            false,
-        ))
+        self.run_with_capped_pipes(command, started, self.timeout, CASS_PIPE_CAPTURE_MAX_BYTES)
     }
 
     /// Spawn the subprocess and stream stdout one UTF-8 line at a time.
@@ -545,11 +527,12 @@ impl CassInvocation {
         }
     }
 
-    fn run_with_timeout(
+    fn run_with_capped_pipes(
         &self,
         mut command: Command,
         started: Instant,
-        timeout: Duration,
+        timeout: Option<Duration>,
+        pipe_capture_max_bytes: usize,
     ) -> Result<CassOutcome, CassError> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
@@ -567,13 +550,11 @@ impl CassInvocation {
             message: "cass subprocess stderr pipe was not available".to_owned(),
         })?;
 
-        let stdout_thread = thread::spawn(move || {
-            read_capped_pipe(&mut stdout, "stdout", CASS_PIPE_CAPTURE_MAX_BYTES)
-        });
+        let stdout_thread =
+            thread::spawn(move || read_capped_pipe(&mut stdout, "stdout", pipe_capture_max_bytes));
 
-        let stderr_thread = thread::spawn(move || {
-            read_capped_pipe(&mut stderr, "stderr", CASS_PIPE_CAPTURE_MAX_BYTES)
-        });
+        let stderr_thread =
+            thread::spawn(move || read_capped_pipe(&mut stderr, "stderr", pipe_capture_max_bytes));
 
         let mut child_status: Option<ExitStatus> = None;
         let mut stdout_thread = Some(stdout_thread);
@@ -601,43 +582,46 @@ impl CassInvocation {
                 ));
             }
 
-            let elapsed = started.elapsed();
-            if elapsed >= timeout {
-                #[cfg(unix)]
-                terminate_cass_process_group(child_group);
-                if child_status.is_none() {
-                    if let Err(kill_error) = child.kill() {
-                        if kill_error.kind() != std::io::ErrorKind::InvalidInput {
-                            tracing::debug!(
-                                "cass subprocess kill failed (child may have already exited): {kill_error}"
-                            );
+            if let Some(timeout) = timeout {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    #[cfg(unix)]
+                    terminate_cass_process_group(child_group);
+                    if child_status.is_none() {
+                        if let Err(kill_error) = child.kill() {
+                            if kill_error.kind() != std::io::ErrorKind::InvalidInput {
+                                tracing::debug!(
+                                    "cass subprocess kill failed (child may have already exited): {kill_error}"
+                                );
+                            }
                         }
+                        child_status = Some(child.wait().map_err(CassError::from)?);
                     }
-                    child_status = Some(child.wait().map_err(CassError::from)?);
+                    let (stdout_bytes, stderr_bytes) = drain_pipe_readers_after_timeout(
+                        &mut stdout_thread,
+                        &mut stderr_thread,
+                        &mut stdout_bytes,
+                        &mut stderr_bytes,
+                    )?;
+                    let Some(status) = child_status.take() else {
+                        return Err(CassError::Io {
+                            message: "cass subprocess status was unavailable after timeout"
+                                .to_owned(),
+                        });
+                    };
+                    return Ok(CassOutcome::new(
+                        self.clone(),
+                        stdout_bytes,
+                        stderr_bytes,
+                        status.code(),
+                        started.elapsed(),
+                        true,
+                    ));
                 }
-                let (stdout_bytes, stderr_bytes) = drain_pipe_readers_after_timeout(
-                    &mut stdout_thread,
-                    &mut stderr_thread,
-                    &mut stdout_bytes,
-                    &mut stderr_bytes,
-                )?;
-                let Some(status) = child_status.take() else {
-                    return Err(CassError::Io {
-                        message: "cass subprocess status was unavailable after timeout".to_owned(),
-                    });
-                };
-                return Ok(CassOutcome::new(
-                    self.clone(),
-                    stdout_bytes,
-                    stderr_bytes,
-                    status.code(),
-                    started.elapsed(),
-                    true,
-                ));
+                thread::sleep(timeout.saturating_sub(elapsed).min(TIMEOUT_POLL_INTERVAL));
+            } else {
+                thread::sleep(TIMEOUT_POLL_INTERVAL);
             }
-
-            let remaining = timeout.saturating_sub(elapsed);
-            thread::sleep(remaining.min(TIMEOUT_POLL_INTERVAL));
         }
     }
 
@@ -1583,6 +1567,29 @@ mod tests {
         assert_eq!(outcome.invocation().binary(), binary.as_path());
         assert_eq!(outcome.exit_code(), Some(CASS_EXIT_OK));
         assert_eq!(outcome.stdout_utf8_lossy(), "{\"ok\":true}\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_without_timeout_uses_capped_pipe_capture() -> Result<(), String> {
+        let dir = unique_test_dir("plain-run-pipe-cap")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(&binary, "#!/bin/sh\nprintf 123456789\n", 0o755)?;
+
+        let inv = CassInvocation::new(binary.clone(), ["health", "--json"]);
+        let mut command = std::process::Command::new(binary);
+        command.args(["health", "--json"]);
+        let error = inv
+            .run_with_capped_pipes(command, Instant::now(), None, 8)
+            .expect_err("plain run path must reject stdout over the capture cap");
+
+        assert_eq!(error.kind_str(), "io");
+        assert!(
+            error.to_string().contains("stdout exceeded 8 byte"),
+            "unexpected error: {error}",
+        );
         Ok(())
     }
 
