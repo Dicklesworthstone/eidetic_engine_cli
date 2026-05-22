@@ -23,6 +23,12 @@ fuzz_target!(|data: &[u8]| {
     if data.starts_with(b"CASS_OVERSIZE") {
         exercise_oversized_line();
     }
+    if data.starts_with(b"CASS_CRLF") {
+        exercise_crlf_line_boundaries();
+    }
+    if data.starts_with(b"CASS_VIEW_CAP") {
+        exercise_oversized_view_envelope_line();
+    }
 });
 
 fn exercise_stream_decoder(data: &[u8]) {
@@ -170,6 +176,39 @@ fn exercise_oversized_line() {
         error
             .to_string()
             .contains("cass subprocess stdout line exceeded")
+    );
+}
+
+fn exercise_crlf_line_boundaries() {
+    let mut capped_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES - 1];
+    capped_crlf.extend_from_slice(b"\r\n");
+
+    let summary = fuzz_decode_cass_stdout_stream(&capped_crlf)
+        .expect("CRLF line within the raw read cap must decode");
+    assert_eq!(summary.line_count, 1);
+    assert_eq!(summary.bytes_seen, CASS_STDOUT_LINE_MAX_BYTES - 1);
+    assert_eq!(summary.peak_line_bytes, CASS_STDOUT_LINE_MAX_BYTES - 1);
+    assert!(summary.peak_buffer_bytes <= CASS_STDOUT_LINE_MAX_BYTES + 1);
+
+    let mut oversized_crlf = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES];
+    oversized_crlf.extend_from_slice(b"\r\n");
+    assert_err_contains(
+        fuzz_decode_cass_stdout_stream(&oversized_crlf),
+        "CRLF input whose raw line bytes exceed the cap must be rejected",
+        "cass subprocess stdout line exceeded",
+    );
+}
+
+fn exercise_oversized_view_envelope_line() {
+    let oversized_content = "x".repeat(CASS_STDOUT_LINE_MAX_BYTES);
+    let content_json =
+        serde_json::to_string(&oversized_content).expect("string JSON encoding should succeed");
+    let view_json = format!(r#"{{"lines":[{{"line":1,"content":{content_json}}}]}}"#);
+
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(view_json.as_bytes(), "/tmp/cass-envelope-fuzz.jsonl"),
+        "single-line CASS view envelope over the line cap must be rejected",
+        "line exceeds",
     );
 }
 
