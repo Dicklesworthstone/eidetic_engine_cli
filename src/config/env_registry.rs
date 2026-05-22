@@ -132,6 +132,8 @@ pub enum EnvVar {
     RememberCurationSyncBudgetMs,
     /// `EE_SECURITY_PROFILE`
     SecurityProfile,
+    /// `EE_SERVE_TOKEN`
+    ServeToken,
     /// `EE_SCIENCE_BACKEND_PATH`
     ScienceBackendPath,
     /// `EE_SHARD_FANOUT_ENABLED`
@@ -242,6 +244,7 @@ impl EnvVar {
             Self::ReadPoolSize,
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
+            Self::ServeToken,
             Self::ScienceBackendPath,
             Self::ShardFanoutEnabled,
             Self::ShardsDir,
@@ -333,6 +336,7 @@ impl EnvVar {
             Self::ReadPoolSize => "EE_READ_POOL_SIZE",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
+            Self::ServeToken => "EE_SERVE_TOKEN",
             Self::ScienceBackendPath => "EE_SCIENCE_BACKEND_PATH",
             Self::ShardFanoutEnabled => "EE_SHARD_FANOUT_ENABLED",
             Self::ShardsDir => "EE_SHARDS_DIR",
@@ -489,6 +493,9 @@ impl EnvVar {
                 "Override remember-time curation sync budget in milliseconds."
             }
             Self::SecurityProfile => "Select security profile.",
+            Self::ServeToken => {
+                "Configure the bearer token required by the localhost serve adapter."
+            }
             Self::ScienceBackendPath => {
                 "Configure an optional science analytics backend path; missing paths report backend-unavailable."
             }
@@ -589,7 +596,7 @@ impl EnvVar {
     /// Whether capabilities output may include this variable's current value.
     #[must_use]
     pub const fn exposes_value(self) -> bool {
-        !matches!(self, Self::PreflightBypassSecret)
+        !matches!(self, Self::PreflightBypassSecret | Self::ServeToken)
     }
 
     /// Broad documentation category for agent docs and env-var catalogs.
@@ -674,6 +681,7 @@ impl EnvVar {
             Self::ShardFanoutEnabled => "storage",
             Self::PreflightBypassSecret
             | Self::SecurityProfile
+            | Self::ServeToken
             | Self::WorkspaceHygieneAlwaysReviewPatterns
             | Self::WorkspaceHygieneGeneratedPatterns
             | Self::WorkspaceHygieneLocalMachinePatterns

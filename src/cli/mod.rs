@@ -39555,7 +39555,7 @@ where
 
 fn handle_serve<W, E>(
     cli: &Cli,
-    _args: &ServeArgs,
+    args: &ServeArgs,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -39563,8 +39563,38 @@ where
     W: Write,
     E: Write,
 {
+    if args.foreground && cli.wants_json() {
+        let token = read(EnvVar::ServeToken);
+        return match serve_startup_response_json(token.as_deref()) {
+            Ok(response) => write_stdout(stdout, &(response + "\n")),
+            Err(error) => write_domain_error(&error, true, stdout, stderr),
+        };
+    }
+
     let error = crate::serve::serve_unavailable_v1_error();
     write_domain_error(&error, cli.wants_json(), stdout, stderr)
+}
+
+fn serve_startup_response_json(token: Option<&str>) -> Result<String, DomainError> {
+    let data = crate::serve::serve_startup_report_json(
+        &crate::serve::ServeStartupOptions::default(),
+        token,
+    )?;
+    let degraded = data
+        .get("degraded")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    serde_json::to_string(&serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": degraded,
+    }))
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize serve startup response: {error}"),
+        repair: Some("Fix the serve startup response serializer.".to_owned()),
+    })
 }
 
 fn write_daemon_status<W, E>(
@@ -51287,6 +51317,56 @@ mod tests {
             Some(Command::Serve(args)) => ensure_equal(&args.foreground, &true, "foreground flag"),
             other => Err(format!("expected serve command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn serve_startup_response_json_reports_policy_denied_without_token_material() -> TestResult {
+        let response = super::serve_startup_response_json(None)
+            .map_err(|error| format!("serve startup response failed: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&response)
+            .map_err(|error| format!("failed to parse serve startup response: {error}"))?;
+
+        ensure_equal(
+            &value.get("schema").and_then(serde_json::Value::as_str),
+            &Some(crate::models::RESPONSE_SCHEMA_V2),
+            "response schema",
+        )?;
+        ensure_equal(
+            &value.get("success").and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "success",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some(crate::serve::SERVE_STARTUP_SCHEMA_V1),
+            "startup schema",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/readiness/state")
+                .and_then(serde_json::Value::as_str),
+            &Some("policy_denied"),
+            "startup readiness",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/tokenPosture/tokenMaterialExposed")
+                .and_then(serde_json::Value::as_bool),
+            &Some(false),
+            "token material exposure",
+        )?;
+        let degraded = value
+            .get("degraded")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| "top-level degraded must be an array".to_owned())?;
+        ensure(
+            degraded.iter().any(|entry| {
+                entry.get("code").and_then(serde_json::Value::as_str) == Some("serve_token_missing")
+            }),
+            "missing token degradation should bubble to response envelope",
+        )
     }
 
     #[test]
