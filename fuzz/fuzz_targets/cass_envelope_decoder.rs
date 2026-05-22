@@ -16,6 +16,7 @@ fuzz_target!(|data: &[u8]| {
     exercise_stream_decoder(data);
     exercise_cass_json_envelopes(data);
     exercise_malformed_utf8_boundaries(data);
+    exercise_parse_recovery_paths(data);
 
     if data.starts_with(b"CASS_CAP_LINE") {
         exercise_cap_sized_line();
@@ -140,6 +141,53 @@ fn exercise_malformed_utf8_boundaries(data: &[u8]) {
         "mutated malformed UTF-8 sessions envelope must be rejected",
         "invalid CASS sessions JSON",
     );
+}
+
+fn exercise_parse_recovery_paths(data: &[u8]) {
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(
+            b"not-json\n{\"line\":1,\"content\":\"ok\"}\n",
+            "/tmp/cass-envelope-fuzz.jsonl",
+        ),
+        "malformed JSONL must not be hidden by later valid lines",
+        "invalid CASS view JSON",
+    );
+    assert_err_contains(
+        ee::cass::parse_view_json_summary(
+            b"{\"lines\":[{\"line\":1}]}",
+            "/tmp/cass-envelope-fuzz.jsonl",
+        ),
+        "view envelope recovery must still validate line entries",
+        "missing non-empty content",
+    );
+    assert_err_contains(
+        ee::cass::parse_sessions_json_summary(b"{\"hits\":[{\"agent\":\"codex\"}]}"),
+        "legacy hits recovery must still require source_path",
+        "missing non-empty source_path",
+    );
+
+    if data.len() > MAX_ENVELOPE_TEXT_BYTES {
+        return;
+    }
+
+    let content = String::from_utf8_lossy(data);
+    let Ok(content_json) = serde_json::to_string(content.as_ref()) else {
+        return;
+    };
+    let view_envelope = format!(r#"{{"lines":[{{"line":17,"content":{content_json}}}]}}"#);
+    let view_summary = ee::cass::parse_view_json_summary(
+        view_envelope.as_bytes(),
+        "/tmp/cass-envelope-fuzz.jsonl",
+    )
+    .expect("valid view envelope must recover after JSONL-shape parse fails");
+    assert_eq!(view_summary.accepted_items, 1);
+    assert_eq!(view_summary.max_line, 17);
+    assert!(view_summary.max_excerpt_bytes <= MAX_EXCERPT_BYTES);
+
+    let sessions_legacy = r#"{"hits":[{"source_path":"/tmp/cass-envelope-fuzz.jsonl","agent":"codex","created_at":1},{"source_path":"/tmp/cass-envelope-fuzz.jsonl","agent":"codex","created_at":2}]}"#;
+    let sessions_summary = ee::cass::parse_sessions_json_summary(sessions_legacy.as_bytes())
+        .expect("legacy hits must recover as sessions when sessions array is absent");
+    assert_eq!(sessions_summary.accepted_items, 1);
 }
 
 fn assert_err_contains<T, E>(result: Result<T, E>, context: &str, expected: &str)
