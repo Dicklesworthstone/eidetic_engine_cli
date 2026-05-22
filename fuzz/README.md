@@ -14,6 +14,9 @@ agent-generated input should produce structured errors, never panics.
 - `jsonl_header_parser` drives arbitrary UTF-8 and lossy byte input through
   the JSONL export-header parser.
 - `cass_import_jsonl` exercises CASS sessions/view JSON envelope decoders.
+- `cass_envelope_decoder` exercises the bounded CASS stdout line decoder plus
+  CASS sessions/view JSON envelope parsing, including cap-sized and oversize
+  synthetic lines.
 
 ## Graph and insights targets
 
@@ -35,6 +38,7 @@ cargo fuzz run insights_section_dispatch -- -max_total_time=300 -print_final_sta
 cargo fuzz run proximity_arg_parser -- -max_total_time=300 -print_final_stats=1
 cargo fuzz run ppr_weight_clamp -- -max_total_time=300 -print_final_stats=1
 cargo fuzz run insights_json_decode -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run cass_envelope_decoder -- -max_total_time=600 -print_final_stats=1
 ```
 
 Nightly or pre-release runs should use `-max_total_time=900`. Keep crash

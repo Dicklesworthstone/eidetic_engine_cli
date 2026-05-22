@@ -23,3 +23,9 @@ search-query-parser-ci:
 
 search-query-parser-check:
   cd .. && cargo +nightly fuzz check search_query_parser
+
+cass-envelope-decoder-ci:
+  cd .. && cargo +nightly fuzz run cass_envelope_decoder -- -max_total_time=600 -timeout=10
+
+cass-envelope-decoder-check:
+  cd .. && cargo +nightly fuzz check cass_envelope_decoder

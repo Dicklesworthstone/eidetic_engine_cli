@@ -63,6 +63,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "cass_envelope_decoder"
+path = "fuzz_targets/cass_envelope_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "schema_version"
 path = "fuzz_targets/schema_version.rs"
 test = false

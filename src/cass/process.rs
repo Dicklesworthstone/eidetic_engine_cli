@@ -739,73 +739,119 @@ fn spawn_stdout_line_reader(
     let (sender, receiver) = mpsc::channel();
     let handle = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
-        // Pre-reserve the buffer at the line cap + 1 byte so that even
-        // an adversarial single-pathological-line input (one line with
-        // no '\n' for many megabytes) cannot push the reader's
-        // allocation past the cap. `Vec::clear` keeps this capacity for
-        // every subsequent line.
-        let mut buf: Vec<u8> = Vec::with_capacity(CASS_STDOUT_LINE_MAX_BYTES + 1);
+        let mut buf: Vec<u8> = bounded_stdout_line_buffer();
         loop {
-            buf.clear();
-            // `take((CAP + 1) as u64).read_until(b'\n', ...)` reads at
-            // most CAP + 1 bytes and stops the moment either a newline
-            // is observed, EOF is reached, or the Take limit is
-            // exhausted. The pre-yield cap check below fires *before*
-            // the bytes are ever realized into a `String`, fixing the
-            // bd-352wc reactive-cap regression (BufReader::lines fully
-            // realized the line into memory before the post-yield
-            // size check).
-            let read_result = reader
-                .by_ref()
-                .take((CASS_STDOUT_LINE_MAX_BYTES + 1) as u64)
-                .read_until(b'\n', &mut buf);
-            peak_buffer_bytes.fetch_max(buf.len(), Ordering::Relaxed);
-            let bytes_read = match read_result {
-                Ok(0) => return Ok(()),
-                Ok(n) => n,
+            match read_bounded_stdout_line(&mut reader, &mut buf, peak_buffer_bytes.as_ref()) {
+                Ok(Some(line)) => {
+                    if sender.send(Ok(line)).is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => return Ok(()),
                 Err(error) => {
-                    let _ = sender.send(Err(CassError::Io {
-                        message: format!("cass subprocess stdout line read failed: {error}"),
-                    }));
+                    let _ = sender.send(Err(error));
                     return Ok(());
                 }
-            };
-            let has_newline = buf.last() == Some(&b'\n');
-            if !has_newline && bytes_read > CASS_STDOUT_LINE_MAX_BYTES {
-                let _ = sender.send(Err(CassError::Io {
-                    message: format!(
-                        "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
-                    ),
-                }));
-                return Ok(());
-            }
-            // Strip trailing '\n' (and a preceding '\r' for CRLF input)
-            // to match the byte-stripping behavior of
-            // `BufRead::read_line` / `BufRead::lines`.
-            let mut line_bytes: &[u8] = buf.as_slice();
-            if has_newline {
-                line_bytes = &line_bytes[..line_bytes.len() - 1];
-                if line_bytes.last() == Some(&b'\r') {
-                    line_bytes = &line_bytes[..line_bytes.len() - 1];
-                }
-            }
-            let line = match std::str::from_utf8(line_bytes) {
-                Ok(s) => s.to_owned(),
-                Err(error) => {
-                    let _ = sender.send(Err(CassError::Io {
-                        message: format!(
-                            "cass subprocess stdout line was not valid UTF-8: {error}"
-                        ),
-                    }));
-                    return Ok(());
-                }
-            };
-            if sender.send(Ok(line)).is_err() {
-                return Ok(());
             }
         }
     });
     (receiver, handle)
+}
+
+fn bounded_stdout_line_buffer() -> Vec<u8> {
+    // Pre-reserve the buffer at the line cap + 1 byte so that even
+    // an adversarial single-pathological-line input (one line with
+    // no '\n' for many megabytes) cannot push the reader's allocation
+    // past the cap. `Vec::clear` keeps this capacity for every
+    // subsequent line.
+    Vec::with_capacity(CASS_STDOUT_LINE_MAX_BYTES + 1)
+}
+
+fn read_bounded_stdout_line<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    peak_buffer_bytes: &AtomicUsize,
+) -> Result<Option<String>, CassError> {
+    buf.clear();
+    // `take((CAP + 1) as u64).read_until(b'\n', ...)` reads at most
+    // CAP + 1 bytes and stops the moment either a newline is observed,
+    // EOF is reached, or the Take limit is exhausted. The pre-yield cap
+    // check below fires *before* the bytes are ever realized into a
+    // `String`, fixing the bd-352wc reactive-cap regression
+    // (BufReader::lines fully realized the line into memory before the
+    // post-yield size check).
+    let read_result = reader
+        .by_ref()
+        .take((CASS_STDOUT_LINE_MAX_BYTES + 1) as u64)
+        .read_until(b'\n', buf);
+    peak_buffer_bytes.fetch_max(buf.len(), Ordering::Relaxed);
+    let bytes_read = match read_result {
+        Ok(0) => return Ok(None),
+        Ok(n) => n,
+        Err(error) => {
+            return Err(CassError::Io {
+                message: format!("cass subprocess stdout line read failed: {error}"),
+            });
+        }
+    };
+    let has_newline = buf.last() == Some(&b'\n');
+    if !has_newline && bytes_read > CASS_STDOUT_LINE_MAX_BYTES {
+        return Err(CassError::Io {
+            message: format!(
+                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
+            ),
+        });
+    }
+    // Strip trailing '\n' (and a preceding '\r' for CRLF input) to
+    // match the byte-stripping behavior of `BufRead::read_line` /
+    // `BufRead::lines`.
+    let mut line_bytes: &[u8] = buf.as_slice();
+    if has_newline {
+        line_bytes = &line_bytes[..line_bytes.len() - 1];
+        if line_bytes.last() == Some(&b'\r') {
+            line_bytes = &line_bytes[..line_bytes.len() - 1];
+        }
+    }
+    let line = std::str::from_utf8(line_bytes)
+        .map_err(|error| CassError::Io {
+            message: format!("cass subprocess stdout line was not valid UTF-8: {error}"),
+        })?
+        .to_owned();
+    Ok(Some(line))
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CassStdoutDecodeFuzzSummary {
+    pub line_count: usize,
+    pub bytes_seen: usize,
+    pub peak_line_bytes: usize,
+    pub peak_buffer_bytes: usize,
+}
+
+#[doc(hidden)]
+pub fn fuzz_decode_cass_stdout_stream(
+    input: &[u8],
+) -> Result<CassStdoutDecodeFuzzSummary, CassError> {
+    let mut reader = BufReader::new(input);
+    let mut buf = bounded_stdout_line_buffer();
+    let peak_buffer_bytes = AtomicUsize::new(0);
+    let mut line_count = 0_usize;
+    let mut bytes_seen = 0_usize;
+    let mut peak_line_bytes = 0_usize;
+
+    while let Some(line) = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)? {
+        line_count = line_count.saturating_add(1);
+        bytes_seen = bytes_seen.saturating_add(line.len());
+        peak_line_bytes = peak_line_bytes.max(line.len());
+    }
+
+    Ok(CassStdoutDecodeFuzzSummary {
+        line_count,
+        bytes_seen,
+        peak_line_bytes,
+        peak_buffer_bytes: peak_buffer_bytes.load(Ordering::Relaxed),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
