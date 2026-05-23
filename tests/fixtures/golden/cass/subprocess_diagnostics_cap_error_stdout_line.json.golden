@@ -1,0 +1,22 @@
+{
+  "cap": {
+    "kind": "line",
+    "limitBytes": 1048576,
+    "stream": "stdout"
+  },
+  "command": null,
+  "killAttempted": true,
+  "outcome": "cap_error",
+  "peakStreamedStdoutLineBufferBytes": null,
+  "reapSucceeded": true,
+  "schema": "ee.cass.subprocess_diagnostics.v1",
+  "stderrCapture": {
+    "captureCapExceeded": false,
+    "truncated": false
+  },
+  "timeout": false,
+  "unavailable": {
+    "command": "cap error surfaced before the higher-level command wrapper was built",
+    "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted"
+  }
+}

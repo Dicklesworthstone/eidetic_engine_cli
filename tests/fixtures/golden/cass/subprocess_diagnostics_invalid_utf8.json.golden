@@ -1,0 +1,18 @@
+{
+  "cap": null,
+  "command": null,
+  "killAttempted": true,
+  "outcome": "invalid_utf8",
+  "peakStreamedStdoutLineBufferBytes": null,
+  "reapSucceeded": true,
+  "schema": "ee.cass.subprocess_diagnostics.v1",
+  "stderrCapture": {
+    "captureCapExceeded": false,
+    "truncated": false
+  },
+  "timeout": false,
+  "unavailable": {
+    "command": "UTF-8 error surfaced before the higher-level command wrapper was built",
+    "peakStreamedStdoutLineBufferBytes": "reader returned the UTF-8 error before a stream outcome was emitted"
+  }
+}

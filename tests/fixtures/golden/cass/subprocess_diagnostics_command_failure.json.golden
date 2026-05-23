@@ -1,0 +1,19 @@
+{
+  "cap": null,
+  "command": "cass view",
+  "exitCode": 2,
+  "killAttempted": false,
+  "outcome": "cass_command_failure",
+  "peakStreamedStdoutLineBufferBytes": 1024,
+  "peakStreamedStdoutLineBytes": 512,
+  "reapSucceeded": null,
+  "reapUnavailableReason": "subprocess exited before adapter cleanup was required",
+  "schema": "ee.cass.subprocess_diagnostics.v1",
+  "stderrCapture": {
+    "capturedBytes": 35,
+    "captureCapExceeded": false,
+    "truncated": true
+  },
+  "stdoutLineCount": 3,
+  "timeout": false
+}

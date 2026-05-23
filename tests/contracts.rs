@@ -4,6 +4,9 @@ mod dependency_contract_matrix;
 #[path = "contracts/cass_robot.rs"]
 mod cass_robot;
 
+#[path = "contracts/cass_subprocess_diagnostics_goldens.rs"]
+mod cass_subprocess_diagnostics_goldens;
+
 #[path = "conformance/cass_contracts.rs"]
 mod cass_contracts;
 

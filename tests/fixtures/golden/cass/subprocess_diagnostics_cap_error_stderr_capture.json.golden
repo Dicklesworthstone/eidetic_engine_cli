@@ -1,0 +1,22 @@
+{
+  "cap": {
+    "kind": "capture",
+    "limitBytes": 65536,
+    "stream": "stderr"
+  },
+  "command": null,
+  "killAttempted": true,
+  "outcome": "cap_error",
+  "peakStreamedStdoutLineBufferBytes": null,
+  "reapSucceeded": true,
+  "schema": "ee.cass.subprocess_diagnostics.v1",
+  "stderrCapture": {
+    "captureCapExceeded": true,
+    "truncated": false
+  },
+  "timeout": false,
+  "unavailable": {
+    "command": "capture-cap error surfaced before the higher-level command wrapper was built",
+    "peakStreamedStdoutLineBufferBytes": "not available for whole-pipe capture mode"
+  }
+}

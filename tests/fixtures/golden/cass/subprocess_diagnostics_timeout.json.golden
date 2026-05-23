@@ -1,0 +1,19 @@
+{
+  "cap": null,
+  "command": "cass view",
+  "exitCode": null,
+  "killAttempted": true,
+  "outcome": "timeout",
+  "peakStreamedStdoutLineBufferBytes": 8192,
+  "peakStreamedStdoutLineBytes": 2048,
+  "reapSucceeded": true,
+  "reapUnavailableReason": null,
+  "schema": "ee.cass.subprocess_diagnostics.v1",
+  "stderrCapture": {
+    "capturedBytes": 27,
+    "captureCapExceeded": false,
+    "truncated": false
+  },
+  "stdoutLineCount": 7,
+  "timeout": true
+}
