@@ -108,6 +108,29 @@ fn magic_mismatch_and_hash_mismatch_have_catalog_codes() {
 }
 
 #[test]
+fn item_length_u32_max_surfaces_as_invalid_offset_not_content_hash_mismatch() {
+    // bd-2frot: pins the downstream invariant that `serialize_pack_binary`'s
+    // saturating-cast (item.len() -> u32, clamped at u32::MAX) now relies on.
+    // If a writer ever emits an item-table entry with len = u32::MAX (either
+    // via the saturating path on a real >4 GiB item, or via direct frame
+    // construction here), the reader must fail with the precise InvalidOffset
+    // diagnostic, NOT with the older ContentHashMismatch confusion. Without
+    // this contract, the saturating cast would still produce a misleading
+    // hash-mismatch error and the bd-2frot improvement would be invisible.
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let first_len_offset = PACK_BINARY_HEADER_LEN + 8; // header (56) + offset (8 bytes)
+    frame[first_len_offset..first_len_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+
+    let error = PackBinaryView::parse(&frame)
+        .expect_err("oversized item length should surface as InvalidOffset");
+    assert!(
+        matches!(error, PackBinaryError::InvalidOffset { .. }),
+        "expected InvalidOffset, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_invalid_offset");
+}
+
+#[test]
 fn event_log_line_matches_pack_binary_contract() {
     let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
     let view = PackBinaryView::parse(&frame).expect("frame should parse");

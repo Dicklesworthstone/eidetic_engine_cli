@@ -412,7 +412,16 @@ pub fn serialize_pack_binary(canonical_json: &str, item_contents: &[&[u8]], flag
     let mut next_offset = blob_start;
     for item in item_contents {
         frame.extend_from_slice(&(next_offset as u64).to_le_bytes());
-        frame.extend_from_slice(&(item.len() as u32).to_le_bytes());
+        // bd-2frot: saturate the per-item length field at u32::MAX instead of
+        // truncating via `as u32`. Items above 4 GiB cannot fit the frame's
+        // `len: u32` slot; the prior `as u32` cast dropped the high bits and
+        // produced a frame whose item slice was the wrong size, surfacing as a
+        // confusing `ContentHashMismatch` at parse time. Saturating to
+        // u32::MAX instead immediately trips `end > canonical_json_start` in
+        // [`PackBinaryView::parse`] and returns a clean `InvalidOffset` naming
+        // the offset, the over-cap len, and the frame size.
+        let len_field = u32::try_from(item.len()).unwrap_or(u32::MAX);
+        frame.extend_from_slice(&len_field.to_le_bytes());
         frame.extend_from_slice(&0_u32.to_le_bytes());
         next_offset += item.len();
     }
