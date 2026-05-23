@@ -385,6 +385,8 @@ pub enum CandidateType {
     AntiPatternProposal,
     /// Distill evidence into a persisted reusable procedure.
     Procedure,
+    /// Create a new memory derived from typed memory or evidence-span sources.
+    CreateDerivedMemory,
 }
 
 impl CandidateType {
@@ -403,11 +405,12 @@ impl CandidateType {
             Self::Rule => "rule",
             Self::AntiPatternProposal => "anti_pattern_proposal",
             Self::Procedure => "procedure",
+            Self::CreateDerivedMemory => "create_derived_memory",
         }
     }
 
     #[must_use]
-    pub const fn all() -> [Self; 12] {
+    pub const fn all() -> [Self; 13] {
         [
             Self::Consolidate,
             Self::Promote,
@@ -421,6 +424,7 @@ impl CandidateType {
             Self::Rule,
             Self::AntiPatternProposal,
             Self::Procedure,
+            Self::CreateDerivedMemory,
         ]
     }
 }
@@ -447,7 +451,7 @@ impl fmt::Display for ParseCandidateTypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, paraphrase_dedup_proposal, split, retract, rule, anti_pattern_proposal, procedure",
+            "unknown candidate type `{}`; expected one of consolidate, promote, deprecate, supersede, tombstone, merge, paraphrase_dedup_proposal, split, retract, rule, anti_pattern_proposal, procedure, create_derived_memory",
             self.input
         )
     }
@@ -480,11 +484,222 @@ impl FromStr for CandidateType {
                 Ok(Self::AntiPatternProposal)
             }
             "procedure" => Ok(Self::Procedure),
+            "create_derived_memory"
+            | "create-derived-memory"
+            | "create_derived"
+            | "create-derived"
+            | "derived_memory"
+            | "derived-memory" => Ok(Self::CreateDerivedMemory),
             _ => Err(ParseCandidateTypeError {
                 input: input.to_owned(),
             }),
         }
     }
+}
+
+/// Kind of source that supports a create-derived-memory candidate.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DerivationSourceKind {
+    /// Persisted CASS evidence span source.
+    EvidenceSpan,
+    /// Existing memory source.
+    Memory,
+}
+
+impl DerivationSourceKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EvidenceSpan => "evidence_span",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+impl fmt::Display for DerivationSourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Typed source reference for a create-derived-memory candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DerivationSourceRef {
+    pub kind: DerivationSourceKind,
+    pub id: String,
+    pub content_hash: String,
+}
+
+impl DerivationSourceRef {
+    #[must_use]
+    pub fn new(
+        kind: DerivationSourceKind,
+        id: impl Into<String>,
+        content_hash: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            id: id.into(),
+            content_hash: content_hash.into(),
+        }
+    }
+}
+
+/// Error while normalizing create-derived source refs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DerivationSourcePackageError {
+    EmptySourcePackage,
+    EmptySourceId {
+        kind: DerivationSourceKind,
+    },
+    EmptyContentHash {
+        kind: DerivationSourceKind,
+        id: String,
+    },
+    InvalidContentHash {
+        kind: DerivationSourceKind,
+        id: String,
+        value: String,
+    },
+    DuplicateSource {
+        kind: DerivationSourceKind,
+        id: String,
+    },
+    JsonSerialization {
+        message: String,
+    },
+}
+
+impl fmt::Display for DerivationSourcePackageError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptySourcePackage => f.write_str("derivation source package must not be empty"),
+            Self::EmptySourceId { kind } => {
+                write!(f, "{kind} derivation source id must not be empty")
+            }
+            Self::EmptyContentHash { kind, id } => {
+                write!(
+                    f,
+                    "{kind} derivation source `{id}` content hash must not be empty"
+                )
+            }
+            Self::InvalidContentHash { kind, id, value } => {
+                write!(
+                    f,
+                    "{kind} derivation source `{id}` content hash `{value}` must be a canonical blake3 hash"
+                )
+            }
+            Self::DuplicateSource { kind, id } => {
+                write!(f, "duplicate {kind} derivation source `{id}`")
+            }
+            Self::JsonSerialization { message } => {
+                write!(f, "failed to serialize derivation source refs: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DerivationSourcePackageError {}
+
+impl DerivationSourcePackageError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::EmptySourcePackage => "empty_derivation_source_package",
+            Self::EmptySourceId { .. } => "empty_derivation_source_id",
+            Self::EmptyContentHash { .. } => "empty_derivation_content_hash",
+            Self::InvalidContentHash { .. } => "invalid_derivation_content_hash",
+            Self::DuplicateSource { .. } => "duplicate_derivation_source",
+            Self::JsonSerialization { .. } => "derivation_source_json_serialization_failed",
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DerivationSourceRefJson<'a> {
+    kind: &'static str,
+    id: &'a str,
+    #[serde(rename = "contentHash")]
+    content_hash: &'a str,
+}
+
+/// Canonical JSON for create-derived source refs.
+///
+/// The encoding is sorted by `(kind, id)` and duplicate-free so producers can
+/// compute stable candidate keys without relying on caller JSON map order.
+pub fn canonical_derivation_source_refs_json(
+    sources: &[DerivationSourceRef],
+) -> Result<String, DerivationSourcePackageError> {
+    if sources.is_empty() {
+        return Err(DerivationSourcePackageError::EmptySourcePackage);
+    }
+
+    let mut seen = BTreeSet::<(&'static str, String)>::new();
+    let mut normalized = Vec::with_capacity(sources.len());
+    for source in sources {
+        let id = source.id.trim();
+        if id.is_empty() {
+            return Err(DerivationSourcePackageError::EmptySourceId { kind: source.kind });
+        }
+        let content_hash = source.content_hash.trim();
+        if content_hash.is_empty() {
+            return Err(DerivationSourcePackageError::EmptyContentHash {
+                kind: source.kind,
+                id: id.to_owned(),
+            });
+        }
+        if !is_canonical_blake3_content_hash(content_hash) {
+            return Err(DerivationSourcePackageError::InvalidContentHash {
+                kind: source.kind,
+                id: id.to_owned(),
+                value: content_hash.to_owned(),
+            });
+        }
+
+        let key = (source.kind.as_str(), id.to_owned());
+        if !seen.insert(key) {
+            return Err(DerivationSourcePackageError::DuplicateSource {
+                kind: source.kind,
+                id: id.to_owned(),
+            });
+        }
+        normalized.push(DerivationSourceRef {
+            kind: source.kind,
+            id: id.to_owned(),
+            content_hash: content_hash.to_owned(),
+        });
+    }
+
+    normalized.sort_by(|left, right| {
+        left.kind
+            .as_str()
+            .cmp(right.kind.as_str())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let payload = normalized
+        .iter()
+        .map(|source| DerivationSourceRefJson {
+            kind: source.kind.as_str(),
+            id: source.id.as_str(),
+            content_hash: source.content_hash.as_str(),
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&payload).map_err(|error| {
+        DerivationSourcePackageError::JsonSerialization {
+            message: error.to_string(),
+        }
+    })
+}
+
+fn is_canonical_blake3_content_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Source that proposed the curation candidate.
@@ -897,6 +1112,7 @@ impl CandidateType {
                 | Self::Rule
                 | Self::AntiPatternProposal
                 | Self::Procedure
+                | Self::CreateDerivedMemory
         )
     }
 
@@ -904,6 +1120,12 @@ impl CandidateType {
     #[must_use]
     pub const fn forbids_content(self) -> bool {
         matches!(self, Self::Tombstone | Self::Retract)
+    }
+
+    /// Whether this candidate type mutates or reviews an existing target memory.
+    #[must_use]
+    pub const fn requires_target_memory(self) -> bool {
+        !matches!(self, Self::CreateDerivedMemory)
     }
 }
 
@@ -2241,7 +2463,7 @@ pub fn validate_candidate(
     if input.workspace_id.trim().is_empty() {
         return Err(CandidateValidationError::EmptyWorkspaceId);
     }
-    if input.target_memory_id.trim().is_empty() {
+    if input.candidate_type.requires_target_memory() && input.target_memory_id.trim().is_empty() {
         return Err(CandidateValidationError::EmptyTargetMemoryId);
     }
     if input.reason.trim().is_empty() {
@@ -3041,7 +3263,10 @@ impl CandidateType {
     pub const fn irreversibility_score(self) -> f32 {
         match self {
             Self::Promote | Self::Deprecate => 0.2,
-            Self::Consolidate | Self::Merge | Self::ParaphraseDedupProposal => 0.4,
+            Self::Consolidate
+            | Self::Merge
+            | Self::ParaphraseDedupProposal
+            | Self::CreateDerivedMemory => 0.4,
             Self::Rule | Self::Procedure => 0.45,
             Self::AntiPatternProposal => 0.55,
             Self::Supersede | Self::Split => 0.5,
@@ -4028,14 +4253,15 @@ mod tests {
         CANDIDATE_TOO_GENERIC_CODE, CandidateInput, CandidateSource, CandidateStatus,
         CandidateType, CandidateValidationError, CurationCandidateEmbeddingText,
         DUPLICATE_RULE_CHECK_SCHEMA_V1, DUPLICATE_RULE_EXACT_CODE,
-        DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE, DUPLICATE_RULE_NEAR_CODE,
-        DuplicateRuleCheckConfig, DuplicateRuleDecision, DuplicateRuleMatchKind,
-        DuplicateRuleRecord, FEEDBACK_RATE_SCHEMA_V1, FeedbackRateConfig,
-        ParseCandidateSourceError, ParseCandidateStatusError, ParseCandidateTypeError,
-        ParseReviewQueueStateError, QuarantineReason, QuarantinedFeedback,
-        REVIEW_QUEUE_INVALID_TRANSITION_CODE, REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState,
-        SpecificityPlatform, SpecificityReport, SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1,
-        TraumaGuardDecision, TraumaGuardInput, candidate_embedding_text, check_duplicate_rule,
+        DUPLICATE_RULE_INSUFFICIENT_SIGNAL_CODE, DUPLICATE_RULE_NEAR_CODE, DerivationSourceKind,
+        DerivationSourcePackageError, DerivationSourceRef, DuplicateRuleCheckConfig,
+        DuplicateRuleDecision, DuplicateRuleMatchKind, DuplicateRuleRecord,
+        FEEDBACK_RATE_SCHEMA_V1, FeedbackRateConfig, ParseCandidateSourceError,
+        ParseCandidateStatusError, ParseCandidateTypeError, ParseReviewQueueStateError,
+        QuarantineReason, QuarantinedFeedback, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
+        REVIEW_QUEUE_STATE_SCHEMA_V1, ReviewQueueState, SpecificityPlatform, SpecificityReport,
+        SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1, TraumaGuardDecision, TraumaGuardInput,
+        candidate_embedding_text, canonical_derivation_source_refs_json, check_duplicate_rule,
         check_duplicate_rule_with_config, evaluate_trauma_guard, specificity_score, subsystem_name,
         validate_candidate, validate_review_queue_transition, validate_status_transition,
     };
@@ -4535,6 +4761,10 @@ Then update src/policy/mod.rs on main."
         assert_eq!(
             CandidateType::from_str("anti-pattern"),
             Ok(CandidateType::AntiPatternProposal)
+        );
+        assert_eq!(
+            CandidateType::from_str("create-derived-memory"),
+            Ok(CandidateType::CreateDerivedMemory)
         );
         assert_eq!(
             CandidateSource::from_str("agent-inference"),
@@ -5358,12 +5588,88 @@ Then update src/policy/mod.rs on main."
         assert!(CandidateType::Rule.requires_content());
         assert!(CandidateType::AntiPatternProposal.requires_content());
         assert!(CandidateType::Procedure.requires_content());
+        assert!(CandidateType::CreateDerivedMemory.requires_content());
         assert!(!CandidateType::Promote.requires_content());
         assert!(!CandidateType::Deprecate.requires_content());
 
         assert!(CandidateType::Tombstone.forbids_content());
         assert!(CandidateType::Retract.forbids_content());
         assert!(!CandidateType::Promote.forbids_content());
+
+        assert!(!CandidateType::CreateDerivedMemory.requires_target_memory());
+        assert!(CandidateType::Rule.requires_target_memory());
+    }
+
+    #[test]
+    fn create_derived_memory_candidate_allows_missing_target() -> TestResult {
+        let input = CandidateInput {
+            workspace_id: "ws_1".to_owned(),
+            candidate_type: CandidateType::CreateDerivedMemory,
+            target_memory_id: String::new(),
+            proposed_content: Some(
+                "Derived memory from ev_1 and mem_1 about release verification.".to_owned(),
+            ),
+            proposed_confidence: Some(0.7),
+            proposed_trust_class: None,
+            source_type: CandidateSource::AgentInference,
+            source_id: Some("reflection_request_1".to_owned()),
+            reason: "Source-only derived memory proposal".to_owned(),
+            confidence: 0.6,
+            ttl_seconds: None,
+        };
+
+        let validated = validate_candidate(input, "2026-05-23T00:00:00Z", true)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(validated.candidate_type, CandidateType::CreateDerivedMemory);
+        assert!(validated.target_memory_id.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_derivation_source_refs_json_sorts_and_renames_fields() -> TestResult {
+        let hash_a = format!("blake3:{}", "a".repeat(64));
+        let hash_b = format!("blake3:{}", "b".repeat(64));
+        let json = canonical_derivation_source_refs_json(&[
+            DerivationSourceRef::new(DerivationSourceKind::Memory, " mem_b ", hash_b.as_str()),
+            DerivationSourceRef::new(
+                DerivationSourceKind::EvidenceSpan,
+                " ev_a ",
+                hash_a.as_str(),
+            ),
+        ])
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            json,
+            format!(
+                "[{{\"kind\":\"evidence_span\",\"id\":\"ev_a\",\"contentHash\":\"{hash_a}\"}},{{\"kind\":\"memory\",\"id\":\"mem_b\",\"contentHash\":\"{hash_b}\"}}]"
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_derivation_source_refs_reject_duplicate_or_bad_hash() {
+        let hash = format!("blake3:{}", "c".repeat(64));
+        let duplicate = canonical_derivation_source_refs_json(&[
+            DerivationSourceRef::new(DerivationSourceKind::Memory, "mem_1", hash.as_str()),
+            DerivationSourceRef::new(DerivationSourceKind::Memory, " mem_1 ", hash.as_str()),
+        ]);
+        assert!(matches!(
+            duplicate,
+            Err(DerivationSourcePackageError::DuplicateSource { .. })
+        ));
+
+        let bad_hash = canonical_derivation_source_refs_json(&[DerivationSourceRef::new(
+            DerivationSourceKind::EvidenceSpan,
+            "ev_1",
+            "BLAKE3:not-canonical",
+        )]);
+        assert!(matches!(
+            bad_hash,
+            Err(DerivationSourcePackageError::InvalidContentHash { .. })
+        ));
     }
 
     // ========================================================================
