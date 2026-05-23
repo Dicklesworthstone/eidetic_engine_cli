@@ -17,7 +17,7 @@
         "severity": "warning",
         "message": "Selected workspace has no .ee state at /workspace.",
         "errorCode": "EE-E004",
-        "repair": "ee --workspace . <command>"
+        "repair": "ee --workspace . --help"
       },
       {
         "name": "database",
