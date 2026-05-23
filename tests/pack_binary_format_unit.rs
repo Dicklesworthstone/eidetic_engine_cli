@@ -141,3 +141,109 @@ fn event_log_line_matches_pack_binary_contract() {
     assert!(line.contains(r#""operation":"deserialize""#));
     assert!(line.contains(r#""endianness_swap_required":false"#));
 }
+
+// bd-hpuik: error-path tests for parse() reject branches that weren't covered.
+// Each test surfaces a distinct PackBinaryError code so the parser's diagnostic
+// vocabulary stays stable as the frame format evolves.
+
+#[test]
+fn empty_item_list_round_trips() {
+    // Zero-item packs are legitimate (e.g. a context query with no candidates):
+    // serialize must produce a parseable frame whose item_count is 0, and the
+    // reader must not require any item-table entries.
+    let json = r#"{"schema":"ee.response.v2","success":true,"data":{"pack":{"items":[]}}}"#;
+    let frame = serialize_pack_binary(json, &[], 0);
+    let view = PackBinaryView::parse(&frame).expect("empty-items frame should parse");
+
+    assert_eq!(view.item_count(), 0);
+    assert_eq!(view.canonical_json().expect("json should be utf8"), json);
+    assert!(view.item_slice(0).is_err());
+}
+
+#[test]
+fn frame_below_header_plus_trailer_minimum_is_truncated() {
+    let needed_min = PACK_BINARY_HEADER_LEN + PACK_BINARY_TRAILER_LEN;
+    let too_short = vec![0_u8; needed_min - 1];
+    let error =
+        PackBinaryView::parse(&too_short).expect_err("undersized buffer should be truncated");
+
+    assert!(
+        matches!(error, PackBinaryError::Truncated { .. }),
+        "expected Truncated, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_truncated");
+}
+
+#[test]
+fn item_count_that_overflows_table_arithmetic_is_rejected() {
+    // Poke u64::MAX into the item_count slot. usize::try_from succeeds on a
+    // 64-bit host, but item_count * 16 overflows in checked_mul, so the parser
+    // must surface ItemCountTooLarge rather than panicking or wrapping.
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    frame[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    let error = PackBinaryView::parse(&frame).expect_err("u64::MAX item_count should reject");
+    assert!(
+        matches!(error, PackBinaryError::ItemCountTooLarge { .. }),
+        "expected ItemCountTooLarge, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_item_count_too_large");
+}
+
+#[test]
+fn declared_total_bytes_must_match_frame_length() {
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let bogus_total = (frame.len() as u64) + 1;
+    frame[16..24].copy_from_slice(&bogus_total.to_le_bytes());
+
+    let error =
+        PackBinaryView::parse(&frame).expect_err("mismatched total_bytes should be rejected");
+    assert!(
+        matches!(error, PackBinaryError::TotalBytesMismatch { .. }),
+        "expected TotalBytesMismatch, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_total_bytes_mismatch");
+}
+
+#[test]
+fn non_utf8_canonical_json_surfaces_dedicated_error_code() {
+    // Build a frame whose canonical_json footer is intentionally not UTF-8.
+    // The frame must be otherwise well-formed (correct BLAKE3 over the invalid
+    // bytes, correct item offsets, correct trailer); otherwise the parser
+    // would short-circuit on a different error before canonical_json() is
+    // called.
+    let invalid_json: [u8; 4] = [0xff, 0xfe, 0xfd, 0xfc];
+    let content_hash = blake3::hash(&invalid_json);
+    let item_contents: [&[u8]; 1] = [b"alpha"];
+    let table_len = item_contents.len() * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+    let blob_start = PACK_BINARY_HEADER_LEN + table_len;
+    let canonical_json_offset = blob_start + item_contents[0].len();
+    let total_bytes = canonical_json_offset + invalid_json.len() + PACK_BINARY_TRAILER_LEN;
+
+    let mut frame: Vec<u8> = Vec::with_capacity(total_bytes);
+    frame.extend_from_slice(&PACK_BINARY_MAGIC);
+    frame.extend_from_slice(&PACK_BINARY_VERSION_V1.to_le_bytes());
+    frame.extend_from_slice(&0_u16.to_le_bytes()); // flags
+    frame.extend_from_slice(&(item_contents.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&(total_bytes as u64).to_le_bytes());
+    frame.extend_from_slice(content_hash.as_bytes());
+    frame.extend_from_slice(&(blob_start as u64).to_le_bytes());
+    frame.extend_from_slice(&(item_contents[0].len() as u32).to_le_bytes());
+    frame.extend_from_slice(&0_u32.to_le_bytes()); // reserved
+    frame.extend_from_slice(item_contents[0]);
+    frame.extend_from_slice(&invalid_json);
+    frame.extend_from_slice(&(canonical_json_offset as u64).to_le_bytes());
+    frame.extend_from_slice(&(invalid_json.len() as u64).to_le_bytes());
+    frame.extend_from_slice(&0_u32.to_le_bytes()); // reserved
+    assert_eq!(frame.len(), total_bytes);
+
+    let view = PackBinaryView::parse(&frame).expect("frame structure should parse");
+    let error = view
+        .canonical_json()
+        .expect_err("non-utf8 canonical_json should reject at decode time");
+    assert!(
+        matches!(error, PackBinaryError::NonUtf8Json),
+        "expected NonUtf8Json, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_json_non_utf8");
+}
