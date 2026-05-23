@@ -267,6 +267,7 @@ pub struct PackConfig {
     pub adaptive_budget: Option<bool>,
     pub mmr_lambda: Option<f64>,
     pub candidate_pool: Option<u64>,
+    pub memory_tier_admission: Option<bool>,
 }
 
 impl PackConfig {
@@ -278,6 +279,7 @@ impl PackConfig {
             adaptive_budget: optional_bool(document, "pack", "adaptive_budget")?,
             mmr_lambda: optional_unit_float(document, "pack", "mmr_lambda")?,
             candidate_pool: optional_u64(document, "pack", "candidate_pool")?,
+            memory_tier_admission: optional_bool(document, "pack", "memory_tier_admission")?,
         })
     }
 }
@@ -2118,6 +2120,7 @@ default_max_tokens = 4000
 adaptive_budget = true
 mmr_lambda = 0.7
 candidate_pool = 100
+memory_tier_admission = true
 
 [handoff.stale_threshold]
 memories_added = 20
@@ -2318,6 +2321,11 @@ prompt_injection_guard = true
             &config.pack.adaptive_budget,
             &Some(true),
             "adaptive pack budget",
+        )?;
+        ensure_equal(
+            &config.pack.memory_tier_admission,
+            &Some(true),
+            "memory tier admission",
         )?;
         ensure_equal(
             &config.handoff.stale_threshold.memories_added,

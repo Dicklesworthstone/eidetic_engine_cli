@@ -651,11 +651,12 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (26)
+#### Coordination / external tools (27)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
 | `agent_mail_archive_degraded` | warning | bd-1zb7k.11 (P) |
+| `agent_mail_semantic_readiness_failed` | warning | bd-2s48u |
 | `agent_status_unavailable` | low | (TBD) |
 | `beads_command_timeout` | warning | bd-2z5ly.9.3 (S) |
 | `beads_no_output` | warning | bd-2z5ly.9.3 (S) |

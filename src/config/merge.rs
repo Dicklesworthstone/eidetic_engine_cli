@@ -53,6 +53,7 @@ pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
 pub const PACK_ADAPTIVE_BUDGET_KEY: &str = "pack.adaptive_budget";
 pub const PACK_MMR_LAMBDA_KEY: &str = "pack.mmr_lambda";
 pub const PACK_CANDIDATE_POOL_KEY: &str = "pack.candidate_pool";
+pub const PACK_MEMORY_TIER_ADMISSION_KEY: &str = "pack.memory_tier_admission";
 pub const CACHE_PACK_L2_ENABLED_KEY: &str = "cache.pack_l2.enabled";
 pub const CACHE_PACK_L2_DIRECTORY_KEY: &str = "cache.pack_l2.directory";
 pub const CACHE_PACK_L2_MAX_BYTES_KEY: &str = "cache.pack_l2.max_bytes";
@@ -367,6 +368,13 @@ impl MergedConfig {
                 PACK_CANDIDATE_POOL_KEY,
                 pool.to_string(),
                 self.source(PACK_CANDIDATE_POOL_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.pack.memory_tier_admission {
+            entries.push(ConfigShowEntry::new(
+                PACK_MEMORY_TIER_ADMISSION_KEY,
+                enabled.to_string(),
+                self.source(PACK_MEMORY_TIER_ADMISSION_KEY),
             ));
         }
 
@@ -904,6 +912,7 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             adaptive_budget: Some(false),
             mmr_lambda: Some(0.7),
             candidate_pool: Some(100),
+            memory_tier_admission: Some(false),
         },
         handoff: HandoffConfig::default(),
         cache: CacheConfig {
@@ -1112,6 +1121,7 @@ pub fn config_from_env(
             adaptive_budget: None,
             mmr_lambda: None,
             candidate_pool: None,
+            memory_tier_admission: None,
         },
         curation: CurationConfig::default(),
         learn: LearnConfig::default(),
@@ -1429,6 +1439,15 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.project.pack.candidate_pool,
                 &layers.user.pack.candidate_pool,
                 &layers.defaults.pack.candidate_pool,
+            ),
+            memory_tier_admission: pick_field(
+                &mut sources,
+                PACK_MEMORY_TIER_ADMISSION_KEY,
+                &layers.cli.pack.memory_tier_admission,
+                &layers.environment.pack.memory_tier_admission,
+                &layers.project.pack.memory_tier_admission,
+                &layers.user.pack.memory_tier_admission,
+                &layers.defaults.pack.memory_tier_admission,
             ),
         },
         handoff: HandoffConfig::default(),
@@ -2272,6 +2291,11 @@ mod tests {
             "adaptive budget default off",
         )?;
         ensure_equal(
+            &defaults.pack.memory_tier_admission,
+            &Some(false),
+            "memory tier admission default off",
+        )?;
+        ensure_equal(
             &defaults.cache.pack_l2.enabled,
             &Some(true),
             "pack L2 cache enabled",
@@ -2612,6 +2636,7 @@ mod tests {
             },
             pack: PackConfig {
                 adaptive_budget: Some(true),
+                memory_tier_admission: Some(true),
                 ..PackConfig::default()
             },
             graph: GraphConfig {
@@ -2804,6 +2829,16 @@ mod tests {
             &merged.source(PACK_ADAPTIVE_BUDGET_KEY),
             &Some(ConfigValueSource::Project),
             "adaptive budget source",
+        )?;
+        ensure_equal(
+            &merged.values.pack.memory_tier_admission,
+            &Some(true),
+            "project memory tier admission",
+        )?;
+        ensure_equal(
+            &merged.source(PACK_MEMORY_TIER_ADMISSION_KEY),
+            &Some(ConfigValueSource::Project),
+            "memory tier admission source",
         )?;
         ensure_equal(
             &merged.values.cache.pack_l2.max_bytes,

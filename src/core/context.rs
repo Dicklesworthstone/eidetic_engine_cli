@@ -37,6 +37,10 @@ use rustix::fs::{FlockOperation, flock};
 #[cfg(unix)]
 use rustix::io::Errno;
 
+use crate::cache::hotset::{
+    MemoryStorageTier, MemoryTierAssignment, MemoryTierInput, MemoryTierPolicyConfig,
+    assign_memory_storage_tiers,
+};
 use crate::cache::pack_l2::{
     DEFAULT_MAX_BYTES as PACK_L2_DEFAULT_MAX_BYTES, PackL2Cache, PackL2CacheError,
     PackL2CacheLookup, PackL2CacheMiss, PackL2CacheMissReason, PackL2CacheOptions,
@@ -58,7 +62,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_search_with_read_connection_seeded_and_audit_connection,
+    query_observation_json, run_context_search_with_read_connection_seeded_and_audit_connection,
     search_degraded_data_json,
 };
 use crate::db::read_pool::{
@@ -99,6 +103,8 @@ pub(crate) const PACK_L2_CACHE_KEY_SCHEMA_V1: &str = "ee.pack.l2_cache_key.v1";
 const PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1: &str = "ee.pack.l2_context_response.v1";
 pub const DEFAULT_CONTEXT_PPR_WEIGHT: f32 = 0.30;
 const CONTEXT_CHANGED_SYMBOL_BOOST: f32 = 0.05;
+const CONTEXT_MEMORY_TIER_HOT_BOOST: f32 = 0.025;
+const CONTEXT_MEMORY_TIER_WARM_BOOST: f32 = 0.010;
 const CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW: u32 = 20;
 
 #[derive(Clone, Debug)]
@@ -792,6 +798,9 @@ struct CandidateResolutionMetrics {
     graph_filtered_candidates: usize,
     graph_missing_seeds: usize,
     graph_traversed_edges: usize,
+    tier_boosted_candidates: usize,
+    tier_cold_candidates: usize,
+    tier_required_cold_candidates: usize,
     converted_candidates: usize,
     skipped_candidates: usize,
 }
@@ -1216,43 +1225,44 @@ fn run_context_pack_with_performance_inner(
     let search_start = Instant::now();
     let mut context_write_connection = DbConnection::open_file(&database_path).ok();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut search_report = match run_search_with_read_connection_seeded_and_audit_connection(
-        &SearchOptions {
-            workspace_path: options.workspace_path.clone(),
-            database_path: Some(database_path.clone()),
-            index_dir: options.index_dir.clone(),
-            query: request.query.clone(),
-            limit: request.candidate_pool,
-            speed: options.speed,
-            explain: false,
-            as_of: context_validity_reference_time(options, &effective_filters),
-            include_tombstoned: options.include_tombstoned,
-            include_expired: context_include_expired(options, &effective_filters),
-            include_future: context_include_future(options, &effective_filters),
-            include_stale: context_include_stale(options, &effective_filters),
-            // Context packing owns relevance and budget filtering after retrieval.
-            // Keep the default candidate pool broad so an exact single-memory match
-            // is not dropped by the interactive search command's presentation floor.
-            // An explicit caller floor still applies for diagnostic/e2e paths.
-            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-            dedup_mode: crate::core::search::SearchDedupMode::DocId,
-            source_mode: crate::core::search::SearchSourceMode::Hybrid,
-            strict_source_mode: false,
-            memory_scope: options.memory_scope,
-            strict_scope: options.strict_scope,
-        },
-        read_connection,
-        context_write_connection.as_ref(),
-        determinism,
-    ) {
-        Ok(report) => report,
-        Err(SearchError::NoIndex) => missing_index_search_report(
-            &request.query,
-            request.candidate_pool,
-            runtime_profile.clone(),
-        ),
-        Err(error) => return Err(ContextPackError::Search(error)),
-    };
+    let mut search_report =
+        match run_context_search_with_read_connection_seeded_and_audit_connection(
+            &SearchOptions {
+                workspace_path: options.workspace_path.clone(),
+                database_path: Some(database_path.clone()),
+                index_dir: options.index_dir.clone(),
+                query: request.query.clone(),
+                limit: request.candidate_pool,
+                speed: options.speed,
+                explain: false,
+                as_of: context_validity_reference_time(options, &effective_filters),
+                include_tombstoned: options.include_tombstoned,
+                include_expired: context_include_expired(options, &effective_filters),
+                include_future: context_include_future(options, &effective_filters),
+                include_stale: context_include_stale(options, &effective_filters),
+                // Context packing owns relevance and budget filtering after retrieval.
+                // Keep the default candidate pool broad so an exact single-memory match
+                // is not dropped by the interactive search command's presentation floor.
+                // An explicit caller floor still applies for diagnostic/e2e paths.
+                relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+                dedup_mode: crate::core::search::SearchDedupMode::DocId,
+                source_mode: crate::core::search::SearchSourceMode::Hybrid,
+                strict_source_mode: false,
+                memory_scope: options.memory_scope,
+                strict_scope: options.strict_scope,
+            },
+            read_connection,
+            context_write_connection.as_ref(),
+            determinism,
+        ) {
+            Ok(report) => report,
+            Err(SearchError::NoIndex) => missing_index_search_report(
+                &request.query,
+                request.candidate_pool,
+                runtime_profile.clone(),
+            ),
+            Err(error) => return Err(ContextPackError::Search(error)),
+        };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
 
@@ -1535,6 +1545,30 @@ fn run_context_pack_with_performance_inner(
             ),
         );
     }
+
+    let tier_admission_start = Instant::now();
+    match context_memory_tier_admission_enabled(&options.workspace_path) {
+        Ok(true) => {
+            let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+            let tier_metrics = apply_memory_tier_candidate_admission(
+                read_connection,
+                &mut candidates,
+                &mut degraded,
+            );
+            candidate_metrics.tier_boosted_candidates = tier_metrics.boosted_candidates;
+            candidate_metrics.tier_cold_candidates = tier_metrics.cold_candidates;
+            candidate_metrics.tier_required_cold_candidates = tier_metrics.required_cold_candidates;
+        }
+        Ok(false) => {}
+        Err(message) => push_degradation(
+            &mut degraded,
+            "context_config_unavailable",
+            ContextResponseSeverity::Medium,
+            message,
+            Some("Fix or remove .ee/config.toml.".to_string()),
+        ),
+    }
+    trace.record_elapsed("memoryTierAdmission", tier_admission_start);
 
     let ppr_rerank_start = Instant::now();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -1895,7 +1929,7 @@ fn run_context_pack_with_performance_inner(
     if persist_succeeded {
         if let Some(connection) = persist_connection.as_ref() {
             audit_context_pack_assembly_with_connection(
-                &connection,
+                connection,
                 &options.workspace_path,
                 &response,
             );
@@ -1966,7 +2000,16 @@ fn audit_context_pack_assembly_with_connection(
         target_id: Some(pack_id_for_audit.clone()),
         details: Some(assembled_details),
     };
-    let _ = conn.insert_audit(&crate::db::generate_audit_id(), &assembled_input);
+    let redaction_count: usize = response
+        .data
+        .pack
+        .items
+        .iter()
+        .map(|item| item.redactions.len())
+        .sum();
+    let mut audit_entries =
+        Vec::with_capacity(1 + response.data.pack.items.len() + redaction_count);
+    audit_entries.push((crate::db::generate_audit_id(), assembled_input));
 
     for (display_index, item) in response.data.pack.items.iter().enumerate() {
         let item_details = serde_json::json!({
@@ -1985,7 +2028,7 @@ fn audit_context_pack_assembly_with_connection(
             target_id: Some(item.memory_id.to_string()),
             details: Some(item_details),
         };
-        let _ = conn.insert_audit(&crate::db::generate_audit_id(), &item_input);
+        audit_entries.push((crate::db::generate_audit_id(), item_input));
 
         for redaction in &item.redactions {
             let redaction_details = serde_json::json!({
@@ -2009,7 +2052,13 @@ fn audit_context_pack_assembly_with_connection(
                 target_id: Some(item.memory_id.to_string()),
                 details: Some(redaction_details),
             };
-            let _ = conn.insert_audit(&crate::db::generate_audit_id(), &redaction_input);
+            audit_entries.push((crate::db::generate_audit_id(), redaction_input));
+        }
+    }
+
+    if conn.insert_audit_batch(&audit_entries).is_err() {
+        for (audit_id, input) in audit_entries {
+            let _ = conn.insert_audit(&audit_id, &input);
         }
     }
 }
@@ -2163,6 +2212,9 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "graphFilteredCandidates": metrics.graph_filtered_candidates,
         "graphMissingSeeds": metrics.graph_missing_seeds,
         "graphTraversedEdges": metrics.graph_traversed_edges,
+        "tierBoostedCandidates": metrics.tier_boosted_candidates,
+        "tierColdCandidates": metrics.tier_cold_candidates,
+        "tierRequiredColdCandidates": metrics.tier_required_cold_candidates,
         "filteredBeforeResolution": trace.filtered_count,
         "filterInputCount": trace.filter_input_count,
         "focusStateHits": trace.focus_state_hits,
@@ -4738,12 +4790,153 @@ struct ProximityToSeedMetrics {
     annotated_candidates: usize,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MemoryTierCandidateAdmissionMetrics {
+    boosted_candidates: usize,
+    cold_candidates: usize,
+    required_cold_candidates: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GraphHintEvidence {
     seed_memory_id: String,
     depth: u32,
     relation: Option<String>,
     traversal: crate::models::QueryGraphTraversal,
+}
+
+fn apply_memory_tier_candidate_admission(
+    connection: &DbConnection,
+    candidates: &mut [PackCandidate],
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> MemoryTierCandidateAdmissionMetrics {
+    if candidates.is_empty() {
+        return MemoryTierCandidateAdmissionMetrics::default();
+    }
+
+    let memory_ids = candidates
+        .iter()
+        .map(|candidate| candidate.memory_id.to_string())
+        .collect::<BTreeSet<_>>();
+    let memory_id_refs = memory_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    let memories = match connection.get_memories_batch(&memory_id_refs) {
+        Ok(memories) => memories,
+        Err(error) => {
+            push_degradation(
+                degraded,
+                "context_candidate_memory_batch_unavailable",
+                ContextResponseSeverity::Medium,
+                format!("Memory tier admission could not batch-load candidate memories: {error}"),
+                Some("ee status --json".to_string()),
+            );
+            return MemoryTierCandidateAdmissionMetrics::default();
+        }
+    };
+
+    apply_memory_tier_candidate_admission_from_memories(
+        candidates,
+        &memories,
+        MemoryTierPolicyConfig::default_swarm(),
+    )
+}
+
+fn apply_memory_tier_candidate_admission_from_memories(
+    candidates: &mut [PackCandidate],
+    memories: &BTreeMap<String, StoredMemory>,
+    policy: MemoryTierPolicyConfig,
+) -> MemoryTierCandidateAdmissionMetrics {
+    if candidates.is_empty() || memories.is_empty() {
+        return MemoryTierCandidateAdmissionMetrics::default();
+    }
+
+    let inputs = candidates
+        .iter()
+        .filter_map(|candidate| {
+            memories
+                .get(&candidate.memory_id.to_string())
+                .map(|memory| memory_tier_input_for_candidate(candidate, memory))
+        })
+        .collect::<Vec<_>>();
+    if inputs.is_empty() {
+        return MemoryTierCandidateAdmissionMetrics::default();
+    }
+
+    let assignments = assign_memory_storage_tiers(inputs, policy)
+        .into_iter()
+        .map(|assignment| (assignment.memory_id.clone(), assignment))
+        .collect::<BTreeMap<_, _>>();
+    let mut metrics = MemoryTierCandidateAdmissionMetrics::default();
+    for candidate in candidates.iter_mut() {
+        let Some(assignment) = assignments.get(&candidate.memory_id.to_string()) else {
+            continue;
+        };
+        apply_memory_tier_assignment_to_candidate(candidate, assignment, &mut metrics);
+    }
+    metrics
+}
+
+fn memory_tier_input_for_candidate(
+    candidate: &PackCandidate,
+    memory: &StoredMemory,
+) -> MemoryTierInput {
+    MemoryTierInput::from_normalized_scores(
+        memory.id.clone(),
+        memory.workspace_id.clone(),
+        f64::from(memory.confidence),
+        f64::from(memory.utility),
+        f64::from(memory.importance),
+        1.0,
+    )
+    .with_trust_class(memory.trust_class.clone())
+    .with_explicit_query_match(memory_tier_explicit_query_match(candidate))
+    .with_safety_or_failure_evidence(memory_tier_safety_or_failure_evidence(&memory.kind))
+}
+
+fn memory_tier_explicit_query_match(candidate: &PackCandidate) -> bool {
+    candidate.why.starts_with("matched '")
+}
+
+fn memory_tier_safety_or_failure_evidence(kind: &str) -> bool {
+    let normalized = kind.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "failure" | "risk" | "anti-pattern" | "anti_pattern" | "safety" | "security"
+    )
+}
+
+fn apply_memory_tier_assignment_to_candidate(
+    candidate: &mut PackCandidate,
+    assignment: &MemoryTierAssignment,
+    metrics: &mut MemoryTierCandidateAdmissionMetrics,
+) {
+    if assignment.tier == MemoryStorageTier::Cold {
+        metrics.cold_candidates = metrics.cold_candidates.saturating_add(1);
+        if assignment.required_evidence_preserved {
+            metrics.required_cold_candidates = metrics.required_cold_candidates.saturating_add(1);
+        }
+    }
+
+    let boost = match assignment.tier {
+        MemoryStorageTier::Hot => CONTEXT_MEMORY_TIER_HOT_BOOST,
+        MemoryStorageTier::Warm => CONTEXT_MEMORY_TIER_WARM_BOOST,
+        MemoryStorageTier::Cold => 0.0,
+    };
+    let base = candidate.relevance.into_inner();
+    let adjusted = unit_score(base + boost).unwrap_or(candidate.relevance);
+    if adjusted.into_inner() > base {
+        candidate.relevance = adjusted;
+        metrics.boosted_candidates = metrics.boosted_candidates.saturating_add(1);
+    }
+
+    candidate.why = format!(
+        "{} tierAdmission tier={} tierScore={} boost={:.4} requiredEvidencePreserved={} noFilter=true policy={} advisoryOnly=true.",
+        candidate.why,
+        assignment.tier.as_str(),
+        assignment.tier_score,
+        adjusted.into_inner() - base,
+        assignment.required_evidence_preserved,
+        assignment.policy_version,
+    );
 }
 
 fn apply_personalized_pagerank_rerank(
@@ -4910,6 +5103,13 @@ fn context_ppr_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
     let config = context_workspace_config(workspace_path, "Personalized PageRank rerank")?;
     Ok(config
         .and_then(|config| config.graph.feature.ppr_enabled)
+        .unwrap_or(false))
+}
+
+fn context_memory_tier_admission_enabled(workspace_path: &Path) -> Result<bool, String> {
+    let config = context_workspace_config(workspace_path, "Memory tier candidate admission")?;
+    Ok(config
+        .and_then(|config| config.pack.memory_tier_admission)
         .unwrap_or(false))
 }
 
@@ -8121,6 +8321,170 @@ mod tests {
             why: "selected by fixture".to_string(),
         })
         .map_err(|error| error.to_string())
+    }
+
+    fn tier_candidate(
+        memory_id: MemoryId,
+        relevance: f32,
+        why: &str,
+    ) -> Result<PackCandidate, String> {
+        let provenance =
+            PackProvenance::new(ProvenanceUri::EeMemory(memory_id), "tier admission fixture")
+                .map_err(|error| error.to_string())?;
+        PackCandidate::new(PackCandidateInput {
+            memory_id,
+            section: PackSection::ProceduralRules,
+            content: format!("tier candidate {memory_id}"),
+            estimated_tokens: 8,
+            relevance: UnitScore::parse(relevance).map_err(|error| error.to_string())?,
+            utility: UnitScore::parse(0.8).map_err(|error| error.to_string())?,
+            provenance: vec![provenance],
+            why: why.to_string(),
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn tier_memory(
+        memory_id: MemoryId,
+        confidence: f32,
+        utility: f32,
+        importance: f32,
+        kind: &str,
+    ) -> StoredMemory {
+        StoredMemory {
+            id: memory_id.to_string(),
+            workspace_id: WorkspaceId::from_uuid(uuid::Uuid::from_u128(930)).to_string(),
+            level: "procedural".to_owned(),
+            kind: kind.to_owned(),
+            content: format!("tier memory {memory_id}"),
+            workflow_id: None,
+            confidence,
+            utility,
+            importance,
+            provenance_uri: None,
+            trust_class: TrustClass::AgentValidated.as_str().to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "1".to_owned(),
+            provenance_verification_status: "pending".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-22T00:00:00Z".to_owned(),
+            updated_at: "2026-05-22T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
+
+    fn tier_memory_map(memories: Vec<StoredMemory>) -> BTreeMap<String, StoredMemory> {
+        memories
+            .into_iter()
+            .map(|memory| (memory.id.clone(), memory))
+            .collect()
+    }
+
+    #[test]
+    fn memory_tier_admission_boosts_hot_and_warm_candidates() -> Result<(), String> {
+        let hot_id = MemoryId::from_uuid(uuid::Uuid::from_u128(931));
+        let warm_id = MemoryId::from_uuid(uuid::Uuid::from_u128(932));
+        let mut candidates = vec![
+            tier_candidate(hot_id, 0.50, "selected by fixture")?,
+            tier_candidate(warm_id, 0.51, "selected by fixture")?,
+        ];
+        let memories = tier_memory_map(vec![
+            tier_memory(hot_id, 1.0, 1.0, 1.0, "rule"),
+            tier_memory(warm_id, 0.5, 0.5, 0.5, "rule"),
+        ]);
+
+        let metrics = super::apply_memory_tier_candidate_admission_from_memories(
+            &mut candidates,
+            &memories,
+            crate::cache::hotset::MemoryTierPolicyConfig::new(1, 1, 700),
+        );
+        super::sort_context_candidates(&mut candidates);
+
+        assert_eq!(metrics.boosted_candidates, 2);
+        assert_eq!(metrics.cold_candidates, 0);
+        assert_eq!(candidates[0].memory_id, hot_id);
+        assert!(candidates[0].why.contains("tierAdmission tier=hot"));
+        assert!(candidates[1].why.contains("tierAdmission tier=warm"));
+        Ok(())
+    }
+
+    #[test]
+    fn memory_tier_admission_preserves_required_cold_evidence() -> Result<(), String> {
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(933));
+        let mut candidates = vec![tier_candidate(
+            memory_id,
+            0.73,
+            "matched 'release failure' via lexical (relevance 0.7300, utility 0.8000)",
+        )?];
+        let memories = tier_memory_map(vec![tier_memory(memory_id, 0.2, 0.2, 0.2, "failure")]);
+
+        let metrics = super::apply_memory_tier_candidate_admission_from_memories(
+            &mut candidates,
+            &memories,
+            crate::cache::hotset::MemoryTierPolicyConfig::new(0, 0, 1000),
+        );
+
+        assert_eq!(metrics.boosted_candidates, 0);
+        assert_eq!(metrics.cold_candidates, 1);
+        assert_eq!(metrics.required_cold_candidates, 1);
+        assert!((candidates[0].relevance.into_inner() - 0.73).abs() < 0.0001);
+        assert!(candidates[0].why.contains("tierAdmission tier=cold"));
+        assert!(candidates[0].why.contains("requiredEvidencePreserved=true"));
+        assert!(candidates[0].why.contains("noFilter=true"));
+        Ok(())
+    }
+
+    #[test]
+    fn memory_tier_admission_is_deterministic_for_tied_inputs() -> Result<(), String> {
+        let lower_id = MemoryId::from_uuid(uuid::Uuid::from_u128(934));
+        let higher_id = MemoryId::from_uuid(uuid::Uuid::from_u128(935));
+        let memories = tier_memory_map(vec![
+            tier_memory(higher_id, 0.8, 0.8, 0.8, "rule"),
+            tier_memory(lower_id, 0.8, 0.8, 0.8, "rule"),
+        ]);
+        let policy = crate::cache::hotset::MemoryTierPolicyConfig::new(1, 1, 700);
+        let mut left = vec![
+            tier_candidate(lower_id, 0.60, "selected by fixture")?,
+            tier_candidate(higher_id, 0.60, "selected by fixture")?,
+        ];
+        let mut right = vec![
+            tier_candidate(higher_id, 0.60, "selected by fixture")?,
+            tier_candidate(lower_id, 0.60, "selected by fixture")?,
+        ];
+
+        super::apply_memory_tier_candidate_admission_from_memories(&mut left, &memories, policy);
+        super::apply_memory_tier_candidate_admission_from_memories(&mut right, &memories, policy);
+        super::sort_context_candidates(&mut left);
+        super::sort_context_candidates(&mut right);
+        let left_summary = left
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.memory_id,
+                    candidate.relevance.into_inner(),
+                    candidate.why.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let right_summary = right
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.memory_id,
+                    candidate.relevance.into_inner(),
+                    candidate.why.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(left_summary, right_summary);
+        assert_eq!(left[0].memory_id, lower_id);
+        assert!(left[0].why.contains("tierAdmission tier=hot"));
+        Ok(())
     }
 
     #[test]

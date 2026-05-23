@@ -1,0 +1,26 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "memory_tier_metadata_stale",
+  "introduced_by": {"bead": "bd-1prrl.6.4", "epic_letter": "Swarm-X"},
+  "surfaces": ["cache prewarm"],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Tier-aware cache prewarm was given memory tier assignments whose generation is older than the current workspace/cache generation. The prewarm report rejects the tier metadata instead of using stale hot/warm/cold residency hints.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee cache hotset --workspace . --json"
+    ],
+    "invocation": "Build a tier-aware prewarm report with tier_generation lower than the current prewarm generation."
+  },
+  "expected_emission": {
+    "code": "memory_tier_metadata_stale",
+    "severity": "medium",
+    "message_contains": [
+      "rejected memory tier metadata",
+      "older than the current generation"
+    ],
+    "repair_contains": "Regenerate memory tier assignments",
+    "repair_string": "Regenerate memory tier assignments before running tier-aware prewarm."
+  }
+}

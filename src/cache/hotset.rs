@@ -64,6 +64,10 @@ pub const CACHE_PREWARM_SCHEMA: &str = "ee.cache.prewarm.v1";
 /// Degraded code emitted when the prewarm planner receives no usable signal.
 pub const PREWARM_NO_SIGNAL_CODE: &str = "hotset_prewarm_no_signals";
 
+/// Degraded code emitted when tier-aware prewarm rejects stale memory tier
+/// metadata instead of using it to bias cache residency.
+pub const MEMORY_TIER_METADATA_STALE_CODE: &str = "memory_tier_metadata_stale";
+
 /// Redaction posture for prewarm plans. Query text, mail bodies, bead titles,
 /// and other raw coordination text are used only in-process to derive BLAKE3
 /// query-shape keys; the plan itself exposes hashes and source classes.
@@ -349,6 +353,367 @@ impl MemoryTierAssignment {
             "policyVersion": self.policy_version,
             "requiredEvidencePreserved": self.required_evidence_preserved,
         })
+    }
+}
+
+/// Schema id for deterministic tier transition audit batches.
+pub const MEMORY_TIER_TRANSITION_AUDIT_SCHEMA: &str = "ee.memory_tier.transition_audit.v1";
+
+/// Previous tier state read from durable metadata before a transition pass.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierPreviousState {
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub tier: MemoryStorageTier,
+    pub tier_score: u16,
+    pub policy_version: String,
+}
+
+impl MemoryTierPreviousState {
+    #[must_use]
+    pub fn new(
+        memory_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+        tier: MemoryStorageTier,
+        tier_score: u16,
+        policy_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            memory_id: memory_id.into(),
+            workspace_id: workspace_id.into(),
+            tier,
+            tier_score,
+            policy_version: policy_version.into(),
+        }
+    }
+}
+
+/// Redaction-safe counters that explain a tier transition decision.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryTierTransitionCounters {
+    pub access_count: u64,
+    pub reuse_count: u64,
+    pub freshness_basis_points: u16,
+    pub trust_basis_points: u16,
+    pub decay_penalty_basis_points: u16,
+}
+
+impl MemoryTierTransitionCounters {
+    #[must_use]
+    pub const fn new(
+        access_count: u64,
+        reuse_count: u64,
+        freshness_basis_points: u16,
+        trust_basis_points: u16,
+        decay_penalty_basis_points: u16,
+    ) -> Self {
+        Self {
+            access_count,
+            reuse_count,
+            freshness_basis_points,
+            trust_basis_points,
+            decay_penalty_basis_points,
+        }
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "accessCount": self.access_count,
+            "reuseCount": self.reuse_count,
+            "freshnessBasisPoints": self.freshness_basis_points,
+            "trustBasisPoints": self.trust_basis_points,
+            "decayPenaltyBasisPoints": self.decay_penalty_basis_points,
+        })
+    }
+}
+
+/// Input row for the pure transition planner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierTransitionInput {
+    pub assignment: MemoryTierAssignment,
+    pub previous: Option<MemoryTierPreviousState>,
+    pub counters: MemoryTierTransitionCounters,
+}
+
+impl MemoryTierTransitionInput {
+    #[must_use]
+    pub fn new(assignment: MemoryTierAssignment) -> Self {
+        Self {
+            assignment,
+            previous: None,
+            counters: MemoryTierTransitionCounters {
+                access_count: 0,
+                reuse_count: 0,
+                freshness_basis_points: 0,
+                trust_basis_points: 0,
+                decay_penalty_basis_points: 0,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn with_previous(mut self, previous: MemoryTierPreviousState) -> Self {
+        self.previous = Some(previous);
+        self
+    }
+
+    #[must_use]
+    pub fn with_counters(mut self, counters: MemoryTierTransitionCounters) -> Self {
+        self.counters = counters;
+        self
+    }
+}
+
+/// Transition kind for tier metadata. `Evict` means "move to cold metadata",
+/// never tombstone or delete the memory.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum MemoryTierTransitionKind {
+    Admit,
+    Promote,
+    Retain,
+    Demote,
+    Evict,
+}
+
+impl MemoryTierTransitionKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Promote => "promote",
+            Self::Retain => "retain",
+            Self::Demote => "demote",
+            Self::Evict => "evict",
+        }
+    }
+}
+
+/// Options for a bounded transition audit batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierTransitionOptions {
+    pub reference_time: String,
+    pub dry_run: bool,
+    pub max_transitions: usize,
+}
+
+impl MemoryTierTransitionOptions {
+    #[must_use]
+    pub fn new(reference_time: impl Into<String>) -> Self {
+        Self {
+            reference_time: reference_time.into(),
+            dry_run: true,
+            max_transitions: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn with_dry_run(mut self, dry_run: bool) -> Self {
+        self.dry_run = dry_run;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_transitions(mut self, max_transitions: usize) -> Self {
+        self.max_transitions = max_transitions;
+        self
+    }
+}
+
+/// One deterministic audit record for a planned tier metadata transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierTransitionAudit {
+    pub memory_id: String,
+    pub workspace_id: String,
+    pub previous_tier: Option<MemoryStorageTier>,
+    pub new_tier: MemoryStorageTier,
+    pub previous_tier_score: Option<u16>,
+    pub new_tier_score: u16,
+    pub transition: MemoryTierTransitionKind,
+    pub reason: &'static str,
+    pub policy_version: &'static str,
+    pub previous_policy_version: Option<String>,
+    pub reference_time: String,
+    pub deterministic_tie_break_key: String,
+    pub required_evidence_preserved: bool,
+    pub counters: MemoryTierTransitionCounters,
+    pub dry_run: bool,
+}
+
+impl MemoryTierTransitionAudit {
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "memoryId": self.memory_id,
+            "workspaceId": self.workspace_id,
+            "previousTier": self.previous_tier.map(MemoryStorageTier::as_str),
+            "newTier": self.new_tier.as_str(),
+            "previousTierScore": self.previous_tier_score,
+            "newTierScore": self.new_tier_score,
+            "transition": self.transition.as_str(),
+            "reason": self.reason,
+            "policyVersion": self.policy_version,
+            "previousPolicyVersion": self.previous_policy_version,
+            "referenceTime": self.reference_time,
+            "deterministicTieBreakKey": self.deterministic_tie_break_key,
+            "requiredEvidencePreserved": self.required_evidence_preserved,
+            "sourceCounters": self.counters.to_json(),
+            "dryRun": self.dry_run,
+            "metadataOnly": true,
+        })
+    }
+}
+
+/// Pure, side-effect-free transition batch. Persistence is intentionally left
+/// to callers so dry-run and write paths can share this exact audit payload.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MemoryTierTransitionPlan {
+    reference_time: String,
+    dry_run: bool,
+    max_transitions: usize,
+    input_count: usize,
+    audits: Vec<MemoryTierTransitionAudit>,
+}
+
+impl MemoryTierTransitionPlan {
+    #[must_use]
+    pub const fn schema(&self) -> &'static str {
+        MEMORY_TIER_TRANSITION_AUDIT_SCHEMA
+    }
+
+    #[must_use]
+    pub const fn input_count(&self) -> usize {
+        self.input_count
+    }
+
+    #[must_use]
+    pub fn audits(&self) -> &[MemoryTierTransitionAudit] {
+        &self.audits
+    }
+
+    #[must_use]
+    pub fn transition_count(&self, kind: MemoryTierTransitionKind) -> usize {
+        self.audits
+            .iter()
+            .filter(|audit| audit.transition == kind)
+            .count()
+    }
+
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        json!({
+            "schema": MEMORY_TIER_TRANSITION_AUDIT_SCHEMA,
+            "policyVersion": MEMORY_TIER_POLICY_VERSION,
+            "referenceTime": self.reference_time,
+            "dryRun": self.dry_run,
+            "metadataOnly": true,
+            "inputCount": self.input_count,
+            "emittedCount": self.audits.len(),
+            "maxTransitions": self.max_transitions,
+            "transitionCounts": {
+                "admit": self.transition_count(MemoryTierTransitionKind::Admit),
+                "promote": self.transition_count(MemoryTierTransitionKind::Promote),
+                "retain": self.transition_count(MemoryTierTransitionKind::Retain),
+                "demote": self.transition_count(MemoryTierTransitionKind::Demote),
+                "evict": self.transition_count(MemoryTierTransitionKind::Evict),
+            },
+            "audits": self
+                .audits
+                .iter()
+                .map(MemoryTierTransitionAudit::to_json)
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[must_use]
+pub fn plan_memory_tier_transitions(
+    inputs: impl IntoIterator<Item = MemoryTierTransitionInput>,
+    options: MemoryTierTransitionOptions,
+) -> MemoryTierTransitionPlan {
+    let mut audits = inputs
+        .into_iter()
+        .map(|input| transition_audit(input, &options))
+        .collect::<Vec<_>>();
+    let input_count = audits.len();
+    audits.sort_by(|left, right| {
+        left.deterministic_tie_break_key
+            .cmp(&right.deterministic_tie_break_key)
+    });
+    if options.max_transitions > 0 {
+        audits.truncate(options.max_transitions);
+    }
+
+    MemoryTierTransitionPlan {
+        reference_time: options.reference_time,
+        dry_run: options.dry_run,
+        max_transitions: options.max_transitions,
+        input_count,
+        audits,
+    }
+}
+
+fn transition_audit(
+    input: MemoryTierTransitionInput,
+    options: &MemoryTierTransitionOptions,
+) -> MemoryTierTransitionAudit {
+    let assignment = input.assignment;
+    let previous = input.previous;
+    let previous_tier = previous.as_ref().map(|state| state.tier);
+    let previous_tier_score = previous.as_ref().map(|state| state.tier_score);
+    let previous_policy_version = previous.as_ref().map(|state| state.policy_version.clone());
+    let transition = transition_kind(previous_tier, assignment.tier);
+    let reason = transition_reason(transition, input.counters);
+
+    MemoryTierTransitionAudit {
+        memory_id: assignment.memory_id,
+        workspace_id: assignment.workspace_id,
+        previous_tier,
+        new_tier: assignment.tier,
+        previous_tier_score,
+        new_tier_score: assignment.tier_score,
+        transition,
+        reason,
+        policy_version: assignment.policy_version,
+        previous_policy_version,
+        reference_time: options.reference_time.clone(),
+        deterministic_tie_break_key: assignment.deterministic_tie_break_key,
+        required_evidence_preserved: assignment.required_evidence_preserved,
+        counters: input.counters,
+        dry_run: options.dry_run,
+    }
+}
+
+fn transition_kind(
+    previous_tier: Option<MemoryStorageTier>,
+    new_tier: MemoryStorageTier,
+) -> MemoryTierTransitionKind {
+    let Some(previous_tier) = previous_tier else {
+        return MemoryTierTransitionKind::Admit;
+    };
+    if previous_tier == new_tier {
+        MemoryTierTransitionKind::Retain
+    } else if new_tier == MemoryStorageTier::Cold {
+        MemoryTierTransitionKind::Evict
+    } else if new_tier < previous_tier {
+        MemoryTierTransitionKind::Promote
+    } else {
+        MemoryTierTransitionKind::Demote
+    }
+}
+
+fn transition_reason(
+    transition: MemoryTierTransitionKind,
+    counters: MemoryTierTransitionCounters,
+) -> &'static str {
+    match transition {
+        MemoryTierTransitionKind::Admit => "admit_new_tier_assignment",
+        MemoryTierTransitionKind::Promote => "promote_higher_tier_score",
+        MemoryTierTransitionKind::Retain => "retain_same_tier",
+        MemoryTierTransitionKind::Demote if counters.decay_penalty_basis_points > 0 => {
+            "demote_decay_or_trust_penalty"
+        }
+        MemoryTierTransitionKind::Demote => "demote_lower_tier_score",
+        MemoryTierTransitionKind::Evict => "evict_to_cold_metadata_only",
     }
 }
 
@@ -989,6 +1354,40 @@ pub fn cache_prewarm_report_from_manifest_json(
     }))
 }
 
+/// Build a cache-prewarm report and attach advisory memory-tier residency
+/// posture. The tier metadata is treated as a derived input: stale tier
+/// generations are rejected and surfaced through `degraded[]`, while the
+/// underlying search/pack prewarm report remains computed from the hotset
+/// manifest alone.
+pub fn tier_aware_cache_prewarm_report_from_manifest_json(
+    manifest: &Value,
+    tier_assignments: impl IntoIterator<Item = MemoryTierAssignment>,
+    tier_generation: u64,
+    options: &CachePrewarmOptions,
+) -> Result<Value, String> {
+    ensure_manifest_header(manifest)?;
+    let admission_threshold = u64_field(manifest, "admissionThreshold")?;
+    let current_generation = options.current_generation.unwrap_or(admission_threshold);
+    let assignments = tier_assignments.into_iter().collect::<Vec<_>>();
+
+    let mut report = cache_prewarm_report_from_manifest_json(manifest, options)?;
+    let (posture, degraded) =
+        memory_tier_prewarm_posture(&report, &assignments, tier_generation, current_generation);
+    let Some(object) = report.as_object_mut() else {
+        return Err("cache prewarm report must be a JSON object".to_owned());
+    };
+    object.insert("memoryTierPosture".to_owned(), posture);
+    if !degraded.is_empty() {
+        match object.get_mut("degraded") {
+            Some(Value::Array(existing)) => existing.extend(degraded),
+            _ => {
+                object.insert("degraded".to_owned(), Value::Array(degraded));
+            }
+        }
+    }
+    Ok(report)
+}
+
 fn ensure_manifest_header(manifest: &Value) -> Result<(), String> {
     if manifest.get("schema").and_then(Value::as_str) != Some(SCHEMA) {
         return Err(format!("expected {SCHEMA} manifest"));
@@ -1187,6 +1586,135 @@ fn cache_prewarm_degraded(
         }));
     }
     degraded
+}
+
+fn memory_tier_prewarm_posture(
+    report: &Value,
+    assignments: &[MemoryTierAssignment],
+    tier_generation: u64,
+    current_generation: u64,
+) -> (Value, Vec<Value>) {
+    let mut sorted_assignments = assignments.iter().collect::<Vec<_>>();
+    sorted_assignments.sort_by(|left, right| {
+        memory_tier_assignment_key(left)
+            .cmp(&memory_tier_assignment_key(right))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+
+    if sorted_assignments.is_empty() {
+        return (
+            memory_tier_posture_json(
+                "empty",
+                tier_generation,
+                current_generation,
+                MemoryTierPrewarmCounts::default(),
+            ),
+            Vec::new(),
+        );
+    }
+
+    if tier_generation < current_generation {
+        let counts = MemoryTierPrewarmCounts {
+            stale_tier_rejected_count: sorted_assignments.len(),
+            required_cold_evidence_count: sorted_assignments
+                .iter()
+                .filter(|assignment| {
+                    assignment.tier == MemoryStorageTier::Cold
+                        && assignment.required_evidence_preserved
+                })
+                .count(),
+            ..MemoryTierPrewarmCounts::default()
+        };
+        let degraded = vec![json!({
+            "code": MEMORY_TIER_METADATA_STALE_CODE,
+            "severity": "medium",
+            "message": "Cache prewarm rejected memory tier metadata because the tier generation is older than the current generation.",
+            "repair": "Regenerate memory tier assignments before running tier-aware prewarm.",
+            "details": {
+                "tierGeneration": tier_generation,
+                "currentGeneration": current_generation,
+                "staleTierRejectedCount": counts.stale_tier_rejected_count,
+            }
+        })];
+        return (
+            memory_tier_posture_json(
+                "stale_rejected",
+                tier_generation,
+                current_generation,
+                counts,
+            ),
+            degraded,
+        );
+    }
+
+    let admitted_memory_keys = admitted_search_memory_keys(report);
+    let mut counts = MemoryTierPrewarmCounts::default();
+    for assignment in sorted_assignments {
+        let key = memory_tier_assignment_key(assignment);
+        let admitted = admitted_memory_keys.contains(&key);
+        match (assignment.tier, admitted) {
+            (MemoryStorageTier::Hot, true) => counts.admitted_hot_count += 1,
+            (MemoryStorageTier::Warm, true) => counts.admitted_warm_count += 1,
+            (MemoryStorageTier::Cold, true) => counts.admitted_cold_count += 1,
+            (MemoryStorageTier::Cold, false) => counts.cold_recall_skipped_count += 1,
+            (MemoryStorageTier::Hot | MemoryStorageTier::Warm, false) => {}
+        }
+        if assignment.tier == MemoryStorageTier::Cold && assignment.required_evidence_preserved {
+            counts.required_cold_evidence_count += 1;
+        }
+    }
+
+    (
+        memory_tier_posture_json("fresh", tier_generation, current_generation, counts),
+        Vec::new(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MemoryTierPrewarmCounts {
+    admitted_hot_count: usize,
+    admitted_warm_count: usize,
+    admitted_cold_count: usize,
+    cold_recall_skipped_count: usize,
+    required_cold_evidence_count: usize,
+    stale_tier_rejected_count: usize,
+}
+
+fn memory_tier_posture_json(
+    status: &'static str,
+    tier_generation: u64,
+    current_generation: u64,
+    counts: MemoryTierPrewarmCounts,
+) -> Value {
+    json!({
+        "status": status,
+        "advisoryOnly": true,
+        "policyVersion": MEMORY_TIER_POLICY_VERSION,
+        "tierGeneration": tier_generation,
+        "currentGeneration": current_generation,
+        "preservesColdRecallEligibility": true,
+        "admittedHotCount": counts.admitted_hot_count,
+        "admittedWarmCount": counts.admitted_warm_count,
+        "admittedColdCount": counts.admitted_cold_count,
+        "coldRecallSkippedCount": counts.cold_recall_skipped_count,
+        "requiredColdEvidenceCount": counts.required_cold_evidence_count,
+        "staleTierRejectedCount": counts.stale_tier_rejected_count,
+    })
+}
+
+fn admitted_search_memory_keys(report: &Value) -> BTreeSet<String> {
+    report
+        .pointer("/reports/search/admitted")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("kind").and_then(Value::as_str) == Some("memory"))
+        .filter_map(|entry| entry.get("key").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+fn memory_tier_assignment_key(assignment: &MemoryTierAssignment) -> String {
+    SearchHotsetEntry::memory(&assignment.memory_id, 0, 0).key
 }
 
 fn report_status(report: &Value) -> Option<&str> {
@@ -1973,6 +2501,228 @@ mod tests {
         assert_eq!(assignments[0].policy_version, MEMORY_TIER_POLICY_VERSION);
     }
 
+    fn tier_assignment(
+        memory_id: &str,
+        tier: MemoryStorageTier,
+        score: u16,
+    ) -> MemoryTierAssignment {
+        MemoryTierAssignment {
+            memory_id: memory_id.to_owned(),
+            workspace_id: "ws-tier".to_owned(),
+            tier,
+            tier_score: score,
+            tier_assignment_reason: "test_assignment",
+            deterministic_tie_break_key: format!("ws-tier:{memory_id}"),
+            policy_version: MEMORY_TIER_POLICY_VERSION,
+            required_evidence_preserved: false,
+        }
+    }
+
+    fn previous_tier(
+        memory_id: &str,
+        tier: MemoryStorageTier,
+        score: u16,
+    ) -> MemoryTierPreviousState {
+        MemoryTierPreviousState::new(
+            memory_id,
+            "ws-tier",
+            tier,
+            score,
+            MEMORY_TIER_POLICY_VERSION,
+        )
+    }
+
+    #[test]
+    fn memory_tier_transition_plan_classifies_metadata_only_changes() {
+        let options = MemoryTierTransitionOptions::new("2026-05-22T23:30:00Z");
+        let demotion_counters = MemoryTierTransitionCounters::new(2, 0, 250, 300, 450);
+        let plan = plan_memory_tier_transitions(
+            [
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_new",
+                    MemoryStorageTier::Hot,
+                    930,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_promote",
+                    MemoryStorageTier::Hot,
+                    880,
+                ))
+                .with_previous(previous_tier(
+                    "mem_promote",
+                    MemoryStorageTier::Warm,
+                    650,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_demote",
+                    MemoryStorageTier::Warm,
+                    590,
+                ))
+                .with_previous(previous_tier("mem_demote", MemoryStorageTier::Hot, 860))
+                .with_counters(demotion_counters),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_evict",
+                    MemoryStorageTier::Cold,
+                    120,
+                ))
+                .with_previous(previous_tier(
+                    "mem_evict",
+                    MemoryStorageTier::Hot,
+                    790,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_retain",
+                    MemoryStorageTier::Warm,
+                    620,
+                ))
+                .with_previous(previous_tier(
+                    "mem_retain",
+                    MemoryStorageTier::Warm,
+                    615,
+                )),
+            ],
+            options,
+        );
+
+        assert_eq!(plan.schema(), MEMORY_TIER_TRANSITION_AUDIT_SCHEMA);
+        assert_eq!(plan.input_count(), 5);
+        assert_eq!(plan.transition_count(MemoryTierTransitionKind::Admit), 1);
+        assert_eq!(plan.transition_count(MemoryTierTransitionKind::Promote), 1);
+        assert_eq!(plan.transition_count(MemoryTierTransitionKind::Demote), 1);
+        assert_eq!(plan.transition_count(MemoryTierTransitionKind::Evict), 1);
+        assert_eq!(plan.transition_count(MemoryTierTransitionKind::Retain), 1);
+
+        let json = plan.to_json();
+        assert_eq!(json["schema"], MEMORY_TIER_TRANSITION_AUDIT_SCHEMA);
+        assert_eq!(json["metadataOnly"], true);
+        assert_eq!(json["transitionCounts"]["evict"], 1);
+
+        let audits = json["audits"].as_array().expect("audit array");
+        let demote = audits
+            .iter()
+            .find(|audit| audit["memoryId"] == "mem_demote")
+            .expect("demote audit");
+        assert_eq!(demote["transition"], "demote");
+        assert_eq!(demote["reason"], "demote_decay_or_trust_penalty");
+        assert_eq!(
+            demote["sourceCounters"]["decayPenaltyBasisPoints"],
+            demotion_counters.decay_penalty_basis_points
+        );
+
+        let evict = audits
+            .iter()
+            .find(|audit| audit["memoryId"] == "mem_evict")
+            .expect("evict audit");
+        assert_eq!(evict["previousTier"], "hot");
+        assert_eq!(evict["newTier"], "cold");
+        assert_eq!(evict["reason"], "evict_to_cold_metadata_only");
+        assert_eq!(evict["metadataOnly"], true);
+    }
+
+    #[test]
+    fn memory_tier_transition_plan_is_deterministic_and_bounded() -> TestResult {
+        let options =
+            MemoryTierTransitionOptions::new("2026-05-22T23:31:00Z").with_max_transitions(2);
+        let first = plan_memory_tier_transitions(
+            [
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_c",
+                    MemoryStorageTier::Cold,
+                    100,
+                ))
+                .with_previous(previous_tier(
+                    "mem_c",
+                    MemoryStorageTier::Warm,
+                    600,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_a",
+                    MemoryStorageTier::Hot,
+                    900,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_b",
+                    MemoryStorageTier::Warm,
+                    650,
+                ))
+                .with_previous(previous_tier(
+                    "mem_b",
+                    MemoryStorageTier::Cold,
+                    250,
+                )),
+            ],
+            options.clone(),
+        );
+        let second = plan_memory_tier_transitions(
+            [
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_b",
+                    MemoryStorageTier::Warm,
+                    650,
+                ))
+                .with_previous(previous_tier(
+                    "mem_b",
+                    MemoryStorageTier::Cold,
+                    250,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_c",
+                    MemoryStorageTier::Cold,
+                    100,
+                ))
+                .with_previous(previous_tier(
+                    "mem_c",
+                    MemoryStorageTier::Warm,
+                    600,
+                )),
+                MemoryTierTransitionInput::new(tier_assignment(
+                    "mem_a",
+                    MemoryStorageTier::Hot,
+                    900,
+                )),
+            ],
+            options,
+        );
+
+        let s1 = serde_json::to_string(&first.to_json()).map_err(|err| err.to_string())?;
+        let s2 = serde_json::to_string(&second.to_json()).map_err(|err| err.to_string())?;
+        assert_eq!(s1, s2, "bounded transition batches must be stable");
+        assert_eq!(first.input_count(), 3);
+        assert_eq!(first.audits().len(), 2);
+        assert_eq!(first.audits()[0].memory_id, "mem_a");
+        assert_eq!(first.audits()[1].memory_id, "mem_b");
+        Ok(())
+    }
+
+    #[test]
+    fn memory_tier_transition_dry_run_and_write_plan_share_audit_identity() {
+        let input = MemoryTierTransitionInput::new(tier_assignment(
+            "mem_shared",
+            MemoryStorageTier::Warm,
+            610,
+        ))
+        .with_previous(previous_tier("mem_shared", MemoryStorageTier::Cold, 120));
+        let dry_run = plan_memory_tier_transitions(
+            [input.clone()],
+            MemoryTierTransitionOptions::new("2026-05-22T23:32:00Z").with_dry_run(true),
+        );
+        let write_plan = plan_memory_tier_transitions(
+            [input],
+            MemoryTierTransitionOptions::new("2026-05-22T23:32:00Z").with_dry_run(false),
+        );
+
+        let dry_audit = &dry_run.audits()[0];
+        let write_audit = &write_plan.audits()[0];
+        assert_eq!(dry_audit.memory_id, write_audit.memory_id);
+        assert_eq!(dry_audit.transition, write_audit.transition);
+        assert_eq!(
+            dry_audit.deterministic_tie_break_key,
+            write_audit.deterministic_tie_break_key
+        );
+        assert!(dry_audit.dry_run);
+        assert!(!write_audit.dry_run);
+    }
+
     fn bead_signal(id: &str, summary: &str) -> PrewarmSignal {
         PrewarmSignal::new(PrewarmSignalSource::Beads, id, summary)
             .with_labels(["context", "prewarm", "swarm-scale"])
@@ -2082,5 +2832,131 @@ mod tests {
         let json = plan.to_json();
         assert_eq!(json["candidateCount"], 0);
         assert_eq!(json["degraded"][0]["code"], "hotset_prewarm_no_signals");
+    }
+
+    #[test]
+    fn tier_aware_prewarm_counts_tiers_without_hiding_required_cold() -> TestResult {
+        let manifest = builder(11)
+            .search_entries([
+                SearchHotsetEntry::memory("mem_hot", 11, 5),
+                SearchHotsetEntry::memory("mem_warm", 11, 4),
+                SearchHotsetEntry::memory("mem_cold", 11, 3),
+            ])
+            .build()
+            .to_json();
+        let required_cold = MemoryTierInput::from_normalized_scores(
+            "mem_required_cold",
+            "ws-tier",
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+        )
+        .with_mandatory_provenance(true);
+        let assignments = assign_memory_storage_tiers(
+            [
+                tier_input("mem_hot", 0.95),
+                tier_input("mem_warm", 0.60),
+                tier_input("mem_cold", 0.20),
+                required_cold,
+            ],
+            MemoryTierPolicyConfig::new(1, 1, 700),
+        );
+
+        let report = tier_aware_cache_prewarm_report_from_manifest_json(
+            &manifest,
+            assignments,
+            11,
+            &CachePrewarmOptions::new("balanced", CacheBudget::new(16, 16 * 1024))
+                .with_current_generation(Some(11)),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let posture = &report["memoryTierPosture"];
+        assert_eq!(posture["status"], "fresh");
+        assert_eq!(posture["admittedHotCount"], 1);
+        assert_eq!(posture["admittedWarmCount"], 1);
+        assert_eq!(posture["admittedColdCount"], 1);
+        assert_eq!(posture["coldRecallSkippedCount"], 1);
+        assert_eq!(posture["requiredColdEvidenceCount"], 1);
+        assert_eq!(posture["preservesColdRecallEligibility"], true);
+        assert!(report["degraded"].as_array().is_none_or(|codes| {
+            codes
+                .iter()
+                .all(|code| code["code"] != MEMORY_TIER_METADATA_STALE_CODE)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn tier_aware_prewarm_rejects_stale_tier_metadata() -> TestResult {
+        let manifest = builder(12)
+            .search_entries([SearchHotsetEntry::memory("mem_hot", 12, 5)])
+            .build()
+            .to_json();
+        let assignments = assign_memory_storage_tiers(
+            [tier_input("mem_hot", 0.95), tier_input("mem_warm", 0.60)],
+            MemoryTierPolicyConfig::new(1, 1, 700),
+        );
+
+        let report = tier_aware_cache_prewarm_report_from_manifest_json(
+            &manifest,
+            assignments,
+            9,
+            &CachePrewarmOptions::new("balanced", CacheBudget::new(16, 16 * 1024))
+                .with_current_generation(Some(12)),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let posture = &report["memoryTierPosture"];
+        assert_eq!(posture["status"], "stale_rejected");
+        assert_eq!(posture["tierGeneration"], 9);
+        assert_eq!(posture["currentGeneration"], 12);
+        assert_eq!(posture["admittedHotCount"], 0);
+        assert_eq!(posture["staleTierRejectedCount"], 2);
+        let degraded = report["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded should be an array".to_owned())?;
+        assert!(
+            degraded
+                .iter()
+                .any(|code| code["code"] == MEMORY_TIER_METADATA_STALE_CODE),
+            "stale tier metadata must emit {MEMORY_TIER_METADATA_STALE_CODE}: {degraded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn tier_aware_prewarm_is_deterministic_for_assignment_order() -> TestResult {
+        let manifest = builder(13)
+            .search_entries([
+                SearchHotsetEntry::memory("mem_a", 13, 5),
+                SearchHotsetEntry::memory("mem_b", 13, 4),
+            ])
+            .build()
+            .to_json();
+        let assignments = assign_memory_storage_tiers(
+            [tier_input("mem_b", 0.8), tier_input("mem_a", 0.8)],
+            MemoryTierPolicyConfig::new(1, 1, 700),
+        );
+        let reversed = assignments.iter().rev().cloned().collect::<Vec<_>>();
+        let options = CachePrewarmOptions::new("balanced", CacheBudget::new(16, 16 * 1024))
+            .with_current_generation(Some(13));
+
+        let first = tier_aware_cache_prewarm_report_from_manifest_json(
+            &manifest,
+            assignments,
+            13,
+            &options,
+        )
+        .map_err(|error| error.to_string())?;
+        let second =
+            tier_aware_cache_prewarm_report_from_manifest_json(&manifest, reversed, 13, &options)
+                .map_err(|error| error.to_string())?;
+
+        let first_json = serde_json::to_string(&first).map_err(|error| error.to_string())?;
+        let second_json = serde_json::to_string(&second).map_err(|error| error.to_string())?;
+        assert_eq!(first_json, second_json);
+        Ok(())
     }
 }

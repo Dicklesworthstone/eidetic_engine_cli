@@ -617,6 +617,11 @@ a budget from retrieval entropy, graph fanout, and task keywords. Passing
 `--max-tokens N` pins the budget for prompt caches, eval fixtures, CI gates, or
 multi-pack composition.
 
+When `[pack] memory_tier_admission = true`, `ee context` treats hot/warm/cold
+memory tiers as advisory candidate signals. Hot and warm candidates can receive
+small deterministic ranking boosts, but cold items are not filtered; explicit
+query matches and safety/failure evidence remain eligible for the pack.
+
 ### Graph-derived insights
 
 Graph views show relationships between memories for navigation, packing,
@@ -1111,6 +1116,7 @@ default_max_tokens = 4000
 adaptive_budget  = false
 mmr_lambda       = 0.7
 candidate_pool   = 100
+memory_tier_admission = false
 
 [curation]
 duplicate_similarity = 0.92
