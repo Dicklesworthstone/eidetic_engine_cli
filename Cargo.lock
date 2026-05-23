@@ -1142,6 +1142,7 @@ dependencies = [
  "tru",
  "unicode-normalization",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

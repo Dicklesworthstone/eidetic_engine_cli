@@ -1,0 +1,398 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.pack.compression_manifest.v1.json",
+  "title": "ee.pack.compression_manifest.v1",
+  "description": "Deterministic manifest for a compressed context-pack artifact. Compression is a storage or transport optimization; canonical pack and replay-ledger hashes stay hashes of the uncompressed pack content or ledger bytes.",
+  "type": "object",
+  "required": [
+    "schema",
+    "manifestId",
+    "createdAt",
+    "codec",
+    "compressionLevel",
+    "dictionary",
+    "artifact",
+    "canonical",
+    "corpusWindow",
+    "compatibility",
+    "storage",
+    "fallback",
+    "redactionStatus"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.pack.compression_manifest.v1"},
+    "manifestId": {
+      "type": "string",
+      "pattern": "^packcm_[0-9a-f]{64}$",
+      "description": "BLAKE3 content address over the manifest identity object. The identity object excludes manifestId, createdAt, storage paths, and operational notes."
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Audit timestamp for this manifest record. It is never part of manifestId, dictionaryId, packHash, or ledgerHash."
+    },
+    "codec": {"type": "string", "enum": ["zstd"]},
+    "codecVersion": {
+      "type": ["string", "null"],
+      "description": "Optional codec implementation version for diagnostics. Readers must not require it to compute canonical hashes."
+    },
+    "compressionLevel": {
+      "type": "integer",
+      "minimum": -7,
+      "maximum": 22
+    },
+    "dictionary": {
+      "type": "object",
+      "required": [
+        "dictionaryId",
+        "dictionaryByteHash",
+        "dictionarySourceHash",
+        "dictionaryBytes",
+        "trainingAlgorithm"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "dictionaryId": {
+          "type": "string",
+          "pattern": "^zstd_dict_[0-9a-f]{64}$",
+          "description": "Content address for the dictionary bytes: zstd_dict_ plus the BLAKE3 hash of the raw dictionary."
+        },
+        "dictionaryByteHash": {"$ref": "#/$defs/blake3Hash"},
+        "dictionarySourceHash": {
+          "$ref": "#/$defs/blake3Hash",
+          "description": "BLAKE3 hash of the deterministic training-corpus manifest, not of the compressed artifact."
+        },
+        "dictionaryBytes": {"type": "integer", "minimum": 0},
+        "trainingAlgorithm": {
+          "type": "string",
+          "description": "Stable algorithm id for dictionary training, for example zstd_train_from_pack_corpus_v1."
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "kind",
+        "uncompressedByteHash",
+        "compressedByteHash",
+        "uncompressedBytes",
+        "compressedBytes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["pack_json_response", "pack_binary_frame", "pack_replay_ledger", "l2_cache_entry"]
+        },
+        "packId": {"type": ["string", "null"]},
+        "packHash": {"type": ["string", "null"]},
+        "ledgerHash": {"type": ["string", "null"]},
+        "uncompressedByteHash": {
+          "$ref": "#/$defs/blake3Hash",
+          "description": "Hash of the exact uncompressed bytes that existing readers consume."
+        },
+        "compressedByteHash": {
+          "$ref": "#/$defs/blake3Hash",
+          "description": "Hash of the compressed byte stream, including any codec frame metadata."
+        },
+        "uncompressedBytes": {"type": "integer", "minimum": 0},
+        "compressedBytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "canonical": {
+      "type": "object",
+      "required": [
+        "hashAlgorithm",
+        "byteEncoding",
+        "manifestIdentity",
+        "packHashMode",
+        "ledgerHashMode",
+        "binaryContentHashMode",
+        "sortOrder"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "hashAlgorithm": {"type": "string", "const": "blake3"},
+        "byteEncoding": {"type": "string", "const": "utf8"},
+        "manifestIdentity": {
+          "type": "string",
+          "const": "stable_json_without_manifestId_createdAt_storage_or_operational_notes"
+        },
+        "packHashMode": {"type": "string", "const": "uncompressed_pack_content_components"},
+        "ledgerHashMode": {"type": "string", "const": "uncompressed_replay_ledger_json"},
+        "binaryContentHashMode": {"type": "string", "const": "uncompressed_binary_footer_canonical_json"},
+        "sortOrder": {
+          "type": "object",
+          "required": ["objectKeys", "arrays"],
+          "additionalProperties": false,
+          "properties": {
+            "objectKeys": {"type": "string", "const": "lexicographic_utf8"},
+            "arrays": {
+              "type": "string",
+              "const": "schema_defined_arrays_preserve_order_other_sets_sort_lexicographically"
+            }
+          }
+        }
+      }
+    },
+    "corpusWindow": {
+      "type": "object",
+      "required": [
+        "sourceKind",
+        "workspaceId",
+        "fromGeneration",
+        "toGeneration",
+        "sampleCount",
+        "sampleHash"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceKind": {
+          "type": "string",
+          "enum": ["pack_records", "l2_cache_entries", "fixture_corpus", "mixed"]
+        },
+        "workspaceId": {"type": ["string", "null"]},
+        "fromGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "toGeneration": {"type": ["integer", "null"], "minimum": 0},
+        "sampleCount": {"type": "integer", "minimum": 0},
+        "sampleHash": {
+          "$ref": "#/$defs/blake3Hash",
+          "description": "BLAKE3 hash of the ordered training sample identity list."
+        },
+        "redactionLevel": {"type": ["string", "null"]},
+        "notes": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "required": [
+        "minReaderVersion",
+        "transparentFallbackRequired",
+        "preservesPackHash",
+        "preservesLedgerHash",
+        "readerMayIgnoreManifest",
+        "writerMustKeepUncompressedRecovery"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "minReaderVersion": {"type": "string"},
+        "featureFlag": {"type": ["string", "null"]},
+        "transparentFallbackRequired": {"type": "boolean", "const": true},
+        "preservesPackHash": {"type": "boolean", "const": true},
+        "preservesLedgerHash": {"type": "boolean", "const": true},
+        "readerMayIgnoreManifest": {"type": "boolean", "const": true},
+        "writerMustKeepUncompressedRecovery": {"type": "boolean", "const": true}
+      }
+    },
+    "storage": {
+      "type": "object",
+      "required": [
+        "authority",
+        "sidecarPath",
+        "dbReference",
+        "publish",
+        "rollback"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "authority": {"type": "string", "const": "sidecar_file"},
+        "sidecarPath": {
+          "type": "string",
+          "description": "Workspace-relative path under .ee/derived/pack-compression/manifests/."
+        },
+        "dbReference": {
+          "type": "object",
+          "required": ["mode", "table", "columns"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": {"type": "string", "enum": ["none", "nullable_metadata_reference"]},
+            "table": {"type": ["string", "null"]},
+            "columns": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "publish": {"type": "string", "const": "write_temp_fsync_rename_fsync_parent"},
+        "rollback": {
+          "type": "string",
+          "const": "ignore_manifest_and_read_uncompressed_source_without_rewriting_pack_record"
+        }
+      }
+    },
+    "fallback": {
+      "type": "object",
+      "required": [
+        "missingManifest",
+        "corruptManifest",
+        "missingDictionary",
+        "staleDictionary",
+        "hashMismatch",
+        "unsupportedCodec"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "missingManifest": {"$ref": "#/$defs/fallbackCase"},
+        "corruptManifest": {"$ref": "#/$defs/fallbackCase"},
+        "missingDictionary": {"$ref": "#/$defs/fallbackCase"},
+        "staleDictionary": {"$ref": "#/$defs/fallbackCase"},
+        "hashMismatch": {"$ref": "#/$defs/fallbackCase"},
+        "unsupportedCodec": {"$ref": "#/$defs/fallbackCase"}
+      }
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "ids_hashes_counts_paths_no_pack_content_no_query_text"
+    },
+    "operationalNotes": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Human diagnostics only. This field is excluded from manifestId."
+    }
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "fallbackCase": {
+      "type": "object",
+      "required": ["degradedCode", "severity", "behavior", "selectedItemsUnaffected"],
+      "additionalProperties": false,
+      "properties": {
+        "degradedCode": {"type": "string"},
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "behavior": {
+          "type": "string",
+          "enum": ["read_uncompressed_source", "cache_miss_and_reassemble", "reject_compressed_artifact"]
+        },
+        "selectedItemsUnaffected": {"type": "boolean"},
+        "repair": {"type": ["string", "null"]}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.pack.compression_manifest.v1",
+      "manifestId": "packcm_1111111111111111111111111111111111111111111111111111111111111111",
+      "createdAt": "2026-05-22T22:40:00Z",
+      "codec": "zstd",
+      "codecVersion": null,
+      "compressionLevel": 8,
+      "dictionary": {
+        "dictionaryId": "zstd_dict_2222222222222222222222222222222222222222222222222222222222222222",
+        "dictionaryByteHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+        "dictionarySourceHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+        "dictionaryBytes": 65536,
+        "trainingAlgorithm": "zstd_train_from_pack_corpus_v1"
+      },
+      "artifact": {
+        "kind": "l2_cache_entry",
+        "packId": null,
+        "packHash": "blake3:4444444444444444444444444444444444444444444444444444444444444444",
+        "ledgerHash": null,
+        "uncompressedByteHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
+        "compressedByteHash": "blake3:6666666666666666666666666666666666666666666666666666666666666666",
+        "uncompressedBytes": 48000,
+        "compressedBytes": 12000
+      },
+      "canonical": {
+        "hashAlgorithm": "blake3",
+        "byteEncoding": "utf8",
+        "manifestIdentity": "stable_json_without_manifestId_createdAt_storage_or_operational_notes",
+        "packHashMode": "uncompressed_pack_content_components",
+        "ledgerHashMode": "uncompressed_replay_ledger_json",
+        "binaryContentHashMode": "uncompressed_binary_footer_canonical_json",
+        "sortOrder": {
+          "objectKeys": "lexicographic_utf8",
+          "arrays": "schema_defined_arrays_preserve_order_other_sets_sort_lexicographically"
+        }
+      },
+      "corpusWindow": {
+        "sourceKind": "pack_records",
+        "workspaceId": "wsp_0123456789abcdef01234567",
+        "fromGeneration": 100,
+        "toGeneration": 180,
+        "sampleCount": 256,
+        "sampleHash": "blake3:7777777777777777777777777777777777777777777777777777777777777777",
+        "redactionLevel": "minimal",
+        "notes": []
+      },
+      "compatibility": {
+        "minReaderVersion": "0.3.0",
+        "featureFlag": null,
+        "transparentFallbackRequired": true,
+        "preservesPackHash": true,
+        "preservesLedgerHash": true,
+        "readerMayIgnoreManifest": true,
+        "writerMustKeepUncompressedRecovery": true
+      },
+      "storage": {
+        "authority": "sidecar_file",
+        "sidecarPath": ".ee/derived/pack-compression/manifests/packcm_1111111111111111111111111111111111111111111111111111111111111111.json",
+        "dbReference": {
+          "mode": "nullable_metadata_reference",
+          "table": "pack_compression_manifests",
+          "columns": ["manifest_id", "dictionary_id", "artifact_kind"]
+        },
+        "publish": "write_temp_fsync_rename_fsync_parent",
+        "rollback": "ignore_manifest_and_read_uncompressed_source_without_rewriting_pack_record"
+      },
+      "fallback": {
+        "missingManifest": {
+          "degradedCode": "pack_compression_manifest_missing",
+          "severity": "low",
+          "behavior": "read_uncompressed_source",
+          "selectedItemsUnaffected": true,
+          "repair": "Regenerate compression sidecars from existing pack records."
+        },
+        "corruptManifest": {
+          "degradedCode": "pack_compression_manifest_corrupt",
+          "severity": "warning",
+          "behavior": "read_uncompressed_source",
+          "selectedItemsUnaffected": true,
+          "repair": "Regenerate compression sidecars and inspect the manifest path."
+        },
+        "missingDictionary": {
+          "degradedCode": "pack_compression_dictionary_missing",
+          "severity": "low",
+          "behavior": "read_uncompressed_source",
+          "selectedItemsUnaffected": true,
+          "repair": "Rebuild the dictionary sidecar for the recorded dictionaryId."
+        },
+        "staleDictionary": {
+          "degradedCode": "pack_compression_dictionary_stale",
+          "severity": "low",
+          "behavior": "cache_miss_and_reassemble",
+          "selectedItemsUnaffected": true,
+          "repair": "Train a fresh dictionary for the current corpus window."
+        },
+        "hashMismatch": {
+          "degradedCode": "pack_compression_hash_mismatch",
+          "severity": "high",
+          "behavior": "reject_compressed_artifact",
+          "selectedItemsUnaffected": true,
+          "repair": "Discard the compressed artifact and rebuild it from the uncompressed source."
+        },
+        "unsupportedCodec": {
+          "degradedCode": "pack_compression_codec_unsupported",
+          "severity": "warning",
+          "behavior": "read_uncompressed_source",
+          "selectedItemsUnaffected": true,
+          "repair": "Upgrade the reader or regenerate with a supported codec."
+        }
+      },
+      "redactionStatus": "ids_hashes_counts_paths_no_pack_content_no_query_text",
+      "operationalNotes": []
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-1prrl.5.1",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/pack-compression.md"
+}

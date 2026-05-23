@@ -58,6 +58,11 @@ Operational metadata belongs in tracing events, not inside the cached JSON
 body. This keeps cached and fresh responses comparable by ordinary determinism
 tests.
 
+Future compressed cache entries must preserve this rule. The compression
+manifest contract is `ee.pack.compression_manifest.v1`; see
+`docs/pack-compression.md`. Compression metadata can select a storage
+representation, but it must not change the canonical key or the emitted JSON.
+
 ## Read Path
 
 The intended read order is:

@@ -122,6 +122,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # Already in dep tree transitively; explicit dep documents the contract.
 unicode-normalization = { version = "0.1" }
 uuid = { version = "1", features = ["v7"] }
+# Direct dependency for deterministic pack-compression dictionary training.
+# The default zstd features include zdict_builder; no forbidden async or HTTP
+# stack is introduced.
+zstd = { version = "0.13.3" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
