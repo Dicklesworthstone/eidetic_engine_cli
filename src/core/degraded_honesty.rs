@@ -103,6 +103,13 @@ impl HonestyReport {
 /// - Start with a known command prefix (ee, cargo, cass, etc.)
 /// - Not be empty
 /// - Not contain placeholder text
+///
+/// This is the original permissive check: a repair containing an unresolved
+/// `<path>` / `<memory-id>` / `<command>` metavariable still passes here
+/// (templates are useful as repair hints even when they are not directly
+/// executable). For a finer-grained classification that distinguishes
+/// actionable commands from templates, see
+/// [`classify_repair_command`] and [`is_repair_command_template`].
 #[must_use]
 pub fn validate_repair_command(repair: &str) -> HonestyCheckResult {
     if repair.is_empty() {
@@ -134,6 +141,109 @@ pub fn validate_repair_command(repair: &str) -> HonestyCheckResult {
     }
 
     HonestyCheckResult::pass("repair_valid")
+}
+
+/// Actionability classification for a repair command (bd-1g7ar).
+///
+/// `validate_repair_command` is intentionally permissive: it accepts both
+/// directly-executable repairs (`ee index rebuild --workspace .`) and
+/// templated repair hints that contain unresolved metavariables such as
+/// `<path>` or `<memory-id>`. Agent harnesses that want to surface "you can
+/// run this command as-is" vs "this is a template to fill in" need a finer
+/// classification — this enum names those states.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairCommandKind {
+    /// The repair string is empty.
+    Empty,
+    /// The repair does not start with a known command prefix.
+    Unknown,
+    /// The repair matches an explicit placeholder marker (`todo`, `fixme`,
+    /// `<placeholder>`, `xxx`, `???`). These signal unfinished authoring,
+    /// not a runnable template.
+    Placeholder,
+    /// The repair contains at least one unresolved angle-bracket metavariable
+    /// (e.g. `<file>`, `<path>`, `<memory-id>`). It is meaningful as a
+    /// template the agent must fill in, but is not directly executable.
+    Template,
+    /// The repair starts with a known prefix and contains no metavariables
+    /// or placeholder markers — directly executable as-is.
+    Actionable,
+}
+
+/// Classify a repair command's actionability without mutating the existing
+/// permissive `validate_repair_command` contract.
+///
+/// This is the strict counterpart to [`validate_repair_command`]: it returns
+/// a typed kind so downstream code can distinguish runnable commands from
+/// templates and placeholders. Callers that need the original boolean-style
+/// honesty check should keep using `validate_repair_command`.
+#[must_use]
+pub fn classify_repair_command(repair: &str) -> RepairCommandKind {
+    if repair.is_empty() {
+        return RepairCommandKind::Empty;
+    }
+
+    let known_prefixes = ["ee ", "cargo ", "cass ", "chmod ", "rm ", "sqlite3 "];
+    if !known_prefixes.iter().any(|p| repair.starts_with(p)) {
+        return RepairCommandKind::Unknown;
+    }
+
+    let placeholder_patterns = ["todo", "fixme", "<placeholder>", "xxx", "???"];
+    let lower_repair = repair.to_lowercase();
+    if placeholder_patterns
+        .iter()
+        .any(|pattern| lower_repair.contains(pattern))
+    {
+        return RepairCommandKind::Placeholder;
+    }
+
+    if contains_unresolved_metavariable(repair) {
+        return RepairCommandKind::Template;
+    }
+
+    RepairCommandKind::Actionable
+}
+
+/// Convenience predicate: true when `repair` contains at least one
+/// unresolved `<name>` metavariable (excluding the explicit `<placeholder>`
+/// marker, which `classify_repair_command` already maps to
+/// `RepairCommandKind::Placeholder`).
+#[must_use]
+pub fn is_repair_command_template(repair: &str) -> bool {
+    contains_unresolved_metavariable(repair)
+}
+
+fn contains_unresolved_metavariable(repair: &str) -> bool {
+    let bytes = repair.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut j = start;
+        while j < bytes.len() {
+            let c = bytes[j];
+            if c == b'>' {
+                break;
+            }
+            if !(c.is_ascii_alphanumeric() || c == b'_' || c == b'-' || c == b'.') {
+                break;
+            }
+            j += 1;
+        }
+        if j < bytes.len() && bytes[j] == b'>' && j > start {
+            let name = &bytes[start..j];
+            if !name.eq_ignore_ascii_case(b"placeholder") {
+                return true;
+            }
+            i = j + 1;
+        } else {
+            i = j.max(i + 1);
+        }
+    }
+    false
 }
 
 /// Validate that severity accurately reflects impact.
@@ -508,6 +618,108 @@ mod tests {
     fn validate_repair_rejects_unknown_prefix() -> TestResult {
         let result = validate_repair_command("unknown command");
         ensure(result.passed, false, "unknown prefix fails")
+    }
+
+    #[test]
+    fn classify_repair_returns_empty_for_empty_string() -> TestResult {
+        ensure(
+            classify_repair_command(""),
+            RepairCommandKind::Empty,
+            "empty repair",
+        )
+    }
+
+    #[test]
+    fn classify_repair_returns_unknown_for_unknown_prefix() -> TestResult {
+        ensure(
+            classify_repair_command("ssh deploy --rollback"),
+            RepairCommandKind::Unknown,
+            "unknown prefix",
+        )
+    }
+
+    #[test]
+    fn classify_repair_returns_placeholder_for_marker() -> TestResult {
+        ensure(
+            classify_repair_command("ee index rebuild TODO"),
+            RepairCommandKind::Placeholder,
+            "TODO marker is placeholder, not template",
+        )?;
+        ensure(
+            classify_repair_command("ee remember <placeholder>"),
+            RepairCommandKind::Placeholder,
+            "<placeholder> marker is placeholder, not template",
+        )
+    }
+
+    #[test]
+    fn classify_repair_detects_template_for_angle_bracket_metavariables() -> TestResult {
+        ensure(
+            classify_repair_command("ee mesh export --out <file>"),
+            RepairCommandKind::Template,
+            "<file> metavariable -> Template",
+        )?;
+        ensure(
+            classify_repair_command("ee index rebuild --workspace <path>"),
+            RepairCommandKind::Template,
+            "<path> metavariable -> Template",
+        )?;
+        ensure(
+            classify_repair_command("ee memory show <memory-id> --json"),
+            RepairCommandKind::Template,
+            "<memory-id> (kebab) metavariable -> Template",
+        )?;
+        ensure(
+            classify_repair_command("ee preflight check --cmd '<command>' --json"),
+            RepairCommandKind::Template,
+            "<command> inside quotes -> Template",
+        )
+    }
+
+    #[test]
+    fn classify_repair_returns_actionable_for_concrete_command() -> TestResult {
+        ensure(
+            classify_repair_command("ee index rebuild --workspace ."),
+            RepairCommandKind::Actionable,
+            "concrete ee command -> Actionable",
+        )?;
+        ensure(
+            classify_repair_command("chmod 600 /var/lib/ee/db.sqlite"),
+            RepairCommandKind::Actionable,
+            "chmod with concrete path -> Actionable",
+        )?;
+        // A legitimate quoted command that resembles shell syntax but contains
+        // no `<name>` metavariable should remain Actionable, not Template.
+        ensure(
+            classify_repair_command("ee preflight check --cmd 'rm -rf target' --json"),
+            RepairCommandKind::Actionable,
+            "quoted concrete command -> Actionable",
+        )
+    }
+
+    #[test]
+    fn is_repair_command_template_matches_classify() -> TestResult {
+        ensure(
+            is_repair_command_template("ee mesh export --out <file>"),
+            true,
+            "<file> is template",
+        )?;
+        ensure(
+            is_repair_command_template("ee index rebuild --workspace ."),
+            false,
+            "concrete command is not template",
+        )?;
+        ensure(
+            is_repair_command_template("ee remember <placeholder>"),
+            false,
+            "<placeholder> marker is not a template metavariable",
+        )?;
+        // Stray `<` without a closing `>` must not be treated as a metavariable.
+        ensure(
+            is_repair_command_template("ee compare a < b"),
+            false,
+            "stray < is not a metavariable",
+        )
     }
 
     #[test]
