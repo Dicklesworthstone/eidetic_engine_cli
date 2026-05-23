@@ -761,7 +761,7 @@ pub const OUTPUT_FORMATS: &[FormatEntry] = &[
     FormatEntry {
         name: "json",
         flag: "--format json or --json or -j",
-        description: "Structured JSON with ee.response.v1 envelope",
+        description: "Structured JSON with ee.response.v2 envelope",
         machine_readable: true,
     },
     FormatEntry {
@@ -1382,6 +1382,24 @@ mod tests {
             ensure(!fmt.name.is_empty(), "format name non-empty")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn json_output_format_documents_current_response_envelope() -> TestResult {
+        let json_format = OUTPUT_FORMATS
+            .iter()
+            .find(|format| format.name == "json")
+            .ok_or_else(|| "json output format is documented".to_string())?;
+        let legacy_schema = ["ee", "response", "v1"].join(".");
+
+        ensure(
+            json_format.description.contains("ee.response.v2"),
+            "json output format documents ee.response.v2",
+        )?;
+        ensure(
+            !json_format.description.contains(&legacy_schema),
+            "json output format does not document legacy response schema",
+        )
     }
 
     #[test]
