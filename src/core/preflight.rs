@@ -711,7 +711,7 @@ impl PreflightDegradation {
             code: "preflight_evidence_stale".to_owned(),
             severity: "warning".to_owned(),
             message: message.into(),
-            repair: Some("ee preflight run <task> --json".to_owned()),
+            repair: Some("ee preflight run --help".to_owned()),
         }
     }
 }

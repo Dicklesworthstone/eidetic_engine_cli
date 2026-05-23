@@ -3369,7 +3369,7 @@ fn remember_candidate_coherent_cluster(
         .get_memory_tags_batch(&memory_ids)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to load curation cluster memory tags: {error}"),
-            repair: Some("ee memory tags <memory-id> --json".to_owned()),
+            repair: Some("ee memory tags --help".to_owned()),
         })?;
     let embedder = HashEmbedder::default_256();
     let points = cluster
