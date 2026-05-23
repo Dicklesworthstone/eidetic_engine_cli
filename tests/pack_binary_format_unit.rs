@@ -247,3 +247,91 @@ fn non_utf8_canonical_json_surfaces_dedicated_error_code() {
     );
     assert_eq!(error.code(), "pack_bin_json_non_utf8");
 }
+
+// bd-2yerq: the four remaining InvalidOffset reject branches in
+// PackBinaryView::parse were unreachable from existing tests. Each test below
+// targets one specific branch so the parser's "pack_bin_invalid_offset"
+// diagnostic stays the stable signal for every frame-geometry violation, not
+// just the u32::MAX item-length case already pinned by bd-2frot.
+
+#[test]
+fn item_offset_below_blob_start_rejects_as_invalid_offset() {
+    // An item-table entry whose offset points before the item-blob region
+    // (i.e. into the header or item table itself) must be rejected at parse
+    // time. The hash check upstream is unaffected because we only mutate
+    // bytes inside the item table, not inside canonical_json.
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let first_offset_field = PACK_BINARY_HEADER_LEN;
+    frame[first_offset_field..first_offset_field + 8].copy_from_slice(&0_u64.to_le_bytes());
+
+    let error =
+        PackBinaryView::parse(&frame).expect_err("item offset before blob_start should reject");
+    assert!(
+        matches!(error, PackBinaryError::InvalidOffset { .. }),
+        "expected InvalidOffset, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_invalid_offset");
+}
+
+#[test]
+fn canonical_json_offset_below_blob_start_rejects_as_invalid_offset() {
+    // The trailer's canonical_json_offset must live inside the item-blob
+    // region. Pointing it back into the header/table is malformed and must
+    // be rejected before the content-hash check runs (so the diagnostic
+    // surfaces InvalidOffset, not ContentHashMismatch).
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let trailer_offset = frame.len() - PACK_BINARY_TRAILER_LEN;
+    frame[trailer_offset..trailer_offset + 8].copy_from_slice(&0_u64.to_le_bytes());
+
+    let error = PackBinaryView::parse(&frame)
+        .expect_err("canonical_json offset before blob_start should reject");
+    assert!(
+        matches!(error, PackBinaryError::InvalidOffset { .. }),
+        "expected InvalidOffset, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_invalid_offset");
+}
+
+#[test]
+fn canonical_json_extends_into_trailer_rejects_as_invalid_offset() {
+    // canonical_json_end must not overlap the 20-byte trailer. Extending the
+    // declared len past trailer_offset must trip the line-238 bounds check,
+    // not the downstream content-hash comparison.
+    let mut frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let trailer_offset = frame.len() - PACK_BINARY_TRAILER_LEN;
+    let original_len = u64::from_le_bytes(
+        frame[trailer_offset + 8..trailer_offset + 16]
+            .try_into()
+            .expect("canonical_json_len slot"),
+    );
+    let bogus_len = original_len + 10;
+    frame[trailer_offset + 8..trailer_offset + 16].copy_from_slice(&bogus_len.to_le_bytes());
+
+    let error = PackBinaryView::parse(&frame)
+        .expect_err("canonical_json overlapping trailer should reject");
+    assert!(
+        matches!(error, PackBinaryError::InvalidOffset { .. }),
+        "expected InvalidOffset, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_invalid_offset");
+}
+
+#[test]
+fn item_slice_out_of_range_returns_invalid_offset_code() {
+    // empty_item_list_round_trips only asserts is_err() for the empty case;
+    // a non-empty parsed view asking for one past the last index must surface
+    // the same "pack_bin_invalid_offset" code so callers can branch on it
+    // without runtime introspection.
+    let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let view = PackBinaryView::parse(&frame).expect("fixture frame should parse");
+    let out_of_range = view.item_count();
+
+    let error = view
+        .item_slice(out_of_range)
+        .expect_err("index past last item should reject");
+    assert!(
+        matches!(error, PackBinaryError::InvalidOffset { .. }),
+        "expected InvalidOffset, got {error:?}"
+    );
+    assert_eq!(error.code(), "pack_bin_invalid_offset");
+}

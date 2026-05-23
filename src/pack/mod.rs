@@ -4771,6 +4771,74 @@ pub fn assemble_draft_with_profile_and_options_seeded(
     }
 }
 
+#[derive(Debug)]
+struct PackDraftScratch {
+    items: Vec<PackDraftItem>,
+    omitted: Vec<PackOmission>,
+    steps: Vec<PackSelectionStep>,
+}
+
+impl PackDraftScratch {
+    fn with_candidate_capacity(candidate_count: usize) -> Self {
+        Self {
+            items: Vec::with_capacity(candidate_count),
+            omitted: Vec::with_capacity(candidate_count),
+            steps: Vec::with_capacity(candidate_count),
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_for_candidate_capacity(&mut self, candidate_count: usize) {
+        self.items.clear();
+        self.omitted.clear();
+        self.steps.clear();
+        ensure_vec_capacity(&mut self.items, candidate_count);
+        ensure_vec_capacity(&mut self.omitted, candidate_count);
+        ensure_vec_capacity(&mut self.steps, candidate_count);
+    }
+}
+
+#[derive(Debug)]
+struct MmrAssemblyScratch {
+    draft: PackDraftScratch,
+    selected_signatures: Vec<CandidateSignature>,
+    coverage_fill_candidates: Vec<MmrCandidate>,
+    max_selected_similarities: Vec<f32>,
+}
+
+impl MmrAssemblyScratch {
+    fn with_candidate_capacity(candidate_count: usize) -> Self {
+        let mut max_selected_similarities = Vec::with_capacity(candidate_count);
+        max_selected_similarities.resize(candidate_count, 0.0);
+        Self {
+            draft: PackDraftScratch::with_candidate_capacity(candidate_count),
+            selected_signatures: Vec::with_capacity(candidate_count),
+            coverage_fill_candidates: Vec::with_capacity(candidate_count),
+            max_selected_similarities,
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_for_candidate_capacity(&mut self, candidate_count: usize) {
+        self.draft.reset_for_candidate_capacity(candidate_count);
+        self.selected_signatures.clear();
+        self.coverage_fill_candidates.clear();
+        self.max_selected_similarities.clear();
+        ensure_vec_capacity(&mut self.selected_signatures, candidate_count);
+        ensure_vec_capacity(&mut self.coverage_fill_candidates, candidate_count);
+        ensure_vec_capacity(&mut self.max_selected_similarities, candidate_count);
+        self.max_selected_similarities.resize(candidate_count, 0.0);
+    }
+}
+
+#[cfg(test)]
+fn ensure_vec_capacity<T>(values: &mut Vec<T>, candidate_count: usize) {
+    let additional = candidate_count.saturating_sub(values.capacity());
+    if additional > 0 {
+        values.reserve(additional);
+    }
+}
+
 fn assemble_mmr_draft(
     profile: ContextPackProfile,
     query: impl Into<String>,
@@ -4800,32 +4868,26 @@ fn assemble_mmr_draft(
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
-    // bd-1i6np: pre-allocate hot-path accumulators to candidate_count. Each Vec
-    // grows to at most n entries through the selection loop, so allocating
-    // up-front avoids the geometric reallocation chain (~log(n) doublings)
-    // without changing observable output.
-    let mut selected_signatures = Vec::with_capacity(candidate_count);
-    let mut items: Vec<PackDraftItem> = Vec::with_capacity(candidate_count);
-    let mut omitted = Vec::with_capacity(candidate_count);
-    let mut steps = Vec::with_capacity(candidate_count);
+    let mut scratch = MmrAssemblyScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
-    let mut coverage_fill_candidates = Vec::with_capacity(candidate_count);
-    let mut max_selected_similarities = vec![0.0_f32; candidates.len()];
 
     while !candidates.is_empty() {
-        let candidate_index = select_next_candidate_index(&candidates, &max_selected_similarities);
+        let candidate_index =
+            select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
         // bd-1igvf: swap_remove is O(1) where Vec::remove is O(n); selection order
         // is determined by score with a memory_id tiebreaker in
         // [`select_next_candidate_index`], so vec position does not influence which
         // candidate is picked next, and the parallel relationship between
         // candidates[i] and max_selected_similarities[i] is preserved by matching
         // swap_remove on both.
-        let selected_max_similarity = max_selected_similarities.swap_remove(candidate_index);
+        let selected_max_similarity = scratch
+            .max_selected_similarities
+            .swap_remove(candidate_index);
         let selection = candidates.swap_remove(candidate_index);
         let marginal_gain =
             strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
         if marginal_gain <= 0.0 {
-            coverage_fill_candidates.push(selection);
+            scratch.coverage_fill_candidates.push(selection);
             continue;
         }
 
@@ -4845,7 +4907,7 @@ fn assemble_mmr_draft(
                         .checked_add(1)
                         .ok_or(PackValidationError::CandidateRankOverflow)?;
                     objective_value += marginal_gain.max(0.0);
-                    steps.push(PackSelectionStep {
+                    scratch.draft.steps.push(PackSelectionStep {
                         rank,
                         memory_id: selection.candidate.memory_id,
                         marginal_gain,
@@ -4859,21 +4921,24 @@ fn assemble_mmr_draft(
                     let redactions = selection.redactions;
                     section_usage.add_candidate(&candidate);
                     let selected_signature = selection.signature.clone();
-                    selected_signatures.push(selection.signature);
+                    scratch.selected_signatures.push(selection.signature);
                     update_mmr_max_similarities(
-                        &mut max_selected_similarities,
+                        &mut scratch.max_selected_similarities,
                         &candidates,
                         &selected_signature,
                     );
-                    items.push(PackDraftItem::from_selected_candidate(
-                        rank,
-                        candidate,
-                        redactions,
-                        PackSelectionPhase::StrictMmr,
-                    ));
+                    scratch
+                        .draft
+                        .items
+                        .push(PackDraftItem::from_selected_candidate(
+                            rank,
+                            candidate,
+                            redactions,
+                            PackSelectionPhase::StrictMmr,
+                        ));
                 }
                 None => {
-                    omitted.push(PackOmission::from_candidate(
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
                         &selection.candidate,
                         PackOmissionReason::TokenBudgetExceeded,
                         Some(minimal_budget_for_candidate(
@@ -4887,7 +4952,7 @@ fn assemble_mmr_draft(
                 }
             }
         } else {
-            omitted.push(PackOmission::from_candidate(
+            scratch.draft.omitted.push(PackOmission::from_candidate(
                 &selection.candidate,
                 PackOmissionReason::TokenBudgetExceeded,
                 Some(minimal_budget_for_candidate(
@@ -4902,13 +4967,15 @@ fn assemble_mmr_draft(
     }
 
     if options.include_coverage_fill {
-        coverage_fill_candidates
+        scratch
+            .coverage_fill_candidates
             .sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
-        let coverage_fill_limit = items.len();
+        let coverage_fill_limit = scratch.draft.items.len();
         let mut coverage_fill_count = 0_usize;
+        let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
             if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
-                omitted.push(PackOmission::from_candidate_at(
+                scratch.draft.omitted.push(PackOmission::from_candidate_at(
                     &selection.candidate,
                     PackOmissionReason::BelowRelevanceFloor,
                     PackRejectionStage::CandidateFilter,
@@ -4929,7 +4996,7 @@ fn assemble_mmr_draft(
                 // `facility_candidate_is_feasible` rejection path.
                 if coverage_fill_limit == 0 {
                     let section_used = section_usage.tokens_for(selection.candidate.section);
-                    omitted.push(PackOmission::from_candidate(
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
                         &selection.candidate,
                         PackOmissionReason::TokenBudgetExceeded,
                         Some(minimal_budget_for_candidate(
@@ -4941,7 +5008,7 @@ fn assemble_mmr_draft(
                         )),
                     ));
                 } else {
-                    omitted.push(PackOmission::from_candidate(
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
                         &selection.candidate,
                         PackOmissionReason::RedundantCandidate,
                         None,
@@ -4965,8 +5032,8 @@ fn assemble_mmr_draft(
                             .checked_add(1)
                             .ok_or(PackValidationError::CandidateRankOverflow)?;
                         let marginal_gain =
-                            strict_mmr_marginal_gain(&selection, &selected_signatures);
-                        steps.push(PackSelectionStep {
+                            strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
+                        scratch.draft.steps.push(PackSelectionStep {
                             rank,
                             memory_id: selection.candidate.memory_id,
                             marginal_gain,
@@ -4979,17 +5046,20 @@ fn assemble_mmr_draft(
                         let candidate = selection.candidate;
                         let redactions = selection.redactions;
                         section_usage.add_candidate(&candidate);
-                        selected_signatures.push(selection.signature);
+                        scratch.selected_signatures.push(selection.signature);
                         coverage_fill_count = coverage_fill_count.saturating_add(1);
-                        items.push(PackDraftItem::from_selected_candidate(
-                            rank,
-                            candidate,
-                            redactions,
-                            PackSelectionPhase::CoverageFill,
-                        ));
+                        scratch
+                            .draft
+                            .items
+                            .push(PackDraftItem::from_selected_candidate(
+                                rank,
+                                candidate,
+                                redactions,
+                                PackSelectionPhase::CoverageFill,
+                            ));
                     }
                     None => {
-                        omitted.push(PackOmission::from_candidate(
+                        scratch.draft.omitted.push(PackOmission::from_candidate(
                             &selection.candidate,
                             PackOmissionReason::TokenBudgetExceeded,
                             Some(minimal_budget_for_candidate(
@@ -5003,7 +5073,7 @@ fn assemble_mmr_draft(
                     }
                 }
             } else {
-                omitted.push(PackOmission::from_candidate(
+                scratch.draft.omitted.push(PackOmission::from_candidate(
                     &selection.candidate,
                     PackOmissionReason::TokenBudgetExceeded,
                     Some(minimal_budget_for_candidate(
@@ -5017,14 +5087,21 @@ fn assemble_mmr_draft(
             }
         }
     } else {
+        let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
         for selection in coverage_fill_candidates {
-            omitted.push(PackOmission::from_candidate(
+            scratch.draft.omitted.push(PackOmission::from_candidate(
                 &selection.candidate,
                 PackOmissionReason::RedundantCandidate,
                 None,
             ));
         }
     }
+
+    let PackDraftScratch {
+        items,
+        omitted,
+        steps,
+    } = scratch.draft;
 
     Ok(PackDraft {
         query,
@@ -5090,13 +5167,7 @@ fn assemble_facility_location_draft(
     let mut used_tokens = 0_u32;
     let mut section_usage = SectionTokenUsage::default();
     let mut next_rank = 1_u32;
-    // bd-1i6np: pre-allocate hot-path accumulators to candidate_count. Each Vec
-    // grows to at most n entries through the selection loop, so allocating
-    // up-front avoids the geometric reallocation chain without changing
-    // observable output.
-    let mut items: Vec<PackDraftItem> = Vec::with_capacity(candidate_count);
-    let mut omitted = Vec::with_capacity(candidate_count);
-    let mut steps = Vec::with_capacity(candidate_count);
+    let mut scratch = PackDraftScratch::with_candidate_capacity(candidate_count);
     let mut objective_value = 0.0_f32;
 
     while remaining_count > 0 {
@@ -5109,48 +5180,42 @@ fn assemble_facility_location_draft(
             &quotas,
             &section_usage,
         ) else {
-            omitted.extend(
-                active
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(profile_index, &is_active)| {
-                        if !is_active {
-                            return None;
-                        }
-                        let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                        Some(PackOmission::from_candidate(
-                            candidate,
-                            PackOmissionReason::TokenBudgetExceeded,
-                            Some(minimal_budget_for_candidate(
-                                profile,
-                                used_tokens,
-                                section_usage.tokens_for(candidate.section),
-                                candidate.section,
-                                candidate.estimated_tokens,
-                            )),
-                        ))
-                    }),
-            );
+            scratch.omitted.extend(active.iter().enumerate().filter_map(
+                |(profile_index, &is_active)| {
+                    if !is_active {
+                        return None;
+                    }
+                    let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                    Some(PackOmission::from_candidate(
+                        candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_usage.tokens_for(candidate.section),
+                            candidate.section,
+                            candidate.estimated_tokens,
+                        )),
+                    ))
+                },
+            ));
             break;
         };
 
         if marginal_gain <= FACILITY_LOCATION_EPSILON {
-            omitted.extend(
-                active
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(profile_index, &is_active)| {
-                        if !is_active {
-                            return None;
-                        }
-                        let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
-                        Some(PackOmission::from_candidate(
-                            candidate,
-                            PackOmissionReason::RedundantCandidate,
-                            None,
-                        ))
-                    }),
-            );
+            scratch.omitted.extend(active.iter().enumerate().filter_map(
+                |(profile_index, &is_active)| {
+                    if !is_active {
+                        return None;
+                    }
+                    let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                    Some(PackOmission::from_candidate(
+                        candidate,
+                        PackOmissionReason::RedundantCandidate,
+                        None,
+                    ))
+                },
+            ));
             break;
         }
 
@@ -5182,11 +5247,15 @@ fn assemble_facility_location_draft(
             .checked_add(candidate.estimated_tokens)
             .ok_or(PackValidationError::CandidateRankOverflow)?;
         section_usage.add_candidate(&candidate);
-        update_facility_coverages_cached(&mut current_coverages, &similarity_cache, profile_index);
+        objective_value = update_facility_coverages_cached(
+            &candidates,
+            &mut current_coverages,
+            &similarity_cache,
+            profile_index,
+        );
         selector.advance_round();
-        objective_value = facility_location_value_from_coverages(&candidates, &current_coverages);
         let covered_features = certificate_features(&candidate);
-        steps.push(PackSelectionStep {
+        scratch.steps.push(PackSelectionStep {
             rank,
             memory_id: candidate.memory_id,
             marginal_gain,
@@ -5195,13 +5264,19 @@ fn assemble_facility_location_draft(
             feasible: true,
             covered_features,
         });
-        items.push(PackDraftItem::from_selected_candidate(
+        scratch.items.push(PackDraftItem::from_selected_candidate(
             rank,
             candidate,
             redactions,
             PackSelectionPhase::FacilityLocation,
         ));
     }
+
+    let PackDraftScratch {
+        items,
+        omitted,
+        steps,
+    } = scratch;
 
     Ok(PackDraft {
         query,
@@ -5640,29 +5715,26 @@ fn facility_marginal_gain_cached(
 }
 
 fn update_facility_coverages_cached(
+    universe: &[FacilityCandidateProfile],
     current_coverages: &mut [f32],
     similarity_cache: &FacilitySimilarityCache,
     selected_index: usize,
-) {
-    for (universe_index, current_coverage) in current_coverages.iter_mut().enumerate() {
+) -> f32 {
+    debug_assert_eq!(universe.len(), current_coverages.len());
+    let mut objective_value = 0.0;
+    for (universe_index, (universe_profile, current_coverage)) in universe
+        .iter()
+        .zip(current_coverages.iter_mut())
+        .enumerate()
+    {
         // bd-q68j3: swap args; symmetric cache makes the f32 identical, but
         // `similarity(selected_index, universe_index)` walks row `selected_index`
         // contiguously instead of striding by `width` down column `selected_index`.
         let selected_coverage = similarity_cache.similarity(selected_index, universe_index);
         *current_coverage = (*current_coverage).max(selected_coverage);
+        objective_value += universe_profile.weight * *current_coverage;
     }
-}
-
-fn facility_location_value_from_coverages(
-    universe: &[FacilityCandidateProfile],
-    current_coverages: &[f32],
-) -> f32 {
-    debug_assert_eq!(universe.len(), current_coverages.len());
-    universe
-        .iter()
-        .zip(current_coverages.iter())
-        .map(|(candidate, &coverage)| candidate.weight * coverage)
-        .sum()
+    objective_value
 }
 
 #[cfg(test)]
@@ -7055,6 +7127,179 @@ mod tests {
         .map_err(|error| format!("test candidate rejected: {error:?}"))
     }
 
+    #[test]
+    fn pack_draft_scratch_reset_reuses_and_expands_capacity() -> TestResult {
+        let mut scratch = super::PackDraftScratch::with_candidate_capacity(2);
+        let selected = candidate(1, 0.9, 0.5, 10)?;
+        let omitted_candidate = candidate(2, 0.8, 0.5, 10)?;
+        scratch.items.push(PackDraftItem::from_selected_candidate(
+            1,
+            selected,
+            Vec::new(),
+            PackSelectionPhase::StrictMmr,
+        ));
+        scratch.omitted.push(super::PackOmission::from_candidate(
+            &omitted_candidate,
+            PackOmissionReason::TokenBudgetExceeded,
+            None,
+        ));
+        scratch.steps.push(super::PackSelectionStep {
+            rank: 1,
+            memory_id: memory_id(1),
+            marginal_gain: 0.5,
+            objective_value: 0.5,
+            token_cost: 10,
+            feasible: true,
+            covered_features: vec!["section:procedural_rules".to_owned()],
+        });
+
+        let item_capacity = scratch.items.capacity();
+        let omission_capacity = scratch.omitted.capacity();
+        let step_capacity = scratch.steps.capacity();
+        scratch.reset_for_candidate_capacity(1);
+
+        ensure_equal(&scratch.items.len(), &0, "items cleared")?;
+        ensure_equal(&scratch.omitted.len(), &0, "omissions cleared")?;
+        ensure_equal(&scratch.steps.len(), &0, "steps cleared")?;
+        ensure(
+            scratch.items.capacity() >= item_capacity,
+            "item capacity should not shrink on reset",
+        )?;
+        ensure(
+            scratch.omitted.capacity() >= omission_capacity,
+            "omission capacity should not shrink on reset",
+        )?;
+        ensure(
+            scratch.steps.capacity() >= step_capacity,
+            "step capacity should not shrink on reset",
+        )?;
+
+        scratch.reset_for_candidate_capacity(8);
+        ensure(
+            scratch.items.capacity() >= 8,
+            "item capacity should expand to requested candidate count",
+        )?;
+        ensure(
+            scratch.omitted.capacity() >= 8,
+            "omission capacity should expand to requested candidate count",
+        )?;
+        ensure(
+            scratch.steps.capacity() >= 8,
+            "step capacity should expand to requested candidate count",
+        )
+    }
+
+    #[test]
+    fn mmr_assembly_scratch_reset_reinitializes_similarity_slots() -> TestResult {
+        let mut scratch = super::MmrAssemblyScratch::with_candidate_capacity(2);
+        let candidate =
+            candidate_with_content(1, 0.9, 0.5, 10, "Run cargo fmt --check before release.")?;
+        scratch
+            .selected_signatures
+            .push(super::CandidateSignature::from(&candidate));
+        scratch
+            .coverage_fill_candidates
+            .push(super::MmrCandidate::from(candidate));
+        scratch.max_selected_similarities[0] = 0.95;
+        let selected_capacity = scratch.selected_signatures.capacity();
+        let fill_capacity = scratch.coverage_fill_candidates.capacity();
+
+        scratch.reset_for_candidate_capacity(4);
+
+        ensure_equal(
+            &scratch.selected_signatures.len(),
+            &0,
+            "selected signatures cleared",
+        )?;
+        ensure_equal(
+            &scratch.coverage_fill_candidates.len(),
+            &0,
+            "coverage-fill candidates cleared",
+        )?;
+        ensure_equal(
+            &scratch.max_selected_similarities.len(),
+            &4,
+            "similarity slot count reset",
+        )?;
+        ensure(
+            scratch
+                .max_selected_similarities
+                .iter()
+                .all(|similarity| *similarity == 0.0),
+            "similarity slots reset to zero",
+        )?;
+        ensure(
+            scratch.selected_signatures.capacity() >= selected_capacity,
+            "selected signature capacity should not shrink on reset",
+        )?;
+        ensure(
+            scratch.coverage_fill_candidates.capacity() >= fill_capacity,
+            "coverage-fill capacity should not shrink on reset",
+        )?;
+        ensure(
+            scratch.max_selected_similarities.capacity() >= 4,
+            "similarity capacity should expand to requested candidate count",
+        )
+    }
+
+    #[test]
+    fn pack_assembly_scratch_adapter_keeps_large_inputs_deterministic() -> TestResult {
+        let candidate_count = 64_usize;
+        let candidates = facility_benchmark_candidates(candidate_count)?;
+        let budget =
+            TokenBudget::new(10_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+
+        let first_mmr = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|error| format!("first mmr draft rejected: {error:?}"))?;
+        let second_mmr = assemble_draft_with_profile(
+            ContextPackProfile::Balanced,
+            "prepare release",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|error| format!("second mmr draft rejected: {error:?}"))?;
+        ensure_equal(
+            &first_mmr.selection_audit.selected_items,
+            &second_mmr.selection_audit.selected_items,
+            "MMR selected item order remains deterministic",
+        )?;
+        ensure_equal(
+            &first_mmr.selection_audit.candidate_count,
+            &candidate_count,
+            "MMR candidate count",
+        )?;
+
+        let first_facility = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates.clone(),
+        )
+        .map_err(|error| format!("first facility draft rejected: {error:?}"))?;
+        let second_facility = assemble_draft_with_profile(
+            ContextPackProfile::Submodular,
+            "prepare release",
+            budget,
+            candidates,
+        )
+        .map_err(|error| format!("second facility draft rejected: {error:?}"))?;
+        ensure_equal(
+            &first_facility.selection_audit.selected_items,
+            &second_facility.selection_audit.selected_items,
+            "facility selected item order remains deterministic",
+        )?;
+        ensure_equal(
+            &first_facility.selection_audit.candidate_count,
+            &candidate_count,
+            "facility candidate count",
+        )
+    }
+
     fn draft_from_candidates(candidates: Vec<PackCandidate>) -> Result<PackDraft, String> {
         let budget = TokenBudget::new(1_000).map_err(|error| format!("budget: {error:?}"))?;
         let mut used_tokens = 0_u32;
@@ -7219,6 +7464,7 @@ mod tests {
             section_usage.add_candidate(&candidate);
             selected.push(candidate.memory_id);
             super::update_facility_coverages_cached(
+                &universe,
                 &mut current_coverages,
                 &similarity_cache,
                 profile_index,

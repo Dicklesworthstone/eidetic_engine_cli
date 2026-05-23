@@ -181,7 +181,7 @@ ee eval run release_failure --pack-quality --scenario usr_pre_task_brief --json
 ```
 
 Run the command without `--scenario` to evaluate every pack-quality case in the
-fixture family. JSON stdout uses the `ee.response.v1` envelope and carries
+fixture family. JSON stdout uses the `ee.response.v2` envelope and carries
 `ee.eval.pack_quality_report.v1`.
 
 ### Interpreting Results
@@ -316,6 +316,7 @@ rch exec -- cargo test --test freshness_contracts
 | `ee.pack_replay.v1` | Replay command stdout contract |
 | `ee.pack_diff.v1` | Diff command stdout contract |
 | `ee.support_bundle.pack_replay_summary.v1` | Support bundle artifact |
+| `ee.pack.compression_manifest.v1` | Optional compressed pack or ledger sidecar manifest; preserves uncompressed pack and ledger hashes |
 
 ## ADR References
 
