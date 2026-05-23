@@ -938,6 +938,107 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
     Ok(())
 }
 
+// bd-tujpb: parse_serve_http_request has four additional pre-parse rejection
+// branches not covered by bd-17386/bd-2e5g1 — header byte limit overflow,
+// declared body byte limit overflow, non-integer Content-Length, and
+// relative request target (no leading '/'). Each branch produces 400 with
+// the flat ee.error.v2 envelope. The limit branches use custom ServeLimits
+// to keep the test cheap rather than synthesizing megabyte-sized requests.
+#[test]
+fn serve_limit_and_content_length_violations_rejected_with_canonical_400_messages() -> TestResult {
+    let token = "01234567890123456789012345678901";
+
+    // Tight limits keep the malformed-request fixtures small enough to read
+    // at a glance while still exercising the >limit code paths.
+    let tight_limits = ee::serve::ServeLimits {
+        max_header_bytes: 256,
+        max_body_bytes: 64,
+        ..ee::serve::ServeLimits::default()
+    };
+
+    // (a) Header bytes exceed max_header_bytes: pad an X-Pad header so the
+    // total header section is well over 256 bytes before the \r\n\r\n
+    // terminator.
+    let bloated_pad = "A".repeat(400);
+    let header_overflow_raw = format!(
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nX-Pad: {bloated_pad}\r\n\r\n"
+    );
+    // (b) Declared body bytes exceed max_body_bytes: Content-Length larger
+    // than 64 (tight max). Body bytes can be empty since the check fires on
+    // the declared length, not the actual byte count.
+    let body_overflow_raw = format!(
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 1000\r\n\r\n"
+    );
+    // (c) Content-Length is not a non-negative integer.
+    let bad_content_length_raw = format!(
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: abc\r\n\r\n"
+    );
+    // (d) Target is a relative path (no leading '/').
+    let relative_target_raw = format!(
+        "GET v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+
+    let cases: [(&str, String, &str); 4] = [
+        (
+            "req-limits-header-overflow",
+            header_overflow_raw,
+            "HTTP request headers exceed the 256 byte limit.",
+        ),
+        (
+            "req-limits-body-overflow",
+            body_overflow_raw,
+            "HTTP request body exceeds the 64 byte limit.",
+        ),
+        (
+            "req-limits-content-length-not-integer",
+            bad_content_length_raw,
+            "Content-Length must be a non-negative integer.",
+        ),
+        (
+            "req-limits-relative-target",
+            relative_target_raw,
+            "HTTP request target must be an absolute path.",
+        ),
+    ];
+
+    for (request_id, raw, expected_message) in cases {
+        let response = render_serve_transport_exchange(
+            request_id,
+            raw.as_bytes(),
+            &tight_limits,
+            Some(token),
+            0,
+        );
+        if !response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+            return Err(format!(
+                "case {request_id} expected 400 response, got {response}"
+            ));
+        }
+        let envelope = response_body_json(&response)?;
+        assert_eq!(
+            envelope["schema"].as_str(),
+            Some("ee.error.v2"),
+            "case {request_id} expected flat ee.error.v2 envelope, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some("usage"),
+            "case {request_id} expected usage error code, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["severity"].as_str(),
+            Some("low"),
+            "case {request_id} expected low severity for usage error, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"].as_str(),
+            Some(expected_message),
+            "case {request_id} expected message {expected_message:?}, got {envelope}"
+        );
+    }
+    Ok(())
+}
+
 // bd-2e5g1: parse_serve_http_request has four pre-parse rejection branches
 // for malformed HTTP/1.1 request shapes that don't even reach the
 // method/path inspection: missing CRLF terminator, wrong HTTP version,
