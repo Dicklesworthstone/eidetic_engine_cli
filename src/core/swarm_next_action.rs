@@ -21,6 +21,9 @@ use crate::core::swarm_brief::{
 pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
 pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
     "counts_ids_statuses_paths_redacted_no_mail_body_no_file_content";
+pub const SWARM_WORK_PACKET_SCHEMA_V1: &str = "ee.swarm.work_packet.v1";
+pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
+    "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,6 +587,156 @@ pub struct SwarmNextActionDegradation {
     pub repair: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacket {
+    pub schema: &'static str,
+    pub packet_id: String,
+    pub workspace: String,
+    pub redaction_status: &'static str,
+    pub observed_state_class: &'static str,
+    pub recommended_action: SwarmWorkPacketRecommendedAction,
+    pub candidates: Vec<SwarmWorkPacketCandidate>,
+    pub coordination: SwarmWorkPacketCoordination,
+    pub rch_proof_posture: SwarmWorkPacketRchProofPosture,
+    pub verification: SwarmWorkPacketVerification,
+    pub source_provenance: Vec<SwarmWorkPacketSourceProvenance>,
+    pub mutation_policy: SwarmWorkPacketMutationPolicy,
+    pub degraded: Vec<SwarmWorkPacketDegradation>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketRecommendedAction {
+    pub action: &'static str,
+    pub candidate_id: Option<String>,
+    pub confidence: &'static str,
+    pub safe_to_claim: Option<bool>,
+    pub reasons: Vec<String>,
+    pub proof_obligations: Vec<String>,
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketCandidate {
+    pub id: String,
+    pub title: String,
+    pub source: &'static str,
+    pub status: String,
+    pub priority: Option<i64>,
+    pub assignee: Option<String>,
+    pub decision: &'static str,
+    pub collision_risk: &'static str,
+    pub unsafe_reasons: Vec<String>,
+    pub stale_reasons: Vec<String>,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketCoordination {
+    pub active_claim_count: usize,
+    pub dirty_path_count: usize,
+    pub file_collision_count: usize,
+    pub agent_mail: SwarmWorkPacketAgentMail,
+    pub active_claims: Vec<SwarmWorkPacketActiveClaim>,
+    pub file_collisions: Vec<SwarmWorkPacketFileCollision>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketAgentMail {
+    pub status: &'static str,
+    pub health_level: Option<&'static str>,
+    pub unread_count: Option<u64>,
+    pub ack_required_count: Option<u64>,
+    pub degraded_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketActiveClaim {
+    pub bead_id: String,
+    pub assignee: Option<String>,
+    pub status: String,
+    pub updated_at: Option<String>,
+    pub source_refs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketFileCollision {
+    pub path_pattern: String,
+    pub risk: &'static str,
+    pub owners: Vec<String>,
+    pub related_bead_ids: Vec<String>,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketRchProofPosture {
+    pub source_enabled: bool,
+    pub remote_only_required: bool,
+    pub posture: &'static str,
+    pub healthy_worker_count: Option<u64>,
+    pub safe_to_launch_cargo_verification: Option<bool>,
+    pub local_fallback_prevented: bool,
+    pub blocker_codes: Vec<String>,
+    pub retry_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketVerification {
+    pub required_commands: Vec<SwarmWorkPacketVerificationCommand>,
+    pub static_checks: Vec<SwarmWorkPacketVerificationCommand>,
+    pub closeout_evidence_required: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketVerificationCommand {
+    pub command_id: &'static str,
+    pub command_template: String,
+    pub required_substrate: &'static str,
+    pub when: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketSourceProvenance {
+    pub source: String,
+    pub collector: &'static str,
+    pub status: &'static str,
+    pub freshness: Option<String>,
+    pub digest: Option<String>,
+    pub redaction: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketMutationPolicy {
+    pub side_effect_free: bool,
+    pub claims_beads: bool,
+    pub reserves_files: bool,
+    pub sends_agent_mail: bool,
+    pub runs_cargo: bool,
+    pub stages_git: bool,
+    pub deletes_files: bool,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketDegradation {
+    pub code: String,
+    pub source: String,
+    pub severity: &'static str,
+    pub message: String,
+    pub repair: Option<String>,
+}
+
 #[must_use]
 pub fn collect_swarm_next_action_snapshot(
     options: &SwarmBriefCollectOptions,
@@ -600,6 +753,16 @@ pub fn collect_swarm_next_action_snapshot_with_verifier_evidence(
 ) -> SwarmNextActionSnapshot {
     let brief = collect_swarm_brief(options, runner);
     SwarmNextActionSnapshot::from_swarm_brief_with_verifier_evidence(&brief, verifier_evidence)
+}
+
+#[must_use]
+pub fn collect_swarm_work_packet_with_verifier_evidence(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+) -> SwarmWorkPacket {
+    let brief = collect_swarm_brief(options, runner);
+    SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, verifier_evidence)
 }
 
 impl SwarmNextActionSnapshot {
@@ -674,6 +837,548 @@ impl SwarmNextActionSnapshot {
     #[must_use]
     pub fn recommendation_cards(&self) -> Vec<SwarmNextActionRecommendationCard> {
         recommendation_cards_from_snapshot(self)
+    }
+}
+
+impl SwarmWorkPacket {
+    #[must_use]
+    pub fn from_swarm_brief_with_verifier_evidence(
+        brief: &SwarmBriefReport,
+        verifier_evidence: &[SwarmNextActionRecentFirstError],
+    ) -> Self {
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief_with_verifier_evidence(
+            brief,
+            verifier_evidence,
+        );
+        Self::from_brief_and_next_action(brief, &snapshot)
+    }
+
+    #[must_use]
+    pub fn from_brief_and_next_action(
+        brief: &SwarmBriefReport,
+        snapshot: &SwarmNextActionSnapshot,
+    ) -> Self {
+        let mut degraded = snapshot
+            .degraded
+            .iter()
+            .map(SwarmWorkPacketDegradation::from_next_action)
+            .collect::<Vec<_>>();
+        degraded.sort();
+        degraded.dedup();
+
+        let mut candidates = work_packet_candidates(snapshot);
+        candidates.sort();
+        candidates.dedup();
+
+        let coordination = work_packet_coordination(brief, snapshot);
+        let rch_proof_posture = work_packet_rch_proof_posture(snapshot, &degraded);
+        let verification = work_packet_verification(snapshot, &rch_proof_posture);
+        let source_provenance = work_packet_source_provenance(brief);
+        let recommended_action =
+            work_packet_recommended_action(snapshot, &candidates, &rch_proof_posture);
+        let observed_state_class =
+            work_packet_observed_state_class(&coordination, &rch_proof_posture, &degraded);
+
+        let mut packet = Self {
+            schema: SWARM_WORK_PACKET_SCHEMA_V1,
+            packet_id: String::new(),
+            workspace: brief.workspace.clone(),
+            redaction_status: SWARM_WORK_PACKET_REDACTION_STATUS,
+            observed_state_class,
+            recommended_action,
+            candidates,
+            coordination,
+            rch_proof_posture,
+            verification,
+            source_provenance,
+            mutation_policy: SwarmWorkPacketMutationPolicy::default_read_only(),
+            degraded,
+        };
+        packet.packet_id = work_packet_id(&packet);
+        packet
+    }
+}
+
+impl SwarmWorkPacketMutationPolicy {
+    const fn default_read_only() -> Self {
+        Self {
+            side_effect_free: true,
+            claims_beads: false,
+            reserves_files: false,
+            sends_agent_mail: false,
+            runs_cargo: false,
+            stages_git: false,
+            deletes_files: false,
+        }
+    }
+}
+
+impl SwarmWorkPacketDegradation {
+    fn from_next_action(degradation: &SwarmNextActionDegradation) -> Self {
+        Self {
+            code: degradation.code.clone(),
+            source: work_packet_source_label(&degradation.source),
+            severity: degradation.severity,
+            message: degradation.message.clone(),
+            repair: degradation.repair.clone(),
+        }
+    }
+}
+
+fn work_packet_id(packet: &SwarmWorkPacket) -> String {
+    let mut stable = packet.clone();
+    stable.packet_id.clear();
+    let bytes = serde_json::to_vec(&stable).unwrap_or_default();
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    format!("swarm_work_packet_{}", &digest[..24])
+}
+
+fn work_packet_candidates(snapshot: &SwarmNextActionSnapshot) -> Vec<SwarmWorkPacketCandidate> {
+    let cards_by_candidate = snapshot
+        .recommendation_cards()
+        .into_iter()
+        .filter_map(|card| card.candidate_id.clone().map(|id| (id, card)))
+        .collect::<BTreeMap<_, _>>();
+    let stale_by_bead = snapshot
+        .stale_work_proposals
+        .iter()
+        .map(|proposal| (proposal.bead_id.as_str(), proposal))
+        .collect::<BTreeMap<_, _>>();
+
+    snapshot
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let card = cards_by_candidate.get(&candidate.id);
+            let stale = stale_by_bead.get(candidate.id.as_str());
+            let unsafe_reasons =
+                card.map_or_else(Vec::new, |card| card.do_not_take_because.clone());
+            let stale_reasons = stale.map_or_else(Vec::new, |proposal| proposal.evidence.clone());
+            SwarmWorkPacketCandidate {
+                id: candidate.id.clone(),
+                title: candidate.title.clone(),
+                source: work_packet_candidate_source(candidate.source),
+                status: candidate.status.clone(),
+                priority: candidate.priority,
+                assignee: candidate.assignee.clone(),
+                decision: work_packet_candidate_decision(card.map(|card| card.decision)),
+                collision_risk: work_packet_collision_risk(candidate, snapshot),
+                unsafe_reasons,
+                stale_reasons,
+                source_refs: work_packet_candidate_source_refs(candidate),
+            }
+        })
+        .collect()
+}
+
+fn work_packet_candidate_source(source: &'static str) -> &'static str {
+    match source {
+        "bv_top_pick" => "bv_top_pick",
+        "beads_ready" => "beads_ready",
+        _ => "manual",
+    }
+}
+
+fn work_packet_candidate_decision(decision: Option<&'static str>) -> &'static str {
+    match decision {
+        Some("new_bead_recommended" | "refine_existing_bead") => "safe_to_claim",
+        Some("blocked_by_owner" | "reuse_recent_evidence") => "coordinate_first",
+        Some("duplicate_rejected") => "skip",
+        Some("no_action_recommended") => "blocked",
+        _ => "safe_to_claim",
+    }
+}
+
+fn work_packet_collision_risk(
+    candidate: &SwarmNextActionCandidate,
+    snapshot: &SwarmNextActionSnapshot,
+) -> &'static str {
+    if candidate.assignee.is_some()
+        || snapshot
+            .compile_health
+            .blockers
+            .iter()
+            .any(|blocker| blocker.owner_agent.is_some())
+    {
+        "high"
+    } else if candidate.blocked_by_compile_health || snapshot.checkout.dirty_path_count > 0 {
+        "medium"
+    } else {
+        "none"
+    }
+}
+
+fn work_packet_candidate_source_refs(candidate: &SwarmNextActionCandidate) -> Vec<String> {
+    let mut refs = BTreeSet::new();
+    if candidate.status != "unknown" {
+        refs.insert(format!("br://{}", candidate.id));
+    }
+    if candidate.source == "bv_top_pick" {
+        refs.insert(format!("bv://top-pick/{}", candidate.id));
+    }
+    refs.into_iter().collect()
+}
+
+fn work_packet_coordination(
+    brief: &SwarmBriefReport,
+    snapshot: &SwarmNextActionSnapshot,
+) -> SwarmWorkPacketCoordination {
+    let mut active_claims = brief
+        .beads
+        .in_progress
+        .iter()
+        .map(|bead| SwarmWorkPacketActiveClaim {
+            bead_id: bead.id.clone(),
+            assignee: bead.assignee.clone(),
+            status: bead.status.clone(),
+            updated_at: None,
+            source_refs: vec![format!("br://{}", bead.id)],
+        })
+        .collect::<Vec<_>>();
+    active_claims.sort();
+    active_claims.dedup();
+
+    let mut file_collisions = brief
+        .file_surface_risks
+        .iter()
+        .filter(|risk| {
+            !risk.reservation_holders.is_empty()
+                || !risk.related_bead_ids.is_empty()
+                || risk.severity == "high"
+        })
+        .map(|risk| SwarmWorkPacketFileCollision {
+            path_pattern: risk.path_pattern.clone(),
+            risk: work_packet_file_collision_risk(&risk.severity),
+            owners: risk.reservation_holders.clone(),
+            related_bead_ids: risk.related_bead_ids.clone(),
+            evidence: risk.evidence.clone(),
+        })
+        .collect::<Vec<_>>();
+    file_collisions.sort();
+    file_collisions.dedup();
+
+    SwarmWorkPacketCoordination {
+        active_claim_count: active_claims.len(),
+        dirty_path_count: snapshot.checkout.dirty_path_count,
+        file_collision_count: file_collisions.len(),
+        agent_mail: work_packet_agent_mail(brief, snapshot),
+        active_claims,
+        file_collisions,
+    }
+}
+
+fn work_packet_file_collision_risk(severity: &str) -> &'static str {
+    match severity {
+        "high" | "critical" => "high",
+        "medium" | "warning" => "medium",
+        _ => "low",
+    }
+}
+
+fn work_packet_agent_mail(
+    brief: &SwarmBriefReport,
+    snapshot: &SwarmNextActionSnapshot,
+) -> SwarmWorkPacketAgentMail {
+    let source = brief
+        .sources
+        .iter()
+        .find(|source| source.source == SwarmBriefSourceKind::AgentMail);
+    let degraded_codes = snapshot
+        .degraded
+        .iter()
+        .filter(|degradation| degradation.source == "agent_mail")
+        .map(|degradation| degradation.code.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let status = source.map_or("skipped", |source| match source.status.as_str() {
+        "ready" => "fresh",
+        "degraded" => "degraded_read_only",
+        "unavailable" => "unavailable",
+        _ => "skipped",
+    });
+    let health_level = match status {
+        "fresh" => Some("green"),
+        "degraded_read_only" => Some("red"),
+        "unavailable" => Some("red"),
+        _ => None,
+    };
+    let counts_available = status == "fresh";
+    SwarmWorkPacketAgentMail {
+        status,
+        health_level,
+        unread_count: counts_available.then_some(snapshot.coordination.unread_inbox_count),
+        ack_required_count: counts_available.then_some(snapshot.coordination.ack_required_count),
+        degraded_codes,
+    }
+}
+
+fn work_packet_rch_proof_posture(
+    snapshot: &SwarmNextActionSnapshot,
+    degraded: &[SwarmWorkPacketDegradation],
+) -> SwarmWorkPacketRchProofPosture {
+    let blocker_codes = degraded
+        .iter()
+        .filter(|degradation| degradation.source == "rch")
+        .map(|degradation| degradation.code.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let topology_blocked = blocker_codes
+        .iter()
+        .any(|code| code == "rch_worker_topology_blocked");
+    let posture = if !snapshot.verification.rch_source_enabled {
+        "unavailable"
+    } else if topology_blocked {
+        "topology_blocked"
+    } else if snapshot.verification.remote_only_safe == Some(true) {
+        "remote_ready"
+    } else if snapshot.verification.remote_only_safe == Some(false)
+        || snapshot.verification.head_of_line_blocked() == Some(true)
+    {
+        "degraded_capacity"
+    } else {
+        "unknown"
+    };
+    SwarmWorkPacketRchProofPosture {
+        source_enabled: snapshot.verification.rch_source_enabled,
+        remote_only_required: snapshot.verification.remote_only_required,
+        posture,
+        healthy_worker_count: snapshot.verification.healthy_worker_count,
+        safe_to_launch_cargo_verification: snapshot.compile_health.safe_to_launch_rch.and_then(
+            |compile_safe| {
+                snapshot
+                    .verification
+                    .remote_only_safe
+                    .map(|remote_safe| compile_safe && remote_safe)
+                    .or(Some(compile_safe))
+            },
+        ),
+        local_fallback_prevented: snapshot.verification.remote_only_required,
+        blocker_codes,
+        retry_after: None,
+    }
+}
+
+fn work_packet_verification(
+    snapshot: &SwarmNextActionSnapshot,
+    rch: &SwarmWorkPacketRchProofPosture,
+) -> SwarmWorkPacketVerification {
+    let mut required_commands = Vec::new();
+    if rch.remote_only_required {
+        required_commands.push(SwarmWorkPacketVerificationCommand {
+            command_id: "cargo_check_all_targets",
+            command_template: "RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh -- cargo check --all-targets"
+                .to_owned(),
+            required_substrate: "rch",
+            when: if rch.safe_to_launch_cargo_verification == Some(false) {
+                "only_after_rch_remote_workers_recover"
+            } else {
+                "after_substantive_rust_changes"
+            },
+        });
+    }
+    let mut static_checks = vec![SwarmWorkPacketVerificationCommand {
+        command_id: "diff_check",
+        command_template: "git diff --check".to_owned(),
+        required_substrate: "static_local",
+        when: "before_closeout",
+    }];
+    if !snapshot.checkout.dirty_paths.is_empty() {
+        static_checks.push(SwarmWorkPacketVerificationCommand {
+            command_id: "dirty_path_review",
+            command_template: "git status --short --branch".to_owned(),
+            required_substrate: "static_local",
+            when: "before_claim_or_closeout",
+        });
+    }
+    static_checks.sort();
+    static_checks.dedup();
+    SwarmWorkPacketVerification {
+        required_commands,
+        static_checks,
+        closeout_evidence_required: true,
+    }
+}
+
+fn work_packet_source_provenance(brief: &SwarmBriefReport) -> Vec<SwarmWorkPacketSourceProvenance> {
+    let mut provenance = brief
+        .sources
+        .iter()
+        .map(|source| {
+            let source_label = work_packet_source_label(source.source.as_str());
+            let degraded_codes = source
+                .degraded
+                .iter()
+                .map(|degradation| degradation.code.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let freshness_state = source.freshness.state;
+            let digest_input = format!(
+                "{}:{}:{}:{}:{}",
+                source_label,
+                source.status.as_str(),
+                freshness_state,
+                source.item_count,
+                degraded_codes
+            );
+            let digest_hex = blake3::hash(digest_input.as_bytes()).to_hex().to_string();
+            SwarmWorkPacketSourceProvenance {
+                source: source_label,
+                collector: match source.source {
+                    SwarmBriefSourceKind::Bv => "swarm next-action",
+                    _ => "swarm brief",
+                },
+                status: work_packet_source_status(source.status.as_str(), freshness_state),
+                freshness: Some(freshness_state.to_owned()),
+                digest: Some(format!("blake3:{}", &digest_hex[..16])),
+                redaction: match source.source {
+                    SwarmBriefSourceKind::AgentMail => "counts_subjects_no_bodies",
+                    SwarmBriefSourceKind::Git => "path_patterns_statuses",
+                    SwarmBriefSourceKind::Rch => "counts_worker_labels_no_raw_logs",
+                    _ => "ids_statuses_counts",
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    provenance.sort();
+    provenance.dedup();
+    provenance
+}
+
+fn work_packet_source_status(status: &str, freshness_state: &str) -> &'static str {
+    // bd-2z5ly.5: when a source is reachable but its freshness signal says the
+    // snapshot is stale (e.g. beads JSONL/DB drift), surface it as "stale" so
+    // agents can distinguish "evidence existed but is past TTL" from harder
+    // "degraded" signals that mean the collector itself misbehaved. Hard
+    // states (unavailable, skipped/not_configured) take precedence.
+    match status {
+        "unavailable" => "unavailable",
+        "skipped" | "not_configured" => "skipped",
+        "ready" if freshness_state == "stale" => "stale",
+        "ready" => "fresh",
+        "degraded" if freshness_state == "stale" => "stale",
+        "degraded" => "degraded",
+        _ => "degraded",
+    }
+}
+
+fn work_packet_source_label(source: &str) -> String {
+    source.replace('_', "-")
+}
+
+fn work_packet_recommended_action(
+    snapshot: &SwarmNextActionSnapshot,
+    candidates: &[SwarmWorkPacketCandidate],
+    rch: &SwarmWorkPacketRchProofPosture,
+) -> SwarmWorkPacketRecommendedAction {
+    let cards = snapshot.recommendation_cards();
+    let selected_card = cards.first();
+    let selected_candidate = selected_card
+        .and_then(|card| card.candidate_id.as_deref())
+        .and_then(|id| candidates.iter().find(|candidate| candidate.id == id))
+        .or_else(|| candidates.first());
+    let mut reasons = selected_card.map_or_else(Vec::new, |card| card.do_not_take_because.clone());
+    if reasons.is_empty() {
+        reasons.extend(
+            selected_card
+                .map(|card| {
+                    card.score_inputs
+                        .iter()
+                        .map(|input| input.name.to_owned())
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["no_candidate_evidence".to_owned()]),
+        );
+    }
+    if rch.safe_to_launch_cargo_verification == Some(false) {
+        reasons.push("rch_remote_verification_blocked".to_owned());
+    }
+    reasons.sort();
+    reasons.dedup();
+
+    let mut proof_obligations = selected_card.map_or_else(
+        || vec!["repair_degraded_sources_before_claim".to_owned()],
+        |card| card.proof_obligations.clone(),
+    );
+    if rch.safe_to_launch_cargo_verification == Some(false) {
+        proof_obligations.push("do_not_run_local_cargo_fallback".to_owned());
+    }
+    proof_obligations.sort();
+    proof_obligations.dedup();
+
+    let candidate_id = selected_candidate.map(|candidate| candidate.id.clone());
+    SwarmWorkPacketRecommendedAction {
+        action: work_packet_action(selected_card.map(|card| card.decision), rch),
+        confidence: selected_card.map_or("low", |card| card.confidence),
+        safe_to_claim: selected_candidate.map(|candidate| {
+            candidate.decision == "safe_to_claim"
+                && rch.safe_to_launch_cargo_verification != Some(false)
+        }),
+        suggested_commands: work_packet_suggested_commands(candidate_id.as_deref(), rch),
+        candidate_id,
+        reasons,
+        proof_obligations,
+    }
+}
+
+fn work_packet_action(
+    decision: Option<&'static str>,
+    rch: &SwarmWorkPacketRchProofPosture,
+) -> &'static str {
+    if rch.safe_to_launch_cargo_verification == Some(false) {
+        return "prefer_static_docs_work";
+    }
+    match decision {
+        Some("new_bead_recommended" | "refine_existing_bead") => "inspect_and_claim",
+        Some("blocked_by_owner" | "duplicate_rejected" | "reuse_recent_evidence") => {
+            "coordinate_before_claim"
+        }
+        Some("no_action_recommended") => "blocked_no_action",
+        _ => "blocked_no_action",
+    }
+}
+
+fn work_packet_suggested_commands(
+    candidate_id: Option<&str>,
+    rch: &SwarmWorkPacketRchProofPosture,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    if let Some(candidate_id) = candidate_id {
+        commands.push(format!("br show {candidate_id} --json"));
+        if rch.safe_to_launch_cargo_verification != Some(false) {
+            commands.push(format!(
+                "br update {candidate_id} --status in_progress --json"
+            ));
+        }
+    }
+    commands.push("ee swarm brief --workspace . --json".to_owned());
+    commands.sort();
+    commands.dedup();
+    commands
+}
+
+fn work_packet_observed_state_class(
+    coordination: &SwarmWorkPacketCoordination,
+    rch: &SwarmWorkPacketRchProofPosture,
+    degraded: &[SwarmWorkPacketDegradation],
+) -> &'static str {
+    let agent_mail_degraded = matches!(
+        coordination.agent_mail.status,
+        "degraded_read_only" | "unavailable"
+    );
+    let rch_degraded = matches!(rch.posture, "topology_blocked" | "degraded_capacity");
+    if agent_mail_degraded || rch_degraded {
+        "degraded_mail_rch_topology"
+    } else if coordination.active_claim_count > 0
+        || coordination.file_collision_count > 0
+        || coordination.dirty_path_count > 0
+    {
+        "crowded_checkout"
+    } else if degraded.is_empty() {
+        "healthy_small_repo"
+    } else {
+        "unknown"
     }
 }
 
@@ -2944,6 +3649,164 @@ mod tests {
         assert!(path_matches_pattern("src/db/mod.rs", "src/db/*.rs"));
         assert!(path_matches_pattern("src/db/a.rs", "src/db/?.rs"));
         assert!(!path_matches_pattern("src/core/status.rs", "src/db/*.rs"));
+    }
+
+    #[test]
+    fn work_packet_is_deterministic_read_only_advice_for_safe_candidate() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Implement isolated work packet surface",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let second = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(packet.schema, SWARM_WORK_PACKET_SCHEMA_V1);
+        assert_eq!(packet.redaction_status, SWARM_WORK_PACKET_REDACTION_STATUS);
+        assert_eq!(packet.packet_id, second.packet_id);
+        assert!(packet.packet_id.starts_with("swarm_work_packet_"));
+        assert_eq!(packet.observed_state_class, "healthy_small_repo");
+        assert_eq!(packet.recommended_action.action, "inspect_and_claim");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert!(packet.mutation_policy.side_effect_free);
+        assert!(!packet.mutation_policy.claims_beads);
+        assert!(!packet.mutation_policy.reserves_files);
+        assert!(!packet.mutation_policy.sends_agent_mail);
+        assert!(!packet.mutation_policy.runs_cargo);
+        assert!(!packet.mutation_policy.stages_git);
+        assert!(!packet.mutation_policy.deletes_files);
+    }
+
+    #[test]
+    fn work_packet_source_provenance_surfaces_stale_freshness_as_distinct_status() {
+        // bd-2z5ly.5: a beads source that reports `freshness.state == "stale"`
+        // (JSONL/DB drift) must produce a packet provenance entry with
+        // `status == "stale"`, not be collapsed into the looser "degraded"
+        // bucket. This lets agents distinguish "evidence is past TTL" from
+        // "the collector itself misbehaved".
+        use crate::core::swarm_brief::{
+            SwarmBriefSourceFreshness, SwarmBriefSourceProvenance, SwarmBriefSourceSnapshot,
+            SwarmBriefSourceStatus,
+        };
+
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::Beads,
+            status: SwarmBriefSourceStatus::Degraded,
+            freshness: SwarmBriefSourceFreshness {
+                observed_at: Some("2026-05-23T00:00:00Z".to_owned()),
+                age_seconds: None,
+                stale_after_seconds: None,
+                state: "stale",
+            },
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: Vec::new(),
+        });
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::AgentMail,
+            status: SwarmBriefSourceStatus::Unavailable,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: Vec::new(),
+        });
+        brief.sources.push(SwarmBriefSourceSnapshot {
+            source: SwarmBriefSourceKind::Bv,
+            status: SwarmBriefSourceStatus::NotConfigured,
+            freshness: SwarmBriefSourceFreshness::unknown(),
+            provenance: SwarmBriefSourceProvenance::local_probe(),
+            item_count: 0,
+            degraded: Vec::new(),
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        let by_source = packet
+            .source_provenance
+            .iter()
+            .map(|entry| (entry.source.clone(), entry.status))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(by_source.get("beads"), Some(&"stale"));
+        assert_eq!(by_source.get("agent-mail"), Some(&"unavailable"));
+        assert_eq!(by_source.get("bv"), Some(&"skipped"));
+
+        // The same brief must hash deterministically, even with freshness in
+        // the digest input, so repeated packet builds remain stable.
+        let second = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        assert_eq!(packet.packet_id, second.packet_id);
+        let beads_entry = packet
+            .source_provenance
+            .iter()
+            .find(|entry| entry.source == "beads")
+            .expect("beads provenance entry present");
+        assert_eq!(beads_entry.freshness.as_deref(), Some("stale"));
+    }
+
+    #[test]
+    fn work_packet_preserves_collision_and_rch_blocker_evidence() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.in_progress = vec![SwarmBriefBead {
+            id: "bd-peer".to_owned(),
+            title: "Peer swarm work".to_owned(),
+            status: "in_progress".to_owned(),
+            priority: Some(2),
+            assignee: Some("BlueLake".to_owned()),
+            source_bucket: "in_progress".to_owned(),
+        }];
+        brief.file_surface_risks = vec![crate::core::swarm_brief::SwarmBriefFileSurfaceRisk {
+            path_pattern: "src/core/swarm_*.rs".to_owned(),
+            git_status_buckets: vec!["modified".to_owned()],
+            reservation_holders: vec!["BlueLake".to_owned()],
+            related_bead_ids: vec!["bd-peer".to_owned()],
+            severity: "high".to_owned(),
+            score: 95,
+            risk_factors: vec!["active_exclusive_reservation".to_owned()],
+            evidence: vec!["reservation:BlueLake:src/core/swarm_*.rs".to_owned()],
+            suggested_commands: vec!["message_owner_before_editing".to_owned()],
+        }];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-contested",
+            "Touch shared swarm collector",
+            "bv_top_pick",
+            Some(1),
+        )]);
+        snapshot.compile_health.safe_to_launch_rch = Some(false);
+        snapshot.verification.remote_only_safe = Some(false);
+        snapshot.degraded = vec![SwarmNextActionDegradation {
+            code: "rch_remote_required_fallback_prevented".to_owned(),
+            source: "rch".to_owned(),
+            severity: "high",
+            message: "remote-required fallback prevented local execution".to_owned(),
+            repair: Some("wait for RCH topology repair".to_owned()),
+        }];
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(packet.observed_state_class, "degraded_mail_rch_topology");
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.coordination.active_claim_count, 1);
+        assert_eq!(packet.coordination.file_collision_count, 1);
+        assert_eq!(packet.coordination.file_collisions[0].risk, "high");
+        assert_eq!(packet.rch_proof_posture.posture, "degraded_capacity");
+        assert!(packet.rch_proof_posture.local_fallback_prevented);
+        assert!(
+            packet
+                .rch_proof_posture
+                .blocker_codes
+                .contains(&"rch_remote_required_fallback_prevented".to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"do_not_run_local_cargo_fallback".to_owned())
+        );
     }
 
     fn snapshot_with_candidates(
