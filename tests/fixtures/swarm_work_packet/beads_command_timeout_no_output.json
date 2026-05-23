@@ -1,0 +1,157 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_beads_timeout_no_output_0001",
+    "generatedAt": "2026-05-23T07:42:00Z",
+    "redactionStatus": "counts_ids_statuses_command_templates_no_stdout_no_stderr_no_pids_no_mail_body_no_file_content",
+    "determinismKey": "blake3:beads-command-timeout-no-output",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "degraded",
+        "freshness": "stale_fallback",
+        "degradedCodes": [
+          "beads_unavailable"
+        ],
+        "provenance": "bounded Beads read timed out with no output; fallback rows are advisory only"
+      },
+      {
+        "source": "agent_mail",
+        "status": "unavailable",
+        "freshness": "unknown",
+        "degradedCodes": [
+          "agent_mail_unavailable"
+        ],
+        "provenance": "health_check unavailable; reservation authority unknown"
+      }
+    ],
+    "beadsSourceHealth": {
+      "status": "timeout_no_output",
+      "attemptedCommands": [
+        {
+          "command": "scripts/br_retry.sh ready --json",
+          "outcome": "timeout_no_output",
+          "timeoutMs": 10000
+        },
+        {
+          "command": "br list --json",
+          "outcome": "timeout_no_output",
+          "timeoutMs": 10000
+        }
+      ],
+      "fallbackRowsAvailable": true,
+      "fallbackRowsAuthoritative": false,
+      "fallbackRowCount": 2,
+      "reasonCodes": [
+        "beads_command_timeout",
+        "beads_no_output",
+        "fallback_rows_stale",
+        "fallback_row_already_owned",
+        "agent_mail_reservation_authority_unknown"
+      ]
+    },
+    "candidateLane": {
+      "beadId": "bd-owned",
+      "title": "Fallback row from stale Beads output",
+      "status": "in_progress",
+      "priority": 2,
+      "assignee": "cc-pack",
+      "decision": "blocked",
+      "decisionReasons": [
+        "source_health:beads_timeout_no_output",
+        "fallback_row_already_owned",
+        "fallback_rows_not_authoritative",
+        "agent_mail_reservation_authority_unknown"
+      ],
+      "suggestedReservations": [],
+      "proofObligations": [
+        "retry_beads_with_timeout",
+        "run_br_doctor_json",
+        "do_not_claim_from_stale_fallback"
+      ],
+      "evidenceCaveats": [
+        "beads_source_stale",
+        "mail_reservations_unknown"
+      ]
+    },
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": true,
+      "unreadInboxCount": null,
+      "ackRequiredCount": null,
+      "agentMailHealth": "unavailable"
+    },
+    "trackerIntegrity": {
+      "health": "db_jsonl_count_mismatch",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2814,
+      "dbRecordCount": 2812,
+      "pendingImportCount": 2,
+      "externalChangesPendingImport": true,
+      "dirtyIssueCount": 1,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": false,
+      "requiresCandidateDowngrade": true,
+      "recoveryHint": "Retry Beads with a bounded timeout, run br doctor --json, and do not run br update / br claim from stale fallback rows."
+    },
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "bounded_retry",
+        "command": "br --no-auto-import --allow-stale ready --json",
+        "why": "Use read-only stale fallback only for inspection while Beads liveness is degraded."
+      },
+      {
+        "order": 2,
+        "kind": "doctor_probe",
+        "command": "br doctor --json",
+        "why": "Determine whether tracker DB/JSONL lock pressure or malformed state caused the timeout."
+      },
+      {
+        "order": 3,
+        "kind": "manual_coordination",
+        "command": null,
+        "why": "Agent Mail is unavailable, so reservation absence is not evidence of safety."
+      }
+    ],
+    "doNotProceedBecause": [
+      "beads_source_timeout_no_output",
+      "fallback_rows_stale",
+      "fallback_row_already_owned",
+      "agent_mail_reservation_authority_unknown"
+    ],
+    "safeToClaim": false,
+    "degraded": [
+      {
+        "code": "beads_unavailable",
+        "severity": "warning",
+        "source": "beads",
+        "message": "Beads command produced no output before the bounded timeout; stale fallback rows are advisory only."
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "beads_unavailable",
+      "severity": "warning",
+      "source": "beads",
+      "message": "Beads command produced no output before the bounded timeout; stale fallback rows are advisory only."
+    }
+  ]
+}
