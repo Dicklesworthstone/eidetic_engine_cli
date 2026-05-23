@@ -120,4 +120,59 @@ MUST NOT include raw inbox bodies, message IDs, headers (`From:`, `Subject:`,
 `work_packet_agent_mail_fallback_semantics_are_contractual` lifecycle test
 fences these properties.
 
+## Shell-safe agent command actions (bd-13dmm.3)
+
+Every agent-actionable command in the work packet now has a structured
+`commandAction` representation alongside the legacy human-readable
+`commandTemplate` string. The structured shape lets a harness execute
+the recommended next step without invoking a shell.
+
+- `commandAction` is defined under `definitions/commandAction` in
+  `docs/schemas/swarm/ee.swarm.work_packet.v1.json`. Required fields:
+  - `commandId` — stable, dot-delimited identifier.
+  - `displayCommand` — single-line human-readable form. Must use the
+    `safeCommandString` shape (no shell metacharacters, mail headers,
+    raw home paths, or secret-looking tokens).
+  - `argv` — exact argv vector to execute. Each entry uses the
+    `safeCommandString` redaction guard; this is the only field a
+    consumer should pass to `Command::new`/`spawn`.
+  - `shellRequired` — `false` for safe argv execution; `true` for
+    commands that genuinely need shell evaluation.
+  - `copySafety` — one of `safe_structured_argv`, `display_only`,
+    `shell_required_review`, `forbidden_until_human_approval`. The
+    schema's `allOf` cross-check forbids `shellRequired=true` paired
+    with `safe_structured_argv`, and forces `shell_required_review`
+    or `forbidden_until_human_approval` whenever `shellRequired` is
+    `true`.
+  - `mutatesState` — `true` for any command that writes Beads, sends
+    Agent Mail, mutates git, runs Cargo, or otherwise changes durable
+    state. Consumers must require explicit confirmation before
+    invoking a mutating action without prior human review.
+  - `requiredSubstrate` — `agent_mail`, `beads`, `bv`, `ee`, `git`,
+    `human`, `jq`, `rch`, `static_local`, or `none`.
+  - `when` — short trigger predicate (also `safeCommandString`).
+  - `rationale` — one-line reason (max 240 chars). Must not embed PEM
+    blocks, GitHub PATs, `DATABASE_URL=` literals, or mail headers.
+
+- `recommendedAction.suggestedCommandActions[]` is the canonical
+  argv-bearing surface for agent-recommended next steps.
+  `recommendedAction.suggestedCommands[]` remains for human display
+  during migration but MUST NOT be passed to a shell — consumers
+  prefer `suggestedCommandActions` when both are present.
+
+- `verification.requiredCommands[].commandAction` and
+  `verification.staticChecks[].commandAction` carry the same shape so
+  a harness can replay verification commands without parsing the
+  legacy `commandTemplate` string. The existing `commandTemplate`
+  field is now explicitly marked legacy display-only in the schema
+  description.
+
+Redaction invariant: every `safeCommandString` slot (`displayCommand`,
+each `argv[]` entry, `when`, `rationale`) blocks raw home paths,
+PEM blocks, GitHub PATs, `DATABASE_URL=` strings, and mail headers
+(`From:`, `Subject:`, `Message-ID:`). The
+`work_packet_command_actions_require_shell_safe_argv_contract`
+lifecycle test fences the definition + every reference site + the
+legacy `commandTemplate` marker text.
+
 Tracking Bead: `bd-2z5ly.2`

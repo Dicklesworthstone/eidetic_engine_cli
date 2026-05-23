@@ -26,6 +26,12 @@ After inspecting the packet:
 2. Reserve the packet's suggested file patterns through Agent Mail when Mail is healthy.
 3. Send a short coordination note in the bead thread.
 4. Run only the verification commands listed in `verification.requiredCommands`.
+   Prefer the structured `commandAction.argv` vector and pass it directly to
+   `Command::new`/`spawn`; never feed `commandTemplate` (or the legacy
+   `recommendedAction.suggestedCommands[]` string) to a shell. If
+   `commandAction.copySafety` is `shell_required_review` or
+   `forbidden_until_human_approval`, treat the entry as display-only until
+   a human approves it.
 5. If RCH is blocked, record the exact blocker and do not use local Cargo as substitute proof.
 
 ## Required Guarantees
@@ -47,6 +53,15 @@ After inspecting the packet:
   verification blockers.
 - The packet never contains mail bodies, raw command output, source snippets, or
   raw file contents.
+- Every agent-actionable command exposes a structured
+  `commandAction` (`commandId`, `displayCommand`, `argv`, `shellRequired`,
+  `copySafety`, `mutatesState`, `requiredSubstrate`, `when`, `rationale`).
+  `copySafety=safe_structured_argv` is the only posture a harness may execute
+  automatically; `shell_required_review` and `forbidden_until_human_approval`
+  require human approval, and `display_only` entries (including legacy
+  `commandTemplate` strings) MUST NOT be passed to a shell. See
+  `bd-13dmm.3` and the `work_packet_command_actions_require_shell_safe_argv_contract`
+  lifecycle test.
 
 ## Fixture Set
 
