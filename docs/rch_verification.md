@@ -152,6 +152,127 @@ Use `source_state_refused` for dirty checkout ambiguity and
 proof. Use `known_blocker_refused` only for the fail-fast non-proof path
 described below.
 
+## Durable RCH Verify Ledger CLI
+
+`scripts/rch_verify.sh` produces the proof. `ee verify rch ...` stores and
+queries that proof so later agents do not spend another RCH slot rediscovering
+the same topology, capacity, or local-fallback blocker.
+
+The ledger commands are storage surfaces only. They never run Cargo, never
+invoke RCH, never mutate Beads, and never reinterpret a refused local fallback
+as a successful proof.
+
+Typical agent workflow:
+
+```bash
+# 1. Generate or capture one ee.rch.verify.v1 proof.
+scripts/rch_verify.sh --bead-id bd-XXXX --summary --no-write -- \
+  cargo test --lib focused_case_name -- --nocapture > proof.json
+
+# 2. Store the proof in the local verification ledger.
+ee verify rch ingest --workspace . --from-json proof.json --json
+
+# 3. Before retrying the same bead, inspect active blockers first.
+ee verify rch blockers --workspace . --bead-id bd-XXXX --json
+
+# 4. Inspect historical runs when deciding whether source, command, or
+#    topology changed enough to justify another remote attempt.
+ee verify rch runs --workspace . --bead-id bd-XXXX --json
+```
+
+Use `--from-json -` when piping a proof from another harness. Query commands are
+read-only; an uninitialized workspace ledger returns an empty report instead of
+creating a database or workspace row. Active blockers are bounded by
+`retry_after`; expired blockers remain historical run evidence but should not
+stop a new remote attempt when source or topology has changed.
+
+`ee status --json` and `ee doctor --json` expose `data.verificationLedger`, a
+bounded summary of active blocker counts, oldest/newest `retry_after`, whether
+local fallback was refused, and up to eight blocker references. `ee swarm
+work-packet --json` folds active ledger blockers into
+`rchProofPosture.knownBlockers`, so packet consumers can prefer static checks
+or waiting instead of launching a duplicate RCH attempt.
+
+When a blocker is active, cite these fields in Beads and Agent Mail:
+
+```text
+RCH verifier ledger blocker for <bead>:
+- command_hash: <run.commandHash>
+- status: <run.status>
+- blocker_fingerprint: <run.blockerFingerprint>
+- degraded_codes: <run.degradedCodes>
+- remediation_bead: <run.remediationBead>
+- retry_after: <run.retryAfter>
+- verification_attribution: <run.verificationAttribution>
+- note: Query only; no Cargo or RCH command was launched by `ee verify rch`.
+```
+
+For a successful remote proof, keep the closeout short and explicit:
+
+```text
+RCH proof stored for <bead>:
+- command_hash: <run.commandHash>
+- status: <run.status, normally passed>
+- worker_id: <run.workerId>
+- git_head: <run.gitHead>
+- git_tree: <run.gitTree>
+- source_state_hash: <run.sourceStateHash>
+- verification_attribution: <run.verificationAttribution>
+- note: Proof was ingested from `ee.rch.verify.v1`; consult `ee verify rch runs --bead-id <bead> --json` for the full durable row.
+```
+
+For topology or capacity blockers, do not say the code was verified:
+
+```text
+RCH proof attempt blocked for <bead>:
+- command_hash: <run.commandHash>
+- status: blocked
+- degraded_codes: <run.degradedCodes>
+- blocker_fingerprint: <run.blockerFingerprint>
+- remediation_bead: <run.remediationBead>
+- retry_after: <run.retryAfter>
+- exact_blocker: <bounded exact blocker string from proof/error_codes>
+- note: Remote Cargo did not reach the test runner, and no local Cargo fallback was run.
+```
+
+Concrete examples:
+
+```text
+RCH proof stored for bd-123:
+- command_hash: sha256:<hash>
+- status: passed
+- worker_id: trj
+- git_head: <commit>
+- git_tree: <tree>
+- source_state_hash: sha256:<hash>
+- verification_attribution: live_dirty_checkout
+- note: Proof was ingested from `ee.rch.verify.v1`; consult `ee verify rch runs --bead-id bd-123 --json` for the full durable row.
+```
+
+```text
+RCH proof attempt blocked for bd-123:
+- command_hash: sha256:<hash>
+- status: rch_environment_failure
+- degraded_codes: rch_verify_remote_command_failed, rch_verify_topology_blocked, rch_verify_local_fallback_refused, rch_verify_remote_marker_missing
+- blocker_fingerprint: sha256:<hash>
+- remediation_bead: bd-17c65.10.17.1.2
+- retry_after: <timestamp>
+- exact_blocker: RCH-E327 / Path dependency topology policy failed; remote required; refusing local fallback
+- note: Remote Cargo did not reach the test runner, and no local Cargo fallback was run.
+```
+
+```text
+RCH proof attempt blocked for bd-123:
+- command_hash: sha256:<hash>
+- status: capacity_or_timeout
+- degraded_codes: rch_verify_remote_command_failed, rch_verify_capacity_or_timeout
+- blocker_fingerprint: sha256:<hash>
+- remediation_bead: <bead or none>
+- retry_after: <timestamp>
+- exact_blocker: all workers failed preflight checks / no healthy worker capacity
+- note: Remote Cargo did not reach the test runner, and no local Cargo fallback was run.
+```
+
 ## Degraded-Code Taxonomy
 
 `degraded_codes` remains the complete ordered list of verifier degradations.

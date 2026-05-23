@@ -214,7 +214,23 @@ br close bd-XXXX --reason "RCH proof: command_hash=<hash>; status=<status>; veri
 
 # 4. Optional: ledger the proof for swarm-wide reuse (bd-1h8ji.3)
 scripts/rch_verify.sh --ledger .ee/derived/rch/runs.jsonl -- <cmd>
+
+# 5. Durable verifier ledger: store/query proof rows without running Cargo/RCH
+ee verify rch ingest --workspace . --from-json /tmp/proof.json --json
+ee verify rch blockers --workspace . --bead-id bd-XXXX --json
+ee verify rch runs --workspace . --bead-id bd-XXXX --json
 ```
+
+Before spending another RCH slot on the same bead, query active blockers first.
+If the ledger reports a matching blocker, respect `retry_after`, cite
+`command_hash`, `blocker_fingerprint`, `degraded_codes`, `remediation_bead`, and
+`retry_after`, and do not run local Cargo as a substitute proof. The concrete
+success, topology, and no-worker comment templates live in
+[`docs/rch_verification.md`](rch_verification.md#durable-rch-verify-ledger-cli).
+Status, doctor, and swarm work-packet surfaces also project active blockers:
+inspect `data.verificationLedger` in `ee status --json` / `ee doctor --json`
+or `rchProofPosture.knownBlockers` in `ee swarm work-packet --json` before
+launching another remote proof.
 
 Paste or summarize these proof fields in the Beads comment. Keep fields with
 `none` values when the verifier did not reach that phase; the absence itself is
@@ -464,6 +480,9 @@ bash and dash. Confirmed by repro on this Mac (`dash` is installed at
 | Scan active local Cargo processes | `scripts/check-local-cargo-tripwire.sh --probe-processes --json` |
 | Detect Mac-leak in transcript | `scripts/check-rch-portability.sh --json /path/to/transcript` |
 | Generate closeout proof | `scripts/rch_verify.sh --bead-id <id> --summary --ledger .ee/derived/rch/runs.jsonl -- <cmd>` |
+| Ingest verifier proof | `ee verify rch ingest --from-json proof.json --json` |
+| Query active RCH blockers | `ee verify rch blockers --bead-id <id> --json` |
+| Query RCH verifier run history | `ee verify rch runs --bead-id <id> --json` |
 
 When in doubt: **don't run local cargo**. The wrapper exists precisely so you
 never have to think about which env vars to set; just give it a `cargo`

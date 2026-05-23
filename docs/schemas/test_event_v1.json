@@ -59,6 +59,10 @@
       "type": "string",
       "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$"
     },
+    "stderr_hash": {
+      "type": "string",
+      "pattern": "^(blake3:[0-9a-f]{64}|sha256:[0-9a-f]{64})$"
+    },
     "stderr_excerpt": {
       "type": "string",
       "description": "First N bytes of stderr (default cap 4096) as a lossy UTF-8 string. Diagnostic excerpt only."

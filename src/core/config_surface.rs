@@ -344,6 +344,15 @@ fn merged_config(
     Ok(merge_config(&layers))
 }
 
+pub fn merged_workspace_config(
+    workspace_root: &Path,
+) -> Result<crate::config::MergedConfig, ConfigSurfaceError> {
+    merged_config(&ConfigSurfaceOptions {
+        workspace_root: workspace_root.to_path_buf(),
+        config_path: None,
+    })
+}
+
 fn read_project_config(
     options: &ConfigSurfaceOptions,
     expander: &PathExpander,

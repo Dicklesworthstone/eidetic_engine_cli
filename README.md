@@ -1048,7 +1048,7 @@ base retrieval signal dominant.
 | `ee diag disk-pressure` / `build-admission` / `artifacts` | Storage, artifact, and build-admission diagnostics |
 | `ee diag graph` / `graph-snapshot` / `search` | Graph, snapshot, and retrieval diagnostics |
 | `ee diag integrity` / `dependencies` / `streams` | Integrity, dependency, and stdout/stderr stream checks |
-| `ee verify ingest` / `proofs` / `broker lookup` / `closure-guidance` | Verification evidence, proof checks, reusable RCH evidence, and closeout guidance |
+| `ee verify ingest` / `ee verify rch ingest` / `ee verify rch blockers` / `ee verify rch runs` / `proofs` / `broker lookup` / `closure-guidance` | Verification evidence, durable RCH proof ledger queries, proof checks, reusable RCH evidence, and closeout guidance |
 | `ee maintenance run` / `status` / `wal-checkpoint` / `graph-snapshot-prune` / `graph-witnesses-prune` | Explicit maintenance jobs and retention helpers |
 | `ee job run` / `list` / `show` | Durable steward job history and explicit job execution |
 | `ee install check` / `plan` and `ee update` | Agent-safe install/update checks and dry-run plans |
