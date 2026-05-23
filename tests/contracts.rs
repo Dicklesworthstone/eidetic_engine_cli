@@ -118,6 +118,9 @@ mod agent_detect_schema_constants;
 #[path = "contracts/cass_import_guidance_agent_count.rs"]
 mod cass_import_guidance_agent_count;
 
+#[path = "contracts/agent_inventory_degradation_fields.rs"]
+mod agent_inventory_degradation_fields;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
