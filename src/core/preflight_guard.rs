@@ -3011,6 +3011,7 @@ action = "explode"
             "cargo rustc --lib",
             "env TMPDIR=/tmp cargo test --workspace --no-run",
             "env -i TMPDIR=/tmp cargo test --workspace --no-run",
+            "env -iv cargo test --workspace --no-run",
             "env --ignore-environment cargo clippy --all-targets -- -D warnings",
             "env -u CARGO_HOME cargo check --all-targets",
             "CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
