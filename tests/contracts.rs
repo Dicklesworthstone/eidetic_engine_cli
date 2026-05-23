@@ -37,6 +37,9 @@ mod cass_session_reference_to_uri;
 #[path = "contracts/cass_session_info_defaults.rs"]
 mod cass_session_info_defaults;
 
+#[path = "contracts/cass_exit_code_constants.rs"]
+mod cass_exit_code_constants;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
