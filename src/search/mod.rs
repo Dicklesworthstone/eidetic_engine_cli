@@ -635,26 +635,16 @@ fn redact_search_projection_ref(value: &str) -> String {
 
 fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PATH_PREFIXES: &[&str] = &[
-        "/home/",
-        "/Users/",
-        "/data/",
-        "/workspace/",
-        "/Volumes/",
-        "C:\\",
-        "D:\\",
-    ];
+    const UNIX_PATH_PREFIXES: &[&str] =
+        &["/home/", "/Users/", "/data/", "/workspace/", "/Volumes/"];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
         let remaining = &input[cursor..];
-        if let Some(prefix) = PATH_PREFIXES
-            .iter()
-            .find(|prefix| remaining.starts_with(**prefix))
-        {
+        if let Some(prefix_len) = search_projection_path_prefix_len(remaining, UNIX_PATH_PREFIXES) {
             output.push_str(REDACTED_PATH);
-            cursor += prefix.len();
+            cursor += prefix_len;
             while cursor < input.len() {
                 let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace() {
@@ -678,6 +668,28 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     }
 
     output
+}
+
+fn search_projection_path_prefix_len(
+    remaining: &str,
+    unix_path_prefixes: &[&str],
+) -> Option<usize> {
+    if let Some(prefix) = unix_path_prefixes
+        .iter()
+        .find(|prefix| remaining.starts_with(**prefix))
+    {
+        return Some(prefix.len());
+    }
+
+    let bytes = remaining.as_bytes();
+    if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && matches!(bytes.get(1), Some(b':'))
+        && matches!(bytes.get(2), Some(b'\\' | b'/'))
+    {
+        Some(3)
+    } else {
+        None
+    }
 }
 
 fn is_search_path_hard_delimiter(character: char) -> bool {
@@ -3259,6 +3271,28 @@ mod tests {
             assert!(
                 !redacted.contains(leaked),
                 "search projection redaction leaked {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_redacts_windows_drive_prefix_casing_and_separator_variants() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"upper=C:\Users\alice\secret lower=c:\Users\alice\secret slash=Z:/Users/alice/secret next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"upper=[REDACTED_PATH] lower=[REDACTED_PATH] slash=[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            r#"C:\Users\alice\secret"#,
+            r#"c:\Users\alice\secret"#,
+            "Z:/Users/alice/secret",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked Windows drive path {leaked}: {redacted}"
             );
         }
     }
