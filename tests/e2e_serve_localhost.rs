@@ -434,3 +434,122 @@ fn serve_status_endpoint_ignores_irrelevant_query_parameters() -> TestResult {
     }
     Ok(())
 }
+
+// bd-2niwj: GET /v1/context exercises the require_single_query_value path on
+// the ?task= parameter — the same shared validator used by /v1/search. This
+// transport-level test pins the positive route: a single non-empty
+// percent-decoded task value flows through to the cli.context dispatch plan
+// with the correct cliArgv shape and surface metadata.
+#[test]
+fn serve_context_endpoint_routes_single_task_to_cli_context_dispatch() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/context?task=plan%20a%20refactor HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-context-positive",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("context"));
+    assert_eq!(envelope["request"]["path"].as_str(), Some("/v1/context"));
+    assert_eq!(
+        envelope["request"]["cliEquivalent"].as_str(),
+        Some("ee context \"<task>\" --json"),
+    );
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2"),
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(
+        payload["data"]["businessLogicExecuted"].as_bool(),
+        Some(false),
+    );
+    let plan = &payload["data"]["dispatchPlan"];
+    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.context"));
+    assert_eq!(plan["mutable"].as_bool(), Some(false));
+    assert_eq!(plan["sseStream"].as_bool(), Some(false));
+    let argv = json_string_array(&plan["cliArgv"])?;
+    assert_eq!(argv, vec!["ee", "context", "plan a refactor", "--json"]);
+    Ok(())
+}
+
+// bd-2niwj: each negative branch of require_single_query_value at /v1/context
+// has its own canonical usage message that downstream agents rely on for
+// diagnostics. Drive the transport with the four shapes (missing, multi-
+// value, empty value, whitespace-only value) and pin each exact message at
+// the SERVE_ENDPOINT_SCHEMA_V1 boundary.
+#[test]
+fn serve_context_endpoint_rejects_invalid_task_query_with_canonical_messages() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let cases: [(&str, &str, &str); 4] = [
+        (
+            "req-context-missing",
+            "/v1/context",
+            "/v1/context requires a `task` query parameter.",
+        ),
+        (
+            "req-context-multi",
+            "/v1/context?task=a&task=b",
+            "/v1/context requires exactly one `task` query parameter.",
+        ),
+        (
+            "req-context-empty",
+            "/v1/context?task=",
+            "/v1/context requires a non-empty `task` query parameter.",
+        ),
+        (
+            "req-context-whitespace",
+            "/v1/context?task=%20%20",
+            "/v1/context requires a non-empty `task` query parameter.",
+        ),
+    ];
+    for (request_id, target, expected_message) in cases {
+        let raw = format!(
+            "GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+        );
+        let response = render_serve_transport_exchange(
+            request_id,
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+        );
+        if !response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+            return Err(format!(
+                "expected 400 response for {target}, got {response}"
+            ));
+        }
+        let envelope = response_body_json(&response)?;
+        assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+        assert_eq!(envelope["request"]["endpoint"].as_str(), Some("context"));
+        assert_eq!(
+            envelope["response"]["payloadSchema"].as_str(),
+            Some("ee.error.v2"),
+        );
+        let payload = &envelope["response"]["payload"];
+        assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+        assert_eq!(
+            payload["error"]["code"].as_str(),
+            Some("usage"),
+            "case {target} expected usage error code, got {payload}"
+        );
+        assert_eq!(
+            payload["error"]["message"].as_str(),
+            Some(expected_message),
+            "case {target} expected message {expected_message:?}, got {payload}"
+        );
+    }
+    Ok(())
+}
