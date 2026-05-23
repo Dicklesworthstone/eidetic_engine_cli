@@ -43,6 +43,9 @@ mod cass_exit_code_constants;
 #[path = "contracts/cass_import_session_status_as_str.rs"]
 mod cass_import_session_status_as_str;
 
+#[path = "contracts/cass_invocation_builder.rs"]
+mod cass_invocation_builder;
+
 #[path = "contracts/cass_contract_constants.rs"]
 mod cass_contract_constants;
 
