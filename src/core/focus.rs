@@ -766,7 +766,7 @@ fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
             vec![FocusDegradation::low(
                 "focus_state_absent",
                 "No focus state artifact exists yet; reporting an empty passive state.",
-                Some("ee focus set <memory-id> --json".to_owned()),
+                Some("ee focus set --help".to_owned()),
             )],
         ),
     };
@@ -782,7 +782,7 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
     let Some(_) = focus_state_metadata_for_read(path)? else {
         return Err(DomainError::Storage {
             message: format!("Focus state {} is missing.", path.display()),
-            repair: Some("Run ee focus set <memory-id> --json.".to_owned()),
+            repair: Some("Run ee focus set --help to choose memory IDs.".to_owned()),
         });
     };
     let raw = read_focus_state_file(path).map_err(|error| DomainError::Storage {
@@ -1255,24 +1255,24 @@ fn status_reason(status: FocusMemoryStatusKind) -> String {
 
 fn memory_status_degradations(statuses: &[FocusMemoryStatus]) -> Vec<FocusDegradation> {
     let mut degraded = Vec::new();
-    if statuses
+    if let Some(status) = statuses
         .iter()
-        .any(|status| status.status == FocusMemoryStatusKind::Missing)
+        .find(|status| status.status == FocusMemoryStatusKind::Missing)
     {
         degraded.push(FocusDegradation::low(
             "focus_missing_memory",
             "Focus state references memory IDs that are missing from the database.",
-            Some("ee focus remove <memory-id> --json".to_owned()),
+            Some(format!("ee focus remove {} --json", status.memory_id)),
         ));
     }
-    if statuses
+    if let Some(status) = statuses
         .iter()
-        .any(|status| status.status == FocusMemoryStatusKind::Tombstoned)
+        .find(|status| status.status == FocusMemoryStatusKind::Tombstoned)
     {
         degraded.push(FocusDegradation::low(
             "focus_tombstoned_memory",
             "Focus state references tombstoned memories that will not be used for context.",
-            Some("ee focus remove <memory-id> --json".to_owned()),
+            Some(format!("ee focus remove {} --json", status.memory_id)),
         ));
     }
     if statuses
@@ -1956,7 +1956,7 @@ mod tests {
             FocusDegradation::low(
                 "focus_missing_memory",
                 "Focus state references memory IDs that are missing from the database.",
-                Some("ee focus remove <memory-id> --json".to_owned()),
+                Some("ee focus remove mem_00000000000000000000000060 --json".to_owned()),
             ),
             FocusDegradation {
                 code: "focus_missing_memory".to_owned(),

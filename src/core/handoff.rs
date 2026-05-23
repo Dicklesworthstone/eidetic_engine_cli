@@ -2614,7 +2614,7 @@ fn add_swarm_incident_summary_to_resume(report: &mut ResumeReport, summary: &ser
             "Replay the relevant committed incident fixture before acting on incident context.",
         )
         .with_reason("Embedded incident summaries are compact evidence, not live repair execution.")
-        .with_command("ee diag incident --fixture <path> --json"),
+        .with_command("ee diag incident --help"),
     );
 
     if let Some(codes) = summary
@@ -2627,7 +2627,7 @@ fn add_swarm_incident_summary_to_resume(report: &mut ResumeReport, summary: &ser
                     format!("swarm_incident_{code}"),
                     "Embedded swarm incident summary reported a degraded incident condition.",
                 )
-                .with_next_action("ee diag incident --fixture <path> --json"),
+                .with_next_action("ee diag incident --help"),
             );
         }
     }
@@ -3619,8 +3619,13 @@ fn compute_stale_snapshot_state(
     let drift_detected = hash_drift_detected || measured_drift_detected;
     let mut repair_hints = Vec::new();
     if memories_added_since.is_some_and(|count| count > 0) {
-        repair_hints.push("Refresh: ee handoff create --refresh <capsule>".to_owned());
-        repair_hints.push("Add new evidence: ee context --extend-capsule <capsule>".to_owned());
+        repair_hints.push(
+            "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json".to_owned(),
+        );
+        repair_hints.push(
+            "Add new evidence: ee context \"refresh handoff evidence\" --workspace . --json"
+                .to_owned(),
+        );
     }
     if memories_expired_since.is_some_and(|count| count > 0) {
         repair_hints.push(
@@ -3634,7 +3639,9 @@ fn compute_stale_snapshot_state(
         );
     }
     if memories_revised_since.is_some_and(|count| count > 0) {
-        repair_hints.push("Refresh: ee handoff create --refresh <capsule>".to_owned());
+        repair_hints.push(
+            "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json".to_owned(),
+        );
     }
     repair_hints.sort();
     repair_hints.dedup();
@@ -3688,7 +3695,7 @@ fn stale_threshold_breach(
                 .memories_added_since
                 .unwrap_or_default()
                 .to_string(),
-            repair_hint: "Refresh: ee handoff create --refresh <capsule>",
+            repair_hint: "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
         });
     }
     if thresholds.any_expired_in_pack
@@ -3731,7 +3738,7 @@ fn stale_threshold_breach(
                 .memories_revised_since
                 .unwrap_or_default()
                 .to_string(),
-            repair_hint: "Refresh: ee handoff create --refresh <capsule>",
+            repair_hint: "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
         });
     }
     breaches.into_iter().fold(None, |best, breach| match best {
@@ -5753,8 +5760,7 @@ memories_revised = 3
         )?;
         ensure(
             report.next_actions.iter().any(|action| {
-                action.suggested_command.as_deref()
-                    == Some("ee diag incident --fixture <path> --json")
+                action.suggested_command.as_deref() == Some("ee diag incident --help")
             }),
             "resume next actions include incident replay command",
         )?;

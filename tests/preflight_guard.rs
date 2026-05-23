@@ -151,7 +151,7 @@ fn no_risk_memories_degradation_pins_fixture_code_and_repair() {
     assert_eq!(degraded.severity, "info");
     assert_eq!(
         degraded.repair,
-        "ee remember --kind risk --severity high <warning>"
+        "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json"
     );
 }
 

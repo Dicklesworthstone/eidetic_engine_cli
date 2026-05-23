@@ -1865,7 +1865,7 @@ pub fn alias_workspace(
     if !options.clear && normalized_alias.is_none() {
         return Err(DomainError::Usage {
             message: "workspace alias requires --as <name> or --clear".to_string(),
-            repair: Some("ee workspace alias --pick <path-or-id> --as <name>".to_string()),
+            repair: Some("ee workspace alias --help".to_string()),
         });
     }
 
@@ -1977,7 +1977,7 @@ fn resolve_path_report(
     )
     .map_err(|error| DomainError::Configuration {
         message: error.to_string(),
-        repair: Some("Run from a readable directory or pass --workspace <path>.".to_string()),
+        repair: Some("Run from a readable directory or pass --workspace .".to_string()),
     })?;
     let resolution = resolve_workspace(&request).map_err(|error| DomainError::Configuration {
         message: error.to_string(),
@@ -2072,7 +2072,7 @@ fn workspace_row_for_path(raw: &str) -> Result<StoredWorkspace, DomainError> {
     let root = lexical_absolute(
         &env::current_dir().map_err(|error| DomainError::Configuration {
             message: format!("failed to read current directory: {error}"),
-            repair: Some("Run from a readable directory or pass --workspace <path>.".to_string()),
+            repair: Some("Run from a readable directory or pass --workspace .".to_string()),
         })?,
         Path::new(raw),
     );

@@ -27,8 +27,8 @@
       "Workspace memory set has drifted",
       "current ground truth"
     ],
-    "repair_contains": "ee handoff create --refresh <capsule>",
-    "repair_string": "Refresh: ee handoff create --refresh <capsule>",
-    "repair_command_regex": "(?<cmd>ee handoff create --refresh <capsule>)"
+    "repair_contains": "ee handoff create --workspace . --out handoff-refresh.json --json",
+    "repair_string": "Refresh: ee handoff create --workspace . --out handoff-refresh.json --json",
+    "repair_command_regex": "(?<cmd>ee handoff create --workspace \\. --out handoff-refresh\\.json --json)"
   }
 }

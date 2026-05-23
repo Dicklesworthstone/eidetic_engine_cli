@@ -362,7 +362,7 @@ pub fn show_procedure_from_records(
     if procedure_id.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure id is required".to_owned(),
-            repair: Some("ee procedure show <procedure-id> --json".to_owned()),
+            repair: Some("ee procedure show --help".to_owned()),
         });
     }
 
@@ -1285,7 +1285,7 @@ pub fn promote_procedure(
     if procedure_id.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure id is required for promotion".to_owned(),
-            repair: Some("ee procedure promote <procedure-id> --dry-run --json".to_owned()),
+            repair: Some("ee procedure promote --help".to_owned()),
         });
     }
     let target_maturity = parse_target_maturity(options.to_maturity.as_deref())?;
@@ -1731,14 +1731,16 @@ pub fn retire_procedure(
     if procedure_id.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure id is required for retirement".to_owned(),
-            repair: Some("ee procedure retire <procedure-id> --reason <reason>".to_owned()),
+            repair: Some("ee procedure retire --help".to_owned()),
         });
     }
     let reason = options.reason.trim();
     if reason.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure retirement reason is required".to_owned(),
-            repair: Some("ee procedure retire <procedure-id> --reason <reason>".to_owned()),
+            repair: Some(format!(
+                "ee procedure retire {procedure_id} --reason \"superseded\""
+            )),
         });
     }
     let store = open_writable_procedure_store(
@@ -2883,7 +2885,7 @@ fn build_verification_report(
     if procedure_id.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure id is required for verification".to_owned(),
-            repair: Some("ee procedure verify <procedure-id> --json".to_owned()),
+            repair: Some("ee procedure verify --help".to_owned()),
         });
     }
 
@@ -2918,11 +2920,13 @@ fn build_verification_report(
     let mut next_actions = Vec::new();
     if fail_count > 0 {
         next_actions.push("Review failed verifications and update procedure steps".to_owned());
-        next_actions.push("ee procedure show <id> --include-verification".to_owned());
+        next_actions.push(format!(
+            "ee procedure show {procedure_id} --include-verification"
+        ));
     }
     if overall_result == "passed" && !options.dry_run {
         next_actions.push("Consider promoting procedure to verified status".to_owned());
-        next_actions.push("ee procedure promote <id> --dry-run".to_owned());
+        next_actions.push(format!("ee procedure promote {procedure_id} --dry-run"));
     }
 
     Ok(ProcedureVerifyReport {
@@ -3065,9 +3069,7 @@ pub fn detect_procedure_drift(
     if procedure_id.is_empty() {
         return Err(DomainError::Usage {
             message: "procedure id is required for drift detection".to_owned(),
-            repair: Some(
-                "ee procedure show <procedure-id> --include-verification --json".to_owned(),
-            ),
+            repair: Some("ee procedure show --help".to_owned()),
         });
     }
 

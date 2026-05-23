@@ -4226,7 +4226,7 @@ ee handoff resume capsule.json --workspace . --json
 
 **Expected emission.** Message contains: `Workspace memory set has drifted ... current ground truth`
 
-**Repair hint.** `ee handoff create --refresh <capsule>`
+**Repair hint.** `ee handoff create --workspace . --out handoff-refresh.json --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/handoff_snapshot_stale.json`](../tests/fixtures/failure_modes/handoff_snapshot_stale.json)
 
@@ -6928,7 +6928,7 @@ ee preflight check --cmd 'rm -rf build-output' --workspace . --json
 
 **Expected emission.** Message contains: `No matching high-severity risk memories ... destructive command`
 
-**Repair hint.** `ee remember --kind risk --severity high`
+**Repair hint.** `ee remember --workspace . --kind risk --severity high "Document this destructive-command risk." --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/no_risk_memories.json`](../tests/fixtures/failure_modes/no_risk_memories.json)
 

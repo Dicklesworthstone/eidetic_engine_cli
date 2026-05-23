@@ -558,7 +558,9 @@ impl RuleListReport {
                 rule.evidence.source_memory_count
             ));
         }
-        output.push_str("Next:\n  ee rule show <RULE_ID>\n");
+        if let Some(first) = self.rules.first() {
+            output.push_str(&format!("Next:\n  ee rule show {}\n", first.id));
+        }
         output
     }
 }
@@ -1438,7 +1440,7 @@ pub fn show_rule(options: &RuleShowOptions<'_>) -> Result<RuleShowReport, Domain
     let prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
-        Some("ee rule show <RULE_ID> --json"),
+        Some("ee rule show --help"),
     )?;
     let rule_id = RuleId::from_str(options.rule_id)
         .map_err(|error| {
@@ -1482,7 +1484,7 @@ pub fn protect_rule(options: &RuleProtectOptions<'_>) -> Result<RuleProtectRepor
     let prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
-        Some("ee rule protect <RULE_ID> --json"),
+        Some("ee rule protect --help"),
     )?;
     let rule_id = RuleId::from_str(options.rule_id)
         .map_err(|error| {
@@ -1568,7 +1570,7 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
     let prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
-        Some("ee rule mark <RULE_ID> --trigger <TRIGGER> --json"),
+        Some("ee rule mark --help"),
     )?;
     let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule mark --help")?;
     let trigger = RuleLifecycleTrigger::from_str(options.trigger)
@@ -1576,22 +1578,20 @@ pub fn mark_rule(options: &RuleMarkOptions<'_>) -> Result<RuleMarkReport, Domain
     let connection = open_existing_database(&prepared.database_path)?;
     let stored = load_active_rule(&connection, &prepared.workspace_id, &rule_id)?;
     let previous_detail = load_rule_details(&connection, stored.clone())?;
-    let maturity = RuleMaturity::from_str(&stored.maturity).map_err(|error| {
-        DomainError::Storage {
+    let maturity =
+        RuleMaturity::from_str(&stored.maturity).map_err(|error| DomainError::Storage {
             message: format!("Stored procedural rule has invalid maturity: {error}"),
-            repair: Some("ee rule update <RULE_ID> --maturity is intentionally unavailable; repair the database or recreate the rule".to_owned()),
-        }
-    })?;
+            repair: Some(format!("ee rule show {rule_id} --json")),
+        })?;
     let evidence =
         build_rule_lifecycle_evidence(&connection, &prepared.workspace_id, &stored, options)?;
     let transition = maturity.evaluate_lifecycle_transition(trigger, &evidence);
     if !transition.allowed {
         return Err(DomainError::PolicyDenied {
             message: format!("Rule lifecycle transition rejected: {}", transition.reason),
-            repair: Some(
-                "Use `ee rule show <RULE_ID> --json` and supply the required lifecycle evidence."
-                    .to_owned(),
-            ),
+            repair: Some(format!(
+                "Use `ee rule show {rule_id} --json` and supply the required lifecycle evidence."
+            )),
         });
     }
 
@@ -1752,7 +1752,7 @@ pub fn update_rule(options: &RuleUpdateOptions<'_>) -> Result<RuleUpdateReport, 
     let prepared = prepare_rule_read(
         options.workspace_path,
         options.database_path,
-        Some("ee rule update <RULE_ID> --json"),
+        Some("ee rule update --help"),
     )?;
     validate_rule_update_request(options)?;
     let rule_id = parse_rule_id_for_command(options.rule_id, "ee rule update --help")?;
@@ -2149,7 +2149,7 @@ pub fn import_playbook(
         serde_json::from_slice(&bytes).map_err(|error| DomainError::Import {
             message: format!("malformed playbook JSON: {error}"),
             repair: Some(
-                "use `ee playbook export --out <path> --json` to create a supported file"
+                "use `ee playbook export --out playbook.json --json` to create a supported file"
                     .to_owned(),
             ),
         })?;
@@ -2413,7 +2413,10 @@ fn validate_playbook_document(document: &PlaybookPortableDocument) -> Result<(),
                 document.rule_count,
                 document.rules.len()
             ),
-            repair: Some("recreate the playbook with `ee playbook export --out <path>`".to_owned()),
+            repair: Some(
+                "recreate the playbook with `ee playbook export --out playbook.json --json`"
+                    .to_owned(),
+            ),
         });
     }
     Ok(())
@@ -2460,7 +2463,7 @@ fn preflight_playbook_import_candidates(
                 error.message()
             ),
             repair: Some(
-                "fix the playbook source or recreate it with `ee playbook export --out <path>`"
+                "fix the playbook source or recreate it with `ee playbook export --out playbook.json --json`"
                     .to_owned(),
             ),
         })?;
@@ -2702,7 +2705,7 @@ fn group_playbook_memories(
                 .get_memory_tags(&memory.id)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to read tags for memory {}: {error}", memory.id),
-                    repair: Some("ee memory show <memory-id> --json".to_owned()),
+                    repair: Some(format!("ee memory show {} --json", memory.id)),
                 })?;
         let release_signal = playbook_release_signal(&memory.content, &tags);
         let entry = groups
@@ -3797,7 +3800,7 @@ fn verify_source_memories(
             .get_memory(source_id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to query source memory {source_id}: {error}"),
-                repair: Some("ee memory show <memory-id> --json".to_owned()),
+                repair: Some(format!("ee memory show {source_id} --json")),
             })?;
         let Some(memory) = memory else {
             return Err(DomainError::NotFound {

@@ -24,7 +24,7 @@
       "No matching high-severity risk memories",
       "destructive command"
     ],
-    "repair_contains": "ee remember --kind risk --severity high",
-    "repair_string": "ee remember --kind risk --severity high <warning>"
+    "repair_contains": "ee remember --workspace . --kind risk --severity high",
+    "repair_string": "ee remember --workspace . --kind risk --severity high \"Document this destructive-command risk.\" --json"
   }
 }
