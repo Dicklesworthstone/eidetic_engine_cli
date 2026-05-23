@@ -851,6 +851,8 @@ mod tests {
         "curation_candidates",
         "curation_candidates_v029",
         "curation_candidates_v033",
+        "curation_candidates_v059",
+        "curation_candidates_v060",
         "curation_ttl_policies",
         "ee_advisory_locks",
         "ee_schema_migrations",
@@ -880,6 +882,7 @@ mod tests {
         "procedural_rules",
         "rationale_trace_links",
         "rationale_traces",
+        "rch_verify_runs",
         "recorder_events",
         "recorder_runs",
         "rule_source_memories",
@@ -1177,6 +1180,10 @@ mod tests {
             reason: "source trust quarantine summaries are durable records",
         },
         AppendixDivergence {
+            table: "rch_verify_runs",
+            reason: "durable RCH verifier evidence ledger landed by V061 (bd-22p8c) for ingest/query of remote-proof artifacts",
+        },
+        AppendixDivergence {
             table: "learning_observations",
             reason: "active learning observations have a dedicated ledger",
         },
@@ -1187,6 +1194,14 @@ mod tests {
         AppendixDivergence {
             table: "curation_candidates_v033",
             reason: "the retained v033 table is migration evidence for procedure-candidate rebuilds",
+        },
+        AppendixDivergence {
+            table: "curation_candidates_v059",
+            reason: "the retained v059 table is migration evidence for V060 anti-pattern candidate rebuilds",
+        },
+        AppendixDivergence {
+            table: "curation_candidates_v060",
+            reason: "the retained v060 table is migration evidence for V062 create-derived-memory candidate rebuilds (bd-8k9gh)",
         },
         AppendixDivergence {
             table: "feedback_events_v037",
