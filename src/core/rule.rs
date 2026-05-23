@@ -2702,7 +2702,7 @@ fn group_playbook_memories(
                 .get_memory_tags(&memory.id)
                 .map_err(|error| DomainError::Storage {
                     message: format!("Failed to read tags for memory {}: {error}", memory.id),
-                    repair: Some("ee memory show <memory-id> --json".to_owned()),
+                    repair: Some(format!("ee memory show {} --json", memory.id)),
                 })?;
         let release_signal = playbook_release_signal(&memory.content, &tags);
         let entry = groups
@@ -3797,7 +3797,7 @@ fn verify_source_memories(
             .get_memory(source_id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to query source memory {source_id}: {error}"),
-                repair: Some("ee memory show <memory-id> --json".to_owned()),
+                repair: Some(format!("ee memory show {source_id} --json")),
             })?;
         let Some(memory) = memory else {
             return Err(DomainError::NotFound {

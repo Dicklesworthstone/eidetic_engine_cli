@@ -103,7 +103,7 @@ pub const WORKSPACE_NOT_SPECIFIED: ErrorCode = ErrorCode {
     id: "EE-E004",
     category: ErrorCategory::Usage,
     description: "Workspace path required but not specified",
-    default_repair: Some("ee --workspace . <command>"),
+    default_repair: Some("ee --workspace . --help"),
 };
 
 // Configuration errors (EE-E100 - EE-E199)
@@ -198,14 +198,14 @@ pub const IMPORT_FORMAT_ERROR: ErrorCode = ErrorCode {
     id: "EE-E401",
     category: ErrorCategory::Import,
     description: "Unrecognized import format",
-    default_repair: Some("ee import jsonl --source <file> --dry-run"),
+    default_repair: Some("ee import jsonl --help"),
 };
 
 pub const IMPORT_DUPLICATE: ErrorCode = ErrorCode {
     id: "EE-E402",
     category: ErrorCategory::Import,
     description: "Import would create duplicate entries",
-    default_repair: Some("ee import jsonl --source <file> --dry-run"),
+    default_repair: Some("ee import jsonl --help"),
 };
 
 // Degraded mode errors (EE-E500 - EE-E599)
@@ -488,6 +488,22 @@ mod tests {
             let codes = by_category(cat);
             if codes.is_empty() {
                 return Err(format!("Category {:?} has no codes", cat));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn default_repairs_do_not_embed_unresolved_metavariables() -> TestResult {
+        for code in ALL_ERROR_CODES {
+            let Some(repair) = code.default_repair else {
+                continue;
+            };
+            if repair.contains('<') || repair.contains('>') {
+                return Err(format!(
+                    "{} default repair contains unresolved metavariable: {}",
+                    code.id, repair
+                ));
             }
         }
         Ok(())
