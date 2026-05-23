@@ -977,6 +977,48 @@ fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
         r#".\.pypirc"#,
         "../.pypirc",
         r#"..\.pypirc"#,
+        ".config/pip/pip.conf",
+        ".config\\pip\\pip.conf",
+        "./.config/pip/pip.conf",
+        r#".\.config\pip\pip.conf"#,
+        "../.config/pip/pip.conf",
+        r#"..\.config\pip\pip.conf"#,
+        ".pip/pip.conf",
+        ".pip\\pip.conf",
+        "./.pip/pip.conf",
+        r#".\.pip\pip.conf"#,
+        "../.pip/pip.conf",
+        r#"..\.pip\pip.conf"#,
+        ".pip/pip.ini",
+        ".pip\\pip.ini",
+        "./.pip/pip.ini",
+        r#".\.pip\pip.ini"#,
+        "../.pip/pip.ini",
+        r#"..\.pip\pip.ini"#,
+        ".composer/auth.json",
+        ".composer\\auth.json",
+        "./.composer/auth.json",
+        r#".\.composer\auth.json"#,
+        "../.composer/auth.json",
+        r#"..\.composer\auth.json"#,
+        ".gradle/gradle.properties",
+        ".gradle\\gradle.properties",
+        "./.gradle/gradle.properties",
+        r#".\.gradle\gradle.properties"#,
+        "../.gradle/gradle.properties",
+        r#"..\.gradle\gradle.properties"#,
+        ".m2/settings.xml",
+        ".m2\\settings.xml",
+        "./.m2/settings.xml",
+        r#".\.m2\settings.xml"#,
+        "../.m2/settings.xml",
+        r#"..\.m2\settings.xml"#,
+        ".nuget/NuGet/NuGet.Config",
+        ".nuget\\NuGet\\NuGet.Config",
+        "./.nuget/NuGet/NuGet.Config",
+        r#".\.nuget\NuGet\NuGet.Config"#,
+        "../.nuget/NuGet/NuGet.Config",
+        r#"..\.nuget\NuGet\NuGet.Config"#,
         ".gem/credentials",
         ".gem\\credentials",
         "./.gem/credentials",
@@ -3831,6 +3873,35 @@ mod tests {
         }
         assert!(
             redacted.contains("ordinary=docs/config.json"),
+            "ordinary relative paths should remain visible: {redacted}"
+        );
+    }
+
+    #[test]
+    fn search_projection_redacts_relative_package_manager_credential_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"pip=.config/pip/pip.conf old_pip=./.pip/pip.ini composer=../.composer/auth.json gradle=.\.gradle\gradle.properties maven=.m2/settings.xml nuget=../.nuget/NuGet/NuGet.Config ordinary=docs/settings.xml next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"pip=[REDACTED_PATH] old_pip=[REDACTED_PATH] composer=[REDACTED_PATH] gradle=[REDACTED_PATH] maven=[REDACTED_PATH] nuget=[REDACTED_PATH] ordinary=docs/settings.xml next=done"#
+        );
+        for leaked in [
+            ".config/pip/pip.conf",
+            "./.pip/pip.ini",
+            "../.composer/auth.json",
+            r#".\.gradle\gradle.properties"#,
+            ".m2/settings.xml",
+            "../.nuget/NuGet/NuGet.Config",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked package-manager credential path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=docs/settings.xml"),
             "ordinary relative paths should remain visible: {redacted}"
         );
     }
