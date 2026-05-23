@@ -3065,7 +3065,7 @@ fn ensure_target_memory_exists(
         .get_memory(memory_id)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to read candidate target memory `{memory_id}`: {error}"),
-            repair: Some("ee memory show <memory-id> --json".to_owned()),
+            repair: Some(format!("ee memory show {memory_id} --json")),
         })? {
         Some(memory) if memory.workspace_id == workspace_id && memory.tombstoned_at.is_none() => {
             Ok(())

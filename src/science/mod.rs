@@ -710,8 +710,7 @@ pub fn analyze_drift(options: &DriftAnalysisOptions) -> DriftAnalysisReport {
             }],
             next_actions: vec![
                 "ee eval run --workspace . --json".to_string(),
-                "ee analyze drift --baseline <snapshot> --current <snapshot> --detailed --json"
-                    .to_string(),
+                "ee analyze drift --help".to_string(),
             ],
             generated_at: chrono::Utc::now().to_rfc3339(),
         };
