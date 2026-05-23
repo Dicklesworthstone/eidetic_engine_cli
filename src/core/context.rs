@@ -1969,6 +1969,9 @@ fn audit_context_pack_assembly_with_connection(
         .canonicalize()
         .unwrap_or_else(|_| workspace_path.to_path_buf());
     let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    if conn.get_workspace(&workspace_id).ok().flatten().is_none() {
+        return;
+    }
     let query_hash = crate::obs::audit_events::query_hash(&response.data.request.query);
     let pack_id_for_audit = response
         .data
