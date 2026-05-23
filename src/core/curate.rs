@@ -19,7 +19,8 @@ use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
-    DerivationSourceKind, DerivationSourceRef, ReviewQueueState,
+    DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
+    DerivationSourceRef, ReviewQueueState, canonical_derivation_metadata_json,
     canonical_derivation_source_refs_json, validate_candidate, validate_candidate_trust_evidence,
     validate_review_queue_transition,
 };
@@ -466,7 +467,7 @@ pub struct ReviewSessionCandidate {
     pub candidate_type: String,
     pub candidate_kind: String,
     pub topic_key: String,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: String,
     pub proposed_confidence: f32,
     pub source_type: String,
@@ -475,6 +476,13 @@ pub struct ReviewSessionCandidate {
     pub confidence: f32,
     pub content_hash: String,
     pub persisted: bool,
+}
+
+fn review_candidate_target_display(candidate: &ReviewSessionCandidate) -> String {
+    candidate
+        .target_memory_id
+        .clone()
+        .unwrap_or_else(|| "new derived memory".to_owned())
 }
 
 /// Result of retiring a curation candidate.
@@ -717,7 +725,9 @@ impl ReviewWorkspaceReport {
             for candidate in &self.candidates {
                 output.push_str(&format!(
                     "  - {} ({}) -> {}\n",
-                    candidate.candidate_id, candidate.candidate_type, candidate.target_memory_id
+                    candidate.candidate_id,
+                    candidate.candidate_type,
+                    review_candidate_target_display(candidate)
                 ));
             }
         }
@@ -1678,56 +1688,14 @@ pub fn review_session_proposals(
     let mut durable_mutation = false;
     if options.propose && !options.dry_run {
         for candidate in &mut candidates {
-            // bd-2d32o: bootstrap (propose_new_memory) candidates carry an
-            // empty target_memory_id sentinel because no existing memory has
-            // been linked yet. The curation_candidates table currently
-            // enforces a FK to memories.id, so persisting an empty string
-            // would fail. Skip persistence for bootstrap candidates and let
-            // the dry-run surface still return them so an agent can act on
-            // them via `ee curate accept` / `ee curate retire`. Persisting
-            // bootstrap candidates needs a schema follow-up to relax the FK
-            // or to materialize a placeholder memory at accept time; tracked
-            // for a downstream slice.
-            if candidate.target_memory_id.is_empty() {
-                continue;
-            }
-            if connection
-                .get_curation_candidate(&prepared.workspace_id, &candidate.candidate_id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to check existing curation candidate: {error}"),
-                    repair: Some("ee curate candidates --json".to_owned()),
-                })?
-                .is_some()
-            {
-                continue;
-            }
-            connection
-                .insert_curation_candidate(
-                    &candidate.candidate_id,
-                    &CreateCurationCandidateInput {
-                        workspace_id: prepared.workspace_id.clone(),
-                        candidate_type: candidate.candidate_type.clone(),
-                        target_memory_id: Some(candidate.target_memory_id.clone()),
-                        proposed_content: Some(candidate.proposed_content.clone()),
-                        proposed_confidence: Some(candidate.proposed_confidence),
-                        proposed_trust_class: None,
-                        source_type: candidate.source_type.clone(),
-                        source_id: Some(candidate.source_ids.join(",")),
-                        reason: candidate.reason.clone(),
-                        confidence: candidate.confidence,
-                        status: Some(CandidateStatus::Pending.as_str().to_owned()),
-                        created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
-                        ttl_expires_at: None,
-                        derivation_source_refs_json: None,
-                        derivation_metadata_json: None,
-                    },
-                )
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to insert session review curation candidate: {error}"),
-                    repair: Some("ee curate candidates --json".to_owned()),
-                })?;
-            candidate.persisted = true;
-            durable_mutation = true;
+            candidate.persisted = persist_review_candidate(
+                &connection,
+                &prepared.workspace_id,
+                candidate,
+                Some(&session),
+                "session review",
+            )?;
+            durable_mutation |= candidate.persisted;
         }
     }
 
@@ -2069,16 +2037,10 @@ fn build_bootstrap_candidate(
 
     Some(ReviewSessionCandidate {
         candidate_id,
-        candidate_type: CandidateType::Rule.as_str().to_owned(),
+        candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
         candidate_kind: REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY.to_owned(),
         topic_key: topic_key.to_owned(),
-        // Sentinel: empty target_memory_id signals a bootstrap candidate
-        // that has not yet been linked to any persisted memory. The
-        // persistence guard at the caller site skips these to avoid
-        // tripping the curation_candidates FK against memories.id; the
-        // dry-run proposer surface returns them so an agent can act on
-        // them via `ee curate accept` / `ee curate retire`.
-        target_memory_id: String::new(),
+        target_memory_id: None,
         proposed_content,
         proposed_confidence: confidence,
         source_type: CandidateSource::AgentInference.as_str().to_owned(),
@@ -2137,7 +2099,7 @@ fn build_review_candidate(
         candidate_type: CandidateType::Rule.as_str().to_owned(),
         candidate_kind,
         topic_key: topic_key.to_owned(),
-        target_memory_id,
+        target_memory_id: Some(target_memory_id),
         proposed_content,
         proposed_confidence: confidence,
         source_type: CandidateSource::AgentInference.as_str().to_owned(),
@@ -4096,7 +4058,7 @@ pub fn run_review_workspace(
                 candidate_type: "review".to_owned(),
                 candidate_kind: "workspace_memory".to_owned(),
                 topic_key: memory.kind.clone(),
-                target_memory_id: memory.id.clone(),
+                target_memory_id: Some(memory.id.clone()),
                 proposed_content: memory.content.clone(),
                 proposed_confidence: memory.confidence,
                 source_type: "workspace_review".to_owned(),
@@ -4156,9 +4118,22 @@ fn persist_workspace_review_candidate(
     workspace_id: &str,
     candidate: &ReviewSessionCandidate,
 ) -> Result<bool, DomainError> {
-    if candidate.target_memory_id.is_empty() {
-        return Ok(false);
-    }
+    persist_review_candidate(
+        connection,
+        workspace_id,
+        candidate,
+        None,
+        "workspace review",
+    )
+}
+
+fn persist_review_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate: &ReviewSessionCandidate,
+    session: Option<&StoredSession>,
+    failure_context: &str,
+) -> Result<bool, DomainError> {
     if connection
         .get_curation_candidate(workspace_id, &candidate.candidate_id)
         .map_err(|error| DomainError::Storage {
@@ -4170,13 +4145,25 @@ fn persist_workspace_review_candidate(
         return Ok(false);
     }
 
+    let (derivation_source_refs_json, derivation_metadata_json) = if candidate
+        .target_memory_id
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        let (source_refs_json, metadata_json) =
+            review_bootstrap_derivation_package(connection, workspace_id, candidate, session)?;
+        (Some(source_refs_json), Some(metadata_json))
+    } else {
+        (None, None)
+    };
+
     connection
         .insert_curation_candidate(
             &candidate.candidate_id,
             &CreateCurationCandidateInput {
                 workspace_id: workspace_id.to_owned(),
                 candidate_type: candidate.candidate_type.clone(),
-                target_memory_id: Some(candidate.target_memory_id.clone()),
+                target_memory_id: candidate.target_memory_id.clone(),
                 proposed_content: Some(candidate.proposed_content.clone()),
                 proposed_confidence: Some(candidate.proposed_confidence),
                 proposed_trust_class: None,
@@ -4187,16 +4174,145 @@ fn persist_workspace_review_candidate(
                 status: Some(CandidateStatus::Pending.as_str().to_owned()),
                 created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
                 ttl_expires_at: None,
-                derivation_source_refs_json: None,
-                derivation_metadata_json: None,
+                derivation_source_refs_json,
+                derivation_metadata_json,
             },
         )
         .map_err(|error| DomainError::Storage {
-            message: format!("Failed to insert workspace review curation candidate: {error}"),
+            message: format!("Failed to insert {failure_context} curation candidate: {error}"),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
 
     Ok(true)
+}
+
+fn review_bootstrap_derivation_package(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate: &ReviewSessionCandidate,
+    session: Option<&StoredSession>,
+) -> Result<(String, String), DomainError> {
+    if candidate.candidate_type != CandidateType::CreateDerivedMemory.as_str() {
+        return Err(review_bootstrap_derivation_error(format!(
+            "Bootstrap candidate {} has candidateType `{}`; expected `{}`.",
+            candidate.candidate_id,
+            candidate.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        )));
+    }
+
+    let mut source_refs = Vec::new();
+    let mut loaded_session = None;
+    for source_id in &candidate.source_ids {
+        let evidence_span =
+            connection
+                .get_evidence_span(source_id)
+                .map_err(|error| DomainError::Storage {
+                    message: format!(
+                        "Failed to load review bootstrap evidence span {source_id}: {error}"
+                    ),
+                    repair: Some("ee import cass --workspace . --json".to_owned()),
+                })?;
+        let evidence_span = evidence_span.ok_or_else(|| {
+            review_bootstrap_derivation_error(format!(
+                "Review bootstrap candidate {} references missing evidence span {source_id}.",
+                candidate.candidate_id
+            ))
+        })?;
+        if evidence_span.workspace_id != workspace_id {
+            return Err(review_bootstrap_derivation_error(format!(
+                "Review bootstrap evidence span {} belongs to workspace {}, not {}.",
+                evidence_span.id, evidence_span.workspace_id, workspace_id
+            )));
+        }
+        if loaded_session.is_none() {
+            loaded_session =
+                connection
+                    .get_session(&evidence_span.session_id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to load review bootstrap session {}: {error}",
+                            evidence_span.session_id
+                        ),
+                        repair: Some("ee import cass --workspace . --json".to_owned()),
+                    })?;
+        }
+        source_refs.push(DerivationSourceRef::new(
+            DerivationSourceKind::EvidenceSpan,
+            evidence_span.id,
+            evidence_span.content_hash,
+        ));
+    }
+
+    let source_refs_json =
+        canonical_derivation_source_refs_json(&source_refs).map_err(|error| {
+            review_bootstrap_derivation_error(format!(
+                "Failed to canonicalize review bootstrap source refs: {error}"
+            ))
+        })?;
+
+    let session = session.or(loaded_session.as_ref());
+    if let Some(session) = session
+        && session.workspace_id != workspace_id
+    {
+        return Err(review_bootstrap_derivation_error(format!(
+            "Review bootstrap session {} belongs to workspace {}, not {}.",
+            session.id, session.workspace_id, workspace_id
+        )));
+    }
+
+    let metadata = DerivationMetadata {
+        memory_spec: DerivationMemorySpec {
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            workflow_id: None,
+            confidence: Some(candidate.proposed_confidence),
+            utility: None,
+            importance: None,
+            provenance_uri: None,
+            trust_class: Some("agent_assertion".to_owned()),
+            trust_subclass: Some("review_session_bootstrap".to_owned()),
+            tags: vec![
+                "review-session".to_owned(),
+                "cass".to_owned(),
+                "bootstrap".to_owned(),
+                candidate.topic_key.clone(),
+            ],
+            valid_from: None,
+            valid_to: None,
+        },
+        producer: DerivationProducerMetadata {
+            producer: "review_session".to_owned(),
+            producer_payload: Some(serde_json::json!({
+                "candidateId": candidate.candidate_id.as_str(),
+                "candidateKind": candidate.candidate_kind.as_str(),
+                "contentHash": candidate.content_hash.as_str(),
+                "sourceIds": &candidate.source_ids,
+                "topicKey": candidate.topic_key.as_str(),
+                "sessionId": session.map(|session| session.id.as_str()),
+                "cassSessionId": session.map(|session| session.cass_session_id.as_str()),
+                "proposedMemory": {
+                    "level": "procedural",
+                    "kind": "rule",
+                    "contentHash": candidate.content_hash.as_str(),
+                },
+            })),
+        },
+    };
+    let metadata_json = canonical_derivation_metadata_json(&metadata).map_err(|error| {
+        review_bootstrap_derivation_error(format!(
+            "Failed to canonicalize review bootstrap metadata: {error}"
+        ))
+    })?;
+
+    Ok((source_refs_json, metadata_json))
+}
+
+fn review_bootstrap_derivation_error(message: String) -> DomainError {
+    DomainError::Storage {
+        message,
+        repair: Some("ee review session --propose --json".to_owned()),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -8422,9 +8538,9 @@ mod tests {
     use super::{
         CURATE_APPLY_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1, CURATE_DISPOSITION_SCHEMA_V1,
         CURATE_RETIRE_SCHEMA_V1, CURATE_REVIEW_SCHEMA_V1, CURATE_TOMBSTONE_SCHEMA_V1,
-        CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CurateCandidatesDegradation,
-        CurateCandidatesFilter, CurateCandidatesOptions, CurateCandidatesReport,
-        CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
+        CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CandidateType,
+        CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
+        CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
         REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
         REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate, ReviewSessionOptions,
         ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
@@ -9047,6 +9163,129 @@ mod tests {
     }
 
     #[test]
+    fn review_session_proposals_persist_bootstrap_as_create_derived_candidate() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let bootstrap_session_id = SessionId::from_uuid(uuid::Uuid::from_u128(506)).to_string();
+        let bootstrap_evidence_id = evidence_id(701);
+        connection
+            .insert_session(
+                &bootstrap_session_id,
+                &session_input(&fixture.workspace_id, "cass-bootstrap-direct"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &bootstrap_evidence_id,
+                &evidence_span_input(
+                    &fixture.workspace_id,
+                    &bootstrap_session_id,
+                    None,
+                    "bootstrap-direct-span",
+                    60,
+                    "Always run cargo fmt --check before cutting a release tag.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let first = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-bootstrap-direct"),
+            propose: true,
+            dry_run: false,
+            min_confidence: 0.0,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+        let second = review_session_proposals(&ReviewSessionOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            session_id: Some("cass-bootstrap-direct"),
+            propose: true,
+            dry_run: false,
+            min_confidence: 0.0,
+            limit: 10,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(first.candidate_count, 1);
+        assert!(first.durable_mutation);
+        assert!(!second.durable_mutation);
+        let bootstrap = first
+            .candidates
+            .first()
+            .ok_or_else(|| "expected bootstrap review candidate".to_owned())?;
+        assert_eq!(
+            bootstrap.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(
+            bootstrap.candidate_kind,
+            REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY
+        );
+        assert_eq!(bootstrap.target_memory_id, None);
+        assert_eq!(bootstrap.source_ids, vec![bootstrap_evidence_id.clone()]);
+        assert!(bootstrap.persisted);
+        assert!(
+            second
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.persisted)
+        );
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_curation_candidate(&fixture.workspace_id, &bootstrap.candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected persisted create-derived candidate".to_owned())?;
+        assert_eq!(
+            stored.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(stored.target_memory_id, None);
+        let source_refs = stored
+            .derivation_source_refs_json
+            .as_deref()
+            .ok_or_else(|| "expected derivation source refs".to_owned())?;
+        assert!(source_refs.contains(bootstrap_evidence_id.as_str()));
+        assert!(source_refs.contains("\"kind\":\"evidence_span\""));
+        let metadata = stored
+            .derivation_metadata_json
+            .as_deref()
+            .ok_or_else(|| "expected derivation metadata".to_owned())?;
+        assert!(metadata.contains("\"producer\":\"review_session\""));
+        assert!(metadata.contains("\"candidateKind\":\"propose_new_memory\""));
+        assert!(metadata.contains("\"cassSessionId\":\"cass-bootstrap-direct\""));
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            candidate_type: Some(CandidateType::CreateDerivedMemory.as_str()),
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "created",
+            group_duplicates: false,
+        })
+        .map_err(|error| error.message())?;
+        assert!(
+            report
+                .candidates
+                .iter()
+                .any(|candidate| candidate.id == bootstrap.candidate_id
+                    && candidate.target_memory_id.is_none()),
+            "curate candidates should list the persisted create-derived bootstrap candidate"
+        );
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
     fn review_session_empty_and_noisy_sessions_propose_nothing() -> TestResult {
         let fixture = review_session_fixture()?;
         let connection =
@@ -9293,15 +9532,18 @@ mod tests {
             .iter()
             .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY)
             .ok_or_else(|| "expected workspace review to surface bootstrap candidate".to_owned())?;
-        assert!(bootstrap.target_memory_id.is_empty());
+        assert_eq!(
+            bootstrap.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(bootstrap.target_memory_id, None);
         assert_eq!(bootstrap.source_ids, vec![bootstrap_evidence_id]);
         assert!(!bootstrap.persisted);
         Ok(())
     }
 
     #[test]
-    fn review_workspace_include_cass_persists_linked_and_skips_bootstrap_candidates() -> TestResult
-    {
+    fn review_workspace_include_cass_persists_linked_and_bootstrap_candidates() -> TestResult {
         let fixture = review_session_fixture()?;
         let connection =
             DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
@@ -9358,7 +9600,7 @@ mod tests {
             .filter(|candidate| candidate.persisted)
             .count();
         assert!(first.durable_mutation);
-        assert_eq!(first_persisted, 4);
+        assert_eq!(first_persisted, 5);
         assert!(!second.durable_mutation);
         assert_eq!(second_persisted, 0);
 
@@ -9369,8 +9611,12 @@ mod tests {
             .ok_or_else(|| {
                 "expected bootstrap candidate in persisted workspace review".to_owned()
             })?;
-        assert!(bootstrap.target_memory_id.is_empty());
-        assert!(!bootstrap.persisted);
+        assert_eq!(
+            bootstrap.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
+        );
+        assert_eq!(bootstrap.target_memory_id, None);
+        assert!(bootstrap.persisted);
 
         let connection =
             DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
@@ -9378,10 +9624,22 @@ mod tests {
             let stored = connection
                 .get_curation_candidate(&fixture.workspace_id, &candidate.candidate_id)
                 .map_err(|error| error.to_string())?;
-            if candidate.target_memory_id.is_empty() {
+            if candidate.target_memory_id.is_none() {
+                let stored = stored.ok_or_else(|| {
+                    "bootstrap create-derived candidate should be persisted".to_owned()
+                })?;
+                assert_eq!(
+                    stored.candidate_type,
+                    CandidateType::CreateDerivedMemory.as_str()
+                );
+                assert_eq!(stored.target_memory_id, None);
                 assert!(
-                    stored.is_none(),
-                    "bootstrap candidate without target memory must not be persisted"
+                    stored.derivation_source_refs_json.is_some(),
+                    "bootstrap candidate should carry source refs"
+                );
+                assert!(
+                    stored.derivation_metadata_json.is_some(),
+                    "bootstrap candidate should carry producer metadata"
                 );
             } else {
                 assert!(
@@ -9463,7 +9721,7 @@ mod tests {
                 candidate_type: "rule".to_owned(),
                 candidate_kind: "rule".to_owned(),
                 topic_key: "testing".to_owned(),
-                target_memory_id: "mem_review_golden".to_owned(),
+                target_memory_id: Some("mem_review_golden".to_owned()),
                 proposed_content:
                     "For `testing` work, follow the evidence-backed procedure shown in this session: Run golden tests / Keep JSON stable"
                         .to_owned(),
@@ -13127,10 +13385,11 @@ mod tests {
             .iter()
             .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY)
             .expect("candidate_kind=propose_new_memory must appear for null memory_id input");
-        assert!(
-            bootstrap.target_memory_id.is_empty(),
-            "bootstrap candidate target_memory_id must be the empty sentinel until accept-time materialization"
+        assert_eq!(
+            bootstrap.candidate_type,
+            CandidateType::CreateDerivedMemory.as_str()
         );
+        assert_eq!(bootstrap.target_memory_id, None);
         assert!(
             !bootstrap.source_ids.is_empty(),
             "bootstrap candidate must carry the source evidence span ids"
