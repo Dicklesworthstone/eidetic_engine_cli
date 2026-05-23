@@ -938,6 +938,140 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
     Ok(())
 }
 
+// bd-3uvoo: POST /v1/durable-write is the only mutable endpoint in the v2
+// surface. Its happy-path transport dispatch (with a valid bearer token and
+// an empty Content-Length: 0 body) returns a placeholder-handler dispatch
+// plan whose mutable=true and handlerSurface='serve.durable_write_placeholder'
+// shapes are not exercised at transport level by any other test. Pin the
+// 200 envelope contract so the placeholder dispatch is anchored before the
+// real durable-write handler lands.
+#[test]
+fn serve_durable_write_endpoint_routes_empty_body_to_placeholder_dispatch_plan() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-durable-write-empty",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(
+        envelope["request"]["endpoint"].as_str(),
+        Some("durableWrite"),
+    );
+    assert_eq!(
+        envelope["request"]["path"].as_str(),
+        Some("/v1/durable-write"),
+    );
+    assert_eq!(envelope["request"]["method"].as_str(), Some("POST"));
+    // DurableWrite has no CLI equivalent (yet) — cliEquivalent must be null.
+    if !envelope["request"]["cliEquivalent"].is_null() {
+        return Err(format!(
+            "/v1/durable-write must not expose a cliEquivalent yet (placeholder dispatch); got {envelope}"
+        ));
+    }
+    // POST endpoints carry contentLengthRequired=true.
+    assert_eq!(
+        envelope["request"]["contentLengthRequired"].as_bool(),
+        Some(true),
+    );
+    assert_eq!(envelope["request"]["bodyBytes"].as_u64(), Some(0));
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(200));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2"),
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(
+        payload["data"]["businessLogicExecuted"].as_bool(),
+        Some(false),
+    );
+    let plan = &payload["data"]["dispatchPlan"];
+    assert_eq!(plan["endpoint"].as_str(), Some("durableWrite"));
+    assert_eq!(
+        plan["handlerSurface"].as_str(),
+        Some("serve.durable_write_placeholder"),
+    );
+    // mutable=true is the structural promise that downstream agents inspect
+    // before treating the response as a write-effect handshake.
+    assert_eq!(plan["mutable"].as_bool(), Some(true));
+    assert_eq!(plan["sseStream"].as_bool(), Some(false));
+    let argv = json_string_array(&plan["cliArgv"])?;
+    if !argv.is_empty() {
+        return Err(format!(
+            "durable-write placeholder must expose no CLI argv: {argv:?}"
+        ));
+    }
+    Ok(())
+}
+
+// bd-3uvoo: POST /v1/durable-write without an Authorization header must
+// short-circuit through the shared serve_auth_failure_envelope (same code
+// path validated for /v1/status in bd-3c3i5) but with the durable-write
+// endpoint identity preserved in request.endpoint and request metadata.
+#[test]
+fn serve_durable_write_endpoint_missing_auth_short_circuits_with_auth_failure_envelope()
+-> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n"
+        .to_owned();
+    let response = render_serve_transport_exchange(
+        "req-durable-write-missing-auth",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 401 Unauthorized\r\n") {
+        return Err(format!("expected 401 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(
+        envelope["request"]["endpoint"].as_str(),
+        Some("durableWrite"),
+    );
+    assert_eq!(envelope["request"]["method"].as_str(), Some("POST"));
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(401));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let degraded_codes = json_string_array(&envelope["response"]["degradedCodes"])?;
+    assert_eq!(degraded_codes, vec!["serve_auth_missing"]);
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(payload["error"]["code"].as_str(), Some("policy_denied"));
+    assert_eq!(
+        payload["error"]["details"]["authState"].as_str(),
+        Some("missing"),
+    );
+    assert_eq!(
+        payload["error"]["details"]["tokenMaterialExposed"].as_bool(),
+        Some(false),
+    );
+    // The placeholder dispatch must NOT run for auth-rejected POSTs — the
+    // mutable=true flag from the dispatch plan would otherwise mislead a
+    // downstream observer into believing a write was queued.
+    if payload["data"]["dispatchPlan"]["mutable"].as_bool() == Some(true) {
+        return Err(format!(
+            "auth-missing POST /v1/durable-write must NOT surface the placeholder mutable=true dispatch plan; got {payload}"
+        ));
+    }
+    Ok(())
+}
+
 // bd-tujpb: parse_serve_http_request has four additional pre-parse rejection
 // branches not covered by bd-17386/bd-2e5g1 — header byte limit overflow,
 // declared body byte limit overflow, non-integer Content-Length, and
