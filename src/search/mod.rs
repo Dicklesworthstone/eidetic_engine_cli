@@ -635,12 +635,31 @@ fn redact_search_projection_ref(value: &str) -> String {
 
 fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const UNIX_PATH_PREFIXES: &[&str] =
-        &["/home/", "/Users/", "/data/", "/workspace/", "/Volumes/"];
+    const UNIX_PATH_PREFIXES: &[&str] = &[
+        "/home/",
+        "/Users/",
+        "/data/",
+        "/workspace/",
+        "/workspaces/",
+        "/Volumes/",
+        "/var/run/",
+        "/run/",
+        "/var/lib/docker/",
+        "/var/lib/kubelet/",
+        "/mnt/",
+        "/media/",
+        "/app/",
+        "/github/workspace/",
+        "/__w/",
+        "/root/",
+        "/tmp/",
+        "/private/tmp/",
+    ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
+        let remaining = &input[cursor..];
         if let Some(prefix_len) =
             search_projection_path_prefix_len(input, cursor, UNIX_PATH_PREFIXES)
         {
@@ -689,6 +708,9 @@ fn search_projection_path_prefix_len(
     }
 
     if let Some(prefix_len) = search_projection_env_path_prefix_len(remaining) {
+        return Some(prefix_len);
+    }
+    if let Some(prefix_len) = sensitive_relative_path_prefix_len(remaining) {
         return Some(prefix_len);
     }
 
@@ -820,6 +842,22 @@ fn dollar_env_path_prefix_len(bytes: &[u8], name_start: usize) -> Option<usize> 
 
 fn is_env_name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'(' | b')')
+}
+
+fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
+    for prefix in [
+        ".ssh/",
+        ".ssh\\",
+        "./.ssh/",
+        r#".\.ssh\"#,
+        "../.ssh/",
+        r#"..\.ssh\"#,
+    ] {
+        if remaining.starts_with(prefix) {
+            return Some(prefix.len());
+        }
+    }
+    None
 }
 
 fn starts_with_forward_slash_network_path(input: &str, cursor: usize) -> bool {
@@ -3536,6 +3574,36 @@ mod tests {
             redacted.contains("https://example.invalid/artifacts/path"),
             "ordinary HTTPS refs should not be treated as slash-UNC paths: {redacted}"
         );
+    }
+
+    #[test]
+    fn search_projection_redacts_runtime_container_and_relative_ssh_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"sock=/var/run/docker.sock run=/run/user/501/agent.sock mount=/mnt/data/.ssh/id_ed25519 app=/app/.ssh/config work=/workspaces/project/.ssh/config github=/github/workspace/.ssh/config root=/root/.ssh/config tmp=/tmp/agent/.ssh/config rel=.ssh/id_ed25519 parent=../.ssh/config winrel=.\.ssh\config next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"sock=[REDACTED_PATH] run=[REDACTED_PATH] mount=[REDACTED_PATH] app=[REDACTED_PATH] work=[REDACTED_PATH] github=[REDACTED_PATH] root=[REDACTED_PATH] tmp=[REDACTED_PATH] rel=[REDACTED_PATH] parent=[REDACTED_PATH] winrel=[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            "/var/run/docker.sock",
+            "/run/user/501",
+            "/mnt/data/.ssh",
+            "/app/.ssh",
+            "/workspaces/project/.ssh",
+            "/github/workspace/.ssh",
+            "/root/.ssh",
+            "/tmp/agent/.ssh",
+            ".ssh/id_ed25519",
+            "../.ssh/config",
+            r#".\.ssh\config"#,
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked runtime or ssh path {leaked}: {redacted}"
+            );
+        }
     }
 
     #[test]
