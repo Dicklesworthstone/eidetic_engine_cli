@@ -1,0 +1,178 @@
+{
+  "schema": "ee.swarm.work_packet.v1",
+  "packetId": "swarm_work_packet_agent_mail_degraded_read_only_0001",
+  "workspace": "repo:25e38e130474e7f0292de2a3",
+  "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+  "observedStateClass": "degraded_mail_rch_topology",
+  "recommendedAction": {
+    "action": "prefer_static_docs_work",
+    "candidateId": "bd-docs.1",
+    "confidence": "medium",
+    "safeToClaim": true,
+    "reasons": [
+      "agent_mail_degraded_read_only",
+      "reservation_evidence_not_authoritative",
+      "inbox_evidence_not_authoritative",
+      "candidate_has_no_source_edits"
+    ],
+    "proofObligations": [
+      "do_not_treat_zero_reservation_count_as_no_conflict",
+      "do_not_treat_zero_inbox_count_as_no_peer_messages",
+      "record_agent_mail_fallback_in_beads"
+    ],
+    "suggestedCommands": [
+      "br show bd-docs.1 --json",
+      "br comments add bd-docs.1 --message 'agent_mail degraded_read_only; coordinating via beads'"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "bd-docs.1",
+      "title": "Document a redaction-safe coordination contract",
+      "source": "beads_ready",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "safe_to_claim",
+      "collisionRisk": "low",
+      "unsafeReasons": [],
+      "staleReasons": [],
+      "sourceRefs": ["br://bd-docs.1"]
+    }
+  ],
+  "coordination": {
+    "activeClaimCount": 0,
+    "dirtyPathCount": 3,
+    "fileCollisionCount": 0,
+    "agentMail": {
+      "status": "degraded_read_only",
+      "healthLevel": "red",
+      "unreadCount": null,
+      "ackRequiredCount": null,
+      "degradedCodes": ["agent_mail_unavailable", "archive_index_parity_drift"],
+      "recoveryMode": "proceed_via_beads",
+      "archiveIndexParity": "archive_ahead",
+      "reservationAuthoritative": false,
+      "inboxAuthoritative": false,
+      "fallbackActions": [
+        {
+          "kind": "beads_comment",
+          "summary": "Record Agent Mail degraded posture and coordinate in Beads until the index recovers.",
+          "command": "br comments add bd-docs.1 --message 'agent_mail degraded_read_only; coordinating via beads'",
+          "manualStep": null
+        },
+        {
+          "kind": "retry_later",
+          "summary": "Retry Agent Mail health check after the archive/SQLite parity drift heals.",
+          "command": null,
+          "manualStep": "Re-run am doctor and the work-packet collector after archive_ahead clears."
+        },
+        {
+          "kind": "switch_to_static_work",
+          "summary": "Prefer static or docs-first work while inbox and reservation evidence is non-authoritative.",
+          "command": null,
+          "manualStep": "Avoid claiming peer-touched lanes until reservation_authoritative becomes true."
+        }
+      ]
+    },
+    "activeClaims": [],
+    "fileCollisions": []
+  },
+  "rchProofPosture": {
+    "sourceEnabled": true,
+    "remoteOnlyRequired": true,
+    "posture": "topology_blocked",
+    "healthyWorkerCount": 0,
+    "safeToLaunchCargoVerification": false,
+    "localFallbackPrevented": true,
+    "blockerCodes": ["rch_worker_topology_blocked"],
+    "knownBlockers": [
+      {
+        "code": "rch_worker_topology_blocked",
+        "fingerprint": "sha256:64139c3370a10eca54471aac3d6f6f23e681e9aa6953b10f870f1f4fb7641560",
+        "commandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77",
+        "message": "Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.",
+        "remediationBead": "bd-17c65.10.17.1.2",
+        "retryAfter": "2026-05-23T06:00:00Z",
+        "remoteRequired": true,
+        "localFallbackRefused": true,
+        "degradedCodes": ["rch_verify_topology_blocked", "rch_verify_local_fallback_refused"]
+      }
+    ],
+    "retryAfter": "2026-05-23T06:00:00Z"
+  },
+  "verification": {
+    "requiredCommands": [
+      {
+        "commandId": "cargo_test_swarm_contract",
+        "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle",
+        "requiredSubstrate": "rch",
+        "when": "only_after_rch_remote_workers_recover",
+        "lastOutcome": "environment_blocked",
+        "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"
+      }
+    ],
+    "staticChecks": [
+      {
+        "commandId": "json_schema_parse",
+        "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json",
+        "requiredSubstrate": "static_local",
+        "when": "after_schema_edits",
+        "lastOutcome": "passed",
+        "lastCommandHash": null
+      }
+    ],
+    "closeoutEvidenceRequired": true
+  },
+  "sourceProvenance": [
+    {
+      "source": "agent-mail",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "archive_ahead_of_sqlite",
+      "digest": "blake3:agent-mail-degraded",
+      "redaction": "health_class_only_no_bodies_no_inbox_no_paths"
+    },
+    {
+      "source": "beads",
+      "collector": "swarm brief",
+      "status": "fresh",
+      "freshness": "current",
+      "digest": "blake3:beads",
+      "redaction": "ids_statuses_titles"
+    },
+    {
+      "source": "rch",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "stale_worker_topology",
+      "digest": "blake3:rch-blocked",
+      "redaction": "counts_worker_labels_no_raw_logs"
+    }
+  ],
+  "mutationPolicy": {
+    "sideEffectFree": true,
+    "claimsBeads": false,
+    "reservesFiles": false,
+    "sendsAgentMail": false,
+    "runsCargo": false,
+    "stagesGit": false,
+    "deletesFiles": false
+  },
+  "degraded": [
+    {
+      "code": "agent_mail_unavailable",
+      "source": "agent-mail",
+      "severity": "warning",
+      "message": "Agent Mail index is degraded_read_only; reservation and inbox evidence are not authoritative.",
+      "repair": "Coordinate via Beads until archive_ahead parity drift clears."
+    },
+    {
+      "code": "archive_index_parity_drift",
+      "source": "agent-mail",
+      "severity": "warning",
+      "message": "Agent Mail JSONL archive is ahead of the SQLite index; some recent messages are not searchable yet.",
+      "repair": "Wait for am doctor repair or rebuild the SQLite index from the archive."
+    }
+  ]
+}
