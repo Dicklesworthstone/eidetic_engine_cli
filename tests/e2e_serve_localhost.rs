@@ -938,6 +938,84 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
     Ok(())
 }
 
+// bd-2e5g1: parse_serve_http_request has four pre-parse rejection branches
+// for malformed HTTP/1.1 request shapes that don't even reach the
+// method/path inspection: missing CRLF terminator, wrong HTTP version,
+// header line missing ':' separator, and empty header name. All four
+// produce 400 with the flat ee.error.v2 envelope (no exchange wrapper).
+// Drive each with a real raw byte stream and pin the canonical message so
+// future refactors can't accidentally swallow these branches into a panic
+// or leak partial-parse state.
+#[test]
+fn serve_malformed_request_line_and_headers_rejected_with_canonical_400_messages() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let cases: [(&str, String, &str); 4] = [
+        (
+            "req-malformed-no-crlf-terminator",
+            // No "\r\n\r\n" terminator — entire payload is one request line.
+            "GET /v1/status HTTP/1.1".to_owned(),
+            "HTTP request is missing the CRLF header terminator.",
+        ),
+        (
+            "req-malformed-wrong-http-version",
+            format!(
+                "GET /v1/status HTTP/2.0\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+            "Only narrow HTTP/1.1 request lines are supported.",
+        ),
+        (
+            "req-malformed-header-no-colon",
+            format!(
+                "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nBadHeaderNoColon foo bar\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+            "HTTP header line is missing ':' separator.",
+        ),
+        (
+            "req-malformed-empty-header-name",
+            format!(
+                "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n: value\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+            "HTTP header name must not be empty.",
+        ),
+    ];
+    for (request_id, raw, expected_message) in cases {
+        let response = render_serve_transport_exchange(
+            request_id,
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+        );
+        if !response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+            return Err(format!(
+                "case {request_id} expected 400 response, got {response}"
+            ));
+        }
+        let envelope = response_body_json(&response)?;
+        assert_eq!(
+            envelope["schema"].as_str(),
+            Some("ee.error.v2"),
+            "case {request_id} expected flat ee.error.v2 envelope, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some("usage"),
+            "case {request_id} expected usage error code, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["severity"].as_str(),
+            Some("low"),
+            "case {request_id} expected low severity for usage error, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"].as_str(),
+            Some(expected_message),
+            "case {request_id} expected message {expected_message:?}, got {envelope}"
+        );
+    }
+    Ok(())
+}
+
 // bd-17386: parse_serve_http_request enforces four HTTP-shape rules that
 // fire before endpoint dispatch can run — chunked rejection, POST without
 // Content-Length, body shorter than Content-Length, and body longer than
