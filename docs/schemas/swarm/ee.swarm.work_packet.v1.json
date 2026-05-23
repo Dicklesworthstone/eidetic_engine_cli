@@ -13,6 +13,7 @@
     "recommendedAction",
     "candidates",
     "coordination",
+    "trackerIntegrity",
     "rchProofPosture",
     "verification",
     "sourceProvenance",
@@ -44,6 +45,7 @@
       "items": {"$ref": "#/definitions/candidate"}
     },
     "coordination": {"$ref": "#/definitions/coordination"},
+    "trackerIntegrity": {"$ref": "#/definitions/trackerIntegrity"},
     "rchProofPosture": {"$ref": "#/definitions/rchProofPosture"},
     "verification": {"$ref": "#/definitions/verification"},
     "sourceProvenance": {
@@ -171,11 +173,12 @@
             "inbox_unavailable",
             "reservation_unavailable",
             "outbox_only",
+            "semantic_readiness_failed",
             "unreachable",
             "unavailable",
             "skipped"
           ],
-          "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
+          "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. bd-2z5ly.8.1: `semantic_readiness_failed` covers the green-transport contradiction where the health endpoint responds with `healthLevel=green` but `semantic_readiness.status=fail` (for example malformed SQLite storage) so reservation/inbox reads cannot be trusted. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
         },
         "healthLevel": {"type": ["string", "null"], "enum": ["green", "yellow", "red", null]},
         "unreadCount": {"type": ["integer", "null"], "minimum": 0},
@@ -203,6 +206,30 @@
           "type": "array",
           "description": "bd-2z5ly.8: ordered, structured recovery actions for an agent operating under degraded Agent Mail. MUST be sorted lexicographically by `kind` so the packet stays deterministic across runs. Empty when status is `fresh`/`healthy`. Replaces prose-only repair strings so harnesses can branch mechanically without parsing natural language.",
           "items": {"$ref": "#/definitions/agentMailFallbackAction"}
+        },
+        "semanticReadiness": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["status"],
+          "description": "bd-2z5ly.8.1: independent semantic-readiness signal from the Agent Mail health response, parsed separately from `status` and `healthLevel` so a green transport response cannot mask a failing semantic-read path (for example malformed SQLite storage). When `status` is `fail` the candidate-safety classifier MUST treat reservation and inbox evidence as non-authoritative even when `healthLevel` is `green`; `reservationAuthoritative` and `inboxAuthoritative` MUST be `false` in that case. `reason` is a bounded reason class; never include filesystem paths, B-tree page numbers, raw error strings, PIDs, or stack frames.",
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["pass", "fail", "unknown"]
+            },
+            "reason": {
+              "type": ["string", "null"],
+              "enum": [
+                "malformed_sqlite",
+                "archive_corruption",
+                "index_rebuild_required",
+                "permission_denied",
+                "unknown",
+                null
+              ],
+              "description": "bd-2z5ly.8.1: bounded reason class for a semantic-readiness failure. Use `malformed_sqlite` when the SQLite storage image is corrupt, `archive_corruption` when the JSONL archive cannot be parsed, `index_rebuild_required` when the index is missing or out of date, `permission_denied` when the process cannot open the store, and `unknown` when classification was not possible. MUST NOT carry raw error text, file paths, or page offsets."
+            }
+          }
         }
       }
     },
@@ -250,6 +277,70 @@
         "owners": {"$ref": "#/definitions/stringArray"},
         "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
         "evidence": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "trackerIntegrity": {
+      "type": "object",
+      "description": "bd-2z5ly.9: bounded Beads tracker integrity posture derived from `br doctor --json` or equivalent collector evidence. This section tells candidate-safety logic whether normal `br` reads are authoritative before an agent claims work. It never includes raw JSONL rows, DB contents, issue bodies, or repair mutations.",
+      "required": [
+        "health",
+        "jsonlPath",
+        "dbPath",
+        "jsonlRecordCount",
+        "dbRecordCount",
+        "pendingImportCount",
+        "externalChangesPendingImport",
+        "dirtyIssueCount",
+        "mergeArtifactPaths",
+        "mergeArtifactCount",
+        "jsonlParseError",
+        "brReadsAuthoritative",
+        "requiresCandidateDowngrade",
+        "recoveryHint"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "health": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "merge_artifacts_warn",
+            "external_changes_pending_import",
+            "db_jsonl_count_mismatch",
+            "jsonl_parse_error"
+          ]
+        },
+        "jsonlPath": {"type": "string"},
+        "dbPath": {"type": "string"},
+        "jsonlRecordCount": {"type": "integer", "minimum": 0},
+        "dbRecordCount": {"type": "integer", "minimum": 0},
+        "pendingImportCount": {"type": "integer", "minimum": 0},
+        "externalChangesPendingImport": {"type": "boolean"},
+        "dirtyIssueCount": {"type": "integer", "minimum": 0},
+        "mergeArtifactPaths": {"$ref": "#/definitions/stringArray"},
+        "mergeArtifactCount": {"type": "integer", "minimum": 0},
+        "jsonlParseError": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["line", "column", "excerpt"],
+          "properties": {
+            "line": {"type": "integer", "minimum": 1},
+            "column": {"type": ["integer", "null"], "minimum": 1},
+            "excerpt": {
+              "type": "string",
+              "description": "Redacted and length-capped excerpt of the first malformed JSONL row."
+            }
+          }
+        },
+        "brReadsAuthoritative": {
+          "type": "boolean",
+          "description": "True only when the tracker health is `ok`; consumers must not treat ready-work or zero-conflict evidence as authoritative when false."
+        },
+        "requiresCandidateDowngrade": {
+          "type": "boolean",
+          "description": "True for parse errors and DB/JSONL count mismatches. Candidate-safety logic must refuse auto-claim style recommendations while true."
+        },
+        "recoveryHint": {"type": ["string", "null"]}
       }
     },
     "rchProofPosture": {
@@ -433,6 +524,22 @@
         "activeClaims": [],
         "fileCollisions": []
       },
+      "trackerIntegrity": {
+        "health": "ok",
+        "jsonlPath": ".beads/issues.jsonl",
+        "dbPath": ".beads/beads.db",
+        "jsonlRecordCount": 2707,
+        "dbRecordCount": 2707,
+        "pendingImportCount": 0,
+        "externalChangesPendingImport": false,
+        "dirtyIssueCount": 0,
+        "mergeArtifactPaths": [],
+        "mergeArtifactCount": 0,
+        "jsonlParseError": null,
+        "brReadsAuthoritative": true,
+        "requiresCandidateDowngrade": false,
+        "recoveryHint": null
+      },
       "rchProofPosture": {
         "sourceEnabled": true,
         "remoteOnlyRequired": true,
@@ -511,6 +618,22 @@
         "fileCollisions": [
           {"pathPattern": "src/core/swarm_*.rs", "risk": "high", "owners": ["OtherAgent"], "relatedBeadIds": ["bd-peer.7"], "evidence": ["git_status:M:src/core/swarm_brief.rs", "reservation:OtherAgent:src/core/swarm_*.rs"]}
         ]
+      },
+      "trackerIntegrity": {
+        "health": "merge_artifacts_warn",
+        "jsonlPath": ".beads/issues.jsonl",
+        "dbPath": ".beads/beads.db",
+        "jsonlRecordCount": 2707,
+        "dbRecordCount": 2707,
+        "pendingImportCount": 0,
+        "externalChangesPendingImport": false,
+        "dirtyIssueCount": 0,
+        "mergeArtifactPaths": [".beads/beads.base.jsonl"],
+        "mergeArtifactCount": 1,
+        "jsonlParseError": null,
+        "brReadsAuthoritative": false,
+        "requiresCandidateDowngrade": false,
+        "recoveryHint": "Inspect or remove merge artifacts in .beads/ before relying on br reads."
       },
       "rchProofPosture": {
         "sourceEnabled": true,
@@ -602,6 +725,22 @@
           {"beadId": "bd-cass.3", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:05:00Z", "sourceRefs": ["br://bd-cass.3"]}
         ],
         "fileCollisions": []
+      },
+      "trackerIntegrity": {
+        "health": "external_changes_pending_import",
+        "jsonlPath": ".beads/issues.jsonl",
+        "dbPath": ".beads/beads.db",
+        "jsonlRecordCount": 2707,
+        "dbRecordCount": 2704,
+        "pendingImportCount": 3,
+        "externalChangesPendingImport": true,
+        "dirtyIssueCount": 0,
+        "mergeArtifactPaths": [],
+        "mergeArtifactCount": 0,
+        "jsonlParseError": null,
+        "brReadsAuthoritative": false,
+        "requiresCandidateDowngrade": false,
+        "recoveryHint": "Run br sync (or br --no-auto-import --allow-stale for read-only inspection) before claiming work."
       },
       "rchProofPosture": {
         "sourceEnabled": true,

@@ -29,6 +29,12 @@ struct DriftCase {
     fixture_manifest_key: &'static str,
 }
 
+struct MultiExampleCoverage {
+    schema_id: &'static str,
+    discriminator_pointer: &'static str,
+    expected_values: &'static [&'static str],
+}
+
 const SCHEMA_CASES: &[SchemaCase] = &[
     SchemaCase {
         id: "ee.producer.metadata.v1",
@@ -295,6 +301,33 @@ const DRIFT_CASES: &[DriftCase] = &[
     },
 ];
 
+const MULTI_EXAMPLE_COVERAGE: &[MultiExampleCoverage] = &[
+    MultiExampleCoverage {
+        schema_id: "ee.coordination_fallback_evidence.v1",
+        discriminator_pointer: "/status",
+        expected_values: &["blocked", "stale", "unavailable", "unknown"],
+    },
+    MultiExampleCoverage {
+        schema_id: "ee.producer.metadata.v1",
+        discriminator_pointer: "/sourceSystem",
+        expected_values: &["cli", "verification"],
+    },
+    MultiExampleCoverage {
+        schema_id: "ee.swarm.work_packet.v1",
+        discriminator_pointer: "/observedStateClass",
+        expected_values: &[
+            "crowded_checkout",
+            "degraded_mail_rch_topology",
+            "healthy_small_repo",
+        ],
+    },
+    MultiExampleCoverage {
+        schema_id: "ee.trust_lane.v1",
+        discriminator_pointer: "/scopeApplied",
+        expected_values: &["self", "swarm"],
+    },
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -352,6 +385,14 @@ fn fixture_examples() -> Result<BTreeMap<String, Value>, String> {
                 .map(|(key, value)| (key.clone(), value.clone()))
                 .collect()
         })
+}
+
+fn schema_case_by_id(schema_id: &str) -> Result<SchemaCase, String> {
+    SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == schema_id)
+        .ok_or_else(|| format!("schema case missing for {schema_id}"))
 }
 
 #[test]
@@ -489,6 +530,73 @@ fn swarm_schema_examples_have_fixture_rows() -> TestResult {
             return Err(format!(
                 "{} first schema example drifted from tests/fixtures/swarm_schemas/all_examples.json",
                 case.id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn multi_example_schema_examples_have_explicit_golden_coverage() -> TestResult {
+    let covered_schema_ids = MULTI_EXAMPLE_COVERAGE
+        .iter()
+        .map(|coverage| coverage.schema_id)
+        .collect::<BTreeSet<_>>();
+
+    for case in SCHEMA_CASES {
+        let schema = schema_doc(*case)?;
+        let example_count = schema
+            .get("examples")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if example_count > 1 && !covered_schema_ids.contains(case.id) {
+            return Err(format!(
+                "{} has {example_count} embedded examples but no MULTI_EXAMPLE_COVERAGE entry",
+                case.id
+            ));
+        }
+    }
+
+    for coverage in MULTI_EXAMPLE_COVERAGE {
+        let case = schema_case_by_id(coverage.schema_id)?;
+        let schema = schema_doc(case)?;
+        let examples = schema
+            .get("examples")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{} missing examples array", coverage.schema_id))?;
+        if examples.len() <= 1 {
+            return Err(format!(
+                "{} is listed in MULTI_EXAMPLE_COVERAGE but has only {} embedded example(s)",
+                coverage.schema_id,
+                examples.len()
+            ));
+        }
+
+        let mut actual_values = BTreeSet::new();
+        let mut serialized_examples = BTreeSet::new();
+        for (index, example) in examples.iter().enumerate() {
+            let context = format!("{} examples[{index}]", coverage.schema_id);
+            actual_values.insert(
+                string_field(example, coverage.discriminator_pointer, &context)?.to_owned(),
+            );
+            let serialized = serde_json::to_string(example)
+                .map_err(|error| format!("serialize {context}: {error}"))?;
+            if !serialized_examples.insert(serialized) {
+                return Err(format!("{context} duplicates another embedded example"));
+            }
+        }
+
+        let expected_values = coverage
+            .expected_values
+            .iter()
+            .copied()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        if actual_values != expected_values {
+            return Err(format!(
+                "{} example coverage drifted for {}\nactual: {actual_values:?}\nexpected: {expected_values:?}",
+                coverage.schema_id, coverage.discriminator_pointer
             ));
         }
     }
@@ -745,6 +853,266 @@ fn work_packet_agent_mail_fallback_semantics_are_contractual() -> TestResult {
         return Err(
             "agent_mail_degraded_read_only fixture must surface archive_ahead parity drift".into(),
         );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult {
+    // bd-2z5ly.8.1: when Agent Mail responds with healthLevel=green but
+    // semantic_readiness.status=fail (for example malformed SQLite storage),
+    // the work-packet must surface the contradiction as an independent
+    // signal and downgrade reservation/inbox authority even though the
+    // transport itself was reachable. The schema must expose the new
+    // semanticReadiness shape and status enum value; the fixture must
+    // prove the green-transport contradiction cannot be misread as a
+    // healthy coordination authority.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+
+    let agent_mail = schema
+        .pointer("/definitions/agentMail")
+        .ok_or_else(|| "agentMail definition missing".to_owned())?;
+
+    let semantic_readiness = agent_mail
+        .pointer("/properties/semanticReadiness")
+        .ok_or_else(|| {
+            "ee.swarm.work_packet.v1 agentMail must expose semanticReadiness".to_owned()
+        })?;
+
+    let semantic_readiness_types = semantic_readiness
+        .pointer("/type")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.semanticReadiness must allow null".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for required in ["object", "null"] {
+        if !semantic_readiness_types.contains(required) {
+            return Err(format!(
+                "agentMail.semanticReadiness type must include {required}"
+            ));
+        }
+    }
+
+    let semantic_readiness_status_enum = semantic_readiness
+        .pointer("/properties/status/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.semanticReadiness.status enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for required in ["pass", "fail", "unknown"] {
+        if !semantic_readiness_status_enum.contains(required) {
+            return Err(format!(
+                "agentMail.semanticReadiness.status enum must include {required}"
+            ));
+        }
+    }
+
+    let semantic_readiness_reason_enum = semantic_readiness
+        .pointer("/properties/reason/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.semanticReadiness.reason enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "malformed_sqlite",
+        "archive_corruption",
+        "index_rebuild_required",
+        "permission_denied",
+        "unknown",
+    ] {
+        if !semantic_readiness_reason_enum.contains(required) {
+            return Err(format!(
+                "agentMail.semanticReadiness.reason enum must include {required}"
+            ));
+        }
+    }
+
+    let status_enum = agent_mail
+        .pointer("/properties/status/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.status enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if !status_enum.contains("semantic_readiness_failed") {
+        return Err(
+            "agentMail.status enum must include semantic_readiness_failed for bd-2z5ly.8.1".into(),
+        );
+    }
+
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("agent_mail_semantic_readiness_failed.json");
+    let fixture = read_json(&fixture_path)?;
+
+    if string_field(
+        &fixture,
+        "/schema",
+        "agent_mail_semantic_readiness_failed fixture",
+    )? != "ee.swarm.work_packet.v1"
+    {
+        return Err("agent_mail_semantic_readiness_failed fixture schema drifted".into());
+    }
+
+    let fixture_agent_mail = fixture.pointer("/coordination/agentMail").ok_or_else(|| {
+        "agent_mail_semantic_readiness_failed fixture missing coordination.agentMail".to_owned()
+    })?;
+
+    if string_field(
+        fixture_agent_mail,
+        "/status",
+        "agent_mail_semantic_readiness_failed fixture agentMail",
+    )? != "semantic_readiness_failed"
+    {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must set status=semantic_readiness_failed"
+                .into(),
+        );
+    }
+
+    if string_field(
+        fixture_agent_mail,
+        "/healthLevel",
+        "agent_mail_semantic_readiness_failed fixture agentMail",
+    )? != "green"
+    {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must demonstrate green transport so the gate proves green health does not imply coordination authority"
+                .into(),
+        );
+    }
+
+    if string_field(
+        fixture_agent_mail,
+        "/semanticReadiness/status",
+        "agent_mail_semantic_readiness_failed fixture agentMail",
+    )? != "fail"
+    {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must set semanticReadiness.status=fail"
+                .into(),
+        );
+    }
+
+    let fixture_reason = string_field(
+        fixture_agent_mail,
+        "/semanticReadiness/reason",
+        "agent_mail_semantic_readiness_failed fixture agentMail",
+    )?;
+    if !semantic_readiness_reason_enum.contains(fixture_reason) {
+        return Err(format!(
+            "agent_mail_semantic_readiness_failed fixture reason {fixture_reason} is not in the schema reason enum"
+        ));
+    }
+
+    if fixture_agent_mail
+        .pointer("/reservationAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || fixture_agent_mail
+            .pointer("/inboxAuthoritative")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must mark reservation/inbox as non-authoritative even when healthLevel is green"
+                .into(),
+        );
+    }
+
+    let degraded_codes = fixture_agent_mail
+        .pointer("/degradedCodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "agent_mail_semantic_readiness_failed fixture missing degradedCodes".to_owned()
+        })?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !degraded_codes.contains("agent_mail_semantic_readiness_failed") {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must include agent_mail_semantic_readiness_failed in degradedCodes"
+                .into(),
+        );
+    }
+
+    let recommended_safe = fixture
+        .pointer("/recommendedAction/safeToClaim")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "agent_mail_semantic_readiness_failed fixture missing recommendedAction.safeToClaim"
+                .to_owned()
+        })?;
+    if recommended_safe {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must not recommend safeToClaim=true when semantic readiness has failed"
+                .into(),
+        );
+    }
+
+    let fallback_actions = fixture_agent_mail
+        .pointer("/fallbackActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "agent_mail_semantic_readiness_failed fixture missing fallbackActions".to_owned()
+        })?;
+    if fallback_actions.is_empty() {
+        return Err(
+            "agent_mail_semantic_readiness_failed fixture must enumerate fallback actions".into(),
+        );
+    }
+    let mut last_kind: Option<&str> = None;
+    for (index, action) in fallback_actions.iter().enumerate() {
+        let context = format!("fallbackActions[{index}]");
+        let kind = string_field(action, "/kind", &context)?;
+        if let Some(previous) = last_kind
+            && kind < previous
+        {
+            return Err(format!(
+                "fallbackActions must be sorted by kind; saw {previous} before {kind}"
+            ));
+        }
+        last_kind = Some(kind);
+    }
+
+    let rendered = serde_json::to_string(fixture_agent_mail)
+        .map_err(|error| format!("serialize semantic_readiness agentMail: {error}"))?;
+    let lowered = rendered.to_ascii_lowercase();
+    for forbidden in [
+        "/private/",
+        "/users/",
+        "/var/",
+        ".sqlite-shm",
+        ".sqlite-wal",
+        "page 283",
+        "page_283",
+        "btree page",
+        "stack trace",
+        "from: ",
+        "subject: ",
+        "message-id:",
+        "begin pgp",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "agent_mail_semantic_readiness_failed fixture must not leak raw path or error marker {forbidden}"
+            ));
+        }
     }
 
     Ok(())
