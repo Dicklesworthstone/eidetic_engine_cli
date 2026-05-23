@@ -8516,6 +8516,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: agent_workload_trace_schema_definition,
         },
         SchemaEntry {
+            id: "ee.swarm_slo.scorecard.v1",
+            version: "1",
+            description: "Replayable, redaction-safe SLO scorecard for multi-agent ee workflows.",
+            category: "ops",
+            definition: swarm_slo_scorecard_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.audit_lane.v1",
             version: "1",
             description: "Structured audit-lane telemetry event emitted by the Swarm-X audit queue.",
@@ -9582,6 +9589,10 @@ fn agent_workload_replay_schema_definition() -> String {
 
 fn agent_workload_trace_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.agent_workload_trace.v1.json").to_string()
+}
+
+fn swarm_slo_scorecard_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.swarm_slo.scorecard.v1.json").to_string()
 }
 
 fn audit_lane_schema_definition() -> String {

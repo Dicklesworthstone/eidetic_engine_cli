@@ -1,0 +1,474 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm_slo.scorecard.v1.json",
+  "title": "ee.swarm_slo.scorecard.v1",
+  "description": "Replayable, redaction-safe SLO scorecard for multi-agent ee workflows. It consumes existing ee.agent_workload_trace.v1 rows and records workload shape, coordination source posture, latency percentiles, stage attribution, deterministic replay hashes, and budget verdicts without raw memory bodies, mail bodies, command output, secrets, private path dumps, or full file listings.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workload",
+    "sourceHealth",
+    "budgets",
+    "measurements",
+    "stageAttribution",
+    "verdict",
+    "failureReasons",
+    "determinism",
+    "redaction"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.swarm_slo.scorecard.v1"
+    },
+    "workload": {
+      "$ref": "#/$defs/workload"
+    },
+    "sourceHealth": {
+      "$ref": "#/$defs/sourceHealth"
+    },
+    "budgets": {
+      "$ref": "#/$defs/budgets"
+    },
+    "measurements": {
+      "$ref": "#/$defs/measurements"
+    },
+    "stageAttribution": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/stageAttribution"
+      }
+    },
+    "verdict": {
+      "$ref": "#/$defs/verdict"
+    },
+    "failureReasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/failureReason"
+      }
+    },
+    "determinism": {
+      "$ref": "#/$defs/determinism"
+    },
+    "redaction": {
+      "$ref": "#/$defs/redaction"
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "workload", "verdict"],
+    "summary": ["schema", "workload", "measurements", "verdict", "failureReasons"],
+    "standard": [
+      "schema",
+      "workload",
+      "sourceHealth",
+      "budgets",
+      "measurements",
+      "verdict",
+      "failureReasons",
+      "determinism"
+    ],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm_slo.scorecard.v1",
+      "workload": {
+        "profileId": "swarm_slo_healthy_small",
+        "scenario": "healthy_small_checkout",
+        "agentCount": 4,
+        "traceSchema": "ee.agent_workload_trace.v1",
+        "expectedDegradationPosture": "none",
+        "concurrency": {
+          "shape": "bounded_parallel",
+          "requestedAgents": 4,
+          "activeAgents": 4,
+          "maxParallelAgents": 4
+        },
+        "commandMix": [
+          { "command": "status", "count": 1 },
+          { "command": "context", "count": 4 },
+          { "command": "search", "count": 4 },
+          { "command": "why", "count": 2 }
+        ],
+        "provenance": {
+          "kind": "synthetic",
+          "recordedRows": 0,
+          "syntheticRows": 11,
+          "traceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      },
+      "sourceHealth": {
+        "agentMail": { "status": "ok", "evidence": ["health_green"] },
+        "beads": { "status": "ok", "evidence": ["ready_json"] },
+        "bv": { "status": "ok", "evidence": ["robot_next"] },
+        "rch": { "status": "ok", "evidence": ["workers_healthy"] },
+        "workspace": { "status": "ok", "evidence": ["clean_paths"] }
+      },
+      "budgets": {
+        "profile": "swarm_heavy",
+        "p50MsTarget": 120,
+        "p95MsTarget": 350,
+        "p99MsTarget": 800,
+        "errorCountMax": 0,
+        "degradedCountMax": 0,
+        "stageBudgets": [
+          { "stage": "coordination", "p95MsTarget": 80 },
+          { "stage": "context", "p95MsTarget": 220 },
+          { "stage": "record", "p95MsTarget": 60 }
+        ]
+      },
+      "measurements": {
+        "sampleCount": 11,
+        "commandCount": 11,
+        "errorCount": 0,
+        "degradedCount": 0,
+        "latency": { "p50Ms": 72, "p95Ms": 180, "p99Ms": 260, "maxMs": 280 }
+      },
+      "stageAttribution": [
+        { "stage": "coordination", "elapsedMs": 48, "shareBasisPoints": 1714, "verdict": "pass" },
+        { "stage": "context", "elapsedMs": 180, "shareBasisPoints": 6429, "verdict": "pass" },
+        { "stage": "record", "elapsedMs": 52, "shareBasisPoints": 1857, "verdict": "pass" }
+      ],
+      "verdict": {
+        "status": "pass",
+        "summary": "Healthy small swarm replay stayed within every latency and degradation budget.",
+        "failingBudgetCount": 0
+      },
+      "failureReasons": [],
+      "determinism": {
+        "replayHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+        "fixtureHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+        "stable": true,
+        "volatileFieldsStripped": ["recordedAt", "durationMs"]
+      },
+      "redaction": {
+        "rawMailBodiesPresent": false,
+        "rawMemoryBodiesPresent": false,
+        "rawCommandOutputPresent": false,
+        "privatePathsPresent": false,
+        "secretScanApplied": true
+      }
+    }
+  ],
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profileId",
+        "scenario",
+        "agentCount",
+        "traceSchema",
+        "expectedDegradationPosture",
+        "concurrency",
+        "commandMix",
+        "provenance"
+      ],
+      "properties": {
+        "profileId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_\\-]*$"
+        },
+        "scenario": {
+          "type": "string",
+          "enum": [
+            "healthy_small_checkout",
+            "crowded_checkout",
+            "agent_mail_unavailable",
+            "bv_timeout_no_output",
+            "rch_topology_blocked"
+          ]
+        },
+        "agentCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "traceSchema": {
+          "type": "string",
+          "const": "ee.agent_workload_trace.v1"
+        },
+        "expectedDegradationPosture": {
+          "type": "string",
+          "enum": ["none", "recoverable", "required", "blocked"]
+        },
+        "concurrency": {
+          "$ref": "#/$defs/concurrency"
+        },
+        "commandMix": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/commandCount"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        }
+      }
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape", "requestedAgents", "activeAgents", "maxParallelAgents"],
+      "properties": {
+        "shape": {
+          "type": "string",
+          "enum": ["serial", "bounded_parallel", "wide_parallel", "resource_limited"]
+        },
+        "requestedAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "activeAgents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxParallelAgents": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "commandCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command", "count"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9\\-]*( [a-z][a-z0-9\\-]*)*$"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "recordedRows", "syntheticRows", "traceHash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["synthetic", "recorded", "mixed"]
+        },
+        "recordedRows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "syntheticRows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "traceHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "sourceHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agentMail", "beads", "bv", "rch", "workspace"],
+      "properties": {
+        "agentMail": { "$ref": "#/$defs/sourcePosture" },
+        "beads": { "$ref": "#/$defs/sourcePosture" },
+        "bv": { "$ref": "#/$defs/sourcePosture" },
+        "rch": { "$ref": "#/$defs/sourcePosture" },
+        "workspace": { "$ref": "#/$defs/sourcePosture" }
+      }
+    },
+    "sourcePosture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "evidence"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["ok", "degraded", "unavailable", "timeout", "blocked", "unknown"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_\\-]*$"
+          }
+        }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "p50MsTarget",
+        "p95MsTarget",
+        "p99MsTarget",
+        "errorCountMax",
+        "degradedCountMax",
+        "stageBudgets"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["swarm_light", "swarm_heavy", "swarm_stress"]
+        },
+        "p50MsTarget": { "type": "integer", "minimum": 0 },
+        "p95MsTarget": { "type": "integer", "minimum": 0 },
+        "p99MsTarget": { "type": "integer", "minimum": 0 },
+        "errorCountMax": { "type": "integer", "minimum": 0 },
+        "degradedCountMax": { "type": "integer", "minimum": 0 },
+        "stageBudgets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/stageBudget"
+          }
+        }
+      }
+    },
+    "stageBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "p95MsTarget"],
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "p95MsTarget": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "measurements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sampleCount", "commandCount", "errorCount", "degradedCount", "latency"],
+      "properties": {
+        "sampleCount": { "type": "integer", "minimum": 1 },
+        "commandCount": { "type": "integer", "minimum": 1 },
+        "errorCount": { "type": "integer", "minimum": 0 },
+        "degradedCount": { "type": "integer", "minimum": 0 },
+        "latency": { "$ref": "#/$defs/latency" }
+      }
+    },
+    "latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["p50Ms", "p95Ms", "p99Ms", "maxMs"],
+      "properties": {
+        "p50Ms": { "type": "integer", "minimum": 0 },
+        "p95Ms": { "type": "integer", "minimum": 0 },
+        "p99Ms": { "type": "integer", "minimum": 0 },
+        "maxMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "stageAttribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "elapsedMs", "shareBasisPoints", "verdict"],
+      "properties": {
+        "stage": { "$ref": "#/$defs/stage" },
+        "elapsedMs": { "type": "integer", "minimum": 0 },
+        "shareBasisPoints": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "verdict": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail", "blocked"]
+        }
+      }
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "coordination",
+        "context",
+        "search",
+        "why",
+        "record",
+        "agent_mail",
+        "beads",
+        "bv",
+        "rch",
+        "workspace",
+        "other"
+      ]
+    },
+    "verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "summary", "failingBudgetCount"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail", "blocked"]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "failingBudgetCount": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "failureReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "source"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string",
+          "enum": ["budget", "coordination", "runner", "rch", "workspace"]
+        }
+      }
+    },
+    "determinism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["replayHash", "fixtureHash", "stable", "volatileFieldsStripped"],
+      "properties": {
+        "replayHash": { "$ref": "#/$defs/blake3Hash" },
+        "fixtureHash": { "$ref": "#/$defs/blake3Hash" },
+        "stable": { "type": "boolean" },
+        "volatileFieldsStripped": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-zA-Z0-9]*$"
+          }
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawMailBodiesPresent",
+        "rawMemoryBodiesPresent",
+        "rawCommandOutputPresent",
+        "privatePathsPresent",
+        "secretScanApplied"
+      ],
+      "properties": {
+        "rawMailBodiesPresent": { "type": "boolean", "const": false },
+        "rawMemoryBodiesPresent": { "type": "boolean", "const": false },
+        "rawCommandOutputPresent": { "type": "boolean", "const": false },
+        "privatePathsPresent": { "type": "boolean", "const": false },
+        "secretScanApplied": { "type": "boolean", "const": true }
+      }
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{64}$"
+    }
+  }
+}

@@ -1,0 +1,87 @@
+{
+  "schema": "ee.swarm_slo.scorecard.v1",
+  "workload": {
+    "profileId": "swarm_slo_crowded_checkout",
+    "scenario": "crowded_checkout",
+    "agentCount": 32,
+    "traceSchema": "ee.agent_workload_trace.v1",
+    "expectedDegradationPosture": "recoverable",
+    "concurrency": {
+      "shape": "wide_parallel",
+      "requestedAgents": 32,
+      "activeAgents": 28,
+      "maxParallelAgents": 32
+    },
+    "commandMix": [
+      { "command": "status", "count": 4 },
+      { "command": "context", "count": 28 },
+      { "command": "search", "count": 24 },
+      { "command": "why", "count": 12 },
+      { "command": "remember", "count": 6 }
+    ],
+    "provenance": {
+      "kind": "mixed",
+      "recordedRows": 54,
+      "syntheticRows": 20,
+      "traceHash": "blake3:4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "sourceHealth": {
+    "agentMail": { "status": "degraded", "evidence": ["slow_health_check"] },
+    "beads": { "status": "ok", "evidence": ["ready_json"] },
+    "bv": { "status": "ok", "evidence": ["robot_triage"] },
+    "rch": { "status": "degraded", "evidence": ["one_worker_unhealthy"] },
+    "workspace": { "status": "degraded", "evidence": ["peer_dirty_paths"] }
+  },
+  "budgets": {
+    "profile": "swarm_heavy",
+    "p50MsTarget": 180,
+    "p95MsTarget": 600,
+    "p99MsTarget": 1200,
+    "errorCountMax": 0,
+    "degradedCountMax": 4,
+    "stageBudgets": [
+      { "stage": "coordination", "p95MsTarget": 180 },
+      { "stage": "context", "p95MsTarget": 420 },
+      { "stage": "record", "p95MsTarget": 100 }
+    ]
+  },
+  "measurements": {
+    "sampleCount": 74,
+    "commandCount": 74,
+    "errorCount": 0,
+    "degradedCount": 3,
+    "latency": { "p50Ms": 141, "p95Ms": 540, "p99Ms": 980, "maxMs": 1120 }
+  },
+  "stageAttribution": [
+    { "stage": "coordination", "elapsedMs": 310, "shareBasisPoints": 2768, "verdict": "warn" },
+    { "stage": "context", "elapsedMs": 690, "shareBasisPoints": 6161, "verdict": "pass" },
+    { "stage": "record", "elapsedMs": 120, "shareBasisPoints": 1071, "verdict": "warn" }
+  ],
+  "verdict": {
+    "status": "warn",
+    "summary": "Crowded checkout replay stayed within global SLOs but attributed warning-level delay to coordination and recording stages.",
+    "failingBudgetCount": 0
+  },
+  "failureReasons": [
+    {
+      "code": "coordination_warn_crowded_checkout",
+      "severity": "warning",
+      "message": "Coordination posture was degraded but still within the swarm-heavy warning budget.",
+      "source": "coordination"
+    }
+  ],
+  "determinism": {
+    "replayHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
+    "fixtureHash": "blake3:6666666666666666666666666666666666666666666666666666666666666666",
+    "stable": true,
+    "volatileFieldsStripped": ["recordedAt", "durationMs"]
+  },
+  "redaction": {
+    "rawMailBodiesPresent": false,
+    "rawMemoryBodiesPresent": false,
+    "rawCommandOutputPresent": false,
+    "privatePathsPresent": false,
+    "secretScanApplied": true
+  }
+}

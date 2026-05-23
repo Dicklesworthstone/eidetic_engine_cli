@@ -29,3 +29,22 @@ Promotion flow:
 2. Run `ee lab replay --trace trace.jsonl --agents 64 --verify-determinism --json`.
 3. Commit the sanitized fixture and use `fixturePromotion.perfBudgetKey` as the
    stable key for downstream budget rows.
+
+## Swarm SLO Scorecards
+
+`ee.swarm_slo.scorecard.v1` is the workload-level SLO contract for multi-agent
+replays. It deliberately reuses `ee.agent_workload_trace.v1` as its trace row
+input instead of defining another workload trace schema. The trace schema is
+already the redaction-safe command-shape contract: it records verb chains, flag
+names, timing, response sizes, hashed memory refs, and degraded codes without
+raw task strings, query text, memory bodies, mail bodies, command output,
+secrets, environment dumps, or private path listings.
+
+The scorecard adds the aggregate layer that a 64-agent swarm needs: agent count,
+concurrency shape, command mix, source postures, synthetic-vs-recorded
+provenance, expected degradation posture, SLO budget profile, p50/p95/p99
+latency, error/degraded counts, stage attribution, deterministic replay hashes,
+and actionable failure reasons. Fixtures under
+`tests/fixtures/golden/swarm_slo_scorecard/` pin the healthy small checkout,
+crowded checkout, Agent Mail unavailable, BV timeout/no-output, and RCH topology
+blocked scenarios without requiring live external services.

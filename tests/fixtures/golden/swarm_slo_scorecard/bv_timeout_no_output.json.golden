@@ -1,0 +1,92 @@
+{
+  "schema": "ee.swarm_slo.scorecard.v1",
+  "workload": {
+    "profileId": "swarm_slo_bv_timeout_no_output",
+    "scenario": "bv_timeout_no_output",
+    "agentCount": 24,
+    "traceSchema": "ee.agent_workload_trace.v1",
+    "expectedDegradationPosture": "required",
+    "concurrency": {
+      "shape": "resource_limited",
+      "requestedAgents": 24,
+      "activeAgents": 20,
+      "maxParallelAgents": 16
+    },
+    "commandMix": [
+      { "command": "status", "count": 3 },
+      { "command": "context", "count": 16 },
+      { "command": "search", "count": 16 },
+      { "command": "why", "count": 8 }
+    ],
+    "provenance": {
+      "kind": "synthetic",
+      "recordedRows": 0,
+      "syntheticRows": 43,
+      "traceHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "sourceHealth": {
+    "agentMail": { "status": "degraded", "evidence": ["health_slow"] },
+    "beads": { "status": "ok", "evidence": ["ready_json"] },
+    "bv": { "status": "timeout", "evidence": ["robot_next_timeout", "no_output"] },
+    "rch": { "status": "ok", "evidence": ["workers_healthy"] },
+    "workspace": { "status": "degraded", "evidence": ["dirty_paths_redacted"] }
+  },
+  "budgets": {
+    "profile": "swarm_heavy",
+    "p50MsTarget": 180,
+    "p95MsTarget": 650,
+    "p99MsTarget": 1300,
+    "errorCountMax": 0,
+    "degradedCountMax": 4,
+    "stageBudgets": [
+      { "stage": "bv", "p95MsTarget": 180 },
+      { "stage": "coordination", "p95MsTarget": 320 },
+      { "stage": "context", "p95MsTarget": 420 }
+    ]
+  },
+  "measurements": {
+    "sampleCount": 43,
+    "commandCount": 43,
+    "errorCount": 0,
+    "degradedCount": 7,
+    "latency": { "p50Ms": 240, "p95Ms": 910, "p99Ms": 1400, "maxMs": 1600 }
+  },
+  "stageAttribution": [
+    { "stage": "bv", "elapsedMs": 1000, "shareBasisPoints": 6250, "verdict": "fail" },
+    { "stage": "coordination", "elapsedMs": 260, "shareBasisPoints": 1625, "verdict": "warn" },
+    { "stage": "context", "elapsedMs": 340, "shareBasisPoints": 2125, "verdict": "pass" }
+  ],
+  "verdict": {
+    "status": "fail",
+    "summary": "BV timeout prevented a reliable next-action recommendation and pushed p95 latency past the required-mode budget.",
+    "failingBudgetCount": 3
+  },
+  "failureReasons": [
+    {
+      "code": "bv_timeout_no_output",
+      "severity": "high",
+      "message": "BV produced no robot output before the coordination timeout.",
+      "source": "coordination"
+    },
+    {
+      "code": "p95_latency_budget_exceeded",
+      "severity": "medium",
+      "message": "Replay p95 latency exceeded the swarm-heavy target.",
+      "source": "budget"
+    }
+  ],
+  "determinism": {
+    "replayHash": "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "fixtureHash": "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "stable": true,
+    "volatileFieldsStripped": ["recordedAt", "durationMs"]
+  },
+  "redaction": {
+    "rawMailBodiesPresent": false,
+    "rawMemoryBodiesPresent": false,
+    "rawCommandOutputPresent": false,
+    "privatePathsPresent": false,
+    "secretScanApplied": true
+  }
+}

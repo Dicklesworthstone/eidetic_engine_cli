@@ -1,0 +1,86 @@
+{
+  "schema": "ee.swarm_slo.scorecard.v1",
+  "workload": {
+    "profileId": "swarm_slo_agent_mail_unavailable",
+    "scenario": "agent_mail_unavailable",
+    "agentCount": 16,
+    "traceSchema": "ee.agent_workload_trace.v1",
+    "expectedDegradationPosture": "recoverable",
+    "concurrency": {
+      "shape": "bounded_parallel",
+      "requestedAgents": 16,
+      "activeAgents": 16,
+      "maxParallelAgents": 12
+    },
+    "commandMix": [
+      { "command": "status", "count": 2 },
+      { "command": "context", "count": 12 },
+      { "command": "search", "count": 12 },
+      { "command": "why", "count": 6 }
+    ],
+    "provenance": {
+      "kind": "synthetic",
+      "recordedRows": 0,
+      "syntheticRows": 32,
+      "traceHash": "blake3:7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  },
+  "sourceHealth": {
+    "agentMail": { "status": "unavailable", "evidence": ["sqlite_malformed"] },
+    "beads": { "status": "ok", "evidence": ["no_db_fallback"] },
+    "bv": { "status": "ok", "evidence": ["robot_next"] },
+    "rch": { "status": "ok", "evidence": ["workers_healthy"] },
+    "workspace": { "status": "degraded", "evidence": ["reservations_unavailable"] }
+  },
+  "budgets": {
+    "profile": "swarm_heavy",
+    "p50MsTarget": 180,
+    "p95MsTarget": 650,
+    "p99MsTarget": 1300,
+    "errorCountMax": 0,
+    "degradedCountMax": 6,
+    "stageBudgets": [
+      { "stage": "agent_mail", "p95MsTarget": 120 },
+      { "stage": "coordination", "p95MsTarget": 260 },
+      { "stage": "context", "p95MsTarget": 420 }
+    ]
+  },
+  "measurements": {
+    "sampleCount": 32,
+    "commandCount": 32,
+    "errorCount": 0,
+    "degradedCount": 5,
+    "latency": { "p50Ms": 155, "p95Ms": 580, "p99Ms": 1040, "maxMs": 1180 }
+  },
+  "stageAttribution": [
+    { "stage": "agent_mail", "elapsedMs": 0, "shareBasisPoints": 0, "verdict": "warn" },
+    { "stage": "coordination", "elapsedMs": 390, "shareBasisPoints": 3305, "verdict": "warn" },
+    { "stage": "context", "elapsedMs": 790, "shareBasisPoints": 6695, "verdict": "pass" }
+  ],
+  "verdict": {
+    "status": "warn",
+    "summary": "Agent Mail was unavailable, but Beads/BV fallback kept the workflow replay within recoverable SLO limits.",
+    "failingBudgetCount": 0
+  },
+  "failureReasons": [
+    {
+      "code": "agent_mail_unavailable",
+      "severity": "warning",
+      "message": "Agent Mail posture was unavailable, so source attribution used Beads and local inspection only.",
+      "source": "coordination"
+    }
+  ],
+  "determinism": {
+    "replayHash": "blake3:8888888888888888888888888888888888888888888888888888888888888888",
+    "fixtureHash": "blake3:9999999999999999999999999999999999999999999999999999999999999999",
+    "stable": true,
+    "volatileFieldsStripped": ["recordedAt", "durationMs"]
+  },
+  "redaction": {
+    "rawMailBodiesPresent": false,
+    "rawMemoryBodiesPresent": false,
+    "rawCommandOutputPresent": false,
+    "privatePathsPresent": false,
+    "secretScanApplied": true
+  }
+}
