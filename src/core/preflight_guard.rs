@@ -3034,6 +3034,32 @@ action = "explode"
     }
 
     #[test]
+    fn local_cargo_guard_blocks_env_split_string_wrappers() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for command in [
+            "env -S 'cargo test --lib preflight_guard'",
+            "env --split-string='cargo check --all-targets'",
+            "env -i --split-string 'cargo clippy --all-targets -- -D warnings'",
+            "sudo /usr/bin/env -S 'CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(
+                report.exit_code, 7,
+                "command `{command}` should be halted by local Cargo guard",
+            );
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == "builtin:local_cargo_heavy_verification"),
+                "command `{command}` did not cite local Cargo guard: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
     fn builtins_block_direct_local_rustc_and_rustdoc_verification() {
         let registry = PreflightGuardRegistry::with_builtins();
 
