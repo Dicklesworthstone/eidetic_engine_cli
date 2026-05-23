@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.request.v1.json",
+  "title": "ee.reflect.request.v1",
+  "description": "Canonical no-LLM reflection request artifact emitted for external reflection producers.",
+  "type": "object",
+  "required": [
+    "schema",
+    "requestId",
+    "requestHash",
+    "workspaceId",
+    "reflectionKind",
+    "sourcePackageHash",
+    "promptTemplate",
+    "responseSchema",
+    "sourcePackage"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.reflect.request.v1"},
+    "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
+    "requestHash": {"$ref": "#/$defs/blake3Hash"},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "reflectionKind": {"type": "string", "minLength": 1},
+    "sourcePackageHash": {"$ref": "#/$defs/blake3Hash"},
+    "promptTemplate": {"$ref": "#/$defs/promptTemplate"},
+    "responseSchema": {"$ref": "#/$defs/responseSchema"},
+    "sourcePackage": {"$ref": "#/$defs/sourcePackage"}
+  },
+  "field_presets": {
+    "minimal": ["schema", "requestId", "requestHash", "reflectionKind"],
+    "summary": ["schema", "requestId", "requestHash", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema"],
+    "standard": ["schema", "requestId", "requestHash", "workspaceId", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema", "sourcePackage"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "promptTemplate": {
+      "type": "object",
+      "required": ["id", "version", "hash"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "const": "ee.reflect.prompt.source_package.v1"
+        },
+        "version": {"type": "string", "minLength": 1},
+        "hash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "responseSchema": {
+      "type": "object",
+      "required": ["id", "hash"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "const": "ee.reflect.result.v1"},
+        "hash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "sourcePackage": {
+      "type": "object",
+      "required": [
+        "schema",
+        "budget",
+        "totalSourceCount",
+        "packagedSourceCount",
+        "omittedSourceCount",
+        "totalExcerptBytes",
+        "requestHash",
+        "redactionSummary",
+        "sources",
+        "omittedSources"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.reflect.source_package.v1"},
+        "budget": {"$ref": "#/$defs/budget"},
+        "totalSourceCount": {"type": "integer", "minimum": 0},
+        "packagedSourceCount": {"type": "integer", "minimum": 0},
+        "omittedSourceCount": {"type": "integer", "minimum": 0},
+        "totalExcerptBytes": {"type": "integer", "minimum": 0},
+        "requestHash": {"$ref": "#/$defs/blake3Hash"},
+        "redactionSummary": {"$ref": "#/$defs/redactionSummary"},
+        "sources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/source"}
+        },
+        "omittedSources": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/omittedSource"}
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "required": [
+        "maxSources",
+        "maxTotalExcerptBytes",
+        "maxExcerptBytesPerSource"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxSources": {"type": "integer", "minimum": 0},
+        "maxTotalExcerptBytes": {"type": "integer", "minimum": 0},
+        "maxExcerptBytesPerSource": {"type": "integer", "minimum": 0}
+      }
+    },
+    "redactionSummary": {
+      "type": "object",
+      "required": [
+        "policyId",
+        "secretPlaceholder",
+        "redactedSourceCount",
+        "promptInjectionLikeSourceCount",
+        "classCounts",
+        "truncationReasonCounts",
+        "omissionReasonCounts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "policyId": {
+          "type": "string",
+          "const": "ee.reflect.source_redaction.v1"
+        },
+        "secretPlaceholder": {
+          "type": "string",
+          "const": "[REDACTED:reflection-source-secret]"
+        },
+        "redactedSourceCount": {"type": "integer", "minimum": 0},
+        "promptInjectionLikeSourceCount": {"type": "integer", "minimum": 0},
+        "classCounts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reasonCount"}
+        },
+        "truncationReasonCounts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reasonCount"}
+        },
+        "omissionReasonCounts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/reasonCount"}
+        }
+      }
+    },
+    "reasonCount": {
+      "type": "object",
+      "required": ["code", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string", "minLength": 1},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id",
+        "contentHash",
+        "excerpt",
+        "excerptHash",
+        "excerptBytes",
+        "redactionClasses"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"$ref": "#/$defs/sourceKind"},
+        "id": {"type": "string", "minLength": 1},
+        "memoryLevel": {"type": "string", "minLength": 1},
+        "memoryKind": {"type": "string", "minLength": 1},
+        "evidenceSpanKind": {"type": "string", "minLength": 1},
+        "contentHash": {"$ref": "#/$defs/blake3Hash"},
+        "excerpt": {"type": "string"},
+        "excerptHash": {"$ref": "#/$defs/blake3Hash"},
+        "excerptBytes": {"type": "integer", "minimum": 0},
+        "redactionClasses": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "truncationReason": {
+          "type": "string",
+          "enum": ["per_source_excerpt_byte_limit"]
+        },
+        "provenanceUri": {"type": "string", "minLength": 1}
+      }
+    },
+    "omittedSource": {
+      "type": "object",
+      "required": ["kind", "id", "contentHash", "omissionReason"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"$ref": "#/$defs/sourceKind"},
+        "id": {"type": "string", "minLength": 1},
+        "contentHash": {"$ref": "#/$defs/blake3Hash"},
+        "omissionReason": {
+          "type": "string",
+          "enum": [
+            "source_count_limit",
+            "total_excerpt_byte_limit",
+            "per_source_excerpt_byte_limit",
+            "source_content_missing"
+          ]
+        }
+      }
+    },
+    "sourceKind": {
+      "type": "string",
+      "enum": ["evidence_span", "memory"]
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}
