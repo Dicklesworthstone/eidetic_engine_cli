@@ -1466,7 +1466,16 @@ fn redaction_safe_label(label: &str) -> Option<String> {
 }
 
 fn label_has_secret_marker(label: &str) -> bool {
-    let normalized = label.to_ascii_lowercase();
+    fn normalize(value: &str) -> String {
+        value
+            .chars()
+            .filter_map(|c| match c {
+                '_' | '-' | '.' => None,
+                other => Some(other.to_ascii_lowercase()),
+            })
+            .collect()
+    }
+    let normalized = normalize(label);
     [
         "api_key",
         "apikey",
@@ -1485,7 +1494,7 @@ fn label_has_secret_marker(label: &str) -> bool {
         "xoxp-",
     ]
     .iter()
-    .any(|marker| normalized.contains(marker))
+    .any(|marker| normalized.contains(&normalize(marker)))
 }
 
 fn stable_mesh_alias(prefix: &str, value: &str) -> String {
@@ -1656,6 +1665,79 @@ mod tests {
         assert!(message.contains(&stable_mesh_alias("mesh_trust_lane", input)));
         assert!(!message.contains("/Users/alice"));
         assert!(!message.contains("trust-token"));
+    }
+
+    #[test]
+    fn label_has_secret_marker_catches_casing_and_separator_variants() {
+        for label in [
+            "api_key",
+            "api-key",
+            "api.key",
+            "apiKey",
+            "API_KEY",
+            "API-KEY",
+            "API.KEY",
+            "private_key",
+            "private-key",
+            "private.key",
+            "privateKey",
+            "PRIVATE_KEY",
+            "PRIVATE-KEY",
+            "ssh_key",
+            "ssh-key",
+            "ssh.key",
+            "sshKey",
+            "SSH_KEY",
+            "sk_live",
+            "sk-live",
+            "sk.live",
+            "skLive",
+            "sk_test",
+            "sk-test",
+            "secret",
+            "TOKEN",
+            "password",
+            "passWord",
+            "PassWord",
+            "credential",
+            "Credentials",
+            "bearer",
+            "ghp_abc123",
+            "ghp-abc123",
+            "xoxb-something",
+            "xoxbsomething",
+            "xoxp-team",
+            "xoxpteam",
+        ] {
+            assert!(
+                label_has_secret_marker(label),
+                "expected `{label}` to be flagged as secret-like"
+            );
+        }
+    }
+
+    #[test]
+    fn label_has_secret_marker_does_not_overmatch_benign_labels() {
+        for label in [
+            "policy_alpha",
+            "peer_builder_one",
+            "metadata",
+            "graphLink",
+            "revisionNotice",
+            "wsp_remote_beta",
+            "trust_lane",
+            "redaction_posture",
+            "share",
+            "redact",
+            "deny",
+            "fake_y_label",
+            "monkey-business",
+        ] {
+            assert!(
+                !label_has_secret_marker(label),
+                "expected `{label}` to NOT be flagged as secret-like"
+            );
+        }
     }
 
     #[test]
