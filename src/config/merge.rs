@@ -23,7 +23,7 @@ use super::file::{
     GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
     MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
     ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
-    SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -47,6 +47,11 @@ pub const SEARCH_DEFAULT_SPEED_KEY: &str = "search.default_speed";
 pub const SEARCH_LEXICAL_WEIGHT_KEY: &str = "search.lexical_weight";
 pub const SEARCH_SEMANTIC_WEIGHT_KEY: &str = "search.semantic_weight";
 pub const SEARCH_GRAPH_WEIGHT_KEY: &str = "search.graph_weight";
+pub const SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY: &str = "search.lexical_ram_tier.enabled";
+pub const SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY: &str =
+    "search.lexical_ram_tier.request_hugepages";
+pub const SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY: &str =
+    "search.lexical_ram_tier.populate_on_open";
 pub const PACK_DEFAULT_PROFILE_KEY: &str = "pack.default_profile";
 pub const PACK_DEFAULT_FORMAT_KEY: &str = "pack.default_format";
 pub const PACK_DEFAULT_MAX_TOKENS_KEY: &str = "pack.default_max_tokens";
@@ -324,6 +329,27 @@ impl MergedConfig {
                 SEARCH_GRAPH_WEIGHT_KEY,
                 weight.to_string(),
                 self.source(SEARCH_GRAPH_WEIGHT_KEY),
+            ));
+        }
+        if let Some(enabled) = self.values.search.lexical_ram_tier.enabled {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY),
+            ));
+        }
+        if let Some(request_hugepages) = self.values.search.lexical_ram_tier.request_hugepages {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY,
+                request_hugepages.to_string(),
+                self.source(SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY),
+            ));
+        }
+        if let Some(populate_on_open) = self.values.search.lexical_ram_tier.populate_on_open {
+            entries.push(ConfigShowEntry::new(
+                SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
+                populate_on_open.to_string(),
+                self.source(SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY),
             ));
         }
 
@@ -904,6 +930,11 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             lexical_weight: Some(0.45),
             semantic_weight: Some(0.45),
             graph_weight: Some(0.10),
+            lexical_ram_tier: SearchLexicalRamTierConfig {
+                enabled: Some(false),
+                request_hugepages: Some(false),
+                populate_on_open: Some(true),
+            },
         },
         pack: PackConfig {
             default_profile: Some("balanced".to_string()),
@@ -1075,7 +1106,17 @@ pub fn config_from_env(
         },
         runtime: RuntimeConfig::default(),
         cass: CassConfig::default(),
-        search: SearchConfig::default(),
+        search: SearchConfig {
+            lexical_ram_tier: SearchLexicalRamTierConfig {
+                enabled: optional_env_bool_flag(env, EnvVar::LexicalIndexPinRam.name())?,
+                request_hugepages: optional_env_bool_flag(
+                    env,
+                    EnvVar::LexicalIndexHugepages.name(),
+                )?,
+                populate_on_open: None,
+            },
+            ..SearchConfig::default()
+        },
         handoff: HandoffConfig::default(),
         cache: CacheConfig {
             pack_l2: PackL2CacheConfig {
@@ -1384,6 +1425,35 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.search.graph_weight,
                 &layers.defaults.search.graph_weight,
             ),
+            lexical_ram_tier: SearchLexicalRamTierConfig {
+                enabled: pick_field(
+                    &mut sources,
+                    SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
+                    &layers.cli.search.lexical_ram_tier.enabled,
+                    &layers.environment.search.lexical_ram_tier.enabled,
+                    &layers.project.search.lexical_ram_tier.enabled,
+                    &layers.user.search.lexical_ram_tier.enabled,
+                    &layers.defaults.search.lexical_ram_tier.enabled,
+                ),
+                request_hugepages: pick_field(
+                    &mut sources,
+                    SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY,
+                    &layers.cli.search.lexical_ram_tier.request_hugepages,
+                    &layers.environment.search.lexical_ram_tier.request_hugepages,
+                    &layers.project.search.lexical_ram_tier.request_hugepages,
+                    &layers.user.search.lexical_ram_tier.request_hugepages,
+                    &layers.defaults.search.lexical_ram_tier.request_hugepages,
+                ),
+                populate_on_open: pick_field(
+                    &mut sources,
+                    SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
+                    &layers.cli.search.lexical_ram_tier.populate_on_open,
+                    &layers.environment.search.lexical_ram_tier.populate_on_open,
+                    &layers.project.search.lexical_ram_tier.populate_on_open,
+                    &layers.user.search.lexical_ram_tier.populate_on_open,
+                    &layers.defaults.search.lexical_ram_tier.populate_on_open,
+                ),
+            },
         },
         pack: PackConfig {
             default_profile: pick_field(
@@ -2150,6 +2220,20 @@ fn optional_env_bool(
     }
 }
 
+fn optional_env_bool_flag(
+    env: &BTreeMap<String, OsString>,
+    variable: &'static str,
+) -> Result<Option<bool>, EnvironmentConfigError> {
+    let Some(value) = optional_env_string(env, variable)? else {
+        return Ok(None);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Ok(Some(true)),
+        "false" | "0" | "no" | "off" => Ok(Some(false)),
+        _ => Err(EnvironmentConfigError::InvalidBoolean { variable, value }),
+    }
+}
+
 fn optional_env_mesh_command_mode(
     env: &BTreeMap<String, OsString>,
     variable: &'static str,
@@ -2205,17 +2289,20 @@ mod tests {
         MESH_COMMAND_MODE_KEY, MESH_ENABLED_KEY, MESH_PEER_GROUP_BINDINGS_KEY,
         MESH_PEER_POLICIES_KEY, PACK_ADAPTIVE_BUDGET_KEY, PACK_DEFAULT_MAX_TOKENS_KEY,
         PACK_DEFAULT_PROFILE_KEY, POLICY_SECRET_DETECTOR_ALLOW_PHRASES_KEY,
-        SEARCH_DEFAULT_SPEED_KEY, STORAGE_DATABASE_PATH_KEY, STORAGE_INDEX_DIR_KEY,
-        STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY, STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
-        STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
-        STORAGE_READ_POOL_SIZE_KEY, built_in_config, config_from_env, merge_config,
+        SEARCH_DEFAULT_SPEED_KEY, SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
+        SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
+        SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY, STORAGE_DATABASE_PATH_KEY,
+        STORAGE_INDEX_DIR_KEY, STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
+        STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
+        STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, built_in_config,
+        config_from_env, merge_config,
     };
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
         GraphFeatureFlagsConfig, GraphGomoryHuConfig, GraphHealthConfig, GraphMemoryConfig,
         GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
-        PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig, SearchSpeed,
-        SecretDetectorConfig, StorageConfig,
+        PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
+        SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -2278,6 +2365,21 @@ mod tests {
             &defaults.search.default_speed,
             &Some(SearchSpeed::Balanced),
             "search speed",
+        )?;
+        ensure_equal(
+            &defaults.search.lexical_ram_tier.enabled,
+            &Some(false),
+            "lexical RAM tier default off",
+        )?;
+        ensure_equal(
+            &defaults.search.lexical_ram_tier.request_hugepages,
+            &Some(false),
+            "lexical RAM tier hugepages default off",
+        )?;
+        ensure_equal(
+            &defaults.search.lexical_ram_tier.populate_on_open,
+            &Some(true),
+            "lexical RAM tier populate default on",
         )?;
         ensure_equal(
             &defaults.pack.default_profile.as_deref(),
@@ -2456,6 +2558,11 @@ mod tests {
             "EE_GRAPH_MEMORY_GROWTH_MULTIPLIER_BASIS_POINTS".to_string(),
             OsString::from("12500"),
         );
+        env.insert("EE_LEXICAL_INDEX_PIN_RAM".to_string(), OsString::from("1"));
+        env.insert(
+            "EE_LEXICAL_INDEX_HUGEPAGES".to_string(),
+            OsString::from("on"),
+        );
         env.insert("EE_PROFILE".to_string(), OsString::from("thorough"));
         env.insert("EE_MAX_TOKENS".to_string(), OsString::from("8192"));
 
@@ -2547,6 +2654,21 @@ mod tests {
             &parsed.graph.memory.growth_multiplier_basis_points,
             &Some(12_500),
             "env graph memory growth multiplier",
+        )?;
+        ensure_equal(
+            &parsed.search.lexical_ram_tier.enabled,
+            &Some(true),
+            "env lexical RAM tier enabled",
+        )?;
+        ensure_equal(
+            &parsed.search.lexical_ram_tier.request_hugepages,
+            &Some(true),
+            "env lexical RAM tier hugepages",
+        )?;
+        ensure_equal(
+            &parsed.search.lexical_ram_tier.populate_on_open,
+            &None,
+            "env lexical RAM tier populate omitted",
         )
     }
 
@@ -2632,6 +2754,11 @@ mod tests {
             },
             search: SearchConfig {
                 default_speed: Some(SearchSpeed::Thorough),
+                lexical_ram_tier: SearchLexicalRamTierConfig {
+                    enabled: Some(false),
+                    request_hugepages: Some(false),
+                    populate_on_open: Some(false),
+                },
                 ..SearchConfig::default()
             },
             pack: PackConfig {
@@ -2717,12 +2844,27 @@ mod tests {
                 },
                 ..GraphConfig::default()
             },
+            search: SearchConfig {
+                lexical_ram_tier: SearchLexicalRamTierConfig {
+                    enabled: Some(true),
+                    request_hugepages: Some(true),
+                    populate_on_open: None,
+                },
+                ..SearchConfig::default()
+            },
             ..ConfigFile::default()
         };
         let cli = ConfigFile {
             pack: PackConfig {
                 default_profile: Some("cli-profile".to_string()),
                 ..PackConfig::default()
+            },
+            search: SearchConfig {
+                lexical_ram_tier: SearchLexicalRamTierConfig {
+                    populate_on_open: Some(true),
+                    ..SearchLexicalRamTierConfig::default()
+                },
+                ..SearchConfig::default()
             },
             ..ConfigFile::default()
         };
@@ -2804,6 +2946,36 @@ mod tests {
             &merged.source(SEARCH_DEFAULT_SPEED_KEY),
             &Some(ConfigValueSource::Project),
             "search speed source",
+        )?;
+        ensure_equal(
+            &merged.values.search.lexical_ram_tier.enabled,
+            &Some(true),
+            "environment beats project lexical RAM tier enabled",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY),
+            &Some(ConfigValueSource::Environment),
+            "lexical RAM tier enabled source",
+        )?;
+        ensure_equal(
+            &merged.values.search.lexical_ram_tier.request_hugepages,
+            &Some(true),
+            "environment lexical RAM tier hugepages",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY),
+            &Some(ConfigValueSource::Environment),
+            "lexical RAM tier hugepages source",
+        )?;
+        ensure_equal(
+            &merged.values.search.lexical_ram_tier.populate_on_open,
+            &Some(true),
+            "cli lexical RAM tier populate override",
+        )?;
+        ensure_equal(
+            &merged.source(SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY),
+            &Some(ConfigValueSource::Cli),
+            "lexical RAM tier populate source",
         )?;
         ensure_equal(
             &merged.values.pack.default_profile.as_deref(),
@@ -3056,6 +3228,9 @@ mod tests {
             STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
             STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
             STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
+            SEARCH_LEXICAL_RAM_TIER_ENABLED_KEY,
+            SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY,
+            SEARCH_LEXICAL_RAM_TIER_POPULATE_ON_OPEN_KEY,
         ] {
             if !keys.contains(&expected) {
                 return Err(format!("show report missing {expected}"));

@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ee::cache::hotset::{GenerationGate, HotsetBudget, HotsetManifestBuilder};
 use ee::models::ProcessExitCode;
@@ -56,7 +56,15 @@ fn write_manifest(path: &Path, generation: u64, include_entries: bool) -> TestRe
         .map_err(|error| format!("write manifest: {error}"))
 }
 
-fn run_cache_prewarm(args: &[&str]) -> Result<Value, String> {
+fn latest_manifest_path(workspace: &Path) -> PathBuf {
+    workspace
+        .join(".ee")
+        .join("cache")
+        .join("hotsets")
+        .join("latest.json")
+}
+
+fn run_cache_prewarm_raw(args: &[&str]) -> Result<(ProcessExitCode, String, String), String> {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let exit = ee::cli::run(
@@ -64,14 +72,17 @@ fn run_cache_prewarm(args: &[&str]) -> Result<Value, String> {
         &mut stdout,
         &mut stderr,
     );
+    let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
+    let stderr = String::from_utf8(stderr).map_err(|error| error.to_string())?;
+    Ok((exit, stdout, stderr))
+}
+
+fn run_cache_prewarm(args: &[&str]) -> Result<Value, String> {
+    let (exit, stdout, stderr) = run_cache_prewarm_raw(args)?;
     ensure(
         exit == ProcessExitCode::Success,
-        format!(
-            "cache prewarm exit {exit:?}; stderr={}",
-            String::from_utf8_lossy(&stderr)
-        ),
+        format!("cache prewarm exit {exit:?}; stderr={stderr}"),
     )?;
-    let stdout = String::from_utf8(stdout).map_err(|error| error.to_string())?;
     serde_json::from_str(&stdout).map_err(|error| format!("parse stdout: {error}; {stdout}"))
 }
 
@@ -130,6 +141,97 @@ fn cache_prewarm_from_hotset_emits_redaction_safe_report() -> TestResult {
     ensure(
         !serialized.contains("secret should hash only"),
         "raw query text must not leak",
+    )
+}
+
+#[test]
+fn cache_prewarm_latest_resolves_workspace_manifest_registry() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let manifest_path = latest_manifest_path(tempdir.path());
+    fs::create_dir_all(
+        manifest_path
+            .parent()
+            .ok_or_else(|| "latest manifest path should have parent".to_string())?,
+    )
+    .map_err(|error| format!("create latest manifest directory: {error}"))?;
+    write_manifest(&manifest_path, 5, true)?;
+
+    let response = run_cache_prewarm(&[
+        "ee",
+        "--json",
+        "--workspace",
+        tempdir
+            .path()
+            .to_str()
+            .ok_or_else(|| "workspace path should be utf8".to_string())?,
+        "cache",
+        "prewarm",
+        "--from-hotset",
+        "latest",
+        "--profile",
+        "lean",
+    ])?;
+
+    ensure(
+        response["success"].as_bool() == Some(true),
+        "latest success envelope",
+    )?;
+    let data = &response["data"];
+    ensure(
+        data["schema"].as_str() == Some("ee.cache.prewarm.v1"),
+        "latest prewarm schema",
+    )?;
+    ensure(
+        data.pointer("/fromHotset/workspaceId")
+            .and_then(Value::as_str)
+            == Some("ws_01HQTPREWARM00000000000"),
+        "latest manifest workspace id",
+    )?;
+    ensure(
+        data.pointer("/admitted/totalEntries")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count >= 3),
+        "latest entries should be admitted",
+    )
+}
+
+#[test]
+fn cache_prewarm_latest_reports_missing_workspace_manifest() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+
+    let (exit, stdout, stderr) = run_cache_prewarm_raw(&[
+        "ee",
+        "--json",
+        "--workspace",
+        tempdir
+            .path()
+            .to_str()
+            .ok_or_else(|| "workspace path should be utf8".to_string())?,
+        "cache",
+        "prewarm",
+        "--from-hotset",
+        "latest",
+    ])?;
+
+    ensure(
+        exit == ProcessExitCode::Usage,
+        format!("missing latest should be usage; exit={exit:?}; stderr={stderr}"),
+    )?;
+    let response: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse stdout: {error}; {stdout}"))?;
+    ensure(
+        response["schema"].as_str() == Some("ee.error.v2"),
+        "missing latest error envelope",
+    )?;
+    ensure(
+        response
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| {
+                message.contains("--from-hotset latest")
+                    && message.contains(".ee/cache/hotsets/latest.json")
+            }),
+        "missing latest message identifies registry path",
     )
 }
 

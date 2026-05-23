@@ -211,6 +211,7 @@ pub struct SearchConfig {
     pub lexical_weight: Option<f64>,
     pub semantic_weight: Option<f64>,
     pub graph_weight: Option<f64>,
+    pub lexical_ram_tier: SearchLexicalRamTierConfig,
 }
 
 impl SearchConfig {
@@ -220,6 +221,26 @@ impl SearchConfig {
             lexical_weight: optional_unit_float(document, "search", "lexical_weight")?,
             semantic_weight: optional_unit_float(document, "search", "semantic_weight")?,
             graph_weight: optional_unit_float(document, "search", "graph_weight")?,
+            lexical_ram_tier: SearchLexicalRamTierConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchLexicalRamTierConfig {
+    pub enabled: Option<bool>,
+    pub request_hugepages: Option<bool>,
+    pub populate_on_open: Option<bool>,
+}
+
+impl SearchLexicalRamTierConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["search", "lexical_ram_tier"];
+
+        Ok(Self {
+            enabled: optional_bool_path(document, SECTIONS, "enabled")?,
+            request_hugepages: optional_bool_path(document, SECTIONS, "request_hugepages")?,
+            populate_on_open: optional_bool_path(document, SECTIONS, "populate_on_open")?,
         })
     }
 }
@@ -2113,6 +2134,11 @@ lexical_weight = 0.45
 semantic_weight = 0.45
 graph_weight = 0.10
 
+[search.lexical_ram_tier]
+enabled = true
+request_hugepages = true
+populate_on_open = false
+
 [pack]
 default_profile = "balanced"
 default_format = "markdown"
@@ -2306,6 +2332,21 @@ prompt_injection_guard = true
             "search speed",
         )?;
         ensure_equal(&config.search.lexical_weight, &Some(0.45), "lexical weight")?;
+        ensure_equal(
+            &config.search.lexical_ram_tier.enabled,
+            &Some(true),
+            "lexical RAM tier enabled",
+        )?;
+        ensure_equal(
+            &config.search.lexical_ram_tier.request_hugepages,
+            &Some(true),
+            "lexical RAM tier hugepages",
+        )?;
+        ensure_equal(
+            &config.search.lexical_ram_tier.populate_on_open,
+            &Some(false),
+            "lexical RAM tier populate",
+        )?;
         ensure_equal(
             &config.pack.default_profile.as_deref(),
             &Some("balanced"),
@@ -2625,6 +2666,21 @@ prompt_injection_guard = true
         ensure_equal(&config.runtime.daemon, &None, "runtime daemon")?;
         ensure_equal(&config.search.default_speed, &None, "search default speed")?;
         ensure_equal(
+            &config.search.lexical_ram_tier.enabled,
+            &None,
+            "lexical RAM tier enabled",
+        )?;
+        ensure_equal(
+            &config.search.lexical_ram_tier.request_hugepages,
+            &None,
+            "lexical RAM tier hugepages",
+        )?;
+        ensure_equal(
+            &config.search.lexical_ram_tier.populate_on_open,
+            &None,
+            "lexical RAM tier populate",
+        )?;
+        ensure_equal(
             &config.learn.decay.demote_threshold,
             &None,
             "learn decay threshold",
@@ -2742,6 +2798,20 @@ prompt_injection_guard = true
                 error,
                 ConfigParseError::InvalidValue { ref key, .. }
                     if key == "search.default_speed"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_wrong_type_for_lexical_ram_tier_bool() -> TestResult {
+        let error = expect_config_error("[search.lexical_ram_tier]\nenabled = \"yes\"\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidType { ref key, expected }
+                    if key == "search.lexical_ram_tier.enabled" && expected == "a boolean"
             ),
             format!("unexpected error: {error:?}"),
         )

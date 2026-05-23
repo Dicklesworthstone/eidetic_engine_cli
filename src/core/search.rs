@@ -13,7 +13,8 @@ use crate::core::why::{DedupLinkEvidence, find_embed_dedup_link};
 #[cfg(test)]
 use crate::db::generate_audit_id_seeded;
 use crate::db::{
-    CreateAuditInput, DbConnection, StoredFeedbackEvent, audit_actions, generate_audit_id,
+    CreateAuditInput, DbConnection, StoredFeedbackEvent, StoredMemory, audit_actions,
+    generate_audit_id,
 };
 use crate::models::degradation::{
     CONFORMAL_CALIBRATION_INSUFFICIENT_CODE, SEARCH_SCORE_CALIBRATION_FILE_TOO_LARGE_CODE,
@@ -313,6 +314,12 @@ pub struct SearchReport {
     pub memory_scope: MemoryScope,
     pub strict_scope: bool,
     pub scope_stats: MemoryScopeStats,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContextSearchReport {
+    pub report: SearchReport,
+    pub preloaded_memories: BTreeMap<String, StoredMemory>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4154,10 +4161,37 @@ impl SearchAuditBatch {
     }
 }
 
+fn search_audit_workspace_persisted(conn: Option<&DbConnection>, workspace_id: &str) -> bool {
+    let Some(conn) = conn else {
+        return true;
+    };
+    match conn.get_workspace(workspace_id) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::debug!(
+                target: "ee::core::search::audit",
+                workspace_id,
+                error = %error,
+                "search audit workspace preflight failed"
+            );
+            true
+        }
+    }
+}
+
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, None, &determinism, &mut audit_ids, None)
+    run_search_inner(
+        options,
+        None,
+        &determinism,
+        &mut audit_ids,
+        None,
+        true,
+        None,
+    )
 }
 
 pub fn run_search_seeded(
@@ -4167,7 +4201,7 @@ pub fn run_search_seeded(
     // Search determinism controls ranking/output replay. Audit rows are durable
     // side effects, so they must remain unique across repeated seeded calls.
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(options, None, determinism, &mut audit_ids, None)
+    run_search_inner(options, None, determinism, &mut audit_ids, None, true, None)
 }
 
 pub fn run_search_with_read_connection(
@@ -4181,6 +4215,8 @@ pub fn run_search_with_read_connection(
         Some(read_connection),
         &determinism,
         &mut audit_ids,
+        None,
+        true,
         None,
     )
 }
@@ -4198,6 +4234,8 @@ pub fn run_search_with_read_connection_seeded(
         Some(read_connection),
         determinism,
         &mut audit_ids,
+        None,
+        true,
         None,
     )
 }
@@ -4217,7 +4255,49 @@ pub fn run_search_with_read_connection_seeded_and_audit_connection(
         determinism,
         &mut audit_ids,
         audit_connection,
+        true,
+        None,
     )
+}
+
+pub fn run_context_search_with_read_connection_seeded_and_audit_connection(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<SearchReport, SearchError> {
+    Ok(run_context_search_with_preloaded_memories(
+        options,
+        read_connection,
+        audit_connection,
+        determinism,
+    )?
+    .report)
+}
+
+pub fn run_context_search_with_preloaded_memories(
+    options: &SearchOptions,
+    read_connection: &DbConnection,
+    audit_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+) -> Result<ContextSearchReport, SearchError> {
+    // Context candidate conversion batch-loads memories itself, so passthrough
+    // swarm/workspace scopes do not need search-analysis metadata on every hit.
+    let mut audit_ids = SearchAuditIdSource::Ambient;
+    let mut preloaded_memories = BTreeMap::new();
+    let report = run_search_inner(
+        options,
+        Some(read_connection),
+        determinism,
+        &mut audit_ids,
+        audit_connection,
+        false,
+        Some(&mut preloaded_memories),
+    )?;
+    Ok(ContextSearchReport {
+        report,
+        preloaded_memories,
+    })
 }
 
 fn run_search_inner(
@@ -4226,6 +4306,8 @@ fn run_search_inner(
     determinism: &Deterministic<Seed>,
     audit_ids: &mut SearchAuditIdSource,
     audit_connection: Option<&DbConnection>,
+    include_passthrough_scope_analysis_metadata: bool,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Result<SearchReport, SearchError> {
     let start = Instant::now();
     let index_dir = options.resolve_index_dir();
@@ -4332,10 +4414,22 @@ fn run_search_inner(
                     hit.score.is_finite() && hit.score >= per_hit_floor
                 });
             let dropped = below_floor.len();
-            let above_floor =
-                apply_tombstone_visibility(options, above_floor, &mut degraded, read_connection);
+            let above_floor = apply_tombstone_visibility_collecting(
+                options,
+                above_floor,
+                &mut degraded,
+                read_connection,
+                preloaded_memories.as_deref_mut(),
+            );
             let (above_floor, scope_stats) =
-                apply_memory_scope_visibility(options, above_floor, &mut degraded, read_connection);
+                apply_memory_scope_visibility_with_metadata_mode_collecting(
+                    options,
+                    above_floor,
+                    &mut degraded,
+                    read_connection,
+                    include_passthrough_scope_analysis_metadata,
+                    preloaded_memories.as_deref_mut(),
+                );
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
             annotate_hits_with_score_calibration(
                 &options.workspace_path,
@@ -4438,75 +4532,79 @@ fn run_search_inner(
                 .canonicalize()
                 .unwrap_or_else(|_| options.workspace_path.clone());
             let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
-            let q_hash = audit_query_hash(&options.query);
-            let source_arms: Vec<&str> = above_floor
-                .iter()
-                .map(|hit| hit.source.as_str())
-                .collect::<std::collections::BTreeSet<&str>>()
-                .into_iter()
-                .collect();
-            let executed_details = serde_json::json!({
-                "queryHash": &q_hash,
-                "resultCount": above_floor.len(),
-                "sourceArms": source_arms,
-                "status": status.as_str(),
-            })
-            .to_string();
-            // bd-21gya: buffer audit rows and flush in one connection +
-            // one transaction instead of opening DbConnection per row.
-            // Capacity hint sized for the worst case (1 executed + 1
-            // returned_mem per hit + redaction overhead).
-            let mut audit_batch = SearchAuditBatch::new(1 + above_floor.len().saturating_mul(2));
-            audit_batch.push(
-                audit_ids,
-                Some(&workspace_id),
-                audit_actions::SEARCH_EXECUTED,
-                Some("workspace"),
-                Some(&workspace_id),
-                Some(executed_details),
-            );
-            for (rank, hit) in above_floor.iter().enumerate() {
-                let returned_details = serde_json::json!({
+            if search_audit_workspace_persisted(audit_connection.or(read_connection), &workspace_id)
+            {
+                let q_hash = audit_query_hash(&options.query);
+                let source_arms: Vec<&str> = above_floor
+                    .iter()
+                    .map(|hit| hit.source.as_str())
+                    .collect::<std::collections::BTreeSet<&str>>()
+                    .into_iter()
+                    .collect();
+                let executed_details = serde_json::json!({
                     "queryHash": &q_hash,
-                    "rank": (rank + 1) as u32,
-                    "score": hit.score,
-                    "source": hit.source.as_str(),
+                    "resultCount": above_floor.len(),
+                    "sourceArms": source_arms,
+                    "status": status.as_str(),
                 })
                 .to_string();
+                // bd-21gya: buffer audit rows and flush in one connection +
+                // one transaction instead of opening DbConnection per row.
+                // Capacity hint sized for the worst case (1 executed + 1
+                // returned_mem per hit + redaction overhead).
+                let mut audit_batch =
+                    SearchAuditBatch::new(1 + above_floor.len().saturating_mul(2));
                 audit_batch.push(
                     audit_ids,
                     Some(&workspace_id),
-                    audit_actions::SEARCH_RETURNED_MEM,
-                    Some("memory"),
-                    Some(&hit.doc_id),
-                    Some(returned_details),
+                    audit_actions::SEARCH_EXECUTED,
+                    Some("workspace"),
+                    Some(&workspace_id),
+                    Some(executed_details),
                 );
-                if output_redaction_enabled {
-                    for detected_pattern in search_hit_output_redaction_patterns(hit) {
-                        let redaction_details = serde_json::json!({
-                            "queryHash": &q_hash,
-                            "rank": (rank + 1) as u32,
-                            "surface": "search",
-                            "memoryId": &hit.doc_id,
-                            "detectedPattern": detected_pattern,
-                            "action": audit_actions::REDACT_AT_OUTPUT,
-                        })
-                        .to_string();
-                        audit_batch.push(
-                            audit_ids,
-                            Some(&workspace_id),
-                            audit_actions::REDACT_AT_OUTPUT,
-                            Some("memory"),
-                            Some(&hit.doc_id),
-                            Some(redaction_details),
-                        );
+                for (rank, hit) in above_floor.iter().enumerate() {
+                    let returned_details = serde_json::json!({
+                        "queryHash": &q_hash,
+                        "rank": (rank + 1) as u32,
+                        "score": hit.score,
+                        "source": hit.source.as_str(),
+                    })
+                    .to_string();
+                    audit_batch.push(
+                        audit_ids,
+                        Some(&workspace_id),
+                        audit_actions::SEARCH_RETURNED_MEM,
+                        Some("memory"),
+                        Some(&hit.doc_id),
+                        Some(returned_details),
+                    );
+                    if output_redaction_enabled {
+                        for detected_pattern in search_hit_output_redaction_patterns(hit) {
+                            let redaction_details = serde_json::json!({
+                                "queryHash": &q_hash,
+                                "rank": (rank + 1) as u32,
+                                "surface": "search",
+                                "memoryId": &hit.doc_id,
+                                "detectedPattern": detected_pattern,
+                                "action": audit_actions::REDACT_AT_OUTPUT,
+                            })
+                            .to_string();
+                            audit_batch.push(
+                                audit_ids,
+                                Some(&workspace_id),
+                                audit_actions::REDACT_AT_OUTPUT,
+                                Some("memory"),
+                                Some(&hit.doc_id),
+                                Some(redaction_details),
+                            );
+                        }
                     }
                 }
-            }
-            if let Some(conn) = audit_connection {
-                audit_batch.flush_best_effort_with_connection(conn);
-            } else {
-                audit_batch.flush_best_effort(&database_path);
+                if let Some(conn) = audit_connection {
+                    audit_batch.flush_best_effort_with_connection(conn);
+                } else {
+                    audit_batch.flush_best_effort(&database_path);
+                }
             }
 
             Ok(SearchReport {
@@ -5724,17 +5822,34 @@ fn search_sync(
     }
 }
 
+#[cfg(test)]
 fn apply_tombstone_visibility(
     options: &SearchOptions,
     hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
     read_connection: Option<&DbConnection>,
 ) -> Vec<SearchHit> {
+    apply_tombstone_visibility_collecting(options, hits, degraded, read_connection, None)
+}
+
+fn apply_tombstone_visibility_collecting(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+) -> Vec<SearchHit> {
     if hits.is_empty() {
         return hits;
     }
     if let Some(connection) = read_connection {
-        return apply_tombstone_visibility_with_connection(options, hits, degraded, connection);
+        return apply_tombstone_visibility_with_connection(
+            options,
+            hits,
+            degraded,
+            connection,
+            preloaded_memories.as_deref_mut(),
+        );
     }
 
     let explicit_database_path = options.database_path.is_some();
@@ -5755,7 +5870,13 @@ fn apply_tombstone_visibility(
         }
     };
 
-    apply_tombstone_visibility_with_connection(options, hits, degraded, &connection)
+    apply_tombstone_visibility_with_connection(
+        options,
+        hits,
+        degraded,
+        &connection,
+        preloaded_memories,
+    )
 }
 
 fn apply_tombstone_visibility_with_connection(
@@ -5763,7 +5884,24 @@ fn apply_tombstone_visibility_with_connection(
     hits: Vec<SearchHit>,
     degraded: &mut Vec<SearchDegradation>,
     connection: &DbConnection,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Vec<SearchHit> {
+    let hit_doc_ids: Vec<&str> = hits
+        .iter()
+        .map(|hit| hit.doc_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let batch_memories = connection.get_memories_batch(&hit_doc_ids).ok();
+    if let (Some(memories), Some(preloaded)) =
+        (batch_memories.as_ref(), preloaded_memories.as_deref_mut())
+    {
+        for (memory_id, memory) in memories {
+            preloaded
+                .entry(memory_id.clone())
+                .or_insert_with(|| memory.clone());
+        }
+    }
     let mut visible_hits = Vec::with_capacity(hits.len());
     let mut filtered = 0usize;
     let mut expired_filtered = 0usize;
@@ -5774,16 +5912,16 @@ fn apply_tombstone_visibility_with_connection(
     let mut drift_hints = Vec::new();
     let reference_time = options.as_of.unwrap_or_else(Utc::now);
 
-    for mut hit in hits {
-        match connection.get_memory(&hit.doc_id) {
-            Ok(Some(memory)) => {
+    {
+        let mut handle_loaded_memory =
+            |mut hit: SearchHit, memory: &crate::db::StoredMemory| -> Option<SearchHit> {
                 if memory.tombstoned_at.is_some() {
                     if options.include_tombstoned {
                         mark_hit_tombstoned(&mut hit, memory.tombstoned_at.as_deref());
                         included = included.saturating_add(1);
                     } else {
                         filtered = filtered.saturating_add(1);
-                        continue;
+                        return None;
                     }
                 }
 
@@ -5791,7 +5929,7 @@ fn apply_tombstone_visibility_with_connection(
                     || hit_indexed_validity_window_is_stale(&hit, &memory);
                 if indexed_stale && !options.include_stale {
                     stale_filtered = stale_filtered.saturating_add(1);
-                    continue;
+                    return None;
                 }
 
                 match memory_validity_visibility(
@@ -5811,25 +5949,54 @@ fn apply_tombstone_visibility_with_connection(
                         if let Some(hint) = annotate_hit_memory_drift(&mut hit, &memory) {
                             drift_hints.push(hint);
                         }
-                        visible_hits.push(hit);
+                        Some(hit)
                     }
                     MemoryValidityVisibility::Expired => {
                         expired_filtered = expired_filtered.saturating_add(1);
+                        None
                     }
                     MemoryValidityVisibility::Future => {
                         future_filtered = future_filtered.saturating_add(1);
+                        None
                     }
                     MemoryValidityVisibility::Malformed => {
                         malformed_filtered = malformed_filtered.saturating_add(1);
+                        None
                     }
                 }
+            };
+
+        if let Some(memories) = batch_memories.as_ref() {
+            for hit in hits {
+                if let Some(memory) = memories.get(&hit.doc_id) {
+                    if let Some(hit) = handle_loaded_memory(hit, memory) {
+                        visible_hits.push(hit);
+                    }
+                } else {
+                    visible_hits.push(hit);
+                }
             }
-            Ok(None) => visible_hits.push(hit),
-            Err(error) => {
-                degraded.push(SearchDegradation::tombstone_visibility_unavailable(
-                    &error.to_string(),
-                ));
-                visible_hits.push(hit);
+        } else {
+            for hit in hits {
+                match connection.get_memory(&hit.doc_id) {
+                    Ok(Some(memory)) => {
+                        if let Some(preloaded) = preloaded_memories.as_deref_mut() {
+                            preloaded
+                                .entry(hit.doc_id.clone())
+                                .or_insert_with(|| memory.clone());
+                        }
+                        if let Some(hit) = handle_loaded_memory(hit, &memory) {
+                            visible_hits.push(hit);
+                        }
+                    }
+                    Ok(None) => visible_hits.push(hit),
+                    Err(error) => {
+                        degraded.push(SearchDegradation::tombstone_visibility_unavailable(
+                            &error.to_string(),
+                        ));
+                        visible_hits.push(hit);
+                    }
+                }
             }
         }
     }
@@ -5946,6 +6113,34 @@ fn apply_memory_scope_visibility(
     degraded: &mut Vec<SearchDegradation>,
     read_connection: Option<&DbConnection>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
+    apply_memory_scope_visibility_with_metadata_mode(options, hits, degraded, read_connection, true)
+}
+
+fn apply_memory_scope_visibility_with_metadata_mode(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+    include_passthrough_analysis_metadata: bool,
+) -> (Vec<SearchHit>, MemoryScopeStats) {
+    apply_memory_scope_visibility_with_metadata_mode_collecting(
+        options,
+        hits,
+        degraded,
+        read_connection,
+        include_passthrough_analysis_metadata,
+        None,
+    )
+}
+
+fn apply_memory_scope_visibility_with_metadata_mode_collecting(
+    options: &SearchOptions,
+    hits: Vec<SearchHit>,
+    degraded: &mut Vec<SearchDegradation>,
+    read_connection: Option<&DbConnection>,
+    include_passthrough_analysis_metadata: bool,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+) -> (Vec<SearchHit>, MemoryScopeStats) {
     let scope_context = MemoryScopeContext::for_workspace(
         &options.workspace_path,
         options.memory_scope,
@@ -5970,6 +6165,12 @@ fn apply_memory_scope_visibility(
         options.memory_scope,
         MemoryScope::Swarm | MemoryScope::Workspace
     );
+    if passthrough_scope && !include_passthrough_analysis_metadata {
+        for hit in &hits {
+            stats.record_candidate_id(true, Some(&hit.doc_id));
+        }
+        return (hits, stats);
+    }
     if let Some(connection) = read_connection {
         return apply_memory_scope_visibility_with_connection(
             options,
@@ -5979,6 +6180,7 @@ fn apply_memory_scope_visibility(
             stats,
             passthrough_scope,
             connection,
+            preloaded_memories.as_deref_mut(),
         );
     }
 
@@ -6024,6 +6226,7 @@ fn apply_memory_scope_visibility(
         stats,
         passthrough_scope,
         &connection,
+        preloaded_memories,
     )
 }
 
@@ -6035,6 +6238,7 @@ fn apply_memory_scope_visibility_with_connection(
     mut stats: MemoryScopeStats,
     passthrough_scope: bool,
     connection: &DbConnection,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> (Vec<SearchHit>, MemoryScopeStats) {
     let hit_doc_ids: BTreeSet<String> = hits.iter().map(|hit| hit.doc_id.clone()).collect();
     let hit_doc_refs: Vec<&str> = hit_doc_ids.iter().map(String::as_str).collect();
@@ -6043,6 +6247,13 @@ fn apply_memory_scope_visibility_with_connection(
             Ok(memories) => (memories, None),
             Err(error) => (BTreeMap::new(), Some(error.to_string())),
         };
+    if let Some(preloaded) = preloaded_memories.as_deref_mut() {
+        for (memory_id, memory) in &scope_memories {
+            preloaded
+                .entry(memory_id.clone())
+                .or_insert_with(|| memory.clone());
+        }
+    }
 
     let mut scoped_hits = Vec::with_capacity(hits.len());
     for mut hit in hits {

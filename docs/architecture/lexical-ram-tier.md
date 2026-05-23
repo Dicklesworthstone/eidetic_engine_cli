@@ -136,6 +136,11 @@ lexical index file that was successfully pinned.
   block schema for future `ee status --json` output.
 - `src/config/env_registry.rs` and `docs/env_vars.md` register
   `EE_LEXICAL_INDEX_PIN_RAM` and `EE_LEXICAL_INDEX_HUGEPAGES`.
+- `src/config/file.rs` and `src/config/merge.rs` parse, merge, and
+  source-attribute `[search.lexical_ram_tier]` so `ee config show`
+  can report the operator-selected values.
+- `src/core/status.rs` reads the merged `[search.lexical_ram_tier]` config
+  before producing the lexical RAM-tier status block.
 - `tests/fixtures/failure_modes/lexical_ram_tier_disabled.json`,
   `tests/fixtures/failure_modes/lexical_hugepages_unavailable.json`, and
   `tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json`
@@ -145,8 +150,9 @@ lexical index file that was successfully pinned.
 
 - Issue any `mmap`, `mlock`, `madvise`, or `munmap` syscalls.
 - Claim `succeeded=true` or non-zero `bytesMmapped`.
-- Register the `[search.lexical_ram_tier]` config section in `src/config/mod.rs`.
-- Read the lexical RAM-tier config through the production config loader.
+- Thread the merged `[search.lexical_ram_tier]` file config into the search
+  runtime path; search still reads the registered env vars directly until the
+  next runtime-integration slice.
 - Add a `ee doctor` lexical-ram-tier readiness check.
 - Land the bench at `benches/lexical_ram_tier.rs` proving the ≥30% p99 improvement.
 - Land the e2e script at `scripts/e2e_overhaul/lexical_ram_tier.sh` with strace-based first-touch proof.

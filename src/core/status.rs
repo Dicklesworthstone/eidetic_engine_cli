@@ -73,6 +73,9 @@ use super::tailscale_probe::{
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
 use super::verify::{VerificationPostureReport, gather_verification_posture_with_connection};
+use super::verify_ledger::{
+    RchVerifyLedgerStatusReport, summarize_rch_verify_ledger_status,
+};
 use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";
@@ -1789,6 +1792,7 @@ pub struct StatusReport {
     pub qos_posture: super::qos::QosLaneSummary,
     pub rch_worker_pressure: RchWorkerPressureReport,
     pub verification_posture: VerificationPostureReport,
+    pub verification_ledger: RchVerifyLedgerStatusReport,
     pub host_calibration: Option<HostCalibrationPostureReport>,
     pub memory_health: MemoryHealthReport,
     pub curation_health: CurationHealthReport,
@@ -1883,6 +1887,10 @@ impl StatusReport {
         let qos_posture = gather_qos_posture(options.workspace_path.as_deref());
         let rch_worker_pressure = gather_rch_worker_pressure(options.workspace_path.as_deref());
         let verification_posture = gather_verification_posture_with_connection(
+            options.workspace_path.as_deref(),
+            status_connection_ref,
+        );
+        let verification_ledger = gather_rch_verify_ledger_status_with_connection(
             options.workspace_path.as_deref(),
             status_connection_ref,
         );
@@ -1991,6 +1999,7 @@ impl StatusReport {
             qos_posture,
             rch_worker_pressure,
             verification_posture,
+            verification_ledger,
             host_calibration,
             memory_health,
             curation_health,
@@ -2141,20 +2150,47 @@ fn push_flight_recorder_degradation(
 
 fn gather_lexical_ram_tier_status(workspace_path: Option<&Path>) -> LexicalRamTierResult {
     let index_path = lexical_ram_tier_index_path(workspace_path);
-    let config = LexicalRamTierConfig::from_environment_with_reader(
-        |name| match name {
-            LEXICAL_RAM_TIER_PIN_RAM_ENV => read_env_var(EnvVar::LexicalIndexPinRam),
-            LEXICAL_RAM_TIER_HUGEPAGES_ENV => read_env_var(EnvVar::LexicalIndexHugepages),
-            _ => None,
-        },
-        |_name, _raw| {},
-    );
+    let config = lexical_ram_tier_config_for_status(workspace_path);
     let result = pin_lexical_index_files(&index_path, &config);
     let workspace_id = workspace_path
         .map(stable_workspace_id)
         .unwrap_or_else(|| "workspace_unknown".to_owned());
     trace_lexical_ram_tier(&workspace_id, &result, 0.0);
     result
+}
+
+fn lexical_ram_tier_config_for_status(workspace_path: Option<&Path>) -> LexicalRamTierConfig {
+    lexical_ram_tier_config_for_status_with(
+        workspace_path,
+        |workspace_path| {
+            crate::core::config_surface::merged_workspace_config(workspace_path)
+                .ok()
+                .map(|merged| merged.values.search.lexical_ram_tier)
+        },
+        |name| match name {
+            LEXICAL_RAM_TIER_PIN_RAM_ENV => read_env_var(EnvVar::LexicalIndexPinRam),
+            LEXICAL_RAM_TIER_HUGEPAGES_ENV => read_env_var(EnvVar::LexicalIndexHugepages),
+            _ => None,
+        },
+    )
+}
+
+fn lexical_ram_tier_config_for_status_with<F, R>(
+    workspace_path: Option<&Path>,
+    load_workspace_config: F,
+    read_environment: R,
+) -> LexicalRamTierConfig
+where
+    F: FnOnce(&Path) -> Option<crate::config::SearchLexicalRamTierConfig>,
+    R: Fn(&'static str) -> Option<String>,
+{
+    if let Some(workspace_path) = workspace_path {
+        if let Some(overrides) = load_workspace_config(workspace_path) {
+            return LexicalRamTierConfig::from_config_overrides(&overrides);
+        }
+    }
+
+    LexicalRamTierConfig::from_environment_with_reader(read_environment, |_name, _raw| {})
 }
 
 fn lexical_ram_tier_index_path(workspace_path: Option<&Path>) -> PathBuf {
@@ -2343,6 +2379,58 @@ fn gather_host_calibration_status(
         workspace,
         runtime.active_profile,
     ))
+}
+
+#[must_use]
+pub fn gather_rch_verify_ledger_status(
+    workspace_path: Option<&Path>,
+) -> RchVerifyLedgerStatusReport {
+    gather_rch_verify_ledger_status_with_connection(workspace_path, None)
+}
+
+#[must_use]
+pub fn gather_rch_verify_ledger_status_with_connection(
+    workspace_path: Option<&Path>,
+    connection: Option<&DbConnection>,
+) -> RchVerifyLedgerStatusReport {
+    let Some(workspace_path) = workspace_path else {
+        return RchVerifyLedgerStatusReport::not_inspected();
+    };
+    let database_path = workspace_path.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return RchVerifyLedgerStatusReport::not_initialized();
+    }
+
+    let owned_connection;
+    let connection = if let Some(connection) = connection {
+        connection
+    } else {
+        match DbConnection::open_file(&database_path) {
+            Ok(connection) => {
+                owned_connection = connection;
+                &owned_connection
+            }
+            Err(_) => {
+                return RchVerifyLedgerStatusReport::unavailable(
+                    "unavailable",
+                    "ee doctor --workspace . --json",
+                    "The RCH verifier ledger database could not be opened.",
+                );
+            }
+        }
+    };
+    let canonical_workspace = workspace_path
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_path.to_path_buf());
+    let workspace_id = stable_workspace_id(&canonical_workspace);
+    summarize_rch_verify_ledger_status(connection, &workspace_id, &Utc::now().to_rfc3339())
+        .unwrap_or_else(|_| {
+            RchVerifyLedgerStatusReport::unavailable(
+                "unavailable",
+                "ee verify rch blockers --workspace . --json",
+                "The RCH verifier ledger could not be queried.",
+            )
+        })
 }
 
 #[must_use]
@@ -5989,6 +6077,63 @@ mod tests {
             true,
             "enabled skyline should not emit disabled degradation",
         )
+    }
+
+    #[test]
+    fn lexical_ram_tier_status_prefers_merged_workspace_config() -> TestResult {
+        let workspace_path = Path::new("/tmp/ee-status-lexical-ram-tier-config");
+        let config = lexical_ram_tier_config_for_status_with(
+            Some(workspace_path),
+            |path| {
+                assert_eq!(path, workspace_path);
+                Some(crate::config::SearchLexicalRamTierConfig {
+                    enabled: Some(true),
+                    request_hugepages: Some(true),
+                    populate_on_open: Some(false),
+                })
+            },
+            |name| match name {
+                LEXICAL_RAM_TIER_PIN_RAM_ENV => Some("false".to_owned()),
+                LEXICAL_RAM_TIER_HUGEPAGES_ENV => Some("false".to_owned()),
+                _ => None,
+            },
+        );
+
+        ensure(config.enabled, true, "config enabled")?;
+        ensure(config.request_hugepages, true, "config hugepages")?;
+        ensure(config.populate_on_open, false, "config populate")
+    }
+
+    #[test]
+    fn lexical_ram_tier_status_uses_env_when_config_load_fails() -> TestResult {
+        let config = lexical_ram_tier_config_for_status_with(
+            Some(Path::new("/tmp/ee-status-lexical-ram-tier-env")),
+            |_path| None,
+            |name| match name {
+                LEXICAL_RAM_TIER_PIN_RAM_ENV => Some("on".to_owned()),
+                LEXICAL_RAM_TIER_HUGEPAGES_ENV => Some("yes".to_owned()),
+                _ => None,
+            },
+        );
+
+        ensure(config.enabled, true, "env enabled")?;
+        ensure(config.request_hugepages, true, "env hugepages")?;
+        ensure(config.populate_on_open, true, "env populate")
+    }
+
+    #[test]
+    fn lexical_ram_tier_status_reads_workspace_config_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[search.lexical_ram_tier]\npopulate_on_open = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let config = lexical_ram_tier_config_for_status(Some(temp.path()));
+        ensure(config.populate_on_open, false, "workspace config populate")
     }
 
     #[test]

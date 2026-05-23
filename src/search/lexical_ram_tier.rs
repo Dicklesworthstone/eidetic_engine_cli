@@ -56,10 +56,10 @@ pub const LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE: &str = "lexical_ram_tier_not_im
 /// `data.search.lexicalRamTier.schema`.
 pub const STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1: &str = "ee.status.search.lexical_ram_tier.v1";
 
-/// Environment-variable name a future bd-21xbi slice will register in
-/// `src/config/env_registry.rs`. Exposed here as a public constant so
+/// Environment-variable name registered in `src/config/env_registry.rs`.
+/// Exposed here as a public constant so
 /// [`LexicalRamTierConfig::from_environment_with_reader`] keeps the
-/// canonical spelling in one place: the registry row will read
+/// canonical spelling in one place: the registry row reads
 /// `EnvVar::LexicalIndexPinRam.name()`, the docs/env_vars.md row will
 /// match this constant, and tests can avoid hard-coding string literals.
 pub const LEXICAL_RAM_TIER_PIN_RAM_ENV: &str = "EE_LEXICAL_INDEX_PIN_RAM";
@@ -158,16 +158,37 @@ impl LexicalRamTierConfig {
         self
     }
 
+    /// Build the runtime posture from the typed config surface.
+    ///
+    /// The config surface stores optional fields so partially-specified
+    /// config files and layered merges can share one type. Missing fields keep
+    /// the runtime defaults. Requesting hugepages while the parent RAM tier is
+    /// disabled is normalized back to `false`, matching the environment
+    /// reader's semantic guard.
+    #[must_use]
+    pub fn from_config_overrides(overrides: &crate::config::SearchLexicalRamTierConfig) -> Self {
+        let mut config = Self::default();
+        if let Some(enabled) = overrides.enabled {
+            config.enabled = enabled;
+        }
+        if let Some(request_hugepages) = overrides.request_hugepages {
+            config.request_hugepages = request_hugepages;
+        }
+        if let Some(populate_on_open) = overrides.populate_on_open {
+            config.populate_on_open = populate_on_open;
+        }
+        config.force_hugepages_off_when_disabled();
+        config
+    }
+
     /// Build a config from an arbitrary env-var reader.
     ///
     /// The reader takes the canonical env-var name (matching
     /// [`LEXICAL_RAM_TIER_PIN_RAM_ENV`] / [`LEXICAL_RAM_TIER_HUGEPAGES_ENV`])
-    /// and returns the configured value. The intended production wiring is
-    /// `LexicalRamTierConfig::from_environment_with_reader(|name|
-    /// env_registry::read(EnvVar::for_name(name)))` once the bd-21xbi sibling
-    /// slice lands the `EnvVar` variants, but the reader indirection lets
-    /// tests inject deterministic values without touching the process
-    /// environment.
+    /// and returns the configured value. Production callers pass the config
+    /// registry reader for the corresponding `EnvVar` variants; the reader
+    /// indirection lets tests inject deterministic values without touching the
+    /// process environment.
     ///
     /// Boolean parsing accepts the same lenient vocabulary `parse_bool_arg`
     /// uses for CLI flags: `true` / `1` / `yes` / `on` → true and
@@ -227,12 +248,20 @@ impl LexicalRamTierConfig {
         // can't MADV_HUGEPAGE a region that was never mmap'd by the
         // optimization). Force the field back to false and tell the caller
         // why so they can record the inconsistency through degraded[].
-        if config.request_hugepages && !config.enabled {
+        if config.force_hugepages_off_when_disabled() {
             on_unparseable(LEXICAL_RAM_TIER_HUGEPAGES_ENV, "requires-pin-ram-enabled");
-            config.request_hugepages = false;
         }
 
         config
+    }
+
+    fn force_hugepages_off_when_disabled(&mut self) -> bool {
+        if self.request_hugepages && !self.enabled {
+            self.request_hugepages = false;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -604,6 +633,42 @@ mod tests {
         assert!(config.request_hugepages);
         assert!(!config.populate_on_open);
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn from_config_overrides_preserves_runtime_defaults_for_absent_fields() {
+        let config = LexicalRamTierConfig::from_config_overrides(
+            &crate::config::SearchLexicalRamTierConfig::default(),
+        );
+        assert_eq!(config, LexicalRamTierConfig::default());
+    }
+
+    #[test]
+    fn from_config_overrides_applies_typed_config_values() {
+        let config = LexicalRamTierConfig::from_config_overrides(
+            &crate::config::SearchLexicalRamTierConfig {
+                enabled: Some(true),
+                request_hugepages: Some(true),
+                populate_on_open: Some(false),
+            },
+        );
+        assert!(config.enabled);
+        assert!(config.request_hugepages);
+        assert!(!config.populate_on_open);
+    }
+
+    #[test]
+    fn from_config_overrides_forces_hugepages_off_when_disabled() {
+        let config = LexicalRamTierConfig::from_config_overrides(
+            &crate::config::SearchLexicalRamTierConfig {
+                enabled: Some(false),
+                request_hugepages: Some(true),
+                populate_on_open: None,
+            },
+        );
+        assert!(!config.enabled);
+        assert!(!config.request_hugepages);
+        assert!(config.populate_on_open);
     }
 
     #[test]

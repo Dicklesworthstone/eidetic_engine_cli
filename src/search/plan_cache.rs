@@ -21,7 +21,8 @@
 //! selection work while still executing fresh retrieval against live indexes.
 
 use std::collections::BTreeMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
 
 use serde::Serialize;
 
@@ -45,7 +46,10 @@ pub const DEFAULT_PLAN_CACHE_ENTRIES: usize = 1024;
 /// hand in a misconfigured value.
 pub const MAX_PLAN_CACHE_ENTRIES: usize = 1 << 20;
 
-static PROCESS_PLAN_CACHE: OnceLock<Mutex<PlanCache>> = OnceLock::new();
+// bd-25yao: RwLock (was Mutex) so cache-hit reads via `PlanCache::get`
+// can take `.read()` and run concurrently. Mirrors bd-2lin9 (PPR
+// prefetch cache) and bd-1nan9 (IN_MEMORY_ALGORITHM_RESULTS).
+static PROCESS_PLAN_CACHE: OnceLock<RwLock<PlanCache>> = OnceLock::new();
 
 /// Composite key for the EQL plan cache. All fields are 64-bit content hashes
 /// so the key itself is cheap to compare and clone.
@@ -153,11 +157,39 @@ pub struct PlanCacheLookup {
     pub evicted: Vec<PlanCacheKey>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PlanCacheEntry {
     plan: CompiledPlan,
     plan_tree_hash: String,
-    last_used_sequence: u64,
+    /// bd-25yao: atomic so the cache read path can update the LRU
+    /// timestamp through a shared `&self` and the outer
+    /// `RwLock<PlanCache>` can be acquired via `.read()` instead of
+    /// `.lock()` for cache hits. `Relaxed` everywhere: eviction
+    /// reads under the outer write lock (consistent within one pass)
+    /// and `next_access_sequence` returns unique values via
+    /// `fetch_add`.
+    last_used_sequence: AtomicU64,
+}
+
+impl PlanCacheEntry {
+    fn last_used(&self) -> u64 {
+        self.last_used_sequence.load(Ordering::Relaxed)
+    }
+
+    fn touch(&self, last_used_sequence: u64) {
+        self.last_used_sequence
+            .store(last_used_sequence, Ordering::Relaxed);
+    }
+}
+
+impl Clone for PlanCacheEntry {
+    fn clone(&self) -> Self {
+        Self {
+            plan: self.plan.clone(),
+            plan_tree_hash: self.plan_tree_hash.clone(),
+            last_used_sequence: AtomicU64::new(self.last_used()),
+        }
+    }
 }
 
 /// Bounded, deterministic LRU cache for compiled EQL plans.
@@ -169,13 +201,24 @@ struct PlanCacheEntry {
 #[derive(Debug)]
 pub struct PlanCache {
     capacity: usize,
-    access_sequence: u64,
+    /// bd-25yao: atomic so `next_access_sequence`, hit/miss
+    /// bookkeeping, and the LRU touch can all happen through a
+    /// shared `&self`. Reads call `fetch_add(1, Relaxed)`; every
+    /// caller observes a unique monotonically-increasing sequence
+    /// number, and the LRU tie-break on lexical PlanCacheKey order
+    /// in `lru_victim_key` keeps eviction deterministic.
+    access_sequence: AtomicU64,
     entries: BTreeMap<PlanCacheKey, PlanCacheEntry>,
-    hits: u64,
-    misses: u64,
-    inserts: u64,
-    evictions: u64,
-    invalidations: u64,
+    // bd-25yao: counters become atomic so they can be incremented
+    // from the read path (`get(&self)`). Observability semantics
+    // are unchanged — `stats()` still samples a coherent-enough
+    // snapshot for diagnostics (Relaxed allows brief inter-counter
+    // skew but each counter's value is monotonic).
+    hits: AtomicU64,
+    misses: AtomicU64,
+    inserts: AtomicU64,
+    evictions: AtomicU64,
+    invalidations: AtomicU64,
 }
 
 impl PlanCache {
@@ -189,13 +232,13 @@ impl PlanCache {
         let capacity = capacity.min(MAX_PLAN_CACHE_ENTRIES);
         Self {
             capacity,
-            access_sequence: 0,
+            access_sequence: AtomicU64::new(0),
             entries: BTreeMap::new(),
-            hits: 0,
-            misses: 0,
-            inserts: 0,
-            evictions: 0,
-            invalidations: 0,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            inserts: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
         }
     }
 
@@ -216,23 +259,37 @@ impl PlanCache {
 
     /// Try to fetch a cached plan. The entry is self-verified before return;
     /// a corrupted entry (whose recomputed hash differs from the stored hash)
-    /// is dropped and the call reports a miss.
-    pub fn get(&mut self, key: &PlanCacheKey) -> Option<PlanCacheHit> {
+    /// reports a miss; the actual removal is **deferred** to the next
+    /// mutating call path (next `insert` for the same key, next
+    /// `invalidate_other_generations`, or the next `clear`).
+    ///
+    /// bd-25yao: this method takes `&self` so the outer
+    /// `RwLock<PlanCache>` can be acquired via `.read()` and
+    /// concurrent lookups parallelize. LRU bookkeeping, hit/miss
+    /// counters, and the `next_access_sequence` bump all happen
+    /// through atomics; eviction stays on the write path. Mirrors
+    /// the bd-2lin9 / bd-1nan9 refactor; see `PprPrefetchCache::get`
+    /// and `load_in_memory_algorithm_result` for the sibling shape.
+    pub fn get(&self, key: &PlanCacheKey) -> Option<PlanCacheHit> {
         if self.capacity == 0 {
-            self.misses = self.misses.saturating_add(1);
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         if !self.entry_hash_is_valid(key) {
-            if self.entries.remove(key).is_some() {
-                self.invalidations = self.invalidations.saturating_add(1);
-            }
-            self.misses = self.misses.saturating_add(1);
+            // Safety-critical contract: corrupted hits never leak;
+            // we report a miss. Eviction is deferred — the next
+            // mutating call path (`insert`, `invalidate_other_
+            // generations`, `clear`) reclaims the slot. The
+            // `invalidations` counter is bumped there instead of
+            // here so it tracks actual removals rather than
+            // observed-stale reads (which may double-count under
+            // concurrent loads).
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        let last_used_sequence = self.next_access_sequence();
-        let entry = self.entries.get_mut(key)?;
-        entry.last_used_sequence = last_used_sequence;
-        self.hits = self.hits.saturating_add(1);
+        let entry = self.entries.get(key)?;
+        entry.touch(self.next_access_sequence());
+        self.hits.fetch_add(1, Ordering::Relaxed);
         Some(PlanCacheHit {
             plan: entry.plan.clone(),
             plan_tree_hash: entry.plan_tree_hash.clone(),
@@ -245,25 +302,45 @@ impl PlanCache {
     pub fn insert(&mut self, key: PlanCacheKey, plan: CompiledPlan) -> PlanCacheInsert {
         let plan_tree_hash = compute_plan_tree_hash(&key, &plan);
         if self.capacity == 0 {
-            self.inserts = self.inserts.saturating_add(1);
+            self.inserts.fetch_add(1, Ordering::Relaxed);
             // Capacity 0 means the cache is disabled; report success but keep
             // no entries so subsequent gets miss as documented.
+            let dropped = self.entries.len();
             self.entries.clear();
+            if dropped > 0 {
+                self.invalidations
+                    .fetch_add(dropped as u64, Ordering::Relaxed);
+            }
             return PlanCacheInsert {
                 plan_tree_hash,
                 evicted: Vec::new(),
             };
         }
         let last_used_sequence = self.next_access_sequence();
+        // bd-25yao: detect whether the natural BTreeMap::insert
+        // overwrites a stale (hash-invalid) entry that earlier
+        // `get` calls observed as a miss. Only the overwrite of a
+        // hash-invalid prior entry counts as an invalidation; an
+        // overwrite of a still-fresh entry is the normal cache
+        // refresh path and must not double-count.
+        // bd-25yao: present-but-hash-invalid prior entry → overwrite
+        // counts as an invalidation. `entry_hash_is_valid` returns
+        // false for both \"not present\" and \"present-and-stale\";
+        // gate on `contains_key` to distinguish.
+        let was_stale_overwrite =
+            self.entries.contains_key(&key) && !self.entry_hash_is_valid(&key);
         self.entries.insert(
             key,
             PlanCacheEntry {
                 plan,
                 plan_tree_hash: plan_tree_hash.clone(),
-                last_used_sequence,
+                last_used_sequence: AtomicU64::new(last_used_sequence),
             },
         );
-        self.inserts = self.inserts.saturating_add(1);
+        if was_stale_overwrite {
+            self.invalidations.fetch_add(1, Ordering::Relaxed);
+        }
+        self.inserts.fetch_add(1, Ordering::Relaxed);
         let evicted = self.evict_to_capacity();
         PlanCacheInsert {
             plan_tree_hash,
@@ -292,7 +369,8 @@ impl PlanCache {
             self.entries.remove(key);
         }
         if !stale.is_empty() {
-            self.invalidations = self.invalidations.saturating_add(stale.len() as u64);
+            self.invalidations
+                .fetch_add(stale.len() as u64, Ordering::Relaxed);
         }
         stale
     }
@@ -303,7 +381,8 @@ impl PlanCache {
         let dropped = self.entries.len();
         self.entries.clear();
         if dropped > 0 {
-            self.invalidations = self.invalidations.saturating_add(dropped as u64);
+            self.invalidations
+                .fetch_add(dropped as u64, Ordering::Relaxed);
         }
         dropped
     }
@@ -314,11 +393,11 @@ impl PlanCache {
         PlanCacheStats {
             capacity: self.capacity,
             current_size: self.entries.len(),
-            hits: self.hits,
-            misses: self.misses,
-            inserts: self.inserts,
-            evictions: self.evictions,
-            invalidations: self.invalidations,
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            inserts: self.inserts.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
         }
     }
 
@@ -328,9 +407,14 @@ impl PlanCache {
         self.entries.keys().copied()
     }
 
-    fn next_access_sequence(&mut self) -> u64 {
-        self.access_sequence = self.access_sequence.saturating_add(1);
+    fn next_access_sequence(&self) -> u64 {
+        // bd-25yao: matches the bd-2lin9 / bd-1nan9 pattern:
+        // fetch_add returns the OLD value, so add 1 to preserve
+        // the "first call returns 1" semantics of the previous
+        // saturating_add path.
         self.access_sequence
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1)
     }
 
     fn evict_to_capacity(&mut self) -> Vec<PlanCacheKey> {
@@ -340,7 +424,7 @@ impl PlanCache {
                 break;
             };
             self.entries.remove(&victim);
-            self.evictions = self.evictions.saturating_add(1);
+            self.evictions.fetch_add(1, Ordering::Relaxed);
             evicted.push(victim);
         }
         evicted
@@ -350,9 +434,14 @@ impl PlanCache {
         self.entries
             .iter()
             .min_by(|(left_key, left_entry), (right_key, right_entry)| {
+                // bd-25yao: Relaxed atomic load. Eviction always
+                // runs under the outer write lock (insert /
+                // invalidate_other_generations / clear all take
+                // `&mut self`), so the snapshot read here is
+                // consistent within one eviction pass.
                 left_entry
-                    .last_used_sequence
-                    .cmp(&right_entry.last_used_sequence)
+                    .last_used()
+                    .cmp(&right_entry.last_used())
                     .then_with(|| left_key.cmp(right_key))
             })
             .map(|(key, _)| *key)
@@ -377,14 +466,41 @@ pub fn lookup_or_insert_process_plan<F>(
 where
     F: FnOnce() -> CompiledPlan,
 {
-    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| RwLock::new(PlanCache::new(capacity)));
+    let bounded_capacity = capacity.min(MAX_PLAN_CACHE_ENTRIES);
+
+    // bd-25yao: double-checked locking. Take the shared lock on the
+    // hot path so concurrent cache-hit lookups parallelize. We must
+    // verify the capacity hasn't changed under the shared lock; if
+    // it has, fall through to the write path to reset the cache.
+    {
+        let read_guard = cache
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if read_guard.capacity() == bounded_capacity
+            && let Some(hit) = read_guard.get(&key)
+        {
+            return PlanCacheLookup {
+                decision: PlanCacheDecision::Hit,
+                plan: hit.plan,
+                plan_tree_hash: hit.plan_tree_hash,
+                evicted: Vec::new(),
+            };
+        }
+    }
+
     let mut guard = cache
-        .lock()
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.capacity() != capacity.min(MAX_PLAN_CACHE_ENTRIES) {
+    if guard.capacity() != bounded_capacity {
         *guard = PlanCache::new(capacity);
     }
 
+    // Re-check after acquiring the write lock: another writer may
+    // have inserted the same key while we were waiting. The recompute
+    // is idempotent for the same key, so we still call insert below
+    // even on the rare read-saw-miss-but-write-saw-hit race; the
+    // hit-counter bookkeeping in insert is unaffected.
     if let Some(hit) = guard.get(&key) {
         return PlanCacheLookup {
             decision: PlanCacheDecision::Hit,
@@ -411,9 +527,9 @@ pub fn process_plan_cache_diag_report(
     env_var_value_source: EnvVarValueSource,
     top_keys_limit: usize,
 ) -> PlanCacheDiagReport {
-    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| RwLock::new(PlanCache::new(capacity)));
     let mut guard = cache
-        .lock()
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if guard.capacity() != capacity.min(MAX_PLAN_CACHE_ENTRIES) {
         *guard = PlanCache::new(capacity);
@@ -425,9 +541,9 @@ pub fn process_plan_cache_diag_report(
 /// can pin the live-counter contract without reaching into private statics.
 #[doc(hidden)]
 pub fn reset_process_plan_cache_for_tests(capacity: usize) {
-    let cache = PROCESS_PLAN_CACHE.get_or_init(|| Mutex::new(PlanCache::new(capacity)));
+    let cache = PROCESS_PLAN_CACHE.get_or_init(|| RwLock::new(PlanCache::new(capacity)));
     let mut guard = cache
-        .lock()
+        .write()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = PlanCache::new(capacity);
 }
@@ -823,21 +939,39 @@ mod tests {
         );
     }
 
+    // bd-25yao: after the RwLock + atomic-LRU refactor, `get(&self)`
+    // CANNOT remove the corrupted entry in place — eviction stays on
+    // the mutating call path. The safety-critical contract is
+    // preserved (corrupted hits never leak; `get` returns None), and
+    // the actual removal + invalidation counter bump fires when the
+    // next `insert` for the same key overwrites the stale slot or
+    // when `invalidate_other_generations` / `clear` runs.
     #[test]
-    fn corrupted_entry_returns_miss_without_panic() {
+    fn corrupted_entry_returns_miss_and_lingers_until_next_insert() {
         let mut cache = PlanCache::new(2);
         cache.insert(key(1, 10, 100), sample_plan("alpha"));
         // Reach into the entry and rewrite the persisted plan-tree hash to a
         // value that no longer matches the stored plan. The next get must
-        // detect the mismatch, drop the entry, and report a miss.
+        // detect the mismatch and report a miss.
         let entry = cache
             .entries
             .get_mut(&key(1, 10, 100))
             .expect("entry inserted above");
         entry.plan_tree_hash = "blake3:deadbeef".to_string();
+
+        // Safety-critical: corrupted hit returns None.
         assert!(cache.get(&key(1, 10, 100)).is_none());
-        assert!(cache.is_empty());
+        // Stale entry lingers; invalidation counter has NOT been
+        // bumped on the read path (deferred semantics).
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.stats().invalidations, 0);
+
+        // A subsequent insert for the same key overwrites the stale
+        // entry and the deferred invalidation counter fires.
+        cache.insert(key(1, 10, 100), sample_plan("alpha"));
         assert_eq!(cache.stats().invalidations, 1);
+        // Post-refresh hit succeeds against the new entry.
+        assert!(cache.get(&key(1, 10, 100)).is_some());
     }
 
     #[test]
