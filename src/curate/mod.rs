@@ -8,14 +8,14 @@ pub mod cluster_coherence;
 pub mod regret;
 
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Duration};
 use serde::Serialize;
 
-use crate::models::ERROR_SCHEMA_V2;
+use crate::models::{ERROR_SCHEMA_V2, TrustClass, UnitScore};
 
 pub const SUBSYSTEM: &str = "curate";
 pub const DEFAULT_SPECIFICITY_MIN: f32 = 0.45;
@@ -700,6 +700,232 @@ fn is_canonical_blake3_content_hash(value: &str) -> bool {
         && hex
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Memory fields carried by a create-derived-memory candidate.
+///
+/// `content` and `workspace_id` are supplied by the candidate row itself; this
+/// spec carries the remaining fields needed to materialize a `CreateMemoryInput`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivationMemorySpec {
+    pub level: String,
+    pub kind: String,
+    pub workflow_id: Option<String>,
+    pub confidence: Option<f32>,
+    pub utility: Option<f32>,
+    pub importance: Option<f32>,
+    pub provenance_uri: Option<String>,
+    pub trust_class: Option<String>,
+    pub trust_subclass: Option<String>,
+    pub tags: Vec<String>,
+    pub valid_from: Option<String>,
+    pub valid_to: Option<String>,
+}
+
+/// Producer package for a create-derived-memory candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivationProducerMetadata {
+    pub producer: String,
+    pub producer_payload: Option<serde_json::Value>,
+}
+
+/// Complete metadata package for a create-derived-memory candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DerivationMetadata {
+    pub memory_spec: DerivationMemorySpec,
+    pub producer: DerivationProducerMetadata,
+}
+
+/// Resolved score defaults for the memory that a create-derived candidate would create.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DerivationResolvedScores {
+    pub confidence: f32,
+    pub utility: f32,
+    pub importance: f32,
+}
+
+/// Error while normalizing create-derived metadata.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DerivationMetadataError {
+    EmptyMemoryLevel,
+    EmptyMemoryKind,
+    EmptyProducer,
+    JsonSerialization { message: String },
+}
+
+impl fmt::Display for DerivationMetadataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyMemoryLevel => f.write_str("derived memory level must not be empty"),
+            Self::EmptyMemoryKind => f.write_str("derived memory kind must not be empty"),
+            Self::EmptyProducer => f.write_str("derived memory producer must not be empty"),
+            Self::JsonSerialization { message } => {
+                write!(f, "failed to serialize derivation metadata: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DerivationMetadataError {}
+
+impl DerivationMetadataError {
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::EmptyMemoryLevel => "empty_derivation_memory_level",
+            Self::EmptyMemoryKind => "empty_derivation_memory_kind",
+            Self::EmptyProducer => "empty_derivation_producer",
+            Self::JsonSerialization { .. } => "derivation_metadata_json_serialization_failed",
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivationMetadataJson<'a> {
+    memory_spec: DerivationMemorySpecJson<'a>,
+    producer: DerivationProducerMetadataJson<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivationMemorySpecJson<'a> {
+    level: &'a str,
+    kind: &'a str,
+    workflow_id: Option<&'a str>,
+    confidence: Option<f32>,
+    utility: Option<f32>,
+    importance: Option<f32>,
+    provenance_uri: Option<&'a str>,
+    trust_class: Option<&'a str>,
+    trust_subclass: Option<&'a str>,
+    tags: &'a [String],
+    valid_from: Option<&'a str>,
+    valid_to: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivationProducerMetadataJson<'a> {
+    producer: &'a str,
+    producer_payload: Option<&'a serde_json::Value>,
+}
+
+/// Canonical JSON for create-derived candidate metadata.
+///
+/// Tags are trimmed, empty tags are dropped, duplicates are removed, and object
+/// payloads are recursively key-sorted before serialization.
+pub fn canonical_derivation_metadata_json(
+    metadata: &DerivationMetadata,
+) -> Result<String, DerivationMetadataError> {
+    let level = metadata.memory_spec.level.trim();
+    if level.is_empty() {
+        return Err(DerivationMetadataError::EmptyMemoryLevel);
+    }
+    let kind = metadata.memory_spec.kind.trim();
+    if kind.is_empty() {
+        return Err(DerivationMetadataError::EmptyMemoryKind);
+    }
+    let producer = metadata.producer.producer.trim();
+    if producer.is_empty() {
+        return Err(DerivationMetadataError::EmptyProducer);
+    }
+
+    let tags = canonical_derivation_tags(&metadata.memory_spec.tags);
+    let producer_payload = metadata
+        .producer
+        .producer_payload
+        .as_ref()
+        .map(canonicalize_json_value);
+    let memory_spec = DerivationMemorySpecJson {
+        level,
+        kind,
+        workflow_id: trimmed_optional(metadata.memory_spec.workflow_id.as_deref()),
+        confidence: clamped_unit_score(metadata.memory_spec.confidence),
+        utility: clamped_unit_score(metadata.memory_spec.utility),
+        importance: clamped_unit_score(metadata.memory_spec.importance),
+        provenance_uri: trimmed_optional(metadata.memory_spec.provenance_uri.as_deref()),
+        trust_class: trimmed_optional(metadata.memory_spec.trust_class.as_deref()),
+        trust_subclass: trimmed_optional(metadata.memory_spec.trust_subclass.as_deref()),
+        tags: &tags,
+        valid_from: trimmed_optional(metadata.memory_spec.valid_from.as_deref()),
+        valid_to: trimmed_optional(metadata.memory_spec.valid_to.as_deref()),
+    };
+    let producer = DerivationProducerMetadataJson {
+        producer,
+        producer_payload: producer_payload.as_ref(),
+    };
+
+    serde_json::to_string(&DerivationMetadataJson {
+        memory_spec,
+        producer,
+    })
+    .map_err(|error| DerivationMetadataError::JsonSerialization {
+        message: error.to_string(),
+    })
+}
+
+/// Resolve missing create-derived memory scores deterministically.
+#[must_use]
+pub fn resolve_derivation_memory_scores(
+    memory_spec: &DerivationMemorySpec,
+    candidate_proposed_confidence: Option<f32>,
+    candidate_confidence: f32,
+) -> DerivationResolvedScores {
+    DerivationResolvedScores {
+        confidence: clamped_unit_score(memory_spec.confidence)
+            .or_else(|| clamped_unit_score(candidate_proposed_confidence))
+            .or_else(|| clamped_unit_score(Some(candidate_confidence)))
+            .unwrap_or_else(|| TrustClass::AgentAssertion.initial_confidence()),
+        utility: clamped_unit_score(memory_spec.utility)
+            .unwrap_or_else(|| UnitScore::neutral().into_inner()),
+        importance: clamped_unit_score(memory_spec.importance)
+            .unwrap_or_else(|| UnitScore::neutral().into_inner()),
+    }
+}
+
+fn canonical_derivation_tags(tags: &[String]) -> Vec<String> {
+    let mut canonical = BTreeSet::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if !trimmed.is_empty() {
+            canonical.insert(trimmed.to_owned());
+        }
+    }
+    canonical.into_iter().collect()
+}
+
+fn trimmed_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn clamped_unit_score(value: Option<f32>) -> Option<f32> {
+    let value = value?;
+    value.is_finite().then(|| {
+        value.clamp(
+            UnitScore::zero().into_inner(),
+            UnitScore::one().into_inner(),
+        )
+    })
+}
+
+fn canonicalize_json_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values
+                .iter()
+                .map(canonicalize_json_value)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(values) => {
+            let sorted = values
+                .iter()
+                .map(|(key, value)| (key.clone(), canonicalize_json_value(value)))
+                .collect::<BTreeMap<_, _>>();
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        _ => value.clone(),
+    }
 }
 
 /// Source that proposed the curation candidate.
@@ -5670,6 +5896,131 @@ Then update src/policy/mod.rs on main."
             bad_hash,
             Err(DerivationSourcePackageError::InvalidContentHash { .. })
         ));
+    }
+
+    #[test]
+    fn canonical_derivation_metadata_json_normalizes_metadata() -> TestResult {
+        let metadata = DerivationMetadata {
+            memory_spec: DerivationMemorySpec {
+                level: " procedural ".to_owned(),
+                kind: " rule ".to_owned(),
+                workflow_id: Some(" wf-1 ".to_owned()),
+                confidence: Some(1.25),
+                utility: Some(f32::NAN),
+                importance: Some(0.75),
+                provenance_uri: Some(" cass://session/1 ".to_owned()),
+                trust_class: Some(" agent_assertion ".to_owned()),
+                trust_subclass: Some(" ".to_owned()),
+                tags: vec![
+                    "release".to_owned(),
+                    " ".to_owned(),
+                    "verification".to_owned(),
+                    "release".to_owned(),
+                ],
+                valid_from: Some(" 2026-05-23T00:00:00Z ".to_owned()),
+                valid_to: None,
+            },
+            producer: DerivationProducerMetadata {
+                producer: " review_session ".to_owned(),
+                producer_payload: Some(serde_json::json!({
+                    "z": 1,
+                    "a": {
+                        "b": true,
+                        "a": "first"
+                    }
+                })),
+            },
+        };
+
+        let json = canonical_derivation_metadata_json(&metadata)
+            .map_err(|error| format!("metadata serialization failed: {error}"))?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+
+        assert_eq!(parsed["memorySpec"]["level"], "procedural");
+        assert_eq!(parsed["memorySpec"]["kind"], "rule");
+        assert_eq!(parsed["memorySpec"]["workflowId"], "wf-1");
+        assert_eq!(parsed["memorySpec"]["confidence"], 1.0);
+        assert!(parsed["memorySpec"]["utility"].is_null());
+        assert_eq!(parsed["memorySpec"]["importance"], 0.75);
+        assert_eq!(
+            parsed["memorySpec"]["tags"],
+            serde_json::json!(["release", "verification"])
+        );
+        assert_eq!(parsed["producer"]["producer"], "review_session");
+        assert_eq!(parsed["producer"]["producerPayload"]["a"]["a"], "first");
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_derivation_metadata_rejects_empty_required_fields() {
+        let mut metadata = DerivationMetadata {
+            memory_spec: DerivationMemorySpec {
+                level: "procedural".to_owned(),
+                kind: "rule".to_owned(),
+                workflow_id: None,
+                confidence: None,
+                utility: None,
+                importance: None,
+                provenance_uri: None,
+                trust_class: None,
+                trust_subclass: None,
+                tags: Vec::new(),
+                valid_from: None,
+                valid_to: None,
+            },
+            producer: DerivationProducerMetadata {
+                producer: "review_session".to_owned(),
+                producer_payload: None,
+            },
+        };
+
+        metadata.memory_spec.level = " ".to_owned();
+        assert!(matches!(
+            canonical_derivation_metadata_json(&metadata),
+            Err(DerivationMetadataError::EmptyMemoryLevel)
+        ));
+        metadata.memory_spec.level = "procedural".to_owned();
+        metadata.memory_spec.kind = "\t".to_owned();
+        assert!(matches!(
+            canonical_derivation_metadata_json(&metadata),
+            Err(DerivationMetadataError::EmptyMemoryKind)
+        ));
+        metadata.memory_spec.kind = "rule".to_owned();
+        metadata.producer.producer = "\n".to_owned();
+        assert!(matches!(
+            canonical_derivation_metadata_json(&metadata),
+            Err(DerivationMetadataError::EmptyProducer)
+        ));
+    }
+
+    #[test]
+    fn resolve_derivation_memory_scores_uses_candidate_defaults() {
+        let spec = DerivationMemorySpec {
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            workflow_id: None,
+            confidence: None,
+            utility: None,
+            importance: Some(1.8),
+            provenance_uri: None,
+            trust_class: None,
+            trust_subclass: None,
+            tags: Vec::new(),
+            valid_from: None,
+            valid_to: None,
+        };
+
+        let scores = resolve_derivation_memory_scores(&spec, Some(0.8), 0.3);
+        assert_eq!(scores.confidence, 0.8);
+        assert_eq!(scores.utility, UnitScore::neutral().into_inner());
+        assert_eq!(scores.importance, UnitScore::one().into_inner());
+
+        let fallback = resolve_derivation_memory_scores(&spec, Some(f32::NAN), f32::INFINITY);
+        assert_eq!(
+            fallback.confidence,
+            TrustClass::AgentAssertion.initial_confidence()
+        );
     }
 
     // ========================================================================
