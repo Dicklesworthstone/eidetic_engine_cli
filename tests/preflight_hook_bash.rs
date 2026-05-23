@@ -24,7 +24,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use ee::hooks::{PreflightHookShell, PreflightHookShellOptions, generate_preflight_shell_snippet};
+use ee::hooks::{
+    PREFLIGHT_HOOK_SHELL_SCHEMA_V1, PreflightHookShell, PreflightHookShellOptions,
+    generate_preflight_shell_snippet,
+};
+use serde_json::Value;
 use tempfile::{Builder as TempDirBuilder, TempDir};
 
 type TestResult = Result<(), String>;
@@ -118,6 +122,114 @@ exit {exit_code}
         fs::set_permissions(&stub_path, perms).map_err(|e| e.to_string())?;
     }
     Ok(stub_path)
+}
+
+#[test]
+fn bash_preflight_shell_cli_json_emits_real_service_hook_report() -> TestResult {
+    let Some(bash) = bash_or_skip() else {
+        eprintln!("skipping: bash not available on PATH");
+        return Ok(());
+    };
+    let temp = worker_local_tempdir("ee-preflight-bash-cli-")?;
+    let install_dir = temp.path().join("hooks");
+    fs::create_dir_all(&install_dir).map_err(|e| e.to_string())?;
+    let real_ee = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+
+    let output = Command::new(&real_ee)
+        .arg("hook")
+        .arg("preflight-shell")
+        .arg("--shell")
+        .arg("bash")
+        .arg("--ee-binary")
+        .arg(&real_ee)
+        .arg("--install-dir")
+        .arg(&install_dir)
+        .arg("--json")
+        .env("HOME", temp.path().join("home"))
+        .env("EE_NO_COLOR", "1")
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(format!(
+            "ee hook preflight-shell failed: status={:?} stdout={stdout} stderr={stderr}",
+            output.status.code()
+        ));
+    }
+    if !stderr.is_empty() {
+        return Err(format!(
+            "ee hook preflight-shell must keep JSON-mode diagnostics out of stderr; stderr={stderr}"
+        ));
+    }
+
+    let value: Value =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("parse JSON: {e}"))?;
+    let envelope_schema = value
+        .get("schema")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing response schema in {value}"))?;
+    if !envelope_schema.starts_with("ee.response.v") {
+        return Err(format!(
+            "unexpected response schema for hook preflight-shell: {envelope_schema}"
+        ));
+    }
+    if value.get("success") != Some(&Value::Bool(true)) {
+        return Err(format!(
+            "expected success=true in CLI JSON envelope: {value}"
+        ));
+    }
+
+    let data = value
+        .get("data")
+        .ok_or_else(|| format!("missing data object in CLI JSON envelope: {value}"))?;
+    if data.get("schema").and_then(Value::as_str) != Some(PREFLIGHT_HOOK_SHELL_SCHEMA_V1) {
+        return Err(format!(
+            "unexpected hook report schema: {:?}",
+            data.get("schema")
+        ));
+    }
+    if data.get("shell").and_then(Value::as_str) != Some("bash") {
+        return Err(format!("unexpected shell in hook report: {data}"));
+    }
+    let real_ee_display = real_ee.display().to_string();
+    if data.get("ee_binary_path").and_then(Value::as_str) != Some(real_ee_display.as_str()) {
+        return Err(format!(
+            "CLI report did not preserve requested ee binary path {real_ee_display}: {data}"
+        ));
+    }
+    let expected_install_path = install_dir.join("preflight.bash").display().to_string();
+    if data.get("install_path").and_then(Value::as_str) != Some(expected_install_path.as_str()) {
+        return Err(format!(
+            "CLI report did not preserve requested install path {expected_install_path}: {data}"
+        ));
+    }
+    let snippet = data
+        .get("snippet")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("missing snippet in hook report: {data}"))?;
+    if !snippet.contains(&format!("EE_PREFLIGHT_HOOK_BINARY='{real_ee_display}'")) {
+        return Err(format!(
+            "snippet did not embed requested real ee binary path {real_ee_display}:\n{snippet}"
+        ));
+    }
+
+    let snippet_path = temp.path().join("cli-preflight.bash");
+    fs::write(&snippet_path, snippet).map_err(|e| e.to_string())?;
+    let syntax = Command::new(&bash)
+        .arg("-n")
+        .arg(&snippet_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !syntax.status.success() {
+        return Err(format!(
+            "bash -n failed for CLI-generated snippet: stdout={} stderr={}",
+            String::from_utf8_lossy(&syntax.stdout),
+            String::from_utf8_lossy(&syntax.stderr),
+        ));
+    }
+    Ok(())
 }
 
 #[test]
