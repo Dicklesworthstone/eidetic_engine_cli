@@ -106,6 +106,9 @@ mod cass_import_guidance_status_as_str;
 #[path = "contracts/agent_inventory_status_as_str.rs"]
 mod agent_inventory_status_as_str;
 
+#[path = "contracts/cass_import_root_guidance_fields.rs"]
+mod cass_import_root_guidance_fields;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
