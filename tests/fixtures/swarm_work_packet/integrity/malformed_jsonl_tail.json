@@ -1,0 +1,17 @@
+{
+  "health": "jsonl_parse_error",
+  "jsonlPath": ".beads/issues.jsonl",
+  "dbPath": ".beads/beads.db",
+  "jsonlRecordCount": 2702,
+  "dbRecordCount": 2702,
+  "pendingImportCount": 0,
+  "mergeArtifactPaths": [],
+  "mergeArtifactCount": 0,
+  "jsonlParseError": {
+    "line": 2703,
+    "column": null,
+    "excerpt": "{\"id\":\"bd-malformed-tail\",\"title\":\"WIP - record was truncated mid"
+  },
+  "requiresCandidateDowngrade": true,
+  "recoveryHint": "Inspect the first invalid JSONL line and run br doctor --json before any br update / br claim."
+}
