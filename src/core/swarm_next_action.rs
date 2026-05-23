@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
@@ -194,6 +195,16 @@ pub struct SwarmNextActionRecentFirstError {
     pub command_hash: Option<String>,
     pub status: Option<String>,
     pub degraded_codes: Vec<String>,
+    #[serde(skip)]
+    pub error_codes: Vec<String>,
+    #[serde(skip)]
+    pub remote_required: Option<bool>,
+    #[serde(skip)]
+    pub local_fallback_refused: bool,
+    #[serde(skip)]
+    pub retry_after: Option<String>,
+    #[serde(skip)]
+    pub known_blocker: Option<SwarmWorkPacketKnownBlocker>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -208,6 +219,7 @@ pub struct SwarmNextActionVerificationSummary {
     pub queue_head_slots_needed: Option<u64>,
     pub active_build_max_age_seconds: Option<u64>,
     pub queue_status: Option<String>,
+    pub verifier_evidence: Vec<SwarmNextActionRecentFirstError>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -684,7 +696,22 @@ pub struct SwarmWorkPacketRchProofPosture {
     pub safe_to_launch_cargo_verification: Option<bool>,
     pub local_fallback_prevented: bool,
     pub blocker_codes: Vec<String>,
+    pub known_blockers: Vec<SwarmWorkPacketKnownBlocker>,
     pub retry_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketKnownBlocker {
+    pub code: String,
+    pub fingerprint: String,
+    pub command_hash: Option<String>,
+    pub message: Option<String>,
+    pub remediation_bead: Option<String>,
+    pub retry_after: Option<String>,
+    pub remote_required: bool,
+    pub local_fallback_refused: bool,
+    pub degraded_codes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -702,6 +729,8 @@ pub struct SwarmWorkPacketVerificationCommand {
     pub command_template: String,
     pub required_substrate: &'static str,
     pub when: &'static str,
+    pub last_outcome: &'static str,
+    pub last_command_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -828,7 +857,7 @@ impl SwarmNextActionSnapshot {
                 dirty_paths,
             },
             compile_health,
-            verification: verification_summary(brief),
+            verification: verification_summary(brief, verifier_evidence),
             environment: environment_summary(brief),
             degraded,
         }
@@ -1117,17 +1146,38 @@ fn work_packet_rch_proof_posture(
     snapshot: &SwarmNextActionSnapshot,
     degraded: &[SwarmWorkPacketDegradation],
 ) -> SwarmWorkPacketRchProofPosture {
-    let blocker_codes = degraded
+    let known_blockers = work_packet_known_blockers(&snapshot.verification.verifier_evidence);
+    let mut blocker_codes = degraded
         .iter()
         .filter(|degradation| degradation.source == "rch")
         .map(|degradation| degradation.code.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    for evidence in &snapshot.verification.verifier_evidence {
+        blocker_codes.extend(normalized_rch_blocker_codes_from_evidence(evidence));
+    }
+    let blocker_codes = blocker_codes.into_iter().collect::<Vec<_>>();
     let topology_blocked = blocker_codes
         .iter()
         .any(|code| code == "rch_worker_topology_blocked");
-    let posture = if !snapshot.verification.rch_source_enabled {
+    let remote_only_required = snapshot.verification.remote_only_required
+        || known_blockers.iter().any(|blocker| blocker.remote_required);
+    let local_fallback_prevented = remote_only_required
+        || blocker_codes
+            .iter()
+            .any(|code| code == "rch_remote_required_fallback_prevented")
+        || snapshot
+            .verification
+            .verifier_evidence
+            .iter()
+            .any(|evidence| evidence.local_fallback_refused);
+    let source_enabled = snapshot.verification.rch_source_enabled
+        || !snapshot.verification.verifier_evidence.is_empty();
+    let verifier_blocks_cargo = snapshot
+        .verification
+        .verifier_evidence
+        .iter()
+        .any(verifier_evidence_is_environment_blocked);
+    let posture = if !source_enabled {
         "unavailable"
     } else if topology_blocked {
         "topology_blocked"
@@ -1140,24 +1190,85 @@ fn work_packet_rch_proof_posture(
     } else {
         "unknown"
     };
+    let retry_after =
+        work_packet_retry_after(&snapshot.verification.verifier_evidence, &known_blockers);
     SwarmWorkPacketRchProofPosture {
-        source_enabled: snapshot.verification.rch_source_enabled,
-        remote_only_required: snapshot.verification.remote_only_required,
+        source_enabled,
+        remote_only_required,
         posture,
         healthy_worker_count: snapshot.verification.healthy_worker_count,
-        safe_to_launch_cargo_verification: snapshot.compile_health.safe_to_launch_rch.and_then(
-            |compile_safe| {
-                snapshot
-                    .verification
-                    .remote_only_safe
-                    .map(|remote_safe| compile_safe && remote_safe)
-                    .or(Some(compile_safe))
-            },
-        ),
-        local_fallback_prevented: snapshot.verification.remote_only_required,
+        safe_to_launch_cargo_verification: if verifier_blocks_cargo {
+            Some(false)
+        } else {
+            snapshot
+                .compile_health
+                .safe_to_launch_rch
+                .and_then(|compile_safe| {
+                    snapshot
+                        .verification
+                        .remote_only_safe
+                        .map(|remote_safe| compile_safe && remote_safe)
+                        .or(Some(compile_safe))
+                })
+        },
+        local_fallback_prevented,
         blocker_codes,
-        retry_after: None,
+        known_blockers,
+        retry_after,
     }
+}
+
+fn work_packet_known_blockers(
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+) -> Vec<SwarmWorkPacketKnownBlocker> {
+    let mut known_blockers = verifier_evidence
+        .iter()
+        .filter_map(|evidence| evidence.known_blocker.clone())
+        .collect::<Vec<_>>();
+    known_blockers.sort();
+    known_blockers.dedup();
+    known_blockers
+}
+
+fn normalized_rch_blocker_codes_from_evidence(
+    evidence: &SwarmNextActionRecentFirstError,
+) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    if evidence.error_codes.iter().any(|code| code == "RCH-E327")
+        || evidence
+            .degraded_codes
+            .iter()
+            .any(|code| code == "rch_verify_topology_blocked")
+    {
+        codes.insert("rch_worker_topology_blocked".to_owned());
+    }
+    if evidence.local_fallback_refused
+        || evidence
+            .degraded_codes
+            .iter()
+            .any(|code| code == "rch_verify_local_fallback_refused")
+    {
+        codes.insert("rch_remote_required_fallback_prevented".to_owned());
+    }
+    codes.into_iter().collect()
+}
+
+fn work_packet_retry_after(
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+    known_blockers: &[SwarmWorkPacketKnownBlocker],
+) -> Option<String> {
+    let mut retry_after = verifier_evidence
+        .iter()
+        .filter_map(|evidence| evidence.retry_after.clone())
+        .chain(
+            known_blockers
+                .iter()
+                .filter_map(|blocker| blocker.retry_after.clone()),
+        )
+        .collect::<Vec<_>>();
+    retry_after.sort();
+    retry_after.dedup();
+    retry_after.into_iter().next()
 }
 
 fn work_packet_verification(
@@ -1176,6 +1287,8 @@ fn work_packet_verification(
             } else {
                 "after_substantive_rust_changes"
             },
+            last_outcome: work_packet_rch_last_outcome(snapshot),
+            last_command_hash: work_packet_rch_last_command_hash(snapshot),
         });
     }
     let mut static_checks = vec![SwarmWorkPacketVerificationCommand {
@@ -1183,6 +1296,8 @@ fn work_packet_verification(
         command_template: "git diff --check".to_owned(),
         required_substrate: "static_local",
         when: "before_closeout",
+        last_outcome: "not_run",
+        last_command_hash: None,
     }];
     if !snapshot.checkout.dirty_paths.is_empty() {
         static_checks.push(SwarmWorkPacketVerificationCommand {
@@ -1190,6 +1305,8 @@ fn work_packet_verification(
             command_template: "git status --short --branch".to_owned(),
             required_substrate: "static_local",
             when: "before_claim_or_closeout",
+            last_outcome: "not_run",
+            last_command_hash: None,
         });
     }
     static_checks.sort();
@@ -1199,6 +1316,28 @@ fn work_packet_verification(
         static_checks,
         closeout_evidence_required: true,
     }
+}
+
+fn work_packet_rch_last_outcome(snapshot: &SwarmNextActionSnapshot) -> &'static str {
+    if snapshot
+        .verification
+        .verifier_evidence
+        .iter()
+        .any(verifier_evidence_is_environment_blocked)
+    {
+        "environment_blocked"
+    } else {
+        "not_run"
+    }
+}
+
+fn work_packet_rch_last_command_hash(snapshot: &SwarmNextActionSnapshot) -> Option<String> {
+    snapshot
+        .verification
+        .verifier_evidence
+        .iter()
+        .filter_map(|evidence| evidence.command_hash.clone())
+        .min()
 }
 
 fn work_packet_source_provenance(brief: &SwarmBriefReport) -> Vec<SwarmWorkPacketSourceProvenance> {
@@ -1416,30 +1555,49 @@ fn collect_verifier_evidence_items(
 }
 
 fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstError> {
+    let object = value.as_object()?;
     let first = value.get("first_error").or_else(|| value.get("firstError"));
-    let file = value
-        .get("first_error_file")
-        .or_else(|| value.get("firstErrorFile"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            first
-                .and_then(Value::as_object)
-                .and_then(|object| object.get("file").or_else(|| object.get("path")))
-                .and_then(Value::as_str)
-        })
-        .map(normalize_remote_repo_path)?;
-    let degraded_codes = string_array(
-        value
-            .get("degraded_codes")
-            .or_else(|| value.get("degradedCodes")),
+    let file = string_value_from_keys(
+        object,
+        &["first_error_file", "firstErrorFile", "file", "path"],
+    )
+    .or_else(|| {
+        first
+            .and_then(Value::as_object)
+            .and_then(|object| object.get("file").or_else(|| object.get("path")))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .map(|path| normalize_remote_repo_path(&path))
+    .unwrap_or_default();
+    let degraded_codes = string_array_from_keys(
+        object,
+        &[
+            "degraded_codes",
+            "degradedCodes",
+            "source_state_degraded_codes",
+            "sourceStateDegradedCodes",
+            "worker_state_degraded_codes",
+            "workerStateDegradedCodes",
+        ],
     );
-    let status = string_value(value.get("status").or_else(|| value.get("result")));
-    let failure_like = status
-        .as_deref()
-        .is_some_and(|status| matches!(status, "remote_failure" | "failed" | "failure"))
+    let error_codes = string_array_from_keys(object, &["error_codes", "errorCodes"]);
+    let status = string_value_from_keys(object, &["status", "result", "outcome"]);
+    let failure_like = status.as_deref().is_some_and(|status| {
+        matches!(
+            status,
+            "remote_failure"
+                | "failed"
+                | "failure"
+                | "rch_environment_failure"
+                | "known_blocker_refused"
+                | "environment_blocked"
+        )
+    }) || !error_codes.is_empty()
         || degraded_codes
             .iter()
-            .any(|code| code == "rch_verify_remote_command_failed");
+            .any(|code| code == "rch_verify_remote_command_failed")
+        || degraded_codes_are_environment_blockers(&degraded_codes);
     if !failure_like {
         return None;
     }
@@ -1453,46 +1611,230 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
                 .and_then(|object| object.get("line"))
                 .and_then(Value::as_u64)
         });
+    let local_fallback_refused = degraded_codes
+        .iter()
+        .any(|code| code == "rch_verify_local_fallback_refused");
+    let remote_required = bool_value_from_keys(object, &["remote_required", "remoteRequired"]);
+    let command_hash = string_value_from_keys(object, &["command_hash", "commandHash"]);
+    let retry_after = string_value_from_keys(object, &["retry_after", "retryAfter"]);
+    let command_kind = string_value_from_keys(object, &["command_kind", "commandKind"]);
+    let command = string_value_from_keys(object, &["command_text", "commandText", "command"])
+        .or_else(|| command_from_array_field(object, "args"))
+        .or_else(|| command_from_array_field(object, "argv"));
+    let known_blocker = known_blocker_from_json(
+        object,
+        command_hash.as_deref(),
+        retry_after.as_deref(),
+        remote_required,
+        local_fallback_refused,
+        &degraded_codes,
+        &error_codes,
+    );
     Some(SwarmNextActionRecentFirstError {
         file,
         line,
-        command_kind: string_value(
-            value
-                .get("command_kind")
-                .or_else(|| value.get("commandKind")),
-        ),
-        command: string_value(
-            value
-                .get("command_text")
-                .or_else(|| value.get("commandText"))
-                .or_else(|| value.get("command")),
-        ),
-        command_hash: string_value(
-            value
-                .get("command_hash")
-                .or_else(|| value.get("commandHash")),
-        ),
+        command_kind,
+        command,
+        command_hash,
         status,
+        degraded_codes,
+        error_codes,
+        remote_required,
+        local_fallback_refused,
+        retry_after,
+        known_blocker,
+    })
+}
+
+fn verifier_evidence_is_environment_blocked(evidence: &SwarmNextActionRecentFirstError) -> bool {
+    evidence.status.as_deref().is_some_and(|status| {
+        matches!(
+            status,
+            "rch_environment_failure" | "known_blocker_refused" | "environment_blocked"
+        )
+    }) || evidence.error_codes.iter().any(|code| code == "RCH-E327")
+        || degraded_codes_are_environment_blockers(&evidence.degraded_codes)
+}
+
+fn degraded_codes_are_environment_blockers(codes: &[String]) -> bool {
+    codes.iter().any(|code| {
+        matches!(
+            code.as_str(),
+            "rch_verify_topology_blocked"
+                | "rch_verify_local_fallback_refused"
+                | "rch_verify_remote_marker_missing"
+                | "rch_verify_known_blocker_active"
+                | "rch_verify_cargo_path_dependency_version_blocked"
+        )
+    })
+}
+
+fn string_value_from_keys(
+    object: &serde_json::Map<String, Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| value_from_object_or_fields(object, key))
+        .find_map(|value| value.as_str().map(str::to_owned))
+        .filter(|value| !value.is_empty())
+}
+
+fn bool_value_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    keys.iter()
+        .filter_map(|key| value_from_object_or_fields(object, key))
+        .find_map(Value::as_bool)
+}
+
+fn value_from_object_or_fields<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<&'a Value> {
+    object.get(key).or_else(|| {
+        object
+            .get("fields")
+            .and_then(Value::as_object)
+            .and_then(|fields| fields.get(key))
+    })
+}
+
+fn string_array_from_keys(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Vec<String> {
+    let mut strings = Vec::new();
+    for key in keys {
+        let Some(Value::Array(items)) = value_from_object_or_fields(object, key) else {
+            continue;
+        };
+        strings.extend(items.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    strings.sort();
+    strings.dedup();
+    strings
+}
+
+fn command_from_array_field(object: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    let value = value_from_object_or_fields(object, key)?;
+    let joined = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+fn known_blocker_from_json(
+    object: &serde_json::Map<String, Value>,
+    command_hash: Option<&str>,
+    retry_after: Option<&str>,
+    remote_required: Option<bool>,
+    local_fallback_refused: bool,
+    degraded_codes: &[String],
+    error_codes: &[String],
+) -> Option<SwarmWorkPacketKnownBlocker> {
+    let known_blocker = value_from_object_or_fields(object, "known_blocker")
+        .or_else(|| value_from_object_or_fields(object, "knownBlocker"))
+        .and_then(Value::as_object);
+    if known_blocker.is_none()
+        && error_codes.is_empty()
+        && !local_fallback_refused
+        && !degraded_codes_are_environment_blockers(degraded_codes)
+    {
+        return None;
+    }
+
+    let retry_after = known_blocker
+        .and_then(|known_blocker| {
+            string_value_from_keys(known_blocker, &["retry_after", "retryAfter"])
+        })
+        .or_else(|| retry_after.map(str::to_owned));
+    let command_hash = known_blocker
+        .and_then(|known_blocker| {
+            string_value_from_keys(known_blocker, &["command_hash", "commandHash"])
+        })
+        .or_else(|| command_hash.map(str::to_owned));
+    let degraded_codes = known_blocker
+        .map(|known_blocker| {
+            string_array_from_keys(known_blocker, &["degraded_codes", "degradedCodes"])
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .chain(degraded_codes.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let code = known_blocker
+        .and_then(|known_blocker| {
+            string_value_from_keys(known_blocker, &["code", "blocker_kind", "blockerKind"])
+        })
+        .or_else(|| error_codes.first().cloned())
+        .or_else(|| degraded_codes.first().cloned())
+        .unwrap_or_else(|| "known_blocker".to_owned());
+    let fingerprint = known_blocker
+        .and_then(|known_blocker| {
+            string_value_from_keys(
+                known_blocker,
+                &["blocker_fingerprint", "blockerFingerprint", "fingerprint"],
+            )
+        })
+        .unwrap_or_else(|| {
+            synthesized_known_blocker_fingerprint(
+                &code,
+                command_hash.as_deref(),
+                &degraded_codes,
+                error_codes,
+            )
+        });
+    Some(SwarmWorkPacketKnownBlocker {
+        code,
+        fingerprint,
+        command_hash,
+        message: known_blocker.and_then(|known_blocker| {
+            string_value_from_keys(known_blocker, &["message", "summary"])
+        }),
+        remediation_bead: known_blocker
+            .and_then(|known_blocker| {
+                string_value_from_keys(known_blocker, &["remediation_bead", "remediationBead"])
+            })
+            .or_else(|| {
+                error_codes
+                    .iter()
+                    .any(|code| code == "RCH-E327")
+                    .then(|| "bd-17c65.10.17.1.2".to_owned())
+            }),
+        retry_after,
+        remote_required: known_blocker
+            .and_then(|known_blocker| {
+                bool_value_from_keys(known_blocker, &["remote_required", "remoteRequired"])
+            })
+            .or(remote_required)
+            .unwrap_or(local_fallback_refused),
+        local_fallback_refused: known_blocker
+            .and_then(|known_blocker| {
+                bool_value_from_keys(
+                    known_blocker,
+                    &["local_fallback_refused", "localFallbackRefused"],
+                )
+            })
+            .unwrap_or(local_fallback_refused),
         degraded_codes,
     })
 }
 
-fn string_value(value: Option<&Value>) -> Option<String> {
-    value.and_then(Value::as_str).map(str::to_owned)
-}
-
-fn string_array(value: Option<&Value>) -> Vec<String> {
-    let Some(Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    let mut strings = items
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    strings.sort();
-    strings.dedup();
-    strings
+fn synthesized_known_blocker_fingerprint(
+    code: &str,
+    command_hash: Option<&str>,
+    degraded_codes: &[String],
+    error_codes: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"ee.rch.known_blocker.v1\0");
+    hasher.update(code.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(command_hash.unwrap_or("").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(degraded_codes.join(",").as_bytes());
+    hasher.update(b"\0");
+    hasher.update(error_codes.join(",").as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 fn normalize_remote_repo_path(path: &str) -> String {
@@ -2480,15 +2822,22 @@ fn coordination_summary(brief: &SwarmBriefReport) -> SwarmNextActionCoordination
     }
 }
 
-fn verification_summary(brief: &SwarmBriefReport) -> SwarmNextActionVerificationSummary {
+fn verification_summary(
+    brief: &SwarmBriefReport,
+    verifier_evidence: &[SwarmNextActionRecentFirstError],
+) -> SwarmNextActionVerificationSummary {
     let rch = brief.rch_local_capability.as_ref();
     SwarmNextActionVerificationSummary {
         rch_source_enabled: rch.is_some()
             || brief
                 .sources
                 .iter()
-                .any(|source| source.source == SwarmBriefSourceKind::Rch),
-        remote_only_required: rch.is_some_and(|report| report.remote_only_required),
+                .any(|source| source.source == SwarmBriefSourceKind::Rch)
+            || !verifier_evidence.is_empty(),
+        remote_only_required: rch.is_some_and(|report| report.remote_only_required)
+            || verifier_evidence.iter().any(|evidence| {
+                evidence.remote_required == Some(true) || evidence.local_fallback_refused
+            }),
         remote_only_safe: rch.map(|report| report.remote_only_safe),
         healthy_worker_count: rch.map(|report| report.worker_probe_summary.healthy_count),
         active_remote_build_count: rch
@@ -2509,6 +2858,7 @@ fn verification_summary(brief: &SwarmBriefReport) -> SwarmNextActionVerification
         queue_status: rch
             .and_then(|report| report.queue_health.as_ref())
             .map(|queue| queue.status.clone()),
+        verifier_evidence: verifier_evidence.to_vec(),
     }
 }
 
@@ -3144,6 +3494,11 @@ mod tests {
             command_hash: Some("abc123".to_owned()),
             status: Some("remote_failure".to_owned()),
             degraded_codes: vec!["rch_verify_remote_command_failed".to_owned()],
+            error_codes: Vec::new(),
+            remote_required: Some(true),
+            local_fallback_refused: false,
+            retry_after: None,
+            known_blocker: None,
         }];
 
         let snapshot =
@@ -3361,6 +3716,52 @@ mod tests {
     }
 
     #[test]
+    fn verifier_evidence_json_parser_extracts_rch_e327_without_first_error() {
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "rch_environment_failure",
+            "command_text": "cargo test --test rch_verify_contract",
+            "command_kind": "cargo_test",
+            "command_hash": "cd825533cce8c288",
+            "remote_required": true,
+            "error_codes": ["RCH-E327"],
+            "degraded_codes": [
+                "rch_verify_remote_command_failed",
+                "rch_verify_topology_blocked",
+                "rch_verify_local_fallback_refused",
+                "rch_verify_remote_marker_missing"
+            ],
+            "known_blocker": {
+                "blocker_kind": "path_dependency_topology",
+                "blocker_fingerprint": "sha256:topology-refusal",
+                "remediation_bead": "bd-17c65.10.17.1.2",
+                "retry_after": "2026-05-23T07:00:00Z",
+                "message": "Path dependency topology policy failed."
+            }
+        }));
+
+        assert_eq!(evidence.len(), 1);
+        let item = &evidence[0];
+        assert_eq!(item.file, "");
+        assert_eq!(item.error_codes, vec!["RCH-E327"]);
+        assert_eq!(item.remote_required, Some(true));
+        assert!(item.local_fallback_refused);
+        assert!(
+            item.degraded_codes
+                .contains(&"rch_verify_topology_blocked".to_owned())
+        );
+        let known_blocker = item.known_blocker.as_ref().expect("known blocker parsed");
+        assert_eq!(known_blocker.code, "path_dependency_topology");
+        assert_eq!(known_blocker.fingerprint, "sha256:topology-refusal");
+        assert_eq!(
+            known_blocker.remediation_bead.as_deref(),
+            Some("bd-17c65.10.17.1.2")
+        );
+        assert!(known_blocker.remote_required);
+        assert!(known_blocker.local_fallback_refused);
+    }
+
+    #[test]
     fn recommendation_cards_explain_refine_new_and_dirty_checkout_caveats() {
         let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
         brief.beads.ready = vec![bead("bd-ready", "Refine existing SWA bead", 2)];
@@ -3508,6 +3909,11 @@ mod tests {
             command_hash: Some("abc123".to_owned()),
             status: Some("remote_failure".to_owned()),
             degraded_codes: vec!["rch_verify_remote_command_failed".to_owned()],
+            error_codes: Vec::new(),
+            remote_required: Some(true),
+            local_fallback_refused: false,
+            retry_after: None,
+            known_blocker: None,
         }];
 
         let snapshot =
@@ -3809,6 +4215,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn work_packet_normalizes_verifier_topology_refusal_into_rch_posture() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief.beads.ready = vec![bead("bd-proof", "Needs RCH verifier evidence", 2)];
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "schema": "ee.rch.verify.v1",
+            "status": "rch_environment_failure",
+            "command_text": "cargo test --test rch_verify_contract",
+            "command_kind": "cargo_test",
+            "command_hash": "cd825533cce8c288",
+            "remote_required": true,
+            "retry_after": "2026-05-23T07:00:00Z",
+            "error_codes": ["RCH-E327"],
+            "degraded_codes": [
+                "rch_verify_remote_command_failed",
+                "rch_verify_topology_blocked",
+                "rch_verify_local_fallback_refused",
+                "rch_verify_remote_marker_missing"
+            ]
+        }));
+
+        let packet = SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, &evidence);
+
+        assert_eq!(packet.rch_proof_posture.posture, "topology_blocked");
+        assert!(packet.rch_proof_posture.source_enabled);
+        assert!(packet.rch_proof_posture.remote_only_required);
+        assert_eq!(
+            packet.rch_proof_posture.safe_to_launch_cargo_verification,
+            Some(false)
+        );
+        assert!(packet.rch_proof_posture.local_fallback_prevented);
+        assert!(
+            packet
+                .rch_proof_posture
+                .blocker_codes
+                .contains(&"rch_worker_topology_blocked".to_owned())
+        );
+        assert!(
+            packet
+                .rch_proof_posture
+                .blocker_codes
+                .contains(&"rch_remote_required_fallback_prevented".to_owned())
+        );
+        assert_eq!(
+            packet.rch_proof_posture.retry_after.as_deref(),
+            Some("2026-05-23T07:00:00Z")
+        );
+        assert_eq!(packet.rch_proof_posture.known_blockers.len(), 1);
+        assert_eq!(packet.rch_proof_posture.known_blockers[0].code, "RCH-E327");
+        assert!(
+            packet.rch_proof_posture.known_blockers[0]
+                .fingerprint
+                .starts_with("sha256:")
+        );
+        assert_eq!(
+            packet.rch_proof_posture.known_blockers[0]
+                .command_hash
+                .as_deref(),
+            Some("cd825533cce8c288")
+        );
+        assert_eq!(
+            packet.rch_proof_posture.known_blockers[0]
+                .remediation_bead
+                .as_deref(),
+            Some("bd-17c65.10.17.1.2")
+        );
+        assert_eq!(
+            packet.verification.required_commands[0].last_outcome,
+            "environment_blocked"
+        );
+        assert_eq!(
+            packet.verification.required_commands[0]
+                .last_command_hash
+                .as_deref(),
+            Some("cd825533cce8c288")
+        );
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"do_not_run_local_cargo_fallback".to_owned())
+        );
+    }
+
     fn snapshot_with_candidates(
         candidates: Vec<SwarmNextActionCandidate>,
     ) -> SwarmNextActionSnapshot {
@@ -3852,6 +4344,7 @@ mod tests {
                 queue_head_slots_needed: None,
                 active_build_max_age_seconds: None,
                 queue_status: Some("ready".to_owned()),
+                verifier_evidence: Vec::new(),
             },
             environment: SwarmNextActionEnvironmentSummary {
                 cargo_target_externalized: true,
@@ -3885,6 +4378,7 @@ mod tests {
             queue_head_slots_needed,
             active_build_max_age_seconds,
             queue_status: queue_status.map(str::to_owned),
+            verifier_evidence: Vec::new(),
         }
     }
 
