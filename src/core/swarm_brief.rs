@@ -61,6 +61,7 @@ const BEADS_NO_OUTPUT_CODE: &str = "beads_no_output";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
+const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
 const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
@@ -5330,11 +5331,13 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
 }
 
 fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation> {
+    let semantic_readiness_degradation = parse_agent_mail_semantic_readiness_degradation(value);
     let is_coordination_health = value
         .get("schema")
         .and_then(Value::as_str)
         .is_some_and(|schema| schema == "ee.swarm.coordination_health.v1")
-        || value.get("fallback_active").is_some();
+        || value.get("fallback_active").is_some()
+        || semantic_readiness_degradation.is_some();
     if !is_coordination_health {
         return Vec::new();
     }
@@ -5358,8 +5361,11 @@ fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation>
         .get("fallback_active")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let mut degraded = semantic_readiness_degradation
+        .into_iter()
+        .collect::<Vec<_>>();
     if !fallback_active && failed_checks.is_empty() {
-        return Vec::new();
+        return degraded;
     }
 
     let panic = value.get("observed_panic").and_then(Value::as_str);
@@ -5377,14 +5383,102 @@ fn parse_agent_mail_health_degraded(value: &Value) -> Vec<SwarmBriefDegradation>
         message.push('.');
     }
 
-    vec![SwarmBriefDegradation::warning(
+    degraded.push(SwarmBriefDegradation::warning(
         SwarmBriefSourceKind::AgentMail,
         AGENT_MAIL_UNAVAILABLE_CODE,
         message,
         Some(
             "Run `am doctor repair` or provide a current redacted Agent Mail snapshot.".to_string(),
         ),
-    )]
+    ));
+    degraded
+}
+
+fn parse_agent_mail_semantic_readiness_degradation(value: &Value) -> Option<SwarmBriefDegradation> {
+    let semantic = value
+        .get("semantic_readiness")
+        .or_else(|| value.get("semanticReadiness"))?;
+    let status = semantic
+        .as_str()
+        .or_else(|| semantic.get("status").and_then(Value::as_str))?;
+    if !status.eq_ignore_ascii_case("fail") {
+        return None;
+    }
+
+    let reason = semantic
+        .get("reason")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("semantic_readiness_reason")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| value.get("semanticReadinessReason").and_then(Value::as_str));
+    let reason_class = agent_mail_semantic_readiness_reason_class(reason);
+    let health_level = value
+        .get("healthLevel")
+        .or_else(|| value.get("health_level"))
+        .and_then(Value::as_str)
+        .and_then(agent_mail_health_level_class);
+    let health_fragment = health_level
+        .map(|level| format!(" with healthLevel={level}"))
+        .unwrap_or_default();
+    let message = format!(
+        "Agent Mail semantic readiness failed{health_fragment} ({reason_class}); reservation and inbox reads are not authoritative."
+    );
+
+    Some(SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::AgentMail,
+        AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE,
+        message,
+        Some(
+            "Repair Agent Mail storage and re-run the work-packet collector after semantic readiness passes."
+                .to_string(),
+        ),
+    ))
+}
+
+fn agent_mail_health_level_class(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "green" => Some("green"),
+        "yellow" => Some("yellow"),
+        "red" => Some("red"),
+        _ => None,
+    }
+}
+
+fn agent_mail_semantic_readiness_reason_class(value: Option<&str>) -> &'static str {
+    let Some(value) = value else {
+        return "unknown";
+    };
+    let normalized = value.to_ascii_lowercase();
+    if normalized == "malformed_sqlite"
+        || (normalized.contains("sqlite") && normalized.contains("malformed"))
+        || normalized.contains("database disk image is malformed")
+    {
+        "malformed_sqlite"
+    } else if normalized == "archive_corruption"
+        || (normalized.contains("archive")
+            && (normalized.contains("corrupt")
+                || normalized.contains("parse")
+                || normalized.contains("jsonl")))
+    {
+        "archive_corruption"
+    } else if normalized == "index_rebuild_required"
+        || (normalized.contains("index")
+            && (normalized.contains("rebuild")
+                || normalized.contains("missing")
+                || normalized.contains("stale")))
+    {
+        "index_rebuild_required"
+    } else if normalized == "permission_denied"
+        || normalized.contains("permission denied")
+        || normalized.contains("access denied")
+    {
+        "permission_denied"
+    } else {
+        "unknown"
+    }
 }
 
 fn parse_file_reservation(item: &Value) -> Option<SwarmBriefFileReservation> {
@@ -8585,6 +8679,33 @@ mod tests {
         )
         .with_degraded(snapshot.degraded);
         assert_eq!(source.status, SwarmBriefSourceStatus::Degraded);
+    }
+
+    #[test]
+    fn agent_mail_health_snapshot_degrades_semantic_readiness_failure_without_raw_storage_leaks() {
+        let snapshot = require_ok(
+            parse_agent_mail_snapshot_json(
+                r#"{
+              "schema":"ee.swarm.coordination_health.v1",
+              "healthLevel":"green",
+              "semantic_readiness":{
+                "status":"fail",
+                "reason":"database disk image is malformed at page 283 in /Users/example/.local/share/mcp_agent_mail/mail.db"
+              }
+            }"#,
+            ),
+            "valid Agent Mail semantic-readiness health JSON",
+        );
+
+        assert_eq!(snapshot.degraded.len(), 1);
+        let degradation = &snapshot.degraded[0];
+        assert_eq!(degradation.code, AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::AgentMail);
+        assert!(degradation.message.contains("healthLevel=green"));
+        assert!(degradation.message.contains("malformed_sqlite"));
+        assert!(!degradation.message.contains("/Users/"));
+        assert!(!degradation.message.contains("page 283"));
+        assert!(!degradation.message.contains("mail.db"));
     }
 
     #[cfg(unix)]

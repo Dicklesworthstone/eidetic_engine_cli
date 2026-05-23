@@ -13,6 +13,10 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::core::beads_integrity::{
+    BeadsIntegrityHealth, BeadsIntegrityInputs, BeadsIntegrityReport, compose_integrity_report,
+    compose_integrity_report_from_br_doctor_json,
+};
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
@@ -26,6 +30,8 @@ pub const SWARM_WORK_PACKET_SCHEMA_V1: &str = "ee.swarm.work_packet.v1";
 pub const SWARM_WORK_PACKET_REDACTION_STATUS: &str =
     "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content";
 const EXTERNAL_AGENT_SPACE_ROOT: &str = "/Volumes/USBNVME16TB/temp_agent_space";
+const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
+const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SwarmNextActionSnapshot {
@@ -610,6 +616,7 @@ pub struct SwarmWorkPacket {
     pub recommended_action: SwarmWorkPacketRecommendedAction,
     pub candidates: Vec<SwarmWorkPacketCandidate>,
     pub coordination: SwarmWorkPacketCoordination,
+    pub tracker_integrity: BeadsIntegrityReport,
     pub rch_proof_posture: SwarmWorkPacketRchProofPosture,
     pub verification: SwarmWorkPacketVerification,
     pub source_provenance: Vec<SwarmWorkPacketSourceProvenance>,
@@ -664,6 +671,28 @@ pub struct SwarmWorkPacketAgentMail {
     pub unread_count: Option<u64>,
     pub ack_required_count: Option<u64>,
     pub degraded_codes: Vec<String>,
+    pub recovery_mode: Option<&'static str>,
+    pub archive_index_parity: Option<&'static str>,
+    pub reservation_authoritative: Option<bool>,
+    pub inbox_authoritative: Option<bool>,
+    pub fallback_actions: Vec<SwarmWorkPacketAgentMailFallbackAction>,
+    pub semantic_readiness: Option<SwarmWorkPacketAgentMailSemanticReadiness>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketAgentMailFallbackAction {
+    pub kind: &'static str,
+    pub summary: &'static str,
+    pub command: Option<String>,
+    pub manual_step: Option<&'static str>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketAgentMailSemanticReadiness {
+    pub status: &'static str,
+    pub reason: Option<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -791,7 +820,82 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
     verifier_evidence: &[SwarmNextActionRecentFirstError],
 ) -> SwarmWorkPacket {
     let brief = collect_swarm_brief(options, runner);
-    SwarmWorkPacket::from_swarm_brief_with_verifier_evidence(&brief, verifier_evidence)
+    let tracker_integrity = collect_work_packet_tracker_integrity(options, runner, &brief);
+    SwarmWorkPacket::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
+        &brief,
+        verifier_evidence,
+        tracker_integrity,
+    )
+}
+
+fn collect_work_packet_tracker_integrity(
+    options: &SwarmBriefCollectOptions,
+    runner: &impl SwarmBriefCommandRunner,
+    brief: &SwarmBriefReport,
+) -> BeadsIntegrityReport {
+    if !options
+        .enabled_sources
+        .contains(&SwarmBriefSourceKind::Beads)
+    {
+        return fallback_work_packet_tracker_integrity(brief, true);
+    }
+
+    runner
+        .run(
+            "br",
+            &["doctor", "--json", "--no-db"],
+            &options.workspace,
+            options.command_timeout_ms,
+        )
+        .ok()
+        .and_then(|output| {
+            compose_integrity_report_from_br_doctor_json(
+                &output.stdout,
+                ".beads/issues.jsonl",
+                ".beads/beads.db",
+                true,
+            )
+            .ok()
+        })
+        .unwrap_or_else(|| fallback_work_packet_tracker_integrity(brief, true))
+}
+
+fn default_work_packet_tracker_integrity(brief: &SwarmBriefReport) -> BeadsIntegrityReport {
+    fallback_work_packet_tracker_integrity(brief, false)
+}
+
+fn fallback_work_packet_tracker_integrity(
+    brief: &SwarmBriefReport,
+    force_non_authoritative: bool,
+) -> BeadsIntegrityReport {
+    let record_count = brief_beads_record_count(brief);
+    let merge_artifact_paths: &[String] = &[];
+    compose_integrity_report(BeadsIntegrityInputs {
+        jsonl_path: ".beads/issues.jsonl",
+        db_path: ".beads/beads.db",
+        jsonl_record_count: record_count,
+        db_record_count: record_count,
+        auto_import_enabled: true,
+        external_changes_pending_import: force_non_authoritative
+            || brief_has_pending_beads_import(brief),
+        dirty_issue_count: 0,
+        merge_artifact_paths,
+        jsonl_parse_error: None,
+    })
+}
+
+fn brief_beads_record_count(brief: &SwarmBriefReport) -> u64 {
+    (brief.beads.ready.len()
+        + brief.beads.blocked.len()
+        + brief.beads.in_progress.len()
+        + brief.beads.deferred.len()) as u64
+}
+
+fn brief_has_pending_beads_import(brief: &SwarmBriefReport) -> bool {
+    brief.degraded.iter().any(|degradation| {
+        degradation.source == SwarmBriefSourceKind::Beads
+            && degradation.code == "beads_tracker_stale"
+    })
 }
 
 impl SwarmNextActionSnapshot {
@@ -875,17 +979,43 @@ impl SwarmWorkPacket {
         brief: &SwarmBriefReport,
         verifier_evidence: &[SwarmNextActionRecentFirstError],
     ) -> Self {
+        Self::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
+            brief,
+            verifier_evidence,
+            default_work_packet_tracker_integrity(brief),
+        )
+    }
+
+    #[must_use]
+    pub fn from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
+        brief: &SwarmBriefReport,
+        verifier_evidence: &[SwarmNextActionRecentFirstError],
+        tracker_integrity: BeadsIntegrityReport,
+    ) -> Self {
         let snapshot = SwarmNextActionSnapshot::from_swarm_brief_with_verifier_evidence(
             brief,
             verifier_evidence,
         );
-        Self::from_brief_and_next_action(brief, &snapshot)
+        Self::from_brief_and_next_action_with_tracker_integrity(brief, &snapshot, tracker_integrity)
     }
 
     #[must_use]
     pub fn from_brief_and_next_action(
         brief: &SwarmBriefReport,
         snapshot: &SwarmNextActionSnapshot,
+    ) -> Self {
+        Self::from_brief_and_next_action_with_tracker_integrity(
+            brief,
+            snapshot,
+            default_work_packet_tracker_integrity(brief),
+        )
+    }
+
+    #[must_use]
+    pub fn from_brief_and_next_action_with_tracker_integrity(
+        brief: &SwarmBriefReport,
+        snapshot: &SwarmNextActionSnapshot,
+        tracker_integrity: BeadsIntegrityReport,
     ) -> Self {
         let mut degraded = snapshot
             .degraded
@@ -895,16 +1025,23 @@ impl SwarmWorkPacket {
         degraded.sort();
         degraded.dedup();
 
+        let coordination = work_packet_coordination(brief, snapshot);
         let mut candidates = work_packet_candidates(snapshot);
         candidates.sort();
         candidates.dedup();
+        apply_agent_mail_authority_candidate_downgrade(&mut candidates, &coordination.agent_mail);
+        apply_tracker_integrity_candidate_downgrade(&mut candidates, &tracker_integrity);
 
-        let coordination = work_packet_coordination(brief, snapshot);
         let rch_proof_posture = work_packet_rch_proof_posture(snapshot, &degraded);
         let verification = work_packet_verification(snapshot, &rch_proof_posture);
         let source_provenance = work_packet_source_provenance(brief);
-        let recommended_action =
-            work_packet_recommended_action(snapshot, &candidates, &rch_proof_posture);
+        let recommended_action = work_packet_recommended_action(
+            snapshot,
+            &candidates,
+            &coordination.agent_mail,
+            &rch_proof_posture,
+            &tracker_integrity,
+        );
         let observed_state_class =
             work_packet_observed_state_class(&coordination, &rch_proof_posture, &degraded);
 
@@ -917,6 +1054,7 @@ impl SwarmWorkPacket {
             recommended_action,
             candidates,
             coordination,
+            tracker_integrity,
             rch_proof_posture,
             verification,
             source_provenance,
@@ -998,6 +1136,47 @@ fn work_packet_candidates(snapshot: &SwarmNextActionSnapshot) -> Vec<SwarmWorkPa
             }
         })
         .collect()
+}
+
+fn apply_tracker_integrity_candidate_downgrade(
+    candidates: &mut [SwarmWorkPacketCandidate],
+    tracker_integrity: &BeadsIntegrityReport,
+) {
+    if tracker_integrity.br_reads_authoritative {
+        return;
+    }
+
+    let unsafe_reason = format!(
+        "beads_tracker_not_authoritative:{}",
+        beads_integrity_health_label(tracker_integrity.health)
+    );
+    for candidate in candidates {
+        if candidate.decision == "safe_to_claim" {
+            candidate.decision = "coordinate_first";
+        }
+        candidate.unsafe_reasons.push(unsafe_reason.clone());
+        candidate.unsafe_reasons.sort();
+        candidate.unsafe_reasons.dedup();
+    }
+}
+
+fn apply_agent_mail_authority_candidate_downgrade(
+    candidates: &mut [SwarmWorkPacketCandidate],
+    agent_mail: &SwarmWorkPacketAgentMail,
+) {
+    if !agent_mail_blocks_claim(agent_mail) {
+        return;
+    }
+
+    let unsafe_reason = AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE;
+    for candidate in candidates {
+        if candidate.decision == "safe_to_claim" {
+            candidate.decision = "coordinate_first";
+        }
+        candidate.unsafe_reasons.push(unsafe_reason.to_owned());
+        candidate.unsafe_reasons.sort();
+        candidate.unsafe_reasons.dedup();
+    }
 }
 
 fn work_packet_candidate_source(source: &'static str) -> &'static str {
@@ -1112,7 +1291,7 @@ fn work_packet_agent_mail(
         .sources
         .iter()
         .find(|source| source.source == SwarmBriefSourceKind::AgentMail);
-    let degraded_codes = snapshot
+    let mut degraded_codes = snapshot
         .degraded
         .iter()
         .filter(|degradation| degradation.source == "agent_mail")
@@ -1126,20 +1305,196 @@ fn work_packet_agent_mail(
         "unavailable" => "unavailable",
         _ => "skipped",
     });
+    let semantic_failure_reason = agent_mail_semantic_failure_reason(snapshot);
+    let status = if semantic_failure_reason.is_some() {
+        "semantic_readiness_failed"
+    } else {
+        status
+    };
+    if status == "semantic_readiness_failed"
+        && !degraded_codes
+            .iter()
+            .any(|code| code == AGENT_MAIL_UNAVAILABLE_CODE)
+    {
+        degraded_codes.push(AGENT_MAIL_UNAVAILABLE_CODE.to_owned());
+        degraded_codes.sort();
+        degraded_codes.dedup();
+    }
     let health_level = match status {
         "fresh" => Some("green"),
-        "degraded_read_only" => Some("red"),
-        "unavailable" => Some("red"),
+        "semantic_readiness_failed" => agent_mail_health_level_from_semantic_failure(snapshot),
+        "degraded_read_only" | "unavailable" => Some("red"),
         _ => None,
     };
     let counts_available = status == "fresh";
+    let reservation_authoritative = agent_mail_authoritative_flag(status);
+    let inbox_authoritative = agent_mail_authoritative_flag(status);
+    let semantic_readiness =
+        semantic_failure_reason.map(|reason| SwarmWorkPacketAgentMailSemanticReadiness {
+            status: "fail",
+            reason: Some(reason),
+        });
     SwarmWorkPacketAgentMail {
         status,
         health_level,
         unread_count: counts_available.then_some(snapshot.coordination.unread_inbox_count),
         ack_required_count: counts_available.then_some(snapshot.coordination.ack_required_count),
         degraded_codes,
+        recovery_mode: agent_mail_recovery_mode(status),
+        archive_index_parity: agent_mail_archive_index_parity(status, snapshot),
+        reservation_authoritative,
+        inbox_authoritative,
+        fallback_actions: agent_mail_fallback_actions(status),
+        semantic_readiness,
     }
+}
+
+fn agent_mail_semantic_failure_reason(snapshot: &SwarmNextActionSnapshot) -> Option<&'static str> {
+    snapshot.degraded.iter().find_map(|degradation| {
+        if degradation.source != "agent_mail"
+            || degradation.code != AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE
+        {
+            return None;
+        }
+        Some(agent_mail_semantic_reason_from_message(
+            &degradation.message,
+        ))
+    })
+}
+
+fn agent_mail_semantic_reason_from_message(message: &str) -> &'static str {
+    if message.contains("malformed_sqlite") {
+        "malformed_sqlite"
+    } else if message.contains("archive_corruption") {
+        "archive_corruption"
+    } else if message.contains("index_rebuild_required") {
+        "index_rebuild_required"
+    } else if message.contains("permission_denied") {
+        "permission_denied"
+    } else {
+        "unknown"
+    }
+}
+
+fn agent_mail_health_level_from_semantic_failure(
+    snapshot: &SwarmNextActionSnapshot,
+) -> Option<&'static str> {
+    snapshot
+        .degraded
+        .iter()
+        .filter(|degradation| {
+            degradation.source == "agent_mail"
+                && degradation.code == AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE
+        })
+        .find_map(|degradation| {
+            let message = degradation.message.as_str();
+            if message.contains("healthLevel=green") {
+                Some("green")
+            } else if message.contains("healthLevel=yellow") {
+                Some("yellow")
+            } else if message.contains("healthLevel=red") {
+                Some("red")
+            } else {
+                None
+            }
+        })
+        .or(Some("green"))
+}
+
+fn agent_mail_authoritative_flag(status: &str) -> Option<bool> {
+    match status {
+        "fresh" | "healthy" => Some(true),
+        "degraded_read_only"
+        | "archive_ahead_of_sqlite"
+        | "inbox_unavailable"
+        | "reservation_unavailable"
+        | "outbox_only"
+        | "semantic_readiness_failed"
+        | "unreachable"
+        | "unavailable" => Some(false),
+        _ => None,
+    }
+}
+
+fn agent_mail_recovery_mode(status: &str) -> Option<&'static str> {
+    match status {
+        "fresh" | "healthy" => Some("none"),
+        "semantic_readiness_failed" => Some("manual_coordination"),
+        "degraded_read_only" | "archive_ahead_of_sqlite" => Some("proceed_via_beads"),
+        "unavailable" | "unreachable" => Some("wait_for_repair"),
+        "inbox_unavailable" | "reservation_unavailable" | "outbox_only" => {
+            Some("manual_coordination")
+        }
+        _ => None,
+    }
+}
+
+fn agent_mail_archive_index_parity(
+    status: &str,
+    snapshot: &SwarmNextActionSnapshot,
+) -> Option<&'static str> {
+    if status == "fresh" || status == "healthy" {
+        return Some("aligned");
+    }
+    if snapshot
+        .degraded
+        .iter()
+        .any(|degradation| degradation.code == "archive_index_parity_drift")
+    {
+        return Some("archive_ahead");
+    }
+    match status {
+        "semantic_readiness_failed" | "degraded_read_only" | "unavailable" => Some("unknown"),
+        _ => None,
+    }
+}
+
+fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFallbackAction> {
+    if status == "fresh" || status == "healthy" || status == "skipped" {
+        return Vec::new();
+    }
+
+    let mut actions = vec![
+        SwarmWorkPacketAgentMailFallbackAction {
+            kind: "manual_coordination",
+            summary: "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
+            command: None,
+            manual_step: Some(
+                "Confirm lane ownership in the active coordination channel before touching shared paths.",
+            ),
+        },
+        SwarmWorkPacketAgentMailFallbackAction {
+            kind: "retry_later",
+            summary: "Retry Agent Mail health after the storage layer or index is repaired.",
+            command: None,
+            manual_step: Some("Re-run the work-packet collector after Agent Mail reads recover."),
+        },
+        SwarmWorkPacketAgentMailFallbackAction {
+            kind: "switch_to_static_work",
+            summary: "Prefer static or docs-first work while coordination authority is unavailable.",
+            command: None,
+            manual_step: Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
+        },
+    ];
+    if status == "semantic_readiness_failed" {
+        actions.push(SwarmWorkPacketAgentMailFallbackAction {
+            kind: "beads_comment",
+            summary: "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
+            command: None,
+            manual_step: Some(
+                "Add a Beads comment before claiming work so peers can see the coordination fallback.",
+            ),
+        });
+        actions.push(SwarmWorkPacketAgentMailFallbackAction {
+            kind: "support_bundle",
+            summary: "Capture a redacted support bundle so the storage class can be triaged without raw paths or page offsets.",
+            command: Some("am support-bundle --workspace . --redact paths,offsets".to_owned()),
+            manual_step: None,
+        });
+    }
+    actions.sort();
+    actions.dedup();
+    actions
 }
 
 fn work_packet_rch_proof_posture(
@@ -1409,7 +1764,9 @@ fn work_packet_source_label(source: &str) -> String {
 fn work_packet_recommended_action(
     snapshot: &SwarmNextActionSnapshot,
     candidates: &[SwarmWorkPacketCandidate],
+    agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
+    tracker_integrity: &BeadsIntegrityReport,
 ) -> SwarmWorkPacketRecommendedAction {
     let cards = snapshot.recommendation_cards();
     let selected_card = cards.first();
@@ -1433,6 +1790,24 @@ fn work_packet_recommended_action(
     if rch.safe_to_launch_cargo_verification == Some(false) {
         reasons.push("rch_remote_verification_blocked".to_owned());
     }
+    if agent_mail_blocks_claim(agent_mail) {
+        if agent_mail.status == "semantic_readiness_failed" {
+            reasons.push(AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned());
+            reasons.push("green_transport_does_not_imply_authoritative_reads".to_owned());
+        }
+        if agent_mail.reservation_authoritative != Some(true) {
+            reasons.push("reservation_evidence_not_authoritative".to_owned());
+        }
+        if agent_mail.inbox_authoritative != Some(true) {
+            reasons.push("inbox_evidence_not_authoritative".to_owned());
+        }
+    }
+    if !tracker_integrity.br_reads_authoritative {
+        reasons.push(format!(
+            "beads_tracker_not_authoritative:{}",
+            beads_integrity_health_label(tracker_integrity.health)
+        ));
+    }
     reasons.sort();
     reasons.dedup();
 
@@ -1443,18 +1818,43 @@ fn work_packet_recommended_action(
     if rch.safe_to_launch_cargo_verification == Some(false) {
         proof_obligations.push("do_not_run_local_cargo_fallback".to_owned());
     }
+    if agent_mail_blocks_claim(agent_mail) {
+        proof_obligations.push("do_not_treat_zero_inbox_count_as_no_peer_messages".to_owned());
+        proof_obligations.push("do_not_treat_zero_reservation_count_as_no_conflict".to_owned());
+        if agent_mail.status == "semantic_readiness_failed" {
+            proof_obligations
+                .push("do_not_treat_green_health_level_as_coordination_authority".to_owned());
+            proof_obligations
+                .push("record_agent_mail_semantic_readiness_failure_in_beads".to_owned());
+        }
+    }
+    if !tracker_integrity.br_reads_authoritative {
+        proof_obligations.push("repair_beads_tracker_before_claim".to_owned());
+    }
     proof_obligations.sort();
     proof_obligations.dedup();
 
     let candidate_id = selected_candidate.map(|candidate| candidate.id.clone());
     SwarmWorkPacketRecommendedAction {
-        action: work_packet_action(selected_card.map(|card| card.decision), rch),
+        action: work_packet_action(
+            selected_card.map(|card| card.decision),
+            agent_mail,
+            rch,
+            tracker_integrity,
+        ),
         confidence: selected_card.map_or("low", |card| card.confidence),
         safe_to_claim: selected_candidate.map(|candidate| {
             candidate.decision == "safe_to_claim"
+                && !agent_mail_blocks_claim(agent_mail)
                 && rch.safe_to_launch_cargo_verification != Some(false)
+                && tracker_integrity.br_reads_authoritative
         }),
-        suggested_commands: work_packet_suggested_commands(candidate_id.as_deref(), rch),
+        suggested_commands: work_packet_suggested_commands(
+            candidate_id.as_deref(),
+            agent_mail,
+            rch,
+            tracker_integrity,
+        ),
         candidate_id,
         reasons,
         proof_obligations,
@@ -1463,8 +1863,23 @@ fn work_packet_recommended_action(
 
 fn work_packet_action(
     decision: Option<&'static str>,
+    agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
+    tracker_integrity: &BeadsIntegrityReport,
 ) -> &'static str {
+    if agent_mail.status == "semantic_readiness_failed" {
+        return "prefer_static_docs_work";
+    }
+    if agent_mail_blocks_claim(agent_mail) {
+        return "coordinate_before_claim";
+    }
+    if !tracker_integrity.br_reads_authoritative {
+        return if tracker_integrity.requires_candidate_downgrade {
+            "blocked_no_action"
+        } else {
+            "coordinate_before_claim"
+        };
+    }
     if rch.safe_to_launch_cargo_verification == Some(false) {
         return "prefer_static_docs_work";
     }
@@ -1478,23 +1893,56 @@ fn work_packet_action(
     }
 }
 
+fn agent_mail_blocks_claim(agent_mail: &SwarmWorkPacketAgentMail) -> bool {
+    agent_mail.status == "semantic_readiness_failed"
+}
+
 fn work_packet_suggested_commands(
     candidate_id: Option<&str>,
+    agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
+    tracker_integrity: &BeadsIntegrityReport,
 ) -> Vec<String> {
     let mut commands = Vec::new();
     if let Some(candidate_id) = candidate_id {
-        commands.push(format!("br show {candidate_id} --json"));
-        if rch.safe_to_launch_cargo_verification != Some(false) {
+        if tracker_integrity.br_reads_authoritative {
+            commands.push(format!("br show {candidate_id} --json"));
+        } else {
+            commands.push(format!(
+                "br --no-auto-import --allow-stale show {candidate_id} --json"
+            ));
+        }
+        if tracker_integrity.br_reads_authoritative
+            && rch.safe_to_launch_cargo_verification != Some(false)
+            && !agent_mail_blocks_claim(agent_mail)
+        {
             commands.push(format!(
                 "br update {candidate_id} --status in_progress --json"
             ));
         }
+        if agent_mail.status == "semantic_readiness_failed" {
+            commands.push(format!(
+                "br comments add {candidate_id} --message 'agent_mail semantic_readiness=fail; coordinating via beads until repair'"
+            ));
+        }
+    }
+    if !tracker_integrity.br_reads_authoritative {
+        commands.push("br doctor --json --no-db".to_owned());
     }
     commands.push("ee swarm brief --workspace . --json".to_owned());
     commands.sort();
     commands.dedup();
     commands
+}
+
+fn beads_integrity_health_label(health: BeadsIntegrityHealth) -> &'static str {
+    match health {
+        BeadsIntegrityHealth::Ok => "ok",
+        BeadsIntegrityHealth::MergeArtifactsWarn => "merge_artifacts_warn",
+        BeadsIntegrityHealth::ExternalChangesPendingImport => "external_changes_pending_import",
+        BeadsIntegrityHealth::DbJsonlCountMismatch => "db_jsonl_count_mismatch",
+        BeadsIntegrityHealth::JsonlParseError => "jsonl_parse_error",
+    }
 }
 
 fn work_packet_observed_state_class(
@@ -1504,7 +1952,7 @@ fn work_packet_observed_state_class(
 ) -> &'static str {
     let agent_mail_degraded = matches!(
         coordination.agent_mail.status,
-        "degraded_read_only" | "unavailable"
+        "degraded_read_only" | "semantic_readiness_failed" | "unavailable"
     );
     let rch_degraded = matches!(rch.posture, "topology_blocked" | "degraded_capacity");
     if agent_mail_degraded || rch_degraded {
@@ -4077,6 +4525,8 @@ mod tests {
         assert_eq!(packet.observed_state_class, "healthy_small_repo");
         assert_eq!(packet.recommended_action.action, "inspect_and_claim");
         assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert!(packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(packet.tracker_integrity.health, BeadsIntegrityHealth::Ok);
         assert!(packet.mutation_policy.side_effect_free);
         assert!(!packet.mutation_policy.claims_beads);
         assert!(!packet.mutation_policy.reserves_files);
@@ -4084,6 +4534,170 @@ mod tests {
         assert!(!packet.mutation_policy.runs_cargo);
         assert!(!packet.mutation_policy.stages_git);
         assert!(!packet.mutation_policy.deletes_files);
+    }
+
+    #[test]
+    fn work_packet_blocks_claim_when_agent_mail_semantic_readiness_fails() {
+        let semantic_failure = degradation(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE,
+            "Agent Mail semantic readiness failed with healthLevel=green (malformed_sqlite); reservation and inbox reads are not authoritative.",
+            Some("Repair Agent Mail storage.".to_owned()),
+        );
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief
+            .sources
+            .push(crate::core::swarm_brief::SwarmBriefSourceSnapshot {
+                source: SwarmBriefSourceKind::AgentMail,
+                status: crate::core::swarm_brief::SwarmBriefSourceStatus::Degraded,
+                freshness: crate::core::swarm_brief::SwarmBriefSourceFreshness::unknown(),
+                provenance: crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                item_count: 0,
+                degraded: vec![semantic_failure.clone()],
+            });
+        brief.degraded = vec![semantic_failure];
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-docs.1",
+            "Document a redaction-safe coordination contract",
+            "beads_ready",
+            Some(2),
+        )]);
+        let mut snapshot = snapshot;
+        snapshot.degraded = brief
+            .degraded
+            .iter()
+            .map(SwarmNextActionDegradation::from_brief)
+            .collect();
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(
+            packet.coordination.agent_mail.status,
+            "semantic_readiness_failed"
+        );
+        assert_eq!(packet.coordination.agent_mail.health_level, Some("green"));
+        assert_eq!(
+            packet
+                .coordination
+                .agent_mail
+                .semantic_readiness
+                .as_ref()
+                .map(|readiness| (readiness.status, readiness.reason)),
+            Some(("fail", Some("malformed_sqlite")))
+        );
+        assert_eq!(
+            packet.coordination.agent_mail.reservation_authoritative,
+            Some(false)
+        );
+        assert_eq!(
+            packet.coordination.agent_mail.inbox_authoritative,
+            Some(false)
+        );
+        assert!(
+            packet
+                .coordination
+                .agent_mail
+                .degraded_codes
+                .contains(&AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned())
+        );
+        assert!(
+            packet
+                .coordination
+                .agent_mail
+                .degraded_codes
+                .contains(&AGENT_MAIL_UNAVAILABLE_CODE.to_owned())
+        );
+        assert_eq!(packet.recommended_action.action, "prefer_static_docs_work");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .reasons
+                .contains(&AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned())
+        );
+        assert_eq!(packet.candidates[0].decision, "coordinate_first");
+        assert!(
+            packet.candidates[0]
+                .unsafe_reasons
+                .contains(&AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE.to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .any(|command| command.starts_with("br comments add bd-docs.1"))
+        );
+        assert!(
+            !packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("br update"))
+        );
+        let fallback_kinds = packet
+            .coordination
+            .agent_mail
+            .fallback_actions
+            .iter()
+            .map(|action| action.kind)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            fallback_kinds,
+            vec![
+                "beads_comment",
+                "manual_coordination",
+                "retry_later",
+                "support_bundle",
+                "switch_to_static_work",
+            ]
+        );
+    }
+
+    #[test]
+    fn work_packet_preserves_semantic_readiness_health_level_class() {
+        let semantic_failure = degradation(
+            SwarmBriefSourceKind::AgentMail,
+            AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE,
+            "Agent Mail semantic readiness failed with healthLevel=yellow (index_rebuild_required); reservation and inbox reads are not authoritative.",
+            Some("Repair Agent Mail storage.".to_owned()),
+        );
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        brief
+            .sources
+            .push(crate::core::swarm_brief::SwarmBriefSourceSnapshot {
+                source: SwarmBriefSourceKind::AgentMail,
+                status: crate::core::swarm_brief::SwarmBriefSourceStatus::Degraded,
+                freshness: crate::core::swarm_brief::SwarmBriefSourceFreshness::unknown(),
+                provenance: crate::core::swarm_brief::SwarmBriefSourceProvenance::local_probe(),
+                item_count: 0,
+                degraded: vec![semantic_failure.clone()],
+            });
+        brief.degraded = vec![semantic_failure];
+        let mut snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-mail.1",
+            "Keep Agent Mail health evidence bounded",
+            "beads_ready",
+            Some(2),
+        )]);
+        snapshot.degraded = brief
+            .degraded
+            .iter()
+            .map(SwarmNextActionDegradation::from_brief)
+            .collect();
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(packet.coordination.agent_mail.health_level, Some("yellow"));
+        assert_eq!(
+            packet
+                .coordination
+                .agent_mail
+                .semantic_readiness
+                .as_ref()
+                .map(|readiness| readiness.reason),
+            Some(Some("index_rebuild_required"))
+        );
     }
 
     #[test]
@@ -4298,6 +4912,66 @@ mod tests {
                 .recommended_action
                 .proof_obligations
                 .contains(&"do_not_run_local_cargo_fallback".to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_downgrades_candidates_when_beads_reads_are_not_authoritative() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-stale",
+            "Claim only after tracker reconciliation",
+            "beads_ready",
+            Some(2),
+        )]);
+        let merge_artifact_paths = Vec::new();
+        let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
+            jsonl_path: ".beads/issues.jsonl",
+            db_path: ".beads/beads.db",
+            jsonl_record_count: 12,
+            db_record_count: 12,
+            auto_import_enabled: true,
+            external_changes_pending_import: true,
+            dirty_issue_count: 0,
+            merge_artifact_paths: &merge_artifact_paths,
+            jsonl_parse_error: None,
+        });
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action_with_tracker_integrity(
+            &brief,
+            &snapshot,
+            tracker_integrity,
+        );
+
+        assert_eq!(
+            packet.tracker_integrity.health,
+            BeadsIntegrityHealth::ExternalChangesPendingImport
+        );
+        assert!(!packet.tracker_integrity.br_reads_authoritative);
+        assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.candidates[0].decision, "coordinate_first");
+        assert!(packet.candidates[0].unsafe_reasons.contains(
+            &"beads_tracker_not_authoritative:external_changes_pending_import".to_owned()
+        ));
+        assert!(
+            packet
+                .recommended_action
+                .proof_obligations
+                .contains(&"repair_beads_tracker_before_claim".to_owned())
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .contains(&"br doctor --json --no-db".to_owned())
+        );
+        assert!(
+            !packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("br update"))
         );
     }
 

@@ -859,6 +859,162 @@ fn work_packet_agent_mail_fallback_semantics_are_contractual() -> TestResult {
 }
 
 #[test]
+fn work_packet_command_actions_require_shell_safe_argv_contract() -> TestResult {
+    // bd-13dmm.3: command strings in work packets are migration-era display
+    // text. The executable contract is a structured argv action with explicit
+    // shell/copy-safety posture and redaction guards on executable fields.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+
+    let command_action = schema
+        .pointer("/definitions/commandAction")
+        .ok_or_else(|| "commandAction definition missing".to_owned())?;
+    let required_fields = command_action
+        .pointer("/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "commandAction.required missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for field in [
+        "commandId",
+        "displayCommand",
+        "argv",
+        "shellRequired",
+        "copySafety",
+        "mutatesState",
+        "requiredSubstrate",
+        "when",
+        "rationale",
+    ] {
+        if !required_fields.contains(field) {
+            return Err(format!("commandAction must require {field}"));
+        }
+    }
+    if command_action
+        .pointer("/additionalProperties")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("commandAction must reject undeclared fields".into());
+    }
+    for (pointer, expected_ref) in [
+        (
+            "/definitions/recommendedAction/properties/suggestedCommandActions/items/$ref",
+            "#/definitions/commandAction",
+        ),
+        (
+            "/definitions/verificationCommand/properties/commandAction/$ref",
+            "#/definitions/commandAction",
+        ),
+        (
+            "/definitions/commandAction/properties/argv/$ref",
+            "#/definitions/argvArray",
+        ),
+    ] {
+        if string_field(&schema, pointer, "ee.swarm.work_packet.v1")? != expected_ref {
+            return Err(format!("{pointer} must reference {expected_ref}"));
+        }
+    }
+
+    let command_template_description = string_field(
+        &schema,
+        "/definitions/verificationCommand/properties/commandTemplate/description",
+        "verificationCommand.commandTemplate",
+    )?;
+    for marker in [
+        "Legacy display-only",
+        "MUST NOT be executed",
+        "not shell-safe",
+    ] {
+        if !command_template_description.contains(marker) {
+            return Err(format!(
+                "commandTemplate description must mark legacy display-only posture with {marker}"
+            ));
+        }
+    }
+
+    let copy_safety = schema
+        .pointer("/definitions/copySafety/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "copySafety enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for variant in [
+        "safe_structured_argv",
+        "display_only",
+        "shell_required_review",
+        "forbidden_until_human_approval",
+    ] {
+        if !copy_safety.contains(variant) {
+            return Err(format!("copySafety enum must include {variant}"));
+        }
+    }
+
+    let substrates = schema
+        .pointer("/definitions/commandSubstrate/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "commandSubstrate enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for substrate in ["agent_mail", "beads", "git", "jq", "rch", "static_local"] {
+        if !substrates.contains(substrate) {
+            return Err(format!("commandSubstrate enum must include {substrate}"));
+        }
+    }
+
+    if schema
+        .pointer("/definitions/argvArray/minItems")
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err("argvArray must require at least one argv element".into());
+    }
+    if string_field(
+        &schema,
+        "/definitions/argvArray/items/$ref",
+        "argvArray.items",
+    )? != "#/definitions/safeCommandString"
+    {
+        return Err("argvArray items must use safeCommandString".into());
+    }
+
+    let guard_patterns = schema
+        .pointer("/definitions/safeCommandString/not/anyOf")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "safeCommandString redaction guards missing".to_owned())?
+        .iter()
+        .filter_map(|value| value.get("pattern").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for pattern in [
+        "BEGIN PRIVATE KEY",
+        "ghp_[A-Za-z0-9_]+",
+        "DATABASE_URL=",
+        "From: ",
+        "Subject: ",
+        "Message-ID:",
+        "stdout:",
+        "stderr:",
+        "/Users/[^\\s]+",
+        "/home/[^\\s]+",
+    ] {
+        if !guard_patterns.contains(pattern) {
+            return Err(format!(
+                "safeCommandString must forbid executable-field marker {pattern}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult {
     // bd-2z5ly.8.1: when Agent Mail responds with healthLevel=green but
     // semantic_readiness.status=fail (for example malformed SQLite storage),

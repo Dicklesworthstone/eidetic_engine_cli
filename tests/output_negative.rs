@@ -481,6 +481,11 @@ fn all_domain_error_variants_produce_valid_json() -> TestResult {
             message: "test".to_string(),
             repair: None,
         },
+        DomainError::ImportWithDetails {
+            message: "test".to_string(),
+            repair: None,
+            details_json: "{}".to_string(),
+        },
         DomainError::NotFound {
             resource: "item".to_string(),
             id: "123".to_string(),
@@ -534,6 +539,11 @@ fn all_domain_error_variants_produce_valid_toon() -> TestResult {
         DomainError::Import {
             message: "test".to_string(),
             repair: Some("ee import cass --dry-run".to_string()),
+        },
+        DomainError::ImportWithDetails {
+            message: "test".to_string(),
+            repair: Some("ee import cass --dry-run".to_string()),
+            details_json: "{}".to_string(),
         },
         DomainError::NotFound {
             resource: "item".to_string(),

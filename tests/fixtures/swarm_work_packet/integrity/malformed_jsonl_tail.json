@@ -5,6 +5,8 @@
   "jsonlRecordCount": 2702,
   "dbRecordCount": 2702,
   "pendingImportCount": 0,
+  "externalChangesPendingImport": false,
+  "dirtyIssueCount": 0,
   "mergeArtifactPaths": [],
   "mergeArtifactCount": 0,
   "jsonlParseError": {
@@ -12,6 +14,7 @@
     "column": null,
     "excerpt": "{\"id\":\"bd-malformed-tail\",\"title\":\"WIP - record was truncated mid"
   },
+  "brReadsAuthoritative": false,
   "requiresCandidateDowngrade": true,
   "recoveryHint": "Inspect the first invalid JSONL line and run br doctor --json before any br update / br claim."
 }

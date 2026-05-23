@@ -78,6 +78,22 @@
     "activeClaims": [],
     "fileCollisions": []
   },
+  "trackerIntegrity": {
+    "health": "external_changes_pending_import",
+    "jsonlPath": ".beads/issues.jsonl",
+    "dbPath": ".beads/beads.db",
+    "jsonlRecordCount": 2707,
+    "dbRecordCount": 2704,
+    "pendingImportCount": 3,
+    "externalChangesPendingImport": true,
+    "dirtyIssueCount": 0,
+    "mergeArtifactPaths": [],
+    "mergeArtifactCount": 0,
+    "jsonlParseError": null,
+    "brReadsAuthoritative": false,
+    "requiresCandidateDowngrade": false,
+    "recoveryHint": "Run br sync (or br --no-auto-import --allow-stale for read-only inspection) before claiming work."
+  },
   "rchProofPosture": {
     "sourceEnabled": true,
     "remoteOnlyRequired": true,

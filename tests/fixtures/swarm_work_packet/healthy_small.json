@@ -1,0 +1,125 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_healthy_small_repo_0001",
+    "generatedAt": "2026-05-22T21:45:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:healthy-small",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      },
+      {
+        "source": "bv",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "bv --robot-next"
+      },
+      {
+        "source": "git",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "git status --short --branch"
+      }
+    ],
+    "candidateLane": {
+      "beadId": "bd-safe",
+      "title": "Implement isolated contract fixture",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "safe_to_claim",
+      "decisionReasons": [
+        "ready_unclaimed",
+        "no_dirty_path_overlap",
+        "remote_verification_not_required_for_contract_only_slice"
+      ],
+      "suggestedReservations": [
+        {
+          "pathPattern": "docs/schemas/swarm/ee.swarm.work_packet.v1.json",
+          "exclusive": true,
+          "reason": "bd-safe"
+        }
+      ],
+      "proofObligations": [
+        "git_diff_check",
+        "jq_fixture_validation",
+        "record_closeout_comment"
+      ],
+      "evidenceCaveats": []
+    },
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 0,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy"
+    },
+    "trackerIntegrity": {
+      "health": "ok",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2707,
+      "dbRecordCount": 2707,
+      "pendingImportCount": 0,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": true,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": null
+    },
+    "checkout": {
+      "dirtyPathCount": 0,
+      "dirtyPathsRedacted": [],
+      "collisionRisk": "none"
+    },
+    "verification": {
+      "remoteOnlyRequired": false,
+      "remoteOnlySafe": null,
+      "rchPosture": "not_required",
+      "blockers": [],
+      "requiredCommands": [
+        {
+          "kind": "json_fixture_syntax",
+          "command": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json tests/fixtures/swarm_work_packet/*.json",
+          "mustUseRch": false,
+          "localFallbackAllowed": true
+        }
+      ]
+    },
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "claim_bead",
+        "command": "br update bd-safe --status in_progress --json",
+        "why": "The packet is advisory and does not claim work."
+      }
+    ],
+    "doNotProceedBecause": [],
+    "safeToClaim": true,
+    "degraded": []
+  },
+  "degraded": []
+}

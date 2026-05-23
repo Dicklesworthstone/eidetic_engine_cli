@@ -1,0 +1,131 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_crowded_checkout_0001",
+    "generatedAt": "2026-05-22T21:46:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:crowded-checkout",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      },
+      {
+        "source": "agent_mail",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "redacted Agent Mail reservation snapshot"
+      },
+      {
+        "source": "git",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "git status --short --branch"
+      }
+    ],
+    "candidateLane": {
+      "beadId": "bd-contested",
+      "title": "Touch shared CASS adapter code",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "coordinate_first",
+      "decisionReasons": [
+        "dirty_path_overlap:src/cass/process.rs",
+        "active_reservation_holder:GreenMoose",
+        "recent_in_progress_neighbor:bd-cass"
+      ],
+      "suggestedReservations": [],
+      "proofObligations": [
+        "message_owner_before_editing",
+        "wait_for_reservation_or_pick_non_overlapping_slice",
+        "use_rch_for_cargo_verification"
+      ],
+      "evidenceCaveats": [
+        "dirty_paths_redacted"
+      ]
+    },
+    "coordination": {
+      "activeReservationCount": 2,
+      "holderAgents": [
+        "GreenMoose",
+        "CalmHeron"
+      ],
+      "inboxUnavailable": false,
+      "unreadInboxCount": 1,
+      "ackRequiredCount": 0,
+      "agentMailHealth": "healthy"
+    },
+    "trackerIntegrity": {
+      "health": "merge_artifacts_warn",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2707,
+      "dbRecordCount": 2707,
+      "pendingImportCount": 0,
+      "externalChangesPendingImport": false,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [".beads/beads.base.jsonl"],
+      "mergeArtifactCount": 1,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": false,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": "Inspect or remove merge artifacts in .beads/ before relying on br reads."
+    },
+    "checkout": {
+      "dirtyPathCount": 3,
+      "dirtyPathsRedacted": [
+        "src/cass/process.rs",
+        "src/cass/import.rs",
+        ".beads/issues.jsonl"
+      ],
+      "collisionRisk": "high"
+    },
+    "verification": {
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": true,
+      "rchPosture": "remote_ready",
+      "blockers": [],
+      "requiredCommands": [
+        {
+          "kind": "cargo_test",
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test --lib cass::process -- --nocapture",
+          "mustUseRch": true,
+          "localFallbackAllowed": false
+        }
+      ]
+    },
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "coordinate",
+        "command": null,
+        "why": "The lane overlaps active CASS work."
+      }
+    ],
+    "doNotProceedBecause": [
+      "active_owner_or_reservation_present",
+      "dirty_path_overlap"
+    ],
+    "safeToClaim": false,
+    "degraded": []
+  },
+  "degraded": []
+}

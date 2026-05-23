@@ -14,7 +14,7 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 
 use crate::cass::{
-    CassClient, CassImportOptions, discover_import_binary, import_cass_sessions,
+    CassClient, CassImportError, CassImportOptions, discover_import_binary, import_cass_sessions,
     parse_import_since_duration,
 };
 use crate::config::env_registry::{EnvVar, read, read_os};
@@ -222,8 +222,9 @@ use crate::core::swarm_brief::{
     default_swarm_brief_sources,
 };
 use crate::core::swarm_next_action::{
-    SwarmNextActionSnapshot, collect_swarm_next_action_snapshot_with_verifier_evidence,
-    verifier_evidence_from_json,
+    SwarmNextActionSnapshot, SwarmWorkPacket,
+    collect_swarm_next_action_snapshot_with_verifier_evidence,
+    collect_swarm_work_packet_with_verifier_evidence, verifier_evidence_from_json,
 };
 use crate::core::task_frame::{
     TaskEvidenceLink, TaskFrameCloseOptions, TaskFrameCreateOptions, TaskFrameReport,
@@ -856,7 +857,7 @@ pub enum CacheCommand {
 /// Arguments for `ee cache prewarm`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct CachePrewarmArgs {
-    /// Hotset manifest path, or `latest` once a manifest registry is available.
+    /// Hotset manifest path, or `latest` for <workspace>/.ee/cache/hotsets/latest.json.
     #[arg(long = "from-hotset", value_name = "PATH|latest")]
     pub from_hotset: String,
 
@@ -7572,6 +7573,10 @@ pub struct CassImportArgs {
     /// Skip first-window evidence span capture through `cass view`.
     #[arg(long, action = ArgAction::SetTrue)]
     pub no_spans: bool,
+
+    /// Override the per-CASS subprocess timeout in milliseconds for diagnostics.
+    #[arg(long, value_name = "MS", hide = true)]
+    pub subprocess_timeout_ms: Option<u64>,
 }
 
 /// Arguments for `ee import jsonl`.
@@ -8931,6 +8936,8 @@ pub enum SwarmCommand {
     Brief(SwarmBriefArgs),
     /// Emit a read-only next-action input snapshot for work allocation.
     NextAction(SwarmNextActionArgs),
+    /// Emit a deterministic read-only work packet for crowded agent checkouts.
+    WorkPacket(SwarmWorkPacketArgs),
 }
 
 /// Arguments for `ee swarm brief`.
@@ -8969,6 +8976,42 @@ pub struct SwarmBriefArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct SwarmNextActionArgs {
     /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory. For next-action, default includes rch.
+    #[arg(long, value_name = "LIST", default_value = "default")]
+    pub sources: String,
+
+    /// Include the optional RCH status probe. Equivalent to adding rch to --sources.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Redacted Agent Mail snapshot JSON to include. No live Agent Mail mutation is performed.
+    #[arg(long, value_name = "PATH")]
+    pub agent_mail_snapshot: Option<PathBuf>,
+
+    /// Recent ee.rch.verify.v1 proof JSON to include for compile-health preflight.
+    #[arg(long, value_name = "PATH")]
+    pub verifier_evidence: Option<PathBuf>,
+
+    /// Comma-separated agent connector slugs to inspect when agent-inventory is enabled.
+    #[arg(long, value_name = "SLUGS")]
+    pub agent_inventory_only: Option<String>,
+
+    /// Number of recent git commits to include when the git source is enabled.
+    #[arg(long, value_name = "N", default_value_t = 8)]
+    pub max_recent_commits: usize,
+
+    /// Per-source command timeout budget in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = 1_500)]
+    pub command_timeout_ms: u64,
+
+    /// Fail with exit code 6 when any selected source is unavailable, not configured, or skipped.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub require_sources: bool,
+}
+
+/// Arguments for `ee swarm work-packet`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct SwarmWorkPacketArgs {
+    /// Comma-separated sources to collect: default, all, none, git, beads, bv, agent-mail, rch, host-profile, agent-inventory. Work packets include rch by default.
     #[arg(long, value_name = "LIST", default_value = "default")]
     pub sources: String,
 
@@ -10627,6 +10670,9 @@ where
         }
         Some(Command::Swarm(SwarmCommand::NextAction(ref args))) => {
             handle_swarm_next_action(&cli, args, stdout, stderr)
+        }
+        Some(Command::Swarm(SwarmCommand::WorkPacket(ref args))) => {
+            handle_swarm_work_packet(&cli, args, stdout, stderr)
         }
         Some(Command::Workspace(ref cmd)) => handle_workspace_command(&cli, cmd, stdout, stderr),
         Some(Command::Tripwire(TripwireCommand::List(ref args))) => {
@@ -13705,21 +13751,18 @@ where
     W: Write,
     E: Write,
 {
-    match build_cache_prewarm_report(args) {
+    let workspace_path = cli.resolve_workspace();
+    match build_cache_prewarm_report(args, &workspace_path) {
         Ok(data) => render_cache_prewarm(cli, &data, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
-fn build_cache_prewarm_report(args: &CachePrewarmArgs) -> Result<serde_json::Value, DomainError> {
-    if args.from_hotset == "latest" {
-        return Err(DomainError::Usage {
-            message: "`--from-hotset latest` requires a hotset manifest registry, which is not implemented yet.".to_string(),
-            repair: Some("Pass `--from-hotset <path>` to an ee.cache.hotset.v1 manifest.".to_string()),
-        });
-    }
-
-    let path = PathBuf::from(&args.from_hotset);
+fn build_cache_prewarm_report(
+    args: &CachePrewarmArgs,
+    workspace_path: &Path,
+) -> Result<serde_json::Value, DomainError> {
+    let path = resolve_cache_prewarm_hotset_path(&args.from_hotset, workspace_path)?;
     let manifest_text = fs::read_to_string(&path).map_err(|error| DomainError::Storage {
         message: format!("failed to read hotset manifest {}: {error}", path.display()),
         repair: Some(
@@ -13750,6 +13793,35 @@ fn build_cache_prewarm_report(args: &CachePrewarmArgs) -> Result<serde_json::Val
             ),
         },
     )
+}
+
+fn resolve_cache_prewarm_hotset_path(
+    from_hotset: &str,
+    workspace_path: &Path,
+) -> Result<PathBuf, DomainError> {
+    if from_hotset == "latest" {
+        let path = workspace_path
+            .join(".ee")
+            .join("cache")
+            .join("hotsets")
+            .join("latest.json");
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(DomainError::Usage {
+                message: format!(
+                    "`--from-hotset latest` could not find a hotset manifest at {}.",
+                    path.display()
+                ),
+                repair: Some(format!(
+                    "Write the latest ee.cache.hotset.v1 manifest to {}, or pass `--from-hotset <path>`.",
+                    path.display()
+                )),
+            })
+        }
+    } else {
+        Ok(PathBuf::from(from_hotset))
+    }
 }
 
 fn render_cache_prewarm<W>(cli: &Cli, data: &serde_json::Value, stdout: &mut W) -> ProcessExitCode
@@ -15498,6 +15570,10 @@ where
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
     };
+    let cass_client = match args.subprocess_timeout_ms {
+        Some(timeout_ms) => cass_client.with_timeout(Duration::from_millis(timeout_ms.max(1))),
+        None => cass_client,
+    };
 
     match import_cass_sessions(&cass_client, &options) {
         Ok(report) => match cli.renderer() {
@@ -15527,12 +15603,25 @@ where
             }
         },
         Err(error) => {
-            let domain_error = DomainError::Import {
-                message: error.to_string(),
-                repair: error.repair_hint().map(str::to_string),
-            };
+            let domain_error = cass_import_domain_error(&error);
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+fn cass_import_domain_error(error: &CassImportError) -> DomainError {
+    let message = error.to_string();
+    let repair = error.repair_hint().map(str::to_string);
+    match error.subprocess_diagnostics_json() {
+        Some(diagnostics) => DomainError::ImportWithDetails {
+            message,
+            repair,
+            details_json: serde_json::json!({
+                "subprocessDiagnostics": diagnostics,
+            })
+            .to_string(),
+        },
+        None => DomainError::Import { message, repair },
     }
 }
 
@@ -37531,7 +37620,7 @@ where
     E: Write,
 {
     match crate::core::situation::show_situation(&args.situation_id) {
-        Some(details) => {
+        Ok(details) => {
             if cli.wants_json() {
                 let json = serde_json::json!({
                     "schema": crate::models::SITUATION_SHOW_SCHEMA_V1,
@@ -37549,14 +37638,7 @@ where
             }
             ProcessExitCode::Success
         }
-        None => {
-            let error = DomainError::NotFound {
-                resource: "situation".to_owned(),
-                id: args.situation_id.clone(),
-                repair: Some("ee situation classify --task <text> --json".to_owned()),
-            };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -37571,7 +37653,7 @@ where
     E: Write,
 {
     match crate::core::situation::explain_situation(&args.situation_id) {
-        Some(explanation) => {
+        Ok(explanation) => {
             if cli.wants_json() {
                 let json = serde_json::json!({
                     "schema": crate::models::SITUATION_EXPLAIN_SCHEMA_V1,
@@ -37592,14 +37674,7 @@ where
             }
             ProcessExitCode::Success
         }
-        None => {
-            let error = DomainError::NotFound {
-                resource: "situation".to_owned(),
-                id: args.situation_id.clone(),
-                repair: Some("ee situation classify --task <text> --json".to_owned()),
-            };
-            write_domain_error(&error, cli.wants_json(), stdout, stderr)
-        }
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
 
@@ -42575,6 +42650,80 @@ where
     }
 }
 
+fn handle_swarm_work_packet<W, E>(
+    cli: &Cli,
+    args: &SwarmWorkPacketArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let enabled_sources = match parse_swarm_work_packet_sources(&args.sources, args.include_rch) {
+        Ok(sources) => sources,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let mut options = SwarmBriefCollectOptions::for_workspace(cli.resolve_workspace());
+    options.max_recent_commits = args.max_recent_commits;
+    options.include_rch = enabled_sources.contains(&SwarmBriefSourceKind::Rch);
+    options.enabled_sources = enabled_sources;
+    options.agent_mail_snapshot_path = args.agent_mail_snapshot.clone();
+    options.agent_inventory_only_connectors = args
+        .agent_inventory_only
+        .as_deref()
+        .map(parse_comma_separated_values);
+    options.command_timeout_ms = args.command_timeout_ms;
+
+    let verifier_evidence = match read_swarm_work_packet_verifier_evidence(args) {
+        Ok(evidence) => evidence,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
+    let runner = SystemSwarmBriefCommandRunner;
+    let packet =
+        collect_swarm_work_packet_with_verifier_evidence(&options, &runner, &verifier_evidence);
+    let unavailable_sources = swarm_work_packet_unavailable_sources(&packet);
+    if args.require_sources && !unavailable_sources.is_empty() {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: format!(
+                "Required swarm work-packet sources are unavailable: {}.",
+                unavailable_sources.join(", ")
+            ),
+            repair: Some(
+                "Run without --require-sources, adjust --sources, or provide --agent-mail-snapshot."
+                    .to_string(),
+            ),
+        };
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_swarm_work_packet_markdown(&packet))
+        }
+        output::Renderer::Toon => {
+            match render_swarm_work_packet_json(&packet, cli.fields_level().to_field_profile()) {
+                Ok(json) => write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let profile = if matches!(cli.renderer(), output::Renderer::Compact) {
+                output::FieldProfile::Summary
+            } else {
+                cli.fields_level().to_field_profile()
+            };
+            match render_swarm_work_packet_json(&packet, profile) {
+                Ok(json) => write_stdout(stdout, &(json + "\n")),
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            }
+        }
+    }
+}
+
 fn parse_swarm_brief_sources(
     raw: &str,
     include_rch: bool,
@@ -42587,6 +42736,13 @@ fn parse_swarm_next_action_sources(
     include_rch: bool,
 ) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
     parse_swarm_sources(raw, include_rch, true, "swarm next-action")
+}
+
+fn parse_swarm_work_packet_sources(
+    raw: &str,
+    include_rch: bool,
+) -> Result<BTreeSet<SwarmBriefSourceKind>, DomainError> {
+    parse_swarm_sources(raw, include_rch, true, "swarm work-packet")
 }
 
 fn parse_swarm_sources(
@@ -42689,6 +42845,30 @@ fn read_swarm_next_action_verifier_evidence(
     Ok(verifier_evidence_from_json(&value))
 }
 
+fn read_swarm_work_packet_verifier_evidence(
+    args: &SwarmWorkPacketArgs,
+) -> Result<Vec<crate::core::swarm_next_action::SwarmNextActionRecentFirstError>, DomainError> {
+    let Some(path) = &args.verifier_evidence else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to read swarm work-packet verifier evidence {}: {error}",
+            path.display()
+        ),
+        repair: Some("Pass a readable ee.rch.verify.v1 JSON proof file.".to_string()),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| DomainError::Usage {
+            message: format!(
+                "Failed to parse swarm work-packet verifier evidence {} as JSON: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a valid ee.rch.verify.v1 proof object or array.".to_string()),
+        })?;
+    Ok(verifier_evidence_from_json(&value))
+}
+
 fn swarm_brief_unavailable_sources(report: &SwarmBriefReport) -> Vec<String> {
     report
         .sources
@@ -42710,6 +42890,15 @@ fn swarm_next_action_unavailable_sources(snapshot: &SwarmNextActionSnapshot) -> 
         .degraded
         .iter()
         .map(|degradation| format!("{}:{}", degradation.source, degradation.code))
+        .collect()
+}
+
+fn swarm_work_packet_unavailable_sources(packet: &SwarmWorkPacket) -> Vec<String> {
+    packet
+        .source_provenance
+        .iter()
+        .filter(|source| matches!(source.status, "unavailable" | "skipped"))
+        .map(|source| format!("{}:{}", source.source, source.status))
         .collect()
 }
 
@@ -42825,6 +43014,56 @@ fn render_swarm_next_action_markdown(snapshot: &SwarmNextActionSnapshot) -> Stri
                     ""
                 }
             ));
+        }
+    }
+    output
+}
+
+fn render_swarm_work_packet_json(
+    packet: &SwarmWorkPacket,
+    _profile: output::FieldProfile,
+) -> Result<String, DomainError> {
+    let data = serde_json::to_value(packet).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm work-packet: {error}."),
+        repair: Some("Fix the swarm work-packet serializer before emitting JSON.".to_string()),
+    })?;
+    let response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": &packet.degraded,
+    });
+    serde_json::to_string_pretty(&response).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm work-packet response: {error}."),
+        repair: Some("Fix the swarm work-packet response serializer.".to_string()),
+    })
+}
+
+fn render_swarm_work_packet_markdown(packet: &SwarmWorkPacket) -> String {
+    let mut output = String::new();
+    output.push_str("# Swarm Work Packet\n\n");
+    output.push_str(&format!("Workspace: `{}`\n", packet.workspace));
+    output.push_str(&format!("Packet: `{}`\n\n", packet.packet_id));
+    output.push_str(&format!(
+        "- Action: `{}`\n- Candidate: `{}`\n- Safe to claim: `{}`\n- RCH posture: `{}`\n- Degraded: {}\n\n",
+        packet.recommended_action.action,
+        packet
+            .recommended_action
+            .candidate_id
+            .as_deref()
+            .unwrap_or("none"),
+        packet
+            .recommended_action
+            .safe_to_claim
+            .map(|safe| safe.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        packet.rch_proof_posture.posture,
+        packet.degraded.len()
+    ));
+    if !packet.recommended_action.reasons.is_empty() {
+        output.push_str("## Reasons\n\n");
+        for reason in &packet.recommended_action.reasons {
+            output.push_str(&format!("- `{reason}`\n"));
         }
     }
     output
@@ -43977,6 +44216,7 @@ impl NormalizedInvocation {
                 Command::Swarm(swarm) => match swarm {
                     SwarmCommand::Brief(_) => "swarm brief".to_string(),
                     SwarmCommand::NextAction(_) => "swarm next-action".to_string(),
+                    SwarmCommand::WorkPacket(_) => "swarm work-packet".to_string(),
                 },
                 Command::TaskFrame(task_frame) => match task_frame {
                     TaskFrameCommand::Create(_) => "task-frame create".to_string(),
@@ -45271,6 +45511,68 @@ mod tests {
     }
 
     #[test]
+    fn parser_accepts_swarm_work_packet_options() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "--json",
+            "--workspace",
+            ".",
+            "swarm",
+            "work-packet",
+            "--sources",
+            "git,beads,rch",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "agent-mail-snapshot.json",
+            "--verifier-evidence",
+            "rch-proof.json",
+            "--agent-inventory-only",
+            "codex,claude",
+            "--max-recent-commits",
+            "5",
+            "--command-timeout-ms",
+            "750",
+            "--require-sources",
+        ])
+        .map_err(|error| format!("failed to parse swarm work-packet: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Swarm(SwarmCommand::WorkPacket(SwarmWorkPacketArgs {
+                sources,
+                include_rch,
+                agent_mail_snapshot,
+                verifier_evidence,
+                agent_inventory_only,
+                max_recent_commits,
+                command_timeout_ms,
+                require_sources,
+            }))) => {
+                ensure_equal(&sources, &"git,beads,rch".to_string(), "sources")?;
+                ensure_equal(&include_rch, &true, "include rch")?;
+                ensure_equal(
+                    &agent_mail_snapshot,
+                    &Some(PathBuf::from("agent-mail-snapshot.json")),
+                    "agent mail snapshot path",
+                )?;
+                ensure_equal(
+                    &verifier_evidence,
+                    &Some(PathBuf::from("rch-proof.json")),
+                    "verifier evidence path",
+                )?;
+                ensure_equal(
+                    &agent_inventory_only,
+                    &Some("codex,claude".to_string()),
+                    "agent inventory connector filter",
+                )?;
+                ensure_equal(&max_recent_commits, &5, "max recent commits")?;
+                ensure_equal(&command_timeout_ms, &750, "command timeout")?;
+                ensure_equal(&require_sources, &true, "require sources")
+            }
+            other => Err(format!("expected swarm work-packet command, got {other:?}")),
+        }
+    }
+
+    #[test]
     fn swarm_brief_source_parser_handles_aliases_and_required_rch() -> TestResult {
         let sources = super::parse_swarm_brief_sources("git,agent_mail,host-profile,none,bv", true)
             .map_err(|error| error.to_string())?;
@@ -45322,6 +45624,32 @@ mod tests {
         ensure(
             !reset_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
             "none still clears next-action default rch",
+        )
+    }
+
+    #[test]
+    fn swarm_work_packet_source_parser_reports_own_surface() -> TestResult {
+        let default_sources = super::parse_swarm_work_packet_sources("default", false)
+            .map_err(|error| error.to_string())?;
+        ensure(
+            default_sources.contains(&crate::core::swarm_brief::SwarmBriefSourceKind::Rch),
+            "work-packet default includes rch",
+        )?;
+
+        let next_action_error = super::parse_swarm_next_action_sources("bogus", false)
+            .expect_err("unknown next-action source should fail");
+        ensure_contains(
+            &next_action_error.message(),
+            "Unknown swarm next-action source `bogus`.",
+            "next-action parser error surface",
+        )?;
+
+        let work_packet_error = super::parse_swarm_work_packet_sources("bogus", false)
+            .expect_err("unknown work-packet source should fail");
+        ensure_contains(
+            &work_packet_error.message(),
+            "Unknown swarm work-packet source `bogus`.",
+            "work-packet parser error surface",
         )
     }
 

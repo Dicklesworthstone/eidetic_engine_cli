@@ -45,6 +45,8 @@ fn malformed_tail_inputs() -> BeadsIntegrityInputs<'static> {
         jsonl_record_count: 2702,
         db_record_count: 2702,
         auto_import_enabled: true,
+        external_changes_pending_import: false,
+        dirty_issue_count: 0,
         merge_artifact_paths: &[],
         jsonl_parse_error: Some(JsonlParseError {
             line: 2703,

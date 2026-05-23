@@ -15,5 +15,7 @@ ee context "release" --json | jq '.data.pack.slo'
 Related schemas: `ee.resource.profile.v1`, `ee.coordination_snapshot.v1`.
 
 Non-goals: SLO output is a report, not a retry loop or remote execution policy.
+Arena-allocation metrics are planned as tracing/perf artifact fields first, not
+as `ee.pack.slo.v1` fields; see `docs/pack-arena-assembly.md`.
 
 Tracking Bead: `bd-1zb7k.5`

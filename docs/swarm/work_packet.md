@@ -5,9 +5,9 @@ Schema: `ee.swarm.work_packet.v1`
 `ee.swarm.work_packet.v1` is the deterministic, redacted, read-only artifact
 emitted by `ee swarm work-packet --json` before an agent chooses work in a
 crowded checkout. It packages the recommended lane, candidate Bead decisions,
-dirty-file collision evidence, active claims, Agent Mail freshness, RCH proof
-posture, required verification commands, source provenance, and exact reasons a
-task is safe, unsafe, blocked, or stale.
+dirty-file collision evidence, active claims, Agent Mail freshness, Beads
+tracker integrity, RCH proof posture, required verification commands, source
+provenance, and exact reasons a task is safe, unsafe, blocked, or stale.
 
 The packet composes existing read-only collectors from `ee swarm brief` and
 `ee swarm next-action`. It must not parse Beads, BV, Agent Mail, RCH, or Git
@@ -43,6 +43,33 @@ Fixture scenarios:
   `coordinate_before_claim`.
 - `degraded_mail_rch_topology`: Agent Mail is degraded and remote-only Cargo
   proof is blocked, so only static or docs work can proceed until RCH recovers.
+
+## Beads tracker integrity (bd-2z5ly.9)
+
+`trackerIntegrity` is the packet's bounded view of Beads JSONL/DB health. It is
+derived from `br doctor --json` or equivalent collector evidence, not by
+re-parsing raw tracker rows inside the work-packet layer.
+
+- `health` is one of `ok`, `merge_artifacts_warn`,
+  `external_changes_pending_import`, `db_jsonl_count_mismatch`, or
+  `jsonl_parse_error`.
+- `brReadsAuthoritative` is true only for `ok`; when false, consumers must not
+  treat `br ready` or a zero-conflict candidate list as proof that claiming is
+  safe.
+- `requiresCandidateDowngrade` is true for malformed JSONL and DB/JSONL count
+  mismatches. Candidate safety MUST refuse auto-claim-style advice in those
+  states.
+- Counts and paths are bounded summaries: JSONL row count, DB row count,
+  pending import count, dirty issue count, merge artifact count, and at most a
+  small sorted list of merge artifact paths.
+- `jsonlParseError` carries only the first invalid line/column plus a redacted,
+  length-capped excerpt. It must never include raw issue bodies beyond that
+  bounded diagnostic.
+
+The work-packet generator never repairs Beads state. Recovery remains explicit:
+inspect the malformed row, run `br doctor --json`, use
+`br --no-auto-import --allow-stale` for read-only fallback when needed, and only
+then claim or update tracker state.
 
 Implementation contract:
 

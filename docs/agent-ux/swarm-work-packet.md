@@ -1,0 +1,64 @@
+# Swarm Work Packet Contract
+
+`ee.swarm.work_packet.v1` is the read-only artifact emitted by
+`ee swarm work-packet --json` for agents joining a crowded checkout. The
+canonical payload schema is
+`docs/schemas/swarm/ee.swarm.work_packet.v1.json`; the response-envelope schema
+is `docs/schemas/ee.swarm.work_packet.v1.json`. Together they package the same
+coordination evidence agents currently collect by hand from `ee swarm brief`,
+`ee swarm next-action`, Beads, Agent Mail, Git, and RCH status.
+
+The packet is advisory. Generating it must not claim a bead, reserve files,
+send mail, stage files, run Cargo, or execute destructive commands. Agents still
+claim work through Beads, coordinate through Agent Mail, and reserve files with
+the reservation service when those systems are healthy enough.
+
+## Intended Flow
+
+```bash
+ee swarm next-action --workspace . --include-rch --json
+ee swarm work-packet --workspace . --include-rch --json
+```
+
+After inspecting the packet:
+
+1. If `safeToClaim` is `true`, claim the bead with `br update ... --status in_progress`.
+2. Reserve the packet's suggested file patterns through Agent Mail when Mail is healthy.
+3. Send a short coordination note in the bead thread.
+4. Run only the verification commands listed in `verification.requiredCommands`.
+5. If RCH is blocked, record the exact blocker and do not use local Cargo as substitute proof.
+
+## Required Guarantees
+
+- The packet uses the standard `ee.response.v2` success envelope.
+- `data.schema` is `ee.swarm.work_packet.v1`.
+- `redactionStatus` is
+  `counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content`.
+- All candidate, source, degraded-code, and command arrays are deterministic.
+- Every included source has a provenance record, even when the source is
+  degraded or unavailable.
+- Agent Mail archive/SQLite parity failures are represented as degraded source
+  evidence, not as an empty healthy inbox.
+- Beads JSONL/DB drift, merge artifacts, and malformed JSONL tails are
+  represented in `data.trackerIntegrity`; agents downgrade candidate safety
+  when `brReadsAuthoritative` is false and must not auto-claim when
+  `requiresCandidateDowngrade` is true.
+- RCH topology and remote-required fallback failures are represented as
+  verification blockers.
+- The packet never contains mail bodies, raw command output, source snippets, or
+  raw file contents.
+
+## Fixture Set
+
+The contract is seeded by three redacted examples:
+
+- `docs/schemas/swarm/ee.swarm.work_packet.v1.json` embeds data-level examples
+  for `healthy_small_repo`, `crowded_checkout`, and
+  `degraded_mail_rch_topology`.
+- `tests/fixtures/swarm_work_packet/healthy_small.json`
+- `tests/fixtures/swarm_work_packet/crowded_checkout.json`
+- `tests/fixtures/swarm_work_packet/degraded_mail_rch_topology.json`
+- `tests/fixtures/swarm_work_packet/integrity/malformed_jsonl_tail.json`
+
+Implementation work should keep these aligned with the emitted command and add
+failure mode fixtures if new degraded codes are introduced.

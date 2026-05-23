@@ -454,6 +454,97 @@
       "suggestedCommands": ["scripts/swarm_coordination_health.sh"],
       "mustNotDo": ["Do not block implementation waiting for live Agent Mail."]
     },
+    "ee.swarm.work_packet.v1": {
+      "schema": "ee.swarm.work_packet.v1",
+      "packetId": "swarm_work_packet_healthy_small_repo_0001",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "observedStateClass": "healthy_small_repo",
+      "recommendedAction": {
+        "action": "inspect_and_claim",
+        "candidateId": "bd-example.1",
+        "confidence": "high",
+        "safeToClaim": true,
+        "reasons": ["bead_ready", "no_dirty_path_overlap", "coordination_sources_fresh"],
+        "proofObligations": ["claim_bead_before_editing", "reserve_files_before_editing", "record_verification_evidence"],
+        "suggestedCommands": ["br show bd-example.1 --json", "br update bd-example.1 --status in_progress --json"]
+      },
+      "candidates": [
+        {
+          "id": "bd-example.1",
+          "title": "Document a small schema improvement",
+          "source": "beads_ready",
+          "status": "open",
+          "priority": 2,
+          "assignee": null,
+          "decision": "safe_to_claim",
+          "collisionRisk": "none",
+          "unsafeReasons": [],
+          "staleReasons": [],
+          "sourceRefs": ["br://bd-example.1"]
+        }
+      ],
+      "coordination": {
+        "activeClaimCount": 0,
+        "dirtyPathCount": 0,
+        "fileCollisionCount": 0,
+        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 0, "ackRequiredCount": 0, "degradedCodes": []},
+        "activeClaims": [],
+        "fileCollisions": []
+      },
+      "trackerIntegrity": {
+        "health": "ok",
+        "jsonlPath": ".beads/issues.jsonl",
+        "dbPath": ".beads/beads.db",
+        "jsonlRecordCount": 2707,
+        "dbRecordCount": 2707,
+        "pendingImportCount": 0,
+        "externalChangesPendingImport": false,
+        "dirtyIssueCount": 0,
+        "mergeArtifactPaths": [],
+        "mergeArtifactCount": 0,
+        "jsonlParseError": null,
+        "brReadsAuthoritative": true,
+        "requiresCandidateDowngrade": false,
+        "recoveryHint": null
+      },
+      "rchProofPosture": {
+        "sourceEnabled": true,
+        "remoteOnlyRequired": true,
+        "posture": "remote_ready",
+        "healthyWorkerCount": 2,
+        "safeToLaunchCargoVerification": true,
+        "localFallbackPrevented": true,
+        "blockerCodes": [],
+        "knownBlockers": [],
+        "retryAfter": null
+      },
+      "verification": {
+        "requiredCommands": [
+          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "after_substantive_rust_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+        ],
+        "staticChecks": [
+          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null}
+        ],
+        "closeoutEvidenceRequired": true
+      },
+      "sourceProvenance": [
+        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
+        {"source": "bv", "collector": "swarm next-action", "status": "fresh", "freshness": "current", "digest": "blake3:bv", "redaction": "ids_scores_reasons"},
+        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"},
+        {"source": "rch", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:rch", "redaction": "counts_worker_labels_no_raw_logs"}
+      ],
+      "mutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false
+      },
+      "degraded": []
+    },
     "ee.swarm_incident.v1": {
       "schema": "ee.swarm_incident.v1",
       "scenarioId": "rch_topology_blocked",

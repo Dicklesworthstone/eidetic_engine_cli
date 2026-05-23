@@ -63,6 +63,99 @@
       "type": "array",
       "items": {"type": "string"}
     },
+    "safeCommandString": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Bounded command metadata string. Executable command fields must not embed raw mail bodies, raw command output, raw home paths, secret-looking tokens, or private file contents.",
+      "not": {
+        "anyOf": [
+          {"pattern": "BEGIN PRIVATE KEY"},
+          {"pattern": "BEGIN OPENSSH PRIVATE KEY"},
+          {"pattern": "ghp_[A-Za-z0-9_]+"},
+          {"pattern": "Bearer [A-Za-z0-9._-]+"},
+          {"pattern": "DATABASE_URL="},
+          {"pattern": "From: "},
+          {"pattern": "Subject: "},
+          {"pattern": "Message-ID:"},
+          {"pattern": "body:"},
+          {"pattern": "raw_inbox"},
+          {"pattern": "stdout:"},
+          {"pattern": "stderr:"},
+          {"pattern": "/Users/[^\\s]+"},
+          {"pattern": "/home/[^\\s]+"}
+        ]
+      }
+    },
+    "argvArray": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Shell-free argv vector for agent execution. Consumers may run this directly only when copySafety is safe_structured_argv and shellRequired is false.",
+      "items": {"$ref": "#/definitions/safeCommandString"}
+    },
+    "copySafety": {
+      "type": "string",
+      "enum": [
+        "safe_structured_argv",
+        "display_only",
+        "shell_required_review",
+        "forbidden_until_human_approval"
+      ]
+    },
+    "commandSubstrate": {
+      "type": "string",
+      "enum": ["agent_mail", "beads", "bv", "ee", "git", "human", "jq", "rch", "static_local", "none"]
+    },
+    "commandAction": {
+      "type": "object",
+      "description": "Structured command action for agent-facing work packets. The displayCommand is for humans; argv is the only execution surface for safe automatic use.",
+      "required": [
+        "commandId",
+        "displayCommand",
+        "argv",
+        "shellRequired",
+        "copySafety",
+        "mutatesState",
+        "requiredSubstrate",
+        "when",
+        "rationale"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]+$"},
+        "displayCommand": {"$ref": "#/definitions/safeCommandString"},
+        "argv": {"$ref": "#/definitions/argvArray"},
+        "shellRequired": {"type": "boolean"},
+        "copySafety": {"$ref": "#/definitions/copySafety"},
+        "mutatesState": {"type": "boolean"},
+        "requiredSubstrate": {"$ref": "#/definitions/commandSubstrate"},
+        "when": {"$ref": "#/definitions/safeCommandString"},
+        "rationale": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "not": {
+            "anyOf": [
+              {"pattern": "BEGIN PRIVATE KEY"},
+              {"pattern": "ghp_[A-Za-z0-9_]+"},
+              {"pattern": "DATABASE_URL="},
+              {"pattern": "From: "},
+              {"pattern": "Subject: "},
+              {"pattern": "Message-ID:"}
+            ]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"shellRequired": {"const": true}}, "required": ["shellRequired"]},
+          "then": {"properties": {"copySafety": {"enum": ["shell_required_review", "forbidden_until_human_approval"]}}}
+        },
+        {
+          "if": {"properties": {"copySafety": {"const": "safe_structured_argv"}}, "required": ["copySafety"]},
+          "then": {"properties": {"shellRequired": {"const": false}}}
+        }
+      ]
+    },
     "recommendedAction": {
       "type": "object",
       "required": [
@@ -92,7 +185,15 @@
         "safeToClaim": {"type": ["boolean", "null"]},
         "reasons": {"$ref": "#/definitions/stringArray"},
         "proofObligations": {"$ref": "#/definitions/stringArray"},
-        "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+        "suggestedCommands": {
+          "$ref": "#/definitions/stringArray",
+          "description": "Legacy display-only command strings retained during migration. Consumers must prefer suggestedCommandActions.argv when present and must not treat these strings as shell-safe executable commands."
+        },
+        "suggestedCommandActions": {
+          "type": "array",
+          "description": "Structured command actions for normal agent workflows. Shell-free argv entries with copySafety=safe_structured_argv are safe to execute without shell evaluation.",
+          "items": {"$ref": "#/definitions/commandAction"}
+        }
       }
     },
     "candidate": {
@@ -423,7 +524,11 @@
       "additionalProperties": false,
       "properties": {
         "commandId": {"type": "string"},
-        "commandTemplate": {"type": "string"},
+        "commandTemplate": {
+          "type": "string",
+          "description": "Legacy display-only command text retained during migration. This field MUST NOT be executed directly and is not shell-safe; consumers must prefer commandAction.argv when present."
+        },
+        "commandAction": {"$ref": "#/definitions/commandAction"},
         "requiredSubstrate": {"type": "string", "enum": ["rch", "static_local", "none"]},
         "when": {"type": "string"},
         "lastOutcome": {

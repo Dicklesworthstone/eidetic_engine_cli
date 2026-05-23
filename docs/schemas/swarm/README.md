@@ -18,6 +18,10 @@ The verification broker view schema is `ee.verification.broker_view.v1`.
 retained verification run records. It is marked shipped because `bd-6boyo.2`
 is closed and the lookup surface is available in current builds.
 
+The work-packet contract is `ee.swarm.work_packet.v1`. It is emitted by
+`ee swarm work-packet --json` as a deterministic read-only onboarding artifact
+composed from existing swarm brief and next-action evidence.
+
 Each schema carries `x-ee-status` so agents can distinguish implemented
 surfaces from documented future contracts. A schema with `"shipped": false`
 must point at an open or in-progress Bead and must also set

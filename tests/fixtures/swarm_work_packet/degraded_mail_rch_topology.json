@@ -1,0 +1,165 @@
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "schema": "ee.swarm.work_packet.v1",
+    "workspace": "/repo",
+    "packetId": "swarm_work_packet_degraded_mail_rch_0001",
+    "generatedAt": "2026-05-22T21:47:00Z",
+    "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+    "determinismKey": "blake3:degraded-mail-rch-topology",
+    "intendedUse": "agent_preclaim_advisory",
+    "nonMutationInvariant": {
+      "claimsBeads": false,
+      "reservesFiles": false,
+      "sendsMail": false,
+      "stagesFiles": false,
+      "runsCargo": false,
+      "runsDestructiveCommands": false
+    },
+    "sourceProvenance": [
+      {
+        "source": "agent_mail",
+        "status": "degraded",
+        "freshness": "unknown",
+        "degradedCodes": [
+          "agent_mail_unavailable"
+        ],
+        "provenance": "health_check degraded_read_only archive ahead of sqlite index"
+      },
+      {
+        "source": "rch",
+        "status": "degraded",
+        "freshness": "current",
+        "degradedCodes": [
+          "rch_worker_topology_blocked",
+          "rch_remote_required_fallback_prevented"
+        ],
+        "provenance": "rch exec remote-required preflight"
+      },
+      {
+        "source": "beads",
+        "status": "ready",
+        "freshness": "current",
+        "degradedCodes": [],
+        "provenance": "br ready --json"
+      }
+    ],
+    "candidateLane": {
+      "beadId": "bd-proof",
+      "title": "Run focused Cargo proof",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "blocked_by_verification",
+      "decisionReasons": [
+        "remote_only_required",
+        "rch_topology_blocked",
+        "agent_mail_inbox_unavailable"
+      ],
+      "suggestedReservations": [],
+      "proofObligations": [
+        "record_exact_rch_blocker",
+        "do_not_run_local_cargo",
+        "choose_static_or_docs_work_until_remote_ready"
+      ],
+      "evidenceCaveats": [
+        "degraded:agent_mail:agent_mail_unavailable",
+        "degraded:rch:rch_worker_topology_blocked"
+      ]
+    },
+    "coordination": {
+      "activeReservationCount": 0,
+      "holderAgents": [],
+      "inboxUnavailable": true,
+      "unreadInboxCount": null,
+      "ackRequiredCount": null,
+      "agentMailHealth": "degraded_read_only"
+    },
+    "trackerIntegrity": {
+      "health": "external_changes_pending_import",
+      "jsonlPath": ".beads/issues.jsonl",
+      "dbPath": ".beads/beads.db",
+      "jsonlRecordCount": 2707,
+      "dbRecordCount": 2704,
+      "pendingImportCount": 3,
+      "externalChangesPendingImport": true,
+      "dirtyIssueCount": 0,
+      "mergeArtifactPaths": [],
+      "mergeArtifactCount": 0,
+      "jsonlParseError": null,
+      "brReadsAuthoritative": false,
+      "requiresCandidateDowngrade": false,
+      "recoveryHint": "Run br sync (or br --no-auto-import --allow-stale for read-only inspection) before claiming work."
+    },
+    "checkout": {
+      "dirtyPathCount": 1,
+      "dirtyPathsRedacted": [
+        ".beads/issues.jsonl"
+      ],
+      "collisionRisk": "unknown"
+    },
+    "verification": {
+      "remoteOnlyRequired": true,
+      "remoteOnlySafe": false,
+      "rchPosture": "remote_required_fallback_prevented",
+      "blockers": [
+        "Project path normalization failed: resolved workspace is outside canonical root",
+        "RCH_REQUIRE_REMOTE refused local fallback"
+      ],
+      "requiredCommands": [
+        {
+          "kind": "cargo_test",
+          "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test --lib focused_target",
+          "mustUseRch": true,
+          "localFallbackAllowed": false
+        }
+      ]
+    },
+    "requiredActions": [
+      {
+        "order": 1,
+        "kind": "record_blocker",
+        "command": "br comments add bd-proof --message '<exact RCH blocker>' --json",
+        "why": "The packet cannot prove Cargo work while remote-only verification is blocked."
+      }
+    ],
+    "doNotProceedBecause": [
+      "remote_only_rch_not_safe",
+      "agent_mail_inbox_unavailable"
+    ],
+    "safeToClaim": false,
+    "degraded": [
+      {
+        "code": "agent_mail_unavailable",
+        "source": "agent_mail",
+        "severity": "warning",
+        "message": "Agent Mail inbox and reservation state are unavailable.",
+        "repair": "Use a fresh redacted Agent Mail snapshot or wait for Mail recovery."
+      },
+      {
+        "code": "rch_remote_required_fallback_prevented",
+        "source": "rch",
+        "severity": "high",
+        "message": "RCH remote-required mode refused local fallback after topology failure.",
+        "repair": "Fix RCH topology or choose non-Cargo work."
+      }
+    ]
+  },
+  "degraded": [
+    {
+      "code": "agent_mail_unavailable",
+      "source": "agent_mail",
+      "severity": "warning",
+      "message": "Agent Mail inbox and reservation state are unavailable.",
+      "repair": "Use a fresh redacted Agent Mail snapshot or wait for Mail recovery."
+    },
+    {
+      "code": "rch_remote_required_fallback_prevented",
+      "source": "rch",
+      "severity": "high",
+      "message": "RCH remote-required mode refused local fallback after topology failure.",
+      "repair": "Fix RCH topology or choose non-Cargo work."
+    }
+  ]
+}

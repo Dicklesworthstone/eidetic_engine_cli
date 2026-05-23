@@ -306,6 +306,22 @@ fn swarm_profile_and_host_readiness_flags_are_help_discoverable() -> TestResult 
         "ee swarm next-action --help",
     )?;
 
+    let swarm_work_packet_help = help_for(&["ee", "swarm", "work-packet", "--help"])?;
+    assert_contains_all(
+        &swarm_work_packet_help,
+        &[
+            "--sources",
+            "--include-rch",
+            "--agent-mail-snapshot",
+            "--verifier-evidence",
+            "--agent-inventory-only",
+            "--max-recent-commits",
+            "--command-timeout-ms",
+            "--require-sources",
+        ],
+        "ee swarm work-packet --help",
+    )?;
+
     let diag_host_profile_help = help_for(&["ee", "diag", "host-profile", "--help"])?;
     assert_contains_all(
         &diag_host_profile_help,
