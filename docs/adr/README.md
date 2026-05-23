@@ -47,3 +47,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0039: Write-Hot-Path V2 Implementation Gate](0039-write-hot-path-v2-implementation-gate.md)
 - [ADR 0040: Per-Workspace Shard Fan-Out](0040-per-workspace-shard-fanout.md)
 - [ADR 0042: Symbol Graph Derived Index](0042-symbol-graph-derived-index.md)
+- [ADR 0044: High-Risk Reflection Routing](0044-high-risk-reflection-routing.md)
