@@ -163,6 +163,14 @@ pub struct BeadsIntegrityInputs<'a> {
     /// Whether `br` is configured to auto-import JSONL on read.
     /// Affects pending-import semantics.
     pub auto_import_enabled: bool,
+    /// Whether Beads sync metadata says external JSONL changes are
+    /// pending import even when the exported row count currently
+    /// matches the DB row count.
+    pub external_changes_pending_import: bool,
+    /// Count of locally dirty Beads issues reported by `br doctor`,
+    /// when available. This is a bounded summary only; the report
+    /// never includes issue bodies or raw tracker rows.
+    pub dirty_issue_count: u64,
     /// Project-relative paths to merge-conflict artifacts found
     /// alongside `issues.jsonl`. Already-redacted by the collector.
     pub merge_artifact_paths: &'a [String],
@@ -185,12 +193,83 @@ pub struct BeadsIntegrityReport {
     pub jsonl_record_count: u64,
     pub db_record_count: u64,
     pub pending_import_count: u64,
+    pub external_changes_pending_import: bool,
+    pub dirty_issue_count: u64,
     pub merge_artifact_paths: Vec<String>,
     pub merge_artifact_count: u64,
     pub jsonl_parse_error: Option<JsonlParseError>,
+    pub br_reads_authoritative: bool,
     pub requires_candidate_downgrade: bool,
     pub recovery_hint: Option<&'static str>,
 }
+
+/// Owned input bundle returned by the `br doctor --json` adapter.
+///
+/// This lets the collector keep `String`/`Vec` ownership while still
+/// feeding the existing borrowed [`BeadsIntegrityInputs`] contract into
+/// [`compose_integrity_report`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedBeadsIntegrityInputs {
+    pub jsonl_path: String,
+    pub db_path: String,
+    pub jsonl_record_count: u64,
+    pub db_record_count: u64,
+    pub auto_import_enabled: bool,
+    pub external_changes_pending_import: bool,
+    pub dirty_issue_count: u64,
+    pub merge_artifact_paths: Vec<String>,
+    pub jsonl_parse_error: Option<JsonlParseError>,
+}
+
+impl OwnedBeadsIntegrityInputs {
+    #[must_use]
+    pub fn as_inputs(&self) -> BeadsIntegrityInputs<'_> {
+        BeadsIntegrityInputs {
+            jsonl_path: &self.jsonl_path,
+            db_path: &self.db_path,
+            jsonl_record_count: self.jsonl_record_count,
+            db_record_count: self.db_record_count,
+            auto_import_enabled: self.auto_import_enabled,
+            external_changes_pending_import: self.external_changes_pending_import,
+            dirty_issue_count: self.dirty_issue_count,
+            merge_artifact_paths: &self.merge_artifact_paths,
+            jsonl_parse_error: self.jsonl_parse_error.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn compose_report(&self) -> BeadsIntegrityReport {
+        compose_integrity_report(self.as_inputs())
+    }
+}
+
+/// Parse failure while translating `br doctor --json` into the
+/// deterministic work-packet integrity input model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeadsDoctorJsonError {
+    message: String,
+}
+
+impl BeadsDoctorJsonError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for BeadsDoctorJsonError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for BeadsDoctorJsonError {}
 
 /// Compose a deterministic [`BeadsIntegrityReport`] from the
 /// already-collected inputs.
@@ -222,6 +301,7 @@ pub fn compose_integrity_report(inputs: BeadsIntegrityInputs<'_>) -> BeadsIntegr
         inputs.jsonl_record_count,
         inputs.db_record_count,
         inputs.auto_import_enabled,
+        inputs.external_changes_pending_import,
         merge_artifact_count > 0,
     );
 
@@ -240,12 +320,128 @@ pub fn compose_integrity_report(inputs: BeadsIntegrityInputs<'_>) -> BeadsIntegr
         jsonl_record_count: inputs.jsonl_record_count,
         db_record_count: inputs.db_record_count,
         pending_import_count,
+        external_changes_pending_import: inputs.external_changes_pending_import,
+        dirty_issue_count: inputs.dirty_issue_count,
         merge_artifact_paths,
         merge_artifact_count,
         jsonl_parse_error: parse_error,
+        br_reads_authoritative: matches!(health, BeadsIntegrityHealth::Ok),
         requires_candidate_downgrade: health.requires_candidate_downgrade(),
         recovery_hint: health.recovery_hint(),
     }
+}
+
+/// Translate a `br doctor --json` payload into a deterministic
+/// [`BeadsIntegrityReport`].
+///
+/// This adapter intentionally reads only bounded metadata from the
+/// doctor payload: check names/statuses, row counts, merge-artifact
+/// filenames, dirty issue counts, and the first parse-error location.
+/// It does not parse `.beads/issues.jsonl`, open `.beads/beads.db`, run
+/// `br`, or mutate tracker state.
+pub fn compose_integrity_report_from_br_doctor_json(
+    raw_json: &str,
+    jsonl_path: &str,
+    db_path: &str,
+    auto_import_enabled: bool,
+) -> Result<BeadsIntegrityReport, BeadsDoctorJsonError> {
+    Ok(beads_integrity_inputs_from_br_doctor_json(
+        raw_json,
+        jsonl_path,
+        db_path,
+        auto_import_enabled,
+    )?
+    .compose_report())
+}
+
+/// Translate `br doctor --json` into owned integrity inputs for later
+/// packet composition.
+pub fn beads_integrity_inputs_from_br_doctor_json(
+    raw_json: &str,
+    jsonl_path: &str,
+    db_path: &str,
+    auto_import_enabled: bool,
+) -> Result<OwnedBeadsIntegrityInputs, BeadsDoctorJsonError> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_json)
+        .map_err(|error| BeadsDoctorJsonError::new(format!("parse br doctor JSON: {error}")))?;
+    let checks = value
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| BeadsDoctorJsonError::new("br doctor JSON missing checks[]"))?;
+
+    let jsonl_parse = find_doctor_check(checks, "jsonl.parse")
+        .ok_or_else(|| BeadsDoctorJsonError::new("br doctor JSON missing jsonl.parse check"))?;
+    let counts_check = find_doctor_check(checks, "counts.db_vs_jsonl");
+    let merge_check = find_doctor_check(checks, "jsonl.merge_artifacts");
+    let sync_check = find_doctor_check(checks, "sync.metadata");
+
+    let jsonl_record_count = doctor_u64_detail(jsonl_parse, &["records"])
+        .or_else(|| first_u64_from_text(doctor_message(jsonl_parse)))
+        .ok_or_else(|| {
+            BeadsDoctorJsonError::new("br doctor jsonl.parse check missing record count")
+        })?;
+    let db_record_count = counts_check
+        .and_then(|check| {
+            doctor_u64_detail(
+                check,
+                &[
+                    "db_records",
+                    "dbRecords",
+                    "database_records",
+                    "databaseRecords",
+                    "db_count",
+                    "dbCount",
+                    "db",
+                    "records",
+                ],
+            )
+            .or_else(|| {
+                if doctor_status(check) == Some("ok") {
+                    first_u64_from_text(doctor_message(check))
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or(jsonl_record_count);
+    let jsonl_record_count = counts_check
+        .and_then(|check| {
+            doctor_u64_detail(
+                check,
+                &[
+                    "jsonl_records",
+                    "jsonlRecords",
+                    "jsonl_count",
+                    "jsonlCount",
+                    "export_records",
+                    "exportRecords",
+                    "jsonl",
+                ],
+            )
+        })
+        .unwrap_or(jsonl_record_count);
+
+    let merge_artifact_paths = merge_check
+        .and_then(|check| doctor_string_array_detail(check, &["files", "paths", "artifacts"]))
+        .unwrap_or_default();
+    let dirty_issue_count = sync_check
+        .and_then(|check| doctor_u64_detail(check, &["dirty_issues", "dirtyIssues"]))
+        .unwrap_or(0);
+    let external_changes_pending_import =
+        sync_check.is_some_and(doctor_message_indicates_external_pending_import);
+    let jsonl_parse_error = doctor_parse_error(jsonl_parse);
+
+    Ok(OwnedBeadsIntegrityInputs {
+        jsonl_path: jsonl_path.to_owned(),
+        db_path: db_path.to_owned(),
+        jsonl_record_count,
+        db_record_count,
+        auto_import_enabled,
+        external_changes_pending_import,
+        dirty_issue_count,
+        merge_artifact_paths,
+        jsonl_parse_error,
+    })
 }
 
 /// Pick the most severe [`BeadsIntegrityHealth`] state implied by
@@ -257,6 +453,7 @@ pub fn classify_health(
     jsonl_count: u64,
     db_count: u64,
     auto_import_enabled: bool,
+    external_changes_pending_import: bool,
     has_merge_artifacts: bool,
 ) -> BeadsIntegrityHealth {
     let mut candidate = BeadsIntegrityHealth::Ok;
@@ -276,11 +473,128 @@ pub fn classify_health(
             promote(BeadsIntegrityHealth::DbJsonlCountMismatch);
         }
     }
+    if external_changes_pending_import && !has_parse_error {
+        promote(BeadsIntegrityHealth::ExternalChangesPendingImport);
+    }
     if has_parse_error {
         promote(BeadsIntegrityHealth::JsonlParseError);
     }
 
     candidate
+}
+
+fn find_doctor_check<'a>(
+    checks: &'a [serde_json::Value],
+    name: &str,
+) -> Option<&'a serde_json::Value> {
+    checks
+        .iter()
+        .find(|check| check.get("name").and_then(serde_json::Value::as_str) == Some(name))
+}
+
+fn doctor_status(check: &serde_json::Value) -> Option<&str> {
+    check.get("status").and_then(serde_json::Value::as_str)
+}
+
+fn doctor_message(check: &serde_json::Value) -> &str {
+    check
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+fn doctor_message_indicates_external_pending_import(check: &serde_json::Value) -> bool {
+    let message = doctor_message(check).to_ascii_lowercase();
+    message.contains("external changes pending import")
+        && !message.contains("no external changes pending import")
+}
+
+fn doctor_details(
+    check: &serde_json::Value,
+) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    check.get("details").and_then(serde_json::Value::as_object)
+}
+
+fn doctor_u64_detail(check: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    let details = doctor_details(check)?;
+    keys.iter().find_map(|key| {
+        let value = details.get(*key)?;
+        value
+            .as_u64()
+            .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+            .or_else(|| value.as_str().and_then(|text| text.parse::<u64>().ok()))
+    })
+}
+
+fn doctor_string_detail(check: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let details = doctor_details(check)?;
+    keys.iter().find_map(|key| {
+        details
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
+fn doctor_string_array_detail(check: &serde_json::Value, keys: &[&str]) -> Option<Vec<String>> {
+    let details = doctor_details(check)?;
+    keys.iter().find_map(|key| {
+        details.get(*key)?.as_array().map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+    })
+}
+
+fn doctor_parse_error(check: &serde_json::Value) -> Option<JsonlParseError> {
+    let status = doctor_status(check)?;
+    if matches!(status, "ok" | "warn") {
+        return None;
+    }
+
+    let message = doctor_message(check);
+    let line = doctor_u64_detail(check, &["line", "line_number", "lineNumber"])
+        .or_else(|| u64_after_token(message, "line"))
+        .unwrap_or(1);
+    let column =
+        doctor_u64_detail(check, &["column", "col"]).or_else(|| u64_after_token(message, "column"));
+    let excerpt = doctor_string_detail(
+        check,
+        &[
+            "excerpt",
+            "line_excerpt",
+            "lineExcerpt",
+            "offending_line",
+            "offendingLine",
+        ],
+    )
+    .unwrap_or_else(|| message.to_owned());
+
+    Some(JsonlParseError {
+        line,
+        column,
+        excerpt,
+    })
+}
+
+fn first_u64_from_text(text: &str) -> Option<u64> {
+    unsigned_numbers(text).into_iter().next()
+}
+
+fn u64_after_token(text: &str, token: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let index = lower.find(token)?;
+    first_u64_from_text(&text[index + token.len()..])
+}
+
+fn unsigned_numbers(text: &str) -> Vec<u64> {
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
 }
 
 fn truncate_parse_error(err: &JsonlParseError) -> JsonlParseError {
@@ -341,9 +655,19 @@ mod tests {
             jsonl_record_count: 100,
             db_record_count: 100,
             auto_import_enabled: true,
+            external_changes_pending_import: false,
+            dirty_issue_count: 0,
             merge_artifact_paths: merge_artifacts,
             jsonl_parse_error: parse_error,
         }
+    }
+
+    fn doctor_payload(checks: serde_json::Value) -> String {
+        serde_json::json!({
+            "ok": true,
+            "checks": checks,
+        })
+        .to_string()
     }
 
     #[test]
@@ -403,6 +727,230 @@ mod tests {
             "pending import is a warning, not a hard downgrade",
         )?;
         ensure_equal(&report.pending_import_count, &5, "pending=5")
+    }
+
+    #[test]
+    fn br_doctor_json_ok_maps_to_authoritative_report() -> TestResult {
+        let raw = doctor_payload(serde_json::json!([
+            {
+                "name": "jsonl.merge_artifacts",
+                "status": "ok",
+                "message": "No merge artifacts",
+                "details": { "files": [] }
+            },
+            {
+                "name": "jsonl.parse",
+                "status": "ok",
+                "message": "Parsed 2708 records",
+                "details": { "records": 2708 }
+            },
+            {
+                "name": "counts.db_vs_jsonl",
+                "status": "ok",
+                "message": "Both have 2708 records",
+                "details": { "db": 2708, "jsonl": 2708 }
+            },
+            {
+                "name": "sync.metadata",
+                "status": "ok",
+                "message": "No external changes pending import",
+                "details": { "dirty_issues": 0 }
+            }
+        ]));
+        let report = compose_integrity_report_from_br_doctor_json(
+            &raw,
+            ".beads/issues.jsonl",
+            ".beads/beads.db",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.health, &BeadsIntegrityHealth::Ok, "doctor ok")?;
+        ensure_equal(&report.jsonl_record_count, &2708, "jsonl count")?;
+        ensure_equal(&report.db_record_count, &2708, "db count")?;
+        ensure_equal(&report.dirty_issue_count, &0, "dirty issues")?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &true,
+            "ok br reads authoritative",
+        )
+    }
+
+    #[test]
+    fn br_doctor_json_external_pending_import_uses_sync_metadata() -> TestResult {
+        let raw = doctor_payload(serde_json::json!([
+            {
+                "name": "jsonl.merge_artifacts",
+                "status": "ok",
+                "message": "No merge artifacts",
+                "details": { "files": [] }
+            },
+            {
+                "name": "jsonl.parse",
+                "status": "ok",
+                "message": "Parsed 2708 records",
+                "details": { "records": 2708 }
+            },
+            {
+                "name": "counts.db_vs_jsonl",
+                "status": "ok",
+                "message": "Both have 2708 records",
+                "details": { "db": 2708, "jsonl": 2708 }
+            },
+            {
+                "name": "sync.metadata",
+                "status": "ok",
+                "message": "External changes pending import",
+                "details": { "dirty_issues": 2 }
+            }
+        ]));
+        let report = compose_integrity_report_from_br_doctor_json(
+            &raw,
+            ".beads/issues.jsonl",
+            ".beads/beads.db",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.health,
+            &BeadsIntegrityHealth::ExternalChangesPendingImport,
+            "sync metadata pending import",
+        )?;
+        ensure_equal(
+            &report.external_changes_pending_import,
+            &true,
+            "external pending flag",
+        )?;
+        ensure_equal(&report.dirty_issue_count, &2, "dirty issues")?;
+        ensure_equal(
+            &report.requires_candidate_downgrade,
+            &false,
+            "metadata-only pending import remains a warning",
+        )?;
+        ensure_equal(
+            &report.br_reads_authoritative,
+            &false,
+            "pending import means current br reads need caution",
+        )
+    }
+
+    #[test]
+    fn br_doctor_json_count_mismatch_reads_db_and_jsonl_detail_keys() -> TestResult {
+        let raw = doctor_payload(serde_json::json!([
+            {
+                "name": "jsonl.merge_artifacts",
+                "status": "warn",
+                "message": "Merge artifacts detected in .beads/",
+                "details": { "files": ["beads.base.jsonl"] }
+            },
+            {
+                "name": "jsonl.parse",
+                "status": "ok",
+                "message": "Parsed 2708 records",
+                "details": { "records": 2708 }
+            },
+            {
+                "name": "counts.db_vs_jsonl",
+                "status": "warn",
+                "message": "DB and JSONL counts differ",
+                "details": { "db": 2709, "jsonl": 2708 }
+            },
+            {
+                "name": "sync.metadata",
+                "status": "ok",
+                "message": "External changes pending import",
+                "details": { "dirty_issues": 0 }
+            }
+        ]));
+        let report = compose_integrity_report_from_br_doctor_json(
+            &raw,
+            ".beads/issues.jsonl",
+            ".beads/beads.db",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.health,
+            &BeadsIntegrityHealth::DbJsonlCountMismatch,
+            "db/jsonl detail keys must preserve mismatch",
+        )?;
+        ensure_equal(&report.db_record_count, &2709, "db count")?;
+        ensure_equal(&report.jsonl_record_count, &2708, "jsonl count")?;
+        ensure_equal(
+            &report.pending_import_count,
+            &0,
+            "db > jsonl saturates pending count at zero",
+        )?;
+        ensure_equal(
+            &report.merge_artifact_paths,
+            &vec!["beads.base.jsonl".to_owned()],
+            "merge artifacts",
+        )
+    }
+
+    #[test]
+    fn br_doctor_json_parse_error_captures_location_and_excerpt() -> TestResult {
+        let raw = doctor_payload(serde_json::json!([
+            {
+                "name": "jsonl.merge_artifacts",
+                "status": "ok",
+                "message": "No merge artifacts",
+                "details": { "files": [] }
+            },
+            {
+                "name": "jsonl.parse",
+                "status": "error",
+                "message": "Invalid JSON at line 2703 column 12",
+                "details": {
+                    "records": 2702,
+                    "line": 2703,
+                    "column": 12,
+                    "excerpt": "{\"id\":\"bd-malformed-tail\""
+                }
+            },
+            {
+                "name": "counts.db_vs_jsonl",
+                "status": "ok",
+                "message": "Both have 2702 records",
+                "details": { "db": 2702, "jsonl": 2702 }
+            },
+            {
+                "name": "sync.metadata",
+                "status": "ok",
+                "message": "No external changes pending import",
+                "details": { "dirty_issues": 0 }
+            }
+        ]));
+        let report = compose_integrity_report_from_br_doctor_json(
+            &raw,
+            ".beads/issues.jsonl",
+            ".beads/beads.db",
+            true,
+        )
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &report.health,
+            &BeadsIntegrityHealth::JsonlParseError,
+            "doctor parse error",
+        )?;
+        let parse_error = report
+            .jsonl_parse_error
+            .ok_or_else(|| "expected parse error details".to_owned())?;
+        ensure_equal(&parse_error.line, &2703, "parse line")?;
+        ensure_equal(&parse_error.column, &Some(12), "parse column")?;
+        ensure_equal(
+            &parse_error.excerpt,
+            &"{\"id\":\"bd-malformed-tail\"".to_owned(),
+            "parse excerpt",
+        )?;
+        ensure_equal(
+            &report.requires_candidate_downgrade,
+            &true,
+            "parse errors must downgrade candidate safety",
+        )
     }
 
     #[test]

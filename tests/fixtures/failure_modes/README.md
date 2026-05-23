@@ -266,6 +266,7 @@ in the same commit, keeping the catalog complete by construction.
 | `beads_tracker_stale` | swarm brief | warning | bd-1zb7k.13.3 (C3) |
 | `bv_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `agent_mail_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `agent_mail_semantic_readiness_failed` | swarm brief, swarm work-packet | warning | bd-2s48u |
 | `rch_remote_required_fallback_prevented` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
 | `rch_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `rch_worker_topology_blocked` | swarm brief | warning | bd-1zb7k.13.4 (C4) |
