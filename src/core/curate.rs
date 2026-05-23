@@ -13199,8 +13199,8 @@ mod tests {
     }
 
     #[test]
-    fn apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict(
-    ) -> TestResult {
+    fn apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict()
+    -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
