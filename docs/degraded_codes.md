@@ -2935,7 +2935,7 @@ ee mesh discovery-policy --workspace . --json
 
 **Expected emission.** Message contains: `discoveryMode is allowlist ... allowlist is empty ... no peers will be probed`
 
-**Repair hint.** `ee mesh discovery-policy allow <node-key>`
+**Repair hint.** `ee mesh discovery-policy allow --help`
 
 **Fixture.** [`tests/fixtures/failure_modes/discovery_policy_empty_allowlist.json`](../tests/fixtures/failure_modes/discovery_policy_empty_allowlist.json)
 

@@ -693,7 +693,7 @@ pub fn evaluate_policy_degradations(
                 "discoveryMode is {} but the allowlist is empty; no peers will be probed",
                 DiscoveryMode::Allowlist.as_str(),
             ),
-            repair: "ee mesh discovery-policy allow <node-key>",
+            repair: "ee mesh discovery-policy allow --help",
         });
     }
     out
@@ -1318,6 +1318,19 @@ mod tests {
             degradations
                 .iter()
                 .any(|d| d.code == DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE)
+        );
+        let empty_allowlist = degradations
+            .iter()
+            .find(|d| d.code == DISCOVERY_POLICY_EMPTY_ALLOWLIST_CODE)
+            .expect("empty allowlist degradation");
+        assert_eq!(
+            empty_allowlist.repair,
+            "ee mesh discovery-policy allow --help"
+        );
+        assert!(
+            !empty_allowlist.repair.contains('<') && !empty_allowlist.repair.contains('>'),
+            "repair hint must not expose an unresolved metavariable: {}",
+            empty_allowlist.repair
         );
     }
 

@@ -26,6 +26,6 @@
       "allowlist is empty",
       "no peers will be probed"
     ],
-    "repair_contains": "ee mesh discovery-policy allow <node-key>"
+    "repair_contains": "ee mesh discovery-policy allow --help"
   }
 }

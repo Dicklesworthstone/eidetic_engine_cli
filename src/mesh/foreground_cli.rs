@@ -93,7 +93,7 @@ impl MeshCliDegradation {
             severity: "info",
             message: "Foreground sync --once did not contact peers because SRR6.7 anti-entropy transport is not implemented yet."
                 .to_owned(),
-            repair: "Use `ee mesh export --out <file>` and `ee mesh import --file <file>` for local file exchange until peer sync lands."
+            repair: "Use `ee mesh export --out mesh-export.json` and `ee mesh import --file mesh-export.json` for local file exchange until peer sync lands."
                 .to_owned(),
         }
     }
@@ -945,7 +945,7 @@ fn auto_enrollment_status_for_snapshot(
     let action_graph = auto_status_action_graph(snapshot, &signals);
     let next_action_hint = auto_status_next_action_hint(snapshot, &signals, new_peer_count);
     let mut degraded = snapshot.degraded.clone();
-    degraded.extend(auto_status_degradations(&signals));
+    degraded.extend(auto_status_degradations(snapshot, &signals));
 
     MeshAutoEnrollmentStatus {
         schema: MESH_AUTO_STATUS_SCHEMA_V1,
@@ -1244,7 +1244,10 @@ fn auto_status_next_action_hint(
         .to_owned()
 }
 
-fn auto_status_degradations(signals: &MeshAutoStatusSignals) -> Vec<MeshCliDegradation> {
+fn auto_status_degradations(
+    snapshot: &MeshForegroundSnapshot,
+    signals: &MeshAutoStatusSignals,
+) -> Vec<MeshCliDegradation> {
     let mut degraded = Vec::new();
     if signals.tailnet_changed {
         degraded.push(MeshCliDegradation {
@@ -1252,8 +1255,10 @@ fn auto_status_degradations(signals: &MeshAutoStatusSignals) -> Vec<MeshCliDegra
             severity: "medium",
             message: "Auto-enrollment materialized state belongs to a different tailnet."
                 .to_owned(),
-            repair: "Run `ee mesh disable --workspace <path>` and then `ee mesh auto-enroll --workspace <path>`."
-                .to_owned(),
+            repair: format!(
+                "Run `ee mesh disable --workspace \"{}\"` and then `ee mesh auto-enroll --workspace \"{}\"`.",
+                snapshot.workspace_path, snapshot.workspace_path
+            ),
         });
     }
     if signals.node_key_changed {
@@ -1263,8 +1268,10 @@ fn auto_status_degradations(signals: &MeshAutoStatusSignals) -> Vec<MeshCliDegra
             message:
                 "Auto-enrollment materialized state was created on a different Tailscale node key."
                     .to_owned(),
-            repair: "Run `ee mesh disable --workspace <path> --reason \"restored from different machine\"` and then `ee mesh auto-enroll --workspace <path>`."
-                .to_owned(),
+            repair: format!(
+                "Run `ee mesh disable --workspace \"{}\" --reason \"restored from different machine\"` and then `ee mesh auto-enroll --workspace \"{}\"`.",
+                snapshot.workspace_path, snapshot.workspace_path
+            ),
         });
     }
     if signals.manual_conflict_present {
@@ -1828,6 +1835,52 @@ mod tests {
                 .degraded
                 .iter()
                 .any(|item| item.code == "auto_enrollment_node_key_changed")
+        );
+    }
+
+    #[test]
+    fn auto_status_degraded_repairs_use_concrete_workspace_path() {
+        let snapshot = sample_snapshot(vec![sample_peer("peer-a", true)]);
+        let auto_status = auto_enrollment_status_for_snapshot(
+            &snapshot,
+            MeshAutoStatusSignals {
+                tailnet_changed: true,
+                node_key_changed: true,
+                ..MeshAutoStatusSignals::default()
+            },
+        );
+
+        let repairs = auto_status
+            .degraded
+            .iter()
+            .filter(|item| {
+                item.code == AUTO_ENROLLMENT_TAILNET_CHANGED_CODE
+                    || item.code == AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE
+            })
+            .map(|item| item.repair.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(repairs.len(), 2);
+        for repair in repairs {
+            assert!(
+                repair.contains("--workspace \"/tmp/ee\""),
+                "repair should include the concrete workspace path: {repair}"
+            );
+            assert!(
+                !repair.contains('<') && !repair.contains('>'),
+                "repair hint must not expose an unresolved metavariable: {repair}"
+            );
+        }
+    }
+
+    #[test]
+    fn sync_once_network_deferred_repair_uses_concrete_file_name() {
+        let degraded = MeshCliDegradation::sync_once_network_deferred();
+
+        assert!(degraded.repair.contains("mesh-export.json"));
+        assert!(
+            !degraded.repair.contains('<') && !degraded.repair.contains('>'),
+            "repair hint must not expose an unresolved metavariable: {}",
+            degraded.repair
         );
     }
 
