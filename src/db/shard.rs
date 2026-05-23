@@ -1020,7 +1020,7 @@ pub fn execute_peer_shard_read_attach_plan(
             continue;
         }
 
-        attempted_count = attempted_count.saturating_add(1);
+        attempted_count = checked_add_peer_attach_count(attempted_count, "attempted_count");
         let Some(attach_sql) = target.attach_sql.as_deref() else {
             let failure = shard_attach_failed_degradation();
             degraded.push(failure.clone());
@@ -1035,7 +1035,7 @@ pub fn execute_peer_shard_read_attach_plan(
 
         match connection.execute_read_snapshot_raw(super::DbOperation::Execute, attach_sql) {
             Ok(()) => {
-                attached_count = attached_count.saturating_add(1);
+                attached_count = checked_add_peer_attach_count(attached_count, "attached_count");
                 targets.push(PeerShardAttachExecutionTarget {
                     workspace_id: target.workspace_id.clone(),
                     attach_alias: target.attach_alias.clone(),
@@ -1301,6 +1301,12 @@ fn checked_add_file_hash_bytes(total: u64, read: usize) -> io::Result<u64> {
     })
 }
 
+fn checked_add_peer_attach_count(count: usize, field: &'static str) -> usize {
+    count.checked_add(1).unwrap_or_else(|| {
+        panic!("peer-shard attach {field} count exhausted at usize::MAX");
+    })
+}
+
 impl From<OsString> for ShardFanoutResolverInput {
     fn from(value: OsString) -> Self {
         Self {
@@ -1349,9 +1355,10 @@ mod tests {
         SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
         SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
         ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutPreserveSourceError,
-        ShardFanoutResolverInput, checked_add_file_hash_bytes, default_shards_dir_from_values,
-        duration_millis_saturating, execute_peer_shard_read_attach_plan, normalize_shard_root,
-        plan_peer_shard_attach, plan_shard_fanout_migration, preserve_shard_fanout_source_database,
+        ShardFanoutResolverInput, checked_add_file_hash_bytes, checked_add_peer_attach_count,
+        default_shards_dir_from_values, duration_millis_saturating,
+        execute_peer_shard_read_attach_plan, normalize_shard_root, plan_peer_shard_attach,
+        plan_shard_fanout_migration, preserve_shard_fanout_source_database,
         preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
@@ -2099,6 +2106,12 @@ mod tests {
             "planned missing shards are represented on their target, not as execution failures"
         );
         Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "peer-shard attach attempted_count count exhausted at usize::MAX")]
+    fn peer_attach_execution_count_overflow_panics() {
+        let _ = checked_add_peer_attach_count(usize::MAX, "attempted_count");
     }
 
     #[test]
