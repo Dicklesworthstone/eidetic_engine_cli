@@ -962,6 +962,16 @@ fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
         r#".\.npmrc"#,
         "../.npmrc",
         r#"..\.npmrc"#,
+        ".yarnrc",
+        "./.yarnrc",
+        r#".\.yarnrc"#,
+        "../.yarnrc",
+        r#"..\.yarnrc"#,
+        ".pnpmrc",
+        "./.pnpmrc",
+        r#".\.pnpmrc"#,
+        "../.pnpmrc",
+        r#"..\.pnpmrc"#,
         ".pypirc",
         "./.pypirc",
         r#".\.pypirc"#,
@@ -3794,12 +3804,12 @@ mod tests {
     #[test]
     fn search_projection_redacts_relative_credential_path_refs() {
         let redacted = super::redact_search_projection_absolute_path_like_segments(
-            r#"aws=.aws/credentials kube=./.kube/config docker=../.docker/config.json gcloud=.config/gcloud/application_default_credentials.json cargo=.cargo/credentials.toml gnupg=.\.gnupg\private-keys-v1.d npm=.npmrc netrc=../.netrc pypi=.\.pypirc ordinary=docs/config.json next=done"#,
+            r#"aws=.aws/credentials kube=./.kube/config docker=../.docker/config.json gcloud=.config/gcloud/application_default_credentials.json cargo=.cargo/credentials.toml gnupg=.\.gnupg\private-keys-v1.d npm=.npmrc yarn=./.yarnrc.yml pnpm=../.pnpmrc netrc=../.netrc pypi=.\.pypirc ordinary=docs/config.json next=done"#,
         );
 
         assert_eq!(
             redacted,
-            r#"aws=[REDACTED_PATH] kube=[REDACTED_PATH] docker=[REDACTED_PATH] gcloud=[REDACTED_PATH] cargo=[REDACTED_PATH] gnupg=[REDACTED_PATH] npm=[REDACTED_PATH] netrc=[REDACTED_PATH] pypi=[REDACTED_PATH] ordinary=docs/config.json next=done"#
+            r#"aws=[REDACTED_PATH] kube=[REDACTED_PATH] docker=[REDACTED_PATH] gcloud=[REDACTED_PATH] cargo=[REDACTED_PATH] gnupg=[REDACTED_PATH] npm=[REDACTED_PATH] yarn=[REDACTED_PATH] pnpm=[REDACTED_PATH] netrc=[REDACTED_PATH] pypi=[REDACTED_PATH] ordinary=docs/config.json next=done"#
         );
         for leaked in [
             ".aws/credentials",
@@ -3809,6 +3819,8 @@ mod tests {
             ".cargo/credentials.toml",
             r#".\.gnupg\private-keys-v1.d"#,
             ".npmrc",
+            "./.yarnrc.yml",
+            "../.pnpmrc",
             "../.netrc",
             r#".\.pypirc"#,
         ] {
