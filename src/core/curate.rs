@@ -4,6 +4,8 @@
 //! validating or applying candidates. Validation and durable mutation are
 //! separate explicit commands.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
@@ -21,16 +23,18 @@ use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
     DerivationSourceRef, ReviewQueueState, canonical_derivation_metadata_json,
-    canonical_derivation_source_refs_json, validate_candidate, validate_candidate_trust_evidence,
-    validate_review_queue_transition,
+    canonical_derivation_source_refs_json, resolve_derivation_memory_scores, validate_candidate,
+    validate_candidate_trust_evidence, validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
-    CreateCurationCandidateInput, CreateProceduralRuleInput, CreateProcedureEventInput,
-    CreateProcedureInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection,
-    MemoryLevelTransitionAuditInput, SearchIndexJobType, StoredCurationCandidate,
-    StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory, StoredMemoryLink, StoredSession,
-    audit_actions, default_curation_ttl_policy_id_for_review_state, generate_audit_id,
+    CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
+    CreateProceduralRuleInput, CreateProcedureEventInput, CreateProcedureInput,
+    CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection, DbError, DbOperation,
+    EvidenceSpanMemoryAttachResult, MemoryLevelTransitionAuditInput, MemoryLinkRelation,
+    MemoryLinkSource, SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy,
+    StoredEvidenceSpan, StoredMemory, StoredMemoryLink, StoredSession, audit_actions,
+    default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::graph::decay::{
     StructuralDecayMultiplier, compute_structural_decay_connectivity,
@@ -1096,6 +1100,10 @@ pub struct CurateApplyResult {
     pub decision: String,
     pub candidate_type: String,
     pub target_memory_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_memory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_memory: Option<CurateApplyMemoryState>,
     pub changes: Vec<CurateApplyChange>,
     pub errors: Vec<CurateValidationIssue>,
     pub warnings: Vec<CurateValidationIssue>,
@@ -3113,37 +3121,59 @@ pub fn apply_curation_candidate(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
-    let target_memory_id = required_stored_target_memory_id(&stored)?;
-    let target_memory =
-        connection
-            .get_memory(target_memory_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load target memory: {error}"),
-                repair: Some("ee memory show <memory-id> --json".to_owned()),
-            })?;
-
     let now = Utc::now().to_rfc3339();
-    let mut decision = evaluate_candidate_for_apply(&stored, target_memory.as_ref(), &now);
-    if decision.tombstone_memory
-        && !options.allow_tombstone_load_bearing
-        && let Some(protection) = load_bearing_tombstone_protection(
-            &connection,
-            &prepared.workspace_id,
-            target_memory_id,
-        )?
-    {
-        decision = blocked_apply(
-            &stored,
-            decision.target_before.clone(),
-            vec![load_bearing_tombstone_issue(
-                target_memory_id,
-                &protection,
-                "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
-            )],
-            decision.application.warnings,
-            "ee why <memory-id> --json".to_owned(),
-        );
-    }
+    let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
+    let decision = match parsed_candidate_type {
+        Ok(CandidateType::CreateDerivedMemory) => {
+            let prompt_injection_guard = crate::core::config_surface::get_config(
+                &crate::core::config_surface::ConfigSurfaceOptions {
+                    workspace_root: options.workspace_path.to_path_buf(),
+                    config_path: None,
+                },
+                crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+            )
+            .map(|c| c.value == "true")
+            .unwrap_or(true);
+            evaluate_create_derived_candidate_for_apply(
+                &connection,
+                &stored,
+                &now,
+                prompt_injection_guard,
+            )
+        }
+        Ok(_) | Err(_) => {
+            let target_memory_id = required_stored_target_memory_id(&stored)?;
+            let target_memory =
+                connection
+                    .get_memory(target_memory_id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to load target memory: {error}"),
+                        repair: Some("ee memory show <memory-id> --json".to_owned()),
+                    })?;
+            let mut decision = evaluate_candidate_for_apply(&stored, target_memory.as_ref(), &now);
+            if decision.tombstone_memory
+                && !options.allow_tombstone_load_bearing
+                && let Some(protection) = load_bearing_tombstone_protection(
+                    &connection,
+                    &prepared.workspace_id,
+                    target_memory_id,
+                )?
+            {
+                decision = blocked_apply(
+                    &stored,
+                    decision.target_before.clone(),
+                    vec![load_bearing_tombstone_issue(
+                        target_memory_id,
+                        &protection,
+                        "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
+                    )],
+                    decision.application.warnings,
+                    "ee why <memory-id> --json".to_owned(),
+                );
+            }
+            decision
+        }
+    };
     let from_status = stored.status.clone();
     let mut applied_at = None;
     let mut persisted = false;
@@ -4331,6 +4361,7 @@ struct ApplyDecision {
     memory_update: Option<ApplyMemoryCurationInput>,
     rule_create: Option<ApplyRuleCurationInput>,
     procedure_create: Option<ApplyProcedureCurationInput>,
+    derived_create: Option<ApplyDerivedMemoryInput>,
     tombstone_memory: bool,
     target_before: Option<CurateApplyMemoryState>,
     target_after: Option<CurateApplyMemoryState>,
@@ -4351,6 +4382,23 @@ struct ApplyProcedureCurationInput {
     procedure: CreateProcedureInput,
     event_id: String,
     event: CreateProcedureEventInput,
+}
+
+#[derive(Clone, Debug)]
+struct ApplyDerivedMemoryInput {
+    memory_id: String,
+    memory: CreateMemoryInput,
+    links: Vec<ApplyDerivedMemoryLinkInput>,
+    evidence_refs: Vec<DerivationSourceRef>,
+    index_job_id: String,
+    index_job: CreateSearchIndexJobInput,
+    audit_details: String,
+}
+
+#[derive(Clone, Debug)]
+struct ApplyDerivedMemoryLinkInput {
+    link_id: String,
+    link: CreateMemoryLinkInput,
 }
 
 #[derive(Clone, Debug)]
@@ -4845,6 +4893,80 @@ fn validate_derivation_metadata(
     }
 }
 
+fn parse_derivation_metadata(
+    stored: &StoredCurationCandidate,
+) -> Result<DerivationMetadata, CurateValidationIssue> {
+    let raw = stored
+        .derivation_metadata_json
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            validation_issue(
+                "derived_metadata_missing",
+                "create-derived-memory apply requires derivation metadata.",
+                "Re-propose the candidate with derivation metadata.",
+            )
+        })?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        validation_issue(
+            "derived_metadata_invalid_json",
+            format!("derivation metadata JSON is invalid: {error}"),
+            "Re-propose the candidate with valid derivation metadata JSON.",
+        )
+    })?;
+    let object = parsed.as_object().ok_or_else(|| {
+        validation_issue(
+            "derived_metadata_invalid",
+            "derivation metadata must be a JSON object.",
+            "Re-propose the candidate with object metadata.",
+        )
+    })?;
+    let memory_spec = object
+        .get("memorySpec")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            validation_issue(
+                "derived_metadata_memory_spec_missing",
+                "derivation metadata must include memorySpec.",
+                "Re-propose the candidate with the derived memory spec.",
+            )
+        })?;
+    let producer = object
+        .get("producer")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            validation_issue(
+                "derived_metadata_producer_missing",
+                "derivation metadata must include producer metadata.",
+                "Re-propose the candidate with producer metadata.",
+            )
+        })?;
+
+    Ok(DerivationMetadata {
+        memory_spec: DerivationMemorySpec {
+            level: required_json_string(memory_spec, "level", "derived_metadata_invalid")?
+                .to_owned(),
+            kind: required_json_string(memory_spec, "kind", "derived_metadata_invalid")?.to_owned(),
+            workflow_id: optional_json_string(memory_spec, "workflowId").map(str::to_owned),
+            confidence: optional_json_f32(memory_spec, "confidence"),
+            utility: optional_json_f32(memory_spec, "utility"),
+            importance: optional_json_f32(memory_spec, "importance"),
+            provenance_uri: optional_json_string(memory_spec, "provenanceUri").map(str::to_owned),
+            trust_class: optional_json_string(memory_spec, "trustClass").map(str::to_owned),
+            trust_subclass: optional_json_string(memory_spec, "trustSubclass").map(str::to_owned),
+            tags: optional_json_tags(memory_spec),
+            valid_from: optional_json_string(memory_spec, "validFrom").map(str::to_owned),
+            valid_to: optional_json_string(memory_spec, "validTo").map(str::to_owned),
+        },
+        producer: DerivationProducerMetadata {
+            producer: required_json_string(producer, "producer", "derived_metadata_invalid")?
+                .to_owned(),
+            producer_payload: producer.get("producerPayload").cloned(),
+        },
+    })
+}
+
 fn validate_derivation_memory_spec(
     memory_spec: &serde_json::Map<String, serde_json::Value>,
     errors: &mut Vec<CurateValidationIssue>,
@@ -5088,6 +5210,28 @@ fn optional_json_string<'a>(
         .filter(|value| !value.is_empty())
 }
 
+fn optional_json_f32(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Option<f32> {
+    object.get(field)?.as_f64().map(|value| value as f32)
+}
+
+fn optional_json_tags(object: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    object
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .map(|tags| {
+            tags.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn memory_content_hash(content: &str) -> String {
     format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
 }
@@ -5183,6 +5327,8 @@ fn evaluate_candidate_for_apply(
                     decision: "unchanged".to_owned(),
                     candidate_type: stored.candidate_type.clone(),
                     target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+                    created_memory_id: None,
+                    created_memory: None,
                     changes: Vec::new(),
                     errors,
                     warnings,
@@ -5192,6 +5338,7 @@ fn evaluate_candidate_for_apply(
                 memory_update: None,
                 rule_create: None,
                 procedure_create: None,
+                derived_create: None,
                 tombstone_memory: false,
                 target_before: target_before.clone(),
                 target_after: target_before,
@@ -5629,6 +5776,8 @@ fn evaluate_candidate_for_apply(
             },
             candidate_type: candidate_type.as_str().to_owned(),
             target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+            created_memory_id: None,
+            created_memory: None,
             changes,
             errors,
             warnings,
@@ -5639,9 +5788,339 @@ fn evaluate_candidate_for_apply(
         memory_update,
         rule_create,
         procedure_create,
+        derived_create: None,
         tombstone_memory,
         target_before,
         target_after: Some(target_after),
+        next_action: "no action required".to_owned(),
+    }
+}
+
+fn evaluate_create_derived_candidate_for_apply(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    now_rfc3339: &str,
+    prompt_injection_guard: bool,
+) -> ApplyDecision {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    let current_status = parse_stored_status(&stored.status, &mut errors);
+
+    match current_status {
+        Some(CandidateStatus::Approved) => {}
+        Some(CandidateStatus::Pending) => {
+            errors.push(validation_issue(
+                "candidate_requires_validation",
+                "Candidate must be approved before it can be applied.",
+                format!("Run `ee curate validate {}` first.", stored.id),
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+        Some(CandidateStatus::Applied) => {
+            warnings.push(validation_issue(
+                "candidate_already_applied",
+                "Candidate has already been applied.",
+                "No apply action is required.",
+            ));
+            return ApplyDecision {
+                application: CurateApplyResult {
+                    status: "already_applied".to_owned(),
+                    decision: "unchanged".to_owned(),
+                    candidate_type: stored.candidate_type.clone(),
+                    target_memory_id: String::new(),
+                    created_memory_id: None,
+                    created_memory: None,
+                    changes: Vec::new(),
+                    errors,
+                    warnings,
+                },
+                to_status: CandidateStatus::Applied.as_str().to_owned(),
+                should_persist: false,
+                memory_update: None,
+                rule_create: None,
+                procedure_create: None,
+                derived_create: None,
+                tombstone_memory: false,
+                target_before: None,
+                target_after: None,
+                next_action: "no action required".to_owned(),
+            };
+        }
+        Some(status @ (CandidateStatus::Rejected | CandidateStatus::Expired)) => {
+            errors.push(validation_issue(
+                "candidate_status_terminal",
+                format!("Candidate is in terminal status {}.", status.as_str()),
+                "No apply transition is available for this candidate.",
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "no action required".to_owned(),
+            );
+        }
+        None => {
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "ee curate candidates --json".to_owned(),
+            );
+        }
+    }
+
+    let validation = evaluate_create_derived_candidate_for_validation(
+        connection,
+        stored,
+        now_rfc3339,
+        prompt_injection_guard,
+    );
+    errors.extend(validation.validation.errors);
+    warnings.extend(validation.validation.warnings);
+    if !errors.is_empty() {
+        return blocked_apply(
+            stored,
+            None,
+            errors,
+            warnings,
+            format!("ee curate validate {}", stored.id),
+        );
+    }
+
+    let source_refs = match parse_derivation_source_refs(stored) {
+        Ok(source_refs) => source_refs,
+        Err(issue) => {
+            errors.push(issue);
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+    };
+    let metadata = match parse_derivation_metadata(stored) {
+        Ok(metadata) => metadata,
+        Err(issue) => {
+            errors.push(issue);
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+    };
+    let proposed_content = match stored
+        .proposed_content
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(content) => content,
+        None => {
+            errors.push(validation_issue(
+                CandidateValidationError::ContentRequiredForType {
+                    candidate_type: CandidateType::CreateDerivedMemory,
+                }
+                .code(),
+                "proposed content is required for create-derived-memory candidates",
+                "Validate or recreate the candidate with derived memory content.",
+            ));
+            return blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                format!("ee curate validate {}", stored.id),
+            );
+        }
+    };
+    let redaction = crate::policy::redact_secret_like_content(proposed_content);
+    if redaction.redacted {
+        warnings.push(validation_issue(
+            "proposed_content_redacted",
+            "Derived memory content contained secret-like values and was redacted before storage.",
+            "Review the source package and keep only durable, non-secret evidence.",
+        ));
+    }
+
+    let memory_level = MemoryLevel::from_str(&metadata.memory_spec.level)
+        .map(|level| level.as_str().to_owned())
+        .unwrap_or_else(|_| metadata.memory_spec.level.trim().to_owned());
+    let memory_kind = MemoryKind::from_str(&metadata.memory_spec.kind)
+        .map(|kind| kind.as_str().to_owned())
+        .unwrap_or_else(|_| metadata.memory_spec.kind.trim().to_owned());
+    let scores = resolve_derivation_memory_scores(
+        &metadata.memory_spec,
+        stored.proposed_confidence,
+        stored.confidence,
+    );
+    let memory_id = MemoryId::now().to_string();
+    let created_memory = CurateApplyMemoryState {
+        id: memory_id.clone(),
+        level: memory_level.clone(),
+        content: redaction.content.clone(),
+        confidence: scores.confidence,
+        trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+        tombstoned: false,
+    };
+    let source_memory_refs = source_refs
+        .iter()
+        .filter(|source_ref| source_ref.kind == DerivationSourceKind::Memory)
+        .cloned()
+        .collect::<Vec<_>>();
+    let evidence_refs = source_refs
+        .iter()
+        .filter(|source_ref| source_ref.kind == DerivationSourceKind::EvidenceSpan)
+        .cloned()
+        .collect::<Vec<_>>();
+    let links = source_memory_refs
+        .iter()
+        .map(|source_ref| ApplyDerivedMemoryLinkInput {
+            link_id: generate_derived_memory_link_id(&memory_id, source_ref.id.as_str()),
+            link: CreateMemoryLinkInput {
+                src_memory_id: memory_id.clone(),
+                dst_memory_id: source_ref.id.clone(),
+                relation: MemoryLinkRelation::DerivedFrom,
+                weight: 1.0,
+                confidence: scores.confidence,
+                directed: true,
+                evidence_count: u32::try_from(source_refs.len()).unwrap_or(u32::MAX),
+                last_reinforced_at: Some(now_rfc3339.to_owned()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("ee curate apply".to_owned()),
+                metadata_json: Some(
+                    serde_json::json!({
+                        "schema": "ee.memory_link.derived_from.v1",
+                        "candidateId": stored.id,
+                        "sourceContentHash": source_ref.content_hash,
+                    })
+                    .to_string(),
+                ),
+            },
+        })
+        .collect::<Vec<_>>();
+    let index_job_id = generate_memory_search_index_job_id(&memory_id);
+    let audit_details = derived_memory_created_audit_details(
+        stored,
+        &metadata,
+        &source_refs,
+        &memory_id,
+        &index_job_id,
+    );
+
+    let mut changes = Vec::new();
+    push_apply_change(
+        &mut changes,
+        "createdMemoryId",
+        None,
+        Some(memory_id.clone()),
+    );
+    push_apply_change(
+        &mut changes,
+        "createdMemoryLevel",
+        None,
+        Some(memory_level.clone()),
+    );
+    push_apply_change(
+        &mut changes,
+        "createdMemoryKind",
+        None,
+        Some(memory_kind.clone()),
+    );
+    push_apply_change(
+        &mut changes,
+        "createdMemoryConfidence",
+        None,
+        Some(format_score(scores.confidence)),
+    );
+    push_apply_change(
+        &mut changes,
+        "createdMemoryTrustClass",
+        None,
+        Some(TrustClass::AgentAssertion.as_str().to_owned()),
+    );
+    push_apply_change(
+        &mut changes,
+        "derivedFromMemoryCount",
+        None,
+        Some(source_memory_refs.len().to_string()),
+    );
+    push_apply_change(
+        &mut changes,
+        "attachedEvidenceSpanCount",
+        None,
+        Some(evidence_refs.len().to_string()),
+    );
+    push_apply_change(
+        &mut changes,
+        "searchIndexJobId",
+        None,
+        Some(index_job_id.clone()),
+    );
+
+    ApplyDecision {
+        application: CurateApplyResult {
+            status: "ready".to_owned(),
+            decision: "create_derived_memory".to_owned(),
+            candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+            target_memory_id: String::new(),
+            created_memory_id: Some(memory_id.clone()),
+            created_memory: Some(created_memory.clone()),
+            changes,
+            errors,
+            warnings,
+        },
+        to_status: CandidateStatus::Applied.as_str().to_owned(),
+        should_persist: current_status
+            .is_some_and(|status| status.can_transition_to(CandidateStatus::Applied)),
+        memory_update: None,
+        rule_create: None,
+        procedure_create: None,
+        derived_create: Some(ApplyDerivedMemoryInput {
+            memory_id,
+            memory: CreateMemoryInput {
+                workspace_id: stored.workspace_id.clone(),
+                level: memory_level,
+                kind: memory_kind,
+                content: redaction.content,
+                workflow_id: metadata.memory_spec.workflow_id.clone(),
+                confidence: scores.confidence,
+                utility: scores.utility,
+                importance: scores.importance,
+                provenance_uri: metadata.memory_spec.provenance_uri.clone(),
+                trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                trust_subclass: metadata.memory_spec.trust_subclass.clone(),
+                tags: canonical_apply_tags(&metadata.memory_spec.tags),
+                valid_from: metadata.memory_spec.valid_from.clone(),
+                valid_to: metadata.memory_spec.valid_to.clone(),
+            },
+            links,
+            evidence_refs,
+            index_job_id: index_job_id.clone(),
+            index_job: CreateSearchIndexJobInput {
+                workspace_id: stored.workspace_id.clone(),
+                job_type: SearchIndexJobType::SingleDocument,
+                document_source: Some("memory".to_owned()),
+                document_id: Some(created_memory.id),
+                documents_total: 1,
+            },
+            audit_details,
+        }),
+        tombstone_memory: false,
+        target_before: None,
+        target_after: None,
         next_action: "no action required".to_owned(),
     }
 }
@@ -6614,6 +7093,8 @@ fn blocked_apply(
             decision: "unchanged".to_owned(),
             candidate_type: stored.candidate_type.clone(),
             target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+            created_memory_id: None,
+            created_memory: None,
             changes: Vec::new(),
             errors,
             warnings,
@@ -6623,6 +7104,7 @@ fn blocked_apply(
         memory_update: None,
         rule_create: None,
         procedure_create: None,
+        derived_create: None,
         tombstone_memory: false,
         target_before: target_before.clone(),
         target_after: target_before,
@@ -6808,6 +7290,17 @@ fn format_score(value: f32) -> String {
     format!("{value:.6}")
 }
 
+fn canonical_apply_tags(tags: &[String]) -> Vec<String> {
+    let mut canonical = BTreeSet::new();
+    for tag in tags {
+        let trimmed = tag.trim();
+        if !trimmed.is_empty() {
+            canonical.insert(trimmed.to_owned());
+        }
+    }
+    canonical.into_iter().collect()
+}
+
 fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec<String> {
     let mut ids = BTreeSet::new();
     if let Some(source_id) = stored.source_id.as_deref() {
@@ -6833,6 +7326,82 @@ fn generate_rule_search_index_job_id() -> String {
     let rule_id = RuleId::now().to_string();
     let payload = rule_id.trim_start_matches("rule_");
     format!("sidx_{payload}")
+}
+
+fn generate_memory_search_index_job_id(memory_id: &str) -> String {
+    let hash = blake3::hash(memory_id.as_bytes()).to_hex().to_string();
+    format!("sidx_{}", &hash[..26])
+}
+
+fn generate_derived_memory_link_id(memory_id: &str, source_memory_id: &str) -> String {
+    let hash = blake3::hash(format!("{memory_id}|derived_from|{source_memory_id}").as_bytes())
+        .to_hex()
+        .to_string();
+    format!("link_{}", &hash[..26])
+}
+
+fn derived_memory_created_audit_details(
+    stored: &StoredCurationCandidate,
+    metadata: &DerivationMetadata,
+    source_refs: &[DerivationSourceRef],
+    memory_id: &str,
+    index_job_id: &str,
+) -> String {
+    let source_refs_json = canonical_derivation_source_refs_json(source_refs)
+        .ok()
+        .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+        .unwrap_or_else(|| {
+            serde_json::Value::Array(
+                source_refs
+                    .iter()
+                    .map(|source_ref| {
+                        serde_json::json!({
+                            "kind": source_ref.kind.as_str(),
+                            "id": source_ref.id,
+                            "contentHash": source_ref.content_hash,
+                        })
+                    })
+                    .collect(),
+            )
+        });
+    let memory_spec_json = serde_json::json!({
+        "level": metadata.memory_spec.level,
+        "kind": metadata.memory_spec.kind,
+        "workflowId": metadata.memory_spec.workflow_id,
+        "confidence": metadata.memory_spec.confidence,
+        "utility": metadata.memory_spec.utility,
+        "importance": metadata.memory_spec.importance,
+        "provenanceUri": metadata.memory_spec.provenance_uri,
+        "trustClass": TrustClass::AgentAssertion.as_str(),
+        "trustSubclass": metadata.memory_spec.trust_subclass,
+        "tags": canonical_apply_tags(&metadata.memory_spec.tags),
+        "validFrom": metadata.memory_spec.valid_from,
+        "validTo": metadata.memory_spec.valid_to,
+    });
+    serde_json::json!({
+        "schema": "ee.audit.derived_memory_created.v1",
+        "candidateId": stored.id,
+        "candidateType": stored.candidate_type,
+        "createdMemoryId": memory_id,
+        "sourceType": stored.source_type,
+        "sourceId": stored.source_id,
+        "producer": metadata.producer.producer,
+        "producerPayload": metadata.producer.producer_payload,
+        "memorySpec": memory_spec_json,
+        "sourceRefs": source_refs_json,
+        "sourceContentHashes": source_refs
+            .iter()
+            .map(|source_ref| {
+                serde_json::json!({
+                    "kind": source_ref.kind.as_str(),
+                    "id": source_ref.id,
+                    "contentHash": source_ref.content_hash,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "searchIndexJobId": index_job_id,
+    })
+    .to_string()
 }
 
 fn generate_procedure_id() -> String {
@@ -7111,32 +7680,34 @@ fn persist_candidate_application(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
-    connection.begin().map_err(|error| DomainError::Storage {
-        message: format!("Failed to begin curation apply transaction: {error}"),
-        repair: Some("ee doctor".to_owned()),
-    })?;
-
-    let result = persist_candidate_application_inner(
-        connection,
-        workspace_id,
-        stored,
-        decision,
-        applied_at,
-        applied_by,
-    );
+    let mut domain_error = None;
+    let result = connection.with_transaction(|| {
+        match persist_candidate_application_inner(
+            connection,
+            workspace_id,
+            stored,
+            decision,
+            applied_at,
+            applied_by,
+        ) {
+            Ok(audit_id) => Ok(audit_id),
+            Err(error) => {
+                let message = error.message();
+                domain_error = Some(error);
+                Err(DbError::MalformedRow {
+                    operation: DbOperation::Execute,
+                    message,
+                })
+            }
+        }
+    });
 
     match result {
-        Ok(audit_id) => {
-            connection.commit().map_err(|error| DomainError::Storage {
-                message: format!("Failed to commit curation apply: {error}"),
-                repair: Some("ee doctor".to_owned()),
-            })?;
-            Ok(audit_id)
-        }
-        Err(error) => {
-            let _ = connection.rollback();
-            Err(error)
-        }
+        Ok(audit_id) => Ok(audit_id),
+        Err(error) => Err(domain_error.unwrap_or_else(|| DomainError::Storage {
+            message: format!("Failed to persist curation apply transaction: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })),
     }
 }
 
@@ -7148,6 +7719,18 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    if let Some(derived_create) = &decision.derived_create {
+        return persist_create_derived_candidate_application_inner(
+            connection,
+            workspace_id,
+            stored,
+            decision,
+            derived_create,
+            applied_at,
+            applied_by,
+        );
+    }
+
     let target_memory_id = required_stored_target_memory_id(stored)?;
     let memory_changed = if decision.tombstone_memory {
         let changed = connection
@@ -7321,6 +7904,209 @@ fn persist_candidate_application_inner(
             message: format!("Failed to write curation apply audit entry: {error}"),
             repair: Some("ee doctor".to_owned()),
         })?;
+    Ok(audit_id)
+}
+
+#[cfg(test)]
+thread_local! {
+    static CURATE_DERIVED_APPLY_FAIL_PHASE: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_create_derived_apply_fail_phase(phase: Option<&'static str>) {
+    CURATE_DERIVED_APPLY_FAIL_PHASE.with(|slot| {
+        *slot.borrow_mut() = phase;
+    });
+}
+
+fn maybe_inject_create_derived_apply_failure(
+    stored: &StoredCurationCandidate,
+    phase: &'static str,
+) -> Result<(), DomainError> {
+    #[cfg(not(test))]
+    let _ = (stored, phase);
+    #[cfg(test)]
+    {
+        let should_fail =
+            CURATE_DERIVED_APPLY_FAIL_PHASE.with(|slot| *slot.borrow() == Some(phase));
+        if should_fail {
+            tracing::warn!(
+                target: "ee::curate::transition",
+                candidate_id = %stored.id,
+                transition_kind = "create_derived_memory",
+                failing_phase = phase,
+                "curate create-derived failure injection"
+            );
+            return Err(DomainError::Storage {
+                message: format!(
+                    "Injected create-derived apply failure at phase {phase} for candidate {}.",
+                    stored.id
+                ),
+                repair: Some("test failure injection".to_owned()),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn persist_create_derived_candidate_application_inner(
+    connection: &DbConnection,
+    workspace_id: &str,
+    stored: &StoredCurationCandidate,
+    decision: &ApplyDecision,
+    derived_create: &ApplyDerivedMemoryInput,
+    applied_at: &str,
+    applied_by: &str,
+) -> Result<String, DomainError> {
+    let mut source_errors = Vec::new();
+    validate_derivation_source_refs(
+        connection,
+        stored,
+        &parse_derivation_source_refs(stored).map_err(|issue| DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} has invalid source refs: {}",
+                stored.id, issue.message
+            ),
+            repair: Some(issue.repair),
+        })?,
+        &mut source_errors,
+    );
+    if !source_errors.is_empty() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} source refs failed apply-time revalidation: {}",
+                stored.id,
+                source_errors
+                    .iter()
+                    .map(|issue| format!("{}: {}", issue.code, issue.message))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+            repair: Some(
+                "Re-run `ee curate validate <candidate-id>` and refresh drifted sources."
+                    .to_owned(),
+            ),
+        });
+    }
+    let redaction = crate::policy::redact_secret_like_content(&derived_create.memory.content);
+    if redaction.redacted {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} still contains secret-like content at apply time.",
+                stored.id
+            ),
+            repair: Some("Re-run validation and apply the redacted candidate content.".to_owned()),
+        });
+    }
+
+    connection
+        .insert_memory(&derived_create.memory_id, &derived_create.memory)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to create derived memory: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    maybe_inject_create_derived_apply_failure(stored, "after_memory_insert")?;
+    for link in &derived_create.links {
+        connection
+            .insert_memory_link(&link.link_id, &link.link)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to create derived memory provenance link: {error}"),
+                repair: Some("ee memory link <memory-id> --json".to_owned()),
+            })?;
+    }
+    maybe_inject_create_derived_apply_failure(stored, "after_derived_links")?;
+    for evidence_ref in &derived_create.evidence_refs {
+        match connection
+            .attach_evidence_span_to_memory_if_unlinked(
+                workspace_id,
+                evidence_ref.id.as_str(),
+                evidence_ref.content_hash.as_str(),
+                derived_create.memory_id.as_str(),
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to attach derived evidence span: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })? {
+            EvidenceSpanMemoryAttachResult::Attached
+            | EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory => {}
+            EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Evidence source {} was attached to another memory during create-derived apply.",
+                        evidence_ref.id
+                    ),
+                    repair: Some(
+                        "Re-run `ee curate validate <candidate-id>` and refresh the source package."
+                            .to_owned(),
+                    ),
+                });
+            }
+            EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch => {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Evidence source {} was missing or hash-drifted during create-derived apply.",
+                        evidence_ref.id
+                    ),
+                    repair: Some(
+                        "Re-run `ee curate validate <candidate-id>` and refresh the source package."
+                            .to_owned(),
+                    ),
+                });
+            }
+        }
+    }
+    maybe_inject_create_derived_apply_failure(stored, "after_evidence_attachment")?;
+    connection
+        .insert_search_index_job(&derived_create.index_job_id, &derived_create.index_job)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to queue derived memory indexing: {error}"),
+            repair: Some("ee index rebuild --workspace .".to_owned()),
+        })?;
+    maybe_inject_create_derived_apply_failure(stored, "after_search_job_enqueue")?;
+    maybe_inject_create_derived_apply_failure(stored, "before_candidate_applied")?;
+    let marked_applied = connection
+        .mark_curation_candidate_applied(workspace_id, &stored.id, applied_at)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to mark create-derived curation candidate applied: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+    if !marked_applied {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Curation candidate {} was not approved at create-derived apply time.",
+                stored.id
+            ),
+            repair: Some(format!("ee curate validate {}", stored.id)),
+        });
+    }
+
+    let audit_id = generate_audit_id();
+    connection
+        .insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_owned()),
+                actor: Some(applied_by.to_owned()),
+                action: audit_actions::MEMORY_CREATE.to_owned(),
+                target_type: Some("memory".to_owned()),
+                target_id: Some(derived_create.memory_id.clone()),
+                details: Some(derived_create.audit_details.clone()),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to write derived memory create audit entry: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    tracing::info!(
+        target: "ee::curate::transition",
+        candidate_id = %stored.id,
+        actor = %applied_by,
+        transition_kind = "create_derived_memory",
+        dry_run = false,
+        created_memory_id = %derived_create.memory_id,
+        decision = %decision.application.decision,
+        "curate create-derived transition recorded"
+    );
     Ok(audit_id)
 }
 
@@ -11283,6 +12069,247 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_creates_derived_memory_with_provenance() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5101)).to_string();
+        let evidence_source_id = evidence_id(0x5102);
+        let candidate_id = curate_id(0x5103);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "applied");
+        assert_eq!(report.application.decision, "create_derived_memory");
+        assert!(report.application.target_memory_id.is_empty());
+        assert!(report.target_before.is_none());
+        assert!(report.target_after.is_none());
+        let created_memory_id = report
+            .application
+            .created_memory_id
+            .as_deref()
+            .ok_or_else(|| "apply report must expose createdMemoryId".to_owned())?;
+        assert_eq!(
+            report
+                .application
+                .created_memory
+                .as_ref()
+                .map(|memory| memory.id.as_str()),
+            Some(created_memory_id)
+        );
+
+        let memory = connection
+            .get_memory(created_memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "created derived memory missing".to_owned())?;
+        assert_eq!(memory.workspace_id, workspace_id);
+        assert_eq!(memory.level, "semantic");
+        assert_eq!(memory.kind, "fact");
+        assert_eq!(memory.trust_class, "agent_assertion");
+        assert_eq!(memory.trust_subclass.as_deref(), Some("reflection"));
+        let tags = connection
+            .get_memory_tags(created_memory_id)
+            .map_err(|error| error.to_string())?;
+        assert!(tags.contains(&"reflection".to_owned()));
+        assert!(tags.contains(&"source.lock".to_owned()));
+
+        let links = connection
+            .list_memory_links_for_memory(created_memory_id, Some(MemoryLinkRelation::DerivedFrom))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].src_memory_id, created_memory_id);
+        assert_eq!(links[0].dst_memory_id, memory_id);
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "attached evidence span missing".to_owned())?;
+        assert_eq!(evidence.memory_id.as_deref(), Some(created_memory_id));
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(jobs.iter().any(|job| {
+            job.document_source.as_deref() == Some("memory")
+                && job.document_id.as_deref() == Some(created_memory_id)
+                && job.status == "pending"
+        }));
+
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "create-derived candidate missing after apply".to_owned())?;
+        assert_eq!(stored.status, "applied");
+        assert!(stored.applied_at.is_some());
+        let audit_id = report
+            .mutation
+            .audit_id
+            .as_ref()
+            .ok_or_else(|| "apply should write a memory-create audit id".to_owned())?;
+        let audit = connection
+            .get_audit(audit_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "derived memory audit entry missing".to_owned())?;
+        assert_eq!(audit.action, audit_actions::MEMORY_CREATE);
+        assert_eq!(audit.target_type.as_deref(), Some("memory"));
+        assert_eq!(audit.target_id.as_deref(), Some(created_memory_id));
+        let details: serde_json::Value = serde_json::from_str(
+            audit
+                .details
+                .as_deref()
+                .ok_or_else(|| "derived audit details missing".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            details["schema"].as_str(),
+            Some("ee.audit.derived_memory_created.v1")
+        );
+        assert_eq!(details["candidateId"].as_str(), Some(candidate_id.as_str()));
+        assert_eq!(details["createdMemoryId"].as_str(), Some(created_memory_id));
+        assert_eq!(details["producer"].as_str(), Some("test-reflector"));
+        assert_eq!(details["sourceRefs"].as_array().map(Vec::len), Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_curation_candidate_rolls_back_create_derived_failures() -> TestResult {
+        for (index, phase) in [
+            "after_memory_insert",
+            "after_derived_links",
+            "after_evidence_attachment",
+            "after_search_job_enqueue",
+            "before_candidate_applied",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_create_derived_apply_failure_rolls_back(
+                phase,
+                u128::try_from(index).map_err(|error| error.to_string())?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn assert_create_derived_apply_failure_rolls_back(
+        phase: &'static str,
+        id_offset: u128,
+    ) -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id =
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x6101 + id_offset * 0x10)).to_string();
+        let evidence_source_id = evidence_id(0x6102 + id_offset * 0x10);
+        let candidate_id = curate_id(0x6103 + id_offset * 0x10);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        super::set_create_derived_apply_fail_phase(Some(phase));
+        let result = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        });
+        super::set_create_derived_apply_fail_phase(None);
+
+        let error = result.expect_err("failure injection should abort create-derived apply");
+        assert!(
+            error.message().contains(phase),
+            "error should name injected phase {phase}: {}",
+            error.message()
+        );
+
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "create-derived candidate missing after failed apply".to_owned())?;
+        assert_eq!(stored.status, "approved");
+        assert!(stored.applied_at.is_none());
+
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(memories.len(), 1, "failed phase {phase} leaked a memory");
+        assert_eq!(memories[0].id, memory_id);
+        let links = connection
+            .list_memory_links_for_memory(&memory_id, Some(MemoryLinkRelation::DerivedFrom))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            links.is_empty(),
+            "failed phase {phase} leaked provenance links"
+        );
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "evidence span missing after failed apply".to_owned())?;
+        assert!(
+            evidence.memory_id.is_none(),
+            "failed phase {phase} left evidence attached"
+        );
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(jobs.is_empty(), "failed phase {phase} leaked search jobs");
+        let audits = connection
+            .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            audits.is_empty(),
+            "failed phase {phase} leaked memory.create audit"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validate_curation_candidate_rejects_create_derived_drift_and_bad_provenance() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -12435,6 +13462,8 @@ mod tests {
                 decision: "apply".to_owned(),
                 candidate_type: "promote".to_owned(),
                 target_memory_id: "mem_aggregate000000000000001".to_owned(),
+                created_memory_id: None,
+                created_memory: None,
                 changes: Vec::new(),
                 errors: Vec::new(),
                 warnings: Vec::new(),
