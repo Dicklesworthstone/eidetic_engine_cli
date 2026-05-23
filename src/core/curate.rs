@@ -19,7 +19,8 @@ use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
-    ReviewQueueState, validate_candidate, validate_candidate_trust_evidence,
+    DerivationSourceKind, DerivationSourceRef, ReviewQueueState,
+    canonical_derivation_source_refs_json, validate_candidate, validate_candidate_trust_evidence,
     validate_review_queue_transition,
 };
 use crate::db::{
@@ -36,8 +37,8 @@ use crate::graph::decay::{
 };
 use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
 use crate::models::{
-    CandidateId, DomainError, MemoryId, ProducerMetadata, REVIEW_SESSION_SCHEMA_V1, RuleId,
-    WorkspaceId,
+    CandidateId, DomainError, MemoryId, MemoryKind, MemoryLevel, ProducerMetadata, ProvenanceUri,
+    REVIEW_SESSION_SCHEMA_V1, RuleId, Tag, TrustClass, UnitScore, WorkspaceId,
 };
 use crate::search::HashEmbedder;
 
@@ -2371,7 +2372,7 @@ fn append_mi_dedup_candidates(
             continue;
         }
         if target_memory_id.is_some_and(|target| {
-            proposal.target_memory_id != target
+            proposal.target_memory_id.as_deref() != Some(target)
                 && !proposal
                     .source_id
                     .as_deref()
@@ -3014,14 +3015,6 @@ pub fn validate_curation_candidate(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
-    let target_memory_id = required_stored_target_memory_id(&stored)?;
-    let target_memory =
-        connection
-            .get_memory(target_memory_id)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to load target memory: {error}"),
-                repair: Some("ee memory show <memory-id> --json".to_owned()),
-            })?;
 
     let now = Utc::now().to_rfc3339();
     let prompt_injection_guard = crate::core::config_surface::get_config(
@@ -3033,12 +3026,31 @@ pub fn validate_curation_candidate(
     )
     .map(|c| c.value == "true")
     .unwrap_or(true);
-    let decision = evaluate_candidate_for_validation(
-        &stored,
-        target_memory.as_ref(),
-        &now,
-        prompt_injection_guard,
-    );
+    let parsed_candidate_type = CandidateType::from_str(&stored.candidate_type);
+    let decision = match parsed_candidate_type {
+        Ok(CandidateType::CreateDerivedMemory) => evaluate_create_derived_candidate_for_validation(
+            &connection,
+            &stored,
+            &now,
+            prompt_injection_guard,
+        ),
+        Ok(_) | Err(_) => {
+            let target_memory_id = required_stored_target_memory_id(&stored)?;
+            let target_memory =
+                connection
+                    .get_memory(target_memory_id)
+                    .map_err(|error| DomainError::Storage {
+                        message: format!("Failed to load target memory: {error}"),
+                        repair: Some("ee memory show <memory-id> --json".to_owned()),
+                    })?;
+            evaluate_candidate_for_validation(
+                &stored,
+                target_memory.as_ref(),
+                &now,
+                prompt_injection_guard,
+            )
+        }
+    };
     let from_status = stored.status.clone();
     let mut reviewed_at = None;
     let mut persisted = false;
@@ -4340,6 +4352,636 @@ fn evaluate_candidate_for_validation(
         }
     }
 
+    finish_candidate_validation(stored, current_status, errors, warnings)
+}
+
+fn evaluate_create_derived_candidate_for_validation(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    now_rfc3339: &str,
+    prompt_injection_guard: bool,
+) -> ValidationDecision {
+    let mut errors = Vec::new();
+    let warnings = Vec::new();
+    let current_status = parse_stored_status(&stored.status, &mut errors);
+
+    if let Some(status) = current_status
+        && status.is_terminal()
+    {
+        errors.push(validation_issue(
+            "candidate_status_terminal",
+            format!(
+                "Candidate is already in terminal status {}.",
+                status.as_str()
+            ),
+            "No validation transition is available for terminal candidates.",
+        ));
+        return blocked_validation(stored, errors, warnings);
+    }
+
+    if let Some(expires_at) = &stored.ttl_expires_at {
+        match timestamp_has_expired(expires_at, now_rfc3339) {
+            Ok(true) => {
+                errors.push(validation_issue(
+                    CandidateValidationError::CandidateExpired.code(),
+                    "Candidate TTL has expired.",
+                    "Create or review a fresh curation candidate.",
+                ));
+                return ValidationDecision {
+                    validation: CurateValidateResult {
+                        status: "failed".to_owned(),
+                        decision: "expired".to_owned(),
+                        errors,
+                        warnings,
+                    },
+                    to_status: CandidateStatus::Expired.as_str().to_owned(),
+                    should_persist: current_status
+                        .is_some_and(|status| status.can_transition_to(CandidateStatus::Expired)),
+                    next_action: "no action required".to_owned(),
+                };
+            }
+            Ok(false) => {}
+            Err(message) => errors.push(validation_issue(
+                "invalid_ttl_timestamp",
+                message,
+                "Store ttl_expires_at as an RFC 3339 timestamp.",
+            )),
+        }
+    }
+
+    if stored
+        .target_memory_id
+        .as_deref()
+        .is_some_and(|target| !target.trim().is_empty())
+    {
+        errors.push(validation_issue(
+            "create_derived_target_forbidden",
+            "create-derived-memory candidates must not target an existing memory.",
+            "Re-propose the candidate with targetMemoryId set to null.",
+        ));
+    }
+
+    if let Some(issue) = validate_create_derived_trust_class(stored.proposed_trust_class.as_deref())
+    {
+        errors.push(issue);
+    }
+
+    let source_type = CandidateSource::from_str(&stored.source_type).map_err(|error| {
+        validation_issue(
+            "invalid_candidate_source",
+            error.to_string(),
+            "Regenerate the candidate with a supported source type.",
+        )
+    });
+    match source_type {
+        Ok(source_type) => {
+            let input = CandidateInput {
+                workspace_id: stored.workspace_id.clone(),
+                candidate_type: CandidateType::CreateDerivedMemory,
+                target_memory_id: None,
+                proposed_content: stored.proposed_content.clone(),
+                proposed_confidence: stored.proposed_confidence,
+                proposed_trust_class: stored.proposed_trust_class.clone(),
+                source_type,
+                source_id: stored.source_id.clone(),
+                reason: stored.reason.clone(),
+                confidence: stored.confidence,
+                ttl_seconds: None,
+            };
+            if let Err(error) = validate_candidate(input, now_rfc3339, prompt_injection_guard) {
+                errors.push(validation_issue(
+                    error.code(),
+                    error.to_string(),
+                    validation_repair(&error),
+                ));
+            }
+        }
+        Err(issue) => errors.push(issue),
+    }
+
+    match parse_derivation_source_refs(stored) {
+        Ok(source_refs) => {
+            validate_derivation_source_refs(connection, stored, &source_refs, &mut errors)
+        }
+        Err(issue) => errors.push(issue),
+    }
+    validate_derivation_metadata(stored, &mut errors);
+
+    finish_candidate_validation(stored, current_status, errors, warnings)
+}
+
+fn parse_derivation_source_refs(
+    stored: &StoredCurationCandidate,
+) -> Result<Vec<DerivationSourceRef>, CurateValidationIssue> {
+    let raw = stored
+        .derivation_source_refs_json
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            validation_issue(
+                "derived_source_refs_missing",
+                "create-derived-memory validation requires derivation source refs.",
+                "Re-propose the candidate with derivationSourceRefs populated.",
+            )
+        })?;
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        validation_issue(
+            "derived_source_refs_invalid_json",
+            format!("derivation source refs JSON is invalid: {error}"),
+            "Re-propose the candidate with valid derivation source JSON.",
+        )
+    })?;
+    let array = parsed.as_array().ok_or_else(|| {
+        validation_issue(
+            "derived_source_refs_not_array",
+            "derivation source refs must be a JSON array.",
+            "Re-propose the candidate with a source refs array.",
+        )
+    })?;
+    let mut refs = Vec::with_capacity(array.len());
+    for entry in array {
+        let object = entry.as_object().ok_or_else(|| {
+            validation_issue(
+                "derived_source_ref_invalid",
+                "each derivation source ref must be a JSON object.",
+                "Re-propose the candidate with object source refs.",
+            )
+        })?;
+        let kind = required_json_string(object, "kind", "derived_source_ref_invalid")?;
+        let kind = match kind {
+            "memory" => DerivationSourceKind::Memory,
+            "evidence_span" => DerivationSourceKind::EvidenceSpan,
+            other => {
+                return Err(validation_issue(
+                    "derived_source_kind_invalid",
+                    format!("unsupported derivation source kind `{other}`."),
+                    "Use memory or evidence_span source refs.",
+                ));
+            }
+        };
+        let id = required_json_string(object, "id", "derived_source_ref_invalid")?;
+        let content_hash =
+            required_json_string(object, "contentHash", "derived_source_ref_invalid")?;
+        refs.push(DerivationSourceRef::new(kind, id, content_hash));
+    }
+    canonical_derivation_source_refs_json(&refs).map_err(|error| {
+        validation_issue(
+            error.code(),
+            error.to_string(),
+            "Re-propose the candidate with a fresh derivation source package.",
+        )
+    })?;
+    Ok(refs)
+}
+
+fn validate_derivation_source_refs(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    source_refs: &[DerivationSourceRef],
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    for source_ref in source_refs {
+        match source_ref.kind {
+            DerivationSourceKind::Memory => {
+                validate_memory_derivation_source(connection, stored, source_ref, errors);
+            }
+            DerivationSourceKind::EvidenceSpan => {
+                validate_evidence_derivation_source(connection, stored, source_ref, errors);
+            }
+        }
+    }
+}
+
+fn validate_memory_derivation_source(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    source_ref: &DerivationSourceRef,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    match connection.get_memory(source_ref.id.as_str()) {
+        Ok(Some(memory)) if memory.workspace_id != stored.workspace_id => {
+            errors.push(validation_issue(
+                "derived_source_workspace_mismatch",
+                format!(
+                    "Memory source {} belongs to workspace {}, not {}.",
+                    memory.id, memory.workspace_id, stored.workspace_id
+                ),
+                "Re-propose the candidate from sources in the same workspace.",
+            ));
+        }
+        Ok(Some(memory)) if memory.tombstoned_at.is_some() => {
+            errors.push(validation_issue(
+                "derived_source_memory_tombstoned",
+                format!("Memory source {} is tombstoned.", memory.id),
+                "Re-propose the candidate from active source memories.",
+            ));
+        }
+        Ok(Some(memory)) => {
+            let actual_hash = memory_content_hash(memory.content.as_str());
+            if actual_hash != source_ref.content_hash {
+                errors.push(validation_issue(
+                    "derived_source_hash_mismatch",
+                    format!(
+                        "Memory source {} hash drifted from {} to {}.",
+                        memory.id, source_ref.content_hash, actual_hash
+                    ),
+                    "Re-propose the candidate against the current source content.",
+                ));
+            }
+        }
+        Ok(None) => {
+            errors.push(validation_issue(
+                "derived_source_memory_missing",
+                format!("Memory source {} does not exist.", source_ref.id),
+                "Re-propose the candidate from existing source memories.",
+            ));
+        }
+        Err(error) => {
+            errors.push(validation_issue(
+                "derived_source_memory_load_failed",
+                format!("Failed to load memory source {}: {error}", source_ref.id),
+                "Retry validation after repairing storage.",
+            ));
+        }
+    }
+}
+
+fn validate_evidence_derivation_source(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    source_ref: &DerivationSourceRef,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    match connection.get_evidence_span(source_ref.id.as_str()) {
+        Ok(Some(span)) if span.workspace_id != stored.workspace_id => {
+            errors.push(validation_issue(
+                "derived_source_workspace_mismatch",
+                format!(
+                    "Evidence source {} belongs to workspace {}, not {}.",
+                    span.id, span.workspace_id, stored.workspace_id
+                ),
+                "Re-propose the candidate from sources in the same workspace.",
+            ));
+        }
+        Ok(Some(span)) if span.content_hash != source_ref.content_hash => {
+            errors.push(validation_issue(
+                "derived_source_hash_mismatch",
+                format!(
+                    "Evidence source {} hash drifted from {} to {}.",
+                    span.id, source_ref.content_hash, span.content_hash
+                ),
+                "Re-propose the candidate against the current source content.",
+            ));
+        }
+        Ok(Some(span))
+            if span
+                .memory_id
+                .as_deref()
+                .is_some_and(|memory_id| !memory_id.trim().is_empty()) =>
+        {
+            errors.push(validation_issue(
+                "derived_source_evidence_already_linked",
+                format!("Evidence source {} is already linked to a memory.", span.id),
+                "Re-propose the candidate with unlinked evidence spans.",
+            ));
+        }
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            errors.push(validation_issue(
+                "derived_source_evidence_missing",
+                format!("Evidence source {} does not exist.", source_ref.id),
+                "Re-propose the candidate from existing evidence spans.",
+            ));
+        }
+        Err(error) => {
+            errors.push(validation_issue(
+                "derived_source_evidence_load_failed",
+                format!("Failed to load evidence source {}: {error}", source_ref.id),
+                "Retry validation after repairing storage.",
+            ));
+        }
+    }
+}
+
+fn validate_derivation_metadata(
+    stored: &StoredCurationCandidate,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(raw) = stored
+        .derivation_metadata_json
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        errors.push(validation_issue(
+            "derived_metadata_missing",
+            "create-derived-memory validation requires derivation metadata.",
+            "Re-propose the candidate with derivation metadata.",
+        ));
+        return;
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            errors.push(validation_issue(
+                "derived_metadata_invalid_json",
+                format!("derivation metadata JSON is invalid: {error}"),
+                "Re-propose the candidate with valid derivation metadata JSON.",
+            ));
+            return;
+        }
+    };
+    let Some(object) = parsed.as_object() else {
+        errors.push(validation_issue(
+            "derived_metadata_invalid",
+            "derivation metadata must be a JSON object.",
+            "Re-propose the candidate with object metadata.",
+        ));
+        return;
+    };
+    let Some(memory_spec) = object
+        .get("memorySpec")
+        .and_then(serde_json::Value::as_object)
+    else {
+        errors.push(validation_issue(
+            "derived_metadata_memory_spec_missing",
+            "derivation metadata must include memorySpec.",
+            "Re-propose the candidate with the derived memory spec.",
+        ));
+        return;
+    };
+    let Some(producer) = object
+        .get("producer")
+        .and_then(serde_json::Value::as_object)
+    else {
+        errors.push(validation_issue(
+            "derived_metadata_producer_missing",
+            "derivation metadata must include producer metadata.",
+            "Re-propose the candidate with producer metadata.",
+        ));
+        return;
+    };
+
+    validate_derivation_memory_spec(memory_spec, errors);
+    if let Err(issue) = required_json_string(producer, "producer", "derived_metadata_invalid") {
+        errors.push(issue);
+    }
+}
+
+fn validate_derivation_memory_spec(
+    memory_spec: &serde_json::Map<String, serde_json::Value>,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    match required_json_string(memory_spec, "level", "derived_metadata_invalid") {
+        Ok(level) => {
+            if let Err(error) = MemoryLevel::from_str(level) {
+                errors.push(validation_issue(
+                    "derived_memory_level_invalid",
+                    error.to_string(),
+                    "Use a supported memory level.",
+                ));
+            }
+        }
+        Err(issue) => errors.push(issue),
+    }
+    match required_json_string(memory_spec, "kind", "derived_metadata_invalid") {
+        Ok(kind) => {
+            if let Err(error) = MemoryKind::from_str(kind) {
+                errors.push(validation_issue(
+                    "derived_memory_kind_invalid",
+                    error.to_string(),
+                    "Use a supported memory kind.",
+                ));
+            }
+        }
+        Err(issue) => errors.push(issue),
+    }
+
+    validate_optional_string(
+        memory_spec,
+        "workflowId",
+        "derived_metadata_invalid",
+        errors,
+    );
+    validate_optional_string(
+        memory_spec,
+        "trustSubclass",
+        "derived_metadata_invalid",
+        errors,
+    );
+    validate_optional_tags(memory_spec, errors);
+    validate_optional_unit_score(memory_spec, "confidence", errors);
+    validate_optional_unit_score(memory_spec, "utility", errors);
+    validate_optional_unit_score(memory_spec, "importance", errors);
+    validate_optional_provenance_uri(memory_spec, errors);
+    validate_optional_trust_class(memory_spec, errors);
+
+    let valid_from = parse_optional_metadata_timestamp(memory_spec, "validFrom", errors);
+    let valid_to = parse_optional_metadata_timestamp(memory_spec, "validTo", errors);
+    if let (Some(valid_from), Some(valid_to)) = (valid_from, valid_to)
+        && valid_to < valid_from
+    {
+        errors.push(validation_issue(
+            "derived_memory_validity_window_invalid",
+            "memorySpec.validTo must not be earlier than memorySpec.validFrom.",
+            "Re-propose the candidate with an ordered validity window.",
+        ));
+    }
+}
+
+fn validate_create_derived_trust_class(value: Option<&str>) -> Option<CurateValidationIssue> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    match TrustClass::from_str(value) {
+        Ok(TrustClass::AgentAssertion) => None,
+        Ok(other) => Some(validation_issue(
+            "derived_trust_class_forbidden",
+            format!(
+                "create-derived-memory validation keeps trust class at agent_assertion, not {other}."
+            ),
+            "Re-propose the candidate with proposedTrustClass agent_assertion or omit it.",
+        )),
+        Err(error) => Some(validation_issue(
+            "derived_trust_class_invalid",
+            error.to_string(),
+            "Use a supported trust class.",
+        )),
+    }
+}
+
+fn validate_optional_trust_class(
+    object: &serde_json::Map<String, serde_json::Value>,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(value) = optional_json_string(object, "trustClass") else {
+        return;
+    };
+    if let Some(issue) = validate_create_derived_trust_class(Some(value)) {
+        errors.push(issue);
+    }
+}
+
+fn validate_optional_provenance_uri(
+    object: &serde_json::Map<String, serde_json::Value>,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(value) = optional_json_string(object, "provenanceUri") else {
+        return;
+    };
+    if let Err(error) = ProvenanceUri::from_str(value) {
+        errors.push(validation_issue(
+            "derived_provenance_uri_invalid",
+            error.to_string(),
+            "Use an accepted provenance URI scheme or null.",
+        ));
+    }
+}
+
+fn validate_optional_tags(
+    object: &serde_json::Map<String, serde_json::Value>,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(value) = object.get("tags") else {
+        return;
+    };
+    if value.is_null() {
+        return;
+    }
+    let Some(tags) = value.as_array() else {
+        errors.push(validation_issue(
+            "derived_tags_invalid",
+            "memorySpec.tags must be an array of strings.",
+            "Re-propose the candidate with valid derived-memory tags.",
+        ));
+        return;
+    };
+    for tag in tags {
+        let Some(tag) = tag.as_str() else {
+            errors.push(validation_issue(
+                "derived_tags_invalid",
+                "memorySpec.tags entries must be strings.",
+                "Re-propose the candidate with valid derived-memory tags.",
+            ));
+            continue;
+        };
+        if let Err(error) = Tag::parse(tag) {
+            errors.push(validation_issue(
+                "derived_tag_invalid",
+                error.to_string(),
+                "Use tags accepted by the memory tag validator.",
+            ));
+        }
+    }
+}
+
+fn validate_optional_unit_score(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(value) = object.get(field) else {
+        return;
+    };
+    if value.is_null() {
+        return;
+    }
+    let Some(value) = value.as_f64() else {
+        errors.push(validation_issue(
+            "derived_score_invalid",
+            format!("memorySpec.{field} must be a number in the unit interval."),
+            "Use score values between 0.0 and 1.0.",
+        ));
+        return;
+    };
+    if !value.is_finite() || UnitScore::parse(value as f32).is_err() {
+        errors.push(validation_issue(
+            "derived_score_invalid",
+            format!("memorySpec.{field} must be between 0.0 and 1.0."),
+            "Use score values between 0.0 and 1.0.",
+        ));
+    }
+}
+
+fn parse_optional_metadata_timestamp(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+    errors: &mut Vec<CurateValidationIssue>,
+) -> Option<DateTime<Utc>> {
+    let value = optional_json_string(object, field)?;
+    match DateTime::parse_from_rfc3339(value) {
+        Ok(timestamp) => Some(timestamp.with_timezone(&Utc)),
+        Err(error) => {
+            errors.push(validation_issue(
+                "derived_validity_timestamp_invalid",
+                format!("memorySpec.{field} must be RFC 3339: {error}"),
+                "Use RFC 3339 validity timestamps or null.",
+            ));
+            None
+        }
+    }
+}
+
+fn validate_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+    code: &'static str,
+    errors: &mut Vec<CurateValidationIssue>,
+) {
+    let Some(value) = object.get(field) else {
+        return;
+    };
+    if value.is_null() {
+        return;
+    }
+    if value.as_str().is_none() {
+        errors.push(validation_issue(
+            code,
+            format!("memorySpec.{field} must be a string or null."),
+            "Re-propose the candidate with valid derivation metadata.",
+        ));
+    }
+}
+
+fn required_json_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+    code: &'static str,
+) -> Result<&'a str, CurateValidationIssue> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            validation_issue(
+                code,
+                format!("{field} must be a non-empty string."),
+                "Re-propose the candidate with valid derivation metadata.",
+            )
+        })
+}
+
+fn optional_json_string<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Option<&'a str> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn memory_content_hash(content: &str) -> String {
+    format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex())
+}
+
+fn finish_candidate_validation(
+    stored: &StoredCurationCandidate,
+    current_status: Option<CandidateStatus>,
+    errors: Vec<CurateValidationIssue>,
+    mut warnings: Vec<CurateValidationIssue>,
+) -> ValidationDecision {
     if warnings.is_empty() && stored.confidence < 0.50 {
         warnings.push(validation_issue(
             "low_candidate_confidence",
@@ -10339,6 +10981,122 @@ mod tests {
     }
 
     #[test]
+    fn validate_curation_candidate_approves_create_derived_without_target_lookup() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(81)).to_string();
+        let evidence_source_id = evidence_id(82);
+        let candidate_id = curate_id(83);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        let report = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.validation.status, "passed");
+        assert_eq!(report.validation.decision, "approved");
+        assert!(report.validation.errors.is_empty());
+        assert_eq!(report.mutation.to_status, "approved");
+        assert!(report.mutation.persisted);
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "create-derived candidate missing after validation".to_owned())?;
+        assert_eq!(stored.status, "approved");
+        assert!(stored.target_memory_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_curation_candidate_rejects_create_derived_drift_and_bad_provenance() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(84)).to_string();
+        let evidence_source_id = evidence_id(85);
+        let candidate_id = curate_id(86);
+        let metadata_json = serde_json::json!({
+            "memorySpec": {
+                "level": "semantic",
+                "kind": "fact",
+                "confidence": 0.61,
+                "utility": 0.50,
+                "importance": 0.40,
+                "provenanceUri": "curation-candidate://not-accepted",
+                "trustClass": "agent_assertion",
+                "tags": ["reflection"]
+            },
+            "producer": {
+                "producer": "test-reflector",
+                "producerPayload": {"schema": "ee.reflect.result.v1"}
+            }
+        })
+        .to_string();
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            Some("blake3:0000000000000000000000000000000000000000000000000000000000000000"),
+            Some(metadata_json),
+            None,
+        )?;
+
+        let report = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.validation.status, "failed");
+        assert_eq!(report.validation.decision, "rejected");
+        assert!(
+            report
+                .validation
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_source_hash_mismatch")
+        );
+        assert!(
+            report
+                .validation
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_provenance_uri_invalid")
+        );
+        let stored = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "create-derived candidate missing after validation".to_owned())?;
+        assert_eq!(stored.status, "rejected");
+        assert!(stored.target_memory_id.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_blocks_load_bearing_tombstone_without_override() -> TestResult {
         let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -11961,6 +12719,146 @@ mod tests {
                 proposed_content,
             },
         )?;
+        Ok(connection)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_create_derived_candidate_database(
+        database_path: &std::path::Path,
+        workspace_path: &std::path::Path,
+        workspace_id: &str,
+        memory_id: &str,
+        evidence_source_id: &str,
+        candidate_id: &str,
+        memory_hash_override: Option<&str>,
+        metadata_json_override: Option<String>,
+        evidence_memory_id: Option<&str>,
+    ) -> Result<DbConnection, String> {
+        let connection =
+            DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("create-derived-validate-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let source_content =
+            "Source memory says derived candidates must lock src/core/curate.rs hashes.";
+        connection
+            .insert_memory(
+                memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.to_owned(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: source_content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.70,
+                    utility: 0.60,
+                    importance: 0.50,
+                    provenance_uri: Some("cass-session://create-derived-session#L1-L2".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["reflection".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(8_200)).to_string();
+        connection
+            .insert_session(
+                &session_id,
+                &session_input(workspace_id, "create-derived-session"),
+            )
+            .map_err(|error| error.to_string())?;
+        let evidence_excerpt =
+            "CASS evidence requires create-derived validation to compare locked source hashes.";
+        let evidence_input = evidence_span_input(
+            workspace_id,
+            &session_id,
+            evidence_memory_id,
+            "create-derived-span",
+            1,
+            evidence_excerpt,
+        );
+        let evidence_hash = evidence_input.content_hash.clone();
+        connection
+            .insert_evidence_span(evidence_source_id, &evidence_input)
+            .map_err(|error| error.to_string())?;
+
+        let memory_hash = memory_hash_override
+            .map(str::to_owned)
+            .unwrap_or_else(|| super::memory_content_hash(source_content));
+        let source_refs_json = serde_json::json!([
+            {
+                "kind": "memory",
+                "id": memory_id,
+                "contentHash": memory_hash
+            },
+            {
+                "kind": "evidence_span",
+                "id": evidence_source_id,
+                "contentHash": evidence_hash
+            }
+        ])
+        .to_string();
+        let metadata_json = metadata_json_override.unwrap_or_else(|| {
+            serde_json::json!({
+                "memorySpec": {
+                    "level": "semantic",
+                    "kind": "fact",
+                    "confidence": 0.61,
+                    "utility": 0.50,
+                    "importance": 0.40,
+                    "provenanceUri": format!("ee-mem://{memory_id}"),
+                    "trustClass": "agent_assertion",
+                    "trustSubclass": "reflection",
+                    "tags": ["reflection", "source.lock"],
+                    "validFrom": "2026-05-01T00:00:00Z",
+                    "validTo": "2026-06-01T00:00:00Z"
+                },
+                "producer": {
+                    "producer": "test-reflector",
+                    "producerPayload": {"schema": "ee.reflect.result.v1"}
+                }
+            })
+            .to_string()
+        });
+
+        connection
+            .insert_curation_candidate(
+                candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.to_owned(),
+                    candidate_type: "create_derived_memory".to_owned(),
+                    target_memory_id: None,
+                    proposed_content: Some(
+                        "Derived memory: validate `src/core/curate.rs` create-derived source hashes before running `ee curate apply`."
+                            .to_owned(),
+                    ),
+                    proposed_confidence: Some(0.61),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("reflect_result_0123456789012345".to_owned()),
+                    reason: "Reflection result cites locked source hashes from CASS evidence."
+                        .to_owned(),
+                    confidence: 0.76,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:05Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: Some(source_refs_json),
+                    derivation_metadata_json: Some(metadata_json),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
         Ok(connection)
     }
 
