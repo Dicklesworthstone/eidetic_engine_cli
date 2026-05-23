@@ -949,7 +949,10 @@ fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
     ];
 
     for prefix in SENSITIVE_RELATIVE_PATH_PREFIXES {
-        if remaining.starts_with(prefix) {
+        if remaining
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
             return Some(prefix.len());
         }
     }
@@ -3763,6 +3766,34 @@ mod tests {
         }
         assert!(
             redacted.contains("ordinary=docs/hosts.yml"),
+            "ordinary relative paths should remain visible: {redacted}"
+        );
+    }
+
+    #[test]
+    fn search_projection_redacts_case_insensitive_relative_credential_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"ssh=.SSH/id_ed25519 gh=.\.Config\GH\hosts.yml azure=../.AZURE/accessTokens.json gem=.Gem/Credentials git=./.GIT-CREDENTIALS ordinary=docs/Hosts.yml next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"ssh=[REDACTED_PATH] gh=[REDACTED_PATH] azure=[REDACTED_PATH] gem=[REDACTED_PATH] git=[REDACTED_PATH] ordinary=docs/Hosts.yml next=done"#
+        );
+        for leaked in [
+            ".SSH/id_ed25519",
+            r#".\.Config\GH\hosts.yml"#,
+            "../.AZURE/accessTokens.json",
+            ".Gem/Credentials",
+            "./.GIT-CREDENTIALS",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked case-insensitive credential path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=docs/Hosts.yml"),
             "ordinary relative paths should remain visible: {redacted}"
         );
     }
