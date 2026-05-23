@@ -339,7 +339,25 @@ fn redaction_safe_label(label: &str) -> Option<String> {
 }
 
 fn label_has_secret_marker(label: &str) -> bool {
-    let normalized = label.to_ascii_lowercase();
+    // bd-brt3i: normalize both label and markers so casing- and
+    // separator-variant labels (apiKey, api-key, api.key,
+    // PRIVATE_KEY, private-key, ssh.key, sk-live, etc.) cannot
+    // slip past the substring match. Lowercase + drop the three
+    // separator chars we observe in the wild (`_`, `-`, `.`).
+    // Markers with intentional separator prefixes (`ghp_`,
+    // `xoxb-`, `xoxp-`) survive because their alphanumeric core
+    // (`ghp`, `xoxb`, `xoxp`) is preserved under the same
+    // normalization.
+    fn normalize(value: &str) -> String {
+        value
+            .chars()
+            .filter_map(|c| match c {
+                '_' | '-' | '.' => None,
+                other => Some(other.to_ascii_lowercase()),
+            })
+            .collect()
+    }
+    let normalized = normalize(label);
     [
         "api_key",
         "apikey",
@@ -358,7 +376,7 @@ fn label_has_secret_marker(label: &str) -> bool {
         "xoxp-",
     ]
     .iter()
-    .any(|marker| normalized.contains(marker))
+    .any(|marker| normalized.contains(&normalize(marker)))
 }
 
 fn stable_mesh_alias(prefix: &str, value: &str) -> String {
@@ -384,6 +402,96 @@ mod tests {
     use super::*;
     use crate::config::{MeshLaneDecision, MeshLaneGrants};
     use crate::models::TrustClass;
+
+    #[test]
+    fn label_has_secret_marker_catches_casing_and_separator_variants() {
+        // bd-brt3i: labels mixing case and the three separator
+        // variants (_, -, .) must all be flagged as secret-like.
+        // Prior implementation lowercased + substring-matched a
+        // fixed marker list, missing kebab/dot variants of
+        // underscore-named markers (private_key, ssh_key, sk_live,
+        // sk_test) and camelCase forms when the camelCase
+        // lowercased shape was not separately enumerated.
+        for label in [
+            // api_key family
+            "api_key",
+            "api-key",
+            "api.key",
+            "apiKey",
+            "API_KEY",
+            "API-KEY",
+            "API.KEY",
+            // private_key family
+            "private_key",
+            "private-key",
+            "private.key",
+            "privateKey",
+            "PRIVATE_KEY",
+            "PRIVATE-KEY",
+            // ssh_key family
+            "ssh_key",
+            "ssh-key",
+            "ssh.key",
+            "sshKey",
+            "SSH_KEY",
+            // sk_live / sk_test (Stripe live/test secret keys)
+            "sk_live",
+            "sk-live",
+            "sk.live",
+            "skLive",
+            "sk_test",
+            "sk-test",
+            // existing-tested forms remain caught
+            "secret",
+            "TOKEN",
+            "password",
+            "passWord",
+            "PassWord",
+            "credential",
+            "Credentials",
+            "bearer",
+            "ghp_abc123",
+            "ghp-abc123",
+            "xoxb-something",
+            "xoxbsomething",
+            "xoxp-team",
+            "xoxpteam",
+        ] {
+            assert!(
+                label_has_secret_marker(label),
+                "expected `{label}` to be flagged as secret-like"
+            );
+        }
+    }
+
+    #[test]
+    fn label_has_secret_marker_does_not_overmatch_benign_labels() {
+        // bd-brt3i: normalization must not turn legitimate labels
+        // into spurious matches. Verify a handful of benign mesh
+        // labels survive — these are domain terms that appear in
+        // policy IDs, peer aliases, and lane names.
+        for label in [
+            "policy_alpha",
+            "peer_builder_one",
+            "metadata",
+            "graphLink",
+            "revisionNotice",
+            "wsp_remote_beta",
+            "trust_lane",
+            "redaction_posture",
+            "share",
+            "redact",
+            "deny",
+            // Tricky edge: contains "ke" + "y" but not the marker
+            "fake_y_label",
+            "monkey-business",
+        ] {
+            assert!(
+                !label_has_secret_marker(label),
+                "expected `{label}` to NOT be flagged as secret-like"
+            );
+        }
+    }
 
     fn policy(policy_id: &str, peer_id: &str, origin_workspace_id: &str) -> MeshPeerPolicy {
         MeshPeerPolicy {
