@@ -40,11 +40,17 @@ mod cass_session_info_defaults;
 #[path = "contracts/cass_exit_code_constants.rs"]
 mod cass_exit_code_constants;
 
+#[path = "contracts/cass_import_session_status_as_str.rs"]
+mod cass_import_session_status_as_str;
+
 #[path = "contracts/cass_contract_constants.rs"]
 mod cass_contract_constants;
 
 #[path = "contracts/cass_client_defaults.rs"]
 mod cass_client_defaults;
+
+#[path = "contracts/cass_schema_id_constants.rs"]
+mod cass_schema_id_constants;
 
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
