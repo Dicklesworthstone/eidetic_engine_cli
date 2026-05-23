@@ -157,14 +157,75 @@
     },
     "agentMail": {
       "type": "object",
+      "description": "bd-2z5ly.8: redacted Agent Mail coordination health. `status` carries the broad availability and recovery class; the `*Authoritative` flags and `archiveIndexParity` tell a downstream candidate-safety classifier whether reservation or inbox evidence can be trusted. `fallbackActions` is an ordered, structured recovery workflow that replaces prose-only repair strings so agents do not parse natural language. No mail bodies, raw inbox contents, agent identities, or unredacted reservation paths may appear in this block.",
       "required": ["status", "healthLevel", "unreadCount", "ackRequiredCount", "degradedCodes"],
       "additionalProperties": false,
       "properties": {
-        "status": {"type": "string", "enum": ["fresh", "degraded_read_only", "unavailable", "skipped"]},
+        "status": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "healthy",
+            "degraded_read_only",
+            "archive_ahead_of_sqlite",
+            "inbox_unavailable",
+            "reservation_unavailable",
+            "outbox_only",
+            "unreachable",
+            "unavailable",
+            "skipped"
+          ],
+          "description": "bd-2z5ly.8: broad Agent Mail health class. `fresh` and `healthy` are aliases; `healthy` is preferred for new emitters. `degraded_read_only` keeps the index queryable but blocks writes. `archive_ahead_of_sqlite` flags archive/index parity drift. `inbox_unavailable` and `reservation_unavailable` are sub-component failures where partial coordination evidence remains. `outbox_only` allows sends but not reads. `unreachable` means the transport itself is down. `unavailable` and `skipped` retain their legacy `swarm brief` meaning."
+        },
         "healthLevel": {"type": ["string", "null"], "enum": ["green", "yellow", "red", null]},
         "unreadCount": {"type": ["integer", "null"], "minimum": 0},
         "ackRequiredCount": {"type": ["integer", "null"], "minimum": 0},
-        "degradedCodes": {"$ref": "#/definitions/stringArray"}
+        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "recoveryMode": {
+          "type": ["string", "null"],
+          "enum": ["none", "wait_for_repair", "proceed_via_beads", "static_work_only", "manual_coordination", null],
+          "description": "bd-2z5ly.8: structured recovery posture for downstream candidate-safety logic. `null` when status is fresh/healthy or evidence is insufficient to recommend a specific recovery path."
+        },
+        "archiveIndexParity": {
+          "type": ["string", "null"],
+          "enum": ["aligned", "archive_ahead", "sqlite_ahead", "unknown", null],
+          "description": "bd-2z5ly.8: bounded summary of Agent Mail archive/SQLite index parity. `archive_ahead` is the canonical degraded shape observed in this checkout when JSONL archive writes are accepted but the SQLite index has not yet caught up. `null` when parity was not probed."
+        },
+        "reservationAuthoritative": {
+          "type": ["boolean", "null"],
+          "description": "bd-2z5ly.8: whether `file_reservation` evidence in this packet can be trusted. `false` or `null` means a candidate-safety classifier must downgrade confidence rather than treat the lane as conflict-free; never use a missing reservation list as positive evidence of no collision when this flag is not `true`."
+        },
+        "inboxAuthoritative": {
+          "type": ["boolean", "null"],
+          "description": "bd-2z5ly.8: whether `unreadCount` and `ackRequiredCount` reflect a fresh indexed snapshot. `false` or `null` means agents must not interpret a zero count as `no peer messages`."
+        },
+        "fallbackActions": {
+          "type": "array",
+          "description": "bd-2z5ly.8: ordered, structured recovery actions for an agent operating under degraded Agent Mail. MUST be sorted lexicographically by `kind` so the packet stays deterministic across runs. Empty when status is `fresh`/`healthy`. Replaces prose-only repair strings so harnesses can branch mechanically without parsing natural language.",
+          "items": {"$ref": "#/definitions/agentMailFallbackAction"}
+        }
+      }
+    },
+    "agentMailFallbackAction": {
+      "type": "object",
+      "description": "bd-2z5ly.8: a single structured Agent Mail fallback step. `command` and `manualStep` are mutually informative: emitters set whichever applies and leave the other `null`. No mail bodies, raw inbox content, or agent identities may appear in `summary`, `command`, or `manualStep`.",
+      "required": ["kind", "summary", "command", "manualStep"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "beads_comment",
+            "manual_coordination",
+            "record_only",
+            "retry_later",
+            "support_bundle",
+            "switch_to_static_work"
+          ]
+        },
+        "summary": {"type": "string"},
+        "command": {"type": ["string", "null"]},
+        "manualStep": {"type": ["string", "null"]}
       }
     },
     "activeClaim": {
@@ -521,7 +582,22 @@
         "activeClaimCount": 1,
         "dirtyPathCount": 5,
         "fileCollisionCount": 0,
-        "agentMail": {"status": "degraded_read_only", "healthLevel": "red", "unreadCount": null, "ackRequiredCount": null, "degradedCodes": ["agent_mail_unavailable", "archive_index_parity_drift"]},
+        "agentMail": {
+          "status": "degraded_read_only",
+          "healthLevel": "red",
+          "unreadCount": null,
+          "ackRequiredCount": null,
+          "degradedCodes": ["agent_mail_unavailable", "archive_index_parity_drift"],
+          "recoveryMode": "proceed_via_beads",
+          "archiveIndexParity": "archive_ahead",
+          "reservationAuthoritative": false,
+          "inboxAuthoritative": false,
+          "fallbackActions": [
+            {"kind": "beads_comment", "summary": "Record Agent Mail degraded posture and coordinate in Beads until the index recovers.", "command": "br comments add bd-static.4 --message 'agent_mail degraded_read_only; coordinating via beads'", "manualStep": null},
+            {"kind": "retry_later", "summary": "Retry Agent Mail health check after the archive/SQLite parity drift heals.", "command": null, "manualStep": "Re-run am doctor and the work-packet collector after archive_ahead clears."},
+            {"kind": "switch_to_static_work", "summary": "Prefer static or docs-first work while inbox and reservation evidence is non-authoritative.", "command": null, "manualStep": "Avoid claiming peer-touched lanes until reservation_authoritative becomes true."}
+          ]
+        },
         "activeClaims": [
           {"beadId": "bd-cass.3", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:05:00Z", "sourceRefs": ["br://bd-cass.3"]}
         ],

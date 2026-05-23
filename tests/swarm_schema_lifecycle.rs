@@ -157,6 +157,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.swarm.work_packet.v1",
+        file_name: "ee.swarm.work_packet.v1.json",
+        doc_path: "docs/swarm/work_packet.md",
+        tracking_bead: "bd-2z5ly.2",
+        shipped: true,
+    },
+    SchemaCase {
         id: "ee.swarm_incident.v1",
         file_name: "ee.swarm_incident.v1.json",
         doc_path: "docs/swarm/swarm_incident_drills.md",
@@ -273,6 +280,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee swarm brief --json",
         json_path: ".data.recommendations[]",
         fixture_manifest_key: "ee.swarm.recommendation.v1",
+    },
+    DriftCase {
+        schema_id: "ee.swarm.work_packet.v1",
+        command: "ee swarm work-packet --json",
+        json_path: ".examples[\"ee.swarm.work_packet.v1\"]",
+        fixture_manifest_key: "ee.swarm.work_packet.v1",
     },
     DriftCase {
         schema_id: "ee.swarm_incident.v1",
@@ -529,6 +542,209 @@ fn coordination_fallback_examples_cover_statuses_and_redaction_contract() -> Tes
         return Err(format!(
             "coordination fallback examples must cover required non-available statuses\nactual: {statuses:?}\nexpected: {expected:?}"
         ));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn work_packet_agent_mail_fallback_semantics_are_contractual() -> TestResult {
+    // bd-2z5ly.8: the agentMail block of ee.swarm.work_packet.v1 must
+    // expose the richer status/recovery/parity/authority surface and
+    // structured fallback actions, with redaction-safe semantics and
+    // deterministic ordering. The degraded example must exercise it.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+
+    let agent_mail = schema
+        .pointer("/definitions/agentMail")
+        .ok_or_else(|| "agentMail definition missing".to_owned())?;
+    let property_names = |pointer: &str| -> Result<BTreeSet<String>, String> {
+        agent_mail
+            .pointer(pointer)
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("agentMail {pointer} object missing"))
+            .map(|map| map.keys().cloned().collect())
+    };
+    let properties = property_names("/properties")?;
+    for required_property in [
+        "recoveryMode",
+        "archiveIndexParity",
+        "reservationAuthoritative",
+        "inboxAuthoritative",
+        "fallbackActions",
+    ] {
+        if !properties.contains(required_property) {
+            return Err(format!(
+                "ee.swarm.work_packet.v1 agentMail must expose {required_property}"
+            ));
+        }
+    }
+
+    let status_enum = agent_mail
+        .pointer("/properties/status/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.status enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for required_status in [
+        "healthy",
+        "degraded_read_only",
+        "archive_ahead_of_sqlite",
+        "inbox_unavailable",
+        "reservation_unavailable",
+        "outbox_only",
+        "unreachable",
+    ] {
+        if !status_enum.contains(required_status) {
+            return Err(format!(
+                "ee.swarm.work_packet.v1 agentMail.status must include {required_status}"
+            ));
+        }
+    }
+
+    let action_enum = schema
+        .pointer("/definitions/agentMailFallbackAction/properties/kind/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMailFallbackAction.kind enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    for required_kind in ["beads_comment", "retry_later", "switch_to_static_work"] {
+        if !action_enum.contains(required_kind) {
+            return Err(format!(
+                "agentMailFallbackAction.kind must include {required_kind}"
+            ));
+        }
+    }
+
+    let examples = schema
+        .get("examples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.swarm.work_packet.v1 missing examples".to_owned())?;
+    let degraded_example = examples
+        .iter()
+        .find(|example| {
+            example
+                .pointer("/observedStateClass")
+                .and_then(Value::as_str)
+                == Some("degraded_mail_rch_topology")
+        })
+        .ok_or_else(|| "ee.swarm.work_packet.v1 missing degraded example".to_owned())?;
+    let example_agent_mail = degraded_example
+        .pointer("/coordination/agentMail")
+        .ok_or_else(|| "degraded example missing coordination.agentMail".to_owned())?;
+    if example_agent_mail
+        .pointer("/reservationAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err(
+            "degraded example must mark reservationAuthoritative=false so candidate-safety downgrades confidence".into(),
+        );
+    }
+    if example_agent_mail
+        .pointer("/inboxAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("degraded example must mark inboxAuthoritative=false".into());
+    }
+    let fallback_actions = example_agent_mail
+        .pointer("/fallbackActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "degraded example missing fallbackActions array".to_owned())?;
+    if fallback_actions.is_empty() {
+        return Err("degraded example must enumerate at least one fallback action".into());
+    }
+    let mut last_kind: Option<&str> = None;
+    for (index, action) in fallback_actions.iter().enumerate() {
+        let context = format!("fallbackActions[{index}]");
+        let kind = string_field(action, "/kind", &context)?;
+        if let Some(previous) = last_kind {
+            if kind < previous {
+                return Err(format!(
+                    "fallbackActions must be sorted by kind; saw {previous} before {kind}"
+                ));
+            }
+        }
+        last_kind = Some(kind);
+        let summary = string_field(action, "/summary", &context)?;
+        for forbidden in ["body:", "raw_inbox", "From: ", "Subject: ", "Message-ID:"] {
+            if summary.contains(forbidden) {
+                return Err(format!(
+                    "{context}.summary leaks mail-body marker {forbidden}"
+                ));
+            }
+        }
+        if !action
+            .get("command")
+            .is_some_and(|value| value.is_null() || value.is_string())
+        {
+            return Err(format!("{context}.command must be string or null"));
+        }
+        if !action
+            .get("manualStep")
+            .is_some_and(|value| value.is_null() || value.is_string())
+        {
+            return Err(format!("{context}.manualStep must be string or null"));
+        }
+    }
+
+    let rendered = serde_json::to_string(example_agent_mail)
+        .map_err(|error| format!("serialize degraded agentMail: {error}"))?;
+    for forbidden in ["rawInbox", "From:", "Subject:", "Message-ID", "BEGIN PGP"] {
+        if rendered.contains(forbidden) {
+            return Err(format!(
+                "degraded agentMail example must not leak mail-body marker {forbidden}"
+            ));
+        }
+    }
+
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("agent_mail_degraded_read_only.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "agent_mail_degraded_read_only fixture")?
+        != "ee.swarm.work_packet.v1"
+    {
+        return Err("agent_mail_degraded_read_only fixture schema drifted".into());
+    }
+    let fixture_agent_mail = fixture
+        .pointer("/coordination/agentMail")
+        .ok_or_else(|| "agent_mail_degraded_read_only fixture missing agentMail".to_owned())?;
+    if fixture_agent_mail
+        .pointer("/reservationAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || fixture_agent_mail
+            .pointer("/inboxAuthoritative")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "agent_mail_degraded_read_only fixture must mark reservation/inbox as non-authoritative"
+                .into(),
+        );
+    }
+    if string_field(
+        fixture_agent_mail,
+        "/archiveIndexParity",
+        "agent_mail_degraded_read_only fixture agentMail",
+    )? != "archive_ahead"
+    {
+        return Err(
+            "agent_mail_degraded_read_only fixture must surface archive_ahead parity drift".into(),
+        );
     }
 
     Ok(())
