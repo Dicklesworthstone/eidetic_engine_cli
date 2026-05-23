@@ -542,7 +542,7 @@ fn copy_workspace_to_shard(
 
     write_catalog_row(catalog, plan, workspace, shard_id, shard_path, &target_hash)?;
 
-    let copied_row_counts_by_table = diff_counts(&before_counts, &after_counts);
+    let copied_row_counts_by_table = diff_counts(&before_counts, &after_counts)?;
     let copied_row_count = copied_row_counts_by_table.values().copied().sum();
 
     Ok(ShardFanoutMigrationWorkspaceOutcome {
@@ -906,14 +906,24 @@ fn verify_workspace_counts(
 fn diff_counts(
     before: &BTreeMap<String, u64>,
     after: &BTreeMap<String, u64>,
-) -> BTreeMap<String, u64> {
-    after
-        .iter()
-        .map(|(table, after_count)| {
-            let before_count = before.get(table).copied().unwrap_or_default();
-            (table.clone(), after_count.saturating_sub(before_count))
-        })
-        .collect()
+) -> Result<BTreeMap<String, u64>, DomainError> {
+    let mut copied = BTreeMap::new();
+    for (table, after_count) in after {
+        let before_count = before.get(table).copied().unwrap_or_default();
+        let copied_count = after_count.checked_sub(before_count).ok_or_else(|| {
+            storage_error(
+                format!(
+                    "Shard row-count regression for table {table}: before {before_count}, after {after_count}."
+                ),
+                Some(
+                    "Inspect the shard database for concurrent mutation or corruption before retrying `ee migrate shard-fanout --json`."
+                        .to_owned(),
+                ),
+            )
+        })?;
+        copied.insert(table.clone(), copied_count);
+    }
+    Ok(copied)
 }
 
 fn ordered_count_tables(tables: &BTreeSet<String>) -> Vec<String> {
@@ -1190,6 +1200,22 @@ mod tests {
             .expect_err("overflowing file byte count must be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert!(error.to_string().contains("exceeds u64"));
+    }
+
+    #[test]
+    fn diff_counts_rejects_decreasing_table_counts() -> TestResult {
+        let before = BTreeMap::from([("memories".to_string(), 2), ("pack_items".to_string(), 4)]);
+        let after = BTreeMap::from([("memories".to_string(), 5), ("pack_items".to_string(), 4)]);
+        let copied = diff_counts(&before, &after).map_err(|error| error.to_string())?;
+        assert_eq!(copied.get("memories"), Some(&3));
+        assert_eq!(copied.get("pack_items"), Some(&0));
+
+        let regressed = BTreeMap::from([("memories".to_string(), 1)]);
+        let error =
+            diff_counts(&before, &regressed).expect_err("decreasing table counts must fail closed");
+        assert!(error.to_string().contains("row-count regression"));
+        assert!(error.to_string().contains("memories"));
+        Ok(())
     }
 
     fn blocking_plan() -> ShardFanoutMigrationPlan {
