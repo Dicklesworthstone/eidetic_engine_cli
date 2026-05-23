@@ -41,10 +41,11 @@ The agent should:
    can avoid the failure mode on subsequent calls.
 
 Per bd-17c65.5.2 (E2), `degraded[]` only emits per-response codes by
-default — codes whose category is `affects_this_response`. Build-time
-feature gaps and workspace-state codes appear here for reference but
-are filtered out of the default per-response array; pass
-`--include-non-affecting-degradations` to surface every category.
+default — `response_time` codes, plus the response-time half of `mixed`
+codes. Build-time feature gaps appear here for reference but are
+surfaced through capabilities rather than the default per-response
+array; pass `--include-non-affecting-degradations` to inspect every
+documented category.
 
 ---
 

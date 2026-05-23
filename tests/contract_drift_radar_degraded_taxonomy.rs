@@ -45,15 +45,10 @@ const BEAD_ID: &str = "bd-31nul.4";
 const TEST_EVENT_SCHEMA: &str = "ee.test_event.v1";
 const CANONICAL_SEVERITIES: &[&str] = &["info", "low", "warning", "medium", "high", "critical"];
 
-/// Codes whose fixtures declare `repair_present: true` but predate the
-/// structured `repair_contains` / `repair_strings` contract. Tracked for
-/// repair in bd-1aekb. Adding a NEW code here requires filing a follow-up
-/// bead and citing it in the comment so the allowlist stays accountable.
-const REPAIR_SHAPE_ALLOWLIST: &[&str] = &[
-    // bd-1aekb: add structured repair strings.
-    "mi_dedup_candidate_proposed",
-    "mi_dedup_threshold_underpowered",
-];
+/// Temporary repair-shape exemptions for legacy fixtures. Keep this empty
+/// unless a follow-up bead cites why a fixture cannot carry structured repair
+/// expectations yet.
+const REPAIR_SHAPE_ALLOWLIST: &[&str] = &[];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -61,6 +56,14 @@ fn repo_root() -> PathBuf {
 
 fn fixtures_dir() -> PathBuf {
     repo_root().join("tests/fixtures/failure_modes")
+}
+
+fn generated_degraded_codes_doc_path() -> PathBuf {
+    repo_root().join("docs/degraded_codes.md")
+}
+
+fn degraded_codes_doc_generator_path() -> PathBuf {
+    repo_root().join("scripts/build_degraded_codes_doc.sh")
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -458,6 +461,38 @@ fn every_fixture_repair_shape_matches_repair_present() -> TestResult {
             "repair_shape_contradicts_flag",
         ],
     )
+}
+
+#[test]
+fn generated_degraded_codes_doc_uses_taxonomy_categories() -> TestResult {
+    let doc_path = generated_degraded_codes_doc_path();
+    let generator_path = degraded_codes_doc_generator_path();
+    let doc = fs::read_to_string(&doc_path)
+        .map_err(|error| format!("read {}: {error}", doc_path.display()))?;
+    let generator = fs::read_to_string(&generator_path)
+        .map_err(|error| format!("read {}: {error}", generator_path.display()))?;
+
+    for (label, path, content) in [
+        ("generated doc", doc_path.as_path(), doc.as_str()),
+        ("generator", generator_path.as_path(), generator.as_str()),
+    ] {
+        ensure(
+            !content.contains("affects_this_response"),
+            format!(
+                "{label} {} references obsolete taxonomy category `affects_this_response`; use `response_time`, `mixed`, or `build_time`",
+                path.display()
+            ),
+        )?;
+        ensure(
+            content.contains("`response_time` codes")
+                && content.contains("response-time half of `mixed`"),
+            format!(
+                "{label} {} must explain that default degraded[] contains `response_time` codes plus the response-time half of `mixed`",
+                path.display()
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 // --- negative fixtures: prove the radar fails closed ---
