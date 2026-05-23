@@ -10,6 +10,9 @@ mod cass_subprocess_diagnostics_goldens;
 #[path = "contracts/cass_session_uri_contract.rs"]
 mod cass_session_uri_contract;
 
+#[path = "contracts/cass_import_error_repair_hint_contract.rs"]
+mod cass_import_error_repair_hint_contract;
+
 #[path = "conformance/cass_contracts.rs"]
 mod cass_contracts;
 
