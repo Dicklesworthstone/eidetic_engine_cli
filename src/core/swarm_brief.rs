@@ -56,6 +56,8 @@ pub const AGENT_MAIL_SNAPSHOT_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 const GIT_UNAVAILABLE_CODE: &str = "git_unavailable";
 const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
+const BEADS_COMMAND_TIMEOUT_CODE: &str = "beads_command_timeout";
+const BEADS_NO_OUTPUT_CODE: &str = "beads_no_output";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
@@ -863,7 +865,7 @@ impl SwarmBriefCommandError {
         &self,
         source: SwarmBriefSourceKind,
         code: &'static str,
-        repair: &'static str,
+        repair: impl Into<String>,
     ) -> SwarmBriefDegradation {
         let message = match self {
             Self::Unavailable(message) => message.clone(),
@@ -878,7 +880,7 @@ impl SwarmBriefCommandError {
             }
             Self::InvalidUtf8(message) => message.clone(),
         };
-        SwarmBriefDegradation::warning(source, code, message, Some(repair.to_string()))
+        SwarmBriefDegradation::warning(source, code, message, Some(repair.into()))
     }
 }
 
@@ -1272,6 +1274,10 @@ fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
 ) -> Option<SwarmBriefBeadsDependencyCycleSummary> {
     let args = ["dep", "cycles", "--json"];
     match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
+        Ok(output) if output.stdout.trim().is_empty() => {
+            degraded.push(beads_no_output_degradation("br dep cycles --json"));
+            None
+        }
         Ok(output) => match parse_beads_dependency_cycles_json(&output.stdout) {
             Ok(summary) => Some(summary),
             Err(message) => {
@@ -1285,9 +1291,8 @@ fn collect_beads_dependency_cycles<R: SwarmBriefCommandRunner>(
             }
         },
         Err(error) => {
-            degraded.push(error.to_degradation(
-                SwarmBriefSourceKind::Beads,
-                BEADS_UNAVAILABLE_CODE,
+            degraded.push(beads_command_error_to_degradation(
+                &error,
                 "br dep cycles --json",
             ));
             None
@@ -1308,6 +1313,11 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
         "--allow-stale",
     ];
     match runner.run("br", &args, &options.workspace, options.command_timeout_ms) {
+        Ok(output) if output.stdout.trim().is_empty() => {
+            vec![beads_no_output_degradation(
+                "br sync --status --json --no-auto-import --allow-stale",
+            )]
+        }
         Ok(output) => match parse_beads_sync_status_json(&output.stdout) {
             Ok(status) if status.jsonl_newer || status.db_newer => {
                 *freshness = SwarmBriefSourceFreshness {
@@ -1332,9 +1342,8 @@ fn collect_beads_freshness<R: SwarmBriefCommandRunner>(
                 Some("br sync --status --json --no-auto-import --allow-stale".to_string()),
             )],
         },
-        Err(error) => vec![error.to_degradation(
-            SwarmBriefSourceKind::Beads,
-            BEADS_UNAVAILABLE_CODE,
+        Err(error) => vec![beads_command_error_to_degradation(
+            &error,
             "br sync --status --json --no-auto-import --allow-stale",
         )],
     }
@@ -1369,6 +1378,10 @@ fn collect_beads_bucket<R: SwarmBriefCommandRunner>(
     degraded: &mut Vec<SwarmBriefDegradation>,
 ) -> Vec<SwarmBriefBead> {
     match runner.run("br", args, &options.workspace, options.command_timeout_ms) {
+        Ok(output) if output.stdout.trim().is_empty() => {
+            degraded.push(beads_no_output_degradation(beads_command_repair(args)));
+            Vec::new()
+        }
         Ok(output) => parse_beads_json(&output.stdout, bucket).unwrap_or_else(|message| {
             degraded.push(SwarmBriefDegradation::warning(
                 SwarmBriefSourceKind::Beads,
@@ -1379,14 +1392,45 @@ fn collect_beads_bucket<R: SwarmBriefCommandRunner>(
             Vec::new()
         }),
         Err(error) => {
-            degraded.push(error.to_degradation(
-                SwarmBriefSourceKind::Beads,
-                BEADS_UNAVAILABLE_CODE,
-                "br ready --json",
+            degraded.push(beads_command_error_to_degradation(
+                &error,
+                beads_command_repair(args),
             ));
             Vec::new()
         }
     }
+}
+
+fn beads_command_error_to_degradation(
+    error: &SwarmBriefCommandError,
+    repair: impl Into<String>,
+) -> SwarmBriefDegradation {
+    let repair = repair.into();
+    match error {
+        SwarmBriefCommandError::TimedOut { timeout_ms } => SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Beads,
+            BEADS_COMMAND_TIMEOUT_CODE,
+            format!(
+                "Beads source command timed out after {timeout_ms} ms; stale-safe fallback rows are advisory only."
+            ),
+            Some(repair),
+        ),
+        _ => error.to_degradation(SwarmBriefSourceKind::Beads, BEADS_UNAVAILABLE_CODE, repair),
+    }
+}
+
+fn beads_no_output_degradation(repair: impl Into<String>) -> SwarmBriefDegradation {
+    SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::Beads,
+        BEADS_NO_OUTPUT_CODE,
+        "Beads source command returned no output; stale-safe fallback rows are advisory only."
+            .to_owned(),
+        Some(repair.into()),
+    )
+}
+
+fn beads_command_repair(args: &[&str]) -> String {
+    format!("br {}", args.join(" "))
 }
 
 pub struct BvSourceAdapter<'a, R> {
@@ -9632,6 +9676,47 @@ mod tests {
     }
 
     #[test]
+    fn beads_timeout_uses_specific_source_health_code() {
+        let error = SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 };
+        let degradation = beads_command_error_to_degradation(&error, "br ready --json");
+
+        assert_eq!(degradation.code, BEADS_COMMAND_TIMEOUT_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::Beads);
+        assert!(degradation.message.contains("timed out after 1500 ms"));
+        assert!(degradation.message.contains("advisory only"));
+        assert_eq!(degradation.repair.as_deref(), Some("br ready --json"));
+    }
+
+    #[test]
+    fn beads_empty_stdout_uses_specific_source_health_code() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default().with_output(
+            "br",
+            &["list", "--status", "in_progress", "--json"],
+            "",
+        );
+        let mut degraded = Vec::new();
+
+        let beads = collect_beads_bucket(
+            &runner,
+            &options,
+            &["list", "--status", "in_progress", "--json"],
+            "in_progress",
+            &mut degraded,
+        );
+
+        assert!(beads.is_empty());
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, BEADS_NO_OUTPUT_CODE);
+        assert_eq!(
+            degraded[0].repair.as_deref(),
+            Some("br list --status in_progress --json")
+        );
+        assert!(degraded[0].message.contains("no output"));
+        assert!(degraded[0].message.contains("advisory only"));
+    }
+
+    #[test]
     fn collector_degrades_missing_optional_sources_deterministically() {
         let options = SwarmBriefCollectOptions::for_workspace(".");
         let runner = FakeRunner::default()
@@ -9679,7 +9764,7 @@ mod tests {
             report
                 .degraded
                 .iter()
-                .any(|degraded| degraded.code == BEADS_UNAVAILABLE_CODE)
+                .any(|degraded| degraded.code == BEADS_COMMAND_TIMEOUT_CODE)
         );
         assert!(
             report

@@ -261,6 +261,8 @@ in the same commit, keeping the catalog complete by construction.
 | `lab_replay_unavailable` | lab capture, lab replay, lab counterfactual | medium | bd-17c65.10.6 (J6) |
 | `git_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `beads_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
+| `beads_command_timeout` | swarm brief, swarm work-packet | warning | bd-2z5ly.9.3 (S) |
+| `beads_no_output` | swarm brief, swarm work-packet | warning | bd-2z5ly.9.3 (S) |
 | `beads_tracker_stale` | swarm brief | warning | bd-1zb7k.13.3 (C3) |
 | `bv_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |
 | `agent_mail_unavailable` | swarm brief | warning | bd-17c65.10.6 (J6) |

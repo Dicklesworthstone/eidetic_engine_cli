@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "beads_command_timeout",
+  "introduced_by": {
+    "bead": "bd-2z5ly.9.3",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "swarm brief",
+    "swarm work-packet"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A bounded read-only Beads source command exceeds the swarm collection timeout.",
+    "setup_commands": [
+      "# run swarm brief or work-packet while br ready/list/doctor is blocked long enough to hit the collector timeout"
+    ],
+    "invocation": "ee swarm work-packet --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "beads_command_timeout",
+    "severity": "warning",
+    "message_contains": [
+      "timed out",
+      "advisory only"
+    ],
+    "repair_contains": "br",
+    "repair_string": "br ready --json",
+    "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}

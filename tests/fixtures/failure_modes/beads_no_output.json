@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "beads_no_output",
+  "introduced_by": {
+    "bead": "bd-2z5ly.9.3",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "swarm brief",
+    "swarm work-packet"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A read-only Beads source command exits successfully but writes no stdout for the JSON parser.",
+    "setup_commands": [
+      "# run swarm brief or work-packet with a br command wrapper that exits 0 and emits empty stdout"
+    ],
+    "invocation": "ee swarm work-packet --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "beads_no_output",
+    "severity": "warning",
+    "message_contains": [
+      "no output",
+      "advisory only"
+    ],
+    "repair_contains": "br",
+    "repair_string": "br list --status in_progress --json",
+    "repair_command_regex": "(?<cmd>br [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+  }
+}
