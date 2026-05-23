@@ -910,11 +910,13 @@ fn local_cargo_target_dir_override_segment_matches(segment: &[String]) -> bool {
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_local_cargo_target_dir_override(shell_body);
     }
-    cargo_heavy_subcommand(segment, command_index).is_some()
-        && segment[..command_index].iter().any(|word| {
-            word.strip_prefix("CARGO_TARGET_DIR=")
-                .is_some_and(local_cargo_target_dir_is_non_external)
-        })
+    if cargo_heavy_subcommand(segment, command_index).is_none() {
+        return false;
+    }
+    segment[..command_index].iter().any(|word| {
+        word.strip_prefix("CARGO_TARGET_DIR=")
+            .is_some_and(local_cargo_target_dir_is_non_external)
+    }) || cargo_target_dir_arg_is_non_external(segment, command_index)
 }
 
 fn local_rust_compiler_segment_matches(segment: &[String]) -> bool {
@@ -984,6 +986,42 @@ fn cargo_global_option_takes_value(word: &str) -> bool {
         word,
         "--color" | "--config" | "--lockfile-path" | "--manifest-path" | "--target-dir"
     )
+}
+
+fn cargo_target_dir_arg_is_non_external(segment: &[String], command_index: usize) -> bool {
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if command_basename(command_name) != "cargo" {
+        return false;
+    }
+
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if word == "--target-dir" {
+            return segment
+                .get(index + 1)
+                .is_some_and(|value| local_cargo_target_dir_is_non_external(value));
+        }
+        if let Some(value) = word.strip_prefix("--target-dir=") {
+            return local_cargo_target_dir_is_non_external(value);
+        }
+        if cargo_global_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 fn local_cargo_target_dir_is_non_external(value: &str) -> bool {
@@ -3029,6 +3067,7 @@ action = "explode"
             "scripts/rch_verify.sh -- rustdoc --test src/lib.rs",
             "scripts/rch_verify.sh --bead-id bd-123 -- cargo check --all-targets",
             "bash scripts/rch_verify.sh --summary -- cargo clippy --all-targets -- -D warnings",
+            "rch exec -- cargo --target-dir /tmp/ee-rch-target test --lib foo",
             "cargo metadata --no-deps --format-version 1",
             "cargo fmt --check",
             "rustfmt +nightly --edition 2024 --check src/core/preflight_guard.rs",
@@ -3051,25 +3090,27 @@ action = "explode"
     #[test]
     fn local_cargo_target_dir_override_is_reported_separately() {
         let registry = PreflightGuardRegistry::with_builtins();
-        let report = run_preflight_guard(
-            &registry,
-            &opts("env -i CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run"),
-        );
-
-        let ids = report
-            .matches
-            .iter()
-            .map(|matched| matched.rule_id.as_str())
-            .collect::<Vec<_>>();
-        assert!(
-            ids.contains(&"builtin:local_cargo_heavy_verification"),
-            "expected local Cargo rule in {ids:?}",
-        );
-        assert!(
-            ids.contains(&"builtin:local_cargo_target_dir_override"),
-            "expected target-dir override rule in {ids:?}",
-        );
-        assert_eq!(report.exit_code, 7);
+        for command in [
+            "env -i CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
+            "cargo --target-dir /tmp/cargo_target test --workspace --no-run",
+            "cargo +nightly --target-dir=/tmp/cargo_target test --workspace --no-run",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            let ids = report
+                .matches
+                .iter()
+                .map(|matched| matched.rule_id.as_str())
+                .collect::<Vec<_>>();
+            assert!(
+                ids.contains(&"builtin:local_cargo_heavy_verification"),
+                "expected local Cargo rule for `{command}` in {ids:?}",
+            );
+            assert!(
+                ids.contains(&"builtin:local_cargo_target_dir_override"),
+                "expected target-dir override rule for `{command}` in {ids:?}",
+            );
+            assert_eq!(report.exit_code, 7);
+        }
     }
 
     #[test]
