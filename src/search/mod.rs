@@ -718,7 +718,7 @@ fn search_projection_path_prefix_len(
     let remaining = &input[cursor..];
     if let Some(prefix) = unix_path_prefixes
         .iter()
-        .find(|prefix| remaining.starts_with(**prefix))
+        .find(|prefix| search_projection_unix_prefix_matches(remaining, prefix))
     {
         return Some(prefix.len());
     }
@@ -752,6 +752,16 @@ fn search_projection_path_prefix_len(
         Some(3)
     } else {
         None
+    }
+}
+
+fn search_projection_unix_prefix_matches(remaining: &str, prefix: &str) -> bool {
+    if matches!(prefix, "/Users/" | "/Volumes/") {
+        remaining
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    } else {
+        remaining.starts_with(prefix)
     }
 }
 
@@ -3795,6 +3805,33 @@ mod tests {
         assert!(
             redacted.contains("ordinary=docs/Hosts.yml"),
             "ordinary relative paths should remain visible: {redacted}"
+        );
+    }
+
+    #[test]
+    fn search_projection_redacts_case_insensitive_macos_absolute_roots() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"home=/USERS/alice/private/session.jsonl file=file:///VOLUMES/USB/private/log.txt ordinary=notes/USERS.md next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"home=[REDACTED_PATH] file=file://[REDACTED_PATH] ordinary=notes/USERS.md next=done"#
+        );
+        for leaked in [
+            "/USERS/alice",
+            "private/session.jsonl",
+            "/VOLUMES/USB",
+            "private/log.txt",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked case-insensitive macOS path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=notes/USERS.md"),
+            "ordinary relative text should remain visible: {redacted}"
         );
     }
 
