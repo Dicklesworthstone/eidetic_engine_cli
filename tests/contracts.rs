@@ -16,6 +16,12 @@ mod cass_import_error_repair_hint_contract;
 #[path = "contracts/cass_error_repair_hint_contract.rs"]
 mod cass_error_repair_hint_contract;
 
+#[path = "contracts/cass_error_display_contract.rs"]
+mod cass_error_display_contract;
+
+#[path = "contracts/cass_import_error_display_contract.rs"]
+mod cass_import_error_display_contract;
+
 #[path = "contracts/cass_import_report_goldens.rs"]
 mod cass_import_report_goldens;
 
