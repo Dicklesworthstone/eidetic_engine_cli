@@ -71,6 +71,17 @@ inspect the malformed row, run `br doctor --json`, use
 `br --no-auto-import --allow-stale` for read-only fallback when needed, and only
 then claim or update tracker state.
 
+Candidate decisions are agent-facing safety states. `safe_to_claim` is the only
+decision that may produce an automatic `br update ... --status in_progress`
+claim command. Fresh owned work is reported as `already_owned`; stale work with
+deterministic missing reservation, commit, and mail-thread evidence is reported
+as `stale_but_reclaimable` and may only guide explicit reopen review through
+`recommendedAction.action = "reopen_stale_work"`. Stale work with weak or degraded
+evidence remains `stale_review`; dependency-blocked stale work remains
+`blocked_by_dependency`; compile-health blocked work remains
+`blocked_by_verification`. These distinctions let agents keep useful stale-work
+evidence visible without silently mutating tracker ownership.
+
 Implementation contract:
 
 - Generate the packet only after reading existing swarm brief and next-action

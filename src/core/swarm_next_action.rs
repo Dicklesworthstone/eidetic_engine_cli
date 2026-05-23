@@ -1189,7 +1189,11 @@ fn work_packet_candidates(snapshot: &SwarmNextActionSnapshot) -> Vec<SwarmWorkPa
                 status: candidate.status.clone(),
                 priority: candidate.priority,
                 assignee: candidate.assignee.clone(),
-                decision: work_packet_candidate_decision(card.map(|card| card.decision)),
+                decision: work_packet_candidate_decision(
+                    candidate,
+                    card.map(|card| card.decision),
+                    stale.map(|proposal| proposal.decision),
+                ),
                 collision_risk: work_packet_collision_risk(candidate, snapshot),
                 unsafe_reasons,
                 stale_reasons,
@@ -1248,11 +1252,32 @@ fn work_packet_candidate_source(source: &'static str) -> &'static str {
     }
 }
 
-fn work_packet_candidate_decision(decision: Option<&'static str>) -> &'static str {
-    match decision {
+fn work_packet_candidate_decision(
+    candidate: &SwarmNextActionCandidate,
+    card_decision: Option<&'static str>,
+    stale_decision: Option<&'static str>,
+) -> &'static str {
+    if card_decision == Some("duplicate_rejected") {
+        return "skip";
+    }
+    if !candidate.blocked_by.is_empty() {
+        return "blocked_by_dependency";
+    }
+    if candidate.blocked_by_compile_health {
+        return "blocked_by_verification";
+    }
+    match stale_decision {
+        Some("reopenSuggested") => return "stale_but_reclaimable",
+        Some("contactSuggested") => return "stale_review",
+        Some("leaveAloneActive") => return "already_owned",
+        _ => {}
+    }
+    if candidate.assignee.is_some() || card_decision == Some("blocked_by_owner") {
+        return "already_owned";
+    }
+    match card_decision {
         Some("new_bead_recommended" | "refine_existing_bead") => "safe_to_claim",
-        Some("blocked_by_owner" | "reuse_recent_evidence") => "coordinate_first",
-        Some("duplicate_rejected") => "skip",
+        Some("reuse_recent_evidence") => "blocked_by_verification",
         Some("no_action_recommended") => "blocked",
         _ => "safe_to_claim",
     }
@@ -1975,8 +2000,10 @@ fn work_packet_recommended_action(
     proof_obligations.dedup();
 
     let candidate_id = selected_candidate.map(|candidate| candidate.id.clone());
+    let candidate_decision = selected_candidate.map(|candidate| candidate.decision);
     let suggested_command_actions = work_packet_suggested_command_actions(
         candidate_id.as_deref(),
+        candidate_decision,
         agent_mail,
         rch,
         tracker_integrity,
@@ -1985,6 +2012,7 @@ fn work_packet_recommended_action(
     SwarmWorkPacketRecommendedAction {
         action: work_packet_action(
             selected_card.map(|card| card.decision),
+            candidate_decision,
             agent_mail,
             rch,
             tracker_integrity,
@@ -2006,6 +2034,7 @@ fn work_packet_recommended_action(
 
 fn work_packet_action(
     decision: Option<&'static str>,
+    candidate_decision: Option<&'static str>,
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
@@ -2025,6 +2054,17 @@ fn work_packet_action(
     }
     if rch.safe_to_launch_cargo_verification == Some(false) {
         return "prefer_static_docs_work";
+    }
+    match candidate_decision {
+        Some("safe_to_claim") => return "inspect_and_claim",
+        Some("stale_but_reclaimable") => return "reopen_stale_work",
+        Some("already_owned" | "stale_review" | "coordinate_first") => {
+            return "coordinate_before_claim";
+        }
+        Some("blocked_by_dependency" | "blocked_by_verification" | "blocked" | "skip") => {
+            return "blocked_no_action";
+        }
+        _ => {}
     }
     match decision {
         Some("new_bead_recommended" | "refine_existing_bead") => "inspect_and_claim",
@@ -2059,6 +2099,7 @@ fn sort_work_packet_command_actions(actions: &mut Vec<SwarmWorkPacketCommandActi
 
 fn work_packet_suggested_command_actions(
     candidate_id: Option<&str>,
+    candidate_decision: Option<&str>,
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
@@ -2096,6 +2137,7 @@ fn work_packet_suggested_command_actions(
         if tracker_integrity.br_reads_authoritative
             && rch.safe_to_launch_cargo_verification != Some(false)
             && !agent_mail_blocks_claim(agent_mail)
+            && candidate_decision == Some("safe_to_claim")
         {
             actions.push(work_packet_command_action(
                 "bead_claim_candidate",
@@ -5519,6 +5561,133 @@ mod tests {
                 .suggested_commands
                 .iter()
                 .any(|command| command.contains("br update"))
+        );
+    }
+
+    #[test]
+    fn work_packet_uses_stale_thresholds_before_owned_claims() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let proposal = |bead_id: &str,
+                        decision: &'static str,
+                        evidence: &[&str]|
+         -> SwarmNextActionStaleWorkProposal {
+            SwarmNextActionStaleWorkProposal {
+                bead_id: bead_id.to_owned(),
+                title: format!("Candidate {bead_id}"),
+                assignee: Some("QuietHill".to_owned()),
+                decision,
+                confidence: if decision == "reopenSuggested" {
+                    "medium"
+                } else {
+                    "high"
+                },
+                evidence: evidence.iter().map(|entry| (*entry).to_owned()).collect(),
+                caveats: Vec::new(),
+                suggested_commands: Vec::new(),
+            }
+        };
+
+        let mut active_candidate = candidate(
+            "bd-active",
+            "Fresh owned candidate with active reservation",
+            "bv_top_pick",
+            Some(2),
+        );
+        active_candidate.status = "in_progress".to_owned();
+        active_candidate.assignee = Some("BlueLake".to_owned());
+        let mut active_snapshot = snapshot_with_candidates(vec![active_candidate]);
+        active_snapshot.stale_work_proposals = vec![proposal(
+            "bd-active",
+            "leaveAloneActive",
+            &["active_reservation_holder:BlueLake:src/search/**"],
+        )];
+
+        let active_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &active_snapshot);
+        let active = &active_packet.candidates[0];
+        assert_eq!(active.decision, "already_owned");
+        assert_eq!(
+            active_packet.recommended_action.action,
+            "coordinate_before_claim"
+        );
+        assert!(
+            active_packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let mut stale_candidate = candidate(
+            "bd-stale",
+            "Inactive owned candidate with missing activity signals",
+            "bv_top_pick",
+            Some(2),
+        );
+        stale_candidate.status = "in_progress".to_owned();
+        stale_candidate.assignee = Some("QuietHill".to_owned());
+        let mut stale_snapshot = snapshot_with_candidates(vec![stale_candidate]);
+        stale_snapshot.stale_work_proposals = vec![proposal(
+            "bd-stale",
+            "reopenSuggested",
+            &[
+                "no_matching_active_reservation",
+                "no_recent_commit_mentions_bead",
+                "no_mail_thread_mentions_bead",
+            ],
+        )];
+
+        let stale_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &stale_snapshot);
+        let stale = &stale_packet.candidates[0];
+        assert_eq!(stale.decision, "stale_but_reclaimable");
+        assert_eq!(stale_packet.recommended_action.action, "reopen_stale_work");
+        assert_eq!(stale_packet.recommended_action.safe_to_claim, Some(false));
+        assert!(stale.source_refs.contains(&"br://bd-stale".to_owned()));
+        for reason in [
+            "no_matching_active_reservation",
+            "no_recent_commit_mentions_bead",
+            "no_mail_thread_mentions_bead",
+        ] {
+            assert!(
+                stale.stale_reasons.contains(&reason.to_owned()),
+                "missing stale reason {reason}"
+            );
+        }
+        assert!(
+            stale_packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+
+        let mut blocked_candidate = candidate(
+            "bd-blocked",
+            "Blocked stale candidate should not be reclaimed",
+            "bv_top_pick",
+            Some(2),
+        );
+        blocked_candidate.status = "in_progress".to_owned();
+        blocked_candidate.assignee = Some("QuietHill".to_owned());
+        blocked_candidate.blocked_by = vec!["bd-parent".to_owned()];
+        let mut blocked_snapshot = snapshot_with_candidates(vec![blocked_candidate]);
+        blocked_snapshot.stale_work_proposals = vec![proposal(
+            "bd-blocked",
+            "reopenSuggested",
+            &[
+                "no_matching_active_reservation",
+                "no_recent_commit_mentions_bead",
+                "blocked_by:bd-parent",
+            ],
+        )];
+
+        let blocked_packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &blocked_snapshot);
+        assert_eq!(
+            blocked_packet.candidates[0].decision,
+            "blocked_by_dependency"
+        );
+        assert_eq!(
+            blocked_packet.recommended_action.action,
+            "blocked_no_action"
         );
     }
 

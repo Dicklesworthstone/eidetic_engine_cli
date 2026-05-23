@@ -224,7 +224,17 @@
         "assignee": {"type": ["string", "null"]},
         "decision": {
           "type": "string",
-          "enum": ["safe_to_claim", "coordinate_first", "blocked", "stale_review", "skip"]
+          "enum": [
+            "safe_to_claim",
+            "already_owned",
+            "blocked_by_dependency",
+            "blocked_by_verification",
+            "stale_but_reclaimable",
+            "stale_review",
+            "coordinate_first",
+            "blocked",
+            "skip"
+          ]
         },
         "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]},
         "unsafeReasons": {"$ref": "#/definitions/stringArray"},
