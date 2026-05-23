@@ -407,7 +407,10 @@ impl ReadConnectionPool {
 
             let elapsed = started.elapsed();
             if elapsed >= self.config.acquire_timeout() {
-                state.ad_hoc_bypass_count = state.ad_hoc_bypass_count.saturating_add(1);
+                state.ad_hoc_bypass_count = checked_increment_pool_counter(
+                    state.ad_hoc_bypass_count,
+                    "ad_hoc_bypass_count",
+                );
                 record_acquire_wait(&mut state, elapsed);
                 drop(state);
                 drop_idle_connections(stale);
@@ -574,7 +577,7 @@ impl ReadConnectionPool {
                     returned_at: Instant::now(),
                 });
             } else {
-                state.drops = state.drops.saturating_add(1);
+                state.drops = checked_increment_pool_counter(state.drops, "drops");
                 to_close = Some(connection);
             }
         }
@@ -585,14 +588,15 @@ impl ReadConnectionPool {
         {
             let mut state = self.lock_state();
             decrement_pool_active(&mut state, "abandon");
-            state.drops = state.drops.saturating_add(1);
+            state.drops = checked_increment_pool_counter(state.drops, "drops");
         }
         let _ = connection.close();
     }
 
     fn note_release_failure(&self) {
         let mut state = self.lock_state();
-        state.release_failures = state.release_failures.saturating_add(1);
+        state.release_failures =
+            checked_increment_pool_counter(state.release_failures, "release_failures");
     }
 
     pub fn expire_stale_pins(&self) -> Vec<ExpiredSnapshotPin> {
@@ -1043,7 +1047,7 @@ fn evict_expired_idle(state: &mut PoolState, idle_timeout: Duration) -> Vec<DbCo
             .checked_duration_since(idle.returned_at)
             .unwrap_or(Duration::ZERO);
         if age >= idle_timeout {
-            state.drops = state.drops.saturating_add(1);
+            state.drops = checked_increment_pool_counter(state.drops, "drops");
             expired.push(idle.connection);
         } else {
             retained.push(idle);
@@ -1060,6 +1064,12 @@ fn checked_pool_count_add(left: usize, right: usize, label: &'static str) -> Res
             operation: DbOperation::Query,
             message: format!("read-pool {label} count overflow"),
         })
+}
+
+fn checked_increment_pool_counter(count: u64, label: &'static str) -> u64 {
+    count.checked_add(1).unwrap_or_else(|| {
+        panic!("read-pool {label} counter exhausted at u64::MAX");
+    })
 }
 
 fn pool_occupancy(state: &PoolState) -> Result<usize> {
@@ -2451,6 +2461,18 @@ mod tests {
     }
 
     #[test]
+    fn read_pool_metric_counter_overflow_panics() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _ = checked_increment_pool_counter(u64::MAX, "drops");
+        }));
+
+        assert!(
+            panic.is_err(),
+            "read-pool metric counter overflow must fail loudly"
+        );
+    }
+
+    #[test]
     fn read_pool_active_count_underflow_panics() {
         let panic = catch_unwind(AssertUnwindSafe(|| {
             let mut state = empty_pool_state();
@@ -2755,7 +2777,7 @@ mod tests {
                 Err(_) => panic!("reader thread panicked"),
             };
             if is_ad_hoc {
-                ad_hoc_count = ad_hoc_count.saturating_add(1);
+                ad_hoc_count += 1;
                 assert_eq!(slot_id, None);
             } else {
                 pooled_slots.insert(must_some(slot_id, "pooled slot id present"));
