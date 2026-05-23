@@ -46,6 +46,9 @@ mod cass_import_session_status_as_str;
 #[path = "contracts/cass_invocation_builder.rs"]
 mod cass_invocation_builder;
 
+#[path = "contracts/cass_client_command_invocations.rs"]
+mod cass_client_command_invocations;
+
 #[path = "contracts/cass_contract_constants.rs"]
 mod cass_contract_constants;
 
