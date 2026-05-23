@@ -5823,34 +5823,9 @@ fn evaluate_create_derived_candidate_for_apply(
             );
         }
         Some(CandidateStatus::Applied) => {
-            warnings.push(validation_issue(
-                "candidate_already_applied",
-                "Candidate has already been applied.",
-                "No apply action is required.",
-            ));
-            return ApplyDecision {
-                application: CurateApplyResult {
-                    status: "already_applied".to_owned(),
-                    decision: "unchanged".to_owned(),
-                    candidate_type: stored.candidate_type.clone(),
-                    target_memory_id: None,
-                    created_memory_id: None,
-                    created_memory: None,
-                    changes: Vec::new(),
-                    errors,
-                    warnings,
-                },
-                to_status: CandidateStatus::Applied.as_str().to_owned(),
-                should_persist: false,
-                memory_update: None,
-                rule_create: None,
-                procedure_create: None,
-                derived_create: None,
-                tombstone_memory: false,
-                target_before: None,
-                target_after: None,
-                next_action: "no action required".to_owned(),
-            };
+            return replay_create_derived_candidate_application(
+                connection, stored, errors, warnings,
+            );
         }
         Some(status @ (CandidateStatus::Rejected | CandidateStatus::Expired)) => {
             errors.push(validation_issue(
@@ -6123,6 +6098,214 @@ fn evaluate_create_derived_candidate_for_apply(
         target_after: None,
         next_action: "no action required".to_owned(),
     }
+}
+
+fn replay_create_derived_candidate_application(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+    mut errors: Vec<CurateValidationIssue>,
+    mut warnings: Vec<CurateValidationIssue>,
+) -> ApplyDecision {
+    warnings.push(validation_issue(
+        "candidate_already_applied",
+        "Candidate has already been applied.",
+        "No apply action is required.",
+    ));
+    if !errors.is_empty() {
+        return blocked_apply(
+            stored,
+            None,
+            errors,
+            warnings,
+            "ee curate candidates --json".to_owned(),
+        );
+    }
+
+    match load_create_derived_replay_memory(connection, stored) {
+        Ok(created_memory) => {
+            let created_memory_state = memory_state_from_stored(&created_memory);
+            ApplyDecision {
+                application: CurateApplyResult {
+                    status: "already_applied".to_owned(),
+                    decision: "idempotent_replay".to_owned(),
+                    candidate_type: stored.candidate_type.clone(),
+                    target_memory_id: None,
+                    created_memory_id: Some(created_memory.id),
+                    created_memory: Some(created_memory_state),
+                    changes: Vec::new(),
+                    errors,
+                    warnings,
+                },
+                to_status: CandidateStatus::Applied.as_str().to_owned(),
+                should_persist: false,
+                memory_update: None,
+                rule_create: None,
+                procedure_create: None,
+                derived_create: None,
+                tombstone_memory: false,
+                target_before: None,
+                target_after: None,
+                next_action: "no action required".to_owned(),
+            }
+        }
+        Err(issue) => {
+            errors.push(issue);
+            blocked_apply(
+                stored,
+                None,
+                errors,
+                warnings,
+                "ee curate candidates --json".to_owned(),
+            )
+        }
+    }
+}
+
+fn load_create_derived_replay_memory(
+    connection: &DbConnection,
+    stored: &StoredCurationCandidate,
+) -> Result<StoredMemory, CurateValidationIssue> {
+    let audits = connection
+        .list_audit_entries(Some(&stored.workspace_id), None)
+        .map_err(|error| {
+            validation_issue(
+                "create_derived_replay_audit_unavailable",
+                format!(
+                    "Could not inspect create-derived audit history for candidate {}: {error}",
+                    stored.id
+                ),
+                "Repair the audit log before retrying this candidate apply.",
+            )
+        })?;
+    let mut matches = Vec::new();
+
+    for audit in audits {
+        if audit.action != audit_actions::MEMORY_CREATE {
+            continue;
+        }
+        let Some(details_raw) = audit.details.as_deref() else {
+            continue;
+        };
+        let Ok(details) = serde_json::from_str::<serde_json::Value>(details_raw) else {
+            continue;
+        };
+        if details.get("schema").and_then(serde_json::Value::as_str)
+            != Some("ee.audit.derived_memory_created.v1")
+        {
+            continue;
+        }
+        if details
+            .get("candidateId")
+            .and_then(serde_json::Value::as_str)
+            != Some(stored.id.as_str())
+        {
+            continue;
+        }
+
+        let Some(memory_id) = details
+            .get("createdMemoryId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(validation_issue(
+                "create_derived_replay_audit_missing_memory_id",
+                format!(
+                    "Create-derived audit for candidate {} is missing createdMemoryId.",
+                    stored.id
+                ),
+                "Repair the audit details or curation candidate state before retrying.",
+            ));
+        };
+        if MemoryId::from_str(memory_id).is_err() {
+            return Err(validation_issue(
+                "create_derived_replay_audit_invalid_memory_id",
+                format!(
+                    "Create-derived audit for candidate {} references invalid memory id {}.",
+                    stored.id, memory_id
+                ),
+                "Repair the audit details or curation candidate state before retrying.",
+            ));
+        }
+        if let Some(target_id) = audit.target_id.as_deref().map(str::trim)
+            && !target_id.is_empty()
+            && target_id != memory_id
+        {
+            return Err(validation_issue(
+                "create_derived_replay_audit_target_mismatch",
+                format!(
+                    "Create-derived audit {} target {} does not match createdMemoryId {}.",
+                    audit.id, target_id, memory_id
+                ),
+                "Repair the audit details before retrying this candidate apply.",
+            ));
+        }
+        matches.push((audit.id, memory_id.to_owned()));
+    }
+
+    let (audit_id, memory_id) = match matches.as_slice() {
+        [] => {
+            return Err(validation_issue(
+                "create_derived_replay_missing_audit",
+                format!(
+                    "Applied create-derived candidate {} has no memory-create replay audit.",
+                    stored.id
+                ),
+                "Repair curation state or re-propose the candidate before retrying.",
+            ));
+        }
+        [(audit_id, memory_id)] => (audit_id.as_str(), memory_id.as_str()),
+        _ => {
+            let audit_ids = matches
+                .iter()
+                .map(|(audit_id, _)| audit_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(validation_issue(
+                "create_derived_replay_ambiguous_audit",
+                format!(
+                    "Applied create-derived candidate {} has multiple memory-create replay audits: {}.",
+                    stored.id, audit_ids
+                ),
+                "Inspect the audit log and repair duplicate apply evidence before retrying.",
+            ));
+        }
+    };
+
+    let memory = connection
+        .get_memory(memory_id)
+        .map_err(|error| {
+            validation_issue(
+                "create_derived_replay_memory_unavailable",
+                format!(
+                    "Could not load replay memory {} from audit {}: {error}",
+                    memory_id, audit_id
+                ),
+                "Repair storage before retrying this candidate apply.",
+            )
+        })?
+        .ok_or_else(|| {
+            validation_issue(
+                "create_derived_replay_memory_missing",
+                format!(
+                    "Replay audit {} references missing derived memory {}.",
+                    audit_id, memory_id
+                ),
+                "Repair curation state or restore the missing memory before retrying.",
+            )
+        })?;
+    if memory.workspace_id != stored.workspace_id {
+        return Err(validation_issue(
+            "create_derived_replay_memory_workspace_mismatch",
+            format!(
+                "Replay memory {} belongs to workspace {}, not {}.",
+                memory.id, memory.workspace_id, stored.workspace_id
+            ),
+            "Repair the audit details or curation candidate workspace before retrying.",
+        ));
+    }
+
+    Ok(memory)
 }
 
 fn evaluate_candidate_for_review(
@@ -12298,6 +12481,152 @@ mod tests {
         assert_eq!(details["createdMemoryId"].as_str(), Some(created_memory_id));
         assert_eq!(details["producer"].as_str(), Some("test-reflector"));
         assert_eq!(details["sourceRefs"].as_array().map(Vec::len), Some(2));
+
+        let replay = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(replay.application.status, "already_applied");
+        assert_eq!(replay.application.decision, "idempotent_replay");
+        assert_eq!(
+            replay.application.created_memory_id.as_deref(),
+            Some(created_memory_id)
+        );
+        assert_eq!(
+            replay
+                .application
+                .created_memory
+                .as_ref()
+                .map(|memory| memory.id.as_str()),
+            Some(created_memory_id)
+        );
+        assert!(replay.application.changes.is_empty());
+        assert!(!replay.mutation.persisted);
+        assert!(!replay.durable_mutation);
+        assert_eq!(replay.mutation.from_status, "applied");
+        assert_eq!(replay.mutation.to_status, "applied");
+        assert!(replay.mutation.audit_id.is_none());
+
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            memories
+                .iter()
+                .filter(|memory| memory.id == created_memory_id)
+                .count(),
+            1
+        );
+        let jobs_after_replay = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            jobs_after_replay
+                .iter()
+                .filter(|job| {
+                    job.document_source.as_deref() == Some("memory")
+                        && job.document_id.as_deref() == Some(created_memory_id)
+                })
+                .count(),
+            1
+        );
+        let memory_create_audits = connection
+            .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        let candidate_create_audit_count = memory_create_audits
+            .iter()
+            .filter(|entry| entry.workspace_id.as_deref() == Some(workspace_id.as_str()))
+            .filter(|entry| {
+                entry
+                    .details
+                    .as_deref()
+                    .and_then(|details| serde_json::from_str::<serde_json::Value>(details).ok())
+                    .and_then(|details| {
+                        (details["candidateId"].as_str() == Some(candidate_id.as_str()))
+                            .then_some(())
+                    })
+                    .is_some()
+            })
+            .count();
+        assert_eq!(candidate_create_audit_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_curation_candidate_blocks_create_derived_replay_without_audit() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5201)).to_string();
+        let evidence_source_id = evidence_id(0x5202);
+        let candidate_id = curate_id(0x5203);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let marked = connection
+            .mark_curation_candidate_applied(&workspace_id, &candidate_id, "2026-05-01T00:01:00Z")
+            .map_err(|error| error.to_string())?;
+        assert!(marked);
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "blocked");
+        assert_eq!(report.application.decision, "unchanged");
+        assert!(report.application.created_memory_id.is_none());
+        assert!(
+            report
+                .application
+                .warnings
+                .iter()
+                .any(|issue| issue.code == "candidate_already_applied")
+        );
+        assert!(
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "create_derived_replay_missing_audit")
+        );
+        assert!(!report.mutation.persisted);
+        assert_eq!(report.mutation.from_status, "applied");
+        assert_eq!(report.mutation.to_status, "applied");
+        assert!(report.mutation.audit_id.is_none());
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(memories.len(), 1);
         Ok(())
     }
 
