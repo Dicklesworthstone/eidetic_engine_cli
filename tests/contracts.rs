@@ -31,6 +31,12 @@ mod cass_import_error_from_conversions;
 #[path = "contracts/cass_import_parse_summaries.rs"]
 mod cass_import_parse_summaries;
 
+#[path = "contracts/cass_session_reference_to_uri.rs"]
+mod cass_session_reference_to_uri;
+
+#[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
+mod cass_stdout_decode_fuzz_summary;
+
 #[path = "contracts/cass_import_report_goldens.rs"]
 mod cass_import_report_goldens;
 
