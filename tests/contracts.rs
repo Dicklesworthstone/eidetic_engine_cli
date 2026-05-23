@@ -97,6 +97,9 @@ mod cass_contract_version_getters;
 #[path = "contracts/cass_unavailable_degradation.rs"]
 mod cass_unavailable_degradation;
 
+#[path = "contracts/cass_import_guidance_status_as_str.rs"]
+mod cass_import_guidance_status_as_str;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
