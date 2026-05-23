@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "certificate_store_unavailable",
+  "introduced_by": {
+    "bead": "bd-79c16",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "certificate list",
+    "certificate show",
+    "certificate verify"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "Certificate list/show/verify is invoked with no manifest path and either no database path/workspace id or an unreadable database. Previously these surfaces emitted an apparently successful empty list / not_found result that was indistinguishable from an honestly empty store; this code distinguishes 'we could not check' from 'we checked and found nothing'.",
+    "setup_commands": [
+      "# invoke ee certificate list/show/verify without a manifest and without a configured workspace database"
+    ],
+    "invocation": "ee certificate list --json"
+  },
+  "expected_emission": {
+    "code": "certificate_store_unavailable",
+    "severity": "medium",
+    "message_contains": [
+      "Certificate store could not be inspected"
+    ],
+    "repair_contains": "Provide an explicit --manifest path"
+  }
+}

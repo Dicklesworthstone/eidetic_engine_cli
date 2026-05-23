@@ -59,6 +59,52 @@ pub const CERTIFICATE_SHOW_SCHEMA_V1: &str = "ee.certificate.show.v1";
 /// Schema version for certificate verify responses.
 pub const CERTIFICATE_VERIFY_SCHEMA_V1: &str = "ee.certificate.verify.v1";
 
+/// Degraded-code emitted on certificate list/show/verify surfaces when the
+/// backing certificate store cannot be inspected (no manifest path and no
+/// (database_path + workspace_id) provided, the database file is absent,
+/// the database connection cannot be opened, or the manifest cannot be
+/// parsed). Distinct from an honestly-empty store: this code says "we
+/// could not check," not "we checked and found nothing." (bd-79c16)
+pub const CERTIFICATE_STORE_UNAVAILABLE_CODE: &str = "certificate_store_unavailable";
+
+/// Availability of the backing certificate store for list/show/verify
+/// surfaces. Defaults to [`CertificateStoreStatus::Available`] so existing
+/// code paths that build a fully-populated report from a real manifest or
+/// database remain a no-op. The [`Self::Unavailable`] variant carries a
+/// human-readable reason so renderers can emit an honest `degraded[]` entry
+/// instead of a fake-empty success. (bd-79c16)
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CertificateStoreStatus {
+    #[default]
+    Available,
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl CertificateStoreStatus {
+    /// Construct an `Unavailable` status with a bounded reason string.
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason: reason.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    #[must_use]
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Self::Available => None,
+            Self::Unavailable { reason } => Some(reason.as_str()),
+        }
+    }
+}
+
 /// Schema version for certificate manifest stores consumed by the core.
 pub const CERTIFICATE_MANIFEST_SCHEMA_V1: &str = "ee.certificate.manifest.v1";
 
@@ -294,6 +340,12 @@ pub struct CertificateListReport {
     pub usable_count: u32,
     pub expired_count: u32,
     pub kinds_present: Vec<CertificateKind>,
+    /// bd-79c16: backing-store availability. Defaults to `Available` so an
+    /// honestly-populated list keeps the historical shape; renderers emit a
+    /// `certificate_store_unavailable` `degraded[]` entry when this is
+    /// `Unavailable`, breaking the long-standing ambiguity between
+    /// "store empty" and "store not inspected."
+    pub store_status: CertificateStoreStatus,
 }
 
 impl CertificateListReport {
@@ -310,6 +362,13 @@ impl CertificateListReport {
     #[must_use]
     pub fn schema() -> &'static str {
         CERTIFICATE_LIST_SCHEMA_V1
+    }
+
+    /// Mark the report as deriving from an unavailable store. (bd-79c16)
+    #[must_use]
+    pub fn with_store_unavailable(mut self, reason: impl Into<String>) -> Self {
+        self.store_status = CertificateStoreStatus::unavailable(reason);
+        self
     }
 }
 
@@ -400,6 +459,8 @@ pub struct CertificateVerifyReport {
     pub signer: Option<String>,
     pub failure_codes: Vec<String>,
     pub message: String,
+    /// bd-79c16: backing-store availability (see [`CertificateListReport::store_status`]).
+    pub store_status: CertificateStoreStatus,
 }
 
 impl CertificateVerifyReport {
@@ -420,6 +481,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: Vec::new(),
             message: "Certificate verification passed".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -440,6 +502,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["not_found".to_owned()],
             message: "Certificate not found".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -460,6 +523,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["expired".to_owned()],
             message: "Certificate has expired".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -480,6 +544,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["stale_payload_hash".to_owned()],
             message: "Certificate payload hash no longer matches the current payload".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -500,6 +565,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["stale_schema_version".to_owned()],
             message: "Certificate schema version is no longer supported".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -520,6 +586,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["failed_assumptions".to_owned()],
             message: "Certificate assumptions failed during verification".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -540,6 +607,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["hash_mismatch".to_owned()],
             message: "Certificate payload hash does not match the manifest".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -560,6 +628,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["revoked".to_owned()],
             message: "Certificate has been revoked".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -580,6 +649,7 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["invalid_status".to_owned()],
             message: "Certificate status is not valid for use".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -604,6 +674,7 @@ impl CertificateVerifyReport {
             signer,
             failure_codes: vec!["attestation_mismatch".to_owned()],
             message: message.into(),
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -624,7 +695,15 @@ impl CertificateVerifyReport {
             signer: None,
             failure_codes: vec!["invalid_manifest".to_owned()],
             message: message.into(),
+            store_status: CertificateStoreStatus::Available,
         }
+    }
+
+    /// Mark the report as deriving from an unavailable store. (bd-79c16)
+    #[must_use]
+    pub fn with_store_unavailable(mut self, reason: impl Into<String>) -> Self {
+        self.store_status = CertificateStoreStatus::unavailable(reason);
+        self
     }
 
     #[must_use]
@@ -644,6 +723,8 @@ pub struct CertificateShowReport {
     pub certificate: Certificate,
     pub verification_status: VerificationResult,
     pub payload_summary: String,
+    /// bd-79c16: backing-store availability (see [`CertificateListReport::store_status`]).
+    pub store_status: CertificateStoreStatus,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -735,6 +816,7 @@ impl CertificateShowReport {
             certificate,
             verification_status,
             payload_summary,
+            store_status: CertificateStoreStatus::Available,
         }
     }
 
@@ -754,7 +836,15 @@ impl CertificateShowReport {
             certificate: placeholder,
             verification_status: VerificationResult::NotFound,
             payload_summary: "Certificate not found".to_owned(),
+            store_status: CertificateStoreStatus::Available,
         }
+    }
+
+    /// Mark the report as deriving from an unavailable store. (bd-79c16)
+    #[must_use]
+    pub fn with_store_unavailable(mut self, reason: impl Into<String>) -> Self {
+        self.store_status = CertificateStoreStatus::unavailable(reason);
+        self
     }
 
     #[must_use]
@@ -770,8 +860,15 @@ pub fn list_certificates(options: &CertificateListOptions) -> CertificateListRep
         return list_database_certificates(options);
     };
 
-    let Ok(records) = read_certificate_manifest(manifest_path) else {
-        return CertificateListReport::new();
+    let records = match read_certificate_manifest(manifest_path) {
+        Ok(records) => records,
+        Err(error) => {
+            return CertificateListReport::new().with_store_unavailable(format!(
+                "manifest at {} could not be parsed: {}",
+                manifest_path.display(),
+                error.message
+            ));
+        }
     };
 
     let total_count = usize_to_u32(records.len());
@@ -825,6 +922,7 @@ pub fn list_certificates(options: &CertificateListOptions) -> CertificateListRep
         usable_count,
         expired_count,
         kinds_present,
+        store_status: CertificateStoreStatus::Available,
     }
 }
 
@@ -841,8 +939,16 @@ pub fn show_certificate_with_options(options: &CertificateLookupOptions) -> Cert
         return show_database_certificate(options);
     };
 
-    let Ok(records) = read_certificate_manifest(manifest_path) else {
-        return CertificateShowReport::not_found(&options.certificate_id);
+    let records = match read_certificate_manifest(manifest_path) {
+        Ok(records) => records,
+        Err(error) => {
+            return CertificateShowReport::not_found(&options.certificate_id)
+                .with_store_unavailable(format!(
+                    "manifest at {} could not be parsed: {}",
+                    manifest_path.display(),
+                    error.message
+                ));
+        }
     };
 
     records
@@ -873,10 +979,20 @@ pub fn verify_certificate_with_options(
     let records = match read_certificate_manifest(manifest_path) {
         Ok(records) => records,
         Err(error) => {
+            // bd-79c16: invalid_manifest is the verify-result code, but the
+            // backing store ALSO never produced inspectable records — emit
+            // both signals so the renderer can surface
+            // `certificate_store_unavailable` in `degraded[]`.
+            let reason = format!(
+                "manifest at {} could not be parsed: {}",
+                manifest_path.display(),
+                error.message,
+            );
             return CertificateVerifyReport::invalid_manifest(
                 &options.certificate_id,
                 error.message,
-            );
+            )
+            .with_store_unavailable(reason);
         }
     };
 
@@ -895,19 +1011,29 @@ fn list_database_certificates(options: &CertificateListOptions) -> CertificateLi
         options.database_path.as_deref(),
         options.workspace_id.as_deref(),
     ) else {
-        return CertificateListReport::new();
+        return CertificateListReport::new().with_store_unavailable(
+            "no certificate manifest configured and no database path or workspace id provided",
+        );
     };
     if !database_path.exists() {
-        return CertificateListReport::new();
+        return CertificateListReport::new().with_store_unavailable(format!(
+            "certificate database not found at {}",
+            database_path.display()
+        ));
     }
 
     let Ok(connection) = DbConnection::open_file(database_path) else {
-        return CertificateListReport::new();
+        return CertificateListReport::new().with_store_unavailable(format!(
+            "certificate database at {} could not be opened",
+            database_path.display()
+        ));
     };
     let Ok(records) =
         connection.list_certificates_for_workspace(workspace_id, None, None, u32::MAX)
     else {
-        return CertificateListReport::new();
+        return CertificateListReport::new().with_store_unavailable(format!(
+            "certificate database query failed for workspace {workspace_id}"
+        ));
     };
 
     let total_count = usize_to_u32(records.len());
@@ -961,10 +1087,15 @@ fn list_database_certificates(options: &CertificateListOptions) -> CertificateLi
         usable_count,
         expired_count,
         kinds_present,
+        store_status: CertificateStoreStatus::Available,
     }
 }
 
 fn show_database_certificate(options: &CertificateLookupOptions) -> CertificateShowReport {
+    if let Some(reason) = database_store_unavailable_reason(options) {
+        return CertificateShowReport::not_found(&options.certificate_id)
+            .with_store_unavailable(reason);
+    }
     load_database_certificate(options).map_or_else(
         || CertificateShowReport::not_found(&options.certificate_id),
         |record| certificate_show_report_from_record(&record),
@@ -972,6 +1103,10 @@ fn show_database_certificate(options: &CertificateLookupOptions) -> CertificateS
 }
 
 fn verify_database_certificate(options: &CertificateLookupOptions) -> CertificateVerifyReport {
+    if let Some(reason) = database_store_unavailable_reason(options) {
+        return CertificateVerifyReport::not_found(&options.certificate_id)
+            .with_store_unavailable(reason);
+    }
     let Some(record) = load_database_certificate(options) else {
         return CertificateVerifyReport::not_found(&options.certificate_id);
     };
@@ -1039,6 +1174,38 @@ fn load_database_certificate(
     (record.workspace_id == workspace_id).then_some(record)
 }
 
+/// Return `Some(reason)` if the backing certificate database cannot be
+/// inspected at all (no path/workspace_id, file missing, connection cannot
+/// be opened). Returns `None` when the database is at least reachable —
+/// even when the specific certificate ID is not present in it. Mirrors the
+/// availability semantics of [`list_database_certificates`] so that
+/// show/verify can emit a `certificate_store_unavailable` honesty signal
+/// instead of fake-empty `not_found` reports. (bd-79c16)
+fn database_store_unavailable_reason(options: &CertificateLookupOptions) -> Option<String> {
+    let (Some(database_path), Some(_)) = (
+        options.database_path.as_deref(),
+        options.workspace_id.as_deref(),
+    ) else {
+        return Some(
+            "no certificate manifest configured and no database path or workspace id provided"
+                .to_owned(),
+        );
+    };
+    if !database_path.exists() {
+        return Some(format!(
+            "certificate database not found at {}",
+            database_path.display()
+        ));
+    }
+    if DbConnection::open_file(database_path).is_err() {
+        return Some(format!(
+            "certificate database at {} could not be opened",
+            database_path.display()
+        ));
+    }
+    None
+}
+
 fn certificate_show_report_from_record(record: &StoredCertificateRecord) -> CertificateShowReport {
     let certificate = certificate_from_stored_record(record);
     let verification_status = certificate_effective_verification_status(&certificate);
@@ -1054,6 +1221,7 @@ fn certificate_show_report_from_record(record: &StoredCertificateRecord) -> Cert
         certificate,
         verification_status,
         payload_summary,
+        store_status: CertificateStoreStatus::Available,
     }
 }
 

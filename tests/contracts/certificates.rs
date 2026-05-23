@@ -6,8 +6,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use ee::core::certificate::{
-    CERTIFICATE_MANIFEST_SCHEMA_V1, CERTIFICATE_PAYLOAD_SCHEMA_V1, CertificateListOptions,
-    CertificateLookupOptions, CertificateVerifyReport, VerificationResult, list_certificates,
+    CERTIFICATE_MANIFEST_SCHEMA_V1, CERTIFICATE_PAYLOAD_SCHEMA_V1,
+    CERTIFICATE_STORE_UNAVAILABLE_CODE, CertificateListOptions, CertificateLookupOptions,
+    CertificateStoreStatus, CertificateVerifyReport, VerificationResult, list_certificates,
     show_certificate, show_certificate_with_options, verify_certificate,
     verify_certificate_with_options,
 };
@@ -18,7 +19,9 @@ use ee::models::certificate::{
     PrivacyBudgetShareCertificate, PrivacyBudgetShareConstraint, ShareValidationCheck,
     ShareableAggregateKind, ShareableAggregateReport,
 };
-use ee::output::render_certificate_verify_json;
+use ee::output::{
+    render_certificate_list_json, render_certificate_show_json, render_certificate_verify_json,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -829,5 +832,140 @@ fn privacy_budget_certificate_is_limited_to_shareable_aggregate_outputs() -> Tes
         "certificates",
         "privacy_budget",
         &pretty(&shareable_output)?,
+    )
+}
+
+// bd-79c16: certificate list/show/verify must distinguish "store unavailable
+// (could not check)" from "store available but empty / id missing." Each of
+// the three surfaces should set `store_status = Unavailable` and the JSON
+// renderer must emit a `certificate_store_unavailable` `degraded[]` entry
+// when no manifest path is provided and no database path/workspace id is
+// configured. Without this distinction, agents see apparently-successful
+// empty/not_found JSON even when the backing store was never inspected.
+
+fn lookup_options_with_no_store(id: &str) -> CertificateLookupOptions {
+    CertificateLookupOptions {
+        certificate_id: id.to_string(),
+        manifest_path: None,
+        database_path: None,
+        workspace_id: None,
+    }
+}
+
+fn list_options_with_no_store() -> CertificateListOptions {
+    CertificateListOptions {
+        manifest_path: None,
+        database_path: None,
+        workspace_id: None,
+        kind: None,
+        status: None,
+        include_expired: false,
+        limit: None,
+    }
+}
+
+fn store_unavailable_reason(status: &CertificateStoreStatus) -> Option<String> {
+    status.unavailable_reason().map(str::to_owned)
+}
+
+#[test]
+fn list_certificates_with_no_store_marks_store_unavailable() -> TestResult {
+    let report = list_certificates(&list_options_with_no_store());
+    ensure(
+        !report.store_status.is_available(),
+        "list with no manifest and no database should not report store_status=Available",
+    )?;
+    let reason = store_unavailable_reason(&report.store_status)
+        .ok_or_else(|| "missing unavailable reason for list".to_owned())?;
+    ensure(
+        reason.contains("no certificate manifest"),
+        format!("unexpected reason: {reason}"),
+    )?;
+
+    let rendered = render_certificate_list_json(&report);
+    let value: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("certificate list JSON did not parse: {error}"))?;
+    let degraded = value
+        .get("degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "list JSON missing degraded[]".to_owned())?;
+    ensure_equal(&degraded.len(), &1, "list degraded[] count")?;
+    let code = degraded[0]
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "list degraded[].code missing".to_owned())?;
+    ensure_equal(
+        &code,
+        &CERTIFICATE_STORE_UNAVAILABLE_CODE,
+        "list degraded[].code",
+    )
+}
+
+#[test]
+fn show_certificate_with_no_store_marks_store_unavailable() -> TestResult {
+    let report = show_certificate_with_options(&lookup_options_with_no_store("cert-missing"));
+    ensure(
+        !report.store_status.is_available(),
+        "show with no manifest and no database should not report store_status=Available",
+    )?;
+    let rendered = render_certificate_show_json(&report);
+    let value: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("certificate show JSON did not parse: {error}"))?;
+    let degraded = value
+        .get("degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "show JSON missing degraded[]".to_owned())?;
+    ensure_equal(&degraded.len(), &1, "show degraded[] count")?;
+    let code = degraded[0]
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "show degraded[].code missing".to_owned())?;
+    ensure_equal(
+        &code,
+        &CERTIFICATE_STORE_UNAVAILABLE_CODE,
+        "show degraded[].code",
+    )
+}
+
+#[test]
+fn verify_certificate_with_no_store_marks_store_unavailable() -> TestResult {
+    let report = verify_certificate_with_options(&lookup_options_with_no_store("cert-missing"));
+    ensure(
+        !report.store_status.is_available(),
+        "verify with no manifest and no database should not report store_status=Available",
+    )?;
+    let rendered = render_certificate_verify_json(&report);
+    let value: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("certificate verify JSON did not parse: {error}"))?;
+    let degraded = value
+        .get("degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "verify JSON missing degraded[]".to_owned())?;
+    ensure_equal(&degraded.len(), &1, "verify degraded[] count")?;
+    let code = degraded[0]
+        .get("code")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "verify degraded[].code missing".to_owned())?;
+    ensure_equal(
+        &code,
+        &CERTIFICATE_STORE_UNAVAILABLE_CODE,
+        "verify degraded[].code",
+    )
+}
+
+#[test]
+fn list_certificates_with_available_store_omits_degraded() -> TestResult {
+    use ee::core::certificate::CertificateListReport;
+    let report = CertificateListReport::default();
+    ensure(
+        report.store_status.is_available(),
+        "default report should be available",
+    )?;
+    let rendered = render_certificate_list_json(&report);
+    let value: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("certificate list JSON did not parse: {error}"))?;
+    ensure(
+        value.get("degraded").is_none(),
+        "available-store list must not emit degraded[]",
     )
 }

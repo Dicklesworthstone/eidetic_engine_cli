@@ -67,14 +67,20 @@ Current conventions:
 | `insights` | Whole-bundle `ee insights` degraded signals that are not owned by one section. |
 | `hubs` | `ee insights --section hubs` HITS profile degradation. |
 | `authorities` | `ee insights --section authorities` HITS profile degradation. |
+| `bridges` | `ee insights --section bridges` degradation. |
 | `causalBottlenecks` | `ee insights --section causalBottlenecks` degradation. |
+| `comprehensiveRules` | `ee insights --section comprehensiveRules` degradation. |
+| `contradictionClusters` | `ee insights --section contradictionClusters` degradation. |
 | `causal_trace` | `ee causal trace` degradation. |
 | `causal_estimate` | `ee causal estimate` degradation. |
 | `causal_compare` | `ee causal compare` degradation. |
 | `causal_promote_plan` | `ee causal promote-plan` degradation. |
+| `kCore` | `ee insights --section kCore` degradation. |
+| `kTruss` | `ee insights --section kTruss` degradation. |
 | `knowledgeSkyline` | `ee insights --section knowledgeSkyline` degradation. |
 | `loadBearingMemories` | `ee insights --section loadBearingMemories` degradation. |
 | `revisionFrontiers` | `ee insights --section revisionFrontiers` degradation. |
+| `topMemories` | `ee insights --section topMemories` degradation. |
 | `context` | General `ee context` response degradation without a narrower subsystem owner. |
 | `pack` | Context pack assembly, advisory, consensus, or conflict degradation. |
 | `index_vacuum` | `ee index vacuum` derived-index preview and lock-state degradation. |
@@ -215,6 +221,7 @@ memory bodies in `sources[]`.
 | `conflict_trust_mismatch` | high | bd-1zb7k.9 (S8) |
 | `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
 | `agent_profile_cold_start` | info | bd-1prrl.2.5 |
+| `certificate_store_unavailable` | medium | bd-79c16 |
 | `coordination_source_stale` | low | bd-1zb7k.4 (S3) |
 | `coordination_source_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `context_evidence_freshness_changed_source` | low | bd-17c65.1.2 (A2) |
@@ -330,6 +337,7 @@ memory bodies in `sources[]`.
 | `wal_holds_orphaned` | high | bd-17c65.12.6 (derived backup assets) |
 | `cache_hotset_stale` | medium | (TBD) |
 | `hotset_prewarm_no_signals` | low | bd-1zb7k.10.3 (O3) |
+| `memory_tier_metadata_stale` | medium | bd-1prrl.6.4 (Swarm-X) |
 | `cross_shard_skew_detected` | warning | (TBD) |
 | `flight_recorder_directory_unwritable` | medium | (TBD) |
 | `shard_attach_failed` | warning | (TBD) |
@@ -456,15 +464,16 @@ memory bodies in `sources[]`.
 | `write_hot_path_cancelled_before_commit` | medium | bd-2lsxf.2.4 (SRR3) |
 | `write_hot_path_fsync_failure` | high | bd-2lsxf.2.4 (SRR3) |
 
-#### Other (7)
+#### Other (8)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_feature_disabled` | medium | bd-17c65.5.3 (E3) — different from build-time `graph_unavailable`; this is a per-call disable |
+| `insights_section_unavailable` | info | bd-113r0 — registered `ee insights` section still has a metadata-only evidence builder |
 | `serve_unavailable_v1` | low | bd-3usjw.4 |
 | `singleflight_follower_timeout` | medium | bd-gni47.3 (SF3) |
 | `singleflight_leader_failed` | medium | bd-gni47.3 (SF3) |
 | `singleflight_state_poisoned` | high | bd-gni47.3 (SF3) |
-| `situation_decisioning_unavailable` | medium | (TBD) |
+| `situation_decisioning_unavailable` | medium | bd-14tio |
 | `test_degraded` | info | testing harness (synthetic; not emitted in production paths) |
 
 #### Tailscale local probe (7)

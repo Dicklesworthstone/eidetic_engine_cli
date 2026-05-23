@@ -11801,7 +11801,11 @@ fn domain_error_degraded(error: &DomainError, message: &str) -> Vec<ErrorDegrada
             repair: error.repair().map(str::to_owned),
         }];
     }
-    if matches!(error, DomainError::Import { .. }) && lower_message.contains("cass binary") {
+    if matches!(
+        error,
+        DomainError::Import { .. } | DomainError::ImportWithDetails { .. }
+    ) && lower_message.contains("cass binary")
+    {
         return vec![ErrorDegradation {
             code: "cass_unavailable",
             severity: "medium",
@@ -11854,6 +11858,7 @@ fn domain_error_severity(error: &DomainError) -> &'static str {
         | DomainError::SearchIndex { .. }
         | DomainError::Graph { .. }
         | DomainError::Import { .. }
+        | DomainError::ImportWithDetails { .. }
         | DomainError::UnsatisfiedDegradedMode { .. }
         | DomainError::UnsatisfiedDegradedModeCode { .. }
         | DomainError::PolicyDenied { .. }
@@ -11870,6 +11875,7 @@ fn domain_error_details(
     match error {
         DomainError::UsageWithDetails { details_json, .. }
         | DomainError::UsageCodeWithDetails { details_json, .. }
+        | DomainError::ImportWithDetails { details_json, .. }
         | DomainError::PolicyDeniedWithDetails { details_json, .. } => {
             append_domain_error_details(details, details_json);
         }
@@ -11879,11 +11885,13 @@ fn domain_error_details(
         details.field_str("resource", resource);
         details.field_str("id", id);
     }
-    if matches!(error, DomainError::Import { .. })
-        && error
-            .message()
-            .to_lowercase()
-            .contains("cass binary not found")
+    if matches!(
+        error,
+        DomainError::Import { .. } | DomainError::ImportWithDetails { .. }
+    ) && error
+        .message()
+        .to_lowercase()
+        .contains("cass binary not found")
     {
         details.field_array_of_strs(
             "attemptedPaths",
@@ -12300,9 +12308,35 @@ pub fn render_quarantine_json_filtered(report: &QuarantineReport, profile: Field
 // ============================================================================
 
 use crate::core::certificate::{
-    CERTIFICATE_LIST_SCHEMA_V1, CERTIFICATE_SHOW_SCHEMA_V1, CERTIFICATE_VERIFY_SCHEMA_V1,
-    CertificateListReport, CertificateShowReport, CertificateVerifyReport,
+    CERTIFICATE_LIST_SCHEMA_V1, CERTIFICATE_SHOW_SCHEMA_V1, CERTIFICATE_STORE_UNAVAILABLE_CODE,
+    CERTIFICATE_VERIFY_SCHEMA_V1, CertificateListReport, CertificateShowReport,
+    CertificateStoreStatus, CertificateVerifyReport,
 };
+
+/// bd-79c16: render a JSON `degraded[]` entry for an unavailable certificate
+/// store. Called from the certificate list/show/verify JSON renderers when
+/// the report's `store_status` is `Unavailable`.
+fn certificate_store_unavailable_degraded(reason: &str) -> String {
+    let mut b = JsonBuilder::with_capacity(256);
+    b.field_str("code", CERTIFICATE_STORE_UNAVAILABLE_CODE);
+    b.field_str("severity", "medium");
+    b.field_str(
+        "message",
+        "Certificate store could not be inspected; result reflects an absent backing store, not an empty store.",
+    );
+    b.field_str("repair", "Provide an explicit --manifest path, or run `ee init` and configure the workspace database before listing/showing/verifying certificates.");
+    b.field_object("details", |d| {
+        d.field_str("reason", reason);
+    });
+    let entry = b.finish();
+    format!("[{entry}]")
+}
+
+fn append_certificate_store_status_degraded(b: &mut JsonBuilder, status: &CertificateStoreStatus) {
+    if let Some(reason) = status.unavailable_reason() {
+        b.field_raw("degraded", &certificate_store_unavailable_degraded(reason));
+    }
+}
 
 #[must_use]
 pub fn render_certificate_list_json(report: &CertificateListReport) -> String {
@@ -12331,6 +12365,7 @@ pub fn render_certificate_list_json(report: &CertificateListReport) -> String {
             d.field_bool("isUsable", cert.is_usable);
         });
     });
+    append_certificate_store_status_degraded(&mut b, &report.store_status);
     b.finish()
 }
 
@@ -12385,6 +12420,7 @@ pub fn render_certificate_show_json(report: &CertificateShowReport) -> String {
             d.field_bool("isUsable", report.certificate.is_usable());
         });
     });
+    append_certificate_store_status_degraded(&mut b, &report.store_status);
     b.finish()
 }
 
@@ -12453,6 +12489,7 @@ pub fn render_certificate_verify_json(report: &CertificateVerifyReport) -> Strin
         );
         d.field_str("message", &report.message);
     });
+    append_certificate_store_status_degraded(&mut b, &report.store_status);
     b.finish()
 }
 
@@ -17042,6 +17079,40 @@ mod tests {
         ensure_contains(&json, "\"severity\":\"medium\"", "degraded severity")?;
         ensure_contains(&json, "cass unavailable", "degraded message")?;
         ensure_contains(&json, "EE_CASS_BINARY", "degraded repair")
+    }
+
+    #[test]
+    fn cass_import_error_json_merges_subprocess_diagnostics_details() -> TestResult {
+        let error = DomainError::ImportWithDetails {
+            message: "cass command `cass view` failed with exit None:".to_string(),
+            repair: Some("run cass health --json".to_string()),
+            details_json: serde_json::json!({
+                "subprocessDiagnostics": {
+                    "schema": "ee.cass.subprocess_diagnostics.v1",
+                    "outcome": "timeout",
+                    "command": "cass view",
+                    "timeout": true,
+                    "killAttempted": true,
+                    "reapSucceeded": true,
+                },
+            })
+            .to_string(),
+        };
+        let json = error_response_json(&error);
+
+        ensure_contains(&json, "\"code\":\"import\"", "error code")?;
+        ensure_contains(
+            &json,
+            "\"subprocessDiagnostics\":{",
+            "subprocess diagnostics details",
+        )?;
+        ensure_contains(
+            &json,
+            "\"schema\":\"ee.cass.subprocess_diagnostics.v1\"",
+            "diagnostics schema",
+        )?;
+        ensure_contains(&json, "\"outcome\":\"timeout\"", "diagnostics outcome")?;
+        ensure_contains(&json, "\"killAttempted\":true", "kill attempted")
     }
 
     #[test]
