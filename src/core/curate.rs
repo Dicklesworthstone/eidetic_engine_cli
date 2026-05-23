@@ -13059,21 +13059,31 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
-        let result = apply_curation_candidate(&super::CurateApplyOptions {
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
             workspace_path,
             database_path: Some(&database_path),
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: false,
             allow_tombstone_load_bearing: false,
-        });
+        })
+        .map_err(|error| error.message())?;
 
-        let error = result.expect_err("memory source drift must fail create-derived apply");
+        assert_eq!(report.application.status, "blocked");
+        assert_eq!(report.application.decision, "unchanged");
         assert!(
-            error.message().contains("derived_source_hash_mismatch"),
-            "error should name memory hash drift: {}",
-            error.message()
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_source_hash_mismatch"),
+            "apply report should name memory hash drift: {:?}",
+            report.application.errors
         );
+        assert!(!report.mutation.persisted);
+        assert_eq!(report.mutation.from_status, "approved");
+        assert_eq!(report.mutation.to_status, "approved");
+        assert!(report.mutation.audit_id.is_none());
         assert_no_create_derived_apply_side_effects(
             &connection,
             &workspace_id,
@@ -13151,23 +13161,31 @@ mod tests {
             .map_err(|error| error.to_string())?;
         assert_eq!(attached, EvidenceSpanMemoryAttachResult::Attached);
 
-        let result = apply_curation_candidate(&super::CurateApplyOptions {
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
             workspace_path,
             database_path: Some(&database_path),
             candidate_id: &candidate_id,
             actor: Some("MistySalmon"),
             dry_run: false,
             allow_tombstone_load_bearing: false,
-        });
+        })
+        .map_err(|error| error.message())?;
 
-        let error = result.expect_err("evidence attachment drift must fail create-derived apply");
+        assert_eq!(report.application.status, "blocked");
+        assert_eq!(report.application.decision, "unchanged");
         assert!(
-            error
-                .message()
-                .contains("derived_source_evidence_already_linked"),
-            "error should name evidence attachment drift: {}",
-            error.message()
+            report
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_source_evidence_already_linked"),
+            "apply report should name evidence attachment drift: {:?}",
+            report.application.errors
         );
+        assert!(!report.mutation.persisted);
+        assert_eq!(report.mutation.from_status, "approved");
+        assert_eq!(report.mutation.to_status, "approved");
+        assert!(report.mutation.audit_id.is_none());
         assert_no_create_derived_apply_side_effects(
             &connection,
             &workspace_id,
@@ -13178,6 +13196,152 @@ mod tests {
             2,
             "evidence attachment drift",
         )
+    }
+
+    #[test]
+    fn apply_curation_candidate_blocks_competing_create_derived_candidate_evidence_conflict(
+    ) -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6701)).to_string();
+        let evidence_source_id = evidence_id(0x6702);
+        let winning_candidate_id = curate_id(0x6703);
+        let losing_candidate_id = curate_id(0x6704);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &winning_candidate_id,
+            None,
+            None,
+            None,
+        )?;
+        let winning_seed = connection
+            .get_curation_candidate(&workspace_id, &winning_candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "winning candidate missing before conflict test".to_owned())?;
+        connection
+            .insert_curation_candidate(
+                &losing_candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "create_derived_memory".to_owned(),
+                    target_memory_id: None,
+                    proposed_content: Some(
+                        "Derived memory: competing candidate cites the same evidence span."
+                            .to_owned(),
+                    ),
+                    proposed_confidence: Some(0.59),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("reflect_result_competing_012345".to_owned()),
+                    reason: "Competing derivation cites the same locked evidence span.".to_owned(),
+                    confidence: 0.70,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:06Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: winning_seed.derivation_source_refs_json.clone(),
+                    derivation_metadata_json: winning_seed.derivation_metadata_json.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        for candidate_id in [&winning_candidate_id, &losing_candidate_id] {
+            let report = validate_curation_candidate(&super::CurateValidateOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                candidate_id,
+                actor: Some("MistySalmon"),
+                dry_run: false,
+            })
+            .map_err(|error| error.message())?;
+            assert_eq!(report.validation.status, "passed");
+            assert_eq!(report.mutation.to_status, "approved");
+            assert!(report.mutation.persisted);
+        }
+
+        let winning = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &winning_candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(winning.application.status, "applied");
+        let created_memory_id = winning
+            .application
+            .created_memory_id
+            .as_deref()
+            .ok_or_else(|| "winning apply should return createdMemoryId".to_owned())?;
+
+        let losing = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &losing_candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(losing.application.status, "blocked");
+        assert_eq!(losing.application.decision, "unchanged");
+        assert!(
+            losing
+                .application
+                .errors
+                .iter()
+                .any(|issue| issue.code == "derived_source_evidence_already_linked"),
+            "losing candidate should report evidence conflict: {:?}",
+            losing.application.errors
+        );
+        assert!(!losing.mutation.persisted);
+        assert_eq!(losing.mutation.from_status, "approved");
+        assert_eq!(losing.mutation.to_status, "approved");
+        assert!(losing.mutation.audit_id.is_none());
+        assert_eq!(
+            losing.next_action,
+            format!("ee curate validate {losing_candidate_id}")
+        );
+
+        let losing_stored = connection
+            .get_curation_candidate(&workspace_id, &losing_candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "losing candidate missing after blocked apply".to_owned())?;
+        assert_eq!(losing_stored.status, "approved");
+        assert!(losing_stored.applied_at.is_none());
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "evidence span missing after competing apply".to_owned())?;
+        assert_eq!(evidence.memory_id.as_deref(), Some(created_memory_id));
+        let memories = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            memories.len(),
+            2,
+            "only the source memory and winning derived memory should exist"
+        );
+        let jobs = connection
+            .list_search_index_jobs(&workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| {
+                    job.document_source.as_deref() == Some("memory")
+                        && job.document_id.as_deref() == Some(created_memory_id)
+                })
+                .count(),
+            1
+        );
+        Ok(())
     }
 
     fn assert_create_derived_apply_failure_rolls_back(
