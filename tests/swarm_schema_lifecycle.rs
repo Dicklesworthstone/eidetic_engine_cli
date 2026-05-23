@@ -1015,6 +1015,225 @@ fn work_packet_command_actions_require_shell_safe_argv_contract() -> TestResult 
 }
 
 #[test]
+fn work_packet_command_surfaces_reject_unsafe_command_drift() -> TestResult {
+    // bd-13dmm.2: work-packet command fields are agent-facing copy surfaces.
+    // Legacy display strings may remain during migration, but concrete
+    // executable actions must carry structured argv/copy-safety posture, and
+    // no example or fixture command surface may smuggle shell-eval, local Cargo,
+    // raw paths, mail bodies, or secret-looking material.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+
+    let mut documents = Vec::new();
+    let schema_examples = schema
+        .pointer("/examples")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.swarm.work_packet.v1 examples missing".to_owned())?;
+    for (index, example) in schema_examples.iter().enumerate() {
+        documents.push((format!("schema.examples[{index}]"), example.clone()));
+    }
+
+    let fixture_dir = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet");
+    for entry in fs::read_dir(&fixture_dir)
+        .map_err(|error| format!("read {}: {error}", fixture_dir.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read fixture entry: {error}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+            let fixture = read_json(&path)?;
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| format!("fixture path has non-UTF8 name: {}", path.display()))?
+                .to_owned();
+            documents.push((format!("tests/fixtures/swarm_work_packet/{name}"), fixture));
+        }
+    }
+
+    let redaction_markers = [
+        "BEGIN PRIVATE KEY",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "ghp_",
+        "Bearer ",
+        "DATABASE_URL=",
+        "From: ",
+        "Subject: ",
+        "Message-ID:",
+        "raw_inbox",
+        "stdout:",
+        "stderr:",
+        "/Users/",
+        "/home/",
+        ".sqlite-shm",
+        ".sqlite-wal",
+    ];
+    let shell_markers = ["`", "$(", "|", ">", "<", "&&", "||"];
+
+    fn command_strings<'a>(value: &'a Value, path: &str, out: &mut Vec<(String, &'a str)>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}/{key}");
+                    match (key.as_str(), child) {
+                        ("commandTemplate" | "displayCommand" | "command", Value::String(text)) => {
+                            out.push((child_path, text.as_str()))
+                        }
+                        ("suggestedCommands", Value::Array(commands)) => {
+                            for (index, command) in commands.iter().enumerate() {
+                                if let Some(text) = command.as_str() {
+                                    out.push((format!("{child_path}[{index}]"), text));
+                                }
+                            }
+                        }
+                        _ => command_strings(child, &child_path, out),
+                    }
+                }
+            }
+            Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    command_strings(child, &format!("{path}[{index}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn command_actions<'a>(value: &'a Value, path: &str, out: &mut Vec<(String, &'a Value)>) {
+        match value {
+            Value::Object(map) => {
+                for (key, child) in map {
+                    let child_path = format!("{path}/{key}");
+                    if key == "commandAction" {
+                        out.push((child_path.clone(), child));
+                    }
+                    if key == "suggestedCommandActions"
+                        && let Value::Array(actions) = child
+                    {
+                        for (index, action) in actions.iter().enumerate() {
+                            out.push((format!("{child_path}[{index}]"), action));
+                        }
+                    }
+                    command_actions(child, &child_path, out);
+                }
+            }
+            Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    command_actions(child, &format!("{path}[{index}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (document_name, document) in &documents {
+        let mut strings = Vec::new();
+        command_strings(document, document_name, &mut strings);
+        for (path, text) in strings {
+            for marker in redaction_markers {
+                if text.contains(marker) {
+                    return Err(format!("{path} leaks forbidden command marker {marker}"));
+                }
+            }
+            for marker in shell_markers {
+                if text.contains(marker) {
+                    return Err(format!("{path} contains shell-eval marker {marker}"));
+                }
+            }
+            if text.contains("cargo ") && !text.contains("rch_verify.sh") {
+                return Err(format!(
+                    "{path} contains local Cargo fallback instead of RCH wrapper"
+                ));
+            }
+        }
+
+        let mut actions = Vec::new();
+        command_actions(document, document_name, &mut actions);
+        for (path, action) in actions {
+            if !action.is_object() {
+                return Err(format!("{path} must be an object"));
+            }
+            let argv = action
+                .pointer("/argv")
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{path} missing argv array"))?;
+            if argv.is_empty() {
+                return Err(format!("{path} argv must not be empty"));
+            }
+            let copy_safety = string_field(action, "/copySafety", &path)?;
+            let shell_required = bool_field(action, "/shellRequired", &path)?;
+            if copy_safety == "safe_structured_argv" && shell_required {
+                return Err(format!(
+                    "{path} cannot require a shell when copySafety is safe_structured_argv"
+                ));
+            }
+            for (index, arg) in argv.iter().enumerate() {
+                let arg = arg
+                    .as_str()
+                    .ok_or_else(|| format!("{path}/argv[{index}] must be a string"))?;
+                for marker in redaction_markers {
+                    if arg.contains(marker) {
+                        return Err(format!(
+                            "{path}/argv[{index}] leaks forbidden command marker {marker}"
+                        ));
+                    }
+                }
+                for marker in shell_markers {
+                    if arg.contains(marker) {
+                        return Err(format!(
+                            "{path}/argv[{index}] contains shell-eval marker {marker}"
+                        ));
+                    }
+                }
+            }
+            let argv_text = argv
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if argv_text.contains("cargo ") && !argv_text.contains("rch_verify.sh") {
+                return Err(format!(
+                    "{path}/argv contains local Cargo fallback instead of RCH wrapper"
+                ));
+            }
+        }
+    }
+
+    for doc_path in [
+        "docs/swarm/work_packet.md",
+        "docs/agent-ux/swarm-work-packet.md",
+    ] {
+        let text = read_text(&repo_root().join(doc_path))?;
+        for required in [
+            "commandAction",
+            "safe_structured_argv",
+            "MUST NOT be passed to a shell",
+        ] {
+            if !text.contains(required) {
+                return Err(format!(
+                    "{doc_path} must document command-action safety marker {required}"
+                ));
+            }
+        }
+        for forbidden in ["rm -rf", "git reset --hard", "BEGIN PRIVATE KEY", "ghp_"] {
+            if text.contains(forbidden) {
+                return Err(format!(
+                    "{doc_path} contains unsafe command marker {forbidden}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult {
     // bd-2z5ly.8.1: when Agent Mail responds with healthLevel=green but
     // semantic_readiness.status=fail (for example malformed SQLite storage),
