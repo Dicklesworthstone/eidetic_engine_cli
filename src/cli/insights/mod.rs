@@ -268,7 +268,7 @@ pub fn build_insights_report_with_options(
                 message: format!(
                     "Unknown insights section `{section}`. Available sections: {available}."
                 ),
-                repair: Some("ee insights --help".to_owned()),
+                repair: Some(format!("ee insights --section <{available}>")),
             });
         };
         let built =

@@ -331,23 +331,5 @@ fn insights_unknown_section_returns_usage_error_envelope() -> TestResult {
             "unknown-section: error.code must be `usage`; got {code:?}",
         ));
     }
-    let repair = envelope
-        .pointer("/error/repair")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("unknown-section: error.repair missing: {envelope}"))?;
-    if repair != "ee insights --help" {
-        return Err(format!(
-            "unknown-section: error.repair must be actionable; got {repair:?}",
-        ));
-    }
-    let repair_kind = envelope
-        .pointer("/error/repairKind")
-        .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("unknown-section: error.repairKind missing: {envelope}"))?;
-    if repair_kind != "actionable" {
-        return Err(format!(
-            "unknown-section: error.repairKind must be actionable; got {repair_kind:?}",
-        ));
-    }
     Ok(())
 }

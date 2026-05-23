@@ -15818,6 +15818,30 @@ fn advisory_lock_retry_delay(attempt: usize) -> Duration {
     Duration::from_millis(BASE_DELAY_MS.saturating_mul(multiplier).min(MAX_DELAY_MS))
 }
 
+fn advisory_lock_expires_at(now_instant: DateTime<Utc>, ttl_secs: u64) -> Result<Option<String>> {
+    if ttl_secs == 0 {
+        return Ok(None);
+    }
+
+    let ttl_i64 = i64::try_from(ttl_secs).map_err(|_| DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("advisory lock ttl_secs {ttl_secs} exceeds chrono duration seconds"),
+    })?;
+    let ttl_delta =
+        chrono::TimeDelta::try_seconds(ttl_i64).ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Execute,
+            message: format!("advisory lock ttl_secs {ttl_secs} exceeds chrono duration seconds"),
+        })?;
+    let expires_at =
+        now_instant
+            .checked_add_signed(ttl_delta)
+            .ok_or_else(|| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("advisory lock ttl_secs {ttl_secs} exceeds timestamp range"),
+            })?;
+    Ok(Some(advisory_lock_timestamp(expires_at)))
+}
+
 pub(crate) fn sleep_retry_delay_or_cancel(operation: DbOperation, delay: Duration) -> Result<()> {
     let cx = asupersync::Cx::current();
     sleep_retry_delay_or_cancel_with_cx(operation, delay, cx.as_ref())
@@ -15974,13 +15998,7 @@ impl DbConnection {
         let now_instant = Utc::now();
         let now = advisory_lock_timestamp(now_instant);
         let ttl = ttl_secs.unwrap_or(concurrent_writer_contract::DEFAULT_LOCK_TTL_SECS);
-        let expires_at = if ttl > 0 {
-            Some(advisory_lock_timestamp(
-                now_instant + chrono::Duration::seconds(ttl as i64),
-            ))
-        } else {
-            None
-        };
+        let expires_at = advisory_lock_expires_at(now_instant, ttl)?;
 
         let resource_key = lock_id.canonical_key();
 
@@ -16259,10 +16277,7 @@ impl DbConnection {
                     .as_ref()
                     .map(|s| Value::Text(s.clone()))
                     .unwrap_or(Value::Null),
-                input
-                    .duration_ms
-                    .map(|d| Value::BigInt(d as i64))
-                    .unwrap_or(Value::Null),
+                sqlite_optional_u64_value("task episode duration_ms", input.duration_ms)?,
                 input
                     .agent
                     .as_ref()
@@ -17300,6 +17315,10 @@ impl DbConnection {
 
 fn recorder_event_sequence_value(sequence: u64) -> Result<Value> {
     sqlite_u64_value("recorder event sequence", sequence)
+}
+
+fn sqlite_optional_u64_value(field: &str, value: Option<u64>) -> Result<Value> {
+    value.map_or(Ok(Value::Null), |value| sqlite_u64_value(field, value))
 }
 
 fn sqlite_u64_value(field: &str, value: u64) -> Result<Value> {
@@ -19599,6 +19618,30 @@ mod tests {
         ensure_task_episode_json_malformed(
             connection.list_task_episodes(None, None, 10),
             "actions",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn task_episode_duration_above_sqlite_integer_range_is_rejected() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        let episode_id = "ep_323456789012345678901234567";
+        let oversized = u64::try_from(i64::MAX).expect("i64 max fits u64") + 1;
+        let input = CreateTaskEpisodeInput {
+            duration_ms: Some(oversized),
+            ..task_episode_input()
+        };
+
+        ensure_sqlite_integer_overflow(
+            connection.insert_task_episode(episode_id, &input),
+            "task episode duration_ms",
+        )?;
+        ensure(
+            connection.get_task_episode(episode_id)?.is_none(),
+            "oversized task episode duration should not persist",
         )?;
 
         connection.close()?;
@@ -27632,6 +27675,42 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn acquire_advisory_lock_rejects_ttl_above_chrono_range() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.ensure_advisory_locks_table()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_test_ttl_overflow");
+        let oversized_ttl = u64::try_from(i64::MAX).expect("i64 max fits u64") + 1;
+        let result =
+            connection.acquire_advisory_lock(&lock_id, "agent_001", Some(oversized_ttl), None);
+
+        match result {
+            Ok(_) => Err(TestFailure::new(
+                "oversized advisory lock ttl unexpectedly succeeded",
+            )),
+            Err(DbError::MalformedRow { operation, message }) => {
+                ensure_equal(
+                    &operation,
+                    &DbOperation::Execute,
+                    "advisory lock ttl overflow operation",
+                )?;
+                ensure(
+                    message.contains("advisory lock ttl_secs")
+                        && message.contains("chrono duration seconds"),
+                    format!("unexpected ttl overflow message: {message}"),
+                )?;
+                ensure(
+                    connection.is_lock_held(&lock_id)?.is_none(),
+                    "oversized advisory lock ttl should not persist a lock row",
+                )
+            }
+            Err(error) => Err(TestFailure::new(format!(
+                "expected malformed-row ttl overflow error, got {error:?}"
+            ))),
+        }
     }
 
     #[test]
