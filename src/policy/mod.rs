@@ -1509,11 +1509,11 @@ fn detect_secret_key_value_matches(input: &str, matches: &mut Vec<SecretRedactio
             if search_start >= lower.len() {
                 break;
             }
-            let Some(relative) = lower[search_start..].find(pattern.key) else {
+            let Some((key_start, key_end)) =
+                find_secret_key_pattern(&lower, pattern.key, search_start)
+            else {
                 break;
             };
-            let key_start = search_start + relative;
-            let key_end = key_start + pattern.key.len();
             if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
                 search_start = key_end;
                 continue;
@@ -1741,11 +1741,11 @@ fn redact_secret_key_values(input: &str, reasons: &mut Vec<&'static str>) -> (St
             if search_start >= lower.len() {
                 break;
             }
-            let Some(relative) = lower[search_start..].find(pattern.key) else {
+            let Some((key_start, key_end)) =
+                find_secret_key_pattern(&lower, pattern.key, search_start)
+            else {
                 break;
             };
-            let key_start = search_start + relative;
-            let key_end = key_start + pattern.key.len();
             if !is_key_boundary(lower.as_bytes(), key_start, key_end) {
                 search_start = key_end;
                 continue;
@@ -1782,6 +1782,44 @@ fn is_key_boundary(bytes: &[u8], start: usize, end: usize) -> bool {
         .get(end)
         .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
     before_ok && after_ok
+}
+
+fn find_secret_key_pattern(
+    input_lower: &str,
+    pattern_key: &str,
+    mut search_start: usize,
+) -> Option<(usize, usize)> {
+    let first = char::from(*pattern_key.as_bytes().first()?);
+    while search_start < input_lower.len() {
+        let relative = input_lower[search_start..].find(first)?;
+        let key_start = search_start + relative;
+        if let Some(key_end) = secret_key_pattern_end(input_lower, pattern_key, key_start) {
+            return Some((key_start, key_end));
+        }
+        search_start = key_start + first.len_utf8();
+    }
+    None
+}
+
+fn secret_key_pattern_end(input_lower: &str, pattern_key: &str, key_start: usize) -> Option<usize> {
+    let bytes = input_lower.as_bytes();
+    let mut cursor = key_start;
+    for pattern_byte in pattern_key.bytes() {
+        let byte = *bytes.get(cursor)?;
+        if is_secret_key_separator(pattern_byte) {
+            if !is_secret_key_separator(byte) {
+                return None;
+            }
+        } else if byte != pattern_byte {
+            return None;
+        }
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn is_secret_key_separator(byte: u8) -> bool {
+    matches!(byte, b'_' | b'-' | b'.')
 }
 
 fn secret_value_range(
@@ -3356,6 +3394,58 @@ mod tests {
                 "service-account-json-value",
             ),
             ("databaseUrl", "database_url", "database-url-value"),
+        ];
+        let input = cases
+            .iter()
+            .map(|(key, _, value)| format!("{key}: {value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let report = redact_secret_like_content(&input);
+
+        assert!(report.redacted);
+        for (_, reason, value) in cases {
+            assert!(
+                report.redacted_reasons.contains(&reason),
+                "missing redaction reason {reason}; got {:?}",
+                report.redacted_reasons
+            );
+            assert!(
+                report.content.contains(&redaction_placeholder(reason)),
+                "missing placeholder for {reason}: {}",
+                report.content
+            );
+            assert!(
+                !report.content.contains(value),
+                "redacted output leaked raw value {value}: {}",
+                report.content
+            );
+        }
+    }
+
+    #[test]
+    fn secret_redactor_masks_separator_variant_key_value_patterns() {
+        let cases = [
+            ("ACCESS-TOKEN", "oauth_access_token", "access-token-value"),
+            (
+                "refresh.token",
+                "oauth_refresh_token",
+                "refresh-token-value",
+            ),
+            ("client-secret", "client_secret", "client-secret-value"),
+            ("session.secret", "session_secret", "session-secret-value"),
+            ("private-key", "private_key", "private-key-value"),
+            (
+                "service-account-json",
+                "service_account_json",
+                "service-account-json-value",
+            ),
+            ("database.url", "database_url", "database-url-value"),
+            (
+                "personal-access-token",
+                "personal_access_token",
+                "personal-access-token-value",
+            ),
+            ("ssh-key", "ssh_key", "ssh-key-value"),
         ];
         let input = cases
             .iter()
