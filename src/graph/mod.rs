@@ -2333,7 +2333,7 @@ impl CentralityAlgorithmStatus {
     }
 
     #[must_use]
-    pub(crate) const fn from_str(value: &str) -> Option<Self> {
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
         match value {
             "computed" => Some(Self::Computed),
             "skipped" => Some(Self::Skipped),

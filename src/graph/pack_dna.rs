@@ -168,6 +168,91 @@ fn compute_pack_dna_unbudgeted(
     input: &PackDnaInput,
     snapshot_version: u64,
 ) -> GraphResult<PackDna> {
+    let (summary, partial_results) =
+        compute_pack_dna_partial_results(cx, directed, undirected, input)?;
+    merge_pack_dna_partial_results(snapshot_version, summary, partial_results)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PackDnaInputSummary {
+    pack_memory_count: usize,
+    query_seed_count: usize,
+    trust_anchor_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PackDnaPartialKey {
+    VoronoiDominator,
+    CommunityOfMass,
+    EgoSubgraph,
+    PprNeighbors,
+    Degraded,
+}
+
+impl PackDnaPartialKey {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::VoronoiDominator => "voronoi_dominator",
+            Self::CommunityOfMass => "community_of_mass",
+            Self::EgoSubgraph => "ego_subgraph",
+            Self::PprNeighbors => "ppr_neighbors",
+            Self::Degraded => "degraded",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PackDnaPartialResult {
+    VoronoiDominator(Option<PackDnaDominator>),
+    CommunityOfMass(Option<PackDnaCommunity>),
+    EgoSubgraph(Option<PackDnaEgoSubgraph>),
+    PprNeighbors(Vec<PackDnaPprNeighbor>),
+    Degraded(Vec<PackDnaDegradation>),
+}
+
+impl PackDnaPartialResult {
+    const fn key(&self) -> PackDnaPartialKey {
+        match self {
+            Self::VoronoiDominator(_) => PackDnaPartialKey::VoronoiDominator,
+            Self::CommunityOfMass(_) => PackDnaPartialKey::CommunityOfMass,
+            Self::EgoSubgraph(_) => PackDnaPartialKey::EgoSubgraph,
+            Self::PprNeighbors(_) => PackDnaPartialKey::PprNeighbors,
+            Self::Degraded(_) => PackDnaPartialKey::Degraded,
+        }
+    }
+}
+
+fn pack_dna_merge_error(source: String) -> GraphError {
+    GraphError::GraphEngine {
+        operation: "merge pack DNA partial results",
+        source,
+    }
+}
+
+fn set_pack_dna_partial<T>(
+    slot: &mut Option<T>,
+    key: PackDnaPartialKey,
+    value: T,
+) -> GraphResult<()> {
+    if slot.replace(value).is_some() {
+        return Err(pack_dna_merge_error(format!(
+            "duplicate {} result",
+            key.as_str()
+        )));
+    }
+    Ok(())
+}
+
+fn require_pack_dna_partial<T>(slot: Option<T>, key: PackDnaPartialKey) -> GraphResult<T> {
+    slot.ok_or_else(|| pack_dna_merge_error(format!("missing {} result", key.as_str())))
+}
+
+fn compute_pack_dna_partial_results(
+    cx: &Cx,
+    directed: &DiGraph,
+    undirected: &Graph,
+    input: &PackDnaInput,
+) -> GraphResult<(PackDnaInputSummary, Vec<PackDnaPartialResult>)> {
     let pack_ids = valid_memory_ids(&input.pack_memory_ids, directed);
     let query_seed_weights = valid_seed_weights(&input.query_seed_weights, directed);
     let trust_anchors = pack_dna_trust_anchors(input, directed);
@@ -181,17 +266,72 @@ fn compute_pack_dna_unbudgeted(
         pack_dna_ppr_neighbors(cx, directed, &query_seed_weights, input.ppr_neighbor_limit)?;
     let degraded = pack_dna_degradations(dominator.as_ref());
 
+    Ok((
+        PackDnaInputSummary {
+            pack_memory_count: pack_ids.len(),
+            query_seed_count: query_seed_weights.len(),
+            trust_anchor_count: trust_anchors.len(),
+        },
+        vec![
+            PackDnaPartialResult::VoronoiDominator(dominator),
+            PackDnaPartialResult::CommunityOfMass(community_of_mass),
+            PackDnaPartialResult::EgoSubgraph(ego_subgraph),
+            PackDnaPartialResult::PprNeighbors(ppr_neighbors),
+            PackDnaPartialResult::Degraded(degraded),
+        ],
+    ))
+}
+
+fn merge_pack_dna_partial_results(
+    snapshot_version: u64,
+    summary: PackDnaInputSummary,
+    partial_results: impl IntoIterator<Item = PackDnaPartialResult>,
+) -> GraphResult<PackDna> {
+    let mut dominator = None;
+    let mut community_of_mass = None;
+    let mut ego_subgraph = None;
+    let mut ppr_neighbors = None;
+    let mut degraded = None;
+
+    let mut ordered_results = partial_results.into_iter().collect::<Vec<_>>();
+    ordered_results.sort_by_key(PackDnaPartialResult::key);
+
+    for result in ordered_results {
+        match result {
+            PackDnaPartialResult::VoronoiDominator(value) => {
+                set_pack_dna_partial(&mut dominator, PackDnaPartialKey::VoronoiDominator, value)?
+            }
+            PackDnaPartialResult::CommunityOfMass(value) => set_pack_dna_partial(
+                &mut community_of_mass,
+                PackDnaPartialKey::CommunityOfMass,
+                value,
+            )?,
+            PackDnaPartialResult::EgoSubgraph(value) => {
+                set_pack_dna_partial(&mut ego_subgraph, PackDnaPartialKey::EgoSubgraph, value)?;
+            }
+            PackDnaPartialResult::PprNeighbors(value) => {
+                set_pack_dna_partial(&mut ppr_neighbors, PackDnaPartialKey::PprNeighbors, value)?
+            }
+            PackDnaPartialResult::Degraded(value) => {
+                set_pack_dna_partial(&mut degraded, PackDnaPartialKey::Degraded, value)?;
+            }
+        }
+    }
+
     Ok(PackDna {
         schema: PACK_DNA_SCHEMA_V1,
         snapshot_version,
-        pack_memory_count: pack_ids.len(),
-        query_seed_count: query_seed_weights.len(),
-        trust_anchor_count: trust_anchors.len(),
-        dominator,
-        community_of_mass,
-        ego_subgraph,
-        ppr_neighbors,
-        degraded,
+        pack_memory_count: summary.pack_memory_count,
+        query_seed_count: summary.query_seed_count,
+        trust_anchor_count: summary.trust_anchor_count,
+        dominator: require_pack_dna_partial(dominator, PackDnaPartialKey::VoronoiDominator)?,
+        community_of_mass: require_pack_dna_partial(
+            community_of_mass,
+            PackDnaPartialKey::CommunityOfMass,
+        )?,
+        ego_subgraph: require_pack_dna_partial(ego_subgraph, PackDnaPartialKey::EgoSubgraph)?,
+        ppr_neighbors: require_pack_dna_partial(ppr_neighbors, PackDnaPartialKey::PprNeighbors)?,
+        degraded: require_pack_dna_partial(degraded, PackDnaPartialKey::Degraded)?,
     })
 }
 
@@ -510,6 +650,41 @@ mod tests {
             .ok_or_else(|| "expected pack dominator".to_owned())?;
         assert_eq!(dominator.memory_id, mem(1).to_string());
         assert_eq!(dominator.pack_member_count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_dna_partial_merge_ignores_result_order() -> Result<(), String> {
+        let projection = pack_dna_projection();
+        let directed = projection.graph.clone();
+        let undirected = undirected_from_directed(&directed).map_err(|error| error.to_string())?;
+        let input = PackDnaInput::new(
+            vec![mem(2), mem(3), mem(5)],
+            vec![mem(1)],
+            vec![mem(1), mem(4)],
+        );
+        let cx = current_or_testing_cx();
+        let (summary, partial_results) =
+            compute_pack_dna_partial_results(&cx, &directed, &undirected, &input)
+                .map_err(|error| error.to_string())?;
+
+        let serial = merge_pack_dna_partial_results(
+            projection.snapshot_version,
+            summary,
+            partial_results.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut out_of_order = partial_results;
+        out_of_order.reverse();
+        let merged =
+            merge_pack_dna_partial_results(projection.snapshot_version, summary, out_of_order)
+                .map_err(|error| error.to_string())?;
+
+        assert_eq!(merged, serial);
+        assert_eq!(
+            serde_json::to_value(&merged).map_err(|error| error.to_string())?,
+            serde_json::to_value(&serial).map_err(|error| error.to_string())?
+        );
         Ok(())
     }
 

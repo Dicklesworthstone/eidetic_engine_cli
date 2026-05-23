@@ -1,10 +1,13 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use clap::Args;
-use fnx_algorithms::CentralityScore;
+use fnx_algorithms::{
+    CentralityScore, articulation_points, bridges as fnx_bridges, number_connected_components,
+};
 use fnx_classes::{AttrMap, Graph};
-use fnx_runtime::CgseValue;
+use fnx_runtime::{CgseValue, CompatibilityMode};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
@@ -16,11 +19,15 @@ use crate::config::{
 use crate::core::config_surface::{ConfigSurfaceOptions, get_config};
 use crate::core::degraded_aggregation::{AggregatedDegradation, aggregate_degraded};
 use crate::core::status::DegradationReport;
-use crate::db::{DbConnection, StoredMemoryLink};
+use crate::db::{DbConnection, StoredMemory, StoredMemoryLink};
 use crate::graph::gomory_hu::{
     GOMORY_HU_WEIGHT_ATTR, PROXIMITY_SCHEMA_V1, build_gomory_hu_tree, query_proximity,
 };
 use crate::graph::hits::{HITS_REPORT_SCHEMA_V1, HitsScores, compute_hits_report};
+use crate::graph::skyline::{
+    KNOWLEDGE_SKYLINE_SCHEMA_V1, KnowledgeSkyline, KnowledgeSkylineInput, KnowledgeSkylineMemory,
+    compute_knowledge_skyline,
+};
 use crate::models::{DomainError, RESPONSE_SCHEMA_V1};
 use crate::output::render_toon_from_json;
 
@@ -38,6 +45,7 @@ const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
     "One or more registered insights sections do not have DB-backed evidence yet.";
 const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
     "Use sections with non-empty evidence, or implement the unavailable section builder.";
+const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
 
 type SectionBuilder = fn() -> InsightsSection;
 type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
@@ -150,6 +158,17 @@ struct ProximityHotspotInput {
 struct CausalBottleneckInput {
     memory_id: String,
     betweenness: f64,
+    snapshot_version: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BridgeInsightInput {
+    memory_id: String,
+    degree: usize,
+    bridge_edge_count: usize,
+    cluster_disconnection_magnitude: usize,
+    component_count_before: usize,
+    component_count_after: usize,
     snapshot_version: u64,
 }
 
@@ -329,12 +348,9 @@ pub fn build_insights_report_with_options(
 // lands for one of these names, remove it from this list in the same
 // change as the `build_registry_section` arm.
 const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &[
-    "bridges",
     "comprehensiveRules",
-    "contradictionClusters",
     "kCore",
     "kTruss",
-    "knowledgeSkyline",
     "revisionFrontiers",
     "topMemories",
 ];
@@ -398,9 +414,21 @@ fn build_registry_section(
             let reports = load_causal_bottleneck_reports(workspace)?;
             Ok(causal_bottlenecks_section_from_reports(&reports))
         }
+        "bridges" => {
+            let inputs = load_bridge_inputs(workspace)?;
+            Ok(bridges_section_from_inputs(&inputs))
+        }
+        "contradictionClusters" => {
+            let clusters = load_contradiction_clusters(workspace)?;
+            Ok(contradiction_clusters_section_from_clusters(&clusters))
+        }
         "hubs" => {
             let scores = load_hits_scores(workspace)?;
             Ok(hubs_section_from_scores(&scores))
+        }
+        "knowledgeSkyline" => {
+            let skyline = load_knowledge_skyline(workspace)?;
+            Ok(knowledge_skyline_section_from_report(skyline.as_ref()))
         }
         "loadBearingMemories" => {
             let items = load_bearing_memory_items(workspace)?;
@@ -519,6 +547,116 @@ impl From<AggregatedDegradation> for InsightsDegradedSignal {
             sources: entry.sources,
         }
     }
+}
+
+struct WorkspaceInsightsGraphData {
+    memories: Vec<StoredMemory>,
+    links: Vec<StoredMemoryLink>,
+}
+
+fn load_workspace_insights_graph_data(
+    workspace: Option<&Path>,
+) -> Result<Option<WorkspaceInsightsGraphData>, DomainError> {
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Ok(None);
+    }
+
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open workspace database: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let Some(workspace_id) = insights_workspace_id(&connection, workspace)? else {
+        return Ok(None);
+    };
+    let memories = connection
+        .list_memories(&workspace_id, None, false)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace memories: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?;
+    let memory_ids = memories
+        .iter()
+        .map(|memory| memory.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let links = connection
+        .list_all_memory_links(None)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query memory links: {error}"),
+            repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+        })?
+        .into_iter()
+        .filter(|link| {
+            memory_ids.contains(link.src_memory_id.as_str())
+                && memory_ids.contains(link.dst_memory_id.as_str())
+        })
+        .collect::<Vec<_>>();
+
+    Ok(Some(WorkspaceInsightsGraphData { memories, links }))
+}
+
+fn load_bridge_inputs(workspace: Option<&Path>) -> Result<Vec<BridgeInsightInput>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+        return Ok(Vec::new());
+    };
+    bridge_inputs_from_links(&data.links)
+}
+
+fn load_contradiction_clusters(
+    workspace: Option<&Path>,
+) -> Result<Vec<crate::graph::health::ContradictionCluster>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+        return Ok(Vec::new());
+    };
+    contradiction_clusters_from_links(&data.links)
+}
+
+fn load_knowledge_skyline(
+    workspace: Option<&Path>,
+) -> Result<Option<KnowledgeSkyline>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+        return Ok(None);
+    };
+    if data.memories.is_empty() {
+        return Ok(None);
+    }
+
+    let mut skyline_graph = proximity_graph_from_links(&data.links)?;
+    let mut skyline_memories = Vec::with_capacity(data.memories.len());
+    for memory in &data.memories {
+        skyline_graph.add_node(memory.id.clone());
+        let created_at = DateTime::parse_from_rfc3339(&memory.created_at)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to parse memory created_at for knowledge skyline `{}`: {error}",
+                    memory.id
+                ),
+                repair: Some("Run `ee doctor --workspace . --json`.".to_owned()),
+            })?
+            .with_timezone(&Utc);
+        skyline_memories.push(KnowledgeSkylineMemory {
+            memory_id: memory.id.clone(),
+            trust_class: memory.trust_class.clone(),
+            created_at,
+        });
+    }
+
+    let ppr_scores = pagerank_scores_for_skyline(&data.links)?;
+    let as_of = skyline_memories
+        .iter()
+        .map(|memory| memory.created_at)
+        .max()
+        .expect("non-empty skyline memories");
+    Ok(Some(compute_knowledge_skyline(&KnowledgeSkylineInput {
+        graph: skyline_graph,
+        memories: skyline_memories,
+        ppr_scores,
+        as_of,
+    })))
 }
 
 fn load_proximity_hotspot_reports(
@@ -749,6 +887,155 @@ fn proximity_hotspot_reports_from_links(
         }
     }
     Ok(reports)
+}
+
+fn bridge_inputs_from_links(
+    links: &[StoredMemoryLink],
+) -> Result<Vec<BridgeInsightInput>, DomainError> {
+    let graph = proximity_graph_from_links(links)?;
+    if graph.node_count() < 3 {
+        return Ok(Vec::new());
+    }
+
+    let articulation = articulation_points(&graph);
+    let bridge_edges = fnx_bridges(&graph).edges;
+    let component_count_before = number_connected_components(&graph).count;
+    let mut inputs = articulation
+        .nodes
+        .into_iter()
+        .map(|memory_id| {
+            let degree = graph
+                .neighbors(&memory_id)
+                .map_or(0, |neighbors| neighbors.len());
+            let bridge_edge_count = bridge_edges
+                .iter()
+                .filter(|(left, right)| left == &memory_id || right == &memory_id)
+                .count();
+            let mut graph_without_memory = graph.clone();
+            graph_without_memory.remove_node(&memory_id);
+            let component_count_after = if graph_without_memory.node_count() == 0 {
+                0
+            } else {
+                number_connected_components(&graph_without_memory).count
+            };
+            let cluster_disconnection_magnitude =
+                component_count_after.saturating_sub(component_count_before);
+            BridgeInsightInput {
+                memory_id,
+                degree,
+                bridge_edge_count,
+                cluster_disconnection_magnitude,
+                component_count_before,
+                component_count_after,
+                snapshot_version: 0,
+            }
+        })
+        .collect::<Vec<_>>();
+    inputs.sort_by(|left, right| {
+        right
+            .cluster_disconnection_magnitude
+            .cmp(&left.cluster_disconnection_magnitude)
+            .then_with(|| right.bridge_edge_count.cmp(&left.bridge_edge_count))
+            .then_with(|| right.degree.cmp(&left.degree))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    Ok(inputs)
+}
+
+fn contradiction_cluster_relation(relation: &str) -> bool {
+    matches!(relation, "contradicts" | "resolves" | "supersedes")
+}
+
+fn contradiction_clusters_from_links(
+    links: &[StoredMemoryLink],
+) -> Result<Vec<crate::graph::health::ContradictionCluster>, DomainError> {
+    let contradiction_links = links
+        .iter()
+        .filter(|link| contradiction_cluster_relation(&link.relation))
+        .cloned()
+        .collect::<Vec<_>>();
+    if contradiction_links.is_empty() {
+        return Ok(Vec::new());
+    }
+    let graph = proximity_graph_from_links(&contradiction_links)?;
+    Ok(crate::graph::health::detect_contradiction_clusters(&graph))
+}
+
+fn pagerank_scores_for_skyline(
+    links: &[StoredMemoryLink],
+) -> Result<std::collections::BTreeMap<String, f64>, DomainError> {
+    if links.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    let mut graph = crate::graph::DiGraph::new(CompatibilityMode::Strict);
+    let mut inserted_edges = std::collections::BTreeSet::<(String, String)>::new();
+    for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
+        graph.add_node(link.src_memory_id.clone());
+        graph.add_node(link.dst_memory_id.clone());
+        add_skyline_pagerank_edge(
+            &mut graph,
+            &mut inserted_edges,
+            &link.src_memory_id,
+            &link.dst_memory_id,
+        )?;
+        if !link.directed {
+            add_skyline_pagerank_edge(
+                &mut graph,
+                &mut inserted_edges,
+                &link.dst_memory_id,
+                &link.src_memory_id,
+            )?;
+        }
+    }
+    if graph.node_count() == 0 {
+        return Ok(std::collections::BTreeMap::new());
+    }
+
+    let node_count = graph.node_count();
+    let edge_count = graph.edge_count();
+    let projection = crate::graph::MemoryGraphProjection {
+        graph,
+        node_count,
+        edge_count,
+        build_ms: 0.0,
+        snapshot_version: 0,
+    };
+    crate::graph::compute_pagerank(&projection)
+        .map(|report| {
+            report
+                .scores
+                .into_iter()
+                .map(|score| (score.node, score.score))
+                .collect()
+        })
+        .map_err(|error| DomainError::Graph {
+            message: format!("Failed to compute knowledge-skyline PageRank scores: {error}"),
+            repair: Some(
+                "Run `ee graph snapshot refresh --graph memory_links --workspace . --json`."
+                    .to_owned(),
+            ),
+        })
+}
+
+fn add_skyline_pagerank_edge(
+    graph: &mut crate::graph::DiGraph,
+    inserted_edges: &mut std::collections::BTreeSet<(String, String)>,
+    source: &str,
+    target: &str,
+) -> Result<(), DomainError> {
+    if !inserted_edges.insert((source.to_owned(), target.to_owned())) {
+        return Ok(());
+    }
+    graph
+        .add_edge(source, target)
+        .map_err(|error| DomainError::Graph {
+            message: format!("Failed to build knowledge-skyline PageRank graph: {error}"),
+            repair: Some("Validate memory link rows with `ee doctor --json`.".to_owned()),
+        })
 }
 
 fn causal_bottleneck_reports_from_scores(scores: &[CentralityScore]) -> Vec<CausalBottleneckInput> {
@@ -1052,13 +1339,42 @@ fn authorities_section_from_scores(scores: &HitsScores) -> InsightsSection {
 }
 
 fn bridges_section() -> InsightsSection {
-    placeholder_section(
-        "bridges",
-        "Bridge Memories",
-        "Top articulation-point memories ranked by cluster-disconnection-magnitude.",
-        "Bridge memories deserve careful decay and review because removing them can disconnect useful context.",
-        vec!["ee insights --section bridges --workspace . --json"],
-    )
+    bridges_section_from_inputs(&[])
+}
+
+fn bridges_section_from_inputs(inputs: &[BridgeInsightInput]) -> InsightsSection {
+    let items = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            serde_json::json!({
+                "rank": index + 1,
+                "memoryId": &input.memory_id,
+                "articulationPoint": true,
+                "clusterDisconnectionMagnitude": input.cluster_disconnection_magnitude,
+                "componentCountBefore": input.component_count_before,
+                "componentCountAfter": input.component_count_after,
+                "bridgeEdgeCount": input.bridge_edge_count,
+                "degree": input.degree,
+                "interpretation": "articulation_point",
+                "evidence": {
+                    "schema": BRIDGE_INSIGHT_SCHEMA_V1,
+                    "algorithm": "tarjan_articulation_points",
+                    "bridgeAlgorithm": "tarjan_bridges",
+                    "snapshotVersion": input.snapshot_version,
+                },
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "bridges",
+        title: "Bridge Memories",
+        summary: "Top articulation-point memories ranked by cluster-disconnection magnitude.",
+        why_it_matters: "Bridge memories deserve careful decay and review because removing them can disconnect useful context.",
+        items,
+        next_commands: vec!["ee insights --section bridges --workspace . --json"],
+    }
 }
 
 fn causal_bottlenecks_section() -> InsightsSection {
@@ -1117,13 +1433,25 @@ fn comprehensive_rules_section() -> InsightsSection {
 }
 
 fn contradiction_clusters_section() -> InsightsSection {
-    placeholder_section(
-        "contradictionClusters",
-        "Contradiction Clusters",
-        "Louvain communities filtered to contradiction-heavy memory neighborhoods.",
-        "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them.",
-        vec!["ee insights --section contradictionClusters --workspace . --json"],
-    )
+    contradiction_clusters_section_from_clusters(&[])
+}
+
+fn contradiction_clusters_section_from_clusters(
+    clusters: &[crate::graph::health::ContradictionCluster],
+) -> InsightsSection {
+    let items = clusters
+        .iter()
+        .filter_map(|cluster| serde_json::to_value(cluster).ok())
+        .collect();
+
+    InsightsSection {
+        name: "contradictionClusters",
+        title: "Contradiction Clusters",
+        summary: "Louvain communities filtered to contradiction-heavy memory neighborhoods.",
+        why_it_matters: "Contradiction clusters identify parts of the memory graph that need curation before agents rely on them.",
+        items,
+        next_commands: vec!["ee insights --section contradictionClusters --workspace . --json"],
+    }
 }
 
 fn hubs_section() -> InsightsSection {
@@ -1210,13 +1538,35 @@ fn k_truss_section() -> InsightsSection {
 }
 
 fn knowledge_skyline_section() -> InsightsSection {
-    placeholder_section(
-        "knowledgeSkyline",
-        "Knowledge Skyline",
-        "Composite posture across onion layer, community, age, trust, and graph health signals.",
-        "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.",
-        vec!["ee insights --section knowledgeSkyline --workspace . --json"],
-    )
+    knowledge_skyline_section_from_report(None)
+}
+
+fn knowledge_skyline_section_from_report(report: Option<&KnowledgeSkyline>) -> InsightsSection {
+    let items = report
+        .filter(|skyline| skyline.node_count > 0)
+        .map(|skyline| {
+            serde_json::json!({
+                "rank": 1,
+                "interpretation": "portfolio_posture",
+                "evidence": {
+                    "schema": KNOWLEDGE_SKYLINE_SCHEMA_V1,
+                    "algorithm": "onion_layers_louvain_k_truss",
+                    "snapshotVersion": 0,
+                },
+                "skyline": skyline,
+            })
+        })
+        .into_iter()
+        .collect();
+
+    InsightsSection {
+        name: "knowledgeSkyline",
+        title: "Knowledge Skyline",
+        summary: "Composite posture across onion layer, community, age, trust, and graph health signals.",
+        why_it_matters: "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.",
+        items,
+        next_commands: vec!["ee insights --section knowledgeSkyline --workspace . --json"],
+    }
 }
 
 fn load_bearing_memories_section() -> InsightsSection {
@@ -1328,7 +1678,12 @@ fn placeholder_section(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{CreateMemoryInput, CreateProceduralRuleInput, CreateWorkspaceInput};
+    use crate::db::{
+        CreateGraphSnapshotInput, CreateMemoryInput, CreateMemoryLinkInput,
+        CreateProceduralRuleInput, CreateWorkspaceInput, GraphSnapshotStatus, GraphSnapshotType,
+        MemoryLinkRelation, MemoryLinkSource,
+    };
+    use chrono::TimeZone;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1454,6 +1809,166 @@ mod tests {
 
         connection.close().map_err(|error| error.to_string())?;
         Ok("mem_loadbearinganchor000000001".to_owned())
+    }
+
+    fn seed_insights_graph_workspace(workspace: &std::path::Path) -> Result<(), String> {
+        let database_path = workspace.join(".ee").join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let workspace_id = "wsp_insightsgraph000000000000";
+        connection
+            .insert_workspace(
+                workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace.to_string_lossy().into_owned(),
+                    name: Some("real insights graph".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_graph_snapshot(
+                "snap_insightsstale000000000001",
+                &CreateGraphSnapshotInput {
+                    workspace_id: workspace_id.to_owned(),
+                    snapshot_version: 7,
+                    schema_version: "ee.graph.snapshot.v1".to_owned(),
+                    graph_type: GraphSnapshotType::MemoryLinks,
+                    node_count: 0,
+                    edge_count: 0,
+                    metrics_json: r#"{"nodes":[],"edges":[]}"#.to_owned(),
+                    content_hash: "blake3:stale-insights-snapshot".to_owned(),
+                    source_generation: 0,
+                    expires_at: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .update_graph_snapshot_status(
+                "snap_insightsstale000000000001",
+                GraphSnapshotStatus::Stale,
+            )
+            .map_err(|error| error.to_string())?;
+
+        for (id, trust_class, content) in [
+            (
+                "mem_insightsbridgea0000000001",
+                "human_explicit",
+                "Bridge endpoint A.",
+            ),
+            (
+                "mem_insightsbridgeb0000000001",
+                "agent_validated",
+                "Bridge articulation B.",
+            ),
+            (
+                "mem_insightsbridgec0000000001",
+                "agent_validated",
+                "Bridge articulation C.",
+            ),
+            (
+                "mem_insightsbridged0000000001",
+                "human_explicit",
+                "Bridge endpoint D.",
+            ),
+            (
+                "mem_insightscontraa0000000001",
+                "human_explicit",
+                "Contradiction exemplar A.",
+            ),
+            (
+                "mem_insightscontrab0000000001",
+                "agent_validated",
+                "Contradiction exemplar B.",
+            ),
+            (
+                "mem_insightscontrac0000000001",
+                "agent_validated",
+                "Contradiction exemplar C.",
+            ),
+        ] {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.to_owned(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.9,
+                        utility: 0.8,
+                        importance: 0.7,
+                        provenance_uri: None,
+                        trust_class: trust_class.to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: Some("2026-05-20T00:00:00Z".to_owned()),
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        for (id, source, target, relation) in [
+            (
+                "link_insightsbridge0000000001",
+                "mem_insightsbridgea0000000001",
+                "mem_insightsbridgeb0000000001",
+                MemoryLinkRelation::Supports,
+            ),
+            (
+                "link_insightsbridge0000000002",
+                "mem_insightsbridgeb0000000001",
+                "mem_insightsbridgec0000000001",
+                MemoryLinkRelation::Supports,
+            ),
+            (
+                "link_insightsbridge0000000003",
+                "mem_insightsbridgec0000000001",
+                "mem_insightsbridged0000000001",
+                MemoryLinkRelation::Supports,
+            ),
+            (
+                "link_insightscontra0000000001",
+                "mem_insightscontraa0000000001",
+                "mem_insightscontrab0000000001",
+                MemoryLinkRelation::Contradicts,
+            ),
+            (
+                "link_insightscontra0000000002",
+                "mem_insightscontrab0000000001",
+                "mem_insightscontrac0000000001",
+                MemoryLinkRelation::Supersedes,
+            ),
+            (
+                "link_insightscontra0000000003",
+                "mem_insightscontraa0000000001",
+                "mem_insightscontrac0000000001",
+                MemoryLinkRelation::Contradicts,
+            ),
+        ] {
+            connection
+                .insert_memory_link(
+                    id,
+                    &CreateMemoryLinkInput {
+                        src_memory_id: source.to_owned(),
+                        dst_memory_id: target.to_owned(),
+                        relation,
+                        weight: 1.0,
+                        confidence: 1.0,
+                        directed: false,
+                        evidence_count: 1,
+                        last_reinforced_at: None,
+                        source: MemoryLinkSource::Agent,
+                        created_by: Some("insights-db-test".to_owned()),
+                        metadata_json: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        connection.close().map_err(|error| error.to_string())
     }
 
     #[test]
@@ -1836,6 +2351,249 @@ mod tests {
     }
 
     #[test]
+    fn real_insight_sections_read_live_db_when_memory_link_snapshot_is_stale() -> TestResult {
+        let workspace = unique_insights_workspace("real-insights")?;
+        write_graph_feature_config(&workspace, true)?;
+        seed_insights_graph_workspace(&workspace)?;
+
+        for section_name in ["bridges", "contradictionClusters", "knowledgeSkyline"] {
+            let report = build_insights_report_with_options(
+                &InsightsArgs {
+                    section: Some(section_name.to_owned()),
+                    explain: None,
+                    limit: DEFAULT_SECTION_LIMIT,
+                    offset: 0,
+                    json_stream: false,
+                },
+                InsightsBuildOptions {
+                    workspace: Some(&workspace),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+            assert_eq!(report.mode, InsightsMode::Section);
+            assert_eq!(report.selected_section.as_deref(), Some(section_name));
+            assert!(
+                report.degraded_signals.is_empty(),
+                "{section_name} should use live DB rows without stale-snapshot degradation"
+            );
+            let item = report
+                .sections
+                .first()
+                .and_then(|section| section.items.first())
+                .ok_or_else(|| format!("{section_name} should emit live graph evidence"))?;
+            match section_name {
+                "bridges" => {
+                    assert_eq!(item["articulationPoint"], true);
+                    assert!(
+                        item["clusterDisconnectionMagnitude"].as_u64().unwrap_or(0) > 0,
+                        "bridge evidence should be ranked by disconnection magnitude"
+                    );
+                }
+                "contradictionClusters" => {
+                    assert_eq!(item["size"].as_u64(), Some(3));
+                    assert_eq!(item["internalContradictions"].as_u64(), Some(3));
+                    assert!(
+                        item["exemplarMemoryIds"]
+                            .as_array()
+                            .is_some_and(|ids| ids.len() == 3),
+                        "contradiction cluster should carry source memory ids"
+                    );
+                }
+                "knowledgeSkyline" => {
+                    assert_eq!(item["skyline"]["nodeCount"].as_u64(), Some(7));
+                    assert!(
+                        item["skyline"]["communities"]
+                            .as_array()
+                            .is_some_and(|communities| !communities.is_empty()),
+                        "knowledge skyline should carry community provenance"
+                    );
+                }
+                unexpected => return Err(format!("unexpected insights section {unexpected}")),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn selected_real_insight_sections_do_not_emit_placeholder_degradation() -> TestResult {
+        for section in ["bridges", "contradictionClusters", "knowledgeSkyline"] {
+            let report = build_insights_report(&InsightsArgs {
+                section: Some(section.to_owned()),
+                explain: None,
+                limit: DEFAULT_SECTION_LIMIT,
+                offset: 0,
+                json_stream: false,
+            })
+            .map_err(|error| error.to_string())?;
+
+            assert_eq!(report.selected_section.as_deref(), Some(section));
+            assert!(
+                report
+                    .degraded_signals
+                    .iter()
+                    .all(|signal| signal.code != INSIGHTS_SECTION_UNAVAILABLE_CODE),
+                "{section} should no longer be placeholder-backed"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn bridge_section_uses_articulation_points_and_deterministic_ranking() -> TestResult {
+        let links = vec![
+            stored_memory_link_with_relation("link_bridge_1", "mem_a", "mem_b", "supports", None),
+            stored_memory_link_with_relation("link_bridge_2", "mem_b", "mem_c", "supports", None),
+            stored_memory_link_with_relation("link_bridge_3", "mem_c", "mem_d", "supports", None),
+        ];
+
+        let inputs = bridge_inputs_from_links(&links)
+            .map_err(|error| format!("bridge input build failed: {error}"))?;
+        let section = bridges_section_from_inputs(&inputs);
+
+        assert_eq!(section.name, "bridges");
+        assert_eq!(section.items.len(), 2);
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["memoryId"], "mem_b");
+        assert_eq!(section.items[0]["articulationPoint"], true);
+        assert_eq!(section.items[0]["clusterDisconnectionMagnitude"], 1);
+        assert_eq!(section.items[0]["componentCountBefore"], 1);
+        assert_eq!(section.items[0]["componentCountAfter"], 2);
+        assert_eq!(section.items[0]["bridgeEdgeCount"], 2);
+        assert_eq!(section.items[0]["degree"], 2);
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            BRIDGE_INSIGHT_SCHEMA_V1
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["algorithm"],
+            "tarjan_articulation_points"
+        );
+        assert_eq!(
+            section.items[0]["evidence"]["bridgeAlgorithm"],
+            "tarjan_bridges"
+        );
+        assert_eq!(section.items[1]["memoryId"], "mem_c");
+
+        Ok(())
+    }
+
+    #[test]
+    fn contradiction_clusters_section_uses_real_contradiction_graph() -> TestResult {
+        let links = vec![
+            stored_memory_link_with_relation(
+                "link_contradiction_1",
+                "mem_a",
+                "mem_b",
+                "contradicts",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_contradiction_2",
+                "mem_b",
+                "mem_c",
+                "supersedes",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_contradiction_3",
+                "mem_a",
+                "mem_c",
+                "resolves",
+                None,
+            ),
+        ];
+
+        let clusters = contradiction_clusters_from_links(&links)
+            .map_err(|error| format!("contradiction cluster build failed: {error}"))?;
+        let section = contradiction_clusters_section_from_clusters(&clusters);
+
+        assert_eq!(section.name, "contradictionClusters");
+        assert_eq!(section.items.len(), 1);
+        assert_eq!(section.items[0]["size"], 3);
+        assert_eq!(section.items[0]["internalContradictions"], 3);
+        assert_eq!(section.items[0]["density"], 1.0);
+        assert_eq!(section.items[0]["severity"], "incoherent");
+        assert_eq!(section.items[0]["suggestedAction"], "curate_urgent");
+
+        Ok(())
+    }
+
+    #[test]
+    fn knowledge_skyline_section_serializes_existing_skyline_report() -> TestResult {
+        let mut graph = Graph::new(CompatibilityMode::Strict);
+        graph
+            .add_edge("mem_a", "mem_b")
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge("mem_b", "mem_c")
+            .map_err(|error| error.to_string())?;
+        graph
+            .add_edge("mem_a", "mem_c")
+            .map_err(|error| error.to_string())?;
+        let skyline = compute_knowledge_skyline(&KnowledgeSkylineInput {
+            graph,
+            memories: vec![
+                skyline_memory("mem_a", "human_explicit", 1),
+                skyline_memory("mem_b", "agent_validated", 2),
+                skyline_memory("mem_c", "agent_validated", 3),
+            ],
+            ppr_scores: std::collections::BTreeMap::new(),
+            as_of: Utc
+                .with_ymd_and_hms(2026, 5, 4, 0, 0, 0)
+                .single()
+                .ok_or_else(|| "valid skyline as-of timestamp".to_owned())?,
+        });
+
+        let section = knowledge_skyline_section_from_report(Some(&skyline));
+
+        assert_eq!(section.name, "knowledgeSkyline");
+        assert_eq!(section.items.len(), 1);
+        assert_eq!(section.items[0]["rank"], 1);
+        assert_eq!(section.items[0]["interpretation"], "portfolio_posture");
+        assert_eq!(
+            section.items[0]["evidence"]["schema"],
+            KNOWLEDGE_SKYLINE_SCHEMA_V1
+        );
+        assert_eq!(
+            section.items[0]["skyline"]["schema"],
+            KNOWLEDGE_SKYLINE_SCHEMA_V1
+        );
+        assert_eq!(section.items[0]["skyline"]["nodeCount"], 3);
+        assert!(
+            section.items[0]["skyline"]["communities"]
+                .as_array()
+                .is_some_and(|communities| !communities.is_empty())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn knowledge_skyline_pagerank_respects_mesh_visibility() -> TestResult {
+        let links = vec![
+            stored_memory_link("visible", "mem_a", "mem_b", None),
+            stored_memory_link(
+                "denied",
+                "mem_b",
+                "mem_private",
+                Some(denied_mesh_link_metadata()),
+            ),
+        ];
+
+        let scores = pagerank_scores_for_skyline(&links)
+            .map_err(|error| format!("skyline pagerank build failed: {error}"))?;
+
+        assert!(scores.contains_key("mem_a"));
+        assert!(scores.contains_key("mem_b"));
+        assert!(!scores.contains_key("mem_private"));
+
+        Ok(())
+    }
+
+    #[test]
     fn insights_degraded_signals_aggregate_same_code_sources() {
         let aggregated = aggregate_insights_degraded(vec![
             (
@@ -2155,11 +2913,21 @@ mod tests {
         target: &str,
         metadata_json: Option<String>,
     ) -> StoredMemoryLink {
+        stored_memory_link_with_relation(id, source, target, "related", metadata_json)
+    }
+
+    fn stored_memory_link_with_relation(
+        id: &str,
+        source: &str,
+        target: &str,
+        relation: &str,
+        metadata_json: Option<String>,
+    ) -> StoredMemoryLink {
         StoredMemoryLink {
             id: id.to_owned(),
             src_memory_id: source.to_owned(),
             dst_memory_id: target.to_owned(),
-            relation: "related".to_owned(),
+            relation: relation.to_owned(),
             weight: 1.0,
             confidence: 1.0,
             directed: false,
@@ -2169,6 +2937,17 @@ mod tests {
             created_at: "2026-05-16T00:00:00Z".to_owned(),
             created_by: Some("insights-mesh-test".to_owned()),
             metadata_json,
+        }
+    }
+
+    fn skyline_memory(memory_id: &str, trust_class: &str, day: u32) -> KnowledgeSkylineMemory {
+        KnowledgeSkylineMemory {
+            memory_id: memory_id.to_owned(),
+            trust_class: trust_class.to_owned(),
+            created_at: Utc
+                .with_ymd_and_hms(2026, 5, day, 0, 0, 0)
+                .single()
+                .expect("valid skyline memory timestamp"),
         }
     }
 

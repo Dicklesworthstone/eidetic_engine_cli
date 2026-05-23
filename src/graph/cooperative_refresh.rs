@@ -400,6 +400,7 @@ fn emit_cooperative_centrality_trace(
     degraded_codes: &str,
 ) {
     let max_subtask_elapsed_ms = pagerank_ms.max(betweenness_ms).max(hits_ms);
+    let max_subtask_elapsed_ms_rounded = trace_millis_to_u64(max_subtask_elapsed_ms);
     tracing::info!(
         target: "ee::graph",
         workspace_id = "",
@@ -407,15 +408,30 @@ fn emit_cooperative_centrality_trace(
         bead_id = "bd-dre9v",
         surface = "cooperative_centrality",
         phase = "response",
-        elapsed_ms = max_subtask_elapsed_ms.round() as u64,
+        elapsed_ms = max_subtask_elapsed_ms_rounded,
         degraded_codes = degraded_codes,
         algorithm_count = COOPERATIVE_ALGORITHM_COUNT,
-        max_subtask_elapsed_ms = max_subtask_elapsed_ms.round() as u64,
+        max_subtask_elapsed_ms = max_subtask_elapsed_ms_rounded,
         supervisor_overhead_ms = 0_u64,
         partial_results_count = if failure_count == 0 { 0 } else { success_count },
         cancelled_algorithms = failure_count,
         "cooperative centrality refresh completed"
     );
+}
+
+fn trace_millis_to_u64(value: f64) -> u64 {
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    if !value.is_finite() {
+        return u64::MAX;
+    }
+    let rounded = value.round();
+    if rounded >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        rounded as u64
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +475,17 @@ mod tests {
             ],
             0,
         ))
+    }
+
+    #[test]
+    fn trace_millis_to_u64_clamps_edge_values() {
+        assert_eq!(trace_millis_to_u64(f64::NAN), 0);
+        assert_eq!(trace_millis_to_u64(f64::NEG_INFINITY), 0);
+        assert_eq!(trace_millis_to_u64(f64::INFINITY), u64::MAX);
+        assert_eq!(trace_millis_to_u64(-1.0), 0);
+        assert_eq!(trace_millis_to_u64(1.4), 1);
+        assert_eq!(trace_millis_to_u64(1.6), 2);
+        assert_eq!(trace_millis_to_u64((u64::MAX as f64) * 2.0), u64::MAX);
     }
 
     #[test]
