@@ -1703,13 +1703,21 @@ impl WhyResultDocumentSource {
         }
     }
 
+    // bd-38fob (slice of bd-11pjb): repair strings emitted from
+    // `why_result_target_unsupported_source` are surfaced to agents that have
+    // no way to substitute the underlying memory/artifact/candidate id without
+    // an extra lookup. Drop the `<...>` metavariable templates in favor of
+    // each command's `--help` form so `classify_repair_command` reports
+    // `RepairCommandKind::Actionable` and an agent can run the hint verbatim
+    // to discover required arguments. `Self::Session` already shipped without
+    // a metavariable and stays unchanged.
     const fn repair(self) -> &'static str {
         match self {
-            Self::Memory => "ee why <memory-id> --json",
+            Self::Memory => "ee why --help",
             Self::Session => "ee import sessions --json",
-            Self::Artifact => "ee artifact show <artifact-id> --json",
-            Self::CurationCandidate => "ee curate show <candidate-id> --json",
-            Self::Unknown => "ee search <query> --json",
+            Self::Artifact => "ee artifact show --help",
+            Self::CurationCandidate => "ee curate show --help",
+            Self::Unknown => "ee search --help",
         }
     }
 }
@@ -3268,6 +3276,28 @@ mod tests {
             "mem_00000000000000000000000001",
             "result target",
         )
+    }
+
+    #[test]
+    fn result_source_repair_strings_are_actionable_after_bd_11pjb() -> TestResult {
+        // bd-38fob (slice of bd-11pjb): every variant's repair hint must be
+        // runnable verbatim. Pin the actionable classification so future
+        // edits do not silently reintroduce <metavar> templates.
+        for source in [
+            WhyResultDocumentSource::Memory,
+            WhyResultDocumentSource::Session,
+            WhyResultDocumentSource::Artifact,
+            WhyResultDocumentSource::CurationCandidate,
+            WhyResultDocumentSource::Unknown,
+        ] {
+            let repair = source.repair();
+            ensure(
+                crate::core::degraded_honesty::classify_repair_command(repair),
+                crate::core::degraded_honesty::RepairCommandKind::Actionable,
+                &format!("repair for {source:?} should be Actionable"),
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
