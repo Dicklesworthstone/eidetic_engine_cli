@@ -5205,6 +5205,104 @@ CREATE INDEX idx_curation_candidates_v060_ttl_policy
     "blake3:v060_anti_pattern_curation_candidates_2026_05_21",
 );
 
+/// V061: Durable storage for externally produced RCH verifier evidence (bd-22p8c).
+///
+/// ee does not run builds locally; it ingests `ee.rch.verify.v1` (or later
+/// compatible) proofs produced by remote verifier workers and records one row
+/// per run for later attribution, retry guidance, and downstream beads
+/// (bd-1rcy2 fixtures, bd-17awb ingest CLI, bd-1lmzr ledger UX).
+///
+/// Storage shape (per bead acceptance):
+/// * row identity: 33-char `rchverify_*` id, workspace-scoped.
+/// * source identity: BLAKE3 `command_hash` + BLAKE3 `source_state_hash`, with
+///   optional `dirty_status_hash` for unstaged-tree fingerprinting.
+/// * verification outcome: `status` mirrors `models::verification::VerificationStatus`
+///   (passed/failed/blocked/interrupted/fallback_detected/unknown), plus
+///   `exit_code`, JSON-validated `degraded_codes_json`, and bounded tail
+///   storage (length <= 8 KiB) or BLAKE3 tail hash only.
+/// * attribution: `verification_attribution`, `worker_id`, `remote_required`.
+/// * retry guidance: `known_blocker_fingerprint`, `remediation_bead`, `retry_after`.
+///
+/// Deterministic dedup: a unique index over
+/// `(command_hash, source_state_hash, COALESCE(blocker_fingerprint,''), status)`
+/// prevents duplicate rows while collapsing NULL fingerprints into the same
+/// equivalence class as the empty string.
+///
+/// Privacy invariants enforced by CHECK constraints rather than at the ingest
+/// boundary: tails are bounded (<= 8192 bytes) and `degraded_codes_json` must
+/// be `json_valid`. The bead's "no raw secrets / no unbounded output / no full
+/// dirty file listings" constraint is upheld by callers staging tail hashes
+/// instead of full payloads; the schema only refuses the unbounded shape.
+pub const V061_RCH_VERIFY_LEDGER: Migration = Migration::new(
+    61,
+    "rch_verify_ledger",
+    r#"
+CREATE TABLE rch_verify_runs (
+    id TEXT PRIMARY KEY CHECK (id GLOB 'rchverify_*' AND length(id) = 33),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    schema_id TEXT NOT NULL CHECK (length(trim(schema_id)) > 0),
+    command_text TEXT CHECK (
+        command_text IS NULL
+        OR (length(trim(command_text)) > 0 AND length(command_text) <= 4096)
+    ),
+    command_hash TEXT NOT NULL CHECK (length(command_hash) = 64),
+    command_kind TEXT NOT NULL CHECK (length(trim(command_kind)) > 0),
+    bead_id TEXT CHECK (bead_id IS NULL OR length(trim(bead_id)) > 0),
+    git_head TEXT CHECK (
+        git_head IS NULL
+        OR (length(git_head) BETWEEN 7 AND 64 AND git_head GLOB '*[0-9a-f]*')
+    ),
+    git_tree TEXT CHECK (
+        git_tree IS NULL
+        OR (length(git_tree) BETWEEN 7 AND 64 AND git_tree GLOB '*[0-9a-f]*')
+    ),
+    source_state_hash TEXT NOT NULL CHECK (length(source_state_hash) = 64),
+    dirty_status_hash TEXT CHECK (dirty_status_hash IS NULL OR length(dirty_status_hash) = 64),
+    verification_attribution TEXT NOT NULL CHECK (length(trim(verification_attribution)) > 0),
+    remote_required INTEGER NOT NULL DEFAULT 0 CHECK (remote_required IN (0, 1)),
+    worker_id TEXT CHECK (worker_id IS NULL OR length(trim(worker_id)) > 0),
+    status TEXT NOT NULL CHECK (status IN (
+        'passed', 'failed', 'blocked', 'interrupted', 'fallback_detected', 'unknown'
+    )),
+    exit_code INTEGER,
+    degraded_codes_json TEXT CHECK (
+        degraded_codes_json IS NULL
+        OR (json_valid(degraded_codes_json) AND length(degraded_codes_json) <= 4096)
+    ),
+    stdout_tail_hash TEXT CHECK (stdout_tail_hash IS NULL OR length(stdout_tail_hash) = 64),
+    stderr_tail_hash TEXT CHECK (stderr_tail_hash IS NULL OR length(stderr_tail_hash) = 64),
+    stdout_tail TEXT CHECK (stdout_tail IS NULL OR length(stdout_tail) <= 8192),
+    stderr_tail TEXT CHECK (stderr_tail IS NULL OR length(stderr_tail) <= 8192),
+    blocker_fingerprint TEXT CHECK (blocker_fingerprint IS NULL OR length(trim(blocker_fingerprint)) > 0),
+    remediation_bead TEXT CHECK (remediation_bead IS NULL OR length(trim(remediation_bead)) > 0),
+    retry_after TEXT CHECK (retry_after IS NULL OR length(trim(retry_after)) > 0),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0)
+);
+
+CREATE UNIQUE INDEX idx_rch_verify_runs_v061_dedup
+    ON rch_verify_runs(
+        command_hash,
+        source_state_hash,
+        COALESCE(blocker_fingerprint, ''),
+        status
+    );
+CREATE INDEX idx_rch_verify_runs_v061_workspace ON rch_verify_runs(workspace_id);
+CREATE INDEX idx_rch_verify_runs_v061_bead
+    ON rch_verify_runs(bead_id)
+    WHERE bead_id IS NOT NULL;
+CREATE INDEX idx_rch_verify_runs_v061_status ON rch_verify_runs(status);
+CREATE INDEX idx_rch_verify_runs_v061_created ON rch_verify_runs(created_at);
+CREATE INDEX idx_rch_verify_runs_v061_command_hash ON rch_verify_runs(command_hash);
+CREATE INDEX idx_rch_verify_runs_v061_blocker
+    ON rch_verify_runs(blocker_fingerprint, remediation_bead)
+    WHERE blocker_fingerprint IS NOT NULL;
+CREATE INDEX idx_rch_verify_runs_v061_retry_after
+    ON rch_verify_runs(retry_after)
+    WHERE retry_after IS NOT NULL;
+"#,
+    "blake3:v061_rch_verify_ledger_2026_05_23",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5267,6 +5365,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V058_PREFLIGHT_BYPASS_TOKEN_SCOPE,
     V059_RULE_VALIDATION_COUNTERS,
     V060_ANTI_PATTERN_CURATION_CANDIDATES,
+    V061_RCH_VERIFY_LEDGER,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -29012,5 +29111,373 @@ mod tests {
         )?;
 
         conn.close().map_err(TestFailure::from)
+    }
+
+    fn insert_rch_verify_row(
+        connection: &DbConnection,
+        id: &str,
+        command_hash: &str,
+        source_state_hash: &str,
+        status: &str,
+        blocker_fingerprint: Option<&str>,
+        remediation_bead: Option<&str>,
+        retry_after: Option<&str>,
+        worker_id: Option<&str>,
+        remote_required: bool,
+        degraded_codes_json: Option<&str>,
+        stdout_tail: Option<&str>,
+    ) -> TestResult {
+        let blocker = blocker_fingerprint
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        let remediation = remediation_bead
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        let retry = retry_after
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        let worker = worker_id
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        let degraded = degraded_codes_json
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        let stdout = stdout_tail
+            .map(|value| Value::Text(value.to_string()))
+            .unwrap_or(Value::Null);
+        connection.execute_for(
+            DbOperation::Execute,
+            "INSERT INTO rch_verify_runs (\
+                 id, workspace_id, schema_id, command_text, command_hash, command_kind, \
+                 bead_id, git_head, git_tree, source_state_hash, dirty_status_hash, \
+                 verification_attribution, remote_required, worker_id, status, exit_code, \
+                 degraded_codes_json, stdout_tail_hash, stderr_tail_hash, stdout_tail, \
+                 stderr_tail, blocker_fingerprint, remediation_bead, retry_after, created_at\
+             ) VALUES (\
+                 ?1, 'wsp_01234567890123456789012345', 'ee.rch.verify.v1', ?2, ?3, 'cargo_check', \
+                 'bd-22p8c', '0c117fe88d48dff84114ba6ca00c6aa39880f1fa', \
+                 'aa11bb22cc33dd44ee55ff66001122334455667788', \
+                 ?4, NULL, 'cc-cass', ?5, ?6, ?7, NULL, \
+                 ?8, NULL, NULL, ?9, NULL, ?10, ?11, ?12, '2026-05-23T04:50:00Z'\
+             )",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(format!("cargo check --target-dir /tmp ({command_hash})")),
+                Value::Text(command_hash.to_string()),
+                Value::Text(source_state_hash.to_string()),
+                Value::Integer(if remote_required { 1 } else { 0 }),
+                worker,
+                Value::Text(status.to_string()),
+                degraded,
+                stdout,
+                blocker,
+                remediation,
+                retry,
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn v061_rch_verify_ledger_table_exists_and_indexes_present() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let tables = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rch_verify_runs'",
+            &[],
+        )?;
+        ensure_equal(&tables.len(), &1_usize, "rch_verify_runs table must exist")?;
+
+        let indexes = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'rch_verify_runs' ORDER BY name",
+            &[],
+        )?;
+        let index_names: Vec<String> = indexes
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(str::to_owned))
+            .collect();
+
+        for expected in [
+            "idx_rch_verify_runs_v061_bead",
+            "idx_rch_verify_runs_v061_blocker",
+            "idx_rch_verify_runs_v061_command_hash",
+            "idx_rch_verify_runs_v061_created",
+            "idx_rch_verify_runs_v061_dedup",
+            "idx_rch_verify_runs_v061_retry_after",
+            "idx_rch_verify_runs_v061_status",
+            "idx_rch_verify_runs_v061_workspace",
+        ] {
+            ensure(
+                index_names.iter().any(|name| name == expected),
+                format!("index {expected} must exist; found {index_names:?}"),
+            )?;
+        }
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v061_rch_verify_ledger_stores_bead_acceptance_cases() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let hash_a = "1111111111111111111111111111111111111111111111111111111111111111";
+        let hash_b = "2222222222222222222222222222222222222222222222222222222222222222";
+        let state_a = "3333333333333333333333333333333333333333333333333333333333333333";
+        let state_b = "4444444444444444444444444444444444444444444444444444444444444444";
+
+        // Bead acceptance case 1: successful remote proof.
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_aaaaaaaaaaaaaaaaaaaaaaa",
+            hash_a,
+            state_a,
+            "passed",
+            None,
+            None,
+            None,
+            Some("worker-01"),
+            true,
+            Some(r#"[]"#),
+            None,
+        )?;
+
+        // Bead acceptance case 2: RCH-E327 topology blocker (cannot reach remote).
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_bbbbbbbbbbbbbbbbbbbbbbb",
+            hash_a,
+            state_a,
+            "blocked",
+            Some("rch_e327_path_topology"),
+            Some("bd-17c65.10.17.1.2"),
+            Some("2026-05-23T05:00:00Z"),
+            None,
+            true,
+            Some(r#"["RCH-E327"]"#),
+            None,
+        )?;
+
+        // Bead acceptance case 3: no-worker / capacity blocker.
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_ccccccccccccccccccccccc",
+            hash_b,
+            state_b,
+            "blocked",
+            Some("rch_no_capacity"),
+            Some("bd-22p8c"),
+            Some("2026-05-23T05:15:00Z"),
+            None,
+            true,
+            Some(r#"["RCH-NOCAP"]"#),
+            None,
+        )?;
+
+        // Bead acceptance case 4: local-fallback-refused (remote required but unavailable).
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_ddddddddddddddddddddddd",
+            hash_b,
+            state_b,
+            "fallback_detected",
+            Some("local_fallback_refused"),
+            None,
+            None,
+            None,
+            true,
+            Some(r#"["RCH-FALLBACK"]"#),
+            Some("local fallback refused per policy"),
+        )?;
+
+        let count_rows = connection.query("SELECT COUNT(*) FROM rch_verify_runs", &[])?;
+        let count = count_rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        ensure_equal(&count, &4_i64, "four acceptance cases stored")?;
+
+        // Dedup contract: re-inserting the same (command_hash, source_state_hash,
+        // blocker_fingerprint, status) tuple must fail UNIQUE even when
+        // blocker_fingerprint is NULL (collapses to '' via the index expression).
+        let duplicate_passed = insert_rch_verify_row(
+            &connection,
+            "rchverify_eeeeeeeeeeeeeeeeeeeeeee",
+            hash_a,
+            state_a,
+            "passed",
+            None,
+            None,
+            None,
+            Some("worker-02"),
+            true,
+            None,
+            None,
+        );
+        ensure(
+            duplicate_passed.is_err(),
+            "duplicate passed run (NULL blocker collapses to '') must violate UNIQUE",
+        )?;
+
+        let duplicate_blocked = insert_rch_verify_row(
+            &connection,
+            "rchverify_fffffffffffffffffffffff",
+            hash_a,
+            state_a,
+            "blocked",
+            Some("rch_e327_path_topology"),
+            Some("bd-17c65.10.17.1.2"),
+            Some("2026-05-23T05:30:00Z"),
+            None,
+            true,
+            None,
+            None,
+        );
+        ensure(
+            duplicate_blocked.is_err(),
+            "duplicate blocked run with same fingerprint must violate UNIQUE",
+        )?;
+
+        // Differentiating fingerprint must be allowed even with same command/source.
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_ggggggggggggggggggggggg",
+            hash_a,
+            state_a,
+            "blocked",
+            Some("rch_other_blocker"),
+            Some("bd-17c65.10.17.1.4"),
+            Some("2026-05-23T05:45:00Z"),
+            None,
+            true,
+            None,
+            None,
+        )?;
+
+        let final_count_rows = connection.query("SELECT COUNT(*) FROM rch_verify_runs", &[])?;
+        let final_count = final_count_rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
+        ensure_equal(&final_count, &5_i64, "differentiated fingerprint accepted")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v061_rch_verify_ledger_check_constraints_reject_unbounded_payloads() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let hash = "5555555555555555555555555555555555555555555555555555555555555555";
+        let state = "6666666666666666666666666666666666666666666666666666666666666666";
+
+        // 8193-byte stdout tail must be rejected by the length CHECK.
+        let oversized_tail = "x".repeat(8193);
+        let oversized = insert_rch_verify_row(
+            &connection,
+            "rchverify_hhhhhhhhhhhhhhhhhhhhhhh",
+            hash,
+            state,
+            "passed",
+            None,
+            None,
+            None,
+            Some("worker-03"),
+            true,
+            Some(r#"[]"#),
+            Some(&oversized_tail),
+        );
+        ensure(
+            oversized.is_err(),
+            "stdout_tail > 8192 bytes must be rejected by CHECK constraint",
+        )?;
+
+        // Invalid degraded_codes_json (not JSON) must be rejected by json_valid.
+        let invalid_json = insert_rch_verify_row(
+            &connection,
+            "rchverify_iiiiiiiiiiiiiiiiiiiiiii",
+            hash,
+            state,
+            "passed",
+            None,
+            None,
+            None,
+            Some("worker-04"),
+            true,
+            Some("not json {"),
+            None,
+        );
+        ensure(
+            invalid_json.is_err(),
+            "non-JSON degraded_codes_json must be rejected by json_valid CHECK",
+        )?;
+
+        // Invalid status value must be rejected.
+        let bad_status = insert_rch_verify_row(
+            &connection,
+            "rchverify_jjjjjjjjjjjjjjjjjjjjjjj",
+            hash,
+            state,
+            "succeeded",
+            None,
+            None,
+            None,
+            Some("worker-05"),
+            true,
+            None,
+            None,
+        );
+        ensure(
+            bad_status.is_err(),
+            "status outside the canonical set must be rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn v061_rch_verify_ledger_preserves_v060_curation_candidates() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        seed_memory(&connection, "mem_01234567890123456789012345")?;
+
+        connection.execute_raw(
+            "INSERT INTO curation_candidates (\
+                 id, workspace_id, candidate_type, target_memory_id, source_type, reason, \
+                 confidence, status, created_at, review_state\
+             ) VALUES (\
+                 'curate_v060compatibility0test01', 'wsp_01234567890123456789012345', \
+                 'anti_pattern_proposal', 'mem_01234567890123456789012345', 'rule_engine', \
+                 'v061 must not disturb v060 anti-pattern schema', 0.7, 'pending', \
+                 '2026-05-23T04:55:00Z', 'new'\
+             )",
+        )?;
+
+        let rows = connection.query(
+            "SELECT candidate_type FROM curation_candidates WHERE id = 'curate_v060compatibility0test01'",
+            &[],
+        )?;
+        ensure_equal(&rows.len(), &1_usize, "v060 row survives v061 application")?;
+        let candidate_type = rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+            .unwrap_or_default();
+        ensure_equal(
+            &candidate_type.as_str(),
+            &"anti_pattern_proposal",
+            "v060 anti_pattern_proposal candidate type preserved",
+        )
     }
 }
