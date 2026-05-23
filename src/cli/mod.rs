@@ -23572,7 +23572,7 @@ where
         &crate::db::CreateCurationCandidateInput {
             workspace_id: workspace_id.clone(),
             candidate_type: candidate_type.as_str().to_string(),
-            target_memory_id: args.target_memory_id.clone(),
+            target_memory_id: Some(args.target_memory_id.clone()),
             proposed_content: args.proposed_content.clone(),
             proposed_confidence: Some(args.confidence),
             proposed_trust_class: None,
@@ -26429,25 +26429,34 @@ where
     };
 
     match crate::graph::graph_neighborhood(&conn, &options) {
-        Ok(report) => match cli.renderer() {
-            output::Renderer::Human | output::Renderer::Markdown => {
-                write_stdout(stdout, &report.human_summary())
+        Ok(report) => {
+            // bd-1rrz5: `--format mermaid` short-circuits the standard
+            // renderer to emit a deterministic, paste-friendly diagram
+            // of the neighborhood. JSON remains the canonical machine
+            // contract via `--format json`.
+            if matches!(cli.format, OutputFormat::Mermaid) {
+                return write_stdout(stdout, &(graph_neighborhood_mermaid_output(&report) + "\n"));
             }
-            output::Renderer::Toon => {
-                write_stdout(stdout, &(graph_neighborhood_toon_output(&report) + "\n"))
+            match cli.renderer() {
+                output::Renderer::Human | output::Renderer::Markdown => {
+                    write_stdout(stdout, &report.human_summary())
+                }
+                output::Renderer::Toon => {
+                    write_stdout(stdout, &(graph_neighborhood_toon_output(&report) + "\n"))
+                }
+                output::Renderer::Json
+                | output::Renderer::Jsonl
+                | output::Renderer::Compact
+                | output::Renderer::Hook => {
+                    let json = serde_json::json!({
+                        "schema": crate::graph::GRAPH_NEIGHBORHOOD_SCHEMA_V1,
+                        "success": true,
+                        "data": report.data_json(),
+                    });
+                    write_stdout(stdout, &(json.to_string() + "\n"))
+                }
             }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let json = serde_json::json!({
-                    "schema": crate::graph::GRAPH_NEIGHBORHOOD_SCHEMA_V1,
-                    "success": true,
-                    "data": report.data_json(),
-                });
-                write_stdout(stdout, &(json.to_string() + "\n"))
-            }
-        },
+        }
         Err(error) => {
             let domain_error = DomainError::Graph {
                 message: error.to_string(),
@@ -26456,6 +26465,113 @@ where
             write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
         }
     }
+}
+
+/// Sanitize a string for use inside a quoted Mermaid label.
+///
+/// Mermaid `["..."]` labels permit most text but break on bare double
+/// quotes and newlines. Replace double quotes with `#quot;` (Mermaid's
+/// own HTML-entity escape) and collapse newlines/CRs to spaces so the
+/// output stays a single Mermaid statement.
+fn mermaid_escape_label(value: &str) -> String {
+    value.replace('"', "#quot;").replace(['\n', '\r'], " ")
+}
+
+/// Sanitize a Mermaid node identifier.
+///
+/// Memory IDs (`mem_xxxx`, etc.) are alphanumeric + underscore by
+/// construction, but defensively replace anything outside `[A-Za-z0-9_]`
+/// with `_` so unexpected legacy ids do not break the diagram.
+fn mermaid_sanitize_node_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn graph_neighborhood_mermaid_output(report: &crate::graph::GraphNeighborhoodReport) -> String {
+    let neighbor_count = report
+        .nodes
+        .iter()
+        .filter(|node| node.role == "neighbor")
+        .count();
+    let mut out = String::new();
+    // Header: render mode + provenance-preserving metadata as comments
+    // (Mermaid ignores `%%` lines but agents/humans see the source).
+    out.push_str("%%{init: {\"flowchart\": {\"htmlLabels\": false}}}%%\n");
+    out.push_str("graph LR\n");
+    out.push_str(&format!(
+        "  %% schema: {}\n",
+        crate::graph::GRAPH_NEIGHBORHOOD_SCHEMA_V1
+    ));
+    out.push_str(&format!(
+        "  %% command: graph neighborhood (memoryId={}, direction={}, status={}, edges={}, neighbors={})\n",
+        mermaid_escape_label(&report.memory_id),
+        report.direction.as_str(),
+        report.status.as_str(),
+        report.edges.len(),
+        neighbor_count,
+    ));
+    if let Some(relation) = report.relation.as_deref() {
+        out.push_str(&format!(
+            "  %% relation filter: {}\n",
+            mermaid_escape_label(relation)
+        ));
+    }
+
+    // Deterministic node emission: sort by (role, memory_id) so center
+    // comes before neighbors and neighbors stay alphabetical regardless
+    // of edge ordering.
+    let mut ordered_nodes: Vec<&crate::graph::GraphNeighborhoodNode> =
+        report.nodes.iter().collect();
+    ordered_nodes.sort_by(|left, right| {
+        let role_rank = |role: &str| if role == "center" { 0u8 } else { 1u8 };
+        role_rank(left.role)
+            .cmp(&role_rank(right.role))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+    });
+    for node in &ordered_nodes {
+        let id = mermaid_sanitize_node_id(&node.memory_id);
+        let label = mermaid_escape_label(&format!("{}: {}", node.role, node.memory_id));
+        out.push_str(&format!("  {id}[\"{label}\"]\n"));
+    }
+
+    // Edges follow the report's own deterministic ordering. Directed
+    // edges use `-->` with the relation as the edge label; undirected
+    // edges use `---` so the diagram visually distinguishes link
+    // directionality (graph_neighborhood already canonicalizes order).
+    for edge in &report.edges {
+        let src_id = mermaid_sanitize_node_id(&edge.src_memory_id);
+        let dst_id = mermaid_sanitize_node_id(&edge.dst_memory_id);
+        let relation = mermaid_escape_label(&edge.relation);
+        let arrow = if edge.directed { "-->" } else { "---" };
+        out.push_str(&format!("  {src_id} {arrow}|{relation}| {dst_id}\n"));
+    }
+
+    if report.limited {
+        if let Some(limit) = report.limit {
+            out.push_str(&format!(
+                "  %% limited output: {} edge(s) shown (limit={limit}); rerun without --limit for the complete neighborhood\n",
+                report.edges.len(),
+            ));
+        } else {
+            out.push_str(
+                "  %% limited output: edge list was truncated; rerun without --limit for the complete neighborhood\n",
+            );
+        }
+    }
+    if report.edges.is_empty() && neighbor_count == 0 {
+        out.push_str(
+            "  %% empty neighborhood: center memory has no incident links matching the filter\n",
+        );
+    }
+    out
 }
 
 fn graph_neighborhood_toon_output(report: &crate::graph::GraphNeighborhoodReport) -> String {
@@ -33143,7 +33259,7 @@ fn format_review_session_human(report: &ReviewSessionReport) -> String {
             candidate.candidate_id,
             candidate.topic_key,
             candidate.confidence,
-            candidate.target_memory_id,
+            candidate.target_memory_id.as_deref().unwrap_or("none"),
             candidate.source_ids.join(","),
             candidate.reason
         ));
