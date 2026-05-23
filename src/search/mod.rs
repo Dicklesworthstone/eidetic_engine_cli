@@ -637,28 +637,12 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
     const UNIX_PATH_PREFIXES: &[&str] =
         &["/home/", "/Users/", "/data/", "/workspace/", "/Volumes/"];
-    const ENV_PATH_PREFIXES: &[&str] = &[
-        "%USERPROFILE%",
-        "%APPDATA%",
-        "%LOCALAPPDATA%",
-        "%HOMEDRIVE%",
-        "%HOMEPATH%",
-        "%PROGRAMDATA%",
-        "%PROGRAMFILES%",
-        "%PROGRAMFILES(X86)%",
-        "%TEMP%",
-        "%TMP%",
-        "${HOME}",
-        "$HOME",
-        "~/",
-    ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
-        let remaining = &input[cursor..];
         if let Some(prefix_len) =
-            search_projection_path_prefix_len(remaining, UNIX_PATH_PREFIXES, ENV_PATH_PREFIXES)
+            search_projection_path_prefix_len(input, cursor, UNIX_PATH_PREFIXES)
         {
             output.push_str(REDACTED_PATH);
             cursor += prefix_len;
@@ -688,10 +672,11 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
 }
 
 fn search_projection_path_prefix_len(
-    remaining: &str,
+    input: &str,
+    cursor: usize,
     unix_path_prefixes: &[&str],
-    env_path_prefixes: &[&str],
 ) -> Option<usize> {
+    let remaining = &input[cursor..];
     if let Some(prefix) = unix_path_prefixes
         .iter()
         .find(|prefix| remaining.starts_with(**prefix))
@@ -703,17 +688,17 @@ fn search_projection_path_prefix_len(
         return Some("file://".len());
     }
 
-    if let Some(prefix) = env_path_prefixes
-        .iter()
-        .find(|prefix| starts_with_ascii_case_insensitive(remaining, prefix))
-    {
-        return Some(prefix.len());
+    if let Some(prefix_len) = search_projection_env_path_prefix_len(remaining) {
+        return Some(prefix_len);
     }
 
     if remaining.starts_with(r"\\?\") || remaining.starts_with(r"\\.\") {
         return Some(4);
     }
     if remaining.starts_with(r"\\") {
+        return Some(2);
+    }
+    if starts_with_forward_slash_network_path(input, cursor) {
         return Some(2);
     }
 
@@ -734,10 +719,157 @@ fn starts_with_search_projection_file_host_ref(remaining: &str) -> bool {
         return false;
     }
 
-    remaining
-        .as_bytes()
+    let bytes = remaining.as_bytes();
+    bytes
         .get(FILE_SCHEME.len())
         .is_some_and(|byte| !matches!(byte, b'/' | b'\\'))
+        || matches!(
+            (
+                bytes.get(FILE_SCHEME.len()),
+                bytes.get(FILE_SCHEME.len() + 1)
+            ),
+            (Some(b'/'), Some(b'/'))
+        )
+}
+
+fn search_projection_env_path_prefix_len(remaining: &str) -> Option<usize> {
+    let bytes = remaining.as_bytes();
+    if bytes.first() == Some(&b'~') {
+        return tilde_path_prefix_len(bytes);
+    }
+    if bytes.first() == Some(&b'%') {
+        return percent_env_path_prefix_len(bytes);
+    }
+    if starts_with_ascii_case_insensitive(remaining, "$env:") {
+        return dollar_env_path_prefix_len(bytes, "$env:".len());
+    }
+    if remaining.starts_with("${") {
+        return braced_env_path_prefix_len(bytes);
+    }
+    if bytes.first() == Some(&b'$') {
+        return dollar_env_path_prefix_len(bytes, 1);
+    }
+    None
+}
+
+fn tilde_path_prefix_len(bytes: &[u8]) -> Option<usize> {
+    let separator = bytes.iter().position(|byte| matches!(byte, b'/' | b'\\'))?;
+    if separator == 1
+        || bytes[1..separator]
+            .iter()
+            .all(|byte| is_env_name_byte(*byte))
+    {
+        Some(separator + 1)
+    } else {
+        None
+    }
+}
+
+fn percent_env_path_prefix_len(bytes: &[u8]) -> Option<usize> {
+    let closing = bytes.iter().skip(1).position(|byte| *byte == b'%')? + 1;
+    if closing == 1 || !bytes[1..closing].iter().all(|byte| is_env_name_byte(*byte)) {
+        return None;
+    }
+    let after = closing + 1;
+    if bytes
+        .get(after)
+        .is_some_and(|byte| matches!(byte, b'/' | b'\\' | b'%'))
+    {
+        Some(after)
+    } else {
+        None
+    }
+}
+
+fn braced_env_path_prefix_len(bytes: &[u8]) -> Option<usize> {
+    let closing = bytes.iter().skip(2).position(|byte| *byte == b'}')? + 2;
+    if closing == 2 || !bytes[2..closing].iter().all(|byte| is_env_name_byte(*byte)) {
+        return None;
+    }
+    let after = closing + 1;
+    if bytes
+        .get(after)
+        .is_some_and(|byte| matches!(byte, b'/' | b'\\'))
+    {
+        Some(after + 1)
+    } else {
+        None
+    }
+}
+
+fn dollar_env_path_prefix_len(bytes: &[u8], name_start: usize) -> Option<usize> {
+    let mut cursor = name_start;
+    while bytes
+        .get(cursor)
+        .is_some_and(|byte| is_env_name_byte(*byte))
+    {
+        cursor += 1;
+    }
+    if cursor == name_start {
+        return None;
+    }
+    if bytes
+        .get(cursor)
+        .is_some_and(|byte| matches!(byte, b'/' | b'\\'))
+    {
+        Some(cursor + 1)
+    } else {
+        None
+    }
+}
+
+fn is_env_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'(' | b')')
+}
+
+fn starts_with_forward_slash_network_path(input: &str, cursor: usize) -> bool {
+    let remaining = &input[cursor..];
+    if !remaining.starts_with("//")
+        || input
+            .as_bytes()
+            .get(cursor.saturating_sub(1))
+            .is_some_and(|byte| *byte == b':')
+    {
+        return false;
+    }
+
+    let bytes = remaining.as_bytes();
+    if !bytes
+        .get(2)
+        .is_some_and(|byte| is_network_path_component_byte(*byte))
+    {
+        return false;
+    }
+    bytes[2..]
+        .iter()
+        .position(|byte| matches!(byte, b'/' | b'\\'))
+        .is_some_and(|offset| offset > 0 && bytes.get(2 + offset + 1).is_some())
+}
+
+fn is_network_path_component_byte(byte: u8) -> bool {
+    !matches!(
+        byte,
+        b'\0'
+            | b'\t'
+            | b'\n'
+            | b'\r'
+            | b' '
+            | b'/'
+            | b'\\'
+            | b'"'
+            | b'\''
+            | b'`'
+            | b'<'
+            | b'>'
+            | b')'
+            | b']'
+            | b'}'
+            | b','
+            | b';'
+            | b'|'
+            | b'?'
+            | b'#'
+    )
 }
 
 fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
@@ -3374,6 +3506,36 @@ mod tests {
                 "search projection redaction leaked path variant {leaked}: {redacted}"
             );
         }
+    }
+
+    #[test]
+    fn search_projection_redacts_generic_env_and_slash_unc_path_roots() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"slash_unc=//server/share/alice/session.jsonl file_unc=file:////server/share/alice/log.txt dollar=$USERPROFILE\Secrets\tokens.json braced=${HOME}/.ssh/config powershell=$env:APPDATA\Roaming\state tilde=~alice/.ssh/config percent=%ONEDRIVE%/Private/file.txt url=https://example.invalid/artifacts/path next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"slash_unc=[REDACTED_PATH] file_unc=[REDACTED_PATH] dollar=[REDACTED_PATH] braced=[REDACTED_PATH] powershell=[REDACTED_PATH] tilde=[REDACTED_PATH] percent=[REDACTED_PATH] url=https://example.invalid/artifacts/path next=done"#
+        );
+        for leaked in [
+            "//server/share",
+            "file:////server/share",
+            r#"$USERPROFILE\Secrets"#,
+            "${HOME}/.ssh",
+            r#"$env:APPDATA\Roaming"#,
+            "~alice/.ssh",
+            "%ONEDRIVE%/Private",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked generic path root {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("https://example.invalid/artifacts/path"),
+            "ordinary HTTPS refs should not be treated as slash-UNC paths: {redacted}"
+        );
     }
 
     #[test]
