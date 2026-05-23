@@ -684,3 +684,108 @@ fn serve_context_endpoint_rejects_invalid_task_query_with_canonical_messages() -
     }
     Ok(())
 }
+
+// bd-o8w0t: GET /v1/doctor is one of two remaining parameterless read-only
+// endpoints with no transport-level E2E coverage. Pin its read_only_cli_dispatch
+// shape end-to-end through render_serve_transport_exchange.
+#[test]
+fn serve_doctor_endpoint_routes_to_cli_doctor_dispatch() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/doctor HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-doctor-dispatch",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("doctor"));
+    assert_eq!(envelope["request"]["path"].as_str(), Some("/v1/doctor"));
+    assert_eq!(envelope["request"]["method"].as_str(), Some("GET"));
+    assert_eq!(
+        envelope["request"]["cliEquivalent"].as_str(),
+        Some("ee doctor --json"),
+    );
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(200));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2"),
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(
+        payload["data"]["businessLogicExecuted"].as_bool(),
+        Some(false),
+    );
+    let plan = &payload["data"]["dispatchPlan"];
+    assert_eq!(plan["endpoint"].as_str(), Some("doctor"));
+    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.doctor"));
+    assert_eq!(plan["mutable"].as_bool(), Some(false));
+    assert_eq!(plan["sseStream"].as_bool(), Some(false));
+    let argv = json_string_array(&plan["cliArgv"])?;
+    assert_eq!(argv, vec!["ee", "doctor", "--json"]);
+    Ok(())
+}
+
+// bd-o8w0t: GET /v1/swarm/brief is the only multi-segment v1 endpoint after
+// /v1/why/{id}. Its path is the literal '/v1/swarm/brief' (no path params),
+// so request.path must round-trip unchanged through the transport metadata.
+// Pin the cli.swarm.brief dispatch contract and verify the multi-segment
+// path is preserved verbatim — guarding against any future refactor that
+// might confuse it with the /v1/why path-segment matcher.
+#[test]
+fn serve_swarm_brief_endpoint_routes_multi_segment_path_to_cli_dispatch() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/swarm/brief HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-swarm-brief-dispatch",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("swarmBrief"),);
+    assert_eq!(
+        envelope["request"]["path"].as_str(),
+        Some("/v1/swarm/brief"),
+    );
+    assert_eq!(
+        envelope["request"]["cliEquivalent"].as_str(),
+        Some("ee swarm brief --json"),
+    );
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(200));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2"),
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["data"]["execution"].as_str(), Some("not_started"),);
+    assert_eq!(
+        payload["data"]["businessLogicExecuted"].as_bool(),
+        Some(false),
+    );
+    let plan = &payload["data"]["dispatchPlan"];
+    assert_eq!(plan["endpoint"].as_str(), Some("swarmBrief"));
+    assert_eq!(plan["handlerSurface"].as_str(), Some("cli.swarm.brief"));
+    assert_eq!(plan["mutable"].as_bool(), Some(false));
+    assert_eq!(plan["sseStream"].as_bool(), Some(false));
+    let argv = json_string_array(&plan["cliArgv"])?;
+    assert_eq!(argv, vec!["ee", "swarm", "brief", "--json"]);
+    Ok(())
+}
