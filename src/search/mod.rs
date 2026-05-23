@@ -3635,6 +3635,52 @@ mod tests {
     }
 
     #[test]
+    fn search_projection_redacts_mixed_case_macos_private_path_roots() {
+        // bd-89312: On case-insensitive macOS filesystems, indexed projection
+        // content can carry uppercase or mixed-case private/var/folders
+        // roots. `is_case_insensitive_macos_search_path_prefix` widened the
+        // case-insensitive list past /Users/ and /Volumes/; this regression
+        // test pins every macOS runtime/secret root the redactor MUST treat
+        // case-insensitively, plus an ordinary relative reference that must
+        // stay visible.
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"users=/USERS/alice/Notes.md volumes=/VOLUMES/Backup/session.jsonl run=/PRIVATE/VAR/RUN/agent.sock log=/Private/Var/Log/system.log tmp=/PRIVATE/VAR/TMP/scratch.txt folders=/PRIVATE/VAR/FOLDERS/zz/T/spool ssh=/PRIVATE/ETC/SSH/sshd_config kube=/PRIVATE/ETC/KUBERNETES/admin.conf ssl=/PRIVATE/ETC/SSL/cert.pem le=/PRIVATE/ETC/LETSENCRYPT/live/example.com secrets=/PRIVATE/ETC/SECRETS/api.json pt=/PRIVATE/TMP/agent.sock varrun=/VAR/RUN/docker.sock varlog=/VAR/LOG/system.log vartmp=/VAR/TMP/cache varfolders=/VAR/FOLDERS/zz/T/scratch ordinary=docs/notes.md next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"users=[REDACTED_PATH] volumes=[REDACTED_PATH] run=[REDACTED_PATH] log=[REDACTED_PATH] tmp=[REDACTED_PATH] folders=[REDACTED_PATH] ssh=[REDACTED_PATH] kube=[REDACTED_PATH] ssl=[REDACTED_PATH] le=[REDACTED_PATH] secrets=[REDACTED_PATH] pt=[REDACTED_PATH] varrun=[REDACTED_PATH] varlog=[REDACTED_PATH] vartmp=[REDACTED_PATH] varfolders=[REDACTED_PATH] ordinary=docs/notes.md next=done"#,
+        );
+        for leaked in [
+            "/USERS/alice",
+            "/VOLUMES/Backup",
+            "/PRIVATE/VAR/RUN/agent.sock",
+            "/Private/Var/Log/system.log",
+            "/PRIVATE/VAR/TMP/scratch.txt",
+            "/PRIVATE/VAR/FOLDERS/zz/T/spool",
+            "/PRIVATE/ETC/SSH/sshd_config",
+            "/PRIVATE/ETC/KUBERNETES/admin.conf",
+            "/PRIVATE/ETC/SSL/cert.pem",
+            "/PRIVATE/ETC/LETSENCRYPT/live",
+            "/PRIVATE/ETC/SECRETS/api.json",
+            "/PRIVATE/TMP/agent.sock",
+            "/VAR/RUN/docker.sock",
+            "/VAR/LOG/system.log",
+            "/VAR/TMP/cache",
+            "/VAR/FOLDERS/zz/T/scratch",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked mixed-case macOS path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=docs/notes.md"),
+            "ordinary relative paths should remain visible: {redacted}"
+        );
+    }
+
+    #[test]
     fn search_projection_redacts_windows_drive_prefix_casing_and_separator_variants() {
         let redacted = super::redact_search_projection_absolute_path_like_segments(
             r#"upper=C:\Users\alice\secret lower=c:\Users\alice\secret slash=Z:/Users/alice/secret next=done"#,
