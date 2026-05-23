@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "insights_section_unavailable",
+  "introduced_by": {
+    "bead": "bd-113r0",
+    "epic_letter": "agent-ux"
+  },
+  "surfaces": [
+    "insights"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "A registered ee insights section is selected while its evidence builder is still metadata-only.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee insights --section topMemories --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "insights_section_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "registered insights sections",
+      "DB-backed evidence"
+    ],
+    "repair_contains": "implement the unavailable section builder",
+    "repair_string": "Use sections with non-empty evidence, or implement the unavailable section builder."
+  }
+}

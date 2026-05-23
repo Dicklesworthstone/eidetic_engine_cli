@@ -33,6 +33,11 @@ const CAUSAL_BOTTLENECK_REPORT_SCHEMA_V1: &str = "ee.graph.causal_evidence_proje
 const DEFAULT_SECTION_LIMIT: usize = 10;
 const MAX_SECTION_LIMIT: usize = 100;
 const EMPTY_WORKSPACE_GENERATED_AT: &str = "1970-01-01T00:00:00Z";
+const INSIGHTS_SECTION_UNAVAILABLE_CODE: &str = "insights_section_unavailable";
+const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
+    "One or more registered insights sections do not have DB-backed evidence yet.";
+const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
+    "Use sections with non-empty evidence, or implement the unavailable section builder.";
 
 type SectionBuilder = fn() -> InsightsSection;
 type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
@@ -317,6 +322,23 @@ pub fn build_insights_report_with_options(
     })
 }
 
+// bd-113r0: these registered sections are still metadata-only builders.
+// Emit an explicit section-unavailable degradation so empty `items[]`
+// never has to mean "no graph data", "feature disabled", and
+// "placeholder implementation" at the same time. When a real builder
+// lands for one of these names, remove it from this list in the same
+// change as the `build_registry_section` arm.
+const PLACEHOLDER_BACKED_SECTIONS: &[&str] = &[
+    "bridges",
+    "comprehensiveRules",
+    "contradictionClusters",
+    "kCore",
+    "kTruss",
+    "knowledgeSkyline",
+    "revisionFrontiers",
+    "topMemories",
+];
+
 fn build_registry_section_with_runtime_gate(
     display_name: &'static str,
     builder: SectionBuilder,
@@ -339,9 +361,26 @@ fn build_registry_section_with_runtime_gate(
         }
     }
 
+    let section = build_registry_section(display_name, builder, workspace)?;
+    // Keep selected-section output honest even when broad full-bundle
+    // degraded aggregation is not running.
+    let degraded_signal = if PLACEHOLDER_BACKED_SECTIONS.contains(&display_name) {
+        Some((
+            display_name,
+            DegradationReport {
+                code: INSIGHTS_SECTION_UNAVAILABLE_CODE,
+                severity: "info",
+                message: INSIGHTS_SECTION_UNAVAILABLE_MESSAGE,
+                repair: INSIGHTS_SECTION_UNAVAILABLE_REPAIR,
+            },
+        ))
+    } else {
+        None
+    };
+
     Ok(BuiltSection {
-        section: build_registry_section(display_name, builder, workspace)?,
-        degraded_signal: None,
+        section,
+        degraded_signal,
     })
 }
 
@@ -426,10 +465,14 @@ fn runtime_graph_feature_enabled(
 }
 
 fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedInput> {
-    if sections.iter().any(|section| !section.items.is_empty()) {
-        Vec::new()
-    } else {
-        vec![(
+    let mut degraded = sections
+        .iter()
+        .filter(|section| section.items.is_empty())
+        .filter_map(|section| placeholder_section_degraded_input(section.name))
+        .collect::<Vec<_>>();
+
+    if sections.iter().all(|section| section.items.is_empty()) {
+        degraded.push((
             "insights",
             DegradationReport {
                 code: "graph.workspace_empty",
@@ -437,7 +480,25 @@ fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDe
                 message: "No graph memories are available for insights yet.",
                 repair: "run: ee remember --workspace . \"<memory>\" --json",
             },
-        )]
+        ));
+    }
+
+    degraded
+}
+
+fn placeholder_section_degraded_input(section_name: &'static str) -> Option<InsightsDegradedInput> {
+    if PLACEHOLDER_BACKED_SECTIONS.contains(&section_name) {
+        Some((
+            section_name,
+            DegradationReport {
+                code: INSIGHTS_SECTION_UNAVAILABLE_CODE,
+                severity: "info",
+                message: INSIGHTS_SECTION_UNAVAILABLE_MESSAGE,
+                repair: INSIGHTS_SECTION_UNAVAILABLE_REPAIR,
+            },
+        ))
+    } else {
+        None
     }
 }
 
@@ -1433,13 +1494,25 @@ mod tests {
         assert_eq!(report.selected_section, None);
         assert_eq!(report.explain_memory_id, None);
         assert_eq!(report.explain_command, None);
-        assert_eq!(report.degraded_signals.len(), 1);
+        assert_eq!(report.degraded_signals.len(), 2);
         assert_eq!(report.degraded_signals[0].code, "graph.workspace_empty");
         assert_eq!(report.degraded_signals[0].severity, "info");
         assert_eq!(
             report.degraded_signals[0].sources,
             vec!["insights".to_owned()]
         );
+        assert_eq!(
+            report.degraded_signals[1].code,
+            INSIGHTS_SECTION_UNAVAILABLE_CODE
+        );
+        let mut expected_sources = PLACEHOLDER_BACKED_SECTIONS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        expected_sources.sort();
+        let mut actual_sources = report.degraded_signals[1].sources.clone();
+        actual_sources.sort();
+        assert_eq!(actual_sources, expected_sources);
         for section in &report.sections {
             assert!(section.items.is_empty());
         }
@@ -1498,7 +1571,10 @@ mod tests {
         assert_eq!(data["pagination"]["offset"], 0);
         assert_eq!(data["pagination"]["returned"], 0);
         assert_eq!(data["pagination"]["total"], 0);
-        assert_eq!(data["degradedSignals"][0]["code"], "graph.workspace_empty");
+        assert_eq!(
+            data["degradedSignals"][0]["code"],
+            INSIGHTS_SECTION_UNAVAILABLE_CODE,
+        );
 
         Ok(())
     }
@@ -1542,7 +1618,10 @@ mod tests {
             .ok_or_else(|| "stream footer should be present".to_owned())?;
         assert_eq!(footer["schema"], INSIGHTS_JSON_STREAM_FOOTER_SCHEMA_V1);
         assert_eq!(footer["kind"], "footer");
-        assert_eq!(footer["degraded"][0]["code"], "graph.workspace_empty");
+        assert_eq!(
+            footer["degraded"][0]["code"],
+            INSIGHTS_SECTION_UNAVAILABLE_CODE,
+        );
         assert_eq!(footer["runDurationMs"], 0);
 
         Ok(())

@@ -78,7 +78,15 @@
           "code": "graph.workspace_empty",
           "severity": "info",
           "message": "No graph memories are available for insights yet.",
-          "repair": "run: ee remember --workspace . \"<memory>\" --json"
+          "repair": "run: ee remember --workspace . \"<memory>\" --json",
+          "sources": ["insights"]
+        },
+        {
+          "code": "insights_section_unavailable",
+          "severity": "info",
+          "message": "One or more registered insights sections do not have DB-backed evidence yet.",
+          "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
+          "sources": ["bridges", "comprehensiveRules", "contradictionClusters", "kCore", "kTruss", "knowledgeSkyline", "revisionFrontiers", "topMemories"]
         }
       ]
     }
