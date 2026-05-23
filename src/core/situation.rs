@@ -17,6 +17,7 @@ pub const SITUATION_FIXTURE_METRICS_SCHEMA_V1: &str = "ee.situation.fixture_metr
 pub const SITUATION_COMPARE_SCHEMA_V1: &str = "ee.situation.compare.v1";
 pub const SITUATION_LINK_DRY_RUN_SCHEMA_V1: &str = "ee.situation.link_dry_run.v1";
 pub const SITUATION_HEURISTIC_SOURCE_V1: &str = "ee.situation.heuristics.v1";
+pub const SITUATION_DECISIONING_UNAVAILABLE_CODE: &str = "situation_decisioning_unavailable";
 const LINK_RECOMMENDATION_MIN_SCORE: f32 = 0.45;
 const DRY_RUN_CREATED_AT: &str = "1970-01-01T00:00:00Z";
 
@@ -1915,17 +1916,34 @@ fn stable_score_json(score: f32) -> f64 {
 }
 
 /// Show details for a situation.
-#[must_use]
-pub fn show_situation(situation_id: &str) -> Option<SituationDetails> {
-    let _ = situation_id;
-    None
+pub fn show_situation(situation_id: &str) -> Result<SituationDetails, crate::models::DomainError> {
+    Err(stored_situation_unavailable_error(
+        "situation show",
+        situation_id,
+    ))
 }
 
 /// Explain a situation.
-#[must_use]
-pub fn explain_situation(situation_id: &str) -> Option<SituationExplanation> {
-    let _ = situation_id;
-    None
+pub fn explain_situation(
+    situation_id: &str,
+) -> Result<SituationExplanation, crate::models::DomainError> {
+    Err(stored_situation_unavailable_error(
+        "situation explain",
+        situation_id,
+    ))
+}
+
+fn stored_situation_unavailable_error(
+    command: &'static str,
+    situation_id: &str,
+) -> crate::models::DomainError {
+    crate::models::DomainError::UnsatisfiedDegradedModeCode {
+        code: SITUATION_DECISIONING_UNAVAILABLE_CODE,
+        message: format!(
+            "{command} cannot read `{situation_id}` because persisted situation storage is not implemented; use deterministic `ee situation classify` or dry-run compare/link instead."
+        ),
+        repair: Some("ee situation classify <task text> --json".to_owned()),
+    }
 }
 
 // ============================================================================
@@ -2100,6 +2118,40 @@ mod tests {
             json.to_string().contains(retired_code),
             false,
             "retired unavailable code absent from classify JSON",
+        )
+    }
+
+    #[test]
+    fn stored_situation_show_and_explain_report_unavailable() -> TestResult {
+        let show_error = show_situation("sit.release_bug").unwrap_err();
+        ensure(
+            show_error.code(),
+            SITUATION_DECISIONING_UNAVAILABLE_CODE,
+            "show unavailable code",
+        )?;
+        ensure(
+            show_error.message().contains("sit.release_bug"),
+            true,
+            "show error names id",
+        )?;
+        ensure(
+            show_error.message().contains("persisted situation storage"),
+            true,
+            "show error names storage gap",
+        )?;
+
+        let explain_error = explain_situation("sit.release_bug").unwrap_err();
+        ensure(
+            explain_error.code(),
+            SITUATION_DECISIONING_UNAVAILABLE_CODE,
+            "explain unavailable code",
+        )?;
+        ensure(
+            explain_error
+                .repair()
+                .is_some_and(|repair| repair.contains("ee situation classify")),
+            true,
+            "explain repair",
         )
     }
 

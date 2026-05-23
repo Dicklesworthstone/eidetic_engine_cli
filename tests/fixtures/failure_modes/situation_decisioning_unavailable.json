@@ -2,28 +2,29 @@
   "schema": "ee.failure_mode_fixture.v1",
   "code": "situation_decisioning_unavailable",
   "introduced_by": {
-    "bead": "bd-17c65.10.6",
+    "bead": "bd-14tio",
     "epic_letter": "J"
   },
   "surfaces": [
-    "situation classify"
+    "situation show",
+    "situation explain"
   ],
-  "severity": "warning",
+  "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "Situation classification returns heuristic-only route hints because stored situation decisioning is unavailable.",
+    "description": "Situation show/explain return an explicit unavailable error because persisted situation storage is not implemented.",
     "setup_commands": [
       "ee init --workspace ."
     ],
-    "invocation": "ee situation classify 'fix failing release workflow' --workspace . --json"
+    "invocation": "ee situation explain sit.release_bug --workspace . --json"
   },
   "expected_emission": {
     "code": "situation_decisioning_unavailable",
-    "severity": "warning",
+    "severity": "medium",
     "message_contains": [
-      "Situation routing",
-      "stored evidence"
+      "persisted situation storage",
+      "not implemented"
     ],
-    "repair_contains": "ee status"
+    "repair_contains": "ee situation classify"
   }
 }

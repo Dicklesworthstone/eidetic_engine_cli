@@ -303,12 +303,16 @@ fn find_duplicate_edits(inputs: &DuplicateWorkInputs<'_>) -> Vec<DuplicateEditCa
 fn path_pattern_overlaps_any(pattern: &str, edit_set: &BTreeSet<&str>) -> bool {
     edit_set
         .iter()
-        .any(|path| path_pattern_matches(pattern, path))
+        .any(|path| path_patterns_overlap(pattern, path))
 }
 
 /// Minimal glob match supporting trailing `**`, leading prefix, and exact
 /// equality. Intentionally narrow — the upstream Agent Mail layer already
 /// normalises patterns and the detector never needs richer matching.
+fn path_patterns_overlap(left: &str, right: &str) -> bool {
+    path_pattern_matches(left, right) || path_pattern_matches(right, left)
+}
+
 fn path_pattern_matches(pattern: &str, path: &str) -> bool {
     if pattern == path {
         return true;
@@ -610,6 +614,48 @@ mod tests {
         assert!(path_pattern_matches("src/*", "src/foo.rs"));
         assert!(!path_pattern_matches("src/core/**", "tests/lib.rs"));
         assert!(!path_pattern_matches("src/core/foo.rs", "src/core/bar.rs"));
+    }
+
+    #[test]
+    fn path_patterns_overlap_symmetrically_for_candidate_globs() {
+        assert!(path_patterns_overlap("src/core/foo.rs", "src/core/**"));
+        assert!(path_patterns_overlap("src/core/**", "src/core/foo.rs"));
+        assert!(path_patterns_overlap("src/core/*", "src/core/**"));
+        assert!(!path_patterns_overlap("src/core/**", "src/db/**"));
+    }
+
+    #[test]
+    fn candidate_edit_glob_overlapping_exact_reservation_recommends_coordination() {
+        let reservation = ActiveFileReservation {
+            path_pattern: "src/core/foo.rs".to_string(),
+            holder_agent: "OtherAgent".to_string(),
+            bead_id: Some("bd-other".to_string()),
+            thread_id: Some("thread-1".to_string()),
+        };
+        let reservations = [reservation];
+        let edits = ["src/core/**"];
+        let inputs = DuplicateWorkInputs {
+            candidate: None,
+            edit_paths: &edits,
+            bead_claim: Some("bd-mine"),
+            active_verifications: &[],
+            active_reservations: &reservations,
+            active_bead_claims: &[],
+            known_blockers: &[],
+            self_agent: agent(),
+        };
+
+        let verdict = detect_duplicate_work(&inputs);
+
+        assert_eq!(
+            verdict.suggested_action,
+            SuggestedAction::CoordinateWithOwner
+        );
+        assert_eq!(verdict.duplicate_edit_candidates.len(), 1);
+        assert_eq!(
+            verdict.duplicate_edit_candidates[0].path_pattern,
+            "src/core/foo.rs"
+        );
     }
 
     #[test]

@@ -20,6 +20,10 @@
       "needs at least 2 memory hits",
       "Search results were left uncollapsed",
       "docId dedup"
+    ],
+    "repair_contains": "ee remember",
+    "repair_strings": [
+      "Rebuild the index or run ee remember before retrying --dedupe=mi."
     ]
   }
 }

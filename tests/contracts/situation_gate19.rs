@@ -279,12 +279,12 @@ fn gate19_heuristic_tag_goldens_are_stable_and_non_decisioning() -> TestResult {
 }
 
 #[test]
-fn gate19_cli_explain_reports_not_found_until_stored_situations_exist() -> TestResult {
+fn gate19_cli_explain_reports_unavailable_until_stored_situations_exist() -> TestResult {
     let output = run_ee(&["--json", "situation", "explain", "sit.release_bug"])?;
     ensure(
-        output.status.code() == Some(1),
+        output.status.code() == Some(6),
         format!(
-            "situation explain must return usage/not-found exit while no stored situation exists: {}",
+            "situation explain must return degraded-required exit while no stored situation exists: {}",
             output.status
         ),
     )?;
@@ -303,22 +303,29 @@ fn gate19_cli_explain_reports_not_found_until_stored_situations_exist() -> TestR
     ensure_json_equal(
         actual.get("schema"),
         JsonValue::String(ERROR_SCHEMA_V2.to_owned()),
-        "not-found schema",
+        "unavailable schema",
     )?;
     ensure_json_equal(
         actual.pointer("/error/code"),
-        JsonValue::String("not_found".to_owned()),
-        "not-found code",
+        JsonValue::String("situation_decisioning_unavailable".to_owned()),
+        "unavailable code",
     )?;
-    ensure_json_equal(
-        actual.pointer("/error/details/resource"),
-        JsonValue::String("situation".to_owned()),
-        "not-found resource",
+    ensure(
+        actual
+            .pointer("/error/message")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|message| {
+                message.contains("persisted situation storage is not implemented")
+                    && message.contains("sit.release_bug")
+            }),
+        "unavailable message must name storage gap and requested id",
     )?;
-    ensure_json_equal(
-        actual.pointer("/error/details/id"),
-        JsonValue::String("sit.release_bug".to_owned()),
-        "not-found id",
+    ensure(
+        actual
+            .pointer("/error/repair")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|repair| repair.contains("ee situation classify")),
+        "unavailable repair must point to deterministic classification",
     )
 }
 

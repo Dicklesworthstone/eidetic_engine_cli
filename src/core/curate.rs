@@ -1818,6 +1818,75 @@ fn review_session_recency_key(session: &StoredSession) -> &str {
         .unwrap_or(session.imported_at.as_str())
 }
 
+fn list_workspace_cass_evidence_spans(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<Vec<StoredEvidenceSpan>, DomainError> {
+    connection
+        .list_evidence_spans_for_workspace(workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list workspace CASS evidence spans: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })
+}
+
+fn count_workspace_cass_evidence_spans(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<usize, DomainError> {
+    connection
+        .count_evidence_spans_for_workspace(workspace_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to count workspace CASS evidence spans: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })
+}
+
+fn workspace_cass_review_candidates(
+    connection: &DbConnection,
+    workspace_id: &str,
+) -> Result<(usize, Vec<ReviewSessionCandidate>), DomainError> {
+    let sessions =
+        connection
+            .list_sessions(workspace_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list workspace CASS sessions: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?;
+    let evidence_spans = list_workspace_cass_evidence_spans(connection, workspace_id)?;
+
+    let evidence_count = evidence_spans.len();
+    let mut spans_by_session = BTreeMap::<String, Vec<StoredEvidenceSpan>>::new();
+    for span in evidence_spans {
+        spans_by_session
+            .entry(span.session_id.clone())
+            .or_default()
+            .push(span);
+    }
+    let mut by_id = BTreeMap::<String, ReviewSessionCandidate>::new();
+    for session in sessions {
+        let evidence_spans = spans_by_session.remove(&session.id).unwrap_or_default();
+        for candidate in
+            build_review_session_candidates(workspace_id, &session, &evidence_spans, 0.0, u32::MAX)
+        {
+            by_id
+                .entry(candidate.candidate_id.clone())
+                .or_insert(candidate);
+        }
+    }
+
+    let mut candidates = by_id.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        right
+            .confidence
+            .total_cmp(&left.confidence)
+            .then_with(|| left.topic_key.cmp(&right.topic_key))
+            .then_with(|| left.candidate_id.cmp(&right.candidate_id))
+    });
+
+    Ok((evidence_count, candidates))
+}
+
 fn build_review_session_candidates(
     workspace_id: &str,
     session: &StoredSession,
@@ -3722,28 +3791,6 @@ pub fn run_review_workspace(
         "ee review workspace --propose --json".to_owned()
     };
 
-    if options.dry_run {
-        return Ok(ReviewWorkspaceReport {
-            schema: REVIEW_WORKSPACE_SCHEMA_V1,
-            command: "review workspace",
-            version: env!("CARGO_PKG_VERSION"),
-            workspace_id: prepared.workspace_id,
-            workspace_path: prepared.workspace_path.display().to_string(),
-            database_path: prepared.database_path.display().to_string(),
-            scope_path: scope_path.display().to_string(),
-            include_cass: options.include_cass,
-            propose_mode: options.propose,
-            dry_run: true,
-            durable_mutation: false,
-            memory_count: 0,
-            evidence_count: 0,
-            candidate_count: 0,
-            candidates: Vec::new(),
-            degraded: Vec::new(),
-            next_action,
-        });
-    }
-
     let connection = open_existing_database(&prepared.database_path)?;
 
     let memories = connection
@@ -3754,18 +3801,26 @@ pub fn run_review_workspace(
         })?;
 
     let mut degraded = Vec::new();
-    let evidence_count = if options.include_cass {
+    let (evidence_count, cass_candidates) = if options.include_cass {
+        if options.propose {
+            workspace_cass_review_candidates(&connection, &prepared.workspace_id)?
+        } else {
+            (
+                count_workspace_cass_evidence_spans(&connection, &prepared.workspace_id)?,
+                Vec::new(),
+            )
+        }
+    } else {
+        (0, Vec::new())
+    };
+    if options.include_cass && evidence_count == 0 {
         degraded.push(CurateCandidatesDegradation {
             code: "cass_evidence_not_available".to_owned(),
             severity: "low".to_owned(),
-            message: "CASS evidence span listing not yet implemented for workspace scope."
-                .to_owned(),
-            repair: "Use `ee review session` for session-specific evidence review.".to_owned(),
+            message: "No CASS evidence spans were found for workspace-scope review.".to_owned(),
+            repair: "Run `ee import cass --workspace . --json`, or use `ee review session <session-id> --propose --json` after importing sessions.".to_owned(),
         });
-        0
-    } else {
-        0
-    };
+    }
 
     let memory_count = memories.len();
 
@@ -3777,49 +3832,16 @@ pub fn run_review_workspace(
             if memory.tombstoned_at.is_some() {
                 continue;
             }
-            let candidate_id = format!("curate_{}", generate_audit_id());
             let content_hash = blake3::hash(memory.content.as_bytes()).to_hex().to_string();
+            let candidate_id = deterministic_curate_id(&[
+                prepared.workspace_id.as_str(),
+                memory.id.as_str(),
+                "workspace_review",
+                content_hash.as_str(),
+            ]);
 
-            let already_exists = connection
-                .get_curation_candidate(&prepared.workspace_id, &candidate_id)
-                .map_err(|error| DomainError::Storage {
-                    message: format!("Failed to check existing curation candidate: {error}"),
-                    repair: Some("ee curate candidates --json".to_owned()),
-                })?
-                .is_some();
-
-            let persisted = if already_exists {
-                false
-            } else {
-                connection
-                    .insert_curation_candidate(
-                        &candidate_id,
-                        &CreateCurationCandidateInput {
-                            workspace_id: prepared.workspace_id.clone(),
-                            candidate_type: "review".to_owned(),
-                            target_memory_id: memory.id.clone(),
-                            proposed_content: Some(memory.content.clone()),
-                            proposed_confidence: Some(memory.confidence),
-                            proposed_trust_class: None,
-                            source_type: "workspace_review".to_owned(),
-                            source_id: Some(memory.id.clone()),
-                            reason: "Workspace evidence review".to_owned(),
-                            confidence: memory.confidence,
-                            status: Some(CandidateStatus::Pending.as_str().to_owned()),
-                            created_at: None,
-                            ttl_expires_at: None,
-                        },
-                    )
-                    .map_err(|error| DomainError::Storage {
-                        message: format!("Failed to insert curation candidate: {error}"),
-                        repair: Some("ee curate candidates --json".to_owned()),
-                    })?;
-                durable_mutation = true;
-                true
-            };
-
-            let candidate = ReviewSessionCandidate {
-                candidate_id: candidate_id.clone(),
+            let mut candidate = ReviewSessionCandidate {
+                candidate_id,
                 candidate_type: "review".to_owned(),
                 candidate_kind: "workspace_memory".to_owned(),
                 topic_key: memory.kind.clone(),
@@ -3831,8 +3853,28 @@ pub fn run_review_workspace(
                 reason: "Workspace evidence review".to_owned(),
                 confidence: memory.confidence,
                 content_hash,
-                persisted,
+                persisted: false,
             };
+            if !options.dry_run {
+                candidate.persisted = persist_workspace_review_candidate(
+                    &connection,
+                    &prepared.workspace_id,
+                    &candidate,
+                )?;
+                durable_mutation |= candidate.persisted;
+            }
+            candidates.push(candidate);
+        }
+
+        for mut candidate in cass_candidates {
+            if !options.dry_run {
+                candidate.persisted = persist_workspace_review_candidate(
+                    &connection,
+                    &prepared.workspace_id,
+                    &candidate,
+                )?;
+                durable_mutation |= candidate.persisted;
+            }
             candidates.push(candidate);
         }
     }
@@ -3847,7 +3889,7 @@ pub fn run_review_workspace(
         scope_path: scope_path.display().to_string(),
         include_cass: options.include_cass,
         propose_mode: options.propose,
-        dry_run: false,
+        dry_run: options.dry_run,
         durable_mutation,
         memory_count,
         evidence_count,
@@ -3856,6 +3898,52 @@ pub fn run_review_workspace(
         degraded,
         next_action,
     })
+}
+
+fn persist_workspace_review_candidate(
+    connection: &DbConnection,
+    workspace_id: &str,
+    candidate: &ReviewSessionCandidate,
+) -> Result<bool, DomainError> {
+    if candidate.target_memory_id.is_empty() {
+        return Ok(false);
+    }
+    if connection
+        .get_curation_candidate(workspace_id, &candidate.candidate_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to check existing curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?
+        .is_some()
+    {
+        return Ok(false);
+    }
+
+    connection
+        .insert_curation_candidate(
+            &candidate.candidate_id,
+            &CreateCurationCandidateInput {
+                workspace_id: workspace_id.to_owned(),
+                candidate_type: candidate.candidate_type.clone(),
+                target_memory_id: candidate.target_memory_id.clone(),
+                proposed_content: Some(candidate.proposed_content.clone()),
+                proposed_confidence: Some(candidate.proposed_confidence),
+                proposed_trust_class: None,
+                source_type: candidate.source_type.clone(),
+                source_id: Some(candidate.source_ids.join(",")),
+                reason: candidate.reason.clone(),
+                confidence: candidate.confidence,
+                status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
+                ttl_expires_at: None,
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to insert workspace review curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+
+    Ok(true)
 }
 
 #[derive(Clone, Debug)]
@@ -4448,6 +4536,13 @@ fn evaluate_candidate_for_apply(
                     "Validate or recreate the candidate with proposed procedural content.",
                 )),
             }
+        }
+        CandidateType::CreateDerivedMemory => {
+            errors.push(validation_issue(
+                "create_derived_memory_apply_unimplemented",
+                "create-derived-memory candidates are not yet wired into curation apply.",
+                "Keep the candidate pending until derived-memory apply support lands.",
+            ));
         }
     }
 
@@ -7435,11 +7530,11 @@ mod tests {
         CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
         REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
         REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate, ReviewSessionOptions,
-        ReviewSessionReport, apply_curation_candidate, build_bootstrap_session_candidates,
-        build_review_session_candidates, candidate_summary_from_stored,
-        evaluate_candidate_for_validation, list_curation_candidates, review_curation_candidate,
-        review_session_proposals, run_curation_disposition, stable_workspace_id,
-        validate_curation_candidate,
+        ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
+        build_bootstrap_session_candidates, build_review_session_candidates,
+        candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
+        review_curation_candidate, review_session_proposals, run_curation_disposition,
+        run_review_workspace, stable_workspace_id, validate_curation_candidate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
@@ -8117,6 +8212,323 @@ mod tests {
             limit: 0,
         });
         assert!(invalid_limit.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_include_cass_dry_run_uses_workspace_evidence() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let first = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: true,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+        let second = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: true,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(first.dry_run);
+        assert!(!first.durable_mutation);
+        assert_eq!(first.memory_count, 2);
+        assert_eq!(first.evidence_count, 10);
+        assert_eq!(first.candidates, second.candidates);
+        assert!(
+            first
+                .degraded
+                .iter()
+                .all(|entry| entry.code != "cass_evidence_not_available"),
+            "CASS evidence exists, so workspace review should not degrade: {:?}",
+            first.degraded
+        );
+        assert!(
+            first.candidate_count >= 4,
+            "workspace review should include memory candidates and CASS-derived candidates"
+        );
+        assert!(
+            first
+                .candidates
+                .iter()
+                .all(|candidate| !candidate.persisted),
+            "dry-run candidates must not report persistence"
+        );
+
+        let cass_candidates = first
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.source_type == "agent_inference")
+            .collect::<Vec<_>>();
+        assert_eq!(cass_candidates.len(), 2);
+        assert!(
+            cass_candidates
+                .iter()
+                .all(|candidate| candidate.source_ids.len() >= 2)
+        );
+        let topics = cass_candidates
+            .iter()
+            .map(|candidate| candidate.topic_key.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(topics, BTreeSet::from(["storage", "testing"]));
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_include_cass_without_propose_reports_evidence_only() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let report = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(!report.propose_mode);
+        assert!(!report.dry_run);
+        assert!(!report.durable_mutation);
+        assert_eq!(report.memory_count, 2);
+        assert_eq!(report.evidence_count, 10);
+        assert_eq!(report.candidate_count, 0);
+        assert!(report.candidates.is_empty());
+        assert!(
+            report
+                .degraded
+                .iter()
+                .all(|entry| entry.code != "cass_evidence_not_available"),
+            "workspace CASS evidence exists, so report-only review should not degrade: {:?}",
+            report.degraded
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_without_cass_stays_memory_only() -> TestResult {
+        let fixture = review_session_fixture()?;
+
+        let report = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: false,
+            propose: true,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.memory_count, 2);
+        assert_eq!(report.evidence_count, 0);
+        assert_eq!(report.candidate_count, 2);
+        assert!(report.degraded.is_empty());
+        assert!(report.candidates.iter().all(|candidate| {
+            candidate.source_type == "workspace_review"
+                && candidate.candidate_kind == "workspace_memory"
+                && candidate.source_ids.len() == 1
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_include_cass_surfaces_bootstrap_candidates() -> TestResult {
+        let fixture = review_session_fixture()?;
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let bootstrap_session_id = SessionId::from_uuid(uuid::Uuid::from_u128(505)).to_string();
+        let bootstrap_evidence_id = evidence_id(700);
+        connection
+            .insert_session(
+                &bootstrap_session_id,
+                &session_input(&fixture.workspace_id, "cass-bootstrap-review"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &bootstrap_evidence_id,
+                &evidence_span_input(
+                    &fixture.workspace_id,
+                    &bootstrap_session_id,
+                    None,
+                    "bootstrap-review-span",
+                    50,
+                    "Always run cargo fmt --check before cutting a release tag.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: true,
+            dry_run: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.evidence_count, 11);
+        let bootstrap = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY)
+            .ok_or_else(|| "expected workspace review to surface bootstrap candidate".to_owned())?;
+        assert!(bootstrap.target_memory_id.is_empty());
+        assert_eq!(bootstrap.source_ids, vec![bootstrap_evidence_id]);
+        assert!(!bootstrap.persisted);
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_include_cass_persists_linked_and_skips_bootstrap_candidates() -> TestResult
+    {
+        let fixture = review_session_fixture()?;
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        let bootstrap_session_id = SessionId::from_uuid(uuid::Uuid::from_u128(506)).to_string();
+        let bootstrap_evidence_id = evidence_id(701);
+        connection
+            .insert_session(
+                &bootstrap_session_id,
+                &session_input(&fixture.workspace_id, "cass-bootstrap-persist-skip"),
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_evidence_span(
+                &bootstrap_evidence_id,
+                &evidence_span_input(
+                    &fixture.workspace_id,
+                    &bootstrap_session_id,
+                    None,
+                    "bootstrap-persist-skip-span",
+                    60,
+                    "Always run cargo fmt --check before release handoff.",
+                ),
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let first = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let second = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: fixture.workspace_path.as_path(),
+            database_path: Some(fixture.database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: true,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let first_persisted = first
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.persisted)
+            .count();
+        let second_persisted = second
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.persisted)
+            .count();
+        assert!(first.durable_mutation);
+        assert_eq!(first_persisted, 4);
+        assert!(!second.durable_mutation);
+        assert_eq!(second_persisted, 0);
+
+        let bootstrap = first
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_kind == REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY)
+            .ok_or_else(|| {
+                "expected bootstrap candidate in persisted workspace review".to_owned()
+            })?;
+        assert!(bootstrap.target_memory_id.is_empty());
+        assert!(!bootstrap.persisted);
+
+        let connection =
+            DbConnection::open_file(&fixture.database_path).map_err(|error| error.to_string())?;
+        for candidate in &first.candidates {
+            let stored = connection
+                .get_curation_candidate(&fixture.workspace_id, &candidate.candidate_id)
+                .map_err(|error| error.to_string())?;
+            if candidate.target_memory_id.is_empty() {
+                assert!(
+                    stored.is_none(),
+                    "bootstrap candidate without target memory must not be persisted"
+                );
+            } else {
+                assert!(
+                    stored.is_some(),
+                    "linked workspace-review candidate should be persisted"
+                );
+            }
+        }
+        connection.close().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn review_workspace_include_cass_empty_workspace_reports_no_evidence() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().to_path_buf();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(&workspace_path);
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("review-workspace-empty-cass-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = run_review_workspace(&ReviewWorkspaceOptions {
+            workspace_path: workspace_path.as_path(),
+            database_path: Some(database_path.as_path()),
+            scope: None,
+            include_cass: true,
+            propose: false,
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.memory_count, 0);
+        assert_eq!(report.evidence_count, 0);
+        assert_eq!(report.candidate_count, 0);
+        let degraded = report
+            .degraded
+            .iter()
+            .find(|entry| entry.code == "cass_evidence_not_available")
+            .ok_or_else(|| "expected cass_evidence_not_available degradation".to_owned())?;
+        assert_eq!(degraded.severity, "low");
+        assert!(degraded.message.contains("No CASS evidence spans"));
+        assert!(
+            !degraded.message.contains("not implemented"),
+            "workspace CASS review is implemented; degradation should describe missing evidence"
+        );
         Ok(())
     }
 

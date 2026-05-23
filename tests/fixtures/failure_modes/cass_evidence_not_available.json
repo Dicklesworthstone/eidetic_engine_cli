@@ -11,7 +11,7 @@
   "severity": "low",
   "repair_present": true,
   "trigger": {
-    "description": "review workspace was asked to include CASS evidence, but workspace-scope CASS evidence span listing is not implemented.",
+    "description": "review workspace was asked to include CASS evidence, but no workspace CASS evidence spans were present.",
     "setup_commands": [
       "ee init --workspace ."
     ],
@@ -21,10 +21,10 @@
     "code": "cass_evidence_not_available",
     "severity": "low",
     "message_contains": [
-      "CASS evidence span listing",
-      "not yet implemented"
+      "No CASS evidence spans",
+      "workspace-scope review"
     ],
-    "repair_contains": "ee review session",
-    "repair_string": "Use `ee review session` for session-specific evidence review."
+    "repair_contains": "ee import cass",
+    "repair_string": "Run `ee import cass --workspace . --json`, or use `ee review session <session-id> --propose --json` after importing sessions."
   }
 }
