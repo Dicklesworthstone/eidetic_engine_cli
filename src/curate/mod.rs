@@ -2110,7 +2110,7 @@ impl FromStr for CandidateStatus {
 pub struct CandidateInput {
     pub workspace_id: String,
     pub candidate_type: CandidateType,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: Option<String>,
     pub proposed_confidence: Option<f32>,
     pub proposed_trust_class: Option<String>,
@@ -2126,7 +2126,7 @@ pub struct CandidateInput {
 pub struct ValidatedCandidate {
     pub workspace_id: String,
     pub candidate_type: CandidateType,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: Option<String>,
     pub specificity_report: Option<SpecificityReport>,
     pub proposed_confidence: Option<f32>,
@@ -3679,7 +3679,13 @@ pub fn validate_candidate(
     if input.workspace_id.trim().is_empty() {
         return Err(CandidateValidationError::EmptyWorkspaceId);
     }
-    if input.candidate_type.requires_target_memory() && input.target_memory_id.trim().is_empty() {
+    let target_memory_id = input
+        .target_memory_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|target_memory_id| !target_memory_id.is_empty())
+        .map(str::to_owned);
+    if input.candidate_type.requires_target_memory() && target_memory_id.is_none() {
         return Err(CandidateValidationError::EmptyTargetMemoryId);
     }
     if input.reason.trim().is_empty() {
@@ -3824,7 +3830,7 @@ pub fn validate_candidate(
     Ok(ValidatedCandidate {
         workspace_id: input.workspace_id.trim().to_string(),
         candidate_type: input.candidate_type,
-        target_memory_id: input.target_memory_id.trim().to_string(),
+        target_memory_id,
         proposed_content,
         specificity_report,
         proposed_confidence: input.proposed_confidence,
@@ -4386,8 +4392,10 @@ fn generate_recommendation(
 pub fn assess_risk(candidate: &ValidatedCandidate, report_only: bool) -> RiskCertificate {
     let mut builder = RiskCertificate::builder()
         .candidate_type(candidate.candidate_type)
-        .target_memory_id(&candidate.target_memory_id)
         .report_only(report_only);
+    if let Some(target_memory_id) = candidate.target_memory_id.as_deref() {
+        builder = builder.target_memory_id(target_memory_id);
+    }
 
     builder = builder.add_factor(RiskFactor::new(
         "irreversibility",
@@ -6358,7 +6366,7 @@ Then update src/policy/mod.rs on main."
         CandidateInput {
             workspace_id: "ws_123".to_string(),
             candidate_type: CandidateType::Promote,
-            target_memory_id: "mem_456".to_string(),
+            target_memory_id: Some("mem_456".to_string()),
             proposed_content: None,
             proposed_confidence: Some(0.8),
             proposed_trust_class: Some("agent_validated".to_string()),
@@ -6492,10 +6500,18 @@ Then update src/policy/mod.rs on main."
     #[test]
     fn validate_candidate_rejects_empty_target_memory_id() {
         let mut input = valid_input();
-        input.target_memory_id = "".to_string();
+        input.target_memory_id = None;
         let result = validate_candidate(input, "2026-04-29T12:00:00Z", true);
         assert!(matches!(
             result,
+            Err(CandidateValidationError::EmptyTargetMemoryId)
+        ));
+
+        let mut blank = valid_input();
+        blank.target_memory_id = Some(" \t ".to_string());
+        let blank_result = validate_candidate(blank, "2026-04-29T12:00:00Z", true);
+        assert!(matches!(
+            blank_result,
             Err(CandidateValidationError::EmptyTargetMemoryId)
         ));
     }
@@ -6835,7 +6851,7 @@ Then update src/policy/mod.rs on main."
         let input = CandidateInput {
             workspace_id: "ws_1".to_owned(),
             candidate_type: CandidateType::CreateDerivedMemory,
-            target_memory_id: String::new(),
+            target_memory_id: None,
             proposed_content: Some(
                 "Derived memory from ev_1 and mem_1 about release verification.".to_owned(),
             ),
@@ -6852,7 +6868,7 @@ Then update src/policy/mod.rs on main."
             .map_err(|error| error.to_string())?;
 
         assert_eq!(validated.candidate_type, CandidateType::CreateDerivedMemory);
-        assert!(validated.target_memory_id.is_empty());
+        assert!(validated.target_memory_id.is_none());
         Ok(())
     }
 
@@ -7933,7 +7949,7 @@ Then update src/policy/mod.rs on main."
         let candidate = ValidatedCandidate {
             workspace_id: "ws-001".to_owned(),
             candidate_type: CandidateType::Promote,
-            target_memory_id: "mem-001".to_owned(),
+            target_memory_id: Some("mem-001".to_owned()),
             proposed_content: None,
             specificity_report: None,
             proposed_confidence: Some(0.9),
@@ -7955,7 +7971,7 @@ Then update src/policy/mod.rs on main."
         let candidate = ValidatedCandidate {
             workspace_id: "ws-001".to_owned(),
             candidate_type: CandidateType::Tombstone,
-            target_memory_id: "mem-001".to_owned(),
+            target_memory_id: Some("mem-001".to_owned()),
             proposed_content: None,
             specificity_report: None,
             proposed_confidence: None,
@@ -7977,7 +7993,7 @@ Then update src/policy/mod.rs on main."
         let candidate = ValidatedCandidate {
             workspace_id: "ws-001".to_owned(),
             candidate_type: CandidateType::Promote,
-            target_memory_id: "mem-001".to_owned(),
+            target_memory_id: Some("mem-001".to_owned()),
             proposed_content: None,
             specificity_report: None,
             proposed_confidence: Some(0.95),

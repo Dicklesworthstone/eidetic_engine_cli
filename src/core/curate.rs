@@ -4074,7 +4074,7 @@ fn evaluate_candidate_for_validation(
             let input = CandidateInput {
                 workspace_id: stored.workspace_id.clone(),
                 candidate_type,
-                target_memory_id: stored.target_memory_id.clone(),
+                target_memory_id: Some(stored.target_memory_id.clone()),
                 proposed_content: stored.proposed_content.clone(),
                 proposed_confidence: stored.proposed_confidence,
                 proposed_trust_class: stored.proposed_trust_class.clone(),
