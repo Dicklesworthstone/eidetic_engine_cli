@@ -789,3 +789,185 @@ fn serve_swarm_brief_endpoint_routes_multi_segment_path_to_cli_dispatch() -> Tes
     assert_eq!(argv, vec!["ee", "swarm", "brief", "--json"]);
     Ok(())
 }
+
+// bd-rpaqi: serve_token_posture posture.state='weak' fires before
+// serve_auth_state can examine the request. The transport must short-circuit
+// to a 401 with response.degradedCodes carrying 'serve_auth_weak_token' even
+// when the client sends a syntactically-valid Authorization header. Pin this
+// so any future refactor that accidentally promotes weak tokens to accepted
+// status is caught at the transport boundary.
+#[test]
+fn serve_status_endpoint_with_weak_server_token_short_circuits_with_weak_degraded_code()
+-> TestResult {
+    let weak_token = "tooshort"; // 8 bytes -> 64 bits, far below 256-bit minimum
+    let raw = format!(
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {weak_token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-status-weak-token",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(weak_token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 401 Unauthorized\r\n") {
+        return Err(format!("expected 401 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(401));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let degraded_codes = json_string_array(&envelope["response"]["degradedCodes"])?;
+    assert_eq!(degraded_codes, vec!["serve_auth_weak_token"]);
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(payload["error"]["code"].as_str(), Some("policy_denied"));
+    assert_eq!(
+        payload["error"]["details"]["authState"].as_str(),
+        Some("weak"),
+    );
+    assert_eq!(
+        payload["error"]["details"]["tokenMaterialExposed"].as_bool(),
+        Some(false),
+    );
+    Ok(())
+}
+
+// bd-rpaqi: client presents a syntactically-valid Authorization Bearer header
+// whose value does NOT match the server's configured token. serve_auth_state
+// must distinguish this from 'missing' by returning 'rejected', and the
+// degraded code must surface as 'serve_auth_rejected' so operators can
+// distinguish a misconfigured client from a missing header in audit logs.
+#[test]
+fn serve_status_endpoint_with_mismatched_token_short_circuits_with_rejected_degraded_code()
+-> TestResult {
+    let server_token = "01234567890123456789012345678901";
+    let client_token = "wrongtokenthatissamelengthbutbad";
+    assert_eq!(
+        client_token.len(),
+        server_token.len(),
+        "client token should be same length as server token to isolate the mismatch path"
+    );
+    let raw = format!(
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {client_token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-status-rejected-token",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(server_token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 401 Unauthorized\r\n") {
+        return Err(format!("expected 401 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(401));
+    let degraded_codes = json_string_array(&envelope["response"]["degradedCodes"])?;
+    assert_eq!(degraded_codes, vec!["serve_auth_rejected"]);
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(payload["error"]["code"].as_str(), Some("policy_denied"));
+    assert_eq!(
+        payload["error"]["details"]["authState"].as_str(),
+        Some("rejected"),
+    );
+    // The mismatched token bytes must NOT leak into the rendered response;
+    // serve_auth_failure_envelope sets tokenMaterialExposed=false as a
+    // structural promise.
+    assert_eq!(
+        payload["error"]["details"]["tokenMaterialExposed"].as_bool(),
+        Some(false),
+    );
+    if response.contains(client_token) {
+        return Err(
+            "rejected-token response must NOT contain the mismatched token bytes".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+// bd-rpaqi: any GET /v1/<unknown-path> reaches the dispatch table per bd-da9h1
+// (auth gate only fires for endpoints with auth_required()=true, and Unknown
+// declares auth_required()=false). The transport adapter must answer with a
+// 404 carrying the SERVE_ENDPOINT_SCHEMA_V1 envelope, request.endpoint='unknown',
+// and the canonical 'No ee serve v2 endpoint is registered for GET <path>.'
+// usage message — so endpoint-discovery errors aren't masked by auth failures.
+#[test]
+fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/nonexistent-endpoint HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-unknown-endpoint",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 404 Not Found\r\n") {
+        return Err(format!("expected 404 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("unknown"));
+    assert_eq!(envelope["request"]["method"].as_str(), Some("GET"));
+    assert_eq!(
+        envelope["request"]["path"].as_str(),
+        Some("/v1/nonexistent-endpoint"),
+    );
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(404));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(payload["error"]["code"].as_str(), Some("usage"));
+    assert_eq!(
+        payload["error"]["message"].as_str(),
+        Some("No ee serve v2 endpoint is registered for GET /v1/nonexistent-endpoint."),
+    );
+    Ok(())
+}
+
+// bd-rpaqi: parse_serve_http_request rejects any method outside {GET, POST}
+// before endpoint dispatch can run. The error path uses the flat
+// serve_error_payload (NOT the SERVE_ENDPOINT_SCHEMA_V1 exchange envelope)
+// because the request itself was unparseable. Pin both the 400 status and
+// the canonical 'Only GET and POST are supported by ee serve v2.' message.
+#[test]
+fn serve_unsupported_http_method_rejected_with_canonical_400_envelope() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "DELETE /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-delete-method",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+        return Err(format!("expected 400 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    // The pre-request-parse error path produces a flat ee.error.v2 envelope
+    // rather than the SERVE_ENDPOINT_SCHEMA_V1 exchange wrapper.
+    assert_eq!(envelope["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(envelope["error"]["code"].as_str(), Some("usage"));
+    assert_eq!(envelope["error"]["severity"].as_str(), Some("low"));
+    assert_eq!(
+        envelope["error"]["message"].as_str(),
+        Some("Only GET and POST are supported by ee serve v2."),
+    );
+    Ok(())
+}
