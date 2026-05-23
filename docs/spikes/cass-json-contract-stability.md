@@ -92,6 +92,61 @@ The first CASS adapter should:
 - Preserve degraded CASS state in `ee status` and context provenance instead of hiding it.
 - Return a stable `ee` error or degradation code when CASS is missing, too old, has a contract mismatch, emits invalid stdout JSON, or reports unavailable lexical search.
 
+## Subprocess Lifecycle Contract
+
+The adapter boundary in `src/cass/process.rs` has two execution modes with
+different memory and cleanup guarantees. Future changes should preserve these
+invariants instead of treating subprocess I/O as ordinary best-effort plumbing.
+
+### Capture Mode
+
+Capture mode is used by `CassInvocation::run()` for commands whose stdout is a
+single bounded payload. It must retain the following behavior:
+
+| Invariant | Contract | Expected coverage |
+| --- | --- | --- |
+| Binary boundary | Only the allowlisted `cass` path lookup or a trusted absolute executable named `cass` may spawn. Absolute paths must reject symlink components, non-files, non-executables, group/other-writable files, and other-writable parent directories. | `rejects_non_allowlisted_binary`, absolute-binary permission tests in `src/cass/process.rs` |
+| Stream separation | stdout is the only machine-data channel; stderr is diagnostic data and is captured independently. A command with non-empty stdout and nonzero exit is `degraded`, not automatically failed. | `classify_degraded_requires_nonzero_exit_with_payload` |
+| Capture caps | stdout and stderr are each capped by `CASS_PIPE_CAPTURE_MAX_BYTES`; a cap breach returns a stable `cass subprocess <stream> exceeded <N> byte capture limit` error. | `run_without_timeout_uses_capped_pipe_capture` and cap-error lifecycle tests |
+| Cap-error cleanup | If a stdout or stderr reader reports a capture-cap/read error while the child is still running, the adapter must terminate the process group when available, kill/wait the child, and best-effort drain/join companion reader threads before returning the original read error. | `run_with_capped_pipes_terminates_child_after_stdout_cap_error` |
+| Timeout cleanup | On timeout, the adapter must terminate the process group when available, kill/wait the child, drain bounded pipe readers within `TIMEOUT_PIPE_DRAIN_GRACE`, join reader threads, and return a timed-out failure outcome. | `run_kills_and_reaps_child_when_timeout_expires`, inherited-pipe timeout coverage |
+| Thread joins | Reader-thread panic or read failure is surfaced as `CassError::Io`; it is not collapsed into empty stdout/stderr. | `join_pipe_reader` and timeout/drain tests |
+
+### Streamed JSONL Mode
+
+Streamed mode is used by `CassInvocation::run_stdout_lines()` for CASS surfaces
+that can emit JSONL, such as `cass view --json` during import. It must retain the
+following behavior:
+
+| Invariant | Contract | Expected coverage |
+| --- | --- | --- |
+| No contiguous stdout retention | stdout is delivered one UTF-8 line at a time; the adapter never retains the full stdout payload in one `Vec<u8>`. | `run_stdout_lines_bounds_buffer_below_oversize_single_line` |
+| Logical line cap | `CASS_STDOUT_LINE_MAX_BYTES` is the maximum logical line length after stripping a trailing LF or CRLF. The raw read window may include delimiter slack, but the delivered line must not exceed the logical cap. | `read_bounded_stdout_line_accepts_exact_cap_crlf_line`, bd-352wc regression coverage |
+| Oversize prevention | A pathological line without a newline must be rejected before being realized as a `String`, and the reader buffer high-water mark must stay within the bounded read window. | `run_stdout_lines_bounds_buffer_below_oversize_single_line` |
+| LF and CRLF semantics | A trailing LF is stripped, and a preceding CR is stripped only as part of a CRLF delimiter. An exact-cap logical line followed by CRLF is valid. | `read_bounded_stdout_line_accepts_exact_cap_crlf_line` |
+| UTF-8 boundary | Invalid UTF-8 in a delivered line returns `cass subprocess stdout line was not valid UTF-8: ...` and stops the child rather than handing partial text to import parsers. | `fuzz_decode_cass_stdout_stream` plus future table-driven lifecycle tests |
+| Handler failure cleanup | If the line handler rejects a line, streamed mode must terminate the process group when available, kill/wait the child, drain available stdout metadata, join the stdout reader, and return the handler error. | `run_stdout_lines_bounds_buffer_below_oversize_single_line` and table-driven lifecycle follow-up |
+| Stderr cap cleanup | A stderr cap/read error during streamed mode must terminate the child and join the stdout reader before returning the stderr read error. | future table-driven lifecycle test from `bd-t2bgr.2` |
+
+### Error-Text Stability
+
+The following substrings are part of the adapter contract because import,
+diagnostics, and Beads closeout evidence use them to classify failures:
+
+- `cass subprocess stdout pipe was not available`
+- `cass subprocess stderr pipe was not available`
+- `cass subprocess stdout line exceeded`
+- `cass subprocess stdout line was not valid UTF-8`
+- `cass subprocess stdout line read failed`
+- `cass subprocess <stream> exceeded <N> byte capture limit`
+- `cass subprocess status was unavailable after timeout`
+- `cass subprocess pipe reader thread panicked`
+- `cass subprocess stdout line reader thread panicked`
+
+Tests may assert substrings rather than exact OS error text, but new wording must
+preserve enough stable structure for `CassError::Io` classification and
+diagnostic closeouts.
+
 ## Fixture Plan
 
 Gate 6 (`eidetic_engine_cli-s67f`, CASS Robot Contract Fixture) should add the executable coverage for this spike.

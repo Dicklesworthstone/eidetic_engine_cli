@@ -37,6 +37,7 @@ const DEFAULT_VIEW_CONTEXT: u32 = 4;
 const IMPORT_SOURCE_KIND: &str = "cass";
 const CASS_REDACTION_AUDIT_SCHEMA_V1: &str = "ee.cass.redaction_audit.v1";
 const CASS_REDACTION_AUDIT_ACTION: &str = "cass.evidence.redacted";
+const CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1: &str = "ee.cass.subprocess_diagnostics.v1";
 #[cfg(test)]
 const CASS_VIEW_STREAM_MEMORY_BUDGET_BYTES: usize = 10 * 1024 * 1024;
 
@@ -249,6 +250,11 @@ pub enum CassImportError {
         command: String,
         exit_code: Option<i32>,
         stderr: String,
+        timed_out: bool,
+        stderr_truncated: bool,
+        stdout_line_count: Option<usize>,
+        peak_stdout_line_bytes: Option<usize>,
+        peak_stdout_buffer_bytes: Option<usize>,
     },
     InvalidJson {
         source: &'static str,
@@ -278,6 +284,35 @@ impl CassImportError {
             Self::Storage(_) => Some("ee init --workspace . --repair-plan"),
         }
     }
+
+    /// Render redaction-safe subprocess supervision diagnostics for failures
+    /// where the adapter has structured cleanup evidence.
+    #[must_use]
+    pub fn subprocess_diagnostics_json(&self) -> Option<JsonValue> {
+        match self {
+            Self::Cass(CassError::Io { message }) => cass_io_subprocess_diagnostics_json(message),
+            Self::CassCommand {
+                command,
+                exit_code,
+                stderr,
+                timed_out,
+                stderr_truncated,
+                stdout_line_count,
+                peak_stdout_line_bytes,
+                peak_stdout_buffer_bytes,
+            } => Some(cass_command_subprocess_diagnostics_json(
+                command,
+                *exit_code,
+                stderr,
+                *timed_out,
+                *stderr_truncated,
+                *stdout_line_count,
+                *peak_stdout_line_bytes,
+                *peak_stdout_buffer_bytes,
+            )),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for CassImportError {
@@ -288,6 +323,7 @@ impl fmt::Display for CassImportError {
                 command,
                 exit_code,
                 stderr,
+                ..
             } => write!(
                 formatter,
                 "cass command `{command}` failed with exit {exit_code:?}: {stderr}",
@@ -318,6 +354,134 @@ impl From<DbError> for CassImportError {
     fn from(error: DbError) -> Self {
         Self::Storage(error)
     }
+}
+
+fn cass_io_subprocess_diagnostics_json(message: &str) -> Option<JsonValue> {
+    let lower = message.to_lowercase();
+    if !lower.contains("cass subprocess") {
+        return None;
+    }
+
+    if lower.contains("stdout line exceeded") {
+        return Some(json!({
+            "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+            "outcome": "cap_error",
+            "command": null,
+            "cap": {
+                "stream": "stdout",
+                "kind": "line",
+                "limitBytes": first_usize_in_text(message),
+            },
+            "timeout": false,
+            "killAttempted": true,
+            "reapSucceeded": true,
+            "stderrCapture": {
+                "truncated": false,
+                "captureCapExceeded": false,
+            },
+            "peakStreamedStdoutLineBufferBytes": null,
+            "unavailable": {
+                "command": "cap error surfaced before the higher-level command wrapper was built",
+                "peakStreamedStdoutLineBufferBytes": "reader returned the cap error before a stream outcome was emitted",
+            },
+        }));
+    }
+
+    if lower.contains("stdout line was not valid utf-8") {
+        return Some(json!({
+            "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+            "outcome": "invalid_utf8",
+            "command": null,
+            "cap": null,
+            "timeout": false,
+            "killAttempted": true,
+            "reapSucceeded": true,
+            "stderrCapture": {
+                "truncated": false,
+                "captureCapExceeded": false,
+            },
+            "peakStreamedStdoutLineBufferBytes": null,
+            "unavailable": {
+                "command": "UTF-8 error surfaced before the higher-level command wrapper was built",
+                "peakStreamedStdoutLineBufferBytes": "reader returned the UTF-8 error before a stream outcome was emitted",
+            },
+        }));
+    }
+
+    if lower.contains("exceeded") && lower.contains("byte capture limit") {
+        let stream = if lower.contains(" stderr ") {
+            "stderr"
+        } else if lower.contains(" stdout ") {
+            "stdout"
+        } else {
+            "unknown"
+        };
+        return Some(json!({
+            "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+            "outcome": "cap_error",
+            "command": null,
+            "cap": {
+                "stream": stream,
+                "kind": "capture",
+                "limitBytes": first_usize_in_text(message),
+            },
+            "timeout": false,
+            "killAttempted": true,
+            "reapSucceeded": true,
+            "stderrCapture": {
+                "truncated": false,
+                "captureCapExceeded": stream == "stderr",
+            },
+            "peakStreamedStdoutLineBufferBytes": null,
+            "unavailable": {
+                "command": "capture-cap error surfaced before the higher-level command wrapper was built",
+                "peakStreamedStdoutLineBufferBytes": "not available for whole-pipe capture mode",
+            },
+        }));
+    }
+
+    None
+}
+
+fn cass_command_subprocess_diagnostics_json(
+    command: &str,
+    exit_code: Option<i32>,
+    stderr: &str,
+    timed_out: bool,
+    stderr_truncated: bool,
+    stdout_line_count: Option<usize>,
+    peak_stdout_line_bytes: Option<usize>,
+    peak_stdout_buffer_bytes: Option<usize>,
+) -> JsonValue {
+    json!({
+        "schema": CASS_SUBPROCESS_DIAGNOSTICS_SCHEMA_V1,
+        "outcome": if timed_out { "timeout" } else { "cass_command_failure" },
+        "command": command,
+        "exitCode": exit_code,
+        "cap": null,
+        "timeout": timed_out,
+        "killAttempted": timed_out,
+        "reapSucceeded": if timed_out { Some(true) } else { None },
+        "reapUnavailableReason": if timed_out {
+            None
+        } else {
+            Some("subprocess exited before adapter cleanup was required")
+        },
+        "stderrCapture": {
+            "truncated": stderr_truncated,
+            "captureCapExceeded": false,
+            "capturedBytes": stderr.len(),
+        },
+        "stdoutLineCount": stdout_line_count,
+        "peakStreamedStdoutLineBytes": peak_stdout_line_bytes,
+        "peakStreamedStdoutLineBufferBytes": peak_stdout_buffer_bytes,
+    })
+}
+
+fn first_usize_in_text(text: &str) -> Option<usize> {
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .find(|token| !token.is_empty())
+        .and_then(|token| token.parse().ok())
 }
 
 /// Bounded summary of CASS import parser output for fuzzing and parser
@@ -543,7 +707,7 @@ fn persist_session_import_if_absent(
     session: &CassSessionInfo,
     spans: &[CassViewSpanForImport],
 ) -> Result<SessionImportPersistResult, DbError> {
-    let session_id = stable_session_id(&session.source_path);
+    let session_id = stable_session_id(workspace_id, &session.source_path);
     let index_job_id = stable_search_index_job_id(workspace_id, &session_id);
 
     with_import_session_transaction(connection, || {
@@ -841,6 +1005,11 @@ fn ensure_successful_outcome(
         command: command.to_string(),
         exit_code: outcome.exit_code(),
         stderr: outcome.stderr_utf8_lossy().trim().to_string(),
+        timed_out: outcome.timed_out(),
+        stderr_truncated: false,
+        stdout_line_count: None,
+        peak_stdout_line_bytes: None,
+        peak_stdout_buffer_bytes: None,
     })
 }
 
@@ -859,6 +1028,11 @@ fn ensure_successful_stream_outcome(
         command: command.to_string(),
         exit_code: outcome.exit_code(),
         stderr: outcome.stderr_utf8_lossy().trim().to_string(),
+        timed_out: outcome.timed_out(),
+        stderr_truncated: false,
+        stdout_line_count: Some(outcome.stdout_line_count()),
+        peak_stdout_line_bytes: Some(outcome.peak_stdout_line_bytes()),
+        peak_stdout_buffer_bytes: Some(outcome.peak_stdout_buffer_bytes()),
     })
 }
 
@@ -1407,18 +1581,7 @@ fn complete_ledger(
         ledger_id,
         &CompleteImportLedgerInput {
             status: status.to_string(),
-            cursor_json: Some(
-                json!({
-                    "lastSourcePath": cursor.last_source_path,
-                    "lastLine": cursor.last_line,
-                    "sessionsDiscovered": cursor.sessions_discovered,
-                    "sessionsImported": cursor.sessions_imported,
-                    "sessionsSkipped": cursor.sessions_skipped,
-                    "spansImported": cursor.spans_imported,
-                    "complete": cursor.is_complete(),
-                })
-                .to_string(),
-            ),
+            cursor_json: Some(import_cursor_json(cursor, error).to_string()),
             imported_session_delta: imported_sessions,
             imported_span_delta: imported_spans,
             error_code: error.map(|err| error_code(err).to_string()),
@@ -1427,6 +1590,24 @@ fn complete_ledger(
         },
     )?;
     Ok(())
+}
+
+fn import_cursor_json(cursor: &ImportCursor, error: Option<&CassImportError>) -> JsonValue {
+    let mut cursor_json = json!({
+        "lastSourcePath": cursor.last_source_path,
+        "lastLine": cursor.last_line,
+        "sessionsDiscovered": cursor.sessions_discovered,
+        "sessionsImported": cursor.sessions_imported,
+        "sessionsSkipped": cursor.sessions_skipped,
+        "spansImported": cursor.spans_imported,
+        "complete": cursor.is_complete(),
+    });
+    if let Some(diagnostics) = error.and_then(CassImportError::subprocess_diagnostics_json)
+        && let Some(object) = cursor_json.as_object_mut()
+    {
+        object.insert("subprocessDiagnostics".to_string(), diagnostics);
+    }
+    cursor_json
 }
 
 fn error_code(error: &CassImportError) -> &'static str {
@@ -1792,8 +1973,11 @@ fn stable_workspace_id(path: &str) -> String {
     WorkspaceId::from_uuid(stable_uuid(&format!("workspace:{path}"))).to_string()
 }
 
-fn stable_session_id(source_path: &str) -> String {
-    SessionId::from_uuid(stable_uuid(&format!("session:{source_path}"))).to_string()
+fn stable_session_id(workspace_id: &str, source_path: &str) -> String {
+    SessionId::from_uuid(stable_uuid(&format!(
+        "session:{workspace_id}:{source_path}"
+    )))
+    .to_string()
 }
 
 fn stable_evidence_id(session_id: &str, span_id: &str) -> String {
@@ -1887,6 +2071,116 @@ mod tests {
         } else {
             Err(format!("{context}: expected {expected:?}, got {actual:?}"))
         }
+    }
+
+    #[test]
+    fn subprocess_diagnostics_classifies_stdout_line_cap() -> TestResult {
+        let error = CassImportError::Cass(CassError::Io {
+            message: format!(
+                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
+            ),
+        });
+        let diagnostics = error
+            .subprocess_diagnostics_json()
+            .ok_or_else(|| "stdout line cap should produce diagnostics".to_string())?;
+
+        ensure_equal(
+            &diagnostics["schema"],
+            &json!("ee.cass.subprocess_diagnostics.v1"),
+            "diagnostics schema",
+        )?;
+        ensure_equal(
+            &diagnostics["outcome"],
+            &json!("cap_error"),
+            "diagnostics outcome",
+        )?;
+        ensure_equal(
+            &diagnostics["cap"]["stream"],
+            &json!("stdout"),
+            "cap stream",
+        )?;
+        ensure_equal(&diagnostics["cap"]["kind"], &json!("line"), "cap kind")?;
+        ensure_equal(&diagnostics["timeout"], &json!(false), "timeout flag")?;
+        ensure_equal(
+            &diagnostics["killAttempted"],
+            &json!(true),
+            "kill attempted",
+        )?;
+        ensure_equal(
+            &diagnostics["reapSucceeded"],
+            &json!(true),
+            "reap succeeded",
+        )
+    }
+
+    #[test]
+    fn subprocess_diagnostics_records_timeout_stream_metrics() -> TestResult {
+        let error = CassImportError::CassCommand {
+            command: "cass view".to_string(),
+            exit_code: None,
+            stderr: String::new(),
+            timed_out: true,
+            stderr_truncated: false,
+            stdout_line_count: Some(1),
+            peak_stdout_line_bytes: Some(128),
+            peak_stdout_buffer_bytes: Some(256),
+        };
+        let diagnostics = error
+            .subprocess_diagnostics_json()
+            .ok_or_else(|| "timeout command should produce diagnostics".to_string())?;
+
+        ensure_equal(
+            &diagnostics["outcome"],
+            &json!("timeout"),
+            "diagnostics outcome",
+        )?;
+        ensure_equal(&diagnostics["command"], &json!("cass view"), "command")?;
+        ensure_equal(&diagnostics["timeout"], &json!(true), "timeout flag")?;
+        ensure_equal(
+            &diagnostics["killAttempted"],
+            &json!(true),
+            "kill attempted",
+        )?;
+        ensure_equal(
+            &diagnostics["reapSucceeded"],
+            &json!(true),
+            "reap succeeded",
+        )?;
+        ensure_equal(
+            &diagnostics["stdoutLineCount"],
+            &json!(1),
+            "stdout line count",
+        )?;
+        ensure_equal(
+            &diagnostics["peakStreamedStdoutLineBufferBytes"],
+            &json!(256),
+            "peak buffer bytes",
+        )
+    }
+
+    #[test]
+    fn failed_import_cursor_includes_subprocess_diagnostics_only_when_available() -> TestResult {
+        let cursor = ImportCursor::new();
+        let clean_cursor = import_cursor_json(&cursor, None);
+        ensure(
+            clean_cursor.get("subprocessDiagnostics").is_none(),
+            "successful cursor should not include subprocess diagnostics",
+        )?;
+
+        let error = CassImportError::Cass(CassError::Io {
+            message: "cass subprocess stderr exceeded 104857600 byte capture limit".to_string(),
+        });
+        let failed_cursor = import_cursor_json(&cursor, Some(&error));
+        ensure_equal(
+            &failed_cursor["subprocessDiagnostics"]["cap"]["stream"],
+            &json!("stderr"),
+            "diagnostic cap stream",
+        )?;
+        ensure_equal(
+            &failed_cursor["subprocessDiagnostics"]["stderrCapture"]["captureCapExceeded"],
+            &json!(true),
+            "stderr cap exceeded",
+        )
     }
 
     #[cfg(unix)]
@@ -2518,11 +2812,15 @@ mod tests {
 
     #[test]
     fn report_json_redacts_sensitive_source_refs() -> TestResult {
+        let source_secret = format!("sk_live_{}", "1234567890abcdef");
+        let session_token = format!("ghp_{}", "1234567890abcdef1234567890abcdef1234");
         let report = CassImportReport {
             schema: IMPORT_CASS_SCHEMA_V1,
             workspace_path: "/Users/alice/project".to_string(),
             database_path: Some("/Users/alice/project/.ee/ee.db".to_string()),
-            source_id: "cass://sessions?workspace=/Users/alice/private&api_key=sk_live_1234567890abcdef".to_string(),
+            source_id: format!(
+                "cass://sessions?workspace=/Users/alice/private&api_key={source_secret}"
+            ),
             ledger_id: Some("imp_abc".to_string()),
             dry_run: false,
             since: None,
@@ -2534,7 +2832,9 @@ mod tests {
             index_required_action: None,
             status: "completed".to_string(),
             sessions: vec![ImportedCassSession {
-                source_path: "file:///Users/alice/.codex/sessions/session.jsonl?token=ghp_1234567890abcdef1234567890abcdef1234".to_string(),
+                source_path: format!(
+                    "file:///Users/alice/.codex/sessions/session.jsonl?token={session_token}"
+                ),
                 session_id: Some("sess_abc".to_string()),
                 index_job_id: None,
                 status: ImportSessionStatus::Imported,
@@ -2562,11 +2862,11 @@ mod tests {
             "raw user path must not appear in public source refs",
         )?;
         ensure(
-            !rendered_source_refs.contains("sk_live_1234567890abcdef"),
+            !rendered_source_refs.contains(&source_secret),
             "source id secret must not appear in public import report JSON",
         )?;
         ensure(
-            !rendered_source_refs.contains("ghp_1234567890abcdef1234567890abcdef1234"),
+            !rendered_source_refs.contains(&session_token),
             "session path token must not appear in public import report JSON",
         )
     }
@@ -2935,7 +3235,7 @@ mod tests {
     #[test]
     fn stable_ids_match_storage_constraints() -> TestResult {
         let workspace_id = stable_workspace_id("/tmp/work");
-        let session_id = stable_session_id("/tmp/session.jsonl");
+        let session_id = stable_session_id(&workspace_id, "/tmp/session.jsonl");
         let evidence_id = stable_evidence_id(&session_id, "span-1");
         let audit_id = stable_cass_redaction_audit_id(&evidence_id);
         let import_id = stable_import_id("cass://sessions?workspace=/tmp/work&limit=10");
@@ -2969,6 +3269,28 @@ mod tests {
         ensure(
             index_job_id.starts_with("sidx_") && index_job_id.len() == 31,
             "search index job id shape",
+        )
+    }
+
+    #[test]
+    fn stable_session_ids_are_workspace_scoped() -> TestResult {
+        let source_path = "/tmp/session.jsonl";
+        let first_workspace = stable_workspace_id("/tmp/work-a");
+        let second_workspace = stable_workspace_id("/tmp/work-b");
+        let first_session = stable_session_id(&first_workspace, source_path);
+        let second_session = stable_session_id(&second_workspace, source_path);
+
+        ensure(
+            first_session != second_session,
+            "same cass source path in different workspaces must not collide",
+        )?;
+        ensure(
+            first_session.starts_with("sess_") && first_session.len() == 31,
+            "first session id shape",
+        )?;
+        ensure(
+            second_session.starts_with("sess_") && second_session.len() == 31,
+            "second session id shape",
         )
     }
 }

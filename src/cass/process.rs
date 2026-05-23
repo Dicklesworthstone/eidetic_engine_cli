@@ -43,6 +43,9 @@ const TIMEOUT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const SPAWN_RETRY_ATTEMPTS: usize = 6;
 const CASS_PIPE_CAPTURE_MAX_BYTES: usize = 100 * 1024 * 1024;
 pub(crate) const CASS_STDOUT_LINE_MAX_BYTES: usize = 1024 * 1024;
+const CASS_STDOUT_LINE_DELIMITER_MAX_BYTES: usize = 2;
+const CASS_STDOUT_LINE_READ_LIMIT_BYTES: usize =
+    CASS_STDOUT_LINE_MAX_BYTES + CASS_STDOUT_LINE_DELIMITER_MAX_BYTES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CassSpawnTarget {
@@ -137,6 +140,7 @@ pub(crate) struct CassStreamOutcome {
     stderr: Vec<u8>,
     exit_code: Option<i32>,
     class: CassExitClass,
+    timed_out: bool,
     stdout_line_count: usize,
     stdout_bytes_seen: usize,
     peak_stdout_line_bytes: usize,
@@ -162,6 +166,7 @@ impl CassStreamOutcome {
             stderr,
             exit_code,
             class,
+            timed_out,
             stdout_line_count,
             stdout_bytes_seen,
             peak_stdout_line_bytes,
@@ -185,6 +190,11 @@ impl CassStreamOutcome {
     }
 
     #[must_use]
+    pub(crate) const fn timed_out(&self) -> bool {
+        self.timed_out
+    }
+
+    #[must_use]
     pub(crate) const fn stdout_line_count(&self) -> usize {
         self.stdout_line_count
     }
@@ -205,8 +215,8 @@ impl CassStreamOutcome {
     /// largest *delivered* line: this field reports the peak size of the
     /// raw read buffer including any line that overshot the size cap and
     /// was rejected. The reader bounds this at
-    /// [`CASS_STDOUT_LINE_MAX_BYTES`] + 1; a higher value here would mean
-    /// the streaming bound has regressed.
+    /// [`CASS_STDOUT_LINE_READ_LIMIT_BYTES`]; a higher value here would
+    /// mean the streaming bound has regressed.
     #[must_use]
     pub(crate) const fn peak_stdout_buffer_bytes(&self) -> usize {
         self.peak_stdout_buffer_bytes
@@ -338,9 +348,9 @@ impl CassInvocation {
     ///
     /// This is for CASS surfaces that can emit JSONL. Unlike [`Self::run`],
     /// stdout is never retained as one contiguous byte buffer, and the
-    /// per-line read buffer is bounded at [`CASS_STDOUT_LINE_MAX_BYTES`]
-    /// + 1 bytes — overshoot is rejected *before* the bytes are realized
-    /// into a [`String`], not after.
+    /// per-line read buffer is bounded at [`CASS_STDOUT_LINE_READ_LIMIT_BYTES`]
+    /// bytes — enough for one logical line plus `\r\n`; overshoot is rejected
+    /// *before* the bytes are realized into a [`String`], not after.
     pub(crate) fn run_stdout_lines<F, E>(
         &self,
         handle_line: F,
@@ -442,8 +452,33 @@ impl CassInvocation {
             if child_status.is_none() {
                 child_status = child.try_wait().map_err(CassStreamError::from_cass)?;
             }
-            collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)
+            if let Err(error) = collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)
+            {
+                #[cfg(unix)]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    child_group,
+                    &mut child_status,
+                    "stderr pipe reader error",
+                )
                 .map_err(CassStreamError::Cass)?;
+                #[cfg(not(unix))]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    &mut child_status,
+                    "stderr pipe reader error",
+                )
+                .map_err(CassStreamError::Cass)?;
+                let _ = drain_stdout_line_reader_after_stop(
+                    &stdout_rx,
+                    &mut stdout_done,
+                    &mut stdout_line_count,
+                    &mut stdout_bytes_seen,
+                    &mut peak_stdout_line_bytes,
+                );
+                let _ = join_stdout_line_reader(&mut stdout_thread);
+                return Err(CassStreamError::Cass(error));
+            }
             if stdout_done {
                 collect_finished_stdout_line_reader(&mut stdout_thread)
                     .map_err(CassStreamError::Cass)?;
@@ -567,8 +602,52 @@ impl CassInvocation {
             if child_status.is_none() {
                 child_status = child.try_wait().map_err(CassError::from)?;
             }
-            collect_finished_pipe_reader(&mut stdout_thread, &mut stdout_bytes)?;
-            collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)?;
+            if let Err(error) = collect_finished_pipe_reader(&mut stdout_thread, &mut stdout_bytes)
+            {
+                #[cfg(unix)]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    child_group,
+                    &mut child_status,
+                    "stdout pipe reader error",
+                )?;
+                #[cfg(not(unix))]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    &mut child_status,
+                    "stdout pipe reader error",
+                )?;
+                let _ = drain_pipe_readers_after_timeout(
+                    &mut stdout_thread,
+                    &mut stderr_thread,
+                    &mut stdout_bytes,
+                    &mut stderr_bytes,
+                );
+                return Err(error);
+            }
+            if let Err(error) = collect_finished_pipe_reader(&mut stderr_thread, &mut stderr_bytes)
+            {
+                #[cfg(unix)]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    child_group,
+                    &mut child_status,
+                    "stderr pipe reader error",
+                )?;
+                #[cfg(not(unix))]
+                terminate_cass_child_after_reader_error(
+                    &mut child,
+                    &mut child_status,
+                    "stderr pipe reader error",
+                )?;
+                let _ = drain_pipe_readers_after_timeout(
+                    &mut stdout_thread,
+                    &mut stderr_thread,
+                    &mut stdout_bytes,
+                    &mut stderr_bytes,
+                );
+                return Err(error);
+            }
 
             if let Some((status, stdout_bytes, stderr_bytes)) =
                 take_completed_subprocess(&mut child_status, &mut stdout_bytes, &mut stderr_bytes)
@@ -730,12 +809,12 @@ fn spawn_stdout_line_reader(
 }
 
 fn bounded_stdout_line_buffer() -> Vec<u8> {
-    // Pre-reserve the buffer at the line cap + 1 byte so that even
-    // an adversarial single-pathological-line input (one line with
-    // no '\n' for many megabytes) cannot push the reader's allocation
-    // past the cap. `Vec::clear` keeps this capacity for every
-    // subsequent line.
-    Vec::with_capacity(CASS_STDOUT_LINE_MAX_BYTES + 1)
+    // Pre-reserve the buffer at the logical line cap plus CRLF delimiter
+    // slack so that even an adversarial single-pathological-line input
+    // (one line with no '\n' for many megabytes) cannot push the reader's
+    // allocation past the bounded read window. `Vec::clear` keeps this
+    // capacity for every subsequent line.
+    Vec::with_capacity(CASS_STDOUT_LINE_READ_LIMIT_BYTES)
 }
 
 fn read_bounded_stdout_line<R: BufRead>(
@@ -744,35 +823,28 @@ fn read_bounded_stdout_line<R: BufRead>(
     peak_buffer_bytes: &AtomicUsize,
 ) -> Result<Option<String>, CassError> {
     buf.clear();
-    // `take((CAP + 1) as u64).read_until(b'\n', ...)` reads at most
-    // CAP + 1 bytes and stops the moment either a newline is observed,
-    // EOF is reached, or the Take limit is exhausted. The pre-yield cap
-    // check below fires *before* the bytes are ever realized into a
-    // `String`, fixing the bd-352wc reactive-cap regression
+    // `take(READ_LIMIT).read_until(b'\n', ...)` reads at most one logical
+    // line plus CRLF delimiter slack and stops the moment either a newline
+    // is observed, EOF is reached, or the Take limit is exhausted. The
+    // pre-yield cap check below fires *before* the bytes are ever realized
+    // into a `String`, fixing the bd-352wc reactive-cap regression
     // (BufReader::lines fully realized the line into memory before the
     // post-yield size check).
     let read_result = reader
         .by_ref()
-        .take((CASS_STDOUT_LINE_MAX_BYTES + 1) as u64)
+        .take(CASS_STDOUT_LINE_READ_LIMIT_BYTES as u64)
         .read_until(b'\n', buf);
     peak_buffer_bytes.fetch_max(buf.len(), Ordering::Relaxed);
-    let bytes_read = match read_result {
+    match read_result {
         Ok(0) => return Ok(None),
-        Ok(n) => n,
+        Ok(_) => {}
         Err(error) => {
             return Err(CassError::Io {
                 message: format!("cass subprocess stdout line read failed: {error}"),
             });
         }
-    };
-    let has_newline = buf.last() == Some(&b'\n');
-    if !has_newline && bytes_read > CASS_STDOUT_LINE_MAX_BYTES {
-        return Err(CassError::Io {
-            message: format!(
-                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
-            ),
-        });
     }
+    let has_newline = buf.last() == Some(&b'\n');
     // Strip trailing '\n' (and a preceding '\r' for CRLF input) to
     // match the byte-stripping behavior of `BufRead::read_line` /
     // `BufRead::lines`.
@@ -782,6 +854,13 @@ fn read_bounded_stdout_line<R: BufRead>(
         if line_bytes.last() == Some(&b'\r') {
             line_bytes = &line_bytes[..line_bytes.len() - 1];
         }
+    }
+    if line_bytes.len() > CASS_STDOUT_LINE_MAX_BYTES {
+        return Err(CassError::Io {
+            message: format!(
+                "cass subprocess stdout line exceeded {CASS_STDOUT_LINE_MAX_BYTES} byte limit"
+            ),
+        });
     }
     let line = std::str::from_utf8(line_bytes)
         .map_err(|error| CassError::Io {
@@ -1028,6 +1107,43 @@ fn collect_finished_pipe_reader(
             *bytes = Some(join_pipe_reader(reader)?);
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn terminate_cass_child_after_reader_error(
+    child: &mut std::process::Child,
+    child_group: Pid,
+    child_status: &mut Option<ExitStatus>,
+    reason: &str,
+) -> Result<(), CassError> {
+    terminate_cass_process_group(child_group);
+    terminate_cass_child_after_reader_error_without_group(child, child_status, reason)
+}
+
+#[cfg(not(unix))]
+fn terminate_cass_child_after_reader_error(
+    child: &mut std::process::Child,
+    child_status: &mut Option<ExitStatus>,
+    reason: &str,
+) -> Result<(), CassError> {
+    terminate_cass_child_after_reader_error_without_group(child, child_status, reason)
+}
+
+fn terminate_cass_child_after_reader_error_without_group(
+    child: &mut std::process::Child,
+    child_status: &mut Option<ExitStatus>,
+    reason: &str,
+) -> Result<(), CassError> {
+    if child_status.is_some() {
+        return Ok(());
+    }
+    if let Err(kill_error) = child.kill()
+        && kill_error.kind() != std::io::ErrorKind::InvalidInput
+    {
+        tracing::debug!("cass subprocess kill failed after {reason}: {kill_error}");
+    }
+    *child_status = Some(child.wait().map_err(CassError::from)?);
     Ok(())
 }
 
@@ -1674,6 +1790,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn run_stdout_lines_rejects_invalid_utf8_before_handler() -> Result<(), String> {
+        let dir = unique_test_dir("stream-invalid-utf8")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        write_executable_script(&binary, "#!/bin/sh\nprintf '\\377\\n'\n", 0o755)?;
+
+        let inv = CassInvocation::new(binary, ["view", "--json"]);
+        let mut handler_invoked = false;
+        let result = inv.run_stdout_lines::<_, std::convert::Infallible>(|_line| {
+            handler_invoked = true;
+            Ok(())
+        });
+
+        let error = match result {
+            Ok(_) => return Err("invalid UTF-8 stdout should fail the stream".to_owned()),
+            Err(super::CassStreamError::Cass(error)) => error,
+            Err(super::CassStreamError::Handler(infallible)) => match infallible {},
+        };
+
+        assert!(
+            error.to_string().contains("was not valid UTF-8"),
+            "unexpected error: {error}",
+        );
+        assert!(!handler_invoked, "handler ran for invalid UTF-8 stdout");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn run_without_timeout_uses_capped_pipe_capture() -> Result<(), String> {
         let dir = unique_test_dir("plain-run-pipe-cap")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -1850,6 +1995,186 @@ mod tests {
         assert_eq!(peak_line_bytes, 3);
     }
 
+    #[test]
+    fn read_bounded_stdout_line_accepts_exact_cap_crlf_line() -> Result<(), String> {
+        use std::io::BufReader;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::{
+            CASS_STDOUT_LINE_MAX_BYTES, CASS_STDOUT_LINE_READ_LIMIT_BYTES,
+            bounded_stdout_line_buffer, read_bounded_stdout_line,
+        };
+
+        let mut input = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES];
+        input.extend_from_slice(b"\r\n");
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = bounded_stdout_line_buffer();
+        let peak_buffer_bytes = AtomicUsize::new(0);
+
+        let line = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+            .map_err(|error| error.to_string())?
+            .ok_or("expected one CRLF-terminated line at the cap")?;
+
+        assert_eq!(line.len(), CASS_STDOUT_LINE_MAX_BYTES);
+        assert!(line.bytes().all(|byte| byte == b'x'));
+        assert!(peak_buffer_bytes.load(Ordering::Relaxed) <= CASS_STDOUT_LINE_READ_LIMIT_BYTES);
+        assert!(
+            read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_bounded_stdout_line_accepts_exact_cap_lf_line() -> Result<(), String> {
+        use std::io::BufReader;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::{
+            CASS_STDOUT_LINE_MAX_BYTES, CASS_STDOUT_LINE_READ_LIMIT_BYTES,
+            bounded_stdout_line_buffer, read_bounded_stdout_line,
+        };
+
+        let mut input = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES];
+        input.push(b'\n');
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = bounded_stdout_line_buffer();
+        let peak_buffer_bytes = AtomicUsize::new(0);
+
+        let line = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+            .map_err(|error| error.to_string())?
+            .ok_or("expected one LF-terminated line at the cap")?;
+
+        assert_eq!(line.len(), CASS_STDOUT_LINE_MAX_BYTES);
+        assert!(line.bytes().all(|byte| byte == b'x'));
+        assert!(peak_buffer_bytes.load(Ordering::Relaxed) <= CASS_STDOUT_LINE_READ_LIMIT_BYTES);
+        Ok(())
+    }
+
+    #[test]
+    fn read_bounded_stdout_line_rejects_cap_plus_one_lf_line() {
+        use std::io::BufReader;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use super::{
+            CASS_STDOUT_LINE_MAX_BYTES, CASS_STDOUT_LINE_READ_LIMIT_BYTES,
+            bounded_stdout_line_buffer, read_bounded_stdout_line,
+        };
+
+        let mut input = vec![b'x'; CASS_STDOUT_LINE_MAX_BYTES + 1];
+        input.push(b'\n');
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = bounded_stdout_line_buffer();
+        let peak_buffer_bytes = AtomicUsize::new(0);
+
+        let error = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+            .expect_err("cap+1 logical line must reject even when LF-terminated");
+
+        assert!(
+            error.to_string().contains("stdout line exceeded"),
+            "unexpected error: {error}",
+        );
+        assert!(peak_buffer_bytes.load(Ordering::Relaxed) <= CASS_STDOUT_LINE_READ_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn read_bounded_stdout_line_rejects_invalid_utf8() {
+        use std::io::BufReader;
+        use std::sync::atomic::AtomicUsize;
+
+        use super::{bounded_stdout_line_buffer, read_bounded_stdout_line};
+
+        let input = [0xff, b'\n'];
+        let mut reader = BufReader::new(input.as_slice());
+        let mut buf = bounded_stdout_line_buffer();
+        let peak_buffer_bytes = AtomicUsize::new(0);
+
+        let error = read_bounded_stdout_line(&mut reader, &mut buf, &peak_buffer_bytes)
+            .expect_err("invalid UTF-8 line must reject before String allocation succeeds");
+
+        assert!(
+            error.to_string().contains("was not valid UTF-8"),
+            "unexpected error: {error}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_capped_pipes_terminates_child_after_stdout_cap_error() -> Result<(), String> {
+        let dir = unique_test_dir("pipe-cap-kills-child")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        let marker = dir.join("child-survived");
+        write_executable_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf 123456789\nsleep 1\nprintf survived > '{}'\n",
+                marker.display()
+            ),
+            0o755,
+        )?;
+
+        let inv = CassInvocation::new(binary.clone(), ["view"]);
+        let error = inv
+            .run_with_capped_pipes(
+                std::process::Command::new(&binary),
+                Instant::now(),
+                Some(Duration::from_secs(5)),
+                8,
+            )
+            .expect_err("stdout cap error should fail the invocation");
+
+        assert!(
+            error.to_string().contains("stdout exceeded 8 byte"),
+            "unexpected error: {error}",
+        );
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "cass child survived after a stdout pipe reader cap error",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_capped_pipes_terminates_child_after_stderr_cap_error() -> Result<(), String> {
+        let dir = unique_test_dir("pipe-cap-kills-child-stderr")?;
+        fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+        let binary = dir.join("cass");
+        let marker = dir.join("child-survived");
+        write_executable_script(
+            &binary,
+            &format!(
+                "#!/bin/sh\nprintf 123456789 >&2\nsleep 1\nprintf survived > '{}'\n",
+                marker.display()
+            ),
+            0o755,
+        )?;
+
+        let inv = CassInvocation::new(binary.clone(), ["view"]);
+        let error = inv
+            .run_with_capped_pipes(
+                std::process::Command::new(&binary),
+                Instant::now(),
+                Some(Duration::from_secs(5)),
+                8,
+            )
+            .expect_err("stderr cap error should fail the invocation");
+
+        assert!(
+            error.to_string().contains("stderr exceeded 8 byte"),
+            "unexpected error: {error}",
+        );
+        std::thread::sleep(Duration::from_millis(1200));
+        assert!(
+            !marker.exists(),
+            "cass child survived after a stderr pipe reader cap error",
+        );
+        Ok(())
+    }
+
     /// bd-352wc regression: a single line larger than the 1 MiB cap
     /// must be rejected *before* its bytes are fully realized into the
     /// reader's buffer. Pre-fix, `BufReader::lines()` allocated the
@@ -1858,14 +2183,17 @@ mod tests {
     /// reactive, not preventive. This test feeds a 2 MiB single-line
     /// blob with no newline and asserts both that the line-cap error
     /// fires *and* that the reader's peak byte buffer stayed well
-    /// under 2 MiB (i.e. ≤ CASS_STDOUT_LINE_MAX_BYTES + 1).
+    /// under 2 MiB (i.e. ≤ CASS_STDOUT_LINE_READ_LIMIT_BYTES).
     #[cfg(unix)]
     #[test]
     fn run_stdout_lines_bounds_buffer_below_oversize_single_line() -> Result<(), String> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use super::{CASS_STDOUT_LINE_MAX_BYTES, CassStreamError, spawn_stdout_line_reader};
+        use super::{
+            CASS_STDOUT_LINE_MAX_BYTES, CASS_STDOUT_LINE_READ_LIMIT_BYTES, CassStreamError,
+            spawn_stdout_line_reader,
+        };
 
         let dir = unique_test_dir("stdout-line-cap-bounded")?;
         fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
@@ -1912,11 +2240,10 @@ mod tests {
         }
 
         let peak_buffer_bytes = probe.load(Ordering::Relaxed);
-        let cap_plus_one = CASS_STDOUT_LINE_MAX_BYTES + 1;
-        if peak_buffer_bytes > cap_plus_one {
+        if peak_buffer_bytes > CASS_STDOUT_LINE_READ_LIMIT_BYTES {
             return Err(format!(
                 "reader buffer overshot the cap: peak={peak_buffer_bytes} bytes \
-                 (cap+1 = {cap_plus_one}); the cap is reactive, not preventive — \
+                 (read limit = {CASS_STDOUT_LINE_READ_LIMIT_BYTES}); the cap is reactive, not preventive — \
                  see bd-352wc"
             ));
         }
@@ -1985,10 +2312,10 @@ mod tests {
             );
         }
         let peak_direct = probe_direct.load(Ordering::Relaxed);
-        if peak_direct > cap_plus_one {
+        if peak_direct > CASS_STDOUT_LINE_READ_LIMIT_BYTES {
             return Err(format!(
                 "direct reader buffer overshot the cap: peak={peak_direct} bytes \
-                 (cap+1 = {cap_plus_one})"
+                 (read limit = {CASS_STDOUT_LINE_READ_LIMIT_BYTES})"
             ));
         }
         Ok(())

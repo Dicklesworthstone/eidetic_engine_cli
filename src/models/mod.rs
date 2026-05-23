@@ -484,6 +484,11 @@ pub enum DomainError {
         message: String,
         repair: Option<String>,
     },
+    ImportWithDetails {
+        message: String,
+        repair: Option<String>,
+        details_json: String,
+    },
     NotFound {
         resource: String,
         id: String,
@@ -527,7 +532,9 @@ impl std::fmt::Display for DomainError {
             Self::Storage { message, .. } => write!(f, "storage error: {message}"),
             Self::SearchIndex { message, .. } => write!(f, "search index error: {message}"),
             Self::Graph { message, .. } => write!(f, "graph error: {message}"),
-            Self::Import { message, .. } => write!(f, "import error: {message}"),
+            Self::Import { message, .. } | Self::ImportWithDetails { message, .. } => {
+                write!(f, "import error: {message}")
+            }
             Self::NotFound { resource, id, .. } => write!(f, "{resource} not found: {id}"),
             Self::UnsatisfiedDegradedMode { message, .. }
             | Self::UnsatisfiedDegradedModeCode { message, .. } => {
@@ -919,7 +926,7 @@ impl DomainError {
             Self::Storage { .. } => "storage",
             Self::SearchIndex { .. } => "search_index",
             Self::Graph { .. } => "graph",
-            Self::Import { .. } => "import",
+            Self::Import { .. } | Self::ImportWithDetails { .. } => "import",
             Self::NotFound { .. } => "not_found",
             Self::UnsatisfiedDegradedMode { .. } => "unsatisfied_degraded_mode",
             Self::UnsatisfiedDegradedModeCode { code, .. } => code,
@@ -940,6 +947,7 @@ impl DomainError {
             | Self::SearchIndex { message, .. }
             | Self::Graph { message, .. }
             | Self::Import { message, .. }
+            | Self::ImportWithDetails { message, .. }
             | Self::UnsatisfiedDegradedMode { message, .. }
             | Self::UnsatisfiedDegradedModeCode { message, .. }
             | Self::PolicyDenied { message, .. }
@@ -963,6 +971,7 @@ impl DomainError {
             | Self::SearchIndex { repair, .. }
             | Self::Graph { repair, .. }
             | Self::Import { repair, .. }
+            | Self::ImportWithDetails { repair, .. }
             | Self::NotFound { repair, .. }
             | Self::UnsatisfiedDegradedMode { repair, .. }
             | Self::UnsatisfiedDegradedModeCode { repair, .. }
@@ -999,27 +1008,31 @@ impl DomainError {
                 "Store long rationale in an external note or memory, then pass a concise pointer.",
             )],
             // Cass binary not found in trusted locations.
-            Self::Import { .. } if message.contains("cass binary not found") => vec![
-                RecoveryAction::env(
-                    1,
-                    "EE_CASS_BINARY",
-                    "<absolute path to executable cass binary>",
-                    "Fastest fix when cass is installed under ~/.local/bin or another non-trusted location",
-                ),
-                RecoveryAction::config(
-                    2,
-                    ".ee/config.toml",
-                    "cass.binary",
-                    "<absolute path>",
-                    "Persists across sessions; survives shell restart and CI",
-                ),
-                RecoveryAction::install(
-                    3,
-                    "brew install cass",
-                    "/opt/homebrew/bin/cass (auto-discovered)",
-                    "Permanent system-wide solution; preferred for developer workstations",
-                ),
-            ],
+            Self::Import { .. } | Self::ImportWithDetails { .. }
+                if message.contains("cass binary not found") =>
+            {
+                vec![
+                    RecoveryAction::env(
+                        1,
+                        "EE_CASS_BINARY",
+                        "<absolute path to executable cass binary>",
+                        "Fastest fix when cass is installed under ~/.local/bin or another non-trusted location",
+                    ),
+                    RecoveryAction::config(
+                        2,
+                        ".ee/config.toml",
+                        "cass.binary",
+                        "<absolute path>",
+                        "Persists across sessions; survives shell restart and CI",
+                    ),
+                    RecoveryAction::install(
+                        3,
+                        "brew install cass",
+                        "/opt/homebrew/bin/cass (auto-discovered)",
+                        "Permanent system-wide solution; preferred for developer workstations",
+                    ),
+                ]
+            }
             // Search index missing / corrupt / stale.
             Self::SearchIndex { .. } if message.contains("index") => vec![
                 RecoveryAction {
@@ -1216,7 +1229,7 @@ impl DomainError {
             Self::Storage { .. } => ProcessExitCode::Storage,
             Self::SearchIndex { .. } => ProcessExitCode::SearchIndex,
             Self::Graph { .. } => ProcessExitCode::SearchIndex,
-            Self::Import { .. } => ProcessExitCode::Import,
+            Self::Import { .. } | Self::ImportWithDetails { .. } => ProcessExitCode::Import,
             Self::NotFound { .. } => ProcessExitCode::Usage,
             Self::UnsatisfiedDegradedMode { .. } | Self::UnsatisfiedDegradedModeCode { .. } => {
                 ProcessExitCode::UnsatisfiedDegradedMode
@@ -1358,6 +1371,15 @@ mod tests {
                 DomainError::Import {
                     message: String::new(),
                     repair: None,
+                },
+                "import",
+                ProcessExitCode::Import,
+            ),
+            (
+                DomainError::ImportWithDetails {
+                    message: String::new(),
+                    repair: None,
+                    details_json: "{}".to_string(),
                 },
                 "import",
                 ProcessExitCode::Import,

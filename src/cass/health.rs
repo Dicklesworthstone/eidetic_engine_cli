@@ -171,16 +171,13 @@ fn get_u64(value: &serde_json::Value, field: &str) -> Result<u64, CassError> {
 
 fn get_optional_u64(value: &serde_json::Value, field: &str) -> Result<Option<u64>, CassError> {
     match value.get(field) {
-        Some(serde_json::Value::Null) => Ok(None),
+        None | Some(serde_json::Value::Null) => Ok(None),
         Some(number) => number
             .as_u64()
             .map(Some)
             .ok_or_else(|| CassError::InvalidStdoutJson {
                 hint: format!("missing or invalid '{field}' u64 field"),
             }),
-        None => Err(CassError::InvalidStdoutJson {
-            hint: format!("missing or invalid '{field}' u64 field"),
-        }),
     }
 }
 
@@ -344,6 +341,40 @@ mod tests {
         assert!(health.db.counts_skipped);
         assert!(health.db.open_skipped);
         assert_eq!(health.index.documents, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_accepts_health_fast_path_omitted_optional_counts() -> TestResult {
+        let payload = r#"{
+          "status": "unhealthy",
+          "healthy": false,
+          "errors": ["index not found"],
+          "latency_ms": 7,
+          "db": {
+            "exists": true,
+            "opened": true,
+            "counts_skipped": true,
+            "open_skipped": true
+          },
+          "state": {
+            "index": {
+              "exists": false,
+              "status": "missing",
+              "fresh": false,
+              "stale": false
+            }
+          }
+        }"#;
+
+        let health = CassHealth::parse_json(payload)
+            .map_err(|error| format!("fast-path health payload should parse: {error}"))?;
+
+        assert_eq!(health.db.conversations, None);
+        assert_eq!(health.db.messages, None);
+        assert_eq!(health.index.documents, None);
+        assert!(health.db.counts_skipped);
+        assert!(health.db.open_skipped);
         Ok(())
     }
 
