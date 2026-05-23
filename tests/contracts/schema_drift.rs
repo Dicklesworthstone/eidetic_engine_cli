@@ -577,12 +577,66 @@ pub fn check_category_coverage(schemas: &[&SchemaEntry]) -> BTreeMap<SchemaCateg
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+    use std::path::Path;
 
     use ee::db::DbConnection;
+    use serde::Deserialize;
     use sqlmodel_core::{Row, Value};
     use sqlmodel_frankensqlite::FrankenConnection;
 
     type TestResult = Result<(), String>;
+
+    const CONTRACT_INVENTORY_JSON: &str =
+        include_str!("../fixtures/contracts/public_contract_inventory.json");
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ContractInventory {
+        schema: String,
+        generated_by: String,
+        contracts: Vec<ContractInventoryEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ContractInventoryEntry {
+        schema_id: String,
+        status: String,
+        surface: String,
+        owner: String,
+        schema_file: Option<String>,
+        canonical_docs: Vec<String>,
+        current_facing_contexts: Vec<String>,
+        allowed_historical_contexts: Vec<HistoricalContext>,
+        forbidden_current_claims: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct HistoricalContext {
+        path_pattern: String,
+        reason: String,
+    }
+
+    fn contract_inventory() -> Result<ContractInventory, String> {
+        serde_json::from_str(CONTRACT_INVENTORY_JSON)
+            .map_err(|error| format!("parse public contract inventory: {error}"))
+    }
+
+    fn inventory_entry<'a>(
+        inventory: &'a ContractInventory,
+        schema_id: &str,
+    ) -> Result<&'a ContractInventoryEntry, String> {
+        inventory
+            .contracts
+            .iter()
+            .find(|entry| entry.schema_id == schema_id)
+            .ok_or_else(|| format!("missing contract inventory entry for {schema_id}"))
+    }
+
+    fn repo_path(path: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+    }
 
     struct LiveSchemaSnapshot {
         tables: BTreeSet<String>,
@@ -1756,5 +1810,185 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn public_contract_inventory_declares_current_and_legacy_envelopes() -> TestResult {
+        let inventory = contract_inventory()?;
+        ensure_equal(
+            &inventory.schema,
+            &"ee.contract_inventory.v1".to_owned(),
+            "inventory schema",
+        )?;
+        ensure_equal(
+            &inventory.generated_by,
+            &"bd-31nul.1".to_owned(),
+            "inventory provenance",
+        )?;
+
+        let mut seen = BTreeSet::new();
+        for entry in &inventory.contracts {
+            ensure(
+                seen.insert(entry.schema_id.as_str()),
+                format!("duplicate contract inventory entry for {}", entry.schema_id),
+            )?;
+            ensure(
+                matches!(
+                    entry.status.as_str(),
+                    "current" | "legacy" | "retired" | "experimental"
+                ),
+                format!(
+                    "{} has unsupported status {}",
+                    entry.schema_id, entry.status
+                ),
+            )?;
+            ensure(
+                !entry.surface.trim().is_empty(),
+                format!("{} must declare owner surface", entry.schema_id),
+            )?;
+            ensure(
+                !entry.owner.trim().is_empty(),
+                format!("{} must declare owner source", entry.schema_id),
+            )?;
+            ensure(
+                !entry.canonical_docs.is_empty(),
+                format!("{} must declare canonical docs", entry.schema_id),
+            )?;
+        }
+
+        ensure_equal(
+            &inventory_entry(&inventory, "ee.response.v2")?.status,
+            &"current".to_owned(),
+            "response v2 status",
+        )?;
+        ensure_equal(
+            &inventory_entry(&inventory, "ee.error.v2")?.status,
+            &"current".to_owned(),
+            "error v2 status",
+        )?;
+        ensure_equal(
+            &inventory_entry(&inventory, "ee.pack.v2")?.status,
+            &"current".to_owned(),
+            "pack v2 status",
+        )?;
+        ensure_equal(
+            &inventory_entry(&inventory, "ee.response.v1")?.status,
+            &"legacy".to_owned(),
+            "response v1 status",
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn public_contract_inventory_current_entries_match_exported_schema_registry() -> TestResult {
+        let inventory = contract_inventory()?;
+        let exported: BTreeSet<&str> = ee::output::public_schemas()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "current")
+        {
+            ensure(
+                exported.contains(entry.schema_id.as_str()),
+                format!(
+                    "{} is current in contract inventory but missing from src/output/mod.rs::public_schemas",
+                    entry.schema_id
+                ),
+            )?;
+            let schema_file = entry.schema_file.as_deref().ok_or_else(|| {
+                format!(
+                    "{} current contract must declare schemaFile",
+                    entry.schema_id
+                )
+            })?;
+            ensure(
+                repo_path(schema_file).is_file(),
+                format!(
+                    "{} schemaFile does not exist: {schema_file}",
+                    entry.schema_id
+                ),
+            )?;
+            ensure(
+                !entry.current_facing_contexts.is_empty(),
+                format!(
+                    "{} current contract must declare currentFacingContexts",
+                    entry.schema_id
+                ),
+            )?;
+            ensure(
+                entry.forbidden_current_claims.is_empty(),
+                format!(
+                    "{} current contract should not need forbidden legacy claim phrases",
+                    entry.schema_id
+                ),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn public_contract_inventory_legacy_success_envelopes_have_historical_policy() -> TestResult {
+        let inventory = contract_inventory()?;
+
+        for schema_id in ["ee.response.v1", "ee.response.v0"] {
+            let entry = inventory_entry(&inventory, schema_id)?;
+            ensure_equal(
+                &entry.status,
+                &"legacy".to_owned(),
+                &format!("{schema_id} legacy status"),
+            )?;
+            ensure(
+                entry.current_facing_contexts.is_empty(),
+                format!("{schema_id} must not declare current-facing contexts"),
+            )?;
+
+            for required_phrase in [
+                "agent-facing",
+                "always emits",
+                "canonical",
+                "current",
+                "default",
+                "required",
+                "success envelope",
+            ] {
+                ensure(
+                    entry
+                        .forbidden_current_claims
+                        .iter()
+                        .any(|phrase| phrase == required_phrase),
+                    format!("{schema_id} missing forbidden phrase {required_phrase}"),
+                )?;
+            }
+
+            ensure(
+                entry.allowed_historical_contexts.iter().any(|context| {
+                    context.path_pattern == "tests/**" && !context.reason.trim().is_empty()
+                }),
+                format!("{schema_id} must allow test fixtures with a reason"),
+            )?;
+            ensure(
+                entry.allowed_historical_contexts.iter().any(|context| {
+                    context.path_pattern == "docs/migration_v0_1_to_v0_2.md"
+                        && !context.reason.trim().is_empty()
+                }),
+                format!("{schema_id} must allow migration-guide references with a reason"),
+            )?;
+        }
+
+        ensure(
+            inventory_entry(&inventory, "ee.response.v1")?
+                .allowed_historical_contexts
+                .iter()
+                .any(|context| {
+                    context.path_pattern == "docs/archive/**" && !context.reason.trim().is_empty()
+                }),
+            "ee.response.v1 must allow archived historical design references",
+        )
     }
 }

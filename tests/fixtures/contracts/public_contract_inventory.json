@@ -1,0 +1,133 @@
+{
+  "schema": "ee.contract_inventory.v1",
+  "generatedBy": "bd-31nul.1",
+  "contracts": [
+    {
+      "schemaId": "ee.response.v2",
+      "status": "current",
+      "surface": "response_success_envelope",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.response.v2.json",
+      "canonicalDocs": [
+        "AGENTS.md#response-envelope-contract",
+        "README.md#json-output-and-exit-codes"
+      ],
+      "currentFacingContexts": [
+        "AGENTS.md",
+        "README.md",
+        "docs/agent-ux/**",
+        "docs/perf-forensics-cookbook.md",
+        "docs/pack-replay.md",
+        "docs/toon-output.md",
+        "docs/plan-sweep-report.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.error.v2",
+      "status": "current",
+      "surface": "response_error_envelope",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.error.v2.json",
+      "canonicalDocs": [
+        "AGENTS.md#response-envelope-contract",
+        "README.md#json-output-and-exit-codes"
+      ],
+      "currentFacingContexts": [
+        "AGENTS.md",
+        "README.md",
+        "docs/agent-ux/**",
+        "docs/perf-forensics-cookbook.md",
+        "docs/pack-replay.md",
+        "docs/toon-output.md",
+        "docs/plan-sweep-report.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.pack.v2",
+      "status": "current",
+      "surface": "context_pack_payload",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.pack.v2.json",
+      "canonicalDocs": [
+        "AGENTS.md#schema-versions",
+        "README.md#context-pack-controls"
+      ],
+      "currentFacingContexts": [
+        "AGENTS.md",
+        "README.md",
+        "docs/agent-ux/**",
+        "docs/pack-replay.md"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.response.v1",
+      "status": "legacy",
+      "surface": "response_success_envelope",
+      "owner": "src/models/mod.rs::RESPONSE_SCHEMA_V1",
+      "schemaFile": "docs/schemas/ee.response.v1.json",
+      "canonicalDocs": [
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "docs/migration_v0_1_to_v0_2.md",
+          "reason": "Explicit v0.1 to v0.2 before/after migration examples."
+        },
+        {
+          "pathPattern": "docs/archive/**",
+          "reason": "Archived historical design material is not current-facing contract guidance."
+        },
+        {
+          "pathPattern": "tests/**",
+          "reason": "Fixtures and regression tests may preserve old schema IDs while asserting migration behavior."
+        }
+      ],
+      "forbiddenCurrentClaims": [
+        "agent-facing",
+        "always emits",
+        "canonical",
+        "current",
+        "default",
+        "required",
+        "success envelope"
+      ]
+    },
+    {
+      "schemaId": "ee.response.v0",
+      "status": "legacy",
+      "surface": "response_success_envelope",
+      "owner": "src/models/mod.rs::RESPONSE_SCHEMA_V0",
+      "schemaFile": null,
+      "canonicalDocs": [
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "docs/migration_v0_1_to_v0_2.md",
+          "reason": "Migration guide may mention pre-v1 compatibility history."
+        },
+        {
+          "pathPattern": "tests/**",
+          "reason": "Schema-version compatibility tests may include v0 identifiers."
+        }
+      ],
+      "forbiddenCurrentClaims": [
+        "agent-facing",
+        "always emits",
+        "canonical",
+        "current",
+        "default",
+        "required",
+        "success envelope"
+      ]
+    }
+  ]
+}
