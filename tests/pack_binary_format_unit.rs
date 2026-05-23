@@ -1,7 +1,7 @@
 use ee::pack::binary::{
-    PACK_BINARY_HEADER_LEN, PACK_BINARY_ITEM_TABLE_ENTRY_LEN, PACK_BINARY_MAGIC,
-    PACK_BINARY_SCHEMA_V1, PACK_BINARY_TRAILER_LEN, PACK_BINARY_VERSION_V1, PackBinaryError,
-    PackBinaryView, serialize_pack_binary,
+    PACK_BINARY_FLAG_EXPLAIN_INCLUDED, PACK_BINARY_HEADER_LEN, PACK_BINARY_ITEM_TABLE_ENTRY_LEN,
+    PACK_BINARY_MAGIC, PACK_BINARY_SCHEMA_V1, PACK_BINARY_TRAILER_LEN, PACK_BINARY_VERSION_V1,
+    PackBinaryError, PackBinaryView, serialize_pack_binary,
 };
 
 fn fixture_json() -> &'static str {
@@ -334,4 +334,50 @@ fn item_slice_out_of_range_returns_invalid_offset_code() {
         "expected InvalidOffset, got {error:?}"
     );
     assert_eq!(error.code(), "pack_bin_invalid_offset");
+}
+
+// bd-2s77k: pin the binary-pack header `flags` field as a u16 that round-trips
+// bit-identically from writer to reader. The explain-flag is the only bit
+// currently defined; future bits must inherit the same guarantee, so the tests
+// cover three angles: no flags, the explain-flag bit, and all bits set.
+
+#[test]
+fn flags_zero_round_trips_through_header() {
+    let frame = serialize_pack_binary(fixture_json(), &fixture_items(), 0);
+    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+
+    assert_eq!(view.header().flags, 0);
+    assert_eq!(
+        view.header().flags & PACK_BINARY_FLAG_EXPLAIN_INCLUDED,
+        0,
+        "explain bit must be off when caller passes 0"
+    );
+}
+
+#[test]
+fn explain_flag_bit_is_observable_after_round_trip() {
+    let frame = serialize_pack_binary(
+        fixture_json(),
+        &fixture_items(),
+        PACK_BINARY_FLAG_EXPLAIN_INCLUDED,
+    );
+    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+
+    assert_eq!(view.header().flags, PACK_BINARY_FLAG_EXPLAIN_INCLUDED);
+    assert_ne!(
+        view.header().flags & PACK_BINARY_FLAG_EXPLAIN_INCLUDED,
+        0,
+        "explain bit must survive serialize → parse"
+    );
+}
+
+#[test]
+fn flags_all_ones_round_trip_without_reader_masking() {
+    // Pins the contract that the parser does not mask any reserved bits.
+    // If a future reader adds a `flags & KNOWN_MASK` step, this test fails
+    // and forces the change to be explicit instead of silent.
+    let frame = serialize_pack_binary(fixture_json(), &fixture_items(), u16::MAX);
+    let view = PackBinaryView::parse(&frame).expect("frame should parse");
+
+    assert_eq!(view.header().flags, u16::MAX);
 }
