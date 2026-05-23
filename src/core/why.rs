@@ -1169,10 +1169,13 @@ fn explain_memory_inner(
             severity: "low",
             message: "No verification evidence ledger row is linked to this memory; verification-sensitive claims are reported as unverified rather than silently absent."
                 .to_owned(),
-            repair: Some(
-                "ee verification ingest --file <verification-evidence.json> --target-type memory --target-id <memory-id>"
-                    .to_owned(),
-            ),
+            // bd-11pjb slice: drop the <verification-evidence.json> /
+            // <memory-id> metavariable template so classify_repair_command
+            // reports `Actionable`. The agent learns the available flags via
+            // `--help`; the actual memory id is still available on the
+            // owning WhyReport for any harness that wants to pre-fill the
+            // --target-id flag.
+            repair: Some("ee verification ingest --help".to_owned()),
         });
     }
     let workspace_path = workspace_path_for_memory(&conn, &memory.workspace_id);
