@@ -25,6 +25,9 @@ mod cass_import_options_defaults;
 #[path = "contracts/cass_import_error_from_conversions.rs"]
 mod cass_import_error_from_conversions;
 
+#[path = "contracts/cass_import_parse_summaries.rs"]
+mod cass_import_parse_summaries;
+
 #[path = "contracts/cass_import_report_goldens.rs"]
 mod cass_import_report_goldens;
 
