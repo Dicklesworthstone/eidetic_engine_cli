@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.pack.v2.json",
   "title": "ee.pack.v2",
-  "description": "Full ee context response envelope. The outer schema remains ee.response.v1; this schema pins the command-specific context pack payload.",
+  "description": "Full ee context response envelope. The outer schema uses ee.response.v2; this schema pins the command-specific context pack payload.",
   "type": "object",
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
+    "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean"},
     "fields": {"type": "string"},
     "data": {
