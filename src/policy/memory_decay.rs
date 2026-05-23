@@ -343,6 +343,34 @@ mod tests {
     }
 
     #[test]
+    fn future_reference_clamps_to_zero_age_without_decay() -> TestResult {
+        let as_of = "2030-01-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .map_err(|error| error.to_string())?;
+        let future_reference = as_of + Duration::days(30);
+
+        let evaluation = evaluate_memory_decay(
+            &memory_fixture("procedural", "rule", 0.8, 0.8),
+            future_reference,
+            as_of,
+            MemoryDecayThresholds::default(),
+        );
+
+        ensure(evaluation.age_days, 0, "future reference age")?;
+        ensure(evaluation.freshness, 1.0, "future reference freshness")?;
+        ensure(
+            evaluation.action,
+            MemoryDecayAction::Preserve,
+            "future reference action",
+        )?;
+        ensure(
+            evaluation.new_level.as_str(),
+            "procedural",
+            "future reference level",
+        )
+    }
+
+    #[test]
     fn decay_level_demotion_is_reversible_not_destructive() -> TestResult {
         let as_of = "2030-01-01T00:00:00Z"
             .parse::<DateTime<Utc>>()
@@ -397,6 +425,41 @@ mod tests {
             evaluation.action,
             MemoryDecayAction::Tombstone,
             "non-finite action",
+        )
+    }
+
+    #[test]
+    fn invalid_half_life_settings_emit_finite_tombstone_score() -> TestResult {
+        let as_of = "2030-01-01T00:00:00Z"
+            .parse::<DateTime<Utc>>()
+            .map_err(|error| error.to_string())?;
+        let half_lives = MemoryDecayHalfLives {
+            procedural_rule: f32::NAN,
+            ..MemoryDecayHalfLives::default()
+        };
+
+        let evaluation = evaluate_memory_decay_with_settings(
+            &memory_fixture("procedural", "rule", 0.9, 0.9),
+            as_of - Duration::days(1),
+            as_of,
+            MemoryDecaySettings {
+                thresholds: MemoryDecayThresholds::default(),
+                half_lives,
+            },
+        );
+
+        ensure(half_lives.is_valid(), false, "invalid half-life guard")?;
+        ensure(evaluation.half_life_days, 0.0, "invalid half-life days")?;
+        ensure(evaluation.freshness, 0.0, "invalid half-life freshness")?;
+        ensure(
+            evaluation.lifecycle_score,
+            0.0,
+            "invalid half-life lifecycle score",
+        )?;
+        ensure(
+            evaluation.action,
+            MemoryDecayAction::Tombstone,
+            "invalid half-life action",
         )
     }
 }
