@@ -637,12 +637,29 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
     const UNIX_PATH_PREFIXES: &[&str] =
         &["/home/", "/Users/", "/data/", "/workspace/", "/Volumes/"];
+    const ENV_PATH_PREFIXES: &[&str] = &[
+        "%USERPROFILE%",
+        "%APPDATA%",
+        "%LOCALAPPDATA%",
+        "%HOMEDRIVE%",
+        "%HOMEPATH%",
+        "%PROGRAMDATA%",
+        "%PROGRAMFILES%",
+        "%PROGRAMFILES(X86)%",
+        "%TEMP%",
+        "%TMP%",
+        "${HOME}",
+        "$HOME",
+        "~/",
+    ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
         let remaining = &input[cursor..];
-        if let Some(prefix_len) = search_projection_path_prefix_len(remaining, UNIX_PATH_PREFIXES) {
+        if let Some(prefix_len) =
+            search_projection_path_prefix_len(remaining, UNIX_PATH_PREFIXES, ENV_PATH_PREFIXES)
+        {
             output.push_str(REDACTED_PATH);
             cursor += prefix_len;
             while cursor < input.len() {
@@ -673,12 +690,31 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
 fn search_projection_path_prefix_len(
     remaining: &str,
     unix_path_prefixes: &[&str],
+    env_path_prefixes: &[&str],
 ) -> Option<usize> {
     if let Some(prefix) = unix_path_prefixes
         .iter()
         .find(|prefix| remaining.starts_with(**prefix))
     {
         return Some(prefix.len());
+    }
+
+    if starts_with_search_projection_file_host_ref(remaining) {
+        return Some("file://".len());
+    }
+
+    if let Some(prefix) = env_path_prefixes
+        .iter()
+        .find(|prefix| starts_with_ascii_case_insensitive(remaining, prefix))
+    {
+        return Some(prefix.len());
+    }
+
+    if remaining.starts_with(r"\\?\") || remaining.starts_with(r"\\.\") {
+        return Some(4);
+    }
+    if remaining.starts_with(r"\\") {
+        return Some(2);
     }
 
     let bytes = remaining.as_bytes();
@@ -690,6 +726,24 @@ fn search_projection_path_prefix_len(
     } else {
         None
     }
+}
+
+fn starts_with_search_projection_file_host_ref(remaining: &str) -> bool {
+    const FILE_SCHEME: &str = "file://";
+    if !starts_with_ascii_case_insensitive(remaining, FILE_SCHEME) {
+        return false;
+    }
+
+    remaining
+        .as_bytes()
+        .get(FILE_SCHEME.len())
+        .is_some_and(|byte| !matches!(byte, b'/' | b'\\'))
+}
+
+fn starts_with_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn is_search_path_hard_delimiter(character: char) -> bool {
@@ -3293,6 +3347,31 @@ mod tests {
             assert!(
                 !redacted.contains(leaked),
                 "search projection redaction leaked Windows drive path {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_redacts_unc_file_host_and_env_rooted_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"unc=\\server\share\alice\session.jsonl extended=\\?\C:\Users\alice\secret file=file://build-server/share/private/log.txt env=%userprofile%\Secrets\tokens.json app=%LOCALAPPDATA%/Temp/cache.json home=$HOME/.ssh/config next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"unc=[REDACTED_PATH] extended=[REDACTED_PATH] file=[REDACTED_PATH] env=[REDACTED_PATH] app=[REDACTED_PATH] home=[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            r#"\\server\share"#,
+            r#"\\?\C:\Users\alice"#,
+            "build-server/share/private",
+            r#"%userprofile%\Secrets"#,
+            "%LOCALAPPDATA%/Temp",
+            "$HOME/.ssh",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked path variant {leaked}: {redacted}"
             );
         }
     }
