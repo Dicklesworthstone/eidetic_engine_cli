@@ -912,6 +912,10 @@ fn work_packet_command_actions_require_shell_safe_argv_contract() -> TestResult 
             "#/definitions/commandAction",
         ),
         (
+            "/definitions/agentMailFallbackAction/properties/commandAction/anyOf/0/$ref",
+            "#/definitions/commandAction",
+        ),
+        (
             "/definitions/commandAction/properties/argv/$ref",
             "#/definitions/argvArray",
         ),

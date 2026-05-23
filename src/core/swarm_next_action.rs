@@ -648,6 +648,21 @@ pub struct SwarmWorkPacketRecommendedAction {
     pub reasons: Vec<String>,
     pub proof_obligations: Vec<String>,
     pub suggested_commands: Vec<String>,
+    pub suggested_command_actions: Vec<SwarmWorkPacketCommandAction>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketCommandAction {
+    pub command_id: &'static str,
+    pub display_command: String,
+    pub argv: Vec<String>,
+    pub shell_required: bool,
+    pub copy_safety: &'static str,
+    pub mutates_state: bool,
+    pub required_substrate: &'static str,
+    pub when: &'static str,
+    pub rationale: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -699,6 +714,7 @@ pub struct SwarmWorkPacketAgentMailFallbackAction {
     pub kind: &'static str,
     pub summary: &'static str,
     pub command: Option<String>,
+    pub command_action: Option<SwarmWorkPacketCommandAction>,
     pub manual_step: Option<&'static str>,
 }
 
@@ -770,6 +786,7 @@ pub struct SwarmWorkPacketVerification {
 pub struct SwarmWorkPacketVerificationCommand {
     pub command_id: &'static str,
     pub command_template: String,
+    pub command_action: SwarmWorkPacketCommandAction,
     pub required_substrate: &'static str,
     pub when: &'static str,
     pub last_outcome: &'static str,
@@ -1503,6 +1520,7 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
             kind: "manual_coordination",
             summary: "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
             command: None,
+            command_action: None,
             manual_step: Some(
                 "Confirm lane ownership in the active coordination channel before touching shared paths.",
             ),
@@ -1511,12 +1529,14 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
             kind: "retry_later",
             summary: "Retry Agent Mail health after the storage layer or index is repaired.",
             command: None,
+            command_action: None,
             manual_step: Some("Re-run the work-packet collector after Agent Mail reads recover."),
         },
         SwarmWorkPacketAgentMailFallbackAction {
             kind: "switch_to_static_work",
             summary: "Prefer static or docs-first work while coordination authority is unavailable.",
             command: None,
+            command_action: None,
             manual_step: Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
         },
     ];
@@ -1525,14 +1545,32 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
             kind: "beads_comment",
             summary: "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
             command: None,
+            command_action: None,
             manual_step: Some(
                 "Add a Beads comment before claiming work so peers can see the coordination fallback.",
             ),
         });
+        let support_bundle_command = "am support-bundle --workspace . --redact paths,offsets";
         actions.push(SwarmWorkPacketAgentMailFallbackAction {
             kind: "support_bundle",
             summary: "Capture a redacted support bundle so the storage class can be triaged without raw paths or page offsets.",
-            command: Some("am support-bundle --workspace . --redact paths,offsets".to_owned()),
+            command: Some(support_bundle_command.to_owned()),
+            command_action: Some(work_packet_command_action(
+                "agent_mail_support_bundle",
+                support_bundle_command,
+                &[
+                    "am",
+                    "support-bundle",
+                    "--workspace",
+                    ".",
+                    "--redact",
+                    "paths,offsets",
+                ],
+                true,
+                "agent_mail",
+                "after_semantic_readiness_failure",
+                "Capture bounded Agent Mail diagnostics without shell evaluation.",
+            )),
             manual_step: None,
         });
     }
@@ -1676,16 +1714,34 @@ fn work_packet_verification(
 ) -> SwarmWorkPacketVerification {
     let mut required_commands = Vec::new();
     if rch.remote_only_required {
+        let when = if rch.safe_to_launch_cargo_verification == Some(false) {
+            "only_after_rch_remote_workers_recover"
+        } else {
+            "after_substantive_rust_changes"
+        };
         required_commands.push(SwarmWorkPacketVerificationCommand {
             command_id: "cargo_check_all_targets",
             command_template: "RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh -- cargo check --all-targets"
                 .to_owned(),
+            command_action: work_packet_command_action(
+                "cargo_check_all_targets",
+                "RCH_REQUIRE_REMOTE=1 scripts/rch_verify.sh -- cargo check --all-targets",
+                &[
+                    "env",
+                    "RCH_REQUIRE_REMOTE=1",
+                    "scripts/rch_verify.sh",
+                    "--",
+                    "cargo",
+                    "check",
+                    "--all-targets",
+                ],
+                true,
+                "rch",
+                when,
+                "Run remote-only Cargo verification through the project RCH wrapper.",
+            ),
             required_substrate: "rch",
-            when: if rch.safe_to_launch_cargo_verification == Some(false) {
-                "only_after_rch_remote_workers_recover"
-            } else {
-                "after_substantive_rust_changes"
-            },
+            when,
             last_outcome: work_packet_rch_last_outcome(snapshot),
             last_command_hash: work_packet_rch_last_command_hash(snapshot),
         });
@@ -1693,6 +1749,15 @@ fn work_packet_verification(
     let mut static_checks = vec![SwarmWorkPacketVerificationCommand {
         command_id: "diff_check",
         command_template: "git diff --check".to_owned(),
+        command_action: work_packet_command_action(
+            "diff_check",
+            "git diff --check",
+            &["git", "diff", "--check"],
+            false,
+            "git",
+            "before_closeout",
+            "Reject whitespace errors before preparing a closeout commit.",
+        ),
         required_substrate: "static_local",
         when: "before_closeout",
         last_outcome: "not_run",
@@ -1702,6 +1767,15 @@ fn work_packet_verification(
         static_checks.push(SwarmWorkPacketVerificationCommand {
             command_id: "dirty_path_review",
             command_template: "git status --short --branch".to_owned(),
+            command_action: work_packet_command_action(
+                "dirty_path_review",
+                "git status --short --branch",
+                &["git", "status", "--short", "--branch"],
+                false,
+                "git",
+                "before_claim_or_closeout",
+                "Review shared-checkout dirt before claiming or closing work.",
+            ),
             required_substrate: "static_local",
             when: "before_claim_or_closeout",
             last_outcome: "not_run",
@@ -1714,6 +1788,28 @@ fn work_packet_verification(
         required_commands,
         static_checks,
         closeout_evidence_required: true,
+    }
+}
+
+fn work_packet_command_action(
+    command_id: &'static str,
+    display_command: impl Into<String>,
+    argv: &[&str],
+    mutates_state: bool,
+    required_substrate: &'static str,
+    when: &'static str,
+    rationale: &'static str,
+) -> SwarmWorkPacketCommandAction {
+    SwarmWorkPacketCommandAction {
+        command_id,
+        display_command: display_command.into(),
+        argv: argv.iter().map(|part| (*part).to_owned()).collect(),
+        shell_required: false,
+        copy_safety: "safe_structured_argv",
+        mutates_state,
+        required_substrate,
+        when,
+        rationale,
     }
 }
 
@@ -1879,6 +1975,13 @@ fn work_packet_recommended_action(
     proof_obligations.dedup();
 
     let candidate_id = selected_candidate.map(|candidate| candidate.id.clone());
+    let suggested_command_actions = work_packet_suggested_command_actions(
+        candidate_id.as_deref(),
+        agent_mail,
+        rch,
+        tracker_integrity,
+    );
+    let suggested_commands = work_packet_display_commands(&suggested_command_actions);
     SwarmWorkPacketRecommendedAction {
         action: work_packet_action(
             selected_card.map(|card| card.decision),
@@ -1893,12 +1996,8 @@ fn work_packet_recommended_action(
                 && rch.safe_to_launch_cargo_verification != Some(false)
                 && tracker_integrity.br_reads_authoritative
         }),
-        suggested_commands: work_packet_suggested_commands(
-            candidate_id.as_deref(),
-            agent_mail,
-            rch,
-            tracker_integrity,
-        ),
+        suggested_commands,
+        suggested_command_actions,
         candidate_id,
         reasons,
         proof_obligations,
@@ -1941,42 +2040,123 @@ fn agent_mail_blocks_claim(agent_mail: &SwarmWorkPacketAgentMail) -> bool {
     agent_mail.status == "semantic_readiness_failed"
 }
 
-fn work_packet_suggested_commands(
+fn work_packet_display_commands(actions: &[SwarmWorkPacketCommandAction]) -> Vec<String> {
+    actions
+        .iter()
+        .map(|action| action.display_command.clone())
+        .collect()
+}
+
+fn sort_work_packet_command_actions(actions: &mut Vec<SwarmWorkPacketCommandAction>) {
+    actions.sort_by(|left, right| {
+        left.display_command
+            .cmp(&right.display_command)
+            .then_with(|| left.command_id.cmp(right.command_id))
+            .then_with(|| left.argv.cmp(&right.argv))
+    });
+    actions.dedup();
+}
+
+fn work_packet_suggested_command_actions(
     candidate_id: Option<&str>,
     agent_mail: &SwarmWorkPacketAgentMail,
     rch: &SwarmWorkPacketRchProofPosture,
     tracker_integrity: &BeadsIntegrityReport,
-) -> Vec<String> {
-    let mut commands = Vec::new();
+) -> Vec<SwarmWorkPacketCommandAction> {
+    let mut actions = Vec::new();
     if let Some(candidate_id) = candidate_id {
         if tracker_integrity.br_reads_authoritative {
-            commands.push(format!("br show {candidate_id} --json"));
+            actions.push(work_packet_command_action(
+                "bead_show_candidate",
+                format!("br show {candidate_id} --json"),
+                &["br", "show", candidate_id, "--json"],
+                false,
+                "beads",
+                "before_claim",
+                "Inspect the selected bead before deciding whether to claim it.",
+            ));
         } else {
-            commands.push(format!(
-                "br --no-auto-import --allow-stale show {candidate_id} --json"
+            actions.push(work_packet_command_action(
+                "bead_show_candidate_stale_safe",
+                format!("br --no-auto-import --allow-stale show {candidate_id} --json"),
+                &[
+                    "br",
+                    "--no-auto-import",
+                    "--allow-stale",
+                    "show",
+                    candidate_id,
+                    "--json",
+                ],
+                false,
+                "beads",
+                "before_claim",
+                "Inspect the selected bead without mutating a stale tracker index.",
             ));
         }
         if tracker_integrity.br_reads_authoritative
             && rch.safe_to_launch_cargo_verification != Some(false)
             && !agent_mail_blocks_claim(agent_mail)
         {
-            commands.push(format!(
-                "br update {candidate_id} --status in_progress --json"
+            actions.push(work_packet_command_action(
+                "bead_claim_candidate",
+                format!("br update {candidate_id} --status in_progress --json"),
+                &[
+                    "br",
+                    "update",
+                    candidate_id,
+                    "--status",
+                    "in_progress",
+                    "--json",
+                ],
+                true,
+                "beads",
+                "after_inspection",
+                "Claim the selected bead after safety checks pass.",
             ));
         }
         if agent_mail.status == "semantic_readiness_failed" {
-            commands.push(format!(
-                "br comments add {candidate_id} --message 'agent_mail semantic_readiness=fail; coordinating via beads until repair'"
+            actions.push(work_packet_command_action(
+                "bead_comment_agent_mail_semantic_readiness",
+                format!(
+                    "br comments add {candidate_id} --message 'agent_mail semantic_readiness=fail; coordinating via beads until repair'"
+                ),
+                &[
+                    "br",
+                    "comments",
+                    "add",
+                    candidate_id,
+                    "--message",
+                    "agent_mail semantic_readiness=fail; coordinating via beads until repair",
+                ],
+                true,
+                "beads",
+                "before_claim",
+                "Record that Beads is the coordination fallback while Agent Mail is not authoritative.",
             ));
         }
     }
     if !tracker_integrity.br_reads_authoritative {
-        commands.push("br doctor --json --no-db".to_owned());
+        actions.push(work_packet_command_action(
+            "beads_doctor_no_db",
+            "br doctor --json --no-db",
+            &["br", "doctor", "--json", "--no-db"],
+            false,
+            "beads",
+            "before_claim",
+            "Inspect tracker health without relying on the stale database.",
+        ));
     }
-    commands.push("ee swarm brief --workspace . --json".to_owned());
-    commands.sort();
-    commands.dedup();
-    commands
+    actions.push(work_packet_command_action(
+        "swarm_brief_refresh",
+        "ee swarm brief --workspace . --json",
+        &["ee", "swarm", "brief", "--workspace", ".", "--json"],
+        false,
+        "ee",
+        "before_claim_or_closeout",
+        "Refresh the read-only swarm input snapshot before acting.",
+    ));
+    sort_work_packet_command_actions(&mut actions);
+    actions
 }
 
 fn beads_integrity_health_label(health: BeadsIntegrityHealth) -> &'static str {
@@ -4798,6 +4978,12 @@ mod tests {
             .collect();
 
         let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let argv = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
 
         assert_eq!(
             packet.coordination.agent_mail.status,
@@ -4880,6 +5066,35 @@ mod tests {
                 "switch_to_static_work",
             ]
         );
+        let support_bundle = packet
+            .coordination
+            .agent_mail
+            .fallback_actions
+            .iter()
+            .find(|action| action.kind == "support_bundle")
+            .expect("support bundle fallback emitted");
+        let command_action = support_bundle
+            .command_action
+            .as_ref()
+            .expect("support bundle fallback has structured action");
+        assert_eq!(
+            support_bundle.command.as_deref(),
+            Some(command_action.display_command.as_str())
+        );
+        assert_eq!(
+            command_action.argv,
+            argv(&[
+                "am",
+                "support-bundle",
+                "--workspace",
+                ".",
+                "--redact",
+                "paths,offsets"
+            ])
+        );
+        assert_eq!(command_action.copy_safety, "safe_structured_argv");
+        assert!(!command_action.shell_required);
+        assert!(command_action.mutates_state);
     }
 
     #[test]
@@ -5141,6 +5356,110 @@ mod tests {
                 .proof_obligations
                 .contains(&"do_not_run_local_cargo_fallback".to_owned())
         );
+    }
+
+    #[test]
+    fn work_packet_emits_structured_command_actions_for_agent_commands() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![candidate(
+            "bd-safe",
+            "Emit safe command argv",
+            "beads_ready",
+            Some(2),
+        )]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let argv = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let display_commands = packet
+            .recommended_action
+            .suggested_command_actions
+            .iter()
+            .map(|action| action.display_command.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            packet.recommended_action.suggested_commands,
+            display_commands
+        );
+
+        let show_candidate = packet
+            .recommended_action
+            .suggested_command_actions
+            .iter()
+            .find(|action| action.command_id == "bead_show_candidate")
+            .expect("show candidate action emitted");
+        assert_eq!(
+            show_candidate.argv,
+            argv(&["br", "show", "bd-safe", "--json"])
+        );
+        assert_eq!(show_candidate.copy_safety, "safe_structured_argv");
+        assert!(!show_candidate.shell_required);
+        assert!(!show_candidate.mutates_state);
+
+        let claim_candidate = packet
+            .recommended_action
+            .suggested_command_actions
+            .iter()
+            .find(|action| action.command_id == "bead_claim_candidate")
+            .expect("claim candidate action emitted");
+        assert_eq!(
+            claim_candidate.argv,
+            argv(&[
+                "br",
+                "update",
+                "bd-safe",
+                "--status",
+                "in_progress",
+                "--json"
+            ])
+        );
+        assert!(claim_candidate.mutates_state);
+
+        let rch_command = packet
+            .verification
+            .required_commands
+            .iter()
+            .find(|command| command.command_id == "cargo_check_all_targets")
+            .expect("RCH command emitted");
+        assert_eq!(
+            rch_command.command_action.command_id,
+            rch_command.command_id
+        );
+        assert_eq!(
+            rch_command.command_action.argv,
+            argv(&[
+                "env",
+                "RCH_REQUIRE_REMOTE=1",
+                "scripts/rch_verify.sh",
+                "--",
+                "cargo",
+                "check",
+                "--all-targets"
+            ])
+        );
+        assert_eq!(
+            rch_command.command_action.copy_safety,
+            "safe_structured_argv"
+        );
+        assert!(!rch_command.command_action.shell_required);
+        assert!(rch_command.command_action.mutates_state);
+
+        for command in packet
+            .verification
+            .required_commands
+            .iter()
+            .chain(packet.verification.static_checks.iter())
+        {
+            assert_eq!(command.command_action.command_id, command.command_id);
+            assert_eq!(command.command_action.copy_safety, "safe_structured_argv");
+            assert!(!command.command_action.shell_required);
+            assert!(!command.command_action.argv.is_empty());
+        }
     }
 
     #[test]

@@ -336,8 +336,8 @@
     },
     "agentMailFallbackAction": {
       "type": "object",
-      "description": "bd-2z5ly.8: a single structured Agent Mail fallback step. `command` and `manualStep` are mutually informative: emitters set whichever applies and leave the other `null`. No mail bodies, raw inbox content, or agent identities may appear in `summary`, `command`, or `manualStep`.",
-      "required": ["kind", "summary", "command", "manualStep"],
+      "description": "bd-2z5ly.8: a single structured Agent Mail fallback step. `command` and `manualStep` are mutually informative: emitters set whichever applies and leave the other `null`. When `command` is present, `commandAction.argv` is the shell-free execution surface. No mail bodies, raw inbox content, or agent identities may appear in `summary`, `command`, `commandAction`, or `manualStep`.",
+      "required": ["kind", "summary", "command", "commandAction", "manualStep"],
       "additionalProperties": false,
       "properties": {
         "kind": {
@@ -353,6 +353,12 @@
         },
         "summary": {"type": "string"},
         "command": {"type": ["string", "null"]},
+        "commandAction": {
+          "anyOf": [
+            {"$ref": "#/definitions/commandAction"},
+            {"type": "null"}
+          ]
+        },
         "manualStep": {"type": ["string", "null"]}
       }
     },
