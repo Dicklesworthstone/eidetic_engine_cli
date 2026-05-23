@@ -1,9 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type TestResult = Result<(), String>;
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 fn unique_report_path(prefix: &str) -> Result<PathBuf, String> {
     let now = SystemTime::now()
@@ -78,7 +82,11 @@ fn run_gate(
     let output = command
         .output()
         .map_err(|error| format!("failed to run vision coverage gate: {error}"))?;
-    trace_swarm_subcommand_gate("response", started.elapsed().as_millis() as u64, &[]);
+    trace_swarm_subcommand_gate(
+        "response",
+        duration_millis_saturating(started.elapsed()),
+        &[],
+    );
     Ok(output)
 }
 

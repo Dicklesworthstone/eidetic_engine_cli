@@ -1,0 +1,21 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo build",
+  "command_kind": "cargo_build",
+  "bead_id": "bd-1rcy2",
+  "success": true,
+  "exit_code": 0,
+  "remote_required": true,
+  "worker_id": null,
+  "source_state": {
+    "git_head": "2f1ad1a4b1c8d8f54e8b9b0fd24e2a31aa7b6a2b",
+    "git_tree": "33db4f63a9e8b1d7244a3eaa9b3f7fb88c7e1c4f",
+    "dirty_status_hash": "sha256:f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d1e2f",
+    "verification_attribution": "cc-graph"
+  },
+  "degraded_codes": [
+    "rch_verify_local_fallback_detected"
+  ],
+  "stdout_tail": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.4s\n",
+  "stderr_tail": "[RCH] local fallback detected (worker pool unreachable); proof is advisory only.\n"
+}

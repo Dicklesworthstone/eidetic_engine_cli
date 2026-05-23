@@ -27,12 +27,7 @@ fn manifest_ids() -> BTreeSet<String> {
         .as_array()
         .expect("fixtures array")
         .iter()
-        .map(|entry| {
-            entry["id"]
-                .as_str()
-                .expect("fixture id")
-                .to_owned()
-        })
+        .map(|entry| entry["id"].as_str().expect("fixture id").to_owned())
         .collect()
 }
 
@@ -46,12 +41,8 @@ fn scored_p0_p1_fms() -> BTreeSet<String> {
         .filter_map(|line| {
             let value: Value = serde_json::from_str(line).expect("failure mode score json");
             let severity = value["severity"].as_str().expect("severity");
-            matches!(severity, "P0" | "P1").then(|| {
-                value["fm_id"]
-                    .as_str()
-                    .expect("fm_id")
-                    .to_owned()
-            })
+            matches!(severity, "P0" | "P1")
+                .then(|| value["fm_id"].as_str().expect("fm_id").to_owned())
         })
         .collect()
 }
@@ -82,8 +73,14 @@ fn doctor_fixtures_have_triplet_files_and_metadata() {
 
         let readme = fs::read_to_string(dir.join("README.md")).expect("readme");
         assert!(readme.contains(id), "README must name {id}");
-        assert!(readme.contains(severity), "README must name severity for {id}");
-        assert!(readme.contains(subsystem), "README must name subsystem for {id}");
+        assert!(
+            readme.contains(severity),
+            "README must name severity for {id}"
+        );
+        assert!(
+            readme.contains(subsystem),
+            "README must name subsystem for {id}"
+        );
         assert!(
             readme.contains("doctor_workspace/analysis/repair_specs/"),
             "README must cite repair spec for {id}"

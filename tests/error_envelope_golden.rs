@@ -241,6 +241,11 @@ mod contract_verification {
                 message: "m".into(),
                 repair: None,
             },
+            DomainError::ImportWithDetails {
+                message: "m".into(),
+                repair: None,
+                details_json: "{}".into(),
+            },
             DomainError::NotFound {
                 resource: "r".into(),
                 id: "i".into(),

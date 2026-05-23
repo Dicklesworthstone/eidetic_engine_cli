@@ -1,0 +1,27 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo test --test contracts contracts::",
+  "command_kind": "cargo_test_focused",
+  "bead_id": "bd-1rcy2",
+  "success": false,
+  "exit_code": null,
+  "remote_required": true,
+  "worker_id": null,
+  "source_state": {
+    "git_head": "2f1ad1a4b1c8d8f54e8b9b0fd24e2a31aa7b6a2b",
+    "git_tree": "33db4f63a9e8b1d7244a3eaa9b3f7fb88c7e1c4f",
+    "dirty_status_hash": "sha256:b8c8e8c5fb6c7a1e1cf2c8b9d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d",
+    "verification_attribution": "cc-graph"
+  },
+  "degraded_codes": [
+    "rch_verify_topology_blocked",
+    "rch_verify_local_fallback_refused"
+  ],
+  "stdout_tail": "",
+  "stderr_tail": "RCH-E327: Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.\n",
+  "known_blocker": {
+    "blocker_fingerprint": "sha256:7212bd96223acbb78b3d57c15287ebff5771b554755c8b6a88d5bbc9035f8d35",
+    "remediation_bead": "bd-17c65.10.17.1.2",
+    "retry_after": "2026-05-23T12:00:00Z"
+  }
+}

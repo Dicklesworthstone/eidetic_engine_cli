@@ -1,0 +1,9 @@
+{
+  "schema": "ee.rch.verify.v0",
+  "command_text": "cargo test --workspace",
+  "command_kind": "cargo_test",
+  "success": true,
+  "source_state": {
+    "verification_attribution": "cc-graph"
+  }
+}

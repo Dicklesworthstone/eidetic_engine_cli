@@ -25,6 +25,10 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Per-process execution log entry for debugging and artifact retention.
 #[derive(Debug, Clone)]
 struct ProcessLog {
@@ -591,7 +595,7 @@ where
     let start = Instant::now();
     let start_time_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(duration_millis_saturating)
         .unwrap_or(0);
 
     let ee_binary = ee_binary_path();
@@ -600,8 +604,8 @@ where
     cmd.args(&args);
 
     let output = cmd.output();
-    let duration_ms = start.elapsed().as_millis() as u64;
-    let end_time_ms = start_time_ms + duration_ms;
+    let duration_ms = duration_millis_saturating(start.elapsed());
+    let end_time_ms = start_time_ms.saturating_add(duration_ms);
 
     match output {
         Ok(out) => {

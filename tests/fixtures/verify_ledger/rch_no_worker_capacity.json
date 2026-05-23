@@ -1,0 +1,26 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo check --all-targets",
+  "command_kind": "cargo_check",
+  "bead_id": "bd-1rcy2",
+  "success": false,
+  "exit_code": null,
+  "remote_required": true,
+  "worker_id": null,
+  "source_state": {
+    "git_head": "2f1ad1a4b1c8d8f54e8b9b0fd24e2a31aa7b6a2b",
+    "git_tree": "33db4f63a9e8b1d7244a3eaa9b3f7fb88c7e1c4f",
+    "dirty_status_hash": "sha256:c9d1e2f3a4b5c6d7e8f90a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f80912a3b",
+    "verification_attribution": "cc-graph"
+  },
+  "degraded_codes": [
+    "rch_verify_no_worker_capacity"
+  ],
+  "stdout_tail": "",
+  "stderr_tail": "RCH worker pool: 0/2 healthy, 0 capacity slots free.\n",
+  "known_blocker": {
+    "blocker_fingerprint": "sha256:a18f4f3d2b1c0d9e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f",
+    "remediation_bead": "bd-17c65.10.17.1.4",
+    "retry_after": "2026-05-23T12:30:00Z"
+  }
+}

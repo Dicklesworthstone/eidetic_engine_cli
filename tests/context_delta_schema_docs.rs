@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use eidetic_engine_cli::core::context_delta::{
+use ee::core::context_delta::{
     ContextDeltaItemSnapshot, ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 

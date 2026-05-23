@@ -1,0 +1,19 @@
+{
+  "schema": "ee.rch.verify.v1",
+  "command_text": "cargo test --test verification_drift_guard -- --nocapture",
+  "command_kind": "cargo_test_focused",
+  "bead_id": "bd-1rcy2",
+  "success": true,
+  "exit_code": 0,
+  "remote_required": true,
+  "worker_id": "vmi1264463",
+  "source_state": {
+    "git_head": "2f1ad1a4b1c8d8f54e8b9b0fd24e2a31aa7b6a2b",
+    "git_tree": "33db4f63a9e8b1d7244a3eaa9b3f7fb88c7e1c4f",
+    "dirty_status_hash": "sha256:11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff",
+    "verification_attribution": "cc-graph"
+  },
+  "degraded_codes": [],
+  "stdout_tail": "test result: ok. 7 passed; 0 failed; 0 ignored; finished in 0.83s\n",
+  "stderr_tail": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.12s\n"
+}

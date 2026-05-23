@@ -9,9 +9,13 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 fn scenario_dir(name: &str) -> PathBuf {
     let ts = SystemTime::now()
@@ -70,7 +74,11 @@ fn run_cli(args: Vec<OsString>) -> (ee::models::ProcessExitCode, String) {
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let exit = ee::cli::run(args, &mut stdout, &mut stderr);
-    trace_db_inspect("response", started.elapsed().as_millis() as u64, &[]);
+    trace_db_inspect(
+        "response",
+        duration_millis_saturating(started.elapsed()),
+        &[],
+    );
     (exit, String::from_utf8_lossy(&stdout).into_owned())
 }
 

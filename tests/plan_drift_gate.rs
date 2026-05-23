@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -22,6 +22,10 @@ const VALID_CODES: &[&str] = &[
 ];
 
 const VALID_SEVERITIES: &[&str] = &["info", "low", "warning", "medium", "high", "critical"];
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -60,7 +64,11 @@ fn run_script_with_args(args: &[&str]) -> Result<Value, String> {
         .map_err(|error| format!("plan-drift.sh stdout was not UTF-8: {error}"))?;
     let report = serde_json::from_str::<Value>(&stdout)
         .map_err(|error| format!("plan-drift.sh stdout was not JSON: {error}\nstdout: {stdout}"))?;
-    trace_plan_drift_gate("response", started.elapsed().as_millis() as u64, &[]);
+    trace_plan_drift_gate(
+        "response",
+        duration_millis_saturating(started.elapsed()),
+        &[],
+    );
     Ok(report)
 }
 

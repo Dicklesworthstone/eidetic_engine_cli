@@ -7,7 +7,7 @@
 #![cfg(feature = "graph")]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ee::graph::hits::compute_hits;
 use ee::graph::minhash_rank::{
@@ -20,6 +20,10 @@ use ee::graph::{AttrMap, DiGraph, GraphResult, PageRankResult};
 use fnx_runtime::CgseValue;
 
 type TestResult = Result<(), String>;
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 const TARGET_TRIPLES: &[&str] = &[
     "x86_64-unknown-linux-gnu",
@@ -291,7 +295,7 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
     if !TARGET_TRIPLES.contains(&target) {
         trace_cross_platform_determinism(
             "response",
-            started.elapsed().as_millis() as u64,
+            duration_millis_saturating(started.elapsed()),
             &["unsupported_target"],
         );
         return Err(format!(
@@ -301,7 +305,7 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
     let manifest = divergence_manifest()?;
     trace_cross_platform_determinism(
         "dependency_check",
-        started.elapsed().as_millis() as u64,
+        duration_millis_saturating(started.elapsed()),
         &[],
     );
     let observed = [
@@ -311,7 +315,11 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
     ];
 
     for observed in observed {
-        trace_cross_platform_determinism("dispatch", started.elapsed().as_millis() as u64, &[]);
+        trace_cross_platform_determinism(
+            "dispatch",
+            duration_millis_saturating(started.elapsed()),
+            &[],
+        );
         let Some(expected) = EXPECTED_HASHES.iter().find(|entry| {
             entry.target_triple == target
                 && entry.algorithm == observed.algorithm
@@ -319,7 +327,7 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
         }) else {
             trace_cross_platform_determinism(
                 "response",
-                started.elapsed().as_millis() as u64,
+                duration_millis_saturating(started.elapsed()),
                 &["missing_expected_hash"],
             );
             return Err(format!(
@@ -339,7 +347,7 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
             if !approved_divergence {
                 trace_cross_platform_determinism(
                     "response",
-                    started.elapsed().as_millis() as u64,
+                    duration_millis_saturating(started.elapsed()),
                     &["hash_mismatch"],
                 );
                 return Err(format!(
@@ -349,7 +357,11 @@ fn current_target_matches_pinned_graph_algorithm_hashes() -> TestResult {
             }
         }
     }
-    trace_cross_platform_determinism("response", started.elapsed().as_millis() as u64, &[]);
+    trace_cross_platform_determinism(
+        "response",
+        duration_millis_saturating(started.elapsed()),
+        &[],
+    );
     Ok(())
 }
 

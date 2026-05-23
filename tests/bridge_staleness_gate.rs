@@ -14,7 +14,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -25,6 +25,10 @@ const VALID_CODES: &[&str] = &[
 ];
 
 const VALID_SEVERITIES: &[&str] = &["info", "low", "medium", "high", "critical"];
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -64,7 +68,11 @@ fn run_script() -> Result<Value, String> {
     let report = serde_json::from_str::<Value>(&stdout).map_err(|error| {
         format!("bridge-staleness.sh stdout was not JSON: {error}\nstdout: {stdout}")
     })?;
-    trace_bridge_staleness_gate("response", started.elapsed().as_millis() as u64, &[]);
+    trace_bridge_staleness_gate(
+        "response",
+        duration_millis_saturating(started.elapsed()),
+        &[],
+    );
     Ok(report)
 }
 

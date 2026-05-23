@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "agent_mail_semantic_readiness_failed",
+  "introduced_by": {
+    "bead": "bd-2s48u",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "swarm brief",
+    "swarm work-packet"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "Agent Mail transport health responds but semantic_readiness.status=fail, so reservation and inbox reads are not authoritative.",
+    "setup_commands": [
+      "# collect a redacted Agent Mail health snapshot with semantic_readiness.status=fail"
+    ],
+    "invocation": "ee swarm brief --workspace . --agent-mail-snapshot <redacted-health.json> --json"
+  },
+  "expected_emission": {
+    "code": "agent_mail_semantic_readiness_failed",
+    "severity": "warning",
+    "message_contains": [
+      "semantic readiness",
+      "reservation and inbox reads are not authoritative"
+    ],
+    "repair_contains": "semantic readiness"
+  }
+}
