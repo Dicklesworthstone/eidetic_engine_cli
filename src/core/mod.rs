@@ -5,7 +5,7 @@ use crate::models::{
     ARTIFACT_SUMMARY_SCHEMA_V1, ERROR_SCHEMA_V2, INSTALL_CHECK_SCHEMA_V1, INSTALL_PLAN_SCHEMA_V1,
     MESH_EVENT_SCHEMA_V1, MESH_PEER_GROUP_BINDING_SCHEMA_V1, MESH_PEER_POLICY_SCHEMA_V1,
     MESH_POLICY_DECISION_SCHEMA_V1, MESH_POLICY_FAILURE_SURFACE_SCHEMA_V1,
-    MESH_STORAGE_STATUS_SCHEMA_V1, RESPONSE_SCHEMA_V1, SINGLEFLIGHT_KEY_SCHEMA_V1,
+    MESH_STORAGE_STATUS_SCHEMA_V1, RESPONSE_SCHEMA_V2, SINGLEFLIGHT_KEY_SCHEMA_V1,
     SINGLEFLIGHT_POSTURE_SCHEMA_V1, SYMBOL_EVIDENCE_LINKS_SCHEMA_V1, SYMBOL_SNAPSHOT_SCHEMA_V1,
     UPDATE_PLAN_SCHEMA_V1,
 };
@@ -235,7 +235,7 @@ pub fn build_features() -> Vec<BuildFeature> {
 #[must_use]
 pub fn supported_schemas() -> Vec<SupportedSchema> {
     vec![
-        SupportedSchema::new("response", RESPONSE_SCHEMA_V1),
+        SupportedSchema::new("response", RESPONSE_SCHEMA_V2),
         SupportedSchema::new("error", ERROR_SCHEMA_V2),
         SupportedSchema::new("version_provenance", VERSION_PROVENANCE_SCHEMA_V1),
         SupportedSchema::new("symbol_snapshot", SYMBOL_SNAPSHOT_SCHEMA_V1),
@@ -662,9 +662,11 @@ mod tests {
                 "runtime_profile",
                 "update_plan",
                 "artifact_summary",
+                "derived_asset_store_summary",
                 "artifact_relocation",
                 "compare_result",
                 "budget_check",
+                "perf_live",
                 "swarm_brief",
                 "insights",
                 "context_pack_dna",
@@ -693,6 +695,25 @@ mod tests {
                 "pack_quality_report",
             ],
             "schema names",
+        )
+    }
+
+    #[test]
+    fn supported_schemas_advertise_current_response_envelope() -> TestResult {
+        let response = supported_schemas()
+            .into_iter()
+            .find(|schema| schema.name == "response")
+            .ok_or_else(|| "response schema should be advertised".to_string())?;
+        let legacy_schema = ["ee", "response", "v1"].join(".");
+
+        ensure_equal(
+            &response.schema,
+            &crate::models::RESPONSE_SCHEMA_V2,
+            "response schema id",
+        )?;
+        ensure(
+            response.schema != legacy_schema,
+            "supported schemas must not advertise the legacy response envelope",
         )
     }
 
