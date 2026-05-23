@@ -22,6 +22,12 @@ pub enum EnvVar {
     AuditLaneFlushMs,
     /// `EE_CASS_BINARY`
     CassBinary,
+    /// `EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR`
+    CurationAutoPromoteConfidenceFloor,
+    /// `EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN`
+    CurationAutoPromoteMaxPerRun,
+    /// `EE_CURATION_DERIVED_PREVIEW_LIMIT`
+    CurationDerivedPreviewLimit,
     /// `EE_DATABASE_PATH`
     DatabasePath,
     /// `EE_DEMO_EVIDENCE_ROOT`
@@ -128,6 +134,24 @@ pub enum EnvVar {
     ReadPoolMaxPinSeconds,
     /// `EE_READ_POOL_SIZE`
     ReadPoolSize,
+    /// `EE_REFLECTION_CONSUMED_RETENTION_DAYS`
+    ReflectionConsumedRetentionDays,
+    /// `EE_REFLECTION_EXPIRED_RETENTION_DAYS`
+    ReflectionExpiredRetentionDays,
+    /// `EE_REFLECTION_HMAC_KEY_ID`
+    ReflectionHmacKeyId,
+    /// `EE_REFLECTION_HMAC_KEY_PATH`
+    ReflectionHmacKeyPath,
+    /// `EE_REFLECTION_HMAC_ROTATION_GRACE_SECONDS`
+    ReflectionHmacRotationGraceSeconds,
+    /// `EE_REFLECTION_REQUEST_LIST_LIMIT`
+    ReflectionRequestListLimit,
+    /// `EE_REFLECTION_REQUEST_SHOW_SOURCE_LIMIT`
+    ReflectionRequestShowSourceLimit,
+    /// `EE_REFLECTION_REQUEST_TTL_SECONDS`
+    ReflectionRequestTtlSeconds,
+    /// `EE_REFLECTION_SOURCE_BUDGET_BYTES`
+    ReflectionSourceBudgetBytes,
     /// `EE_REMEMBER_CURATION_SYNC_BUDGET_MS`
     RememberCurationSyncBudgetMs,
     /// `EE_SECURITY_PROFILE`
@@ -189,6 +213,9 @@ impl EnvVar {
             Self::AuditLaneCapacity,
             Self::AuditLaneFlushMs,
             Self::CassBinary,
+            Self::CurationAutoPromoteConfidenceFloor,
+            Self::CurationAutoPromoteMaxPerRun,
+            Self::CurationDerivedPreviewLimit,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
             Self::DiagForceCapabilityGap,
@@ -242,6 +269,15 @@ impl EnvVar {
             Self::ReadPoolIdleTimeoutSeconds,
             Self::ReadPoolMaxPinSeconds,
             Self::ReadPoolSize,
+            Self::ReflectionConsumedRetentionDays,
+            Self::ReflectionExpiredRetentionDays,
+            Self::ReflectionHmacKeyId,
+            Self::ReflectionHmacKeyPath,
+            Self::ReflectionHmacRotationGraceSeconds,
+            Self::ReflectionRequestListLimit,
+            Self::ReflectionRequestShowSourceLimit,
+            Self::ReflectionRequestTtlSeconds,
+            Self::ReflectionSourceBudgetBytes,
             Self::RememberCurationSyncBudgetMs,
             Self::SecurityProfile,
             Self::ServeToken,
@@ -279,6 +315,9 @@ impl EnvVar {
             Self::AuditLaneCapacity => "EE_AUDIT_LANE_CAPACITY",
             Self::AuditLaneFlushMs => "EE_AUDIT_LANE_FLUSH_MS",
             Self::CassBinary => "EE_CASS_BINARY",
+            Self::CurationAutoPromoteConfidenceFloor => "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
+            Self::CurationAutoPromoteMaxPerRun => "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
+            Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
@@ -334,6 +373,15 @@ impl EnvVar {
             Self::ReadPoolIdleTimeoutSeconds => "EE_READ_POOL_IDLE_TIMEOUT_S",
             Self::ReadPoolMaxPinSeconds => "EE_READ_POOL_MAX_PIN_SECONDS",
             Self::ReadPoolSize => "EE_READ_POOL_SIZE",
+            Self::ReflectionConsumedRetentionDays => "EE_REFLECTION_CONSUMED_RETENTION_DAYS",
+            Self::ReflectionExpiredRetentionDays => "EE_REFLECTION_EXPIRED_RETENTION_DAYS",
+            Self::ReflectionHmacKeyId => "EE_REFLECTION_HMAC_KEY_ID",
+            Self::ReflectionHmacKeyPath => "EE_REFLECTION_HMAC_KEY_PATH",
+            Self::ReflectionHmacRotationGraceSeconds => "EE_REFLECTION_HMAC_ROTATION_GRACE_SECONDS",
+            Self::ReflectionRequestListLimit => "EE_REFLECTION_REQUEST_LIST_LIMIT",
+            Self::ReflectionRequestShowSourceLimit => "EE_REFLECTION_REQUEST_SHOW_SOURCE_LIMIT",
+            Self::ReflectionRequestTtlSeconds => "EE_REFLECTION_REQUEST_TTL_SECONDS",
+            Self::ReflectionSourceBudgetBytes => "EE_REFLECTION_SOURCE_BUDGET_BYTES",
             Self::RememberCurationSyncBudgetMs => "EE_REMEMBER_CURATION_SYNC_BUDGET_MS",
             Self::SecurityProfile => "EE_SECURITY_PROFILE",
             Self::ServeToken => "EE_SERVE_TOKEN",
@@ -380,6 +428,15 @@ impl EnvVar {
                 "Override the WAL checkpoint warning threshold in bytes."
             }
             Self::CassBinary => "Override the trusted cass import binary path.",
+            Self::CurationAutoPromoteConfidenceFloor => {
+                "Override the minimum confidence required by curation auto-promotion."
+            }
+            Self::CurationAutoPromoteMaxPerRun => {
+                "Override the maximum curation candidates auto-promotion may accept per run."
+            }
+            Self::CurationDerivedPreviewLimit => {
+                "Override the derived-candidate preview/reject listing limit."
+            }
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
             Self::DiagForceCapabilityGap => {
@@ -489,6 +546,31 @@ impl EnvVar {
                 "Override the read-side snapshot pin maximum lifetime in seconds."
             }
             Self::ReadPoolSize => "Override the read-side connection pool size.",
+            Self::ReflectionConsumedRetentionDays => {
+                "Override retention for consumed reflection requests in days."
+            }
+            Self::ReflectionExpiredRetentionDays => {
+                "Override retention for expired reflection requests in days."
+            }
+            Self::ReflectionHmacKeyId => "Select the reflection request HMAC key identifier.",
+            Self::ReflectionHmacKeyPath => {
+                "Select the reflection request HMAC key file path without exposing key material."
+            }
+            Self::ReflectionHmacRotationGraceSeconds => {
+                "Override reflection HMAC key rotation grace in seconds."
+            }
+            Self::ReflectionRequestListLimit => {
+                "Override the default reflection request list limit."
+            }
+            Self::ReflectionRequestShowSourceLimit => {
+                "Override how many source-package entries reflection request show may include."
+            }
+            Self::ReflectionRequestTtlSeconds => {
+                "Override the default reflection request TTL in seconds."
+            }
+            Self::ReflectionSourceBudgetBytes => {
+                "Override the reflection source-package byte budget."
+            }
             Self::RememberCurationSyncBudgetMs => {
                 "Override remember-time curation sync budget in milliseconds."
             }
@@ -588,6 +670,16 @@ impl EnvVar {
             Self::WalCheckpointBytesThreshold => Some("67108864"),
             Self::WorkspaceCloseDrainTimeoutSeconds => Some("5"),
             Self::IndexPublishLockRetryAttempts => Some("200"),
+            Self::CurationAutoPromoteConfidenceFloor => Some("0.80"),
+            Self::CurationAutoPromoteMaxPerRun => Some("10"),
+            Self::CurationDerivedPreviewLimit => Some("20"),
+            Self::ReflectionConsumedRetentionDays => Some("30"),
+            Self::ReflectionExpiredRetentionDays => Some("7"),
+            Self::ReflectionHmacRotationGraceSeconds => Some("86400"),
+            Self::ReflectionRequestListLimit => Some("50"),
+            Self::ReflectionRequestShowSourceLimit => Some("20"),
+            Self::ReflectionRequestTtlSeconds => Some("86400"),
+            Self::ReflectionSourceBudgetBytes => Some("65536"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             _ => None,
         }
@@ -596,7 +688,10 @@ impl EnvVar {
     /// Whether capabilities output may include this variable's current value.
     #[must_use]
     pub const fn exposes_value(self) -> bool {
-        !matches!(self, Self::PreflightBypassSecret | Self::ServeToken)
+        !matches!(
+            self,
+            Self::PreflightBypassSecret | Self::ReflectionHmacKeyPath | Self::ServeToken
+        )
     }
 
     /// Broad documentation category for agent docs and env-var catalogs.
@@ -604,11 +699,16 @@ impl EnvVar {
     pub const fn category(self) -> &'static str {
         match self {
             Self::CassBinary => "integration",
+            Self::CurationAutoPromoteConfidenceFloor
+            | Self::CurationAutoPromoteMaxPerRun
+            | Self::CurationDerivedPreviewLimit
+            | Self::RememberCurationSyncBudgetMs => "curation",
             Self::DatabasePath
             | Self::DemoEvidenceRoot
             | Self::FlightRecorderDir
             | Self::IndexDir
             | Self::L2PackCacheDir
+            | Self::ReflectionHmacKeyPath
             | Self::ShardsDir
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
@@ -649,6 +749,14 @@ impl EnvVar {
             | Self::TailscalePeerProbeTimeoutMs
             | Self::TailscaleDiscoveryBudgetMs
             | Self::TailscaleRespondMode => "mesh",
+            Self::ReflectionConsumedRetentionDays
+            | Self::ReflectionExpiredRetentionDays
+            | Self::ReflectionHmacKeyId
+            | Self::ReflectionHmacRotationGraceSeconds
+            | Self::ReflectionRequestListLimit
+            | Self::ReflectionRequestShowSourceLimit
+            | Self::ReflectionRequestTtlSeconds
+            | Self::ReflectionSourceBudgetBytes => "reflection",
             Self::HarmfulBurstWindowSeconds
             | Self::AuditLaneBatchMax
             | Self::AuditLaneCapacity
@@ -675,8 +783,7 @@ impl EnvVar {
             | Self::WalCheckpointBytesThreshold
             | Self::WorkspaceCloseDrainTimeoutSeconds
             | Self::DisableRememberSearchNeighbors
-            | Self::IndexPublishLockRetryAttempts
-            | Self::RememberCurationSyncBudgetMs => "tuning",
+            | Self::IndexPublishLockRetryAttempts => "tuning",
             Self::ScienceBackendPath => "integration",
             Self::ShardFanoutEnabled => "storage",
             Self::PreflightBypassSecret
@@ -813,6 +920,121 @@ mod tests {
     }
 
     #[test]
+    fn curation_policy_env_vars_are_registered_with_defaults() -> TestResult {
+        let expected = [
+            (
+                EnvVar::CurationDerivedPreviewLimit,
+                "EE_CURATION_DERIVED_PREVIEW_LIMIT",
+                "20",
+            ),
+            (
+                EnvVar::CurationAutoPromoteMaxPerRun,
+                "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
+                "10",
+            ),
+            (
+                EnvVar::CurationAutoPromoteConfidenceFloor,
+                "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
+                "0.80",
+            ),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "curation" {
+                return Err(format!("{name} must be categorized as curation"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_policy_env_vars_are_registered_with_safe_exposure() -> TestResult {
+        let expected = [
+            (
+                EnvVar::ReflectionSourceBudgetBytes,
+                "EE_REFLECTION_SOURCE_BUDGET_BYTES",
+                "65536",
+            ),
+            (
+                EnvVar::ReflectionRequestTtlSeconds,
+                "EE_REFLECTION_REQUEST_TTL_SECONDS",
+                "86400",
+            ),
+            (
+                EnvVar::ReflectionRequestListLimit,
+                "EE_REFLECTION_REQUEST_LIST_LIMIT",
+                "50",
+            ),
+            (
+                EnvVar::ReflectionRequestShowSourceLimit,
+                "EE_REFLECTION_REQUEST_SHOW_SOURCE_LIMIT",
+                "20",
+            ),
+            (
+                EnvVar::ReflectionExpiredRetentionDays,
+                "EE_REFLECTION_EXPIRED_RETENTION_DAYS",
+                "7",
+            ),
+            (
+                EnvVar::ReflectionConsumedRetentionDays,
+                "EE_REFLECTION_CONSUMED_RETENTION_DAYS",
+                "30",
+            ),
+            (
+                EnvVar::ReflectionHmacRotationGraceSeconds,
+                "EE_REFLECTION_HMAC_ROTATION_GRACE_SECONDS",
+                "86400",
+            ),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "reflection" {
+                return Err(format!("{name} must be categorized as reflection"));
+            }
+            if !var.exposes_value() {
+                return Err(format!("{name} should expose non-secret effective values"));
+            }
+        }
+
+        for var in [EnvVar::ReflectionHmacKeyId, EnvVar::ReflectionHmacKeyPath] {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{} missing from registry order", var.name()));
+            }
+            if var.default_value().is_some() {
+                return Err(format!("{} must not have a baked-in default", var.name()));
+            }
+        }
+        if EnvVar::ReflectionHmacKeyId.category() != "reflection" {
+            return Err("EE_REFLECTION_HMAC_KEY_ID must be categorized as reflection".to_owned());
+        }
+        if EnvVar::ReflectionHmacKeyPath.category() != "paths" {
+            return Err("EE_REFLECTION_HMAC_KEY_PATH must be categorized as paths".to_owned());
+        }
+        if EnvVar::ReflectionHmacKeyPath.exposes_value() {
+            return Err("EE_REFLECTION_HMAC_KEY_PATH must not expose currentValue".to_owned());
+        }
+        Ok(())
+    }
+
+    #[test]
     fn shard_fanout_env_vars_are_registered() -> TestResult {
         if !EnvVar::all().contains(&EnvVar::ShardFanoutEnabled) {
             return Err("EE_SHARD_FANOUT_ENABLED missing from registry order".to_owned());
@@ -936,9 +1158,14 @@ mod tests {
     #[test]
     fn sensitive_env_vars_do_not_expose_values() -> TestResult {
         if EnvVar::PreflightBypassSecret.exposes_value() {
-            Err("EE_PREFLIGHT_BYPASS_SECRET must not expose currentValue".to_owned())
-        } else {
-            Ok(())
+            return Err("EE_PREFLIGHT_BYPASS_SECRET must not expose currentValue".to_owned());
         }
+        if EnvVar::ServeToken.exposes_value() {
+            return Err("EE_SERVE_TOKEN must not expose currentValue".to_owned());
+        }
+        if EnvVar::ReflectionHmacKeyPath.exposes_value() {
+            return Err("EE_REFLECTION_HMAC_KEY_PATH must not expose currentValue".to_owned());
+        }
+        Ok(())
     }
 }
