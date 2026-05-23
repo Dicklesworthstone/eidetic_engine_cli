@@ -106,6 +106,33 @@ fn ensure_success(output: &Output, context: &str) -> TestResult {
     ))
 }
 
+fn write_doctor_run_state(
+    workspace: &E2eWorkspace,
+    run_id: &str,
+    started_at: &str,
+    finished_at: Option<&str>,
+    action_count: u64,
+) -> TestResult<PathBuf> {
+    let run_dir = workspace.path.join(".doctor").join("runs").join(run_id);
+    fs::create_dir_all(&run_dir)
+        .map_err(|error| format!("create {}: {error}", run_dir.display()))?;
+    let state = json!({
+        "schema": "ee.doctor.run_state.v1",
+        "run_id": run_id,
+        "target_sha": format!("sha256:{run_id}"),
+        "workspace": path_string(&workspace.path),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "status": "completed_ok",
+        "action_count": action_count,
+        "dry_run": false,
+    });
+    let state_path = run_dir.join("state.json");
+    fs::write(&state_path, state.to_string())
+        .map_err(|error| format!("write {}: {error}", state_path.display()))?;
+    Ok(state_path)
+}
+
 fn golden_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -243,4 +270,131 @@ fn doctor_capabilities_cli_output_matches_scrubbed_golden() -> TestResult {
         }),
     )?;
     assert_golden(&scrubbed)
+}
+
+#[test]
+fn doctor_run_index_and_gc_plan_cli_outputs_are_read_only_and_ordered() -> TestResult {
+    let workspace = E2eWorkspace::create("doctor-runs-index-gc")?;
+    let workspace_arg = workspace.as_str()?.to_string();
+    let old_state = write_doctor_run_state(
+        &workspace,
+        "run-old",
+        "2000-01-01T00:00:00Z",
+        Some("2000-01-01T00:00:01Z"),
+        2,
+    )?;
+    let future_state = write_doctor_run_state(
+        &workspace,
+        "run-future",
+        "2099-01-01T00:00:00Z",
+        Some("2099-01-01T00:00:01Z"),
+        1,
+    )?;
+
+    let list_output = run_ee(
+        &workspace,
+        "doctor_list_runs",
+        &[
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--list-runs",
+            "--json",
+        ],
+    )?;
+    ensure_success(&list_output, "ee doctor --list-runs --json")?;
+    if !list_output.stderr.is_empty() {
+        return Err(format!(
+            "ee doctor --list-runs --json must keep stderr empty; stderr={}",
+            String::from_utf8_lossy(&list_output.stderr)
+        ));
+    }
+    let list_json: Value = serde_json::from_slice(&list_output.stdout)
+        .map_err(|error| format!("parse doctor list-runs JSON: {error}"))?;
+    if list_json.get("schema").and_then(Value::as_str) != Some("ee.doctor.run_index.v1") {
+        return Err(format!("unexpected run index schema: {list_json}"));
+    }
+    if list_json.get("count").and_then(Value::as_u64) != Some(2) {
+        return Err(format!(
+            "expected exactly two indexed doctor runs: {list_json}"
+        ));
+    }
+    let runs = list_json
+        .get("runs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("run index missing runs[]: {list_json}"))?;
+    let run_ids: Vec<&str> = runs
+        .iter()
+        .filter_map(|run| run.get("runId").and_then(Value::as_str))
+        .collect();
+    if run_ids != ["run-future", "run-old"] {
+        return Err(format!(
+            "doctor run index must sort by started_at descending; got {run_ids:?}"
+        ));
+    }
+
+    let gc_output = run_ee(
+        &workspace,
+        "doctor_gc_plan",
+        &[
+            "--workspace",
+            &workspace_arg,
+            "doctor",
+            "--gc-plan",
+            "30",
+            "--json",
+        ],
+    )?;
+    ensure_success(&gc_output, "ee doctor --gc-plan 30 --json")?;
+    if !gc_output.stderr.is_empty() {
+        return Err(format!(
+            "ee doctor --gc-plan --json must keep stderr empty; stderr={}",
+            String::from_utf8_lossy(&gc_output.stderr)
+        ));
+    }
+    let gc_json: Value = serde_json::from_slice(&gc_output.stdout)
+        .map_err(|error| format!("parse doctor gc-plan JSON: {error}"))?;
+    if gc_json.get("schema").and_then(Value::as_str) != Some("ee.doctor.gc_plan.v1") {
+        return Err(format!("unexpected GC plan schema: {gc_json}"));
+    }
+    if gc_json.get("sideEffectFree") != Some(&Value::Bool(true))
+        || gc_json.get("configMutation").and_then(Value::as_str) != Some("never")
+    {
+        return Err(format!(
+            "doctor GC plan must declare read-only posture: {gc_json}"
+        ));
+    }
+    if gc_json.get("eligibleCount").and_then(Value::as_u64) != Some(1) {
+        return Err(format!(
+            "expected only the old run to be GC-eligible: {gc_json}"
+        ));
+    }
+    let eligible = gc_json
+        .get("eligible")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("GC plan missing eligible[]: {gc_json}"))?;
+    if eligible
+        .first()
+        .and_then(|entry| entry.get("runId"))
+        .and_then(Value::as_str)
+        != Some("run-old")
+    {
+        return Err(format!("old run should be first eligible entry: {gc_json}"));
+    }
+    let ineligible = gc_json
+        .get("ineligible")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("GC plan missing ineligible[]: {gc_json}"))?;
+    if !ineligible.iter().any(|entry| {
+        entry
+            .get("runId")
+            .and_then(Value::as_str)
+            .is_some_and(|run_id| run_id == "run-future")
+    }) {
+        return Err(format!("future run should remain ineligible: {gc_json}"));
+    }
+    if !old_state.exists() || !future_state.exists() {
+        return Err("doctor GC plan must not delete run state files".to_string());
+    }
+    Ok(())
 }
