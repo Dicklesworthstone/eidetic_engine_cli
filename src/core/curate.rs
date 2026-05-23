@@ -1099,7 +1099,7 @@ pub struct CurateApplyResult {
     pub status: String,
     pub decision: String,
     pub candidate_type: String,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_memory_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5326,7 +5326,7 @@ fn evaluate_candidate_for_apply(
                     status: "already_applied".to_owned(),
                     decision: "unchanged".to_owned(),
                     candidate_type: stored.candidate_type.clone(),
-                    target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+                    target_memory_id: stored.target_memory_id.clone(),
                     created_memory_id: None,
                     created_memory: None,
                     changes: Vec::new(),
@@ -5775,7 +5775,7 @@ fn evaluate_candidate_for_apply(
                 "update_memory".to_owned()
             },
             candidate_type: candidate_type.as_str().to_owned(),
-            target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+            target_memory_id: stored.target_memory_id.clone(),
             created_memory_id: None,
             created_memory: None,
             changes,
@@ -5833,7 +5833,7 @@ fn evaluate_create_derived_candidate_for_apply(
                     status: "already_applied".to_owned(),
                     decision: "unchanged".to_owned(),
                     candidate_type: stored.candidate_type.clone(),
-                    target_memory_id: String::new(),
+                    target_memory_id: None,
                     created_memory_id: None,
                     created_memory: None,
                     changes: Vec::new(),
@@ -6075,7 +6075,7 @@ fn evaluate_create_derived_candidate_for_apply(
             status: "ready".to_owned(),
             decision: "create_derived_memory".to_owned(),
             candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
-            target_memory_id: String::new(),
+            target_memory_id: None,
             created_memory_id: Some(memory_id.clone()),
             created_memory: Some(created_memory.clone()),
             changes,
@@ -7092,7 +7092,7 @@ fn blocked_apply(
             status: "blocked".to_owned(),
             decision: "unchanged".to_owned(),
             candidate_type: stored.candidate_type.clone(),
-            target_memory_id: stored_target_memory_id_text(stored).to_owned(),
+            target_memory_id: stored.target_memory_id.clone(),
             created_memory_id: None,
             created_memory: None,
             changes: Vec::new(),
@@ -7958,6 +7958,7 @@ fn persist_create_derived_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    ensure_create_derived_candidate_still_approved(connection, workspace_id, stored)?;
     let mut source_errors = Vec::new();
     validate_derivation_source_refs(
         connection,
@@ -8108,6 +8109,55 @@ fn persist_create_derived_candidate_application_inner(
         "curate create-derived transition recorded"
     );
     Ok(audit_id)
+}
+
+fn ensure_create_derived_candidate_still_approved(
+    connection: &DbConnection,
+    workspace_id: &str,
+    stored: &StoredCurationCandidate,
+) -> Result<(), DomainError> {
+    let Some(current) = connection
+        .get_curation_candidate(workspace_id, &stored.id)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to re-read create-derived curation candidate {} at apply time: {error}",
+                stored.id
+            ),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?
+    else {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} disappeared at apply time.",
+                stored.id
+            ),
+            repair: Some("Re-propose the candidate before applying it.".to_owned()),
+        });
+    };
+    if current.status != CandidateStatus::Approved.as_str() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} is no longer approved at apply time; current status is {}.",
+                stored.id, current.status
+            ),
+            repair: Some(format!("ee curate validate {}", stored.id)),
+        });
+    }
+    if current.candidate_type != CandidateType::CreateDerivedMemory.as_str()
+        || current.derivation_source_refs_json != stored.derivation_source_refs_json
+        || current.derivation_metadata_json != stored.derivation_metadata_json
+        || current.proposed_content != stored.proposed_content
+        || current.proposed_confidence != stored.proposed_confidence
+    {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Create-derived curation candidate {} changed after validation.",
+                stored.id
+            ),
+            repair: Some("Re-run `ee curate validate <candidate-id>` before applying.".to_owned()),
+        });
+    }
+    Ok(())
 }
 
 fn applied_level_change(
@@ -9338,8 +9388,9 @@ mod tests {
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
         CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
-        CreateWorkspaceInput, DbConnection, MemoryLinkRelation, MemoryLinkSource,
-        StoredCurationCandidate, StoredEvidenceSpan, StoredSession, audit_actions,
+        CreateWorkspaceInput, DbConnection, EvidenceSpanMemoryAttachResult, MemoryLinkRelation,
+        MemoryLinkSource, StoredCurationCandidate, StoredEvidenceSpan, StoredSession,
+        audit_actions,
     };
     use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
     use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
@@ -10528,6 +10579,53 @@ mod tests {
         let actual = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
         let expected =
             include_str!("../../tests/fixtures/golden/review/session_propose.golden").trim_end();
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn review_session_bootstrap_report_json_matches_golden() -> TestResult {
+        let report = ReviewSessionReport {
+            schema: "ee.review.session.v1",
+            command: "review session",
+            version: "0.0.0",
+            workspace_id: "wsp_review_bootstrap_golden".to_owned(),
+            workspace_path: "/workspace/bootstrap".to_owned(),
+            database_path: "/workspace/bootstrap/.ee/ee.db".to_owned(),
+            session_id: "sess_review_bootstrap_golden".to_owned(),
+            cass_session_id: "cass-review-bootstrap-golden".to_owned(),
+            propose_mode: true,
+            dry_run: true,
+            durable_mutation: false,
+            evidence_span_count: 1,
+            topic_count: 1,
+            candidate_count: 1,
+            candidates: vec![ReviewSessionCandidate {
+                candidate_id: "curate_review_bootstrap_golden".to_owned(),
+                candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+                candidate_kind: REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY.to_owned(),
+                topic_key: "bootstrap".to_owned(),
+                target_memory_id: None,
+                proposed_content:
+                    "Derived memory: run cargo fmt --check before release handoff.".to_owned(),
+                proposed_confidence: 0.58,
+                source_type: "agent_inference".to_owned(),
+                source_ids: vec!["ev_review_bootstrap".to_owned()],
+                reason:
+                    "Bootstrap candidate from 1 evidence span(s) in CASS session `cass-review-bootstrap-golden`."
+                        .to_owned(),
+                confidence: 0.58,
+                content_hash: "blake3:review-bootstrap-golden-hash".to_owned(),
+                persisted: false,
+            }],
+            degraded: Vec::new(),
+            next_action: "ee review session <session-id> --propose --json".to_owned(),
+        };
+
+        let actual = serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?;
+        let expected =
+            include_str!("../../tests/fixtures/golden/review/session_bootstrap_propose.golden")
+                .trim_end();
         assert_eq!(actual, expected);
         Ok(())
     }
@@ -12109,7 +12207,7 @@ mod tests {
 
         assert_eq!(report.application.status, "applied");
         assert_eq!(report.application.decision, "create_derived_memory");
-        assert!(report.application.target_memory_id.is_empty());
+        assert_eq!(report.application.target_memory_id, None);
         assert!(report.target_before.is_none());
         assert!(report.target_after.is_none());
         let created_memory_id = report
@@ -12117,6 +12215,12 @@ mod tests {
             .created_memory_id
             .as_deref()
             .ok_or_else(|| "apply report must expose createdMemoryId".to_owned())?;
+        let report_json = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        assert!(report_json["application"]["targetMemoryId"].is_null());
+        assert_eq!(
+            report_json["application"]["createdMemoryId"].as_str(),
+            Some(created_memory_id)
+        );
         assert_eq!(
             report
                 .application
@@ -12217,6 +12321,168 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn apply_curation_candidate_rejects_create_derived_memory_hash_drift() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6501)).to_string();
+        let evidence_source_id = evidence_id(0x6502);
+        let candidate_id = curate_id(0x6503);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        connection
+            .apply_memory_curation_update(
+                &memory_id,
+                &crate::db::ApplyMemoryCurationInput {
+                    workspace_id: workspace_id.clone(),
+                    content: "Source memory drifted after validation.".to_owned(),
+                    confidence: 0.70,
+                    trust_class: "agent_assertion".to_owned(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let result = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        });
+
+        let error = result.expect_err("memory source drift must fail create-derived apply");
+        assert!(
+            error.message().contains("derived_source_hash_mismatch"),
+            "error should name memory hash drift: {}",
+            error.message()
+        );
+        assert_no_create_derived_apply_side_effects(
+            &connection,
+            &workspace_id,
+            &candidate_id,
+            &memory_id,
+            &evidence_source_id,
+            None,
+            1,
+            "memory hash drift",
+        )
+    }
+
+    #[test]
+    fn apply_curation_candidate_rejects_create_derived_evidence_attachment_drift() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6601)).to_string();
+        let evidence_source_id = evidence_id(0x6602);
+        let candidate_id = curate_id(0x6603);
+        let competing_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6604)).to_string();
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        connection
+            .insert_memory(
+                &competing_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: "Competing memory claimed the evidence first.".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.64,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "evidence span missing before conflict attach".to_owned())?;
+        let attached = connection
+            .attach_evidence_span_to_memory_if_unlinked(
+                &workspace_id,
+                &evidence_source_id,
+                &evidence.content_hash,
+                &competing_memory_id,
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(attached, EvidenceSpanMemoryAttachResult::Attached);
+
+        let result = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        });
+
+        let error = result.expect_err("evidence attachment drift must fail create-derived apply");
+        assert!(
+            error
+                .message()
+                .contains("derived_source_evidence_already_linked"),
+            "error should name evidence attachment drift: {}",
+            error.message()
+        );
+        assert_no_create_derived_apply_side_effects(
+            &connection,
+            &workspace_id,
+            &candidate_id,
+            &memory_id,
+            &evidence_source_id,
+            Some(&competing_memory_id),
+            2,
+            "evidence attachment drift",
+        )
+    }
+
     fn assert_create_derived_apply_failure_rolls_back(
         phase: &'static str,
         id_offset: u128,
@@ -12305,6 +12571,58 @@ mod tests {
         assert!(
             audits.is_empty(),
             "failed phase {phase} leaked memory.create audit"
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assert_no_create_derived_apply_side_effects(
+        connection: &DbConnection,
+        workspace_id: &str,
+        candidate_id: &str,
+        source_memory_id: &str,
+        evidence_source_id: &str,
+        expected_evidence_memory_id: Option<&str>,
+        expected_memory_count: usize,
+        label: &str,
+    ) -> TestResult {
+        let stored = connection
+            .get_curation_candidate(workspace_id, candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("candidate missing after failed apply: {label}"))?;
+        assert_eq!(stored.status, "approved");
+        assert!(stored.applied_at.is_none());
+
+        let memories = connection
+            .list_memories(workspace_id, None, true)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            memories.len(),
+            expected_memory_count,
+            "failed apply leaked a derived memory: {label}"
+        );
+        let links = connection
+            .list_memory_links_for_memory(source_memory_id, Some(MemoryLinkRelation::DerivedFrom))
+            .map_err(|error| error.to_string())?;
+        assert!(
+            links.is_empty(),
+            "failed apply leaked provenance links: {label}"
+        );
+        let evidence = connection
+            .get_evidence_span(evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("evidence span missing after failed apply: {label}"))?;
+        assert_eq!(evidence.memory_id.as_deref(), expected_evidence_memory_id);
+        let jobs = connection
+            .list_search_index_jobs(workspace_id, None)
+            .map_err(|error| error.to_string())?;
+        assert!(jobs.is_empty(), "failed apply leaked search jobs: {label}");
+        let audits = connection
+            .list_audit_by_action(audit_actions::MEMORY_CREATE, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            audits.is_empty(),
+            "failed apply leaked memory.create audit: {label}"
         );
         Ok(())
     }
@@ -13461,7 +13779,7 @@ mod tests {
                 status: "would_apply".to_owned(),
                 decision: "apply".to_owned(),
                 candidate_type: "promote".to_owned(),
-                target_memory_id: "mem_aggregate000000000000001".to_owned(),
+                target_memory_id: Some("mem_aggregate000000000000001".to_owned()),
                 created_memory_id: None,
                 created_memory: None,
                 changes: Vec::new(),

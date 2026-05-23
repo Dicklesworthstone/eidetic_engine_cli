@@ -1,0 +1,37 @@
+{
+  "schema": "ee.review.session.v1",
+  "command": "review session",
+  "version": "0.0.0",
+  "workspaceId": "wsp_review_bootstrap_golden",
+  "workspacePath": "/workspace/bootstrap",
+  "databasePath": "/workspace/bootstrap/.ee/ee.db",
+  "sessionId": "sess_review_bootstrap_golden",
+  "cassSessionId": "cass-review-bootstrap-golden",
+  "proposeMode": true,
+  "dryRun": true,
+  "durableMutation": false,
+  "evidenceSpanCount": 1,
+  "topicCount": 1,
+  "candidateCount": 1,
+  "candidates": [
+    {
+      "candidateId": "curate_review_bootstrap_golden",
+      "candidateType": "create_derived_memory",
+      "candidateKind": "propose_new_memory",
+      "topicKey": "bootstrap",
+      "targetMemoryId": null,
+      "proposedContent": "Derived memory: run cargo fmt --check before release handoff.",
+      "proposedConfidence": 0.58,
+      "sourceType": "agent_inference",
+      "sourceIds": [
+        "ev_review_bootstrap"
+      ],
+      "reason": "Bootstrap candidate from 1 evidence span(s) in CASS session `cass-review-bootstrap-golden`.",
+      "confidence": 0.58,
+      "contentHash": "blake3:review-bootstrap-golden-hash",
+      "persisted": false
+    }
+  ],
+  "degraded": [],
+  "nextAction": "ee review session <session-id> --propose --json"
+}
