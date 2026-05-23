@@ -67,6 +67,9 @@ mod cass_view_span_defaults;
 #[path = "contracts/cass_default_impls.rs"]
 mod cass_default_impls;
 
+#[path = "contracts/cass_subsystem_name.rs"]
+mod cass_subsystem_name;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
