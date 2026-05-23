@@ -3922,15 +3922,15 @@ mod tests {
         // (camelCase JSON pointers) for the structures listed in the bead's
         // "JSON Contract" section.
         let envelope = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": report,
         });
 
         assert_eq!(
             envelope.pointer("/schema").and_then(Value::as_str),
-            Some(crate::models::RESPONSE_SCHEMA_V1),
-            "top-level envelope schema must match the response v1 contract"
+            Some(crate::models::RESPONSE_SCHEMA_V2),
+            "top-level envelope schema must match the current response contract"
         );
         assert_eq!(
             envelope.pointer("/success").and_then(Value::as_bool),
@@ -4194,7 +4194,7 @@ mod tests {
 
         attach_workspace_hygiene_agent_harness_advisory(&mut report, true);
         let envelope = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": report,
         });
