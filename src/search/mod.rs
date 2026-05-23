@@ -865,14 +865,67 @@ fn is_env_name_byte(byte: u8) -> bool {
 }
 
 fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
-    for prefix in [
+    const SENSITIVE_RELATIVE_PATH_PREFIXES: &[&str] = &[
         ".ssh/",
         ".ssh\\",
         "./.ssh/",
         r#".\.ssh\"#,
         "../.ssh/",
         r#"..\.ssh\"#,
-    ] {
+        ".aws/",
+        ".aws\\",
+        "./.aws/",
+        r#".\.aws\"#,
+        "../.aws/",
+        r#"..\.aws\"#,
+        ".kube/",
+        ".kube\\",
+        "./.kube/",
+        r#".\.kube\"#,
+        "../.kube/",
+        r#"..\.kube\"#,
+        ".config/gcloud/",
+        ".config\\gcloud\\",
+        "./.config/gcloud/",
+        r#".\.config\gcloud\"#,
+        "../.config/gcloud/",
+        r#"..\.config\gcloud\"#,
+        ".docker/",
+        ".docker\\",
+        "./.docker/",
+        r#".\.docker\"#,
+        "../.docker/",
+        r#"..\.docker\"#,
+        ".gnupg/",
+        ".gnupg\\",
+        "./.gnupg/",
+        r#".\.gnupg\"#,
+        "../.gnupg/",
+        r#"..\.gnupg\"#,
+        ".cargo/credentials",
+        ".cargo\\credentials",
+        "./.cargo/credentials",
+        r#".\.cargo\credentials"#,
+        "../.cargo/credentials",
+        r#"..\.cargo\credentials"#,
+        ".netrc",
+        "./.netrc",
+        r#".\.netrc"#,
+        "../.netrc",
+        r#"..\.netrc"#,
+        ".npmrc",
+        "./.npmrc",
+        r#".\.npmrc"#,
+        "../.npmrc",
+        r#"..\.npmrc"#,
+        ".pypirc",
+        "./.pypirc",
+        r#".\.pypirc"#,
+        "../.pypirc",
+        r#"..\.pypirc"#,
+    ];
+
+    for prefix in SENSITIVE_RELATIVE_PATH_PREFIXES {
         if remaining.starts_with(prefix) {
             return Some(prefix.len());
         }
@@ -3628,6 +3681,38 @@ mod tests {
                 "search projection redaction leaked runtime or ssh path {leaked}: {redacted}"
             );
         }
+    }
+
+    #[test]
+    fn search_projection_redacts_relative_credential_path_refs() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"aws=.aws/credentials kube=./.kube/config docker=../.docker/config.json gcloud=.config/gcloud/application_default_credentials.json cargo=.cargo/credentials.toml gnupg=.\.gnupg\private-keys-v1.d npm=.npmrc netrc=../.netrc pypi=.\.pypirc ordinary=docs/config.json next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"aws=[REDACTED_PATH] kube=[REDACTED_PATH] docker=[REDACTED_PATH] gcloud=[REDACTED_PATH] cargo=[REDACTED_PATH] gnupg=[REDACTED_PATH] npm=[REDACTED_PATH] netrc=[REDACTED_PATH] pypi=[REDACTED_PATH] ordinary=docs/config.json next=done"#
+        );
+        for leaked in [
+            ".aws/credentials",
+            "./.kube/config",
+            "../.docker/config.json",
+            ".config/gcloud/application_default_credentials.json",
+            ".cargo/credentials.toml",
+            r#".\.gnupg\private-keys-v1.d"#,
+            ".npmrc",
+            "../.netrc",
+            r#".\.pypirc"#,
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked relative credential path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=docs/config.json"),
+            "ordinary relative paths should remain visible: {redacted}"
+        );
     }
 
     #[test]
