@@ -1173,9 +1173,13 @@ fn rand_id() -> u32 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        return now.subsec_nanos() ^ (now.as_secs() as u32);
+        return now.subsec_nanos() ^ saturating_unix_seconds_u32(now);
     }
     u32::from_ne_bytes(bytes)
+}
+
+fn saturating_unix_seconds_u32(duration: std::time::Duration) -> u32 {
+    u32::try_from(duration.as_secs()).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -1558,6 +1562,12 @@ mod tests {
         let plan = generate_plan(&options);
         assert_eq!(plan.recipe_id, "unknown");
         assert!(plan.classification.ambiguous);
+    }
+
+    #[test]
+    fn rand_id_fallback_seconds_saturate_before_narrowing() {
+        let duration = std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
+        assert_eq!(saturating_unix_seconds_u32(duration), u32::MAX);
     }
 
     #[test]
