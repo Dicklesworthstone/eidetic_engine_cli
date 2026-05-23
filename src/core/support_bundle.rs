@@ -321,7 +321,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         .clone()
         .ok_or_else(|| DomainError::Usage {
             message: "--out is required".to_string(),
-            repair: Some("ee support bundle --out <dir>".to_string()),
+            repair: Some("ee support bundle --help".to_string()),
         })?;
 
     let workspace_path = options
@@ -737,9 +737,7 @@ pub fn summarize_inspected_bundle_for_perf_compare(inspect: &InspectReport) -> A
             artifact_id: Some(artifact_id),
             field_path: Some("manifest.json".to_owned()),
             message: "Support bundle manifest is missing or malformed.".to_owned(),
-            repair: Some(
-                "Run ee support bundle --out <dir> and inspect the generated bundle.".to_owned(),
-            ),
+            repair: Some("ee support bundle --help".to_owned()),
         });
     }
 
@@ -5172,7 +5170,7 @@ mod tests {
                 "code": "context_evidence_freshness_changed_source",
                 "severity": "medium",
                 "message": "Source evidence changed after pack creation.",
-                "repair": "ee why <memory-id> --json"
+                "repair": format!("ee why {memory_id} --json")
             }
         ])
         .to_string();
