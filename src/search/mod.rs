@@ -646,6 +646,7 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
         "/run/",
         "/var/lib/docker/",
         "/var/lib/kubelet/",
+        "/var/folders/",
         "/var/log/",
         "/var/tmp/",
         "/proc/",
@@ -663,6 +664,15 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
         "/__w/",
         "/root/",
         "/tmp/",
+        "/private/var/run/",
+        "/private/var/log/",
+        "/private/var/tmp/",
+        "/private/var/folders/",
+        "/private/etc/ssh/",
+        "/private/etc/kubernetes/",
+        "/private/etc/ssl/",
+        "/private/etc/letsencrypt/",
+        "/private/etc/secrets/",
         "/private/tmp/",
     ];
 
@@ -3645,6 +3655,35 @@ mod tests {
             assert!(
                 !redacted.contains(leaked),
                 "search projection redaction leaked OS or secret config root {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_redacts_macos_private_runtime_and_secret_roots() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"run=/private/var/run/agent.sock log=/private/var/log/agent/secrets.log vartmp=/private/var/tmp/ee/session.json folders=/var/folders/vt/n2xyn/T/tmp.stderr pfolders=/private/var/folders/vt/n2xyn/T/tmp.stdout etcssh=/private/etc/ssh/ssh_host_ed25519_key kube=/private/etc/kubernetes/admin.conf ssl=/private/etc/ssl/private/server.key le=/private/etc/letsencrypt/live/example/privkey.pem secrets=/private/etc/secrets/token next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"run=[REDACTED_PATH] log=[REDACTED_PATH] vartmp=[REDACTED_PATH] folders=[REDACTED_PATH] pfolders=[REDACTED_PATH] etcssh=[REDACTED_PATH] kube=[REDACTED_PATH] ssl=[REDACTED_PATH] le=[REDACTED_PATH] secrets=[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            "/private/var/run/agent.sock",
+            "/private/var/log/agent",
+            "/private/var/tmp/ee",
+            "/var/folders/vt",
+            "/private/var/folders/vt",
+            "/private/etc/ssh/ssh_host_ed25519_key",
+            "/private/etc/kubernetes/admin.conf",
+            "/private/etc/ssl/private",
+            "/private/etc/letsencrypt/live",
+            "/private/etc/secrets/token",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked macOS private root {leaked}: {redacted}"
             );
         }
     }
