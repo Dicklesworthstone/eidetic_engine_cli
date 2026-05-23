@@ -55,6 +55,9 @@ mod cass_schema_id_constants;
 #[path = "contracts/cass_error_from_io.rs"]
 mod cass_error_from_io;
 
+#[path = "contracts/cass_view_span_defaults.rs"]
+mod cass_view_span_defaults;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
