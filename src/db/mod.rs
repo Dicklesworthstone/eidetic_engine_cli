@@ -17499,6 +17499,268 @@ fn stored_recorder_event_from_row(row: &Row) -> Result<StoredRecorderEvent> {
     })
 }
 
+/// One row read back from `rch_verify_runs`, matching the V061 schema landed
+/// for bd-22p8c. Query helpers populate this struct in deterministic order
+/// (active blocker first, then `retry_after`, `command_kind`, `bead_id`,
+/// `command_hash`, `created_at`) so agent consumers can rely on stable
+/// pagination.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredRchVerifyRun {
+    pub id: String,
+    pub workspace_id: String,
+    pub schema_id: String,
+    pub command_text: Option<String>,
+    pub command_hash: String,
+    pub command_kind: String,
+    pub bead_id: Option<String>,
+    pub git_head: Option<String>,
+    pub git_tree: Option<String>,
+    pub source_state_hash: String,
+    pub dirty_status_hash: Option<String>,
+    pub verification_attribution: String,
+    pub remote_required: bool,
+    pub worker_id: Option<String>,
+    pub status: String,
+    pub exit_code: Option<i32>,
+    pub degraded_codes_json: Option<String>,
+    pub stdout_tail_hash: Option<String>,
+    pub stderr_tail_hash: Option<String>,
+    pub stdout_tail: Option<String>,
+    pub stderr_tail: Option<String>,
+    pub blocker_fingerprint: Option<String>,
+    pub remediation_bead: Option<String>,
+    pub retry_after: Option<String>,
+    pub created_at: String,
+}
+
+/// Outcome of a single `insert_rch_verify_run` call. `Inserted` corresponds to
+/// a newly written row; `Duplicate` indicates the deterministic unique index
+/// `(command_hash, source_state_hash, COALESCE(blocker_fingerprint,''), status)`
+/// already had a matching row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RchVerifyIngestOutcome {
+    Inserted,
+    Duplicate,
+}
+
+impl DbConnection {
+    /// Insert a normalized RCH verifier row, returning whether the row was
+    /// newly written or collapsed into a prior duplicate.
+    ///
+    /// The id is derived deterministically from the row's content fingerprint
+    /// so repeated ingestion of the same proof produces the same id and
+    /// short-circuits at the unique index.
+    pub fn insert_rch_verify_run(
+        &self,
+        id: &str,
+        workspace_id: &str,
+        row: &crate::core::verify_ledger::NormalizedRchVerifyRow,
+        created_at: &str,
+    ) -> Result<RchVerifyIngestOutcome> {
+        let changes_before = self.changes_total()?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO rch_verify_runs (\
+                 id, workspace_id, schema_id, command_text, command_hash, command_kind, \
+                 bead_id, git_head, git_tree, source_state_hash, dirty_status_hash, \
+                 verification_attribution, remote_required, worker_id, status, exit_code, \
+                 degraded_codes_json, stdout_tail_hash, stderr_tail_hash, stdout_tail, \
+                 stderr_tail, blocker_fingerprint, remediation_bead, retry_after, created_at\
+             ) VALUES (\
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, \
+                 ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25\
+             )",
+            &[
+                Value::Text(id.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(row.schema_id.clone()),
+                optional_text_value(row.command_text.as_deref()),
+                Value::Text(row.command_hash.clone()),
+                Value::Text(row.command_kind.clone()),
+                optional_text_value(row.bead_id.as_deref()),
+                optional_text_value(row.git_head.as_deref()),
+                optional_text_value(row.git_tree.as_deref()),
+                Value::Text(row.source_state_hash.clone()),
+                optional_text_value(row.dirty_status_hash.as_deref()),
+                Value::Text(row.verification_attribution.clone()),
+                Value::Integer(if row.remote_required { 1 } else { 0 }),
+                optional_text_value(row.worker_id.as_deref()),
+                Value::Text(row.status.clone()),
+                row.exit_code
+                    .map_or(Value::Null, |code| Value::Integer(i64::from(code))),
+                optional_text_value(row.degraded_codes_json.as_deref()),
+                optional_text_value(row.stdout_tail_hash.as_deref()),
+                optional_text_value(row.stderr_tail_hash.as_deref()),
+                optional_text_value(row.stdout_tail.as_deref()),
+                optional_text_value(row.stderr_tail.as_deref()),
+                optional_text_value(row.blocker_fingerprint.as_deref()),
+                optional_text_value(row.remediation_bead.as_deref()),
+                optional_text_value(row.retry_after.as_deref()),
+                Value::Text(created_at.to_string()),
+            ],
+        )?;
+        let changes_after = self.changes_total()?;
+        if changes_after > changes_before {
+            Ok(RchVerifyIngestOutcome::Inserted)
+        } else {
+            Ok(RchVerifyIngestOutcome::Duplicate)
+        }
+    }
+
+    /// Query stored RCH verifier runs filtered by workspace, optionally
+    /// narrowed by bead id and/or command hash. Results sort by active
+    /// blocker first (rows whose retry_after is unset or in the future),
+    /// then by retry_after ascending, command_kind, bead_id, command_hash,
+    /// and created_at descending.
+    pub fn query_rch_verify_runs(
+        &self,
+        workspace_id: &str,
+        bead_id: Option<&str>,
+        command_hash: Option<&str>,
+        now_rfc3339: &str,
+    ) -> Result<Vec<StoredRchVerifyRun>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, schema_id, command_text, command_hash, command_kind, \
+             bead_id, git_head, git_tree, source_state_hash, dirty_status_hash, \
+             verification_attribution, remote_required, worker_id, status, exit_code, \
+             degraded_codes_json, stdout_tail_hash, stderr_tail_hash, stdout_tail, \
+             stderr_tail, blocker_fingerprint, remediation_bead, retry_after, created_at \
+             FROM rch_verify_runs WHERE workspace_id = ?1",
+        );
+        let mut params: Vec<Value> = vec![Value::Text(workspace_id.to_string())];
+        if let Some(bead) = bead_id {
+            params.push(Value::Text(bead.to_string()));
+            sql.push_str(&format!(" AND bead_id = ?{}", params.len()));
+        }
+        if let Some(hash) = command_hash {
+            params.push(Value::Text(hash.to_string()));
+            sql.push_str(&format!(" AND command_hash = ?{}", params.len()));
+        }
+        params.push(Value::Text(now_rfc3339.to_string()));
+        let active_param = params.len();
+        sql.push_str(&format!(
+            " ORDER BY \
+             CASE WHEN blocker_fingerprint IS NOT NULL \
+                  AND (retry_after IS NULL OR retry_after > ?{active_param}) \
+                  THEN 0 ELSE 1 END ASC, \
+             retry_after IS NULL, retry_after ASC, command_kind ASC, \
+             bead_id IS NULL, bead_id ASC, command_hash ASC, created_at DESC"
+        ));
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_rch_verify_run_from_row).collect()
+    }
+
+    /// Query stored RCH verifier runs that currently advertise an active
+    /// blocker (`blocker_fingerprint` set and `retry_after` either unset or
+    /// in the future). Results sort deterministically as in
+    /// [`Self::query_rch_verify_runs`], filtered to blockers only.
+    pub fn query_rch_verify_blockers(
+        &self,
+        workspace_id: &str,
+        bead_id: Option<&str>,
+        now_rfc3339: &str,
+    ) -> Result<Vec<StoredRchVerifyRun>> {
+        let mut sql = String::from(
+            "SELECT id, workspace_id, schema_id, command_text, command_hash, command_kind, \
+             bead_id, git_head, git_tree, source_state_hash, dirty_status_hash, \
+             verification_attribution, remote_required, worker_id, status, exit_code, \
+             degraded_codes_json, stdout_tail_hash, stderr_tail_hash, stdout_tail, \
+             stderr_tail, blocker_fingerprint, remediation_bead, retry_after, created_at \
+             FROM rch_verify_runs WHERE workspace_id = ?1 \
+             AND blocker_fingerprint IS NOT NULL \
+             AND (retry_after IS NULL OR retry_after > ?2)",
+        );
+        let mut params: Vec<Value> = vec![
+            Value::Text(workspace_id.to_string()),
+            Value::Text(now_rfc3339.to_string()),
+        ];
+        if let Some(bead) = bead_id {
+            params.push(Value::Text(bead.to_string()));
+            sql.push_str(&format!(" AND bead_id = ?{}", params.len()));
+        }
+        sql.push_str(
+            " ORDER BY retry_after IS NULL, retry_after ASC, command_kind ASC, \
+             bead_id IS NULL, bead_id ASC, command_hash ASC, created_at DESC",
+        );
+        let rows = self.query_for(DbOperation::Query, &sql, &params)?;
+        rows.iter().map(stored_rch_verify_run_from_row).collect()
+    }
+
+    fn changes_total(&self) -> Result<i64> {
+        let rows = self.query_for(DbOperation::Query, "SELECT total_changes()", &[])?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0))
+    }
+}
+
+fn optional_text_value(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |raw| Value::Text(raw.to_string()))
+}
+
+fn stored_rch_verify_run_from_row(row: &Row) -> Result<StoredRchVerifyRun> {
+    Ok(StoredRchVerifyRun {
+        id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
+        workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
+        schema_id: required_text(row, 2, DbOperation::Query, "schema_id")?.to_string(),
+        command_text: optional_text(row, 3)?.map(str::to_string),
+        command_hash: required_text(row, 4, DbOperation::Query, "command_hash")?.to_string(),
+        command_kind: required_text(row, 5, DbOperation::Query, "command_kind")?.to_string(),
+        bead_id: optional_text(row, 6)?.map(str::to_string),
+        git_head: optional_text(row, 7)?.map(str::to_string),
+        git_tree: optional_text(row, 8)?.map(str::to_string),
+        source_state_hash: required_text(row, 9, DbOperation::Query, "source_state_hash")?
+            .to_string(),
+        dirty_status_hash: optional_text(row, 10)?.map(str::to_string),
+        verification_attribution: required_text(
+            row,
+            11,
+            DbOperation::Query,
+            "verification_attribution",
+        )?
+        .to_string(),
+        remote_required: row
+            .get(12)
+            .and_then(|value| value.as_i64())
+            .is_some_and(|value| value != 0),
+        worker_id: optional_text(row, 13)?.map(str::to_string),
+        status: required_text(row, 14, DbOperation::Query, "status")?.to_string(),
+        exit_code: row
+            .get(15)
+            .and_then(|value| value.as_i64())
+            .and_then(|value| i32::try_from(value).ok()),
+        degraded_codes_json: optional_text(row, 16)?.map(str::to_string),
+        stdout_tail_hash: optional_text(row, 17)?.map(str::to_string),
+        stderr_tail_hash: optional_text(row, 18)?.map(str::to_string),
+        stdout_tail: optional_text(row, 19)?.map(str::to_string),
+        stderr_tail: optional_text(row, 20)?.map(str::to_string),
+        blocker_fingerprint: optional_text(row, 21)?.map(str::to_string),
+        remediation_bead: optional_text(row, 22)?.map(str::to_string),
+        retry_after: optional_text(row, 23)?.map(str::to_string),
+        created_at: required_text(row, 24, DbOperation::Query, "created_at")?.to_string(),
+    })
+}
+
+/// Derive a deterministic 33-char `rchverify_*` row id from the normalized
+/// uniqueness fingerprint. Same proof content always produces the same id so
+/// repeated ingestion lands cleanly on the V061 unique index.
+pub fn rch_verify_run_id(
+    command_hash: &str,
+    source_state_hash: &str,
+    status: &str,
+    blocker_fingerprint: Option<&str>,
+) -> String {
+    let payload = format!(
+        "{command_hash}\u{1f}{source_state_hash}\u{1f}{status}\u{1f}{}",
+        blocker_fingerprint.unwrap_or("")
+    );
+    let hex = blake3::hash(payload.as_bytes()).to_hex().to_string();
+    let suffix: String = hex.chars().take(23).collect();
+    format!("rchverify_{suffix}")
+}
+
 #[cfg(test)]
 // DB tests use unwrap/expect only as fixture assertions around in-memory stores.
 #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -29365,6 +29627,194 @@ mod tests {
             .and_then(|v| v.as_i64())
             .unwrap_or(-1);
         ensure_equal(&final_count, &5_i64, "differentiated fingerprint accepted")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn public_insert_rch_verify_run_roundtrips_then_dedups() -> TestResult {
+        use crate::core::verify_ledger::NormalizedRchVerifyRow;
+        use crate::db::{RchVerifyIngestOutcome, rch_verify_run_id};
+
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let row = NormalizedRchVerifyRow {
+            schema_id: "ee.rch.verify.v1".to_owned(),
+            command_text: Some("cargo test --lib pack_compression".to_owned()),
+            command_hash: "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+                .to_owned(),
+            command_kind: "cargo_test".to_owned(),
+            bead_id: Some("bd-17awb".to_owned()),
+            git_head: Some("0123456789abcdef0123456789abcdef01234567".to_owned()),
+            git_tree: Some("fedcba9876543210fedcba9876543210fedcba98".to_owned()),
+            source_state_hash: "1111111111111111111111111111111111111111111111111111111111111111"
+                .to_owned(),
+            dirty_status_hash: None,
+            verification_attribution: "committed_tree".to_owned(),
+            remote_required: true,
+            worker_id: Some("worker-01".to_owned()),
+            status: "passed".to_owned(),
+            exit_code: Some(0),
+            degraded_codes: vec![],
+            degraded_codes_json: Some("[]".to_owned()),
+            stdout_tail_hash: None,
+            stderr_tail_hash: None,
+            stdout_tail: Some("ok 1 test".to_owned()),
+            stderr_tail: None,
+            blocker_fingerprint: None,
+            remediation_bead: None,
+            retry_after: None,
+        };
+
+        let id = rch_verify_run_id(
+            &row.command_hash,
+            &row.source_state_hash,
+            &row.status,
+            row.blocker_fingerprint.as_deref(),
+        );
+        assert!(id.starts_with("rchverify_"));
+        assert_eq!(id.len(), 33);
+
+        let first = connection.insert_rch_verify_run(
+            &id,
+            "wsp_01234567890123456789012345",
+            &row,
+            "2026-05-23T05:10:00Z",
+        )?;
+        ensure_equal(
+            &(first as i64),
+            &(RchVerifyIngestOutcome::Inserted as i64),
+            "first insert reports Inserted",
+        )?;
+
+        let second = connection.insert_rch_verify_run(
+            &id,
+            "wsp_01234567890123456789012345",
+            &row,
+            "2026-05-23T05:11:00Z",
+        )?;
+        ensure_equal(
+            &(second as i64),
+            &(RchVerifyIngestOutcome::Duplicate as i64),
+            "second insert collapses to Duplicate via the V061 dedup index",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn query_rch_verify_blockers_filters_expired_and_sorts_deterministically() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let hash_a = "1111111111111111111111111111111111111111111111111111111111111111";
+        let hash_b = "2222222222222222222222222222222222222222222222222222222222222222";
+        let state_a = "3333333333333333333333333333333333333333333333333333333333333333";
+
+        // Success row: not a blocker, must be excluded.
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_aaaaaaaaaaaaaaaaaaaaaaa",
+            hash_a,
+            state_a,
+            "passed",
+            None,
+            None,
+            None,
+            Some("worker-01"),
+            true,
+            Some(r#"[]"#),
+            None,
+        )?;
+
+        // Active blocker (retry_after in the future).
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_bbbbbbbbbbbbbbbbbbbbbbb",
+            hash_a,
+            state_a,
+            "blocked",
+            Some("rch_e327_path_topology"),
+            Some("bd-17c65.10.17.1.2"),
+            Some("2026-05-23T07:00:00Z"),
+            None,
+            true,
+            Some(r#"["RCH-E327"]"#),
+            None,
+        )?;
+
+        // Expired blocker (retry_after in the past relative to query now).
+        insert_rch_verify_row(
+            &connection,
+            "rchverify_ccccccccccccccccccccccc",
+            hash_b,
+            state_a,
+            "blocked",
+            Some("rch_no_capacity"),
+            Some("bd-22p8c"),
+            Some("2026-05-23T04:00:00Z"),
+            None,
+            true,
+            Some(r#"["RCH-NOCAP"]"#),
+            None,
+        )?;
+
+        let active = connection.query_rch_verify_blockers(
+            "wsp_01234567890123456789012345",
+            None,
+            "2026-05-23T05:30:00Z",
+        )?;
+        ensure_equal(
+            &active.len(),
+            &1_usize,
+            "only one blocker is active at the query timestamp",
+        )?;
+        ensure_equal(
+            &active[0].blocker_fingerprint.clone().unwrap_or_default(),
+            &"rch_e327_path_topology".to_owned(),
+            "active blocker matches the topology-blocked row",
+        )?;
+
+        let scoped = connection.query_rch_verify_blockers(
+            "wsp_01234567890123456789012345",
+            Some("bd-17c65.10.17.1.2"),
+            "2026-05-23T05:30:00Z",
+        )?;
+        ensure_equal(&scoped.len(), &1_usize, "bead filter narrows result")?;
+
+        let none_match = connection.query_rch_verify_blockers(
+            "wsp_01234567890123456789012345",
+            Some("bd-does-not-exist"),
+            "2026-05-23T05:30:00Z",
+        )?;
+        ensure_equal(
+            &none_match.len(),
+            &0_usize,
+            "non-matching bead returns empty",
+        )?;
+
+        let all_runs = connection.query_rch_verify_runs(
+            "wsp_01234567890123456789012345",
+            None,
+            None,
+            "2026-05-23T05:30:00Z",
+        )?;
+        ensure_equal(
+            &all_runs.len(),
+            &3_usize,
+            "query_rch_verify_runs returns every row",
+        )?;
+        // Active blocker must sort before success and expired-blocker rows.
+        ensure_equal(
+            &all_runs[0].blocker_fingerprint.clone().unwrap_or_default(),
+            &"rch_e327_path_topology".to_owned(),
+            "active blocker sorts ahead of non-active rows",
+        )?;
 
         connection.close()?;
         Ok(())

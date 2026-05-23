@@ -102,6 +102,7 @@ pub mod tailscale_probe;
 pub mod task_frame;
 pub mod tripwire;
 pub mod verify;
+pub mod verify_ledger;
 pub mod why;
 pub mod witness_retention;
 pub mod workspace;
