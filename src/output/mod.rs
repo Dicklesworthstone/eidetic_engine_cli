@@ -17,6 +17,7 @@ use crate::core::curate::{
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
 };
+use crate::core::degraded_honesty::{RepairCommandKind, classify_repair_command};
 use crate::core::doctor::{
     DependencyBlockedFeature, DependencyContractEntry, DependencyDiagnosticsReport,
     DependencyFeatureProfile, DependencyOptionalFeatureProfile, DependencySource,
@@ -2774,7 +2775,7 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
     obj.field_str("severity", &degraded.severity);
     obj.field_str("message", &degraded.message);
     if !degraded.repair.is_empty() {
-        obj.field_str("repair", &degraded.repair);
+        build_repair_fields(obj, &degraded.repair);
     }
     obj.field_raw(
         "sources",
@@ -2789,6 +2790,21 @@ fn build_aggregated_degradation(obj: &mut JsonBuilder, degraded: &AggregatedDegr
                 build_recovery_action_fields,
             );
         });
+    }
+}
+
+fn build_repair_fields(obj: &mut JsonBuilder, repair: &str) {
+    obj.field_str("repair", repair);
+    obj.field_str("repairKind", repair_command_kind_name(repair));
+}
+
+fn repair_command_kind_name(repair: &str) -> &'static str {
+    match classify_repair_command(repair) {
+        RepairCommandKind::Actionable => "actionable",
+        RepairCommandKind::Template => "template",
+        RepairCommandKind::Placeholder => "placeholder",
+        RepairCommandKind::Unknown => "unknown",
+        RepairCommandKind::Empty => "empty",
     }
 }
 
@@ -11768,7 +11784,7 @@ pub fn error_response_json(error: &DomainError) -> String {
         obj.field_str("message", &message);
         obj.field_str("severity", domain_error_severity(error));
         if let Some(repair) = error.repair() {
-            obj.field_str("repair", repair);
+            build_repair_fields(obj, repair);
         }
         obj.field_object("details", |details| {
             domain_error_details(details, error, &recovery_actions);
@@ -11832,7 +11848,7 @@ fn render_error_degradation(obj: &mut JsonBuilder, degradation: &ErrorDegradatio
     obj.field_str("severity", degradation.severity);
     obj.field_str("message", &degradation.message);
     if let Some(repair) = &degradation.repair {
-        obj.field_str("repair", repair);
+        build_repair_fields(obj, repair);
     }
 }
 
@@ -16051,6 +16067,33 @@ mod tests {
     }
 
     #[test]
+    fn aggregated_degradation_repair_kind_marks_templates() -> TestResult {
+        let degraded = AggregatedDegradation {
+            code: "repair_kind_fixture".to_string(),
+            severity: "warning".to_string(),
+            message: "fixture degradation".to_string(),
+            repair: "ee index rebuild --workspace <path>".to_string(),
+            sources: vec!["fixture".to_string()],
+        };
+        let mut builder = JsonBuilder::with_capacity(256);
+
+        build_aggregated_degradation(&mut builder, &degraded);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&builder.finish()).map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed["repair"].as_str(),
+            &Some("ee index rebuild --workspace <path>"),
+            "repair string",
+        )?;
+        ensure_equal(
+            &parsed["repairKind"].as_str(),
+            &Some("template"),
+            "template repair kind",
+        )
+    }
+
+    #[test]
     fn embed_model_unavailable_degradation_renders_recovery_details() -> TestResult {
         let degraded = AggregatedDegradation {
             code: "embed_model_unavailable".to_string(),
@@ -18028,6 +18071,37 @@ mod tests {
     }
 
     #[test]
+    fn context_response_json_exposes_degraded_repair_kind() -> TestResult {
+        let mut response = context_response_fixture()?;
+        response.data.degraded.push(
+            crate::pack::ContextResponseDegradation::new(
+                "template_repair_fixture",
+                crate::pack::ContextResponseSeverity::Medium,
+                "fixture degradation",
+                Some("ee preflight check --cmd <command> --json".to_string()),
+            )
+            .map_err(|error| format!("degradation rejected: {error:?}"))?,
+        );
+
+        let json = render_context_response_json(&response);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        let degraded = parsed["data"]["degraded"]
+            .as_array()
+            .ok_or_else(|| "degraded must be an array".to_string())?;
+        let entry = degraded
+            .iter()
+            .find(|entry| entry["code"] == "template_repair_fixture")
+            .ok_or_else(|| "template repair fixture degradation missing".to_string())?;
+
+        ensure_equal(
+            &entry["repairKind"].as_str(),
+            &Some("template"),
+            "context degraded repair kind",
+        )
+    }
+
+    #[test]
     fn context_markdown_preserves_section_order_by_rank() -> TestResult {
         // Create items in a specific non-alphabetical order: Failures (rank 1),
         // ProceduralRules (rank 2), Decisions (rank 3). Alphabetically this would
@@ -18277,6 +18351,27 @@ mod tests {
     }
 
     #[test]
+    fn error_schema_repair_kind_marks_template_repairs() -> TestResult {
+        let error = DomainError::UnsatisfiedDegradedMode {
+            message: "Preflight command requires caller-supplied shell text.".to_string(),
+            repair: Some("ee preflight check --cmd <command> --json".to_string()),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+
+        ensure_equal(
+            &parsed["error"]["repair"].as_str(),
+            &Some("ee preflight check --cmd <command> --json"),
+            "repair string",
+        )?;
+        ensure_equal(
+            &parsed["error"]["repairKind"].as_str(),
+            &Some("template"),
+            "error repair kind",
+        )
+    }
+
+    #[test]
     fn error_schema_configuration_has_stable_structure() -> TestResult {
         let error = DomainError::Configuration {
             message: "Invalid config file format.".to_string(),
@@ -18341,6 +18436,13 @@ mod tests {
             &json,
             "ee diag advisory-lock --workspace . --json",
             "repair command",
+        )?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &parsed["degraded"][0]["repairKind"].as_str(),
+            &Some("actionable"),
+            "error degraded repair kind",
         )
     }
 

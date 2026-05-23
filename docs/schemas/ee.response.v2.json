@@ -46,6 +46,10 @@
         },
         "message": {"type": "string"},
         "repair": {"type": "string"},
+        "repairKind": {
+          "type": "string",
+          "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
+        },
         "sources": {
           "type": "array",
           "items": {"type": "string"}

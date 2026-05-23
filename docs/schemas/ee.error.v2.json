@@ -20,6 +20,10 @@
         "message": {"type": "string"},
         "severity": {"type": "string", "enum": ["low", "medium", "high"]},
         "repair": {"type": "string"},
+        "repairKind": {
+          "type": "string",
+          "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
+        },
         "details": {
           "type": "object",
           "properties": {
@@ -36,6 +40,10 @@
         },
         "nonRecoverable": {"type": "boolean"}
       }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/degradation"}
     }
   },
   "field_presets": {
@@ -53,7 +61,11 @@
         "code": {"type": "string"},
         "severity": {"type": "string", "enum": ["low", "medium", "high"]},
         "message": {"type": "string"},
-        "repair": {"type": "string"}
+        "repair": {"type": "string"},
+        "repairKind": {
+          "type": "string",
+          "enum": ["actionable", "template", "placeholder", "unknown", "empty"]
+        }
       }
     },
     "recoveryAction": {
