@@ -1,0 +1,591 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.swarm.work_packet.v1.json",
+  "title": "ee.swarm.work_packet.v1",
+  "description": "Deterministic, redacted, read-only work packet for crowded agent checkouts.",
+  "type": "object",
+  "required": [
+    "schema",
+    "packetId",
+    "workspace",
+    "redactionStatus",
+    "observedStateClass",
+    "recommendedAction",
+    "candidates",
+    "coordination",
+    "rchProofPosture",
+    "verification",
+    "sourceProvenance",
+    "mutationPolicy",
+    "degraded"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.swarm.work_packet.v1"},
+    "packetId": {
+      "type": "string",
+      "description": "Deterministic content identifier for the redacted packet payload."
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Redacted workspace label or stable workspace hash, never an unredacted home path."
+    },
+    "redactionStatus": {
+      "type": "string",
+      "const": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content"
+    },
+    "observedStateClass": {
+      "type": "string",
+      "enum": ["healthy_small_repo", "crowded_checkout", "degraded_mail_rch_topology", "unknown"]
+    },
+    "recommendedAction": {"$ref": "#/definitions/recommendedAction"},
+    "candidates": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/candidate"}
+    },
+    "coordination": {"$ref": "#/definitions/coordination"},
+    "rchProofPosture": {"$ref": "#/definitions/rchProofPosture"},
+    "verification": {"$ref": "#/definitions/verification"},
+    "sourceProvenance": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/sourceProvenance"}
+    },
+    "mutationPolicy": {"$ref": "#/definitions/mutationPolicy"},
+    "degraded": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/degradation"}
+    }
+  },
+  "definitions": {
+    "stringArray": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "recommendedAction": {
+      "type": "object",
+      "required": [
+        "action",
+        "candidateId",
+        "confidence",
+        "safeToClaim",
+        "reasons",
+        "proofObligations",
+        "suggestedCommands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "inspect_and_claim",
+            "coordinate_before_claim",
+            "continue_existing_claim",
+            "prefer_static_docs_work",
+            "reopen_stale_work",
+            "blocked_no_action"
+          ]
+        },
+        "candidateId": {"type": ["string", "null"]},
+        "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+        "safeToClaim": {"type": ["boolean", "null"]},
+        "reasons": {"$ref": "#/definitions/stringArray"},
+        "proofObligations": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "source",
+        "status",
+        "priority",
+        "assignee",
+        "decision",
+        "collisionRisk",
+        "unsafeReasons",
+        "staleReasons",
+        "sourceRefs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "source": {
+          "type": "string",
+          "enum": ["bv_top_pick", "beads_ready", "beads_in_progress", "idea_wizard", "manual"]
+        },
+        "status": {"type": "string"},
+        "priority": {"type": ["integer", "null"]},
+        "assignee": {"type": ["string", "null"]},
+        "decision": {
+          "type": "string",
+          "enum": ["safe_to_claim", "coordinate_first", "blocked", "stale_review", "skip"]
+        },
+        "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]},
+        "unsafeReasons": {"$ref": "#/definitions/stringArray"},
+        "staleReasons": {"$ref": "#/definitions/stringArray"},
+        "sourceRefs": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "coordination": {
+      "type": "object",
+      "required": [
+        "activeClaimCount",
+        "dirtyPathCount",
+        "fileCollisionCount",
+        "agentMail",
+        "activeClaims",
+        "fileCollisions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "activeClaimCount": {"type": "integer", "minimum": 0},
+        "dirtyPathCount": {"type": "integer", "minimum": 0},
+        "fileCollisionCount": {"type": "integer", "minimum": 0},
+        "agentMail": {"$ref": "#/definitions/agentMail"},
+        "activeClaims": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/activeClaim"}
+        },
+        "fileCollisions": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/fileCollision"}
+        }
+      }
+    },
+    "agentMail": {
+      "type": "object",
+      "required": ["status", "healthLevel", "unreadCount", "ackRequiredCount", "degradedCodes"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"type": "string", "enum": ["fresh", "degraded_read_only", "unavailable", "skipped"]},
+        "healthLevel": {"type": ["string", "null"], "enum": ["green", "yellow", "red", null]},
+        "unreadCount": {"type": ["integer", "null"], "minimum": 0},
+        "ackRequiredCount": {"type": ["integer", "null"], "minimum": 0},
+        "degradedCodes": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "activeClaim": {
+      "type": "object",
+      "required": ["beadId", "assignee", "status", "updatedAt", "sourceRefs"],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "assignee": {"type": ["string", "null"]},
+        "status": {"type": "string"},
+        "updatedAt": {"type": ["string", "null"]},
+        "sourceRefs": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "fileCollision": {
+      "type": "object",
+      "required": ["pathPattern", "risk", "owners", "relatedBeadIds", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "pathPattern": {"type": "string"},
+        "risk": {"type": "string", "enum": ["low", "medium", "high"]},
+        "owners": {"$ref": "#/definitions/stringArray"},
+        "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
+        "evidence": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "rchProofPosture": {
+      "type": "object",
+      "required": [
+        "sourceEnabled",
+        "remoteOnlyRequired",
+        "posture",
+        "healthyWorkerCount",
+        "safeToLaunchCargoVerification",
+        "localFallbackPrevented",
+        "blockerCodes",
+        "knownBlockers",
+        "retryAfter"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceEnabled": {"type": "boolean"},
+        "remoteOnlyRequired": {"type": "boolean"},
+        "posture": {
+          "type": "string",
+          "enum": ["remote_ready", "degraded_capacity", "topology_blocked", "unavailable", "unknown"]
+        },
+        "healthyWorkerCount": {"type": ["integer", "null"], "minimum": 0},
+        "safeToLaunchCargoVerification": {"type": ["boolean", "null"]},
+        "localFallbackPrevented": {"type": "boolean"},
+        "blockerCodes": {"$ref": "#/definitions/stringArray"},
+        "knownBlockers": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/knownBlocker"}
+        },
+        "retryAfter": {"type": ["string", "null"]}
+      }
+    },
+    "knownBlocker": {
+      "type": "object",
+      "description": "bd-2z5ly.6: bounded record of an RCH preflight / known-blocker hit that prevented a verification command from running. Preserves enough evidence (code, fingerprint, command hash, remediation bead, retry hint) for agents to decide whether to retry now, wait for retry_after, or record blocked evidence without local Cargo fallback. Source-health (rchProofPosture.posture) is separate from per-command verification outcome (verificationOutcome enum); a healthy RCH worker pool can still surface a known blocker for a specific argv shape.",
+      "required": ["code", "fingerprint", "remoteRequired", "localFallbackRefused"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "fingerprint": {
+          "type": "string",
+          "description": "sha256-prefixed fingerprint of the blocker (e.g. `sha256:64139c3370a1...`). MUST match the upstream RCH known_blocker fingerprint verbatim so downstream reconciliation can compare without normalization."
+        },
+        "commandHash": {
+          "type": ["string", "null"],
+          "description": "Normalized argv hash of the blocked command if RCH supplied one. Bounded; do not embed raw stdout/stderr."
+        },
+        "message": {"type": ["string", "null"]},
+        "remediationBead": {
+          "type": ["string", "null"],
+          "description": "Beads issue id (e.g. `bd-17c65.10.17.1.2`) tracking the remediation. Null when no canonical remediation bead is registered for this blocker."
+        },
+        "retryAfter": {"type": ["string", "null"]},
+        "remoteRequired": {"type": "boolean"},
+        "localFallbackRefused": {"type": "boolean"},
+        "degradedCodes": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["requiredCommands", "staticChecks", "closeoutEvidenceRequired"],
+      "additionalProperties": false,
+      "properties": {
+        "requiredCommands": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/verificationCommand"}
+        },
+        "staticChecks": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/verificationCommand"}
+        },
+        "closeoutEvidenceRequired": {"type": "boolean"}
+      }
+    },
+    "verificationCommand": {
+      "type": "object",
+      "required": ["commandId", "commandTemplate", "requiredSubstrate", "when", "lastOutcome"],
+      "additionalProperties": false,
+      "properties": {
+        "commandId": {"type": "string"},
+        "commandTemplate": {"type": "string"},
+        "requiredSubstrate": {"type": "string", "enum": ["rch", "static_local", "none"]},
+        "when": {"type": "string"},
+        "lastOutcome": {
+          "type": "string",
+          "description": "bd-2z5ly.6: outcome of the most recent attempted run of this command, as recorded by the work-packet generator. Distinguishes pre-Cargo RCH failures (`environment_blocked`) from test failures (`failed_project`) so agents do not retry a command whose blocker is environmental.",
+          "enum": ["not_run", "passed", "failed_project", "environment_blocked"]
+        },
+        "lastCommandHash": {
+          "type": ["string", "null"],
+          "description": "Normalized argv hash of the most recent attempted run. Joins with `knownBlocker.commandHash` for cross-evidence reconciliation."
+        }
+      }
+    },
+    "sourceProvenance": {
+      "type": "object",
+      "required": ["source", "collector", "status", "freshness", "digest", "redaction"],
+      "additionalProperties": false,
+      "properties": {
+        "source": {"type": "string"},
+        "collector": {"type": "string"},
+        "status": {"type": "string", "enum": ["fresh", "stale", "degraded", "unavailable", "skipped"]},
+        "freshness": {"type": ["string", "null"]},
+        "digest": {"type": ["string", "null"]},
+        "redaction": {"type": "string"}
+      }
+    },
+    "mutationPolicy": {
+      "type": "object",
+      "required": [
+        "sideEffectFree",
+        "claimsBeads",
+        "reservesFiles",
+        "sendsAgentMail",
+        "runsCargo",
+        "stagesGit",
+        "deletesFiles"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sideEffectFree": {"type": "boolean", "const": true},
+        "claimsBeads": {"type": "boolean", "const": false},
+        "reservesFiles": {"type": "boolean", "const": false},
+        "sendsAgentMail": {"type": "boolean", "const": false},
+        "runsCargo": {"type": "boolean", "const": false},
+        "stagesGit": {"type": "boolean", "const": false},
+        "deletesFiles": {"type": "boolean", "const": false}
+      }
+    },
+    "degradation": {
+      "type": "object",
+      "required": ["code", "source", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "source": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "message": {"type": "string"},
+        "repair": {"type": ["string", "null"]}
+      }
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm.work_packet.v1",
+      "packetId": "swarm_work_packet_healthy_small_repo_0001",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "observedStateClass": "healthy_small_repo",
+      "recommendedAction": {
+        "action": "inspect_and_claim",
+        "candidateId": "bd-example.1",
+        "confidence": "high",
+        "safeToClaim": true,
+        "reasons": ["bead_ready", "no_dirty_path_overlap", "coordination_sources_fresh"],
+        "proofObligations": ["claim_bead_before_editing", "reserve_files_before_editing", "record_verification_evidence"],
+        "suggestedCommands": ["br show bd-example.1 --json", "br update bd-example.1 --status in_progress --json"]
+      },
+      "candidates": [
+        {
+          "id": "bd-example.1",
+          "title": "Document a small schema improvement",
+          "source": "beads_ready",
+          "status": "open",
+          "priority": 2,
+          "assignee": null,
+          "decision": "safe_to_claim",
+          "collisionRisk": "none",
+          "unsafeReasons": [],
+          "staleReasons": [],
+          "sourceRefs": ["br://bd-example.1"]
+        }
+      ],
+      "coordination": {
+        "activeClaimCount": 0,
+        "dirtyPathCount": 0,
+        "fileCollisionCount": 0,
+        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 0, "ackRequiredCount": 0, "degradedCodes": []},
+        "activeClaims": [],
+        "fileCollisions": []
+      },
+      "rchProofPosture": {
+        "sourceEnabled": true,
+        "remoteOnlyRequired": true,
+        "posture": "remote_ready",
+        "healthyWorkerCount": 2,
+        "safeToLaunchCargoVerification": true,
+        "localFallbackPrevented": true,
+        "blockerCodes": [],
+        "knownBlockers": [],
+        "retryAfter": null
+      },
+      "verification": {
+        "requiredCommands": [
+          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "after_substantive_rust_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+        ],
+        "staticChecks": [
+          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null}
+        ],
+        "closeoutEvidenceRequired": true
+      },
+      "sourceProvenance": [
+        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
+        {"source": "bv", "collector": "swarm next-action", "status": "fresh", "freshness": "current", "digest": "blake3:bv", "redaction": "ids_scores_reasons"},
+        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"},
+        {"source": "rch", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:rch", "redaction": "counts_worker_labels_no_raw_logs"}
+      ],
+      "mutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.swarm.work_packet.v1",
+      "packetId": "swarm_work_packet_crowded_checkout_0001",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "observedStateClass": "crowded_checkout",
+      "recommendedAction": {
+        "action": "coordinate_before_claim",
+        "candidateId": "bd-overlap.2",
+        "confidence": "high",
+        "safeToClaim": false,
+        "reasons": ["active_claim_overlap", "dirty_path_overlap", "exclusive_reservation_present"],
+        "proofObligations": ["message_owner_before_editing", "record_overlap_decision", "choose_static_non_overlapping_work_if_no_reply"],
+        "suggestedCommands": ["br show bd-overlap.2 --json", "ee swarm brief --workspace . --json"]
+      },
+      "candidates": [
+        {
+          "id": "bd-overlap.2",
+          "title": "Touch swarm collector implementation",
+          "source": "bv_top_pick",
+          "status": "open",
+          "priority": 1,
+          "assignee": null,
+          "decision": "coordinate_first",
+          "collisionRisk": "high",
+          "unsafeReasons": ["dirty_path_overlap", "active_exclusive_reservation"],
+          "staleReasons": [],
+          "sourceRefs": ["bv://top-pick/bd-overlap.2", "br://bd-overlap.2"]
+        }
+      ],
+      "coordination": {
+        "activeClaimCount": 1,
+        "dirtyPathCount": 2,
+        "fileCollisionCount": 1,
+        "agentMail": {"status": "fresh", "healthLevel": "green", "unreadCount": 1, "ackRequiredCount": 0, "degradedCodes": []},
+        "activeClaims": [
+          {"beadId": "bd-peer.7", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:00:00Z", "sourceRefs": ["br://bd-peer.7"]}
+        ],
+        "fileCollisions": [
+          {"pathPattern": "src/core/swarm_*.rs", "risk": "high", "owners": ["OtherAgent"], "relatedBeadIds": ["bd-peer.7"], "evidence": ["git_status:M:src/core/swarm_brief.rs", "reservation:OtherAgent:src/core/swarm_*.rs"]}
+        ]
+      },
+      "rchProofPosture": {
+        "sourceEnabled": true,
+        "remoteOnlyRequired": true,
+        "posture": "remote_ready",
+        "healthyWorkerCount": 2,
+        "safeToLaunchCargoVerification": true,
+        "localFallbackPrevented": true,
+        "blockerCodes": [],
+        "knownBlockers": [],
+        "retryAfter": null
+      },
+      "verification": {
+        "requiredCommands": [
+          {"commandId": "cargo_test_swarm_contract", "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle", "requiredSubstrate": "rch", "when": "after_swarm_runtime_or_test_changes", "lastOutcome": "not_run", "lastCommandHash": null}
+        ],
+        "staticChecks": [
+          {"commandId": "diff_check", "commandTemplate": "git diff --check -- docs/schemas/swarm docs/swarm tests/swarm_schema_lifecycle.rs tests/fixtures/swarm_schemas/all_examples.json", "requiredSubstrate": "static_local", "when": "before_closeout", "lastOutcome": "passed", "lastCommandHash": null}
+        ],
+        "closeoutEvidenceRequired": true
+      },
+      "sourceProvenance": [
+        {"source": "git", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:git", "redaction": "path_patterns_statuses"},
+        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"},
+        {"source": "agent-mail", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:mail", "redaction": "counts_subjects_no_bodies"}
+      ],
+      "mutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false
+      },
+      "degraded": []
+    },
+    {
+      "schema": "ee.swarm.work_packet.v1",
+      "packetId": "swarm_work_packet_degraded_mail_rch_0001",
+      "workspace": "repo:25e38e130474e7f0292de2a3",
+      "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content",
+      "observedStateClass": "degraded_mail_rch_topology",
+      "recommendedAction": {
+        "action": "prefer_static_docs_work",
+        "candidateId": "bd-static.4",
+        "confidence": "medium",
+        "safeToClaim": true,
+        "reasons": ["agent_mail_degraded_read_only", "rch_remote_verification_blocked", "candidate_has_no_source_edits"],
+        "proofObligations": ["record_mail_degradation_in_beads", "do_not_run_local_cargo_fallback", "limit_closeout_to_static_evidence_until_rch_recovers"],
+        "suggestedCommands": ["br show bd-static.4 --json", "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json"]
+      },
+      "candidates": [
+        {
+          "id": "bd-static.4",
+          "title": "Write read-only coordination contract",
+          "source": "beads_ready",
+          "status": "open",
+          "priority": 2,
+          "assignee": null,
+          "decision": "safe_to_claim",
+          "collisionRisk": "low",
+          "unsafeReasons": [],
+          "staleReasons": [],
+          "sourceRefs": ["br://bd-static.4"]
+        }
+      ],
+      "coordination": {
+        "activeClaimCount": 1,
+        "dirtyPathCount": 5,
+        "fileCollisionCount": 0,
+        "agentMail": {"status": "degraded_read_only", "healthLevel": "red", "unreadCount": null, "ackRequiredCount": null, "degradedCodes": ["agent_mail_unavailable", "archive_index_parity_drift"]},
+        "activeClaims": [
+          {"beadId": "bd-cass.3", "assignee": "OtherAgent", "status": "in_progress", "updatedAt": "2026-05-15T16:05:00Z", "sourceRefs": ["br://bd-cass.3"]}
+        ],
+        "fileCollisions": []
+      },
+      "rchProofPosture": {
+        "sourceEnabled": true,
+        "remoteOnlyRequired": true,
+        "posture": "topology_blocked",
+        "healthyWorkerCount": 0,
+        "safeToLaunchCargoVerification": false,
+        "localFallbackPrevented": true,
+        "blockerCodes": ["rch_worker_topology_blocked", "rch_remote_required_fallback_prevented"],
+        "knownBlockers": [
+          {
+            "code": "rch_worker_topology_blocked",
+            "fingerprint": "sha256:64139c3370a10eca54471aac3d6f6f23e681e9aa6953b10f870f1f4fb7641560",
+            "commandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77",
+            "message": "Path dependency topology policy failed; move dependencies under /data/projects (or /dp) and retry.",
+            "remediationBead": "bd-17c65.10.17.1.2",
+            "retryAfter": "2026-05-15T17:00:00Z",
+            "remoteRequired": true,
+            "localFallbackRefused": true,
+            "degradedCodes": ["rch_verify_topology_blocked", "rch_verify_local_fallback_refused"]
+          }
+        ],
+        "retryAfter": "2026-05-15T17:00:00Z"
+      },
+      "verification": {
+        "requiredCommands": [
+          {"commandId": "cargo_check_all_targets", "commandTemplate": "scripts/rch_verify.sh -- cargo check --all-targets", "requiredSubstrate": "rch", "when": "only_after_rch_remote_workers_recover", "lastOutcome": "environment_blocked", "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"}
+        ],
+        "staticChecks": [
+          {"commandId": "json_schema_parse", "commandTemplate": "jq empty docs/schemas/swarm/ee.swarm.work_packet.v1.json", "requiredSubstrate": "static_local", "when": "after_schema_edits", "lastOutcome": "passed", "lastCommandHash": null},
+          {"commandId": "markdown_diff_check", "commandTemplate": "git diff --check -- docs/schemas/swarm/ee.swarm.work_packet.v1.json docs/swarm/work_packet.md", "requiredSubstrate": "static_local", "when": "before_closeout", "lastOutcome": "passed", "lastCommandHash": null}
+        ],
+        "closeoutEvidenceRequired": true
+      },
+      "sourceProvenance": [
+        {"source": "agent-mail", "collector": "swarm brief", "status": "degraded", "freshness": null, "digest": null, "redaction": "unavailable_no_bodies"},
+        {"source": "rch", "collector": "swarm brief", "status": "degraded", "freshness": "stale_worker_topology", "digest": "blake3:rch-blocked", "redaction": "counts_worker_labels_no_raw_logs"},
+        {"source": "beads", "collector": "swarm brief", "status": "fresh", "freshness": "current", "digest": "blake3:beads", "redaction": "ids_statuses_titles"}
+      ],
+      "mutationPolicy": {
+        "sideEffectFree": true,
+        "claimsBeads": false,
+        "reservesFiles": false,
+        "sendsAgentMail": false,
+        "runsCargo": false,
+        "stagesGit": false,
+        "deletesFiles": false
+      },
+      "degraded": [
+        {"code": "agent_mail_unavailable", "source": "agent-mail", "severity": "warning", "message": "Agent Mail could not provide a fresh indexed inbox snapshot.", "repair": "Use Beads for coordination and retry Agent Mail after repair."},
+        {"code": "rch_remote_required_fallback_prevented", "source": "rch", "severity": "medium", "message": "Remote-required Cargo verification is blocked and local fallback is forbidden.", "repair": "Record the RCH blocker and continue only with static checks."}
+      ]
+    }
+  ],
+  "x-ee-status": {
+    "shipped": true,
+    "tracking_bead": "bd-2z5ly.2",
+    "available_in_build": true,
+    "feature_flag": null,
+    "expected_version": "0.4.0"
+  },
+  "x-ee-doc": "docs/swarm/work_packet.md"
+}
