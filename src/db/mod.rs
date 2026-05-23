@@ -13709,14 +13709,7 @@ impl DbConnection {
             "SELECT this_row_hash \
              FROM audit_log \
              WHERE this_row_hash IS NOT NULL \
-               AND timestamp = ( \
-                   SELECT timestamp \
-                   FROM audit_log \
-                   WHERE this_row_hash IS NOT NULL \
-                   ORDER BY timestamp DESC \
-                   LIMIT 1 \
-               ) \
-             ORDER BY id DESC \
+             ORDER BY timestamp DESC, id DESC \
              LIMIT 1",
             &[],
         )?;
