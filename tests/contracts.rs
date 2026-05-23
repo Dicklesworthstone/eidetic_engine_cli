@@ -100,6 +100,9 @@ mod cass_unavailable_degradation;
 #[path = "contracts/cass_import_guidance_status_as_str.rs"]
 mod cass_import_guidance_status_as_str;
 
+#[path = "contracts/agent_inventory_status_as_str.rs"]
+mod agent_inventory_status_as_str;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
