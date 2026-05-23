@@ -1229,13 +1229,14 @@ impl CurateCandidatesReport {
             return output;
         }
         for candidate in &self.candidates {
+            let target = curate_candidate_target_display(candidate);
             output.push_str(&format!(
                 "  {} [{}] confidence={:.2}\n",
                 candidate.id, candidate.status, candidate.confidence
             ));
             output.push_str(&format!(
                 "    type={}, target={}\n",
-                candidate.candidate_type, candidate.target_memory_id
+                candidate.candidate_type, target
             ));
             output.push_str(&format!("    reason={}\n\n", candidate.reason));
         }
@@ -1277,7 +1278,7 @@ pub struct CurateCandidateSummary {
     pub kind: String,
     #[serde(rename = "type")]
     pub candidate_type: String,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: Option<String>,
     pub proposed_level: Option<String>,
     pub proposed_kind: Option<String>,
@@ -1294,6 +1295,8 @@ pub struct CurateCandidateSummary {
     pub producer: ProducerMetadata,
     pub evidence: Vec<CurateCandidateEvidence>,
     pub evidence_summary: CurateCandidateEvidenceSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derivation_source_summary: Option<CurateCandidateDerivationSourceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub peer_evidence: Option<CuratePeerEvidenceEnvelope>,
     pub member_memory_ids: Vec<String>,
@@ -1371,6 +1374,30 @@ pub struct CurateCandidateEvidenceSummary {
     pub support_count: usize,
     pub contradiction_count: usize,
     pub cluster_coherence: Option<f32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateCandidateDerivationSourceSummary {
+    pub total_count: usize,
+    pub memory_count: usize,
+    pub evidence_span_count: usize,
+    pub memory_ids: Vec<String>,
+    pub evidence_span_ids: Vec<String>,
+}
+
+fn curate_candidate_target_display(candidate: &CurateCandidateSummary) -> String {
+    if let Some(target_memory_id) = candidate.target_memory_id.as_deref() {
+        return target_memory_id.to_owned();
+    }
+    if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str() {
+        let source_count = candidate
+            .derivation_source_summary
+            .as_ref()
+            .map_or(0, |summary| summary.total_count);
+        return format!("new memory derived from {source_count} source(s)");
+    }
+    "none".to_owned()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2753,14 +2780,196 @@ fn required_stored_target_memory_id<'a>(
 }
 
 fn duplicate_group_key(candidate: &StoredCurationCandidate) -> (String, String, String) {
+    let content_key = canonical_candidate_content_key(candidate);
+    let target_or_package_key =
+        if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str() {
+            create_derived_duplicate_package_key(candidate, &content_key)
+        } else {
+            candidate.target_memory_id.clone().unwrap_or_default()
+        };
+
     (
-        candidate.target_memory_id.clone().unwrap_or_default(),
+        target_or_package_key,
         candidate.candidate_type.clone(),
+        content_key,
+    )
+}
+
+fn create_derived_duplicate_package_key(
+    candidate: &StoredCurationCandidate,
+    content_key: &str,
+) -> String {
+    format!(
+        "create_derived_memory|content={content_key}|sources={}|memory_spec={}",
+        canonical_derivation_source_refs_key(candidate.derivation_source_refs_json.as_deref()),
+        canonical_derivation_memory_spec_key(candidate.derivation_metadata_json.as_deref())
+    )
+}
+
+fn canonical_candidate_content_key(candidate: &StoredCurationCandidate) -> String {
+    canonical_text_key(
         candidate
             .proposed_content
-            .clone()
-            .unwrap_or_else(|| candidate.reason.clone()),
+            .as_deref()
+            .unwrap_or(candidate.reason.as_str()),
     )
+}
+
+fn canonical_text_key(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn canonical_derivation_source_refs_key(raw: Option<&str>) -> String {
+    let refs = parsed_derivation_source_refs(raw);
+    if refs.is_empty() {
+        return canonical_json_key(raw).unwrap_or_default();
+    }
+
+    let payload = refs
+        .into_iter()
+        .map(|source| {
+            let mut object = serde_json::Map::new();
+            object.insert("kind".to_owned(), serde_json::Value::String(source.kind));
+            object.insert("id".to_owned(), serde_json::Value::String(source.id));
+            object.insert(
+                "contentHash".to_owned(),
+                serde_json::Value::String(source.content_hash),
+            );
+            serde_json::Value::Object(object)
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&payload).unwrap_or_default()
+}
+
+fn canonical_derivation_memory_spec_key(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return String::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return canonical_text_key(raw);
+    };
+    let memory_spec = value
+        .get("memorySpec")
+        .or_else(|| value.get("memory_spec"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::to_string(&canonicalize_json_for_key(memory_spec)).unwrap_or_default()
+}
+
+fn canonical_json_key(raw: Option<&str>) -> Option<String> {
+    let raw = raw.map(str::trim).filter(|value| !value.is_empty())?;
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    serde_json::to_string(&canonicalize_json_for_key(value)).ok()
+}
+
+fn canonicalize_json_for_key(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .into_iter()
+                .map(canonicalize_json_for_key)
+                .collect::<Vec<_>>(),
+        ),
+        serde_json::Value::Object(object) => {
+            let mut sorted = serde_json::Map::new();
+            for (key, value) in object.into_iter().collect::<BTreeMap<_, _>>() {
+                sorted.insert(key, canonicalize_json_for_key(value));
+            }
+            serde_json::Value::Object(sorted)
+        }
+        other => other,
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ParsedDerivationSourceRef {
+    kind: String,
+    id: String,
+    content_hash: String,
+}
+
+fn parsed_derivation_source_refs(raw: Option<&str>) -> Vec<ParsedDerivationSourceRef> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return Vec::new();
+    };
+
+    let mut refs = items
+        .into_iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let kind = object.get("kind")?.as_str()?.trim().to_ascii_lowercase();
+            let id = object.get("id")?.as_str()?.trim().to_owned();
+            let content_hash = object
+                .get("contentHash")
+                .or_else(|| object.get("content_hash"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or("")
+                .to_owned();
+            if kind.is_empty() || id.is_empty() {
+                return None;
+            }
+            Some(ParsedDerivationSourceRef {
+                kind,
+                id,
+                content_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    refs.sort();
+    refs.dedup();
+    refs
+}
+
+fn derivation_source_summary_for_stored(
+    stored: &StoredCurationCandidate,
+) -> Option<CurateCandidateDerivationSourceSummary> {
+    let refs = parsed_derivation_source_refs(stored.derivation_source_refs_json.as_deref());
+    if refs.is_empty() {
+        return None;
+    }
+
+    let memory_ids = refs
+        .iter()
+        .filter(|source| source.kind == "memory")
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+    let evidence_span_ids = refs
+        .iter()
+        .filter(|source| source.kind == "evidence_span")
+        .map(|source| source.id.clone())
+        .collect::<Vec<_>>();
+
+    Some(CurateCandidateDerivationSourceSummary {
+        total_count: refs.len(),
+        memory_count: memory_ids.len(),
+        evidence_span_count: evidence_span_ids.len(),
+        memory_ids,
+        evidence_span_ids,
+    })
+}
+
+fn create_derived_source_memory_ids(candidate: &StoredCurationCandidate) -> Vec<String> {
+    parsed_derivation_source_refs(candidate.derivation_source_refs_json.as_deref())
+        .into_iter()
+        .filter(|source| source.kind == "memory")
+        .map(|source| source.id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn structural_memory_ids_for_candidate(candidate: &StoredCurationCandidate) -> Vec<String> {
+    if let Some(target_memory_id) = candidate.target_memory_id.clone() {
+        return vec![target_memory_id];
+    }
+    if candidate.candidate_type == CandidateType::CreateDerivedMemory.as_str() {
+        return create_derived_source_memory_ids(candidate);
+    }
+    Vec::new()
 }
 
 fn review_state_rank(review_state: &str) -> u8 {
@@ -4994,7 +5203,7 @@ fn curate_structural_decay_adjustments(
 ) -> Result<BTreeMap<String, CurateStructuralDecayAdjustment>, DomainError> {
     let memory_ids = candidates
         .iter()
-        .filter_map(|candidate| candidate.target_memory_id.clone())
+        .flat_map(structural_memory_ids_for_candidate)
         .collect::<BTreeSet<_>>();
     let links = connection
         .list_all_memory_links(None)
@@ -5040,13 +5249,14 @@ fn curate_structural_decay_adjustments(
         } else {
             (elapsed_seconds as f64 / policy.threshold_seconds as f64).clamp(0.0, 1.0) as f32
         };
-        let Some(target_memory_id) = candidate.target_memory_id.as_deref() else {
+        let source_memory_ids = structural_memory_ids_for_candidate(candidate);
+        let Some(structural_memory_id) = source_memory_ids.first() else {
             continue;
         };
-        let structural = structural_decay_index.adjustment(target_memory_id);
+        let structural = structural_decay_index.adjustment(structural_memory_id);
         let adjustment = curate_structural_decay_adjustment(
             &candidate.id,
-            target_memory_id,
+            structural_memory_id,
             policy.threshold_seconds,
             base_decay,
             structural,
@@ -6562,13 +6772,14 @@ fn candidate_summary_from_parts(
     let created_at = stored.created_at.clone();
     let peer_evidence = curate_peer_evidence_summary(&stored);
     let trust_class = effective_candidate_trust_class(&stored, &proposal_source);
+    let derivation_source_summary = derivation_source_summary_for_stored(&stored);
 
     CurateCandidateSummary {
         candidate_id,
         id: stored.id,
         kind: kind_for_candidate_type(&candidate_type),
         candidate_type,
-        target_memory_id: stored.target_memory_id.unwrap_or_default(),
+        target_memory_id: stored.target_memory_id,
         proposed_content: stored.proposed_content,
         proposed_level: proposed_level_for_candidate_type(&stored.candidate_type),
         proposed_kind: proposed_kind_for_candidate_type(&stored.candidate_type),
@@ -6593,6 +6804,7 @@ fn candidate_summary_from_parts(
             contradiction_count: facts.contradiction_count,
             cluster_coherence: facts.cluster_coherence,
         },
+        derivation_source_summary,
         peer_evidence,
         member_memory_ids: facts.member_memory_ids,
         tombstoned_member_count: facts.tombstoned_member_count,
@@ -9179,6 +9391,241 @@ mod tests {
         assert_eq!(report.candidates[1].id, dup_older);
         assert_eq!(report.candidates[2].id, other_group);
         Ok(())
+    }
+
+    #[test]
+    fn list_curation_candidates_surfaces_create_derived_null_target() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let source_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(31)).to_string();
+        let target_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(32)).to_string();
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("curate-create-derived-list".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for memory_id in [&source_memory_id, &target_memory_id] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: "procedural".to_owned(),
+                        kind: "rule".to_owned(),
+                        content: format!("Memory fixture {memory_id}."),
+                        workflow_id: None,
+                        confidence: 0.7,
+                        utility: 0.6,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "human_explicit".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let ordinary_id = curate_id(33);
+        connection
+            .insert_curation_candidate(
+                &ordinary_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "promote".to_owned(),
+                    target_memory_id: Some(target_memory_id.clone()),
+                    proposed_content: None,
+                    proposed_confidence: Some(0.82),
+                    proposed_trust_class: Some("agent_validated".to_owned()),
+                    source_type: "feedback_event".to_owned(),
+                    source_id: Some("outcome_create_derived_control".to_owned()),
+                    reason: "Ordinary target-mutating candidate.".to_owned(),
+                    confidence: 0.82,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:01Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let source_hash = format!("blake3:{}", "a".repeat(64));
+        let evidence_hash = format!("blake3:{}", "b".repeat(64));
+        let derived_id = curate_id(34);
+        let source_refs_json = serde_json::json!([
+            {"kind": "evidence_span", "id": "ev_create_derived_01", "contentHash": evidence_hash},
+            {"kind": "memory", "id": source_memory_id.clone(), "contentHash": source_hash}
+        ])
+        .to_string();
+        let metadata_json = serde_json::json!({
+            "memorySpec": {
+                "kind": "rule",
+                "level": "procedural",
+                "tags": ["derived", "release"],
+                "confidence": 0.72
+            },
+            "producer": {"producer": "unit_test"}
+        })
+        .to_string();
+        connection
+            .insert_curation_candidate(
+                &derived_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "create_derived_memory".to_owned(),
+                    target_memory_id: None,
+                    proposed_content: Some("Create a derived release rule.".to_owned()),
+                    proposed_confidence: Some(0.72),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("reflection_create_derived".to_owned()),
+                    reason: "Derived from one memory and one evidence span.".to_owned(),
+                    confidence: 0.72,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:02Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: Some(source_refs_json),
+                    derivation_metadata_json: Some(metadata_json),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: None,
+            status: Some("pending"),
+            target_memory_id: None,
+            limit: 10,
+            offset: 0,
+            sort: "created_at",
+            group_duplicates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        let ordinary = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == ordinary_id)
+            .ok_or_else(|| "ordinary candidate missing".to_owned())?;
+        assert_eq!(
+            ordinary.target_memory_id.as_deref(),
+            Some(target_memory_id.as_str())
+        );
+
+        let derived = report
+            .candidates
+            .iter()
+            .find(|candidate| candidate.id == derived_id)
+            .ok_or_else(|| "create-derived candidate missing".to_owned())?;
+        assert_eq!(derived.target_memory_id, None);
+        let source_summary = derived
+            .derivation_source_summary
+            .as_ref()
+            .ok_or_else(|| "create-derived source summary missing".to_owned())?;
+        assert_eq!(source_summary.total_count, 2);
+        assert_eq!(source_summary.memory_ids, vec![source_memory_id]);
+        assert_eq!(
+            source_summary.evidence_span_ids,
+            vec!["ev_create_derived_01".to_owned()]
+        );
+
+        let rendered = serde_json::to_value(derived).map_err(|error| error.to_string())?;
+        assert!(rendered["targetMemoryId"].is_null());
+        assert!(
+            report
+                .human_summary()
+                .contains("new memory derived from 2 source(s)")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_derived_duplicate_group_key_is_canonical() {
+        let source_hash = format!("blake3:{}", "c".repeat(64));
+        let evidence_hash = format!("blake3:{}", "d".repeat(64));
+        let left_refs = format!(
+            r#"[{{"kind":"memory","id":"mem_a","contentHash":"{source_hash}"}},{{"kind":"evidence_span","id":"ev_b","contentHash":"{evidence_hash}"}}]"#
+        );
+        let right_refs = format!(
+            r#"[{{"contentHash":"{evidence_hash}","id":"ev_b","kind":"evidence_span"}},{{"contentHash":"{source_hash}","id":"mem_a","kind":"memory"}}]"#
+        );
+        let left_metadata = r#"{"memorySpec":{"level":"procedural","kind":"rule","tags":["release","cargo"]},"producer":{"producer":"left"}}"#;
+        let right_metadata = r#"{"producer":{"producer":"right","producerPayload":{"ignored":true}},"memorySpec":{"tags":["release","cargo"],"kind":"rule","level":"procedural"}}"#;
+
+        let mut left = create_derived_stored_candidate(
+            "curate_create_derived_canon_left",
+            "Create a release rule from evidence.",
+            left_refs,
+            left_metadata.to_owned(),
+        );
+        let right = create_derived_stored_candidate(
+            "curate_create_derived_canon_right",
+            "Create   a release rule from evidence.",
+            right_refs,
+            right_metadata.to_owned(),
+        );
+        assert_eq!(
+            super::duplicate_group_key(&left),
+            super::duplicate_group_key(&right)
+        );
+
+        left.derivation_metadata_json = Some(
+            r#"{"memorySpec":{"level":"procedural","kind":"procedure","tags":["release","cargo"]},"producer":{"producer":"left"}}"#
+                .to_owned(),
+        );
+        assert_ne!(
+            super::duplicate_group_key(&left),
+            super::duplicate_group_key(&right)
+        );
+    }
+
+    fn create_derived_stored_candidate(
+        id: &str,
+        proposed_content: &str,
+        source_refs_json: String,
+        metadata_json: String,
+    ) -> StoredCurationCandidate {
+        StoredCurationCandidate {
+            id: id.to_owned(),
+            workspace_id: "wsp_create_derived_canon".to_owned(),
+            candidate_type: "create_derived_memory".to_owned(),
+            target_memory_id: None,
+            proposed_content: Some(proposed_content.to_owned()),
+            proposed_confidence: Some(0.72),
+            proposed_trust_class: Some("agent_assertion".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some("reflection_canonical".to_owned()),
+            reason: "Create-derived canonical grouping fixture.".to_owned(),
+            confidence: 0.72,
+            status: "pending".to_owned(),
+            created_at: "2026-05-01T00:00:00Z".to_owned(),
+            reviewed_at: None,
+            reviewed_by: None,
+            applied_at: None,
+            ttl_expires_at: None,
+            review_state: "new".to_owned(),
+            snoozed_until: None,
+            merged_into_candidate_id: None,
+            state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
+            last_action_at: None,
+            ttl_policy_id: None,
+            derivation_source_refs_json: Some(source_refs_json),
+            derivation_metadata_json: Some(metadata_json),
+        }
     }
 
     #[test]
