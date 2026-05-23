@@ -7081,6 +7081,15 @@ pub struct StoredEvidenceSpan {
     pub updated_at: String,
 }
 
+/// Result of atomically attaching an evidence span to a newly derived memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceSpanMemoryAttachResult {
+    Attached,
+    AlreadyAttachedToRequestedMemory,
+    AlreadyAttachedToDifferentMemory,
+    NotFoundOrHashMismatch,
+}
+
 impl DbConnection {
     /// Insert a CASS evidence span row.
     pub fn insert_evidence_span(&self, id: &str, input: &CreateEvidenceSpanInput) -> Result<()> {
@@ -7162,6 +7171,62 @@ impl DbConnection {
         )?;
 
         rows.iter().map(stored_evidence_span_from_row).collect()
+    }
+
+    /// Attach an unlinked evidence span to a memory only if its workspace and
+    /// content hash still match the caller's source package.
+    pub fn attach_evidence_span_to_memory_if_unlinked(
+        &self,
+        workspace_id: &str,
+        evidence_span_id: &str,
+        expected_content_hash: &str,
+        memory_id: &str,
+    ) -> Result<EvidenceSpanMemoryAttachResult> {
+        let Some(existing) = self.get_evidence_span(evidence_span_id)? else {
+            return Ok(EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch);
+        };
+        if !text_matches(&existing.workspace_id, workspace_id)
+            || !text_matches(&existing.content_hash, expected_content_hash)
+        {
+            return Ok(EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch);
+        }
+        if let Some(attached_memory_id) = existing.memory_id.as_deref() {
+            if text_matches(attached_memory_id, memory_id) {
+                return Ok(EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory);
+            }
+            if !attached_memory_id.is_empty() {
+                return Ok(EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory);
+            }
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE evidence_spans SET memory_id = ?1, updated_at = ?2 WHERE id = ?3 AND workspace_id = ?4 AND content_hash = ?5 AND (memory_id IS NULL OR memory_id = '')",
+            &[
+                Value::Text(memory_id.to_string()),
+                Value::Text(now),
+                Value::Text(evidence_span_id.to_string()),
+                Value::Text(workspace_id.to_string()),
+                Value::Text(expected_content_hash.to_string()),
+            ],
+        )?;
+        if affected > 0 {
+            return Ok(EvidenceSpanMemoryAttachResult::Attached);
+        }
+
+        match self
+            .get_evidence_span(evidence_span_id)?
+            .and_then(|span| span.memory_id)
+        {
+            Some(attached_memory_id) if text_matches(&attached_memory_id, memory_id) => {
+                Ok(EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory)
+            }
+            Some(attached_memory_id) if !attached_memory_id.is_empty() => {
+                Ok(EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory)
+            }
+            _ => Ok(EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch),
+        }
     }
 }
 
@@ -21605,6 +21670,108 @@ mod tests {
         let by_memory =
             connection.list_evidence_spans_for_memory("mem_01234567890123456789012345")?;
         ensure_equal(&by_memory, &vec![span], "linked memory evidence list")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn attach_evidence_span_to_memory_if_unlinked_is_hash_guarded_and_idempotent() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_session(
+            "sess_attachderived00000000000001",
+            &session_input("cass-session-attach-derived"),
+        )?;
+        for memory_id in [
+            "mem_attachderived00000000000001",
+            "mem_attachderived00000000000002",
+        ] {
+            connection.insert_memory(
+                memory_id,
+                &super::CreateMemoryInput {
+                    workspace_id: "wsp_01234567890123456789012345".to_string(),
+                    level: "episodic".to_string(),
+                    kind: "derived".to_string(),
+                    content: format!("Derived memory fixture {memory_id}."),
+                    workflow_id: None,
+                    confidence: 0.45,
+                    utility: 0.5,
+                    importance: 0.4,
+                    provenance_uri: Some("cass-session://cass-session-attach-derived".to_string()),
+                    trust_class: "agent_assertion".to_string(),
+                    trust_subclass: None,
+                    tags: vec!["derived".to_string()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )?;
+        }
+
+        let input = evidence_span_input(
+            "sess_attachderived00000000000001",
+            "span-attach-derived",
+            10,
+        );
+        let expected_hash = input.content_hash.clone();
+        connection.insert_evidence_span("ev_attachderived000000000000001", &input)?;
+
+        let wrong_hash = connection.attach_evidence_span_to_memory_if_unlinked(
+            "wsp_01234567890123456789012345",
+            "ev_attachderived000000000000001",
+            "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "mem_attachderived00000000000001",
+        )?;
+        ensure_equal(
+            &wrong_hash,
+            &super::EvidenceSpanMemoryAttachResult::NotFoundOrHashMismatch,
+            "source hash drift refuses attachment",
+        )?;
+
+        let attached = connection.attach_evidence_span_to_memory_if_unlinked(
+            "wsp_01234567890123456789012345",
+            "ev_attachderived000000000000001",
+            &expected_hash,
+            "mem_attachderived00000000000001",
+        )?;
+        ensure_equal(
+            &attached,
+            &super::EvidenceSpanMemoryAttachResult::Attached,
+            "matching unlinked evidence span attaches",
+        )?;
+        let span = connection
+            .get_evidence_span("ev_attachderived000000000000001")?
+            .ok_or_else(|| TestFailure::new("attached evidence span missing"))?;
+        ensure_equal(
+            &span.memory_id,
+            &Some("mem_attachderived00000000000001".to_string()),
+            "evidence span records attached memory",
+        )?;
+
+        let idempotent = connection.attach_evidence_span_to_memory_if_unlinked(
+            "wsp_01234567890123456789012345",
+            "ev_attachderived000000000000001",
+            &expected_hash,
+            "mem_attachderived00000000000001",
+        )?;
+        ensure_equal(
+            &idempotent,
+            &super::EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory,
+            "same candidate retry is idempotent",
+        )?;
+
+        let conflict = connection.attach_evidence_span_to_memory_if_unlinked(
+            "wsp_01234567890123456789012345",
+            "ev_attachderived000000000000001",
+            &expected_hash,
+            "mem_attachderived00000000000002",
+        )?;
+        ensure_equal(
+            &conflict,
+            &super::EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory,
+            "different derived memory sees attachment conflict",
+        )?;
 
         connection.close()?;
         Ok(())
