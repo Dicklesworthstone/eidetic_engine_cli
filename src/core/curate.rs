@@ -67,6 +67,8 @@ pub const CURATE_TOMBSTONE_SCHEMA_V1: &str = "ee.curate.tombstone.v1";
 pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 /// Stable schema for review workspace reports.
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
+/// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
+pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
 pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
@@ -4140,6 +4142,372 @@ pub fn run_review_workspace(
         candidates,
         degraded,
         next_action,
+    })
+}
+
+/// Options for [`propose_derived_candidate`] (bd-kxm0c).
+///
+/// Backs `ee curate propose-derived`: a generic, user-operable CLI for
+/// creating a `create_derived_memory` curation candidate without going
+/// through review-session or reflection-specific producers.
+#[derive(Clone, Debug)]
+pub struct ProposeDerivedOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub source_memory_ids: &'a [String],
+    pub source_evidence_span_ids: &'a [String],
+    pub level: &'a str,
+    pub kind: &'a str,
+    pub content: &'a str,
+    pub tags: &'a [String],
+    pub confidence: f32,
+    pub utility: Option<f32>,
+    pub importance: Option<f32>,
+    pub valid_from: Option<&'a str>,
+    pub valid_to: Option<&'a str>,
+    pub producer_kind: Option<&'a str>,
+    pub producer_model: Option<&'a str>,
+    pub producer_note: Option<&'a str>,
+    pub dry_run: bool,
+}
+
+/// One canonical source ref in the proposed derivation package.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeDerivedSourceRef {
+    pub kind: String,
+    pub id: String,
+    pub content_hash: String,
+}
+
+/// Report returned by [`propose_derived_candidate`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeDerivedReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub candidate_id: String,
+    pub candidate_type: &'static str,
+    pub target_memory_id: Option<String>,
+    pub source_refs: Vec<ProposeDerivedSourceRef>,
+    pub memory_spec: serde_json::Value,
+    pub producer: serde_json::Value,
+    pub proposed_confidence: f32,
+    pub content_hash: String,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub persisted: bool,
+    pub next_actions: Vec<String>,
+}
+
+/// Build a deterministic create-derived-memory candidate package from
+/// caller-supplied source memory/evidence-span ids and a memory spec.
+///
+/// Behavior contract (per bd-kxm0c):
+///
+/// * Propose-only: never creates the memory, attaches evidence spans,
+///   or auto-applies. Only inserts a pending curation candidate (when
+///   `dry_run = false`).
+/// * `target_memory_id` in the persisted row is `NULL`; the report
+///   surfaces it as `Option::None` so JSON serializes `null`.
+/// * `derivation_source_refs_json` is a canonical, deduplicated JSON
+///   array sorted by `(kind, id)`. Each ref carries the live
+///   `contentHash` of the cited memory/evidence span so a later
+///   `ee curate validate`/`apply` can detect source drift.
+/// * `derivation_metadata_json` carries a `memorySpec` (level, kind,
+///   tags, confidence, utility, importance, validFrom, validTo) used
+///   later when minting the derived memory, and a `producer` block
+///   identifying the external producer (defaults to `external_cli`).
+/// * `--dry-run` returns the report with `persisted = false` and never
+///   writes to the database.
+pub fn propose_derived_candidate(
+    options: &ProposeDerivedOptions<'_>,
+) -> Result<ProposeDerivedReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+
+    let level = options.level.trim();
+    if level.is_empty() {
+        return Err(curate_usage_error(
+            "propose-derived --level must not be empty".to_owned(),
+            "ee curate propose-derived --help",
+        ));
+    }
+    let kind = options.kind.trim();
+    if kind.is_empty() {
+        return Err(curate_usage_error(
+            "propose-derived --kind must not be empty".to_owned(),
+            "ee curate propose-derived --help",
+        ));
+    }
+    let content = options.content;
+    if content.trim().is_empty() {
+        return Err(curate_usage_error(
+            "propose-derived --content must not be empty".to_owned(),
+            "ee curate propose-derived --help",
+        ));
+    }
+    if !(0.0..=1.0).contains(&options.confidence) {
+        return Err(curate_usage_error(
+            format!(
+                "propose-derived --confidence must be in [0.0, 1.0], got {}",
+                options.confidence
+            ),
+            "ee curate propose-derived --help",
+        ));
+    }
+    if let Some(utility) = options.utility {
+        if !(0.0..=1.0).contains(&utility) {
+            return Err(curate_usage_error(
+                format!("propose-derived --utility must be in [0.0, 1.0], got {utility}"),
+                "ee curate propose-derived --help",
+            ));
+        }
+    }
+    if let Some(importance) = options.importance {
+        if !(0.0..=1.0).contains(&importance) {
+            return Err(curate_usage_error(
+                format!("propose-derived --importance must be in [0.0, 1.0], got {importance}"),
+                "ee curate propose-derived --help",
+            ));
+        }
+    }
+    if options.source_memory_ids.is_empty() && options.source_evidence_span_ids.is_empty() {
+        return Err(curate_usage_error(
+            "propose-derived must cite at least one --source-memory or --source-evidence-span"
+                .to_owned(),
+            "ee curate propose-derived --help",
+        ));
+    }
+
+    let connection = open_existing_database(&prepared.database_path)?;
+
+    // Resolve source ids -> canonical (kind, id, contentHash) tuples.
+    // Deduplicate via BTreeSet so the array is sorted and idempotent
+    // regardless of the order ids arrive on the command line.
+    let mut refs: BTreeSet<(String, String, String)> = BTreeSet::new();
+    for raw_id in options.source_memory_ids {
+        let id = raw_id.trim();
+        if id.is_empty() {
+            return Err(curate_usage_error(
+                "propose-derived --source-memory ids must not be empty".to_owned(),
+                "ee curate propose-derived --help",
+            ));
+        }
+        let memory = connection
+            .get_memory(id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load source memory {id}: {error}"),
+                repair: Some(format!("ee memory show {id} --json")),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "memory".to_owned(),
+                id: id.to_owned(),
+                repair: Some(format!("ee memory show {id} --json")),
+            })?;
+        if memory.workspace_id != prepared.workspace_id {
+            return Err(curate_usage_error(
+                format!("propose-derived --source-memory {id} belongs to a different workspace"),
+                "ee curate propose-derived --help",
+            ));
+        }
+        let content_hash = format!(
+            "blake3:{}",
+            blake3::hash(memory.content.as_bytes()).to_hex()
+        );
+        refs.insert(("memory".to_owned(), id.to_owned(), content_hash));
+    }
+    for raw_id in options.source_evidence_span_ids {
+        let id = raw_id.trim();
+        if id.is_empty() {
+            return Err(curate_usage_error(
+                "propose-derived --source-evidence-span ids must not be empty".to_owned(),
+                "ee curate propose-derived --help",
+            ));
+        }
+        let span = connection
+            .get_evidence_span(id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load source evidence span {id}: {error}"),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?
+            .ok_or_else(|| DomainError::NotFound {
+                resource: "evidence_span".to_owned(),
+                id: id.to_owned(),
+                repair: Some("ee import cass --workspace . --json".to_owned()),
+            })?;
+        if span.workspace_id != prepared.workspace_id {
+            return Err(curate_usage_error(
+                format!(
+                    "propose-derived --source-evidence-span {id} belongs to a different workspace"
+                ),
+                "ee curate propose-derived --help",
+            ));
+        }
+        refs.insert(("evidence_span".to_owned(), id.to_owned(), span.content_hash));
+    }
+
+    let source_refs: Vec<ProposeDerivedSourceRef> = refs
+        .into_iter()
+        .map(|(kind, id, content_hash)| ProposeDerivedSourceRef {
+            kind,
+            id,
+            content_hash,
+        })
+        .collect();
+
+    // Canonical JSON for the source refs (sorted by (kind, id), no
+    // duplicates). The DB validator (`validate_derivation_source_refs_json`)
+    // requires exactly this shape.
+    let source_refs_json = serde_json::Value::Array(
+        source_refs
+            .iter()
+            .map(|sref| {
+                serde_json::json!({
+                    "kind": sref.kind,
+                    "id": sref.id,
+                    "contentHash": sref.content_hash,
+                })
+            })
+            .collect(),
+    )
+    .to_string();
+
+    // memorySpec / producer metadata used downstream when minting the
+    // derived memory. Optional numeric/temporal fields are emitted as
+    // null when absent so the JSON shape is stable across calls.
+    let tags_value = serde_json::Value::Array(
+        options
+            .tags
+            .iter()
+            .map(|tag| serde_json::Value::String(tag.to_owned()))
+            .collect(),
+    );
+    let memory_spec = serde_json::json!({
+        "level": level,
+        "kind": kind,
+        "tags": tags_value,
+        "confidence": options.confidence,
+        "utility": options.utility,
+        "importance": options.importance,
+        "validFrom": options.valid_from,
+        "validTo": options.valid_to,
+    });
+    let producer_kind = options.producer_kind.unwrap_or("external_cli");
+    let mut producer_payload = serde_json::Map::new();
+    if let Some(model) = options.producer_model {
+        producer_payload.insert(
+            "model".to_owned(),
+            serde_json::Value::String(model.to_owned()),
+        );
+    }
+    if let Some(note) = options.producer_note {
+        producer_payload.insert(
+            "note".to_owned(),
+            serde_json::Value::String(note.to_owned()),
+        );
+    }
+    let producer = serde_json::json!({
+        "producer": producer_kind,
+        "producerPayload": serde_json::Value::Object(producer_payload),
+    });
+    let metadata_json = serde_json::json!({
+        "memorySpec": memory_spec,
+        "producer": producer,
+    })
+    .to_string();
+
+    // Deterministic candidate id: derived from workspace + sorted source
+    // refs + canonical content hash so repeating the same proposal is a
+    // no-op (lets the caller retry safely).
+    let content_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let mut id_parts: Vec<String> = vec![
+        prepared.workspace_id.clone(),
+        "propose_derived".to_owned(),
+        level.to_owned(),
+        kind.to_owned(),
+        content_hash.clone(),
+    ];
+    for sref in &source_refs {
+        id_parts.push(format!("{}|{}|{}", sref.kind, sref.id, sref.content_hash));
+    }
+    let id_part_refs: Vec<&str> = id_parts.iter().map(String::as_str).collect();
+    let candidate_id = deterministic_curate_id(&id_part_refs);
+
+    let now = Utc::now().to_rfc3339();
+    let reason = format!(
+        "External producer derivation proposal: {} source(s) -> new {level}/{kind} memory",
+        source_refs.len()
+    );
+
+    let mut persisted = false;
+    let mut durable_mutation = false;
+    if !options.dry_run {
+        let already_present = connection
+            .get_curation_candidate(&prepared.workspace_id, &candidate_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to check existing curation candidate: {error}"),
+                repair: Some("ee curate candidates --json".to_owned()),
+            })?;
+        if already_present.is_none() {
+            connection
+                .insert_curation_candidate(
+                    &candidate_id,
+                    &CreateCurationCandidateInput {
+                        workspace_id: prepared.workspace_id.clone(),
+                        candidate_type: CandidateType::CreateDerivedMemory.as_str().to_owned(),
+                        target_memory_id: None,
+                        proposed_content: Some(content.to_owned()),
+                        proposed_confidence: Some(options.confidence),
+                        proposed_trust_class: Some("agent_assertion".to_owned()),
+                        source_type: CandidateSource::AgentInference.as_str().to_owned(),
+                        source_id: Some(format!("propose_derived|{producer_kind}")),
+                        reason,
+                        confidence: options.confidence,
+                        status: Some(CandidateStatus::Pending.as_str().to_owned()),
+                        created_at: Some(now.clone()),
+                        ttl_expires_at: None,
+                        derivation_source_refs_json: Some(source_refs_json),
+                        derivation_metadata_json: Some(metadata_json),
+                    },
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to insert create-derived candidate: {error}"),
+                    repair: Some("ee curate candidates --json".to_owned()),
+                })?;
+            persisted = true;
+            durable_mutation = true;
+        }
+    }
+
+    let next_actions = vec![
+        format!("ee curate validate {candidate_id} --json"),
+        format!("ee curate apply {candidate_id} --json"),
+        "ee curate candidates --status pending --json".to_owned(),
+    ];
+
+    Ok(ProposeDerivedReport {
+        schema: CURATE_PROPOSE_DERIVED_SCHEMA_V1,
+        command: "curate propose-derived",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        candidate_id,
+        candidate_type: "create_derived_memory",
+        target_memory_id: None,
+        source_refs,
+        memory_spec,
+        producer,
+        proposed_confidence: options.confidence,
+        content_hash,
+        dry_run: options.dry_run,
+        durable_mutation,
+        persisted,
+        next_actions,
     })
 }
 

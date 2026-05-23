@@ -6914,6 +6914,83 @@ pub enum CurateCommand {
     Tombstone(CurateTombstoneArgs),
     /// Restore a tombstoned memory row with an audited record.
     Untombstone(CurateUntombstoneArgs),
+    /// Propose a create_derived_memory curation candidate from one or
+    /// more existing memories or evidence spans. The command is
+    /// propose-only: it inserts a pending candidate carrying canonical
+    /// source refs and a memorySpec, then surfaces `ee curate validate`
+    /// / `ee curate apply` as next actions. It never creates the
+    /// derived memory or attaches spans directly. See bd-kxm0c.
+    #[command(name = "propose-derived")]
+    ProposeDerived(CurateProposeDerivedArgs),
+}
+
+/// Arguments for `ee curate propose-derived` (bd-kxm0c).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateProposeDerivedArgs {
+    /// Source memory id to cite (repeatable). At least one
+    /// `--source-memory` or `--source-evidence-span` is required.
+    #[arg(long = "source-memory", value_name = "MEMORY_ID", action = ArgAction::Append)]
+    pub source_memory: Vec<String>,
+
+    /// Source evidence-span id to cite (repeatable).
+    #[arg(long = "source-evidence-span", value_name = "EVIDENCE_SPAN_ID", action = ArgAction::Append)]
+    pub source_evidence_span: Vec<String>,
+
+    /// Memory level the proposal will mint (semantic, episodic, procedural, ...).
+    #[arg(long, value_name = "LEVEL")]
+    pub level: String,
+
+    /// Memory kind the proposal will mint (rule, fact, insight, ...).
+    #[arg(long, value_name = "KIND")]
+    pub kind: String,
+
+    /// Body text of the derived memory the proposal would mint.
+    #[arg(long, value_name = "TEXT")]
+    pub content: String,
+
+    /// Tag to attach to the future derived memory (repeatable).
+    #[arg(long, value_name = "TAG", action = ArgAction::Append)]
+    pub tag: Vec<String>,
+
+    /// Confidence score in [0.0, 1.0] for the proposed memory.
+    #[arg(long, default_value_t = 0.5_f32)]
+    pub confidence: f32,
+
+    /// Optional utility score in [0.0, 1.0] for the proposed memory.
+    #[arg(long, value_name = "UTILITY")]
+    pub utility: Option<f32>,
+
+    /// Optional importance score in [0.0, 1.0] for the proposed memory.
+    #[arg(long, value_name = "IMPORTANCE")]
+    pub importance: Option<f32>,
+
+    /// Optional RFC 3339 validity window start.
+    #[arg(long = "valid-from", value_name = "RFC3339")]
+    pub valid_from: Option<String>,
+
+    /// Optional RFC 3339 validity window end.
+    #[arg(long = "valid-to", value_name = "RFC3339")]
+    pub valid_to: Option<String>,
+
+    /// Producer kind label persisted under metadata.producer.producer.
+    #[arg(long = "producer-kind", value_name = "KIND")]
+    pub producer_kind: Option<String>,
+
+    /// Producer model identifier persisted under metadata.producer.producerPayload.model.
+    #[arg(long = "producer-model", value_name = "MODEL")]
+    pub producer_model: Option<String>,
+
+    /// Optional free-form note recorded under metadata.producer.producerPayload.note.
+    #[arg(long = "producer-note", value_name = "TEXT")]
+    pub producer_note: Option<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Preview the candidate package and validation without inserting.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee curate candidates`.
@@ -10593,6 +10670,9 @@ where
         }
         Some(Command::Curate(CurateCommand::Untombstone(ref args))) => {
             handle_curate_untombstone(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::ProposeDerived(ref args))) => {
+            handle_curate_propose_derived(&cli, args, stdout, stderr)
         }
         Some(Command::Rule(RuleCommand::Add(ref args))) => {
             handle_rule_add(&cli, args, stdout, stderr)
@@ -36961,6 +37041,92 @@ where
     }
 }
 
+fn handle_curate_propose_derived<W, E>(
+    cli: &Cli,
+    args: &CurateProposeDerivedArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+
+    let options = crate::core::curate::ProposeDerivedOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        source_memory_ids: &args.source_memory,
+        source_evidence_span_ids: &args.source_evidence_span,
+        level: args.level.as_str(),
+        kind: args.kind.as_str(),
+        content: args.content.as_str(),
+        tags: &args.tag,
+        confidence: args.confidence,
+        utility: args.utility,
+        importance: args.importance,
+        valid_from: args.valid_from.as_deref(),
+        valid_to: args.valid_to.as_deref(),
+        producer_kind: args.producer_kind.as_deref(),
+        producer_model: args.producer_model.as_deref(),
+        producer_note: args.producer_note.as_deref(),
+        dry_run: args.dry_run,
+    };
+
+    match crate::core::curate::propose_derived_candidate(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mode = if report.dry_run {
+                    "DRY RUN"
+                } else if report.persisted {
+                    "PROPOSED"
+                } else {
+                    "ALREADY PROPOSED"
+                };
+                let mut human = format!("{mode}: {}\n\n", report.candidate_id);
+                human.push_str(&format!("  candidateType: {}\n", report.candidate_type));
+                human.push_str("  targetMemoryId: null\n");
+                human.push_str(&format!("  sources: {} ref(s)\n", report.source_refs.len()));
+                for sref in &report.source_refs {
+                    human.push_str(&format!("    - {}/{}\n", sref.kind, sref.id));
+                }
+                human.push_str(&format!(
+                    "  confidence: {:.3}\n",
+                    report.proposed_confidence
+                ));
+                human.push_str(&format!("  persisted: {}\n", report.persisted));
+                human.push_str("\nNext:\n");
+                for next in &report.next_actions {
+                    human.push_str(&format!("  {next}\n"));
+                }
+                write_stdout(stdout, &human)
+            }
+            output::Renderer::Toon => {
+                let toon = format!(
+                    "CURATE_PROPOSE_DERIVED|candidate_id={}|sources={}|persisted={}|dry_run={}",
+                    report.candidate_id,
+                    report.source_refs.len(),
+                    report.persisted,
+                    report.dry_run,
+                );
+                write_stdout(stdout, &(toon + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let envelope = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report,
+                });
+                write_stdout(stdout, &(envelope.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_review_workspace<W, E>(
     cli: &Cli,
     args: &ReviewWorkspaceArgs,
@@ -44423,6 +44589,7 @@ impl NormalizedInvocation {
                     CurateCommand::Retire(_) => "curate retire".to_string(),
                     CurateCommand::Tombstone(_) => "curate tombstone".to_string(),
                     CurateCommand::Untombstone(_) => "curate untombstone".to_string(),
+                    CurateCommand::ProposeDerived(_) => "curate propose-derived".to_string(),
                 },
                 Command::Diag(diag) => match diag {
                     DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
