@@ -969,6 +969,60 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn strict_workspace_permission_report_rejects_default_readable_config() -> TestResult {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        let db_path = ee_dir.join("ee.db");
+        let config_path = ee_dir.join("config.toml");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        std::fs::write(&db_path, b"db").map_err(|error| error.to_string())?;
+        std::fs::write(&config_path, b"config").map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+
+        let default_report = check_workspace_permissions(&workspace, SecurityProfile::Default);
+        let strict_report = check_workspace_permissions(&workspace, SecurityProfile::Strict);
+
+        assert!(default_report.passed);
+        assert!(!strict_report.passed);
+        assert_eq!(strict_report.issue_count, 1);
+        let config_check = strict_report
+            .checks
+            .iter()
+            .find(|check| check.path.ends_with(".ee/config.toml"))
+            .ok_or_else(|| "config check missing".to_owned())?;
+        assert!(!config_check.passed);
+        assert_eq!(config_check.current_mode, Some(0o644));
+        assert_eq!(config_check.max_allowed_mode, 0o600);
+        assert!(
+            config_check
+                .issue
+                .as_deref()
+                .is_some_and(|issue| issue.contains("disallowed bits 0044")),
+            "strict config diagnostic should name the group/other read bits: {:?}",
+            config_check.issue
+        );
+        let expected_repair = format!("chmod 0600 {}", shell_quote_path(&config_path));
+        assert_eq!(
+            config_check.repair.as_deref(),
+            Some(expected_repair.as_str())
+        );
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| error.to_string())?;
+        let repaired_report = check_workspace_permissions(&workspace, SecurityProfile::Strict);
+        assert!(repaired_report.passed);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn permissive_workspace_permission_report_relaxes_mode_bits() -> TestResult {
         use std::os::unix::fs::PermissionsExt;
 
