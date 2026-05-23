@@ -1,0 +1,520 @@
+//! bd-3cedd: real-binary pin test for `ee graph k-core`.
+//!
+//! Mirrors the runtime shape of `graph_neighborhood_smoke.rs` and the
+//! sibling pin tests (pagerank/betweenness/hits/path/centrality/
+//! louvain/articulation) but exercises CLI angles unique to k-core:
+//!
+//! * the two shared `validate_graph_read_options` usage errors
+//!   (--min-weight 2.0, --min-confidence -0.5)
+//! * empty workspace returns `status=computed` with empty `nodes` /
+//!   `edges` arrays under the `ee.graph.algorithm.v1` envelope and
+//!   `command="graph k-core"`, plus `k=null` when --k is omitted
+//! * a directed triangle a -> b -> c -> a (whose undirected
+//!   projection has every vertex at degree 2) returns the main core
+//!   containing all three vertices and all three edges, with the
+//!   nodes sorted alphabetically and each edge emitted as
+//!   `{left, right}` with the smaller id first (canonical orientation)
+//! * `--k 3` against the same triangle returns empty nodes/edges
+//!   (no vertex has degree >= 3); this proves we are actually
+//!   peeling against the requested k, not a stub
+//! * `--k 1` against the triangle still returns all three vertices
+//!   (every vertex trivially has degree >= 1)
+//! * witness object carries algorithm + edgesScanned > 0
+
+#![cfg(unix)]
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use ee::db::{CreateMemoryLinkInput, DbConnection, MemoryLinkRelation, MemoryLinkSource};
+use serde_json::Value;
+
+type TestResult = Result<(), String>;
+
+fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn run_ee(args: &[&str]) -> Result<Output, String> {
+    Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(args)
+        .output()
+        .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock moved backwards: {error}"))?
+        .as_nanos();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("ee-graph-k-core-pin")
+        .join(format!("{prefix}-{}-{now}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    Ok(dir)
+}
+
+fn init_workspace(workspace_arg: &str) -> TestResult {
+    let init = run_ee(&["--workspace", workspace_arg, "--json", "init"])?;
+    ensure(
+        init.status.success(),
+        format!(
+            "ee init must succeed; stderr: {}",
+            String::from_utf8_lossy(&init.stderr)
+        ),
+    )
+}
+
+fn remember(workspace_arg: &str, content: &str) -> Result<String, String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "remember",
+        "--level",
+        "semantic",
+        "--kind",
+        "fact",
+        content,
+    ])?;
+    if !output.status.success() {
+        return Err(format!(
+            "remember failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    parsed["data"]["public_id"]
+        .as_str()
+        .or_else(|| parsed["data"]["memory_id"].as_str())
+        .or_else(|| parsed["data"]["id"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            format!(
+                "remember response missing memory id: {}",
+                serde_json::to_string(&parsed).unwrap_or_default()
+            )
+        })
+}
+
+fn insert_link(database_path: &std::path::Path, link_id: &str, src: &str, dst: &str) -> TestResult {
+    let connection = DbConnection::open_file(database_path).map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            link_id,
+            &CreateMemoryLinkInput {
+                src_memory_id: src.to_owned(),
+                dst_memory_id: dst.to_owned(),
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.9,
+                confidence: 0.85,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-05-01T00:00:00Z".to_string()),
+                source: MemoryLinkSource::Human,
+                created_by: Some("e2e-graph-k-core-pin".to_string()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn run_graph_k_core(workspace_arg: &str, extra: &[&str]) -> Result<(Output, Value), String> {
+    let mut args: Vec<&str> = vec!["--workspace", workspace_arg, "--json", "graph", "k-core"];
+    args.extend_from_slice(extra);
+    let output = run_ee(&args)?;
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("graph k-core stdout must be JSON: {error}"))?;
+    Ok((output, parsed))
+}
+
+fn assert_envelope_shape(data: &Value) -> TestResult {
+    ensure(
+        data["schema"].as_str() == Some("ee.graph.algorithm.v1"),
+        format!("schema must be ee.graph.algorithm.v1; got {data}"),
+    )?;
+    ensure(
+        data["command"].as_str() == Some("graph k-core"),
+        format!("command must be graph k-core; got {data}"),
+    )?;
+    ensure(
+        data["status"].as_str() == Some("computed"),
+        format!("status must be computed; got {data}"),
+    )?;
+    ensure(
+        data["graph"].is_object(),
+        format!("graph block must be present; got {data}"),
+    )?;
+    ensure(
+        data["graph"]["nodeCount"].is_u64(),
+        format!("graph.nodeCount must be numeric; got {data}"),
+    )?;
+    ensure(
+        data["graph"]["edgeCount"].is_u64(),
+        format!("graph.edgeCount must be numeric; got {data}"),
+    )?;
+    ensure(
+        data["nodes"].is_array(),
+        format!("nodes must be an array; got {data}"),
+    )?;
+    ensure(
+        data["edges"].is_array(),
+        format!("edges must be an array; got {data}"),
+    )?;
+    ensure(
+        data["witness"].is_object(),
+        format!("witness must be an object; got {data}"),
+    )?;
+    Ok(())
+}
+
+fn assert_usage_error(parsed: &Value, message_needles: &[&str], repair_needle: &str) -> TestResult {
+    let error = &parsed["error"];
+    ensure(
+        error.is_object(),
+        format!("response must include an error object; got {parsed}"),
+    )?;
+    let message = error["message"].as_str().unwrap_or_default();
+    for needle in message_needles {
+        ensure(
+            message.contains(needle),
+            format!("usage message must contain {needle:?}; got {message}"),
+        )?;
+    }
+    let repair = error["repair"].as_str().unwrap_or_default();
+    ensure(
+        repair.contains(repair_needle),
+        format!("usage repair must contain {repair_needle:?}; got {repair}"),
+    )?;
+    Ok(())
+}
+
+/// Seeds a directed triangle a -> b -> c -> a. The undirected
+/// projection has every vertex at degree 2.
+fn seed_triangle() -> Result<(PathBuf, String, String, String, String), String> {
+    let workspace = unique_workspace("triangle")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let a = remember(&workspace_arg, "Pin-test k-core triangle node a.")?;
+    let b = remember(&workspace_arg, "Pin-test k-core triangle node b.")?;
+    let c = remember(&workspace_arg, "Pin-test k-core triangle node c.")?;
+    let database_path = workspace.join(".ee").join("ee.db");
+    insert_link(&database_path, "link_00000000000000000000kcr00001", &a, &b)?;
+    insert_link(&database_path, "link_00000000000000000000kcr00002", &b, &c)?;
+    insert_link(&database_path, "link_00000000000000000000kcr00003", &c, &a)?;
+    Ok((workspace, workspace_arg, a, b, c))
+}
+
+#[test]
+fn graph_k_core_rejects_min_weight_out_of_range_with_usage_error() -> TestResult {
+    let workspace = unique_workspace("usage-weight")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--min-weight", "2.0"])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "graph k-core --min-weight 2.0 must fail; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    assert_usage_error(
+        &parsed,
+        &["--min-weight", "finite value in [0.0, 1.0]"],
+        "--min-weight",
+    )
+}
+
+#[test]
+fn graph_k_core_rejects_min_confidence_out_of_range_with_usage_error() -> TestResult {
+    let workspace = unique_workspace("usage-confidence")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--min-confidence", "-0.5"])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "graph k-core --min-confidence -0.5 must fail; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    assert_usage_error(
+        &parsed,
+        &["--min-confidence", "finite value in [0.0, 1.0]"],
+        "--min-confidence",
+    )
+}
+
+#[test]
+fn graph_k_core_returns_empty_core_on_fresh_workspace() -> TestResult {
+    let workspace = unique_workspace("empty")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &[])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "graph k-core on a fresh workspace must exit zero; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    ensure(
+        parsed["schema"].as_str() == Some("ee.response.v1"),
+        format!("envelope schema must be ee.response.v1; got {parsed}"),
+    )?;
+    ensure(
+        parsed["success"] == Value::Bool(true),
+        format!("success must be true; got {parsed}"),
+    )?;
+    let data = &parsed["data"];
+    assert_envelope_shape(data)?;
+    ensure(
+        data["graph"]["nodeCount"].as_u64() == Some(0),
+        format!("nodeCount must be 0 with no links; got {data}"),
+    )?;
+    ensure(
+        data["graph"]["edgeCount"].as_u64() == Some(0),
+        format!("edgeCount must be 0 with no links; got {data}"),
+    )?;
+    ensure(
+        data["nodes"].as_array().map(Vec::len) == Some(0),
+        format!("nodes must be empty with no links; got {data}"),
+    )?;
+    ensure(
+        data["edges"].as_array().map(Vec::len) == Some(0),
+        format!("edges must be empty with no links; got {data}"),
+    )?;
+    // When --k is omitted the handler passes args.k = None and the
+    // emitted `k` field is null (Option<usize> serializes to null).
+    ensure(
+        data["k"].is_null(),
+        format!("k must be null when --k is omitted; got {data}"),
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    ensure(
+        stdout.lines().filter(|line| !line.is_empty()).count() == 1,
+        format!("--json stdout must be a single line; got {stdout}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn graph_k_core_returns_full_triangle_at_main_core() -> TestResult {
+    let (_workspace, workspace_arg, a, b, c) = seed_triangle()?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &[])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "graph k-core on triangle must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let data = &parsed["data"];
+    assert_envelope_shape(data)?;
+    ensure(
+        data["graph"]["nodeCount"].as_u64() == Some(3),
+        format!("nodeCount must reflect three seeded nodes; got {data}"),
+    )?;
+    ensure(
+        data["graph"]["edgeCount"].as_u64() == Some(3),
+        format!("edgeCount must reflect three seeded edges; got {data}"),
+    )?;
+
+    // Triangle: every vertex has undirected degree 2, so the main
+    // core is the full triangle.
+    let nodes: Vec<String> = data["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("nodes must be array; got {data}"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    ensure(
+        nodes.len() == 3,
+        format!("main core of a triangle must contain all 3 nodes; got {nodes:?}"),
+    )?;
+    let mut expected_nodes = vec![a.clone(), b.clone(), c.clone()];
+    expected_nodes.sort();
+    ensure(
+        nodes == expected_nodes,
+        format!(
+            "nodes must be sorted [{a}, {b}, {c}] alphabetically; got {nodes:?}, expected {expected_nodes:?}"
+        ),
+    )?;
+
+    // Edges: each emitted as {left, right} with left <= right
+    // (canonical orientation enforced by handle_graph_k_core), and
+    // the array sorted by (left, right) lexicographically.
+    let edges = data["edges"]
+        .as_array()
+        .ok_or_else(|| format!("edges must be array; got {data}"))?;
+    ensure(
+        edges.len() == 3,
+        format!("triangle main core must contain 3 edges; got {edges:?}"),
+    )?;
+    let mut canonical_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    for (index, edge) in edges.iter().enumerate() {
+        let left = edge["left"]
+            .as_str()
+            .ok_or_else(|| format!("edge[{index}].left must be string; got {edge}"))?
+            .to_owned();
+        let right = edge["right"]
+            .as_str()
+            .ok_or_else(|| format!("edge[{index}].right must be string; got {edge}"))?
+            .to_owned();
+        ensure(
+            left <= right,
+            format!(
+                "edge[{index}] must be canonically oriented (left <= right); got left={left}, right={right}"
+            ),
+        )?;
+        canonical_pairs.insert((left, right));
+    }
+    // Verify the three undirected edges are exactly {a,b}, {b,c}, {a,c}
+    // (regardless of how the directed inputs a->b->c->a were written).
+    let mut expected_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut ab = [a.clone(), b.clone()];
+    ab.sort();
+    let mut bc = [b.clone(), c.clone()];
+    bc.sort();
+    let mut ac = [a.clone(), c.clone()];
+    ac.sort();
+    expected_pairs.insert((ab[0].clone(), ab[1].clone()));
+    expected_pairs.insert((bc[0].clone(), bc[1].clone()));
+    expected_pairs.insert((ac[0].clone(), ac[1].clone()));
+    ensure(
+        canonical_pairs == expected_pairs,
+        format!(
+            "edges must equal the triangle's three undirected pairs; got {canonical_pairs:?}, expected {expected_pairs:?}"
+        ),
+    )?;
+
+    // Edge array ordering: lexicographic ascending across the full pair.
+    let observed_pairs: Vec<(String, String)> = edges
+        .iter()
+        .map(|edge| {
+            (
+                edge["left"].as_str().unwrap_or("").to_owned(),
+                edge["right"].as_str().unwrap_or("").to_owned(),
+            )
+        })
+        .collect();
+    let mut sorted_check = observed_pairs.clone();
+    sorted_check.sort();
+    ensure(
+        observed_pairs == sorted_check,
+        format!("edges must be sorted lexicographically; got {observed_pairs:?}"),
+    )?;
+
+    let witness = &data["witness"];
+    ensure(
+        witness["algorithm"].is_string(),
+        format!("witness.algorithm must be string; got {witness}"),
+    )?;
+    ensure(
+        witness["edgesScanned"].as_u64().unwrap_or(0) > 0,
+        format!("witness.edgesScanned must be > 0 after seeding edges; got {witness}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn graph_k_core_returns_empty_when_k_exceeds_max_degree() -> TestResult {
+    let (_workspace, workspace_arg, _a, _b, _c) = seed_triangle()?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--k", "3"])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "graph k-core --k 3 on triangle must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let data = &parsed["data"];
+    assert_envelope_shape(data)?;
+    ensure(
+        data["k"].as_u64() == Some(3),
+        format!("k must echo requested --k 3; got {data}"),
+    )?;
+    let nodes = data["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("nodes must be array; got {data}"))?;
+    let edges = data["edges"]
+        .as_array()
+        .ok_or_else(|| format!("edges must be array; got {data}"))?;
+    // Triangle's max degree is 2; --k 3 must yield an empty 3-core
+    // (no vertex survives 3-degree peeling). This proves we are
+    // actually peeling against the requested k, not a stub.
+    ensure(
+        nodes.is_empty(),
+        format!("--k 3 against triangle must yield no nodes; got {nodes:?}"),
+    )?;
+    ensure(
+        edges.is_empty(),
+        format!("--k 3 against triangle must yield no edges; got {edges:?}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn graph_k_core_returns_full_triangle_at_k_equals_one() -> TestResult {
+    let (_workspace, workspace_arg, a, b, c) = seed_triangle()?;
+
+    let (output, parsed) = run_graph_k_core(&workspace_arg, &["--k", "1"])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "graph k-core --k 1 on triangle must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let data = &parsed["data"];
+    assert_envelope_shape(data)?;
+    ensure(
+        data["k"].as_u64() == Some(1),
+        format!("k must echo requested --k 1; got {data}"),
+    )?;
+    let nodes: Vec<String> = data["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("nodes must be array; got {data}"))?
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    ensure(
+        nodes.len() == 3,
+        format!("--k 1 against triangle must keep all 3 vertices; got {nodes:?}"),
+    )?;
+    let expected: BTreeSet<String> = [a, b, c].into_iter().collect();
+    let observed: BTreeSet<String> = nodes.into_iter().collect();
+    ensure(
+        observed == expected,
+        format!("1-core nodes must equal {{a,b,c}}; got {observed:?}, expected {expected:?}"),
+    )?;
+    Ok(())
+}
