@@ -602,8 +602,19 @@ fn workspace_row_counts(
         let count = rows
             .first()
             .and_then(|row| row.get(0).and_then(|value| value.as_i64()))
-            .unwrap_or(0);
-        counts.insert(table, u64::try_from(count).unwrap_or_default());
+            .ok_or_else(|| {
+                storage_error(
+                    format!("Failed to read {table} row count for workspace {workspace_id}"),
+                    None,
+                )
+            })?;
+        let count = u64::try_from(count).map_err(|_| {
+            storage_error(
+                format!("{table} row count for workspace {workspace_id} must fit u64"),
+                None,
+            )
+        })?;
+        counts.insert(table, count);
     }
     Ok(counts)
 }

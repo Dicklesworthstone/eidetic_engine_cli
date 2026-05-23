@@ -1049,21 +1049,21 @@ impl DbConnection {
     /// Return the SQLite page size in bytes.
     pub fn page_size(&self) -> Result<u32> {
         let rows = self.query_for(DbOperation::Query, "PRAGMA page_size", &[])?;
-        let value = rows
-            .first()
-            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        Ok(u32::try_from(value).unwrap_or(0))
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "PRAGMA page_size returned no result row".to_string(),
+        })?;
+        sqlite_u32_column(first, 0, DbOperation::Query, "page_size")
     }
 
     /// Return the SQLite page count (number of pages in the main database).
     pub fn page_count(&self) -> Result<u64> {
         let rows = self.query_for(DbOperation::Query, "PRAGMA page_count", &[])?;
-        let value = rows
-            .first()
-            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
-            .unwrap_or(0);
-        Ok(u64::try_from(value).unwrap_or(0))
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "PRAGMA page_count returned no result row".to_string(),
+        })?;
+        sqlite_u64_column(first, 0, DbOperation::Query, "page_count")
     }
 
     /// Return non-mutating WAL sidecar size details for file-backed databases.
@@ -1113,11 +1113,8 @@ impl DbConnection {
             message: "wal_checkpoint returned no result row".to_string(),
         })?;
         let busy = sqlite_i64_column(first, 0, operation, "busy")? != 0;
-        let log_frames =
-            u64::try_from(sqlite_i64_column(first, 1, operation, "log")?).unwrap_or_default();
-        let checkpointed_frames =
-            u64::try_from(sqlite_i64_column(first, 2, operation, "checkpointed")?)
-                .unwrap_or_default();
+        let log_frames = sqlite_u64_column(first, 1, operation, "log")?;
+        let checkpointed_frames = sqlite_u64_column(first, 2, operation, "checkpointed")?;
         let after = self.wal_status()?;
         Ok(WalCheckpointReport {
             mode,
@@ -1168,10 +1165,18 @@ impl DbConnection {
 
         let sql = format!("SELECT COUNT(*) FROM \"{table}\"");
         let rows = self.query_for(DbOperation::Query, &sql, &[])?;
-        Ok(rows
-            .first()
-            .and_then(|row| row.get(0).and_then(|v| v.as_i64()))
-            .unwrap_or(0))
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("row-count query for table {table:?} returned no result row"),
+        })?;
+        let count = required_i64(first, 0, DbOperation::Query, "row_count")?;
+        if count < 0 {
+            return Err(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: format!("row-count query for table {table:?} returned negative count"),
+            });
+        }
+        Ok(count)
     }
 
     /// Return the list of compiled migration versions that have not yet been
@@ -1595,6 +1600,32 @@ fn sqlite_i64_column(
             operation,
             message: format!("wal_checkpoint result column `{label}` was not an integer"),
         })
+}
+
+fn sqlite_u32_column(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    label: &'static str,
+) -> Result<u32> {
+    let value = sqlite_i64_column(row, index, operation, label)?;
+    u32::try_from(value).map_err(|_| DbError::MalformedRow {
+        operation,
+        message: format!("SQLite result column `{label}` must fit u32"),
+    })
+}
+
+fn sqlite_u64_column(
+    row: &Row,
+    index: usize,
+    operation: DbOperation,
+    label: &'static str,
+) -> Result<u64> {
+    let value = sqlite_i64_column(row, index, operation, label)?;
+    u64::try_from(value).map_err(|_| DbError::MalformedRow {
+        operation,
+        message: format!("SQLite result column `{label}` must fit u64"),
+    })
 }
 
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
@@ -11047,15 +11078,11 @@ impl DbConnection {
             "SELECT COUNT(*) FROM memories WHERE logical_id = ?1",
             &[Value::Text(logical_id.to_string())],
         )?;
-        let count = rows
-            .first()
-            .and_then(|row| match row.get(0) {
-                Some(Value::BigInt(n)) => u32::try_from(*n).ok(),
-                Some(Value::Int(n)) => u32::try_from(*n).ok(),
-                _ => None,
-            })
-            .unwrap_or(0);
-        Ok(count)
+        let first = rows.first().ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: "memory chain count query returned no result row".to_string(),
+        })?;
+        required_u32(first, 0, DbOperation::Query, "memory_chain_count")
     }
 
     /// Get the trust_class string for a memory (N7.1 Phase 6 /
@@ -20083,6 +20110,30 @@ mod tests {
 
         connection.close()?;
         Ok(())
+    }
+
+    #[test]
+    fn sqlite_metadata_unsigned_columns_reject_invalid_values() -> TestResult {
+        let negative = Row::new(vec!["page_count".to_string()], vec![Value::BigInt(-1)]);
+        let negative_error = sqlite_u64_column(&negative, 0, DbOperation::Query, "page_count")
+            .expect_err("negative page_count should be malformed");
+        let negative_message = negative_error.to_string();
+        ensure(
+            negative_message.contains("page_count") && negative_message.contains("u64"),
+            format!("negative page_count error should name the unsigned field: {negative_message}"),
+        )?;
+
+        let oversized = Row::new(
+            vec!["page_size".to_string()],
+            vec![Value::BigInt(i64::from(u32::MAX) + 1)],
+        );
+        let oversized_error = sqlite_u32_column(&oversized, 0, DbOperation::Query, "page_size")
+            .expect_err("oversized page_size should be malformed");
+        let oversized_message = oversized_error.to_string();
+        ensure(
+            oversized_message.contains("page_size") && oversized_message.contains("u32"),
+            format!("oversized page_size error should name the bounded field: {oversized_message}"),
+        )
     }
 
     #[test]
