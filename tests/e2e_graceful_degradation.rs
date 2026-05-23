@@ -117,19 +117,28 @@ fn assert_success(output: &EeOutput, context: &str) -> TestResult {
     )
 }
 
-fn remember(workspace: &Path, content: &str) -> Result<String, String> {
-    let output = run_ee_json(
-        workspace,
-        [
-            "remember",
-            content,
-            "--level",
-            "procedural",
-            "--kind",
-            "rule",
-        ],
+fn remember_with_validity(
+    workspace: &Path,
+    content: &str,
+    valid_from: Option<&str>,
+    valid_to: Option<&str>,
+) -> Result<String, String> {
+    let mut args = vec![
         "remember",
-    )?;
+        content,
+        "--level",
+        "procedural",
+        "--kind",
+        "rule",
+    ];
+    if let Some(valid_from) = valid_from {
+        args.extend(["--valid-from", valid_from]);
+    }
+    if let Some(valid_to) = valid_to {
+        args.extend(["--valid-to", valid_to]);
+    }
+
+    let output = run_ee_json(workspace, args, "remember")?;
     assert_success(&output, "remember")?;
     output
         .json
@@ -137,6 +146,10 @@ fn remember(workspace: &Path, content: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("remember output missing memory id: {}", output.stdout))
+}
+
+fn remember(workspace: &Path, content: &str) -> Result<String, String> {
+    remember_with_validity(workspace, content, None, None)
 }
 
 fn insert_unindexed_memory(workspace: &Path, content: &str) -> Result<String, String> {
@@ -404,5 +417,152 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
     ensure(
         degraded_codes(&recovered_search.json).is_empty(),
         "recovered search should not report stale-index degradation after rebuild",
+    )
+}
+
+#[test]
+fn search_validity_window_filters_real_index_results_and_opt_ins_restore_them() -> TestResult {
+    let artifact_dir = unique_artifact_dir("search-validity-window")?;
+    let workspace = artifact_dir.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("failed to create workspace: {error}"))?;
+
+    let init = run_ee_json(&workspace, ["init"], "init")?;
+    assert_success(&init, "init")?;
+
+    let current_memory = remember_with_validity(
+        &workspace,
+        "validwindow alpha temporal search current rule remains visible during May proof",
+        Some("2026-01-01T00:00:00Z"),
+        Some("2026-12-31T23:59:59Z"),
+    )?;
+    let expired_memory = remember_with_validity(
+        &workspace,
+        "validwindow alpha temporal search expired rule is hidden unless expired memories are requested",
+        Some("2020-01-01T00:00:00Z"),
+        Some("2021-01-01T00:00:00Z"),
+    )?;
+    let future_memory = remember_with_validity(
+        &workspace,
+        "validwindow alpha temporal search future rule is hidden unless future memories are requested",
+        Some("2099-01-01T00:00:00Z"),
+        None,
+    )?;
+
+    let rebuild = run_ee_json(&workspace, ["index", "rebuild"], "index rebuild")?;
+    assert_success(&rebuild, "index rebuild")?;
+    ensure_equal(
+        &rebuild.json.pointer("/data/memories_indexed"),
+        &Some(&Value::from(3)),
+        "validity rebuild memory count",
+    )?;
+
+    let default_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "validwindow alpha temporal search",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--source-mode",
+            "lexical_only",
+            "--relevance-floor",
+            "0.0",
+            "--limit",
+            "10",
+        ],
+        "default validity search",
+    )?;
+    assert_success(&default_search, "default validity search")?;
+    let default_doc_ids = result_doc_ids(&default_search.json)?;
+    ensure(
+        default_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &current_memory),
+        format!("default validity search should include current memory: {default_doc_ids:?}"),
+    )?;
+    ensure(
+        !default_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &expired_memory),
+        format!("default validity search should exclude expired memory: {default_doc_ids:?}"),
+    )?;
+    ensure(
+        !default_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &future_memory),
+        format!("default validity search should exclude future memory: {default_doc_ids:?}"),
+    )?;
+
+    let include_expired_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "validwindow alpha temporal search expired",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-expired",
+            "--source-mode",
+            "lexical_only",
+            "--relevance-floor",
+            "0.0",
+            "--limit",
+            "10",
+        ],
+        "include expired validity search",
+    )?;
+    assert_success(&include_expired_search, "include expired validity search")?;
+    let include_expired_doc_ids = result_doc_ids(&include_expired_search.json)?;
+    ensure(
+        include_expired_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &expired_memory),
+        format!(
+            "include-expired validity search should restore expired memory: {include_expired_doc_ids:?}"
+        ),
+    )?;
+    ensure(
+        !include_expired_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &future_memory),
+        format!(
+            "include-expired validity search should still exclude future memory: {include_expired_doc_ids:?}"
+        ),
+    )?;
+
+    let include_future_search = run_ee_json(
+        &workspace,
+        [
+            "search",
+            "validwindow alpha temporal search future",
+            "--as-of",
+            "2026-05-13T00:00:00Z",
+            "--include-future",
+            "--source-mode",
+            "lexical_only",
+            "--relevance-floor",
+            "0.0",
+            "--limit",
+            "10",
+        ],
+        "include future validity search",
+    )?;
+    assert_success(&include_future_search, "include future validity search")?;
+    let include_future_doc_ids = result_doc_ids(&include_future_search.json)?;
+    ensure(
+        include_future_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &future_memory),
+        format!(
+            "include-future validity search should restore future memory: {include_future_doc_ids:?}"
+        ),
+    )?;
+    ensure(
+        !include_future_doc_ids
+            .iter()
+            .any(|doc_id| doc_id == &expired_memory),
+        format!(
+            "include-future validity search should still exclude expired memory: {include_future_doc_ids:?}"
+        ),
     )
 }
