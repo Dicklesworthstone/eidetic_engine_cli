@@ -1791,6 +1791,304 @@ fn preflight_run_blocks_high_risk_deploy_task() -> TestResult {
 }
 
 #[test]
+fn preflight_run_show_close_persists_guard_tripwire_lifecycle() -> TestResult {
+    let (_tempdir, workspace) = empty_workspace()?;
+    let run = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "preflight",
+        "run",
+        "rm -rf /",
+    ])?;
+    ensure_equal(&run.status.code(), &Some(0), "preflight run exit")?;
+    ensure(stdout_is_json(&run), "preflight run stdout must be JSON")?;
+    ensure(stdout_is_clean(&run), "preflight run stdout must be clean")?;
+    ensure(
+        run.stderr.is_empty(),
+        "preflight run JSON stderr must be empty",
+    )?;
+
+    let run_json = stdout_json(&run)?;
+    ensure_equal(
+        &run_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "preflight run response schema",
+    )?;
+    ensure_equal(
+        &run_json["success"],
+        &serde_json::json!(true),
+        "preflight run response success",
+    )?;
+    ensure_equal(
+        &run_json["data"]["risk_level"],
+        &serde_json::json!("critical"),
+        "guard-backed run risk level",
+    )?;
+    ensure_equal(
+        &run_json["data"]["tripwires_set"],
+        &serde_json::json!(1),
+        "guard-backed run tripwire count",
+    )?;
+    ensure_equal(
+        &run_json["data"]["degraded"],
+        &serde_json::json!([]),
+        "guard-backed run must not report degraded mode",
+    )?;
+    ensure_equal(
+        &run_json["data"]["evidence_ids"][0],
+        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        "guard-backed run evidence id",
+    )?;
+    ensure_equal(
+        &run_json["data"]["tripwires"][0]["source_kind"],
+        &serde_json::json!("dependency_contract"),
+        "guard-backed run tripwire source kind",
+    )?;
+    ensure_equal(
+        &run_json["data"]["tripwires"][0]["source_id"],
+        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        "guard-backed run tripwire provenance",
+    )?;
+    let run_id = run_json["data"]["run_id"]
+        .as_str()
+        .ok_or_else(|| "preflight run_id should be a string".to_owned())?;
+    ensure(
+        run_id.starts_with("pf_"),
+        format!("preflight run_id should use pf_ prefix: {run_id}"),
+    )?;
+    let expected_tripwire_provenance =
+        format!("preflight://{run_id}/tripwire-source/preflight_guard:builtin:rm_rf_root");
+    ensure(
+        run_json["data"]["tripwires"][0]["provenance"]
+            .as_array()
+            .is_some_and(|provenance| {
+                provenance.iter().any(|entry| {
+                    entry
+                        .as_str()
+                        .is_some_and(|value| value == expected_tripwire_provenance.as_str())
+                })
+            }),
+        "guard-backed run must expose dynamic tripwire provenance URI",
+    )?;
+
+    let store_path = Path::new(&workspace)
+        .join(".ee")
+        .join("preflight_runs.json");
+    ensure(
+        store_path.is_file(),
+        format!(
+            "preflight run store should exist at {}",
+            store_path.display()
+        ),
+    )?;
+    let store_text = fs::read_to_string(&store_path)
+        .map_err(|error| format!("preflight run store reads: {error}"))?;
+    let store_json: serde_json::Value = serde_json::from_str(&store_text)
+        .map_err(|error| format!("preflight run store JSON parses: {error}"))?;
+    ensure_equal(
+        &store_json["schema"],
+        &serde_json::json!("ee.preflight_run_store.v1"),
+        "preflight run store schema",
+    )?;
+    ensure_equal(
+        &store_json["runs"][0]["report"]["run_id"],
+        &serde_json::json!(run_id),
+        "preflight run store captures dynamic run id",
+    )?;
+    ensure_equal(
+        &store_json["runs"][0]["report"]["tripwires"][0]["source_id"],
+        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        "preflight run store captures guard tripwire provenance",
+    )?;
+    ensure_equal(
+        &store_json["runs"][0]["close_report"],
+        &serde_json::Value::Null,
+        "preflight run store starts without a close report",
+    )?;
+
+    let show = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "preflight",
+        "show",
+        run_id,
+    ])?;
+    ensure_equal(&show.status.code(), &Some(0), "preflight show exit")?;
+    ensure(stdout_is_json(&show), "preflight show stdout must be JSON")?;
+    ensure(
+        stdout_is_clean(&show),
+        "preflight show stdout must be clean",
+    )?;
+    ensure(
+        show.stderr.is_empty(),
+        "preflight show JSON stderr must be empty",
+    )?;
+    let show_json = stdout_json(&show)?;
+    ensure_equal(
+        &show_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "preflight show response schema",
+    )?;
+    ensure_equal(
+        &show_json["success"],
+        &serde_json::json!(true),
+        "preflight show response success",
+    )?;
+    ensure_equal(
+        &show_json["data"]["run"]["id"],
+        &serde_json::json!(run_id),
+        "preflight show reads persisted run id",
+    )?;
+    ensure_equal(
+        &show_json["data"]["tripwires"][0]["source_id"],
+        &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
+        "preflight show reads persisted tripwire provenance",
+    )?;
+    ensure(
+        show_json["data"]["tripwires"][0]["provenance"]
+            .as_array()
+            .is_some_and(|provenance| {
+                provenance.iter().any(|entry| {
+                    entry
+                        .as_str()
+                        .is_some_and(|value| value == expected_tripwire_provenance.as_str())
+                })
+            }),
+        "preflight show reads persisted dynamic tripwire provenance URI",
+    )?;
+
+    let close = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "preflight",
+        "close",
+        run_id,
+        "--cleared",
+        "--reason",
+        "advanced e2e lifecycle cleared",
+        "--task-outcome",
+        "success",
+        "--feedback",
+        "helped",
+    ])?;
+    ensure_equal(&close.status.code(), &Some(0), "preflight close exit")?;
+    ensure(
+        stdout_is_json(&close),
+        "preflight close stdout must be JSON",
+    )?;
+    ensure(
+        stdout_is_clean(&close),
+        "preflight close stdout must be clean",
+    )?;
+    ensure(
+        close.stderr.is_empty(),
+        "preflight close JSON stderr must be empty",
+    )?;
+    let close_json = stdout_json(&close)?;
+    ensure_equal(
+        &close_json["schema"],
+        &serde_json::json!("ee.response.v2"),
+        "preflight close response schema",
+    )?;
+    ensure_equal(
+        &close_json["success"],
+        &serde_json::json!(true),
+        "preflight close response success",
+    )?;
+    ensure_equal(
+        &close_json["data"]["run_id"],
+        &serde_json::json!(run_id),
+        "preflight close run id",
+    )?;
+    ensure_equal(
+        &close_json["data"]["new_status"],
+        &serde_json::json!("completed"),
+        "preflight close completed status",
+    )?;
+    ensure_equal(
+        &close_json["data"]["cleared"],
+        &serde_json::json!(true),
+        "preflight close cleared flag",
+    )?;
+    ensure_equal(
+        &close_json["data"]["reason"],
+        &serde_json::json!("advanced e2e lifecycle cleared"),
+        "preflight close reason",
+    )?;
+    ensure_equal(
+        &close_json["data"]["task_outcome"],
+        &serde_json::json!("success"),
+        "preflight close task outcome",
+    )?;
+
+    let show_after_close = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "preflight",
+        "show",
+        run_id,
+    ])?;
+    ensure_equal(
+        &show_after_close.status.code(),
+        &Some(0),
+        "preflight show after close exit",
+    )?;
+    ensure(
+        show_after_close.stderr.is_empty(),
+        "preflight show after close JSON stderr must be empty",
+    )?;
+    ensure(
+        stdout_is_json(&show_after_close),
+        "preflight show after close stdout must be JSON",
+    )?;
+    ensure(
+        stdout_is_clean(&show_after_close),
+        "preflight show after close stdout must be clean",
+    )?;
+    let show_after_close_json = stdout_json(&show_after_close)?;
+    ensure_equal(
+        &show_after_close_json["data"]["run"]["status"],
+        &serde_json::json!("completed"),
+        "preflight show reflects completed status after close",
+    )?;
+    ensure_equal(
+        &show_after_close_json["data"]["run"]["cleared"],
+        &serde_json::json!(true),
+        "preflight show reflects closed cleared state",
+    )?;
+    ensure_equal(
+        &show_after_close_json["data"]["run"]["block_reason"],
+        &serde_json::Value::Null,
+        "preflight show clears block reason after cleared close",
+    )?;
+
+    let store_after_close_text = fs::read_to_string(&store_path)
+        .map_err(|error| format!("preflight run store after close reads: {error}"))?;
+    let store_after_close_json: serde_json::Value =
+        serde_json::from_str(&store_after_close_text)
+            .map_err(|error| format!("preflight run store after close JSON parses: {error}"))?;
+    ensure_equal(
+        &store_after_close_json["runs"][0]["close_report"]["run_id"],
+        &serde_json::json!(run_id),
+        "preflight run store records close report",
+    )?;
+    ensure_equal(
+        &store_after_close_json["runs"][0]["close_report"]["new_status"],
+        &serde_json::json!("completed"),
+        "preflight run store records completed close status",
+    )?;
+    ensure_equal(
+        &store_after_close_json["runs"][0]["close_report"]["cleared"],
+        &serde_json::json!(true),
+        "preflight run store records cleared close state",
+    )
+}
+
+#[test]
 fn preflight_show_returns_stubbed_storage_details() -> TestResult {
     let (_tempdir, workspace) = empty_workspace()?;
     let output = run_ee(&[
