@@ -12,17 +12,18 @@ Golden fixtures in `tests/fixtures/golden/` enforce these patterns.
    produces identical JSON output. IDs, timestamps, and ordering are stable.
 
 3. **Agent-native by default**: Every command supports `--json` for machine
-   consumption. The response envelope is always `ee.response.v1` or `ee.error.v2`.
+   consumption. The response envelope is always `ee.response.v2` or `ee.error.v2`.
 
-4. **Useful errors**: Errors include a repair hint (`next` action) when possible.
+4. **Useful errors**: Errors include structured recovery actions when possible.
 
-## Response Envelope (ee.response.v1)
+## Response Envelope (ee.response.v2)
 
 All successful JSON responses use this envelope:
 
 ```json
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
+  "success": true,
   "data": { ... }
 }
 ```
@@ -31,7 +32,8 @@ With `--meta`, additional fields are included:
 
 ```json
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
+  "success": true,
   "meta": {
     "timestamp": "2026-01-01T00:00:00Z",
     "elapsed_ms": 42,
@@ -51,12 +53,19 @@ All errors use this envelope:
   "error": {
     "code": "error_code",
     "message": "Human-readable description.",
-    "repair": "ee command to fix it"
+    "severity": "medium",
+    "repair": "ee command to fix it",
+    "details": {
+      "recovery": [
+        { "priority": 1, "kind": "command", "command": "ee command to fix it" }
+      ]
+    }
   }
 }
 ```
 
-The `repair` field is optional but should be present when a fix is known.
+The `repair` field is a human-readable summary. Agent integrations should prefer
+`error.details.recovery[]` when a fix is known.
 
 ## Exit Codes
 

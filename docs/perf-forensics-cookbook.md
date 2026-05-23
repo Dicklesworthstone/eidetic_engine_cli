@@ -91,7 +91,7 @@ Example regression output:
 
 ```json
 {
-  "schema": "ee.response.v1",
+  "schema": "ee.response.v2",
   "success": true,
   "data": {
     "report": {
@@ -317,5 +317,5 @@ These scenarios are covered by automated tests:
 | Schema | Description |
 |--------|-------------|
 | `ee.perf.artifact_summary.v1` | Normalized performance artifact |
-| `ee.response.v1` | Standard response envelope |
+| `ee.response.v2` | Standard response envelope |
 | `ee.error.v2` | Error response envelope |

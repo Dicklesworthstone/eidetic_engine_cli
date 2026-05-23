@@ -21,22 +21,22 @@ into:
 
 ## Response Schema Compatibility Window
 
-`ee.response.v1` remains the default success envelope:
+`ee.response.v2` is the default success envelope:
 
 ```json
-{"schema":"ee.response.v1","success":true,"data":{}}
+{"schema":"ee.response.v2","success":true,"data":{},"degraded":[]}
 ```
 
-For agents pinned to the previous envelope shape, `--schema-version v0` or
-`--legacy-schema` emits `ee.response.v0`:
+For agents pinned to the previous envelope shape, use the documented migration
+surface for that release line. Older `0.1.x` builds accepted `--schema-version
+v0` or `--legacy-schema` to emit `ee.response.v0`:
 
 ```json
 {"schema":"ee.response.v0","ok":true,"result":{}}
 ```
 
-The v0 response envelope is retained for the full `0.1.x` minor-version cycle.
-It may be removed when the project cuts `0.2.0`. New integrations should consume
-the default v1 envelope.
+New integrations should consume the default v2 envelope and read structured
+recovery actions from `error.details.recovery[]`.
 
 ## Status Graph Fields
 
@@ -89,7 +89,18 @@ snapshot yet; it does not mean live graph compute is unavailable.
     "code": "search_index_unavailable",
     "message": "Search index is stale or unavailable.",
     "severity": "medium",
-    "repair": "ee index rebuild --workspace ."
+    "repair": "ee index rebuild --workspace .",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived search index from the database.",
+          "command": "ee index rebuild --workspace .",
+          "resultsIn": "Search and context commands can satisfy indexed retrieval again."
+        }
+      ]
+    }
   }
 }
 ```
@@ -197,7 +208,19 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
   "error": {
     "code": "unsatisfied_degraded_mode",
     "message": "Experiment execution requires persisted experiment definitions from an evaluation registry.",
-    "repair": "Provide explicit input datasets or use skill workflows for experiment orchestration."
+    "severity": "medium",
+    "repair": "Provide explicit input datasets or use skill workflows for experiment orchestration.",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "seed",
+          "rationale": "The CLI cannot synthesize missing experiment inputs.",
+          "example": "Provide an evaluation registry entry with input datasets before rerunning the experiment command.",
+          "resultsIn": "Experiment execution has concrete persisted inputs to evaluate."
+        }
+      ]
+    }
   }
 }
 ```
@@ -293,7 +316,18 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
   "error": {
     "code": "situation_skill_required",
     "message": "Situation classification requires skill interpretation.",
-    "repair": "Use skills/situation-framing/SKILL.md workflow."
+    "severity": "medium",
+    "repair": "Use skills/situation-framing/SKILL.md workflow.",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "none",
+          "rationale": "This route intentionally hands interpretation to the documented skill workflow.",
+          "resultsIn": "The user follows the skill-owned classification path instead of a fabricated CLI result."
+        }
+      ]
+    }
   }
 }
 ```
@@ -318,7 +352,18 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
   "error": {
     "code": "rehearsal_unavailable",
     "message": "Rehearsal requires isolated sandbox implementation.",
-    "repair": "Rehearsal is not yet implemented."
+    "severity": "high",
+    "repair": "Rehearsal is not yet implemented.",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "none",
+          "rationale": "No CLI recovery can create the missing isolated sandbox implementation.",
+          "resultsIn": "Callers stop relying on rehearsal until the feature lands."
+        }
+      ]
+    }
   }
 }
 ```

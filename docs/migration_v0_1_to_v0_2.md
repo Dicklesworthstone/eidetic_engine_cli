@@ -24,16 +24,16 @@ corresponding v1 surface fails CI, and adding a new v1 string to
 
 | Envelope | v0.1 | v0.2 | Status |
 |---|---|---|---|
-| Response envelope (success path) | `ee.response.v1` | `ee.response.v1` | **Unchanged at the envelope level.** Only additive field changes within v1 — permissive consumers are forward-compatible. |
+| Response envelope (success path) | `ee.response.v1` | `ee.response.v2` | **Breaking for strict parsers.** Success envelopes now include the v2 schema marker, explicit `success: true`, and response-scoped `degraded[]` semantics. |
 | Error envelope | `ee.error.v1` | `ee.error.v2` | **Breaking.** `error.details.recovery[]` added as structured array (F1); `error.nonRecoverable?: bool` added. See [A10](#a10--error-envelope-v1--v2). |
 | Pack object inside response | `ee.pack.v1` | `ee.pack.v2` | **Breaking.** See [A1 phase 2](#a1-phase-2--collapse-selectioncertificate--provenancefooter-into-items). |
 | Model status data object | `ee.model.status.v1` | `ee.model.status.v2` | **Breaking for strict parsers.** `data.reranker` was added and active embedder selection is now explicitly embedding-purpose only. See [N8](#n8--model-status-reranker-posture). |
 | Hook contract | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` | **Unchanged.** E2's filter applies; no field shape changes. |
 | Other envelopes (`ee.memory.list.v1`, `ee.rule.list.v1`, `ee.search.v1`, `ee.handoff.capsule.v1`, …) | v1 | v1 | **Unchanged at envelope level.** Some field-level renames; see per-surface sections. |
 
-The conservative bumping strategy means most agents see additive
-changes within v1 envelopes; only a hard switch for the error
-envelope and the pack object is required.
+The v2 response marker makes response-scoped degradation explicit. Agents should
+key success parsing on `schema == "ee.response.v2"` and treat `degraded[]` as
+runtime evidence that affected the emitted response.
 
 ---
 
@@ -507,9 +507,9 @@ Already covered as part of [A10](#a10--error-envelope-v1--v2). The recovery stru
 
 | Old schema | New schema | Coverage |
 |---|---|---|
+| `ee.response.v1` | `ee.response.v2` | success envelope contract |
 | `ee.error.v1` | `ee.error.v2` | A10 |
 | `ee.pack.v1` (inside data.pack) | `ee.pack.v2` | A1 phase 2, A4 |
-| `ee.response.v1` | `ee.response.v1` (unchanged) | — |
 | `ee.hook.context_pack.v1` | `ee.hook.context_pack.v1` (unchanged) | — |
 
 ---

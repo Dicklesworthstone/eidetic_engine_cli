@@ -44,7 +44,7 @@ tracing::info!(
     bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("unassigned"),
     surface = "db_inspect",
     phase = "response",
-    elapsed_ms = elapsed.as_millis() as u64,
+    elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     degraded_codes = ?degraded_codes,
     "surface completed"
 );

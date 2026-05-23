@@ -10,7 +10,7 @@ uses the SQLite rowid as the monotonic cursor until the audit MPSC lane lands.
 ee subscribe poll --cursor 0 --filter LEVEL=procedural,TAG=release --json
 ```
 
-The response is an `ee.response.v1` envelope. Persist `data.nextCursor` after
+The response is an `ee.response.v2` envelope. Persist `data.nextCursor` after
 every successful poll and pass it back as `--cursor` on the next call. The
 command advances the cursor across inspected audit rows even when a filter
 excludes them, so non-matching changes do not replay forever.

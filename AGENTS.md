@@ -669,13 +669,25 @@ JSON error shape:
 
 ```json
 {
-  "schema": "ee.error.v1",
+  "schema": "ee.error.v2",
   "error": {
     "code": "search_index_stale",
     "message": "Search index is stale.",
     "severity": "medium",
     "repair": "ee index rebuild --workspace .",
-    "details": { "databaseGeneration": 12, "indexGeneration": 9 }
+    "details": {
+      "databaseGeneration": 12,
+      "indexGeneration": 9,
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived search index from the database generation.",
+          "command": "ee index rebuild --workspace .",
+          "resultsIn": "Search index generation catches up to the database."
+        }
+      ]
+    }
   }
 }
 ```
