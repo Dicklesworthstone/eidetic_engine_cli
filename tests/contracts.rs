@@ -61,6 +61,9 @@ mod cass_error_from_io;
 #[path = "contracts/cass_view_span_defaults.rs"]
 mod cass_view_span_defaults;
 
+#[path = "contracts/cass_default_impls.rs"]
+mod cass_default_impls;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
