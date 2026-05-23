@@ -112,6 +112,9 @@ mod cass_import_root_guidance_fields;
 #[path = "contracts/cass_import_guidance_commands_and_message.rs"]
 mod cass_import_guidance_commands_and_message;
 
+#[path = "contracts/agent_detect_schema_constants.rs"]
+mod agent_detect_schema_constants;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
