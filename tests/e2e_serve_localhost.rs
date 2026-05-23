@@ -257,3 +257,180 @@ fn serve_why_endpoint_rejects_empty_or_nested_memory_id_path_segments() -> TestR
 
     Ok(())
 }
+
+// bd-3c3i5: GET /v1/status is the only ee serve v2 endpoint whose transport
+// adapter crosses into a real subsystem (core::status::StatusReport::gather +
+// output::render_status_json). Every other endpoint stops at a dispatch-plan
+// placeholder with execution='not_started'. This test pins that the transport
+// envelope actually carries the real ee.response.v2 status payload, proving
+// the integration boundary in the absence of mocks.
+#[test]
+fn serve_status_endpoint_crosses_into_real_status_report_gather() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-status-real-gather",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(envelope["request"]["path"].as_str(), Some("/v1/status"));
+    assert_eq!(envelope["request"]["method"].as_str(), Some("GET"));
+    assert_eq!(
+        envelope["request"]["cliEquivalent"].as_str(),
+        Some("ee status --json"),
+    );
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(200));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.response.v2"),
+    );
+    // The payload must be the actual StatusReport JSON rendered through
+    // output::render_status_json, not a transport-only placeholder. Confirm
+    // by spot-checking fields that only the real renderer populates and that
+    // the placeholder serve_dispatch_payload_json never emits.
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+    assert_eq!(payload["data"]["command"].as_str(), Some("status"));
+    if payload["data"]["version"].as_str().is_none() {
+        return Err(format!(
+            "status payload must carry data.version from the real StatusReport; got {payload}"
+        ));
+    }
+    if !payload["data"]["runtime"].is_object() {
+        return Err(format!(
+            "status payload must carry data.runtime object from real StatusReport; got {payload}"
+        ));
+    }
+    if !payload["data"]["capabilities"].is_object() {
+        return Err(format!(
+            "status payload must carry data.capabilities object from real StatusReport; got {payload}"
+        ));
+    }
+    if !payload["data"]["posture"].is_object() {
+        return Err(format!(
+            "status payload must carry data.posture object from real StatusReport; got {payload}"
+        ));
+    }
+    // The placeholder transport payload would expose data.execution and
+    // data.dispatchPlan; the real status payload must not.
+    if payload["data"]["execution"].as_str() == Some("not_started")
+        || payload["data"]["execution"].as_str() == Some("transport_only")
+    {
+        return Err(format!(
+            "status endpoint must not return a placeholder transport payload; got {payload}"
+        ));
+    }
+    if payload["data"]["dispatchPlan"].is_object() {
+        return Err(format!(
+            "status payload must not carry the transport-only dispatchPlan; got {payload}"
+        ));
+    }
+    if !payload["data"]["businessLogicExecuted"].is_null() {
+        return Err(format!(
+            "status payload must not carry the transport-only businessLogicExecuted flag; got {payload}"
+        ));
+    }
+    Ok(())
+}
+
+// bd-3c3i5: GET /v1/status without an Authorization header must trip the
+// shared auth-failure envelope rather than ever reaching StatusReport::gather.
+// Pins that the auth gate fires before any real subsystem dispatch.
+#[test]
+fn serve_status_endpoint_missing_auth_short_circuits_with_auth_failure_envelope() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_owned();
+    let response = render_serve_transport_exchange(
+        "req-status-missing-auth",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 401 Unauthorized\r\n") {
+        return Err(format!("expected 401 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(envelope["response"]["statusCode"].as_u64(), Some(401));
+    assert_eq!(
+        envelope["response"]["payloadSchema"].as_str(),
+        Some("ee.error.v2"),
+    );
+    let degraded_codes = json_string_array(&envelope["response"]["degradedCodes"])?;
+    assert_eq!(degraded_codes, vec!["serve_auth_missing"]);
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.error.v2"));
+    assert_eq!(payload["error"]["code"].as_str(), Some("policy_denied"));
+    assert_eq!(
+        payload["error"]["details"]["authState"].as_str(),
+        Some("missing"),
+    );
+    assert_eq!(
+        payload["error"]["details"]["tokenMaterialExposed"].as_bool(),
+        Some(false),
+    );
+    // The real StatusReport payload would carry data.command='status'. The
+    // auth-failure envelope must not include it — proving the request short-
+    // circuited before StatusReport::gather.
+    if payload["data"]["command"].as_str() == Some("status") {
+        return Err(format!(
+            "auth-rejected response must NOT contain the real status payload; got {payload}"
+        ));
+    }
+    Ok(())
+}
+
+// bd-3c3i5: GET /v1/status?extra=value must still route to the parameterless
+// status endpoint. Query parameters on a parameterless endpoint are ignored
+// at routing, and the real status payload must still come back. Pins that
+// query bytes don't break path routing for status (an easily-broken
+// parser-edge invariant under no-mock conditions).
+#[test]
+fn serve_status_endpoint_ignores_irrelevant_query_parameters() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let raw = format!(
+        "GET /v1/status?extra=value&other=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    let response = render_serve_transport_exchange(
+        "req-status-with-query",
+        raw.as_bytes(),
+        &ServeLimits::default(),
+        Some(token),
+        0,
+    );
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    assert_eq!(envelope["request"]["path"].as_str(), Some("/v1/status"));
+    assert_eq!(
+        envelope["response"]["payload"]["data"]["command"].as_str(),
+        Some("status"),
+    );
+    // Query map must reflect what came in even though the endpoint ignores
+    // it — proving the parser parsed it and routing chose to ignore.
+    let query = &envelope["request"]["query"];
+    if !query.is_object() {
+        return Err(format!("request.query must be an object; got {query}"));
+    }
+    if query["extra"].is_null() && query["other"].is_null() {
+        return Err(format!(
+            "request.query must surface the parsed query params; got {query}"
+        ));
+    }
+    Ok(())
+}
