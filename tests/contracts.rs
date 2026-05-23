@@ -88,6 +88,9 @@ mod cass_import_error_subprocess_diagnostics_none;
 #[path = "contracts/cass_error_equality.rs"]
 mod cass_error_equality;
 
+#[path = "contracts/cass_contract_version_getters.rs"]
+mod cass_contract_version_getters;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
