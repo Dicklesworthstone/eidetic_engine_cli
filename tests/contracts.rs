@@ -43,6 +43,9 @@ mod cass_session_info_builders;
 #[path = "contracts/cass_client_extra_env.rs"]
 mod cass_client_extra_env;
 
+#[path = "contracts/cass_import_guidance_from_inventory.rs"]
+mod cass_import_guidance_from_inventory;
+
 #[path = "contracts/cass_exit_code_constants.rs"]
 mod cass_exit_code_constants;
 
