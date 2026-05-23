@@ -1,5 +1,5 @@
 use crate::config::EnvVar;
-use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V1};
+use crate::models::{ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 
 fn normalized_agent_docs_token(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
@@ -813,7 +813,7 @@ pub struct ContractEntry {
 pub const CONTRACTS: &[ContractEntry] = &[
     ContractEntry {
         name: "response",
-        schema: RESPONSE_SCHEMA_V1,
+        schema: RESPONSE_SCHEMA_V2,
         description: "Standard success response envelope with data payload",
         stability: "stable",
     },
@@ -1424,6 +1424,25 @@ mod tests {
             ensure_equal(&contract.stability, &"stable", "contract stability")?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn contracts_catalog_lists_current_response_envelope() -> TestResult {
+        let response_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "response")
+            .ok_or_else(|| "response contract is documented".to_string())?;
+        let legacy_schema = ["ee", "response", "v1"].join(".");
+
+        ensure_equal(
+            &response_contract.schema,
+            &crate::models::RESPONSE_SCHEMA_V2,
+            "response contract schema",
+        )?;
+        ensure(
+            response_contract.schema != legacy_schema,
+            "response contract must not publish legacy schema",
+        )
     }
 
     #[test]
