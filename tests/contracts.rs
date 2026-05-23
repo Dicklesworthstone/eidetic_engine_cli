@@ -76,6 +76,9 @@ mod cass_subsystem_name;
 #[path = "contracts/cass_error_is_degraded.rs"]
 mod cass_error_is_degraded;
 
+#[path = "contracts/cass_health_predicates.rs"]
+mod cass_health_predicates;
+
 #[path = "contracts/cass_stdout_decode_fuzz_summary.rs"]
 mod cass_stdout_decode_fuzz_summary;
 
