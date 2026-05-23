@@ -24,13 +24,17 @@
 //! ```
 
 use std::path::Path;
+use std::str::FromStr;
 
 use asupersync::Outcome;
 use asupersync::types::{CancelKind, CancelReason, PanicPayload};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 
-use crate::core::bayes::{BetaPosterior, DEFAULT_HARMFUL_WEIGHT};
+use crate::core::bayes::{
+    BetaPosterior, DEFAULT_HARMFUL_WEIGHT, TrustClassTransition, TrustClassTransitionDirection,
+    trust_class_transition,
+};
 use crate::core::sprt::{
     SPRT_ALPHA, SPRT_BETA, SprtDecision, SprtEvaluation, SprtObservation, evaluate_sprt,
 };
@@ -43,7 +47,9 @@ use crate::db::{
     generate_audit_id_seeded,
 };
 use crate::models::degradation::HARMFUL_BURST_QUARANTINE_CODE;
-use crate::models::{AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind};
+use crate::models::{
+    AgentContextProfileCounts, DomainError, ProcessExitCode, RecoveryKind, TrustClass,
+};
 use crate::runtime::determinism::{Deterministic, Seed};
 
 /// Exit code for cancelled operations (SIGINT convention).
@@ -1254,6 +1260,20 @@ fn record_outcome_inner(
                         message: format!("Failed to audit Bayesian posterior update: {error}"),
                         repair: Some("ee doctor".to_string()),
                     })?;
+
+                let validation_events =
+                    current_feedback_summary(&connection, "memory", &target_id)?.positive_count;
+                apply_memory_trust_class_transition(
+                    &connection,
+                    &target.workspace_id,
+                    &target_id,
+                    &event_id,
+                    &posterior,
+                    u64::from(validation_events),
+                    false,
+                    options.actor.as_deref(),
+                    id_source,
+                )?;
             }
         }
         // Posterior is None ⇒ memory row doesn't exist; the
@@ -1303,6 +1323,112 @@ fn record_outcome_inner(
         feedback,
         degraded,
     })
+}
+
+fn apply_memory_trust_class_transition(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    feedback_event_id: &str,
+    posterior: &BetaPosterior,
+    validation_events: u64,
+    explicit_human_promotion: bool,
+    actor: Option<&str>,
+    id_source: &mut OutcomeIdSource<'_>,
+) -> Result<(), DomainError> {
+    let Some(stored_trust_class) =
+        connection
+            .get_memory_trust_class(memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to read memory trust class: {error}"),
+                repair: Some("ee doctor".to_string()),
+            })?
+    else {
+        return Ok(());
+    };
+
+    let current_class =
+        TrustClass::from_str(&stored_trust_class).map_err(|error| DomainError::Storage {
+            message: format!("Stored memory trust class is invalid: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    let transition = trust_class_transition(
+        current_class,
+        posterior,
+        validation_events,
+        explicit_human_promotion,
+    );
+    if !transition.audit_required {
+        return Ok(());
+    }
+
+    let updated = connection
+        .update_memory_trust_class(memory_id, transition.next_class.as_str())
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to update memory trust class: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })?;
+    if !updated {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Failed to update memory trust class for {memory_id}: memory no longer exists"
+            ),
+            repair: Some("ee memory show <id> --json".to_string()),
+        });
+    }
+
+    connection
+        .insert_audit(
+            &id_source.next_audit_id(),
+            &CreateAuditInput {
+                workspace_id: Some(workspace_id.to_string()),
+                actor: actor.map(ToOwned::to_owned),
+                action: audit_actions::TRUST_CLASS_TRANSITION.to_string(),
+                target_type: Some("memory".to_string()),
+                target_id: Some(memory_id.to_string()),
+                details: Some(memory_trust_class_transition_audit_details(
+                    feedback_event_id,
+                    &transition,
+                    posterior,
+                )),
+            },
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to audit memory trust-class transition: {error}"),
+            repair: Some("ee doctor".to_string()),
+        })
+}
+
+fn memory_trust_class_transition_audit_details(
+    feedback_event_id: &str,
+    transition: &TrustClassTransition,
+    posterior: &BetaPosterior,
+) -> String {
+    serde_json::json!({
+        "schema": "ee.audit.trust_class_transition.v1",
+        "feedbackEventId": feedback_event_id,
+        "fromClass": transition.previous_class.as_str(),
+        "toClass": transition.next_class.as_str(),
+        "direction": transition.direction.as_str(),
+        "trigger": trust_class_transition_trigger(transition.direction),
+        "reason": transition.reason,
+        "posteriorAlpha": posterior.alpha(),
+        "posteriorBeta": posterior.beta(),
+        "ci90Lower": transition.ci90_lower,
+        "ci90Upper": transition.ci90_upper,
+        "effectiveSampleSize": transition.effective_sample_size,
+        "validationEvents": transition.validation_events,
+        "explicitHumanPromotion": transition.explicit_human_promotion,
+    })
+    .to_string()
+}
+
+fn trust_class_transition_trigger(direction: TrustClassTransitionDirection) -> &'static str {
+    match direction {
+        TrustClassTransitionDirection::Promote => "ci90_lo_crossed_up",
+        TrustClassTransitionDirection::Demote => "ci90_hi_crossed_down",
+        TrustClassTransitionDirection::Stable => "stable",
+    }
 }
 
 fn maybe_propose_anti_pattern_candidate(
@@ -3706,6 +3832,23 @@ mod tests {
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "posterior missing for outcome memory".to_string())?;
         ensure_equal(&posterior, &(1.5, 0.5), "persisted Bayes posterior")?;
+        let trust_transition_audit = audit
+            .iter()
+            .filter(|row| row.action == crate::db::audit_actions::TRUST_CLASS_TRANSITION)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &trust_transition_audit.len(),
+            &0_usize,
+            "human_explicit helpful outcome does not transition trust class",
+        )?;
+        let trust_class = connection
+            .get_memory_trust_class(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &trust_class,
+            &Some("human_explicit".to_string()),
+            "trust class remains human_explicit",
+        )?;
         let profile = connection
             .get_agent_context_profile(OUTCOME_TEST_WORKSPACE_ID, "test", OUTCOME_TEST_MEMORY_ID)
             .map_err(|error| error.to_string())?;
@@ -3713,6 +3856,143 @@ mod tests {
             &profile.is_none(),
             &true,
             "audit actor alone must not create an agent profile",
+        )
+    }
+
+    #[test]
+    fn record_outcome_applies_trust_class_transition_and_audit() -> TestResult {
+        let (_dir, database) = seed_outcome_database("ee-outcome-trust-transition")?;
+        {
+            let connection =
+                DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+            let updated = connection
+                .update_memory_trust_class(OUTCOME_TEST_MEMORY_ID, "cass_evidence")
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&updated, &true, "seed trust class update")?;
+            let updated = connection
+                .update_memory_bayes_posterior(OUTCOME_TEST_MEMORY_ID, 29.0, 1.0)
+                .map_err(|error| error.to_string())?;
+            ensure_equal(&updated, &true, "seed Bayes posterior update")?;
+        }
+
+        let report = record_outcome(&OutcomeRecordOptions {
+            database_path: &database,
+            target_type: "memory".to_string(),
+            target_id: OUTCOME_TEST_MEMORY_ID.to_string(),
+            workspace_id: None,
+            signal: "helpful".to_string(),
+            weight: Some(1.0),
+            source_type: "outcome_observed".to_string(),
+            source_id: Some("release-proof".to_string()),
+            reason: Some("Repeated outcome validation crossed the trust threshold.".to_string()),
+            evidence_json: None,
+            session_id: Some(OUTCOME_TEST_SESSION_ID.to_string()),
+            event_id: Some("fb_21234567890123456789012345".to_string()),
+            actor: Some("test".to_string()),
+            agent_name: None,
+            dry_run: false,
+            harmful_per_source_per_hour: DEFAULT_HARMFUL_PER_SOURCE_PER_HOUR,
+            harmful_burst_window_seconds: DEFAULT_HARMFUL_BURST_WINDOW_SECONDS,
+            prompt_injection_guard: true,
+        })
+        .map_err(|error| error.message())?;
+        ensure_equal(
+            &report.status,
+            &OutcomeRecordStatus::Recorded,
+            "recorded status",
+        )?;
+
+        let connection = DbConnection::open_file(&database).map_err(|error| error.to_string())?;
+        let trust_class = connection
+            .get_memory_trust_class(OUTCOME_TEST_MEMORY_ID)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(
+            &trust_class,
+            &Some("agent_assertion".to_string()),
+            "cass_evidence promotes to agent_assertion",
+        )?;
+        let audit = connection
+            .list_audit_by_target("memory", OUTCOME_TEST_MEMORY_ID, None)
+            .map_err(|error| error.to_string())?;
+        let transition_audit = audit
+            .iter()
+            .filter(|row| row.action == crate::db::audit_actions::TRUST_CLASS_TRANSITION)
+            .collect::<Vec<_>>();
+        ensure_equal(
+            &transition_audit.len(),
+            &1_usize,
+            "trust class transition audit row count",
+        )?;
+        let transition_row = transition_audit
+            .first()
+            .ok_or_else(|| "trust transition audit row missing after length check".to_string())?;
+        let details = transition_row
+            .details
+            .as_deref()
+            .ok_or_else(|| "trust transition audit details missing".to_string())?;
+        let details: serde_json::Value = serde_json::from_str(details)
+            .map_err(|error| format!("trust transition audit details must parse: {error}"))?;
+        ensure_equal(
+            &details["schema"],
+            &serde_json::json!("ee.audit.trust_class_transition.v1"),
+            "trust transition audit schema",
+        )?;
+        ensure_equal(
+            &details["feedbackEventId"],
+            &serde_json::json!("fb_21234567890123456789012345"),
+            "trust transition audit event link",
+        )?;
+        ensure_equal(
+            &details["fromClass"],
+            &serde_json::json!("cass_evidence"),
+            "trust transition audit from class",
+        )?;
+        ensure_equal(
+            &details["toClass"],
+            &serde_json::json!("agent_assertion"),
+            "trust transition audit to class",
+        )?;
+        ensure_equal(
+            &details["direction"],
+            &serde_json::json!("promote"),
+            "trust transition audit direction",
+        )?;
+        ensure_equal(
+            &details["trigger"],
+            &serde_json::json!("ci90_lo_crossed_up"),
+            "trust transition audit trigger",
+        )?;
+        ensure_equal(
+            &details["reason"],
+            &serde_json::json!("cass_evidence_promote_ci90_lower_gt_0_60"),
+            "trust transition audit reason",
+        )?;
+        ensure_equal(
+            &details["posteriorAlpha"],
+            &serde_json::json!(30.0),
+            "trust transition audit posterior alpha",
+        )?;
+        ensure_equal(
+            &details["posteriorBeta"],
+            &serde_json::json!(1.0),
+            "trust transition audit posterior beta",
+        )?;
+        ensure_equal(
+            &details["validationEvents"],
+            &serde_json::json!(1),
+            "trust transition audit validation event count",
+        )?;
+        ensure_equal(
+            &details["explicitHumanPromotion"],
+            &serde_json::json!(false),
+            "outcome feedback is not an explicit human promotion",
+        )?;
+        let ci90_lower = details["ci90Lower"]
+            .as_f64()
+            .ok_or_else(|| "ci90Lower must be numeric".to_string())?;
+        ensure(
+            ci90_lower > 0.60,
+            "trust transition audit carries threshold-crossing lower bound",
         )
     }
 

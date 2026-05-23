@@ -40,12 +40,16 @@
 
 #![allow(clippy::cast_precision_loss)]
 
+use crate::models::TrustClass;
+
 /// Default Jeffreys prior alpha.
 pub const DEFAULT_PRIOR_ALPHA: f64 = 0.5;
 /// Default Jeffreys prior beta.
 pub const DEFAULT_PRIOR_BETA: f64 = 0.5;
 /// Default harmful event weight per `[curation] harmful_weight` in README.
 pub const DEFAULT_HARMFUL_WEIGHT: f64 = 2.5;
+/// ADR 0032 transition confidence level.
+const TRUST_TRANSITION_CI_LEVEL: f64 = 0.90;
 
 /// Canonical feedback signal used when replaying feedback events into a
 /// Beta-Bernoulli posterior.
@@ -256,6 +260,318 @@ impl BetaPosterior {
             )
         } else {
             (self.alpha, self.beta)
+        }
+    }
+}
+
+/// Direction of an ADR 0032 trust-class transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrustClassTransitionDirection {
+    Promote,
+    Demote,
+    Stable,
+}
+
+impl TrustClassTransitionDirection {
+    /// Stable lowercase wire form for audit payloads and tests.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Promote => "promote",
+            Self::Demote => "demote",
+            Self::Stable => "stable",
+        }
+    }
+}
+
+/// Deterministic ADR 0032 trust-class transition decision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrustClassTransition {
+    pub previous_class: TrustClass,
+    pub next_class: TrustClass,
+    pub direction: TrustClassTransitionDirection,
+    pub ci90_lower: Option<f64>,
+    pub ci90_upper: Option<f64>,
+    pub effective_sample_size: f64,
+    pub validation_events: u64,
+    pub explicit_human_promotion: bool,
+    pub reason: &'static str,
+    pub audit_required: bool,
+}
+
+impl TrustClassTransition {
+    fn stable(
+        current_class: TrustClass,
+        posterior: &BetaPosterior,
+        ci90: Option<(f64, f64)>,
+        validation_events: u64,
+        explicit_human_promotion: bool,
+        reason: &'static str,
+    ) -> Self {
+        Self::new(
+            current_class,
+            current_class,
+            TrustClassTransitionDirection::Stable,
+            posterior,
+            ci90,
+            validation_events,
+            explicit_human_promotion,
+            reason,
+        )
+    }
+
+    fn promote(
+        current_class: TrustClass,
+        next_class: TrustClass,
+        posterior: &BetaPosterior,
+        ci90: (f64, f64),
+        validation_events: u64,
+        explicit_human_promotion: bool,
+        reason: &'static str,
+    ) -> Self {
+        Self::new(
+            current_class,
+            next_class,
+            TrustClassTransitionDirection::Promote,
+            posterior,
+            Some(ci90),
+            validation_events,
+            explicit_human_promotion,
+            reason,
+        )
+    }
+
+    fn demote(
+        current_class: TrustClass,
+        next_class: TrustClass,
+        posterior: &BetaPosterior,
+        ci90: (f64, f64),
+        validation_events: u64,
+        explicit_human_promotion: bool,
+        reason: &'static str,
+    ) -> Self {
+        Self::new(
+            current_class,
+            next_class,
+            TrustClassTransitionDirection::Demote,
+            posterior,
+            Some(ci90),
+            validation_events,
+            explicit_human_promotion,
+            reason,
+        )
+    }
+
+    fn new(
+        previous_class: TrustClass,
+        next_class: TrustClass,
+        direction: TrustClassTransitionDirection,
+        posterior: &BetaPosterior,
+        ci90: Option<(f64, f64)>,
+        validation_events: u64,
+        explicit_human_promotion: bool,
+        reason: &'static str,
+    ) -> Self {
+        let (ci90_lower, ci90_upper) = match ci90 {
+            Some((lower, upper)) => (Some(lower), Some(upper)),
+            None => (None, None),
+        };
+        Self {
+            previous_class,
+            next_class,
+            direction,
+            ci90_lower,
+            ci90_upper,
+            effective_sample_size: posterior.effective_sample_size(),
+            validation_events,
+            explicit_human_promotion,
+            reason,
+            audit_required: direction != TrustClassTransitionDirection::Stable,
+        }
+    }
+}
+
+/// Evaluate the ADR 0032 trust-class transition table.
+///
+/// The result is pure and deterministic. Callers that persist a changed class
+/// must also emit the ADR-required `trust_class.transition` audit row.
+#[must_use]
+pub fn trust_class_transition(
+    current_class: TrustClass,
+    posterior: &BetaPosterior,
+    validation_events: u64,
+    explicit_human_promotion: bool,
+) -> TrustClassTransition {
+    let ci90 = posterior.credible_interval(TRUST_TRANSITION_CI_LEVEL);
+    let Some((ci90_lower, ci90_upper)) = ci90 else {
+        return TrustClassTransition::stable(
+            current_class,
+            posterior,
+            None,
+            validation_events,
+            explicit_human_promotion,
+            "ci90_unavailable",
+        );
+    };
+
+    match current_class {
+        TrustClass::LegacyImport => {
+            if ci90_lower > 0.50 && validation_events > 0 {
+                TrustClassTransition::promote(
+                    current_class,
+                    TrustClass::CassEvidence,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "legacy_import_promote_ci90_lower_gt_0_50_with_validation",
+                )
+            } else if ci90_lower > 0.50 {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "legacy_import_validation_required",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "no_transition_threshold_crossed",
+                )
+            }
+        }
+        TrustClass::CassEvidence => {
+            if ci90_lower > 0.60 {
+                TrustClassTransition::promote(
+                    current_class,
+                    TrustClass::AgentAssertion,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "cass_evidence_promote_ci90_lower_gt_0_60",
+                )
+            } else if ci90_upper < 0.30 {
+                TrustClassTransition::demote(
+                    current_class,
+                    TrustClass::LegacyImport,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "cass_evidence_demote_ci90_upper_lt_0_30",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "no_transition_threshold_crossed",
+                )
+            }
+        }
+        TrustClass::AgentAssertion => {
+            if ci90_lower > 0.70 && posterior.effective_sample_size() >= 6.0 {
+                TrustClassTransition::promote(
+                    current_class,
+                    TrustClass::AgentValidated,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "agent_assertion_promote_ci90_lower_gt_0_70_sample_size_ge_6",
+                )
+            } else if ci90_lower > 0.70 {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "agent_assertion_sample_size_gate_unmet",
+                )
+            } else if ci90_upper < 0.35 {
+                TrustClassTransition::demote(
+                    current_class,
+                    TrustClass::CassEvidence,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "agent_assertion_demote_ci90_upper_lt_0_35",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "no_transition_threshold_crossed",
+                )
+            }
+        }
+        TrustClass::AgentValidated => {
+            if explicit_human_promotion {
+                TrustClassTransition::promote(
+                    current_class,
+                    TrustClass::HumanExplicit,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "agent_validated_promote_explicit_human_operator",
+                )
+            } else if ci90_upper < 0.40 {
+                TrustClassTransition::demote(
+                    current_class,
+                    TrustClass::AgentAssertion,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "agent_validated_demote_ci90_upper_lt_0_40",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "human_explicit_promotion_requires_operator",
+                )
+            }
+        }
+        TrustClass::HumanExplicit => {
+            if ci90_upper < 0.45 {
+                TrustClassTransition::demote(
+                    current_class,
+                    TrustClass::AgentValidated,
+                    posterior,
+                    (ci90_lower, ci90_upper),
+                    validation_events,
+                    explicit_human_promotion,
+                    "human_explicit_demote_ci90_upper_lt_0_45",
+                )
+            } else {
+                TrustClassTransition::stable(
+                    current_class,
+                    posterior,
+                    Some((ci90_lower, ci90_upper)),
+                    validation_events,
+                    explicit_human_promotion,
+                    "no_transition_threshold_crossed",
+                )
+            }
         }
     }
 }

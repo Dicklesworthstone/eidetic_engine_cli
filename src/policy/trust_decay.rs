@@ -203,16 +203,28 @@ impl TrustDecayCalculator {
         let mut factor = 1.0_f32;
 
         // Apply quarantine decay
-        factor *= self.config.quarantine_decay.powi(state.quarantine_count.min(i32::MAX as u32) as i32);
+        factor *= self
+            .config
+            .quarantine_decay
+            .powi(state.quarantine_count.min(i32::MAX as u32) as i32);
 
         // Apply contradiction decay
-        factor *= self.config.contradiction_decay.powi(state.contradiction_count.min(i32::MAX as u32) as i32);
+        factor *= self
+            .config
+            .contradiction_decay
+            .powi(state.contradiction_count.min(i32::MAX as u32) as i32);
 
         // Apply harmful decay
-        factor *= self.config.harmful_decay.powi(state.harmful_count.min(i32::MAX as u32) as i32);
+        factor *= self
+            .config
+            .harmful_decay
+            .powi(state.harmful_count.min(i32::MAX as u32) as i32);
 
         // Apply inaccurate decay
-        factor *= self.config.inaccurate_decay.powi(state.inaccurate_count.min(i32::MAX as u32) as i32);
+        factor *= self
+            .config
+            .inaccurate_decay
+            .powi(state.inaccurate_count.min(i32::MAX as u32) as i32);
 
         // Apply positive recovery without allowing severe harm history to disappear.
         let recovery_ceiling = self.positive_recovery_ceiling(state);
