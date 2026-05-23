@@ -250,7 +250,7 @@ pub struct DbConnection {
     inner: FrankenConnection,
     location: DatabaseLocation,
     mode: DatabaseOpenMode,
-    agent_context_profile_pack_cache: Mutex<Option<AgentContextProfilePackCache>>,
+    agent_context_profile_pack_cache: RwLock<Option<AgentContextProfilePackCache>>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -769,7 +769,7 @@ impl DbConnection {
             inner,
             location: config.location,
             mode: config.mode,
-            agent_context_profile_pack_cache: Mutex::new(None),
+            agent_context_profile_pack_cache: RwLock::new(None),
         })
     }
 
@@ -7991,10 +7991,10 @@ impl DbConnection {
     ) -> Result<Option<Vec<StoredAgentContextProfileForPack>>> {
         let cache =
             self.agent_context_profile_pack_cache
-                .lock()
+                .read()
                 .map_err(|_| DbError::MalformedRow {
                     operation: DbOperation::Query,
-                    message: "agent context profile pack cache lock poisoned".to_string(),
+                    message: "agent context profile pack cache read lock poisoned".to_string(),
                 })?;
         Ok(cache
             .as_ref()
@@ -8010,10 +8010,10 @@ impl DbConnection {
     ) -> Result<()> {
         let mut cache =
             self.agent_context_profile_pack_cache
-                .lock()
+                .write()
                 .map_err(|_| DbError::MalformedRow {
                     operation: DbOperation::Query,
-                    message: "agent context profile pack cache lock poisoned".to_string(),
+                    message: "agent context profile pack cache write lock poisoned".to_string(),
                 })?;
         *cache = Some(AgentContextProfilePackCache {
             workspace_id: workspace_id.to_string(),
@@ -8026,10 +8026,10 @@ impl DbConnection {
     fn clear_agent_context_profile_pack_cache(&self, operation: DbOperation) -> Result<()> {
         let mut cache =
             self.agent_context_profile_pack_cache
-                .lock()
+                .write()
                 .map_err(|_| DbError::MalformedRow {
                     operation,
-                    message: "agent context profile pack cache lock poisoned".to_string(),
+                    message: "agent context profile pack cache write lock poisoned".to_string(),
                 })?;
         *cache = None;
         Ok(())
