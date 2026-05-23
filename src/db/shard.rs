@@ -1281,9 +1281,24 @@ fn blake3_file_hash(path: &Path) -> io::Result<(String, u64)> {
             break;
         }
         hasher.update(&buffer[..read]);
-        bytes = bytes.saturating_add(read as u64);
+        bytes = checked_add_file_hash_bytes(bytes, read)?;
     }
     Ok((format!("blake3:{}", hasher.finalize().to_hex()), bytes))
+}
+
+fn checked_add_file_hash_bytes(total: u64, read: usize) -> io::Result<u64> {
+    let read_len = u64::try_from(read).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("file hash read length {read} does not fit u64"),
+        )
+    })?;
+    total.checked_add(read_len).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file hash byte count exceeds u64",
+        )
+    })
 }
 
 impl From<OsString> for ShardFanoutResolverInput {
@@ -1334,9 +1349,9 @@ mod tests {
         SHARD_FANOUT_PRESERVE_SOURCE_SCHEMA_V1, SHARD_FANOUT_STATUS_SCHEMA_V1,
         SHARD_FANOUT_WORKSPACE_ID_UNSAFE_CODE, ShardFanoutMigrationPlanInput,
         ShardFanoutMigrationWorkspaceInput, ShardFanoutPosture, ShardFanoutPreserveSourceError,
-        ShardFanoutResolverInput, default_shards_dir_from_values, duration_millis_saturating,
-        execute_peer_shard_read_attach_plan, normalize_shard_root, plan_peer_shard_attach,
-        plan_shard_fanout_migration, preserve_shard_fanout_source_database,
+        ShardFanoutResolverInput, checked_add_file_hash_bytes, default_shards_dir_from_values,
+        duration_millis_saturating, execute_peer_shard_read_attach_plan, normalize_shard_root,
+        plan_peer_shard_attach, plan_shard_fanout_migration, preserve_shard_fanout_source_database,
         preserved_legacy_database_path, resolve_shard_fanout_status,
         shard_fanout_enabled_from_env_value, shard_file_path,
     };
@@ -1369,6 +1384,15 @@ mod tests {
             .checked_add(Duration::from_millis(1))
             .expect("duration one millisecond above u64::MAX is representable");
         assert_eq!(duration_millis_saturating(oversized), u64::MAX);
+    }
+
+    #[test]
+    fn file_hash_byte_count_overflow_is_rejected() {
+        assert_eq!(checked_add_file_hash_bytes(41, 1).unwrap(), 42);
+        let error = checked_add_file_hash_bytes(u64::MAX, 1)
+            .expect_err("overflowing file byte count must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("exceeds u64"));
     }
 
     #[test]
