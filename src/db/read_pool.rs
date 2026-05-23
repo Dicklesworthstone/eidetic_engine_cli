@@ -353,12 +353,22 @@ impl ReadConnectionPool {
         loop {
             let mut state = self.lock_state();
             let stale = evict_expired_idle(&mut state, self.config.idle_timeout());
+            let occupancy = match pool_occupancy(&state) {
+                Ok(occupancy) => occupancy,
+                Err(error) => {
+                    drop(state);
+                    drop_idle_connections(stale);
+                    return Err(error);
+                }
+            };
 
             if let Some(idle) = state.idle.pop() {
-                state.active = state.active.saturating_add(1);
-                state.max_seen = state
-                    .max_seen
-                    .max(state.active.saturating_add(state.idle.len()));
+                if let Err(error) = increment_pool_active(&mut state) {
+                    drop(state);
+                    drop_idle_connections(stale);
+                    return Err(error);
+                }
+                state.max_seen = state.max_seen.max(occupancy);
                 record_acquire_wait(&mut state, started.elapsed());
                 drop(state);
                 drop_idle_connections(stale);
@@ -369,12 +379,14 @@ impl ReadConnectionPool {
                 });
             }
 
-            if state.active.saturating_add(state.idle.len()) < max_size {
+            if occupancy < max_size {
                 let slot_id = allocate_next_read_pool_id(&mut state.next_slot_id, "slot");
-                state.active = state.active.saturating_add(1);
-                state.max_seen = state
-                    .max_seen
-                    .max(state.active.saturating_add(state.idle.len()));
+                if let Err(error) = increment_pool_active(&mut state) {
+                    drop(state);
+                    drop_idle_connections(stale);
+                    return Err(error);
+                }
+                state.max_seen = state.max_seen.max(occupancy + 1);
                 record_acquire_wait(&mut state, started.elapsed());
                 drop(state);
 
@@ -387,7 +399,7 @@ impl ReadConnectionPool {
                     }),
                     Err(error) => {
                         let mut state = self.lock_state();
-                        state.active = state.active.saturating_sub(1);
+                        decrement_pool_active(&mut state, "open failure");
                         Err(error)
                     }
                 };
@@ -554,7 +566,7 @@ impl ReadConnectionPool {
         let mut to_close = None;
         {
             let mut state = self.lock_state();
-            state.active = state.active.saturating_sub(1);
+            decrement_pool_active(&mut state, "release");
             if state.idle.len() < self.config.max_size() {
                 state.idle.push(IdleConnection {
                     slot_id,
@@ -572,7 +584,7 @@ impl ReadConnectionPool {
     fn abandon(&self, connection: DbConnection) {
         {
             let mut state = self.lock_state();
-            state.active = state.active.saturating_sub(1);
+            decrement_pool_active(&mut state, "abandon");
             state.drops = state.drops.saturating_add(1);
         }
         let _ = connection.close();
@@ -1042,6 +1054,29 @@ fn evict_expired_idle(state: &mut PoolState, idle_timeout: Duration) -> Vec<DbCo
     expired
 }
 
+fn checked_pool_count_add(left: usize, right: usize, label: &'static str) -> Result<usize> {
+    left.checked_add(right)
+        .ok_or_else(|| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("read-pool {label} count overflow"),
+        })
+}
+
+fn pool_occupancy(state: &PoolState) -> Result<usize> {
+    checked_pool_count_add(state.active, state.idle.len(), "occupancy")
+}
+
+fn increment_pool_active(state: &mut PoolState) -> Result<()> {
+    state.active = checked_pool_count_add(state.active, 1, "active")?;
+    Ok(())
+}
+
+fn decrement_pool_active(state: &mut PoolState, context: &'static str) {
+    state.active = state.active.checked_sub(1).unwrap_or_else(|| {
+        panic!("read-pool active count underflow during {context}");
+    });
+}
+
 fn record_acquire_wait(state: &mut PoolState, duration: Duration) {
     if state.acquire_wait_ns.len() == ACQUIRE_WAIT_SAMPLE_CAP {
         state.acquire_wait_ns.remove(0);
@@ -1169,6 +1204,21 @@ mod tests {
         match value {
             Some(value) => value,
             None => panic!("{context}"),
+        }
+    }
+
+    fn empty_pool_state() -> PoolState {
+        PoolState {
+            active: 0,
+            idle: Vec::new(),
+            acquire_wait_ns: Vec::with_capacity(ACQUIRE_WAIT_SAMPLE_CAP),
+            next_slot_id: 1,
+            next_pin_id: 1,
+            active_pins: BTreeMap::new(),
+            max_seen: 0,
+            drops: 0,
+            release_failures: 0,
+            ad_hoc_bypass_count: 0,
         }
     }
 
@@ -2375,6 +2425,39 @@ mod tests {
         };
         assert!(error.operation().is_some());
         assert_eq!(pool.stats().active, 0);
+    }
+
+    #[test]
+    fn read_pool_active_count_overflow_is_rejected() {
+        let mut state = empty_pool_state();
+        state.active = usize::MAX;
+
+        let error =
+            increment_pool_active(&mut state).expect_err("overflowing active count must fail");
+        assert_eq!(state.active, usize::MAX);
+        assert!(
+            error
+                .to_string()
+                .contains("read-pool active count overflow")
+        );
+
+        let occupancy_error = checked_pool_count_add(usize::MAX, 1, "occupancy")
+            .expect_err("overflowing occupancy count must fail");
+        assert!(
+            occupancy_error
+                .to_string()
+                .contains("read-pool occupancy count overflow")
+        );
+    }
+
+    #[test]
+    fn read_pool_active_count_underflow_panics() {
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let mut state = empty_pool_state();
+            decrement_pool_active(&mut state, "test");
+        }));
+
+        assert!(panic.is_err(), "active count underflow must fail loudly");
     }
 
     #[test]
