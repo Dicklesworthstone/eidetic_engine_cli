@@ -96,6 +96,7 @@
         "current",
         "default",
         "required",
+        "response envelope",
         "success envelope"
       ]
     },
@@ -126,6 +127,7 @@
         "current",
         "default",
         "required",
+        "response envelope",
         "success envelope"
       ]
     }

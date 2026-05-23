@@ -577,7 +577,8 @@ pub fn check_category_coverage(schemas: &[&SchemaEntry]) -> BTreeMap<SchemaCateg
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     use ee::db::DbConnection;
     use serde::Deserialize;
@@ -618,6 +619,15 @@ mod tests {
         reason: String,
     }
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct LegacySchemaClaimViolation {
+        path: String,
+        line: usize,
+        schema_id: String,
+        phrase: String,
+        source_excerpt: String,
+    }
+
     fn contract_inventory() -> Result<ContractInventory, String> {
         serde_json::from_str(CONTRACT_INVENTORY_JSON)
             .map_err(|error| format!("parse public contract inventory: {error}"))
@@ -634,8 +644,187 @@ mod tests {
             .ok_or_else(|| format!("missing contract inventory entry for {schema_id}"))
     }
 
-    fn repo_path(path: &str) -> std::path::PathBuf {
+    fn repo_path(path: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+    }
+
+    fn normalize_repo_path(path: &Path) -> String {
+        path.strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap_or(path)
+            .to_string_lossy()
+            .trim_start_matches('/')
+            .to_owned()
+    }
+
+    fn path_matches_pattern(path: &str, pattern: &str) -> bool {
+        if let Some(prefix) = pattern.strip_suffix("/**") {
+            path == prefix || path.starts_with(&format!("{prefix}/"))
+        } else {
+            path == pattern
+        }
+    }
+
+    fn path_is_allowed_historical(path: &str, entry: &ContractInventoryEntry) -> bool {
+        entry
+            .allowed_historical_contexts
+            .iter()
+            .any(|context| path_matches_pattern(path, &context.path_pattern))
+    }
+
+    fn previous_char_boundary(text: &str, mut index: usize) -> usize {
+        index = index.min(text.len());
+        while index > 0 && !text.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    }
+
+    fn next_char_boundary(text: &str, mut index: usize) -> usize {
+        index = index.min(text.len());
+        while index < text.len() && !text.is_char_boundary(index) {
+            index += 1;
+        }
+        index
+    }
+
+    fn current_facing_doc_paths(inventory: &ContractInventory) -> Result<BTreeSet<String>, String> {
+        let mut paths = BTreeSet::new();
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "current")
+        {
+            for pattern in &entry.current_facing_contexts {
+                if let Some(prefix) = pattern.strip_suffix("/**") {
+                    collect_markdown_paths(&repo_path(prefix), &mut paths)?;
+                } else if repo_path(pattern).is_file() {
+                    paths.insert(pattern.clone());
+                }
+            }
+        }
+        Ok(paths)
+    }
+
+    fn collect_markdown_paths(root: &Path, paths: &mut BTreeSet<String>) -> Result<(), String> {
+        if !root.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(root)
+            .map_err(|error| format!("read current-facing docs dir {}: {error}", root.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read current-facing docs dir {}: {error}", root.display()))?;
+        entries.sort_by_key(|entry| entry.path());
+
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_markdown_paths(&path, paths)?;
+            } else if path.extension().and_then(|ext| ext.to_str()) == Some("md") {
+                paths.insert(normalize_repo_path(&path));
+            }
+        }
+        Ok(())
+    }
+
+    fn legacy_schema_claim_violations_for_text(
+        path: &str,
+        text: &str,
+        inventory: &ContractInventory,
+    ) -> Vec<LegacySchemaClaimViolation> {
+        let mut violations = Vec::new();
+        let lower_text = text.to_ascii_lowercase();
+
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "legacy")
+        {
+            if path_is_allowed_historical(path, entry) {
+                continue;
+            }
+
+            let schema_id = entry.schema_id.as_str();
+            let schema_id_lower = schema_id.to_ascii_lowercase();
+            let mut search_from = 0;
+            while let Some(relative_index) = lower_text[search_from..].find(&schema_id_lower) {
+                let match_start = search_from + relative_index;
+                let line = text[..match_start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1;
+                let window_start = previous_char_boundary(text, match_start.saturating_sub(240));
+                let window_end = next_char_boundary(text, match_start + schema_id.len() + 240);
+                let window = &text[window_start..window_end];
+                let lower_window = window.to_ascii_lowercase();
+
+                if let Some(phrase) = entry
+                    .forbidden_current_claims
+                    .iter()
+                    .find(|phrase| lower_window.contains(&phrase.to_ascii_lowercase()))
+                {
+                    violations.push(LegacySchemaClaimViolation {
+                        path: path.to_owned(),
+                        line,
+                        schema_id: schema_id.to_owned(),
+                        phrase: phrase.clone(),
+                        source_excerpt: window
+                            .split_whitespace()
+                            .take(32)
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    });
+                }
+
+                search_from = match_start + schema_id.len();
+            }
+        }
+
+        violations
+    }
+
+    fn legacy_schema_claim_violations(
+        inventory: &ContractInventory,
+    ) -> Result<Vec<LegacySchemaClaimViolation>, String> {
+        let mut violations = Vec::new();
+        for path in current_facing_doc_paths(inventory)? {
+            let text = fs::read_to_string(repo_path(&path))
+                .map_err(|error| format!("read current-facing doc {path}: {error}"))?;
+            violations.extend(legacy_schema_claim_violations_for_text(
+                &path, &text, inventory,
+            ));
+        }
+        violations.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.schema_id.cmp(&right.schema_id))
+                .then(left.phrase.cmp(&right.phrase))
+        });
+        Ok(violations)
+    }
+
+    fn legacy_schema_claim_event(violation: &LegacySchemaClaimViolation) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "phase": "contract_drift_docs_scan",
+            "path": &violation.path,
+            "line": violation.line,
+            "schema_id": &violation.schema_id,
+            "matched_phrase": &violation.phrase,
+            "policy_decision": "violation",
+            "source_excerpt": &violation.source_excerpt,
+        })
+    }
+
+    fn legacy_schema_claim_events(violations: &[LegacySchemaClaimViolation]) -> String {
+        violations
+            .iter()
+            .map(legacy_schema_claim_event)
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     struct LiveSchemaSnapshot {
@@ -1955,6 +2144,7 @@ mod tests {
                 "current",
                 "default",
                 "required",
+                "response envelope",
                 "success envelope",
             ] {
                 ensure(
@@ -1989,6 +2179,75 @@ mod tests {
                     context.path_pattern == "docs/archive/**" && !context.reason.trim().is_empty()
                 }),
             "ee.response.v1 must allow archived historical design references",
+        )
+    }
+
+    #[test]
+    fn legacy_schema_claim_policy_classifies_current_and_historical_contexts() -> TestResult {
+        let inventory = contract_inventory()?;
+
+        let current_violation = legacy_schema_claim_violations_for_text(
+            "README.md",
+            "The default response envelope is `ee.response.v1` for agents.",
+            &inventory,
+        );
+        ensure_equal(&current_violation.len(), &1, "current violation count")?;
+        ensure_equal(
+            &current_violation[0].phrase,
+            &"default".to_owned(),
+            "current violation phrase",
+        )?;
+
+        let migration_allowed = legacy_schema_claim_violations_for_text(
+            "docs/migration_v0_1_to_v0_2.md",
+            "Before migration, the default response envelope was `ee.response.v1`.",
+            &inventory,
+        );
+        ensure(
+            migration_allowed.is_empty(),
+            format!(
+                "migration before/after examples should be allowed but got:\n{}",
+                legacy_schema_claim_events(&migration_allowed)
+            ),
+        )?;
+
+        let archive_allowed = legacy_schema_claim_violations_for_text(
+            "docs/archive/old_contract.md",
+            "The default response envelope was `ee.response.v1` in this archived plan.",
+            &inventory,
+        );
+        ensure(
+            archive_allowed.is_empty(),
+            format!(
+                "archive references should be allowed but got:\n{}",
+                legacy_schema_claim_events(&archive_allowed)
+            ),
+        )?;
+
+        let neutral_mention = legacy_schema_claim_violations_for_text(
+            "README.md",
+            "The literal schema identifier `ee.response.v1` appears in migration tests.",
+            &inventory,
+        );
+        ensure(
+            neutral_mention.is_empty(),
+            format!(
+                "neutral legacy schema mention should be allowed but got:\n{}",
+                legacy_schema_claim_events(&neutral_mention)
+            ),
+        )
+    }
+
+    #[test]
+    fn current_facing_docs_do_not_claim_legacy_success_envelopes() -> TestResult {
+        let inventory = contract_inventory()?;
+        let violations = legacy_schema_claim_violations(&inventory)?;
+        ensure(
+            violations.is_empty(),
+            format!(
+                "current-facing docs contain legacy success-envelope claims:\n{}",
+                legacy_schema_claim_events(&violations)
+            ),
         )
     }
 }

@@ -87,7 +87,7 @@ disabled: false
 All `ee` TOON output follows the standard response envelope:
 
 ```
-schema: ee.response.v1
+schema: ee.response.v2
 success: true
 data:
   command: status
@@ -150,7 +150,7 @@ TOON can be decoded back to equivalent JSON for validation:
 ```rust
 use toon::try_decode;
 
-let toon_output = "schema: ee.response.v1\nsuccess: true";
+let toon_output = "schema: ee.response.v2\nsuccess: true";
 let json = try_decode(toon_output, None)?;
 ```
 
