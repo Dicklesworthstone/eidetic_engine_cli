@@ -1486,10 +1486,10 @@ pub fn analyze_clustering(options: &ClusteringAnalysisOptions) -> ClusteringAnal
     let embeddings = candidates
         .iter()
         .filter_map(|candidate| {
-            let target_memory = connection
-                .get_memory(&candidate.target_memory_id)
-                .ok()
-                .flatten();
+            let target_memory = candidate
+                .target_memory_id
+                .as_deref()
+                .and_then(|memory_id| connection.get_memory(memory_id).ok().flatten());
             if !candidate_has_clustering_payload(candidate, target_memory.as_ref()) {
                 return None;
             }
@@ -2013,7 +2013,7 @@ mod tests {
                     &crate::db::CreateCurationCandidateInput {
                         workspace_id: workspace_id.clone(),
                         candidate_type: "consolidate".to_string(),
-                        target_memory_id: target_memory_id.to_string(),
+                        target_memory_id: Some(target_memory_id.to_string()),
                         proposed_content: Some(proposed_content.to_string()),
                         proposed_confidence: Some(0.88),
                         proposed_trust_class: Some("agent_assertion".to_string()),
@@ -2024,6 +2024,8 @@ mod tests {
                         status: Some("pending".to_string()),
                         created_at: Some(created_at.to_string()),
                         ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
                     },
                 )
                 .map_err(|error| error.to_string())?;
@@ -2035,7 +2037,7 @@ mod tests {
                 &crate::db::CreateCurationCandidateInput {
                     workspace_id,
                     candidate_type: "promote".to_string(),
-                    target_memory_id: "mem_00000000000000000000000011".to_string(),
+                    target_memory_id: Some("mem_00000000000000000000000011".to_string()),
                     proposed_content: Some("Promote the release formatting rule.".to_string()),
                     proposed_confidence: Some(0.95),
                     proposed_trust_class: Some("agent_assertion".to_string()),
@@ -2046,6 +2048,8 @@ mod tests {
                     status: Some("pending".to_string()),
                     created_at: Some("2026-05-04T12:04:00Z".to_string()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2926,7 +2930,7 @@ mod tests {
                 &crate::db::CreateCurationCandidateInput {
                     workspace_id,
                     candidate_type: "tombstone".to_string(),
-                    target_memory_id: "mem_00000000000000000000000011".to_string(),
+                    target_memory_id: Some("mem_00000000000000000000000011".to_string()),
                     proposed_content: None,
                     proposed_confidence: None,
                     proposed_trust_class: None,
@@ -2937,6 +2941,8 @@ mod tests {
                     status: Some("pending".to_string()),
                     created_at: Some("2026-05-04T12:05:00Z".to_string()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;

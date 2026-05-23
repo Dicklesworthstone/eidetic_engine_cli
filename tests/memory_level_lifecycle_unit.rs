@@ -688,7 +688,7 @@ fn curate_apply_promote_moves_episodic_to_semantic_with_transition_audit() {
             &CreateCurationCandidateInput {
                 workspace_id: remembered.workspace_id.clone(),
                 candidate_type: "promote".to_owned(),
-                target_memory_id: memory_id.clone(),
+                target_memory_id: Some(memory_id.clone()),
                 proposed_content: None,
                 proposed_confidence: None,
                 proposed_trust_class: None,
@@ -700,6 +700,8 @@ fn curate_apply_promote_moves_episodic_to_semantic_with_transition_audit() {
                 status: Some("approved".to_owned()),
                 created_at: Some("2026-05-13T00:00:00Z".to_owned()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .expect("candidate inserts");

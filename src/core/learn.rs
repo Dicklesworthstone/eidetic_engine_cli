@@ -2225,7 +2225,7 @@ pub fn propose_experiments(
                     &CreateCurationCandidateInput {
                         workspace_id: snapshot.workspace_id.clone(),
                         candidate_type: "rule".to_string(),
-                        target_memory_id: target_memory_id.clone(),
+                        target_memory_id: Some(target_memory_id.clone()),
                         proposed_content: Some(proposed_content),
                         proposed_confidence: Some(cluster.proposed_confidence()),
                         proposed_trust_class: Some(
@@ -2247,6 +2247,8 @@ pub fn propose_experiments(
                         status: Some("pending".to_string()),
                         created_at: Some(stable_learning_generated_at()),
                         ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
                     },
                 )
                 .map_err(|error| DomainError::Storage {

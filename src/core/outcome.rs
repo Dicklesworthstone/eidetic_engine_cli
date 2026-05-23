@@ -1512,7 +1512,7 @@ fn maybe_propose_anti_pattern_candidate(
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.to_owned(),
                     candidate_type: CandidateType::AntiPatternProposal.as_str().to_owned(),
-                    target_memory_id: target_id.to_owned(),
+                    target_memory_id: Some(target_id.to_owned()),
                     proposed_content: Some(proposed_content.clone()),
                     proposed_confidence: Some(severity),
                     proposed_trust_class: None,
@@ -1523,6 +1523,8 @@ fn maybe_propose_anti_pattern_candidate(
                     status: Some(CandidateStatus::Pending.as_str().to_owned()),
                     created_at: None,
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )?;
             connection.insert_audit(

@@ -1944,7 +1944,7 @@ pub fn extract_playbook_candidates(
             let input = CreateCurationCandidateInput {
                 workspace_id: prepared.workspace_id.clone(),
                 candidate_type: CandidateType::Rule.as_str().to_owned(),
-                target_memory_id: target_memory_id.clone(),
+                target_memory_id: Some(target_memory_id.clone()),
                 proposed_content: Some(proposed_content.clone()),
                 proposed_confidence: Some(confidence),
                 proposed_trust_class: None,
@@ -1955,6 +1955,8 @@ pub fn extract_playbook_candidates(
                 status: Some("pending".to_owned()),
                 created_at: None,
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             };
             let details = playbook_candidate_audit_details(
                 &new_candidate_id,

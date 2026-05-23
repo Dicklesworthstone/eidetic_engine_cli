@@ -12117,7 +12117,7 @@ pub struct StoredProceduralRule {
 pub struct CreateCurationCandidateInput {
     pub workspace_id: String,
     pub candidate_type: String,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: Option<String>,
     pub proposed_confidence: Option<f32>,
     pub proposed_trust_class: Option<String>,
@@ -12128,6 +12128,8 @@ pub struct CreateCurationCandidateInput {
     pub status: Option<String>,
     pub created_at: Option<String>,
     pub ttl_expires_at: Option<String>,
+    pub derivation_source_refs_json: Option<String>,
+    pub derivation_metadata_json: Option<String>,
 }
 
 /// A stored curation candidate row.
@@ -12136,7 +12138,7 @@ pub struct StoredCurationCandidate {
     pub id: String,
     pub workspace_id: String,
     pub candidate_type: String,
-    pub target_memory_id: String,
+    pub target_memory_id: Option<String>,
     pub proposed_content: Option<String>,
     pub proposed_confidence: Option<f32>,
     pub proposed_trust_class: Option<String>,
@@ -12156,6 +12158,8 @@ pub struct StoredCurationCandidate {
     pub state_entered_at: Option<String>,
     pub last_action_at: Option<String>,
     pub ttl_policy_id: Option<String>,
+    pub derivation_source_refs_json: Option<String>,
+    pub derivation_metadata_json: Option<String>,
 }
 
 /// Explicit review-state mutation for one curation candidate.
@@ -12310,6 +12314,170 @@ pub fn default_curation_ttl_policy_id_for_review_state(review_state: &str) -> &'
     }
 }
 
+const CREATE_DERIVED_MEMORY_CANDIDATE_TYPE: &str = "create_derived_memory";
+
+fn validate_curation_candidate_insert_input(input: &CreateCurationCandidateInput) -> Result<()> {
+    let target_is_present = input
+        .target_memory_id
+        .as_deref()
+        .is_some_and(|target| !target.trim().is_empty());
+
+    if input.candidate_type == CREATE_DERIVED_MEMORY_CANDIDATE_TYPE {
+        if target_is_present {
+            return Err(malformed_curation_candidate_input(
+                "create_derived_memory candidates must not set target_memory_id",
+            ));
+        }
+        let source_refs_json = required_curation_json(
+            input.derivation_source_refs_json.as_deref(),
+            "derivation_source_refs_json",
+        )?;
+        validate_derivation_source_refs_json(source_refs_json)?;
+        let metadata_json = required_curation_json(
+            input.derivation_metadata_json.as_deref(),
+            "derivation_metadata_json",
+        )?;
+        validate_derivation_metadata_json(metadata_json)?;
+    } else {
+        if !target_is_present {
+            return Err(malformed_curation_candidate_input(
+                "target-mutating curation candidates must set target_memory_id",
+            ));
+        }
+        if input.derivation_source_refs_json.is_some() || input.derivation_metadata_json.is_some() {
+            return Err(malformed_curation_candidate_input(
+                "target-mutating curation candidates must not set derivation JSON fields",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn required_curation_json<'a>(value: Option<&'a str>, column: &str) -> Result<&'a str> {
+    let value = value.ok_or_else(|| {
+        malformed_curation_candidate_input(&format!(
+            "{column} is required for create_derived_memory"
+        ))
+    })?;
+    if value.trim().is_empty() {
+        return Err(malformed_curation_candidate_input(&format!(
+            "{column} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_derivation_source_refs_json(raw: &str) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        malformed_curation_candidate_input(&format!(
+            "derivation_source_refs_json must be valid JSON: {error}"
+        ))
+    })?;
+    let refs = parsed.as_array().ok_or_else(|| {
+        malformed_curation_candidate_input("derivation_source_refs_json must be a JSON array")
+    })?;
+    if refs.is_empty() {
+        return Err(malformed_curation_candidate_input(
+            "derivation_source_refs_json must include at least one source",
+        ));
+    }
+
+    let mut seen = BTreeSet::<(String, String)>::new();
+    for source_ref in refs {
+        let object = source_ref.as_object().ok_or_else(|| {
+            malformed_curation_candidate_input("each derivation source ref must be a JSON object")
+        })?;
+        let kind = trimmed_json_string(object.get("kind"), "derivation source kind")?;
+        if !matches!(kind, "memory" | "evidence_span") {
+            return Err(malformed_curation_candidate_input(
+                "derivation source kind must be memory or evidence_span",
+            ));
+        }
+        let id = trimmed_json_string(object.get("id"), "derivation source id")?;
+        let content_hash =
+            trimmed_json_string(object.get("contentHash"), "derivation source contentHash")?;
+        if !is_canonical_blake3_content_hash(content_hash) {
+            return Err(malformed_curation_candidate_input(
+                "derivation source contentHash must be a canonical blake3 hash",
+            ));
+        }
+        if !seen.insert((kind.to_owned(), id.to_owned())) {
+            return Err(malformed_curation_candidate_input(
+                "derivation_source_refs_json must not contain duplicate sources",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_derivation_metadata_json(raw: &str) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        malformed_curation_candidate_input(&format!(
+            "derivation_metadata_json must be valid JSON: {error}"
+        ))
+    })?;
+    let object = parsed.as_object().ok_or_else(|| {
+        malformed_curation_candidate_input("derivation_metadata_json must be a JSON object")
+    })?;
+    let memory_spec = object
+        .get("memorySpec")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            malformed_curation_candidate_input(
+                "derivation_metadata_json.memorySpec must be a JSON object",
+            )
+        })?;
+    trimmed_json_string(memory_spec.get("level"), "derivation memorySpec.level")?;
+    trimmed_json_string(memory_spec.get("kind"), "derivation memorySpec.kind")?;
+
+    let producer = object
+        .get("producer")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            malformed_curation_candidate_input(
+                "derivation_metadata_json.producer must be a JSON object",
+            )
+        })?;
+    trimmed_json_string(producer.get("producer"), "derivation producer.producer")?;
+
+    Ok(())
+}
+
+fn trimmed_json_string<'a>(
+    value: Option<&'a serde_json::Value>,
+    label: &'static str,
+) -> Result<&'a str> {
+    let value = value
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| malformed_curation_candidate_input(&format!("{label} must be a string")))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(malformed_curation_candidate_input(&format!(
+            "{label} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn is_canonical_blake3_content_hash(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("blake3:") else {
+        return false;
+    };
+    hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn malformed_curation_candidate_input(message: &str) -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("invalid curation candidate input: {message}"),
+    }
+}
+
 impl DbConnection {
     /// Insert a curation candidate proposal.
     pub fn insert_curation_candidate(
@@ -12317,6 +12485,8 @@ impl DbConnection {
         id: &str,
         input: &CreateCurationCandidateInput,
     ) -> Result<()> {
+        validate_curation_candidate_insert_input(input)?;
+
         let created_at = input
             .created_at
             .clone()
@@ -12326,12 +12496,15 @@ impl DbConnection {
 
         self.execute_for(
             DbOperation::Execute,
-            "INSERT INTO curation_candidates (id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, ttl_expires_at, state_entered_at, last_action_at, ttl_policy_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            "INSERT INTO curation_candidates (id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, ttl_expires_at, state_entered_at, last_action_at, ttl_policy_id, derivation_source_refs_json, derivation_metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             &[
                 Value::Text(id.to_string()),
                 Value::Text(input.workspace_id.clone()),
                 Value::Text(input.candidate_type.clone()),
-                Value::Text(input.target_memory_id.clone()),
+                input
+                    .target_memory_id
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
                 input
                     .proposed_content
                     .as_ref()
@@ -12359,6 +12532,14 @@ impl DbConnection {
                 Value::Text(created_at.clone()),
                 Value::Text(created_at),
                 Value::Text(ttl_policy_id.to_owned()),
+                input
+                    .derivation_source_refs_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
+                input
+                    .derivation_metadata_json
+                    .as_ref()
+                    .map_or(Value::Null, |value| Value::Text(value.clone())),
             ],
         )?;
 
@@ -12375,7 +12556,7 @@ impl DbConnection {
     ) -> Result<Vec<StoredCurationCandidate>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id FROM curation_candidates WHERE workspace_id = ?1 AND (?2 IS NULL OR candidate_type = ?2) AND (?3 IS NULL OR status = ?3) AND (?4 IS NULL OR target_memory_id = ?4) ORDER BY created_at DESC, id ASC",
+            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id, derivation_source_refs_json, derivation_metadata_json FROM curation_candidates WHERE workspace_id = ?1 AND (?2 IS NULL OR candidate_type = ?2) AND (?3 IS NULL OR status = ?3) AND (?4 IS NULL OR target_memory_id = ?4) ORDER BY created_at DESC, id ASC",
             &[
                 Value::Text(workspace_id.to_string()),
                 candidate_type.map_or(Value::Null, |value| Value::Text(value.to_string())),
@@ -12397,7 +12578,7 @@ impl DbConnection {
     ) -> Result<Option<StoredCurationCandidate>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id FROM curation_candidates WHERE workspace_id = ?1 AND id = ?2",
+            "SELECT id, workspace_id, candidate_type, target_memory_id, proposed_content, proposed_confidence, proposed_trust_class, source_type, source_id, reason, confidence, status, created_at, reviewed_at, reviewed_by, applied_at, ttl_expires_at, review_state, snoozed_until, merged_into_candidate_id, state_entered_at, last_action_at, ttl_policy_id, derivation_source_refs_json, derivation_metadata_json FROM curation_candidates WHERE workspace_id = ?1 AND id = ?2",
             &[
                 Value::Text(workspace_id.to_string()),
                 Value::Text(candidate_id.to_string()),
@@ -13231,8 +13412,7 @@ fn stored_curation_candidate_from_row(row: &Row) -> Result<StoredCurationCandida
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
         workspace_id: required_text(row, 1, DbOperation::Query, "workspace_id")?.to_string(),
         candidate_type: required_text(row, 2, DbOperation::Query, "candidate_type")?.to_string(),
-        target_memory_id: required_text(row, 3, DbOperation::Query, "target_memory_id")?
-            .to_string(),
+        target_memory_id: optional_text(row, 3)?.map(str::to_string),
         proposed_content: optional_text(row, 4)?.map(str::to_string),
         proposed_confidence: optional_f32(row, 5, DbOperation::Query, "proposed_confidence")?,
         proposed_trust_class: optional_text(row, 6)?.map(str::to_string),
@@ -13252,6 +13432,8 @@ fn stored_curation_candidate_from_row(row: &Row) -> Result<StoredCurationCandida
         state_entered_at: optional_text(row, 20)?.map(str::to_string),
         last_action_at: optional_text(row, 21)?.map(str::to_string),
         ttl_policy_id: optional_text(row, 22)?.map(str::to_string),
+        derivation_source_refs_json: optional_text(row, 23)?.map(str::to_string),
+        derivation_metadata_json: optional_text(row, 24)?.map(str::to_string),
     })
 }
 
@@ -13524,7 +13706,18 @@ impl DbConnection {
     fn latest_audit_row_hash(&self) -> Result<Option<String>> {
         let rows = self.query_for(
             DbOperation::Query,
-            "SELECT this_row_hash FROM audit_log WHERE this_row_hash IS NOT NULL ORDER BY timestamp DESC, id DESC LIMIT 1",
+            "SELECT this_row_hash \
+             FROM audit_log \
+             WHERE this_row_hash IS NOT NULL \
+               AND timestamp = ( \
+                   SELECT timestamp \
+                   FROM audit_log \
+                   WHERE this_row_hash IS NOT NULL \
+                   ORDER BY timestamp DESC \
+                   LIMIT 1 \
+               ) \
+             ORDER BY id DESC \
+             LIMIT 1",
             &[],
         )?;
 

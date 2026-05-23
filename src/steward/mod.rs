@@ -4083,7 +4083,7 @@ impl ManualRunner {
             let input = CreateCurationCandidateInput {
                 workspace_id: opened.workspace_id.clone(),
                 candidate_type: candidate_type.to_owned(),
-                target_memory_id: candidate.target_memory_id.clone(),
+                target_memory_id: Some(candidate.target_memory_id.clone()),
                 proposed_content: Some(candidate.proposed_content.clone()),
                 proposed_confidence: Some(candidate.proposed_confidence),
                 proposed_trust_class: None,
@@ -4094,6 +4094,8 @@ impl ManualRunner {
                 status: Some("pending".to_owned()),
                 created_at: self.options.as_of.clone(),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             };
             if let Err(error) = opened
                 .connection

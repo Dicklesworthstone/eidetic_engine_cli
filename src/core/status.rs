@@ -6715,7 +6715,7 @@ mod tests {
             id: id.to_owned(),
             workspace_id: "wsp_test".to_owned(),
             candidate_type: "promote".to_owned(),
-            target_memory_id: "mem_test".to_owned(),
+            target_memory_id: Some("mem_test".to_owned()),
             proposed_content: None,
             proposed_confidence: Some(0.8),
             proposed_trust_class: None,
@@ -6735,6 +6735,8 @@ mod tests {
             state_entered_at: state_entered_at.map(|s| s.to_owned()),
             last_action_at: None,
             ttl_policy_id: ttl_policy_id.map(|s| s.to_owned()),
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         }
     }
 

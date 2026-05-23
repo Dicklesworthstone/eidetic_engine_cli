@@ -2719,7 +2719,7 @@ fn curate_validate_json_approves_pending_candidate() -> TestResult {
             &CreateCurationCandidateInput {
                 workspace_id,
                 candidate_type: "promote".to_string(),
-                target_memory_id: memory_id,
+                target_memory_id: Some(memory_id),
                 proposed_content: None,
                 proposed_confidence: Some(0.82),
                 proposed_trust_class: Some("agent_validated".to_string()),
@@ -2730,6 +2730,8 @@ fn curate_validate_json_approves_pending_candidate() -> TestResult {
                 status: Some("pending".to_string()),
                 created_at: Some("2026-05-01T00:00:02Z".to_string()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -2873,7 +2875,7 @@ fn curate_apply_json_updates_approved_candidate_target() -> TestResult {
             &CreateCurationCandidateInput {
                 workspace_id: workspace_id.clone(),
                 candidate_type: "promote".to_string(),
-                target_memory_id: memory_id.clone(),
+                target_memory_id: Some(memory_id.clone()),
                 proposed_content: None,
                 proposed_confidence: Some(0.91),
                 proposed_trust_class: Some("agent_validated".to_string()),
@@ -2884,6 +2886,8 @@ fn curate_apply_json_updates_approved_candidate_target() -> TestResult {
                 status: Some("approved".to_string()),
                 created_at: Some("2026-05-01T00:00:02Z".to_string()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -3044,7 +3048,7 @@ fn curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire() -> TestR
             &CreateCurationCandidateInput {
                 workspace_id: workspace_id.clone(),
                 candidate_type: "procedure".to_string(),
-                target_memory_id: memory_id,
+                target_memory_id: Some(memory_id),
                 proposed_content: Some(
                     "Run cargo fmt --check and cargo clippy before release.".to_string(),
                 ),
@@ -3057,6 +3061,8 @@ fn curate_apply_procedure_candidate_then_harmful_outcomes_auto_retire() -> TestR
                 status: Some("approved".to_string()),
                 created_at: Some("2026-05-07T00:00:00Z".to_string()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -3261,7 +3267,7 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_string(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.82),
                     proposed_trust_class: Some("agent_validated".to_string()),
@@ -3272,6 +3278,8 @@ fn curate_review_lifecycle_commands_json_update_review_state() -> TestResult {
                     status: Some("pending".to_string()),
                     created_at: Some("2026-05-01T00:00:02Z".to_string()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -3564,7 +3572,7 @@ fn curate_review_with_reason_pins_audit_row_shape() -> TestResult {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_string(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.82),
                     proposed_trust_class: Some("agent_validated".to_string()),
@@ -3575,6 +3583,8 @@ fn curate_review_with_reason_pins_audit_row_shape() -> TestResult {
                     status: Some("pending".to_string()),
                     created_at: Some("2026-05-01T00:00:02Z".to_string()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;

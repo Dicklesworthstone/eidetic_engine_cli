@@ -1352,7 +1352,7 @@ pub fn propose_tripwire_from_harmful_feedback(
     let input = CreateCurationCandidateInput {
         workspace_id: options.workspace_id.clone(),
         candidate_type: "rule".to_owned(),
-        target_memory_id: options.memory_id.clone(),
+        target_memory_id: Some(options.memory_id.clone()),
         proposed_content: Some(condition.clone()),
         proposed_confidence: Some(0.55),
         proposed_trust_class: Some("agent_assertion".to_owned()),
@@ -1363,6 +1363,8 @@ pub fn propose_tripwire_from_harmful_feedback(
         status: Some("pending".to_owned()),
         created_at: None,
         ttl_expires_at: None,
+        derivation_source_refs_json: None,
+        derivation_metadata_json: None,
     };
 
     HarmFeedbackPromotionOutcome::Promoted(Box::new(HarmFeedbackPromotionProposal {
@@ -2074,7 +2076,7 @@ mod tests {
             input: CreateCurationCandidateInput {
                 workspace_id: "ws_test".to_owned(),
                 candidate_type: "rule".to_owned(),
-                target_memory_id: "mem_redaction".to_owned(),
+                target_memory_id: Some("mem_redaction".to_owned()),
                 proposed_content: Some("redacted proposal".to_owned()),
                 proposed_confidence: Some(0.7),
                 proposed_trust_class: Some("agent_derived".to_owned()),
@@ -2085,6 +2087,8 @@ mod tests {
                 status: None,
                 created_at: None,
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
             condition: "source:memory:mem_redaction remains relevant".to_owned(),
             memory_id: "mem_redaction".to_owned(),

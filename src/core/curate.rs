@@ -1679,7 +1679,7 @@ pub fn review_session_proposals(
                     &CreateCurationCandidateInput {
                         workspace_id: prepared.workspace_id.clone(),
                         candidate_type: candidate.candidate_type.clone(),
-                        target_memory_id: candidate.target_memory_id.clone(),
+                        target_memory_id: Some(candidate.target_memory_id.clone()),
                         proposed_content: Some(candidate.proposed_content.clone()),
                         proposed_confidence: Some(candidate.proposed_confidence),
                         proposed_trust_class: None,
@@ -1690,6 +1690,8 @@ pub fn review_session_proposals(
                         status: Some(CandidateStatus::Pending.as_str().to_owned()),
                         created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
                         ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
                     },
                 )
                 .map_err(|error| DomainError::Storage {
@@ -2485,7 +2487,7 @@ fn mi_dedup_candidate_from_cluster(
         id,
         workspace_id: workspace_id.to_owned(),
         candidate_type: CandidateType::ParaphraseDedupProposal.as_str().to_owned(),
-        target_memory_id,
+        target_memory_id: Some(target_memory_id),
         proposed_content,
         proposed_confidence: Some(best_pair.normalized_mi as f32),
         proposed_trust_class: Some("derived".to_owned()),
@@ -2508,6 +2510,8 @@ fn mi_dedup_candidate_from_cluster(
             default_curation_ttl_policy_id_for_review_state(ReviewQueueState::New.as_str())
                 .to_owned(),
         ),
+        derivation_source_refs_json: None,
+        derivation_metadata_json: None,
     })
 }
 
@@ -2726,9 +2730,31 @@ fn sort_curate_candidates(
     });
 }
 
+fn stored_target_memory_id_text(stored: &StoredCurationCandidate) -> &str {
+    stored.target_memory_id.as_deref().unwrap_or("")
+}
+
+fn required_stored_target_memory_id<'a>(
+    stored: &'a StoredCurationCandidate,
+) -> Result<&'a str, DomainError> {
+    stored
+        .target_memory_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| DomainError::Storage {
+            message: format!(
+                "Curation candidate {} has no target memory id for target-mutating operation.",
+                stored.id
+            ),
+            repair: Some(
+                "Use a target-mutating candidate type or create-derived apply support.".to_owned(),
+            ),
+        })
+}
+
 fn duplicate_group_key(candidate: &StoredCurationCandidate) -> (String, String, String) {
     (
-        candidate.target_memory_id.clone(),
+        candidate.target_memory_id.clone().unwrap_or_default(),
         candidate.candidate_type.clone(),
         candidate
             .proposed_content
@@ -2779,12 +2805,14 @@ pub fn validate_curation_candidate(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
-    let target_memory = connection
-        .get_memory(&stored.target_memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to load target memory: {error}"),
-            repair: Some("ee memory show <memory-id> --json".to_owned()),
-        })?;
+    let target_memory_id = required_stored_target_memory_id(&stored)?;
+    let target_memory =
+        connection
+            .get_memory(target_memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load target memory: {error}"),
+                repair: Some("ee memory show <memory-id> --json".to_owned()),
+            })?;
 
     let now = Utc::now().to_rfc3339();
     let prompt_injection_guard = crate::core::config_surface::get_config(
@@ -2902,12 +2930,14 @@ pub fn apply_curation_candidate(
             id: candidate_id.clone(),
             repair: Some("ee curate candidates --json".to_owned()),
         })?;
-    let target_memory = connection
-        .get_memory(&stored.target_memory_id)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to load target memory: {error}"),
-            repair: Some("ee memory show <memory-id> --json".to_owned()),
-        })?;
+    let target_memory_id = required_stored_target_memory_id(&stored)?;
+    let target_memory =
+        connection
+            .get_memory(target_memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to load target memory: {error}"),
+                repair: Some("ee memory show <memory-id> --json".to_owned()),
+            })?;
 
     let now = Utc::now().to_rfc3339();
     let mut decision = evaluate_candidate_for_apply(&stored, target_memory.as_ref(), &now);
@@ -2916,14 +2946,14 @@ pub fn apply_curation_candidate(
         && let Some(protection) = load_bearing_tombstone_protection(
             &connection,
             &prepared.workspace_id,
-            &stored.target_memory_id,
+            target_memory_id,
         )?
     {
         decision = blocked_apply(
             &stored,
             decision.target_before.clone(),
             vec![load_bearing_tombstone_issue(
-                &stored.target_memory_id,
+                target_memory_id,
                 &protection,
                 "ee curate apply <candidate-id> --allow-tombstone-load-bearing",
             )],
@@ -3925,7 +3955,7 @@ fn persist_workspace_review_candidate(
             &CreateCurationCandidateInput {
                 workspace_id: workspace_id.to_owned(),
                 candidate_type: candidate.candidate_type.clone(),
-                target_memory_id: candidate.target_memory_id.clone(),
+                target_memory_id: Some(candidate.target_memory_id.clone()),
                 proposed_content: Some(candidate.proposed_content.clone()),
                 proposed_confidence: Some(candidate.proposed_confidence),
                 proposed_trust_class: None,
@@ -3936,6 +3966,8 @@ fn persist_workspace_review_candidate(
                 status: Some(CandidateStatus::Pending.as_str().to_owned()),
                 created_at: Some(REVIEW_SESSION_CREATED_AT.to_owned()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .map_err(|error| DomainError::Storage {
@@ -4074,7 +4106,7 @@ fn evaluate_candidate_for_validation(
             let input = CandidateInput {
                 workspace_id: stored.workspace_id.clone(),
                 candidate_type,
-                target_memory_id: Some(stored.target_memory_id.clone()),
+                target_memory_id: stored.target_memory_id.clone(),
                 proposed_content: stored.proposed_content.clone(),
                 proposed_confidence: stored.proposed_confidence,
                 proposed_trust_class: stored.proposed_trust_class.clone(),
@@ -4183,7 +4215,7 @@ fn evaluate_candidate_for_apply(
                     status: "already_applied".to_owned(),
                     decision: "unchanged".to_owned(),
                     candidate_type: stored.candidate_type.clone(),
-                    target_memory_id: stored.target_memory_id.clone(),
+                    target_memory_id: stored_target_memory_id_text(stored).to_owned(),
                     changes: Vec::new(),
                     errors,
                     warnings,
@@ -4629,7 +4661,7 @@ fn evaluate_candidate_for_apply(
                 "update_memory".to_owned()
             },
             candidate_type: candidate_type.as_str().to_owned(),
-            target_memory_id: stored.target_memory_id.clone(),
+            target_memory_id: stored_target_memory_id_text(stored).to_owned(),
             changes,
             errors,
             warnings,
@@ -4962,7 +4994,7 @@ fn curate_structural_decay_adjustments(
 ) -> Result<BTreeMap<String, CurateStructuralDecayAdjustment>, DomainError> {
     let memory_ids = candidates
         .iter()
-        .map(|candidate| candidate.target_memory_id.clone())
+        .filter_map(|candidate| candidate.target_memory_id.clone())
         .collect::<BTreeSet<_>>();
     let links = connection
         .list_all_memory_links(None)
@@ -5008,10 +5040,13 @@ fn curate_structural_decay_adjustments(
         } else {
             (elapsed_seconds as f64 / policy.threshold_seconds as f64).clamp(0.0, 1.0) as f32
         };
-        let structural = structural_decay_index.adjustment(&candidate.target_memory_id);
+        let Some(target_memory_id) = candidate.target_memory_id.as_deref() else {
+            continue;
+        };
+        let structural = structural_decay_index.adjustment(target_memory_id);
         let adjustment = curate_structural_decay_adjustment(
             &candidate.id,
-            &candidate.target_memory_id,
+            target_memory_id,
             policy.threshold_seconds,
             base_decay,
             structural,
@@ -5610,7 +5645,7 @@ fn blocked_apply(
             status: "blocked".to_owned(),
             decision: "unchanged".to_owned(),
             candidate_type: stored.candidate_type.clone(),
-            target_memory_id: stored.target_memory_id.clone(),
+            target_memory_id: stored_target_memory_id_text(stored).to_owned(),
             changes: Vec::new(),
             errors,
             warnings,
@@ -5669,7 +5704,10 @@ fn validate_target_memory(
         Some(_) => {}
         None => errors.push(validation_issue(
             "target_memory_missing",
-            format!("Target memory {} does not exist.", stored.target_memory_id),
+            format!(
+                "Target memory {} does not exist.",
+                stored_target_memory_id_text(stored)
+            ),
             "Reject this candidate or recreate the missing memory first.",
         )),
     }
@@ -5816,7 +5854,9 @@ fn source_memory_ids_for_rule_candidate(stored: &StoredCurationCandidate) -> Vec
         }
     }
     if ids.is_empty() {
-        ids.insert(stored.target_memory_id.clone());
+        if let Some(target_memory_id) = stored.target_memory_id.clone() {
+            ids.insert(target_memory_id);
+        }
     }
     ids.into_iter().collect()
 }
@@ -6140,9 +6180,10 @@ fn persist_candidate_application_inner(
     applied_at: &str,
     applied_by: &str,
 ) -> Result<String, DomainError> {
+    let target_memory_id = required_stored_target_memory_id(stored)?;
     let memory_changed = if decision.tombstone_memory {
         let changed = connection
-            .tombstone_memory(&stored.target_memory_id)
+            .tombstone_memory(target_memory_id)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to tombstone target memory: {error}"),
                 repair: Some("ee memory show <memory-id> --json".to_owned()),
@@ -6157,7 +6198,7 @@ fn persist_candidate_application_inner(
                 .insert_memory_level_transition_audit(&MemoryLevelTransitionAuditInput {
                     workspace_id: workspace_id.to_owned(),
                     actor: Some(applied_by.to_owned()),
-                    memory_id: stored.target_memory_id.clone(),
+                    memory_id: target_memory_id.to_owned(),
                     previous_level,
                     new_level: "tombstoned".to_owned(),
                     reason: "manual_tombstone".to_owned(),
@@ -6174,7 +6215,7 @@ fn persist_candidate_application_inner(
         changed
     } else if let Some(update) = &decision.memory_update {
         connection
-            .apply_memory_curation_update(&stored.target_memory_id, update)
+            .apply_memory_curation_update(target_memory_id, update)
             .map_err(|error| DomainError::Storage {
                 message: format!("Failed to update target memory: {error}"),
                 repair: Some("ee memory show <memory-id> --json".to_owned()),
@@ -6226,7 +6267,7 @@ fn persist_candidate_application_inner(
             curate_level_transition_metadata(&stored.candidate_type, &previous_level, &new_level);
         let _ = connection
             .apply_memory_level_transition_in_current_transaction(
-                &stored.target_memory_id,
+                target_memory_id,
                 &ApplyMemoryLevelTransitionInput {
                     workspace_id: workspace_id.to_owned(),
                     expected_level: Some(previous_level.clone()),
@@ -6251,7 +6292,7 @@ fn persist_candidate_application_inner(
         return Err(DomainError::Storage {
             message: format!(
                 "Curation candidate {} did not mutate target memory {} or create a rule/procedure.",
-                stored.id, stored.target_memory_id
+                stored.id, target_memory_id
             ),
             repair: Some("ee curate candidates --json".to_owned()),
         });
@@ -6295,7 +6336,7 @@ fn persist_candidate_application_inner(
     let target_id = created_rule_id
         .as_deref()
         .or(created_procedure_id.as_deref())
-        .unwrap_or(stored.target_memory_id.as_str());
+        .unwrap_or(target_memory_id);
     connection
         .insert_audit(
             &audit_id,
@@ -6334,7 +6375,9 @@ fn level_transition_evidence_refs(
 ) -> Vec<String> {
     let mut evidence_refs = BTreeSet::new();
     evidence_refs.insert(stored.id.clone());
-    evidence_refs.insert(stored.target_memory_id.clone());
+    if let Some(target_memory_id) = stored.target_memory_id.clone() {
+        evidence_refs.insert(target_memory_id);
+    }
     if let Some(source_id) = stored.source_id.as_deref() {
         evidence_refs.extend(
             source_id
@@ -6525,7 +6568,7 @@ fn candidate_summary_from_parts(
         id: stored.id,
         kind: kind_for_candidate_type(&candidate_type),
         candidate_type,
-        target_memory_id: stored.target_memory_id,
+        target_memory_id: stored.target_memory_id.unwrap_or_default(),
         proposed_content: stored.proposed_content,
         proposed_level: proposed_level_for_candidate_type(&stored.candidate_type),
         proposed_kind: proposed_kind_for_candidate_type(&stored.candidate_type),
@@ -7747,7 +7790,7 @@ mod tests {
             id: "curate_00000000000000000000000000".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "promote".to_owned(),
-            target_memory_id: "mem_00000000000000000000000000".to_owned(),
+            target_memory_id: Some("mem_00000000000000000000000000".to_owned()),
             proposed_content: None,
             proposed_confidence: Some(0.82),
             proposed_trust_class: Some("agent_validated".to_owned()),
@@ -7767,6 +7810,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
@@ -7787,7 +7832,7 @@ mod tests {
             id: "curate_cluster0000000000000000".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "rule".to_owned(),
-            target_memory_id: "mem_a".to_owned(),
+            target_memory_id: Some("mem_a".to_owned()),
             proposed_content: Some("Consolidate repeated cargo rules.".to_owned()),
             proposed_confidence: Some(0.82),
             proposed_trust_class: None,
@@ -7807,6 +7852,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
@@ -7828,7 +7875,7 @@ mod tests {
             id: "curate_cluster0000000000000001".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "rule".to_owned(),
-            target_memory_id: "mem_alpha".to_owned(),
+            target_memory_id: Some("mem_alpha".to_owned()),
             proposed_content: Some(
                 "Always run cargo fmt --check before cutting a release tag.".to_owned(),
             ),
@@ -7850,6 +7897,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
@@ -7876,7 +7925,7 @@ mod tests {
             id: "curate_peer0000000000000001".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "rule".to_owned(),
-            target_memory_id: "mem_peer_target".to_owned(),
+            target_memory_id: Some("mem_peer_target".to_owned()),
             proposed_content: Some("Prefer remote-validated RCH proof before closing.".to_owned()),
             proposed_confidence: Some(0.82),
             proposed_trust_class: Some("human_explicit".to_owned()),
@@ -7899,6 +7948,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let summary = candidate_summary_from_stored(stored, std::path::Path::new("/repo"));
@@ -7934,7 +7985,7 @@ mod tests {
             id: "curate_peer0000000000000002".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "procedure".to_owned(),
-            target_memory_id: "mem_peer_target".to_owned(),
+            target_memory_id: Some("mem_peer_target".to_owned()),
             proposed_content: Some("Replay remote evidence before adopting it.".to_owned()),
             proposed_confidence: Some(0.66),
             proposed_trust_class: Some("agent_validated".to_owned()),
@@ -7957,6 +8008,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let first = candidate_summary_from_stored(stored.clone(), std::path::Path::new("/repo"));
@@ -7981,7 +8034,7 @@ mod tests {
             id: "curate_peer0000000000000003".to_owned(),
             workspace_id: "wsp_00000000000000000000000000".to_owned(),
             candidate_type: "rule".to_owned(),
-            target_memory_id: "mem_peer_target".to_owned(),
+            target_memory_id: Some("mem_peer_target".to_owned()),
             proposed_content: Some(
                 "Do not promote peer-only evidence without local review.".to_owned(),
             ),
@@ -8006,6 +8059,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:02:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let decision =
@@ -8629,7 +8684,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.8),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -8640,6 +8695,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:02Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -8649,7 +8706,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id,
+                    target_memory_id: Some(memory_id),
                     proposed_content: None,
                     proposed_confidence: Some(0.85),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -8660,6 +8717,8 @@ mod tests {
                     status: Some("approved".to_owned()),
                     created_at: Some("2026-05-01T00:00:03Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -8766,7 +8825,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "rule".to_owned(),
-                    target_memory_id: memory_one.clone(),
+                    target_memory_id: Some(memory_one.clone()),
                     proposed_content: Some(
                         "Always run cargo fmt --check before cutting a release tag.".to_owned(),
                     ),
@@ -8779,6 +8838,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:02Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -8930,7 +8991,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "rule".to_owned(),
-                    target_memory_id: memory_ids[0].clone(),
+                    target_memory_id: Some(memory_ids[0].clone()),
                     proposed_content: Some(
                         "Separate repeated cargo and storage rules before promotion.".to_owned(),
                     ),
@@ -8946,6 +9007,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:02Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9035,7 +9098,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: Some("group-a".to_owned()),
                     proposed_confidence: Some(0.65),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9046,6 +9109,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:01Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9055,7 +9120,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: Some("group-a".to_owned()),
                     proposed_confidence: Some(0.90),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9066,6 +9131,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:03Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9075,7 +9142,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "supersede".to_owned(),
-                    target_memory_id: memory_id,
+                    target_memory_id: Some(memory_id),
                     proposed_content: Some("group-b".to_owned()),
                     proposed_confidence: Some(0.80),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9086,6 +9153,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:02Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9509,7 +9578,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.91),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9520,6 +9589,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:05Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9664,7 +9735,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.95),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9675,6 +9746,8 @@ mod tests {
                     status: Some("approved".to_owned()),
                     created_at: Some("2026-05-01T00:00:06Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9932,7 +10005,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.72),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9943,6 +10016,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:03Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -9952,7 +10027,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id.clone(),
+                    target_memory_id: Some(memory_id.clone()),
                     proposed_content: None,
                     proposed_confidence: Some(0.68),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -9963,6 +10038,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:04Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -10099,7 +10176,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id,
+                    target_memory_id: Some(memory_id),
                     proposed_content: None,
                     proposed_confidence: Some(0.86),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -10110,6 +10187,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:04Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -10274,7 +10353,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_owned(),
-                    target_memory_id: memory_id,
+                    target_memory_id: Some(memory_id),
                     proposed_content: None,
                     proposed_confidence: Some(0.74),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -10285,6 +10364,8 @@ mod tests {
                     status: Some("pending".to_owned()),
                     created_at: Some("2026-05-01T00:00:05Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -10777,7 +10858,7 @@ mod tests {
             id: "curate_aggregate00000000000001".to_owned(),
             workspace_id: "wsp_curate_aggregate".to_owned(),
             candidate_type: "promote".to_owned(),
-            target_memory_id: "mem_aggregate000000000000001".to_owned(),
+            target_memory_id: Some("mem_aggregate000000000000001".to_owned()),
             proposed_content: None,
             proposed_confidence: Some(0.82),
             proposed_trust_class: Some("agent_validated".to_owned()),
@@ -10797,6 +10878,8 @@ mod tests {
             state_entered_at: Some("2026-05-01T00:00:00Z".to_owned()),
             last_action_at: None,
             ttl_policy_id: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         candidate_summary_from_stored(stored, std::path::Path::new("/repo"))
@@ -11355,7 +11438,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: input.workspace_id.to_owned(),
                     candidate_type: input.candidate_type.to_owned(),
-                    target_memory_id: input.memory_id.to_owned(),
+                    target_memory_id: Some(input.memory_id.to_owned()),
                     proposed_content: input.proposed_content.map(str::to_owned),
                     proposed_confidence: Some(0.82),
                     proposed_trust_class: Some("agent_validated".to_owned()),
@@ -11366,6 +11449,8 @@ mod tests {
                     status: input.status.map(str::to_owned),
                     created_at: Some("2026-05-01T00:00:02Z".to_owned()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())

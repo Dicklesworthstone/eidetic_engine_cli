@@ -3008,7 +3008,7 @@ pub fn promote_causal_chain_from_store(
             &CreateCurationCandidateInput {
                 workspace_id: workspace_id.to_owned(),
                 candidate_type: "procedure".to_owned(),
-                target_memory_id: artifact_id.clone(),
+                target_memory_id: Some(artifact_id.clone()),
                 proposed_content: Some(proposed_content),
                 proposed_confidence: Some(estimated_uplift as f32),
                 proposed_trust_class: Some("agent_validated".to_owned()),
@@ -3019,6 +3019,8 @@ pub fn promote_causal_chain_from_store(
                 status: Some("pending".to_owned()),
                 created_at: Some(created_at.clone()),
                 ttl_expires_at: None,
+                derivation_source_refs_json: None,
+                derivation_metadata_json: None,
             },
         )
         .map_err(|error| DomainError::Storage {

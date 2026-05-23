@@ -1149,7 +1149,7 @@ impl CurationCandidateDocumentBuilder {
             &crate::curate::CurationCandidateEmbeddingText {
                 id: &candidate.id,
                 candidate_type: &candidate.candidate_type,
-                target_memory_id: &candidate.target_memory_id,
+                target_memory_id: candidate.target_memory_id.as_deref().unwrap_or(""),
                 target_memory_content: self.target_memory_content.as_deref(),
                 proposed_content: candidate.proposed_content.as_deref(),
                 proposed_confidence: candidate.proposed_confidence,
@@ -1170,11 +1170,13 @@ impl CurationCandidateDocumentBuilder {
                 .with_created_at(&candidate.created_at)
                 .with_metadata_entry("workspace_id", &candidate.workspace_id)
                 .with_metadata_entry("candidate_type", &candidate.candidate_type)
-                .with_metadata_entry("target_memory_id", &candidate.target_memory_id)
                 .with_metadata_entry("source_type", &candidate.source_type)
                 .with_metadata_entry("confidence", format!("{:.3}", candidate.confidence))
                 .with_metadata_entry("status", &candidate.status)
                 .with_metadata_entry("review_state", &candidate.review_state);
+        if let Some(target_memory_id) = candidate.target_memory_id.as_deref() {
+            doc = doc.with_metadata_entry("target_memory_id", target_memory_id);
+        }
 
         if let Some(workspace) = self.workspace_path {
             doc = doc.with_workspace(workspace);
@@ -3299,7 +3301,7 @@ mod tests {
             id: "curate_01234567890123456789012345".to_string(),
             workspace_id: "wsp_01234567890123456789012345".to_string(),
             candidate_type: "consolidate".to_string(),
-            target_memory_id: "mem_01234567890123456789012345".to_string(),
+            target_memory_id: Some("mem_01234567890123456789012345".to_string()),
             proposed_content: Some(
                 "Run cargo fmt --check before release verification.".to_string(),
             ),
@@ -3321,6 +3323,8 @@ mod tests {
             state_entered_at: Some("2026-04-29T12:02:00Z".to_string()),
             last_action_at: Some("2026-04-29T12:02:00Z".to_string()),
             ttl_policy_id: Some("curation.proposed.default".to_string()),
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         }
     }
 

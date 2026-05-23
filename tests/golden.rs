@@ -2801,7 +2801,7 @@ mod tests {
                 &CreateCurationCandidateInput {
                     workspace_id: workspace_id.clone(),
                     candidate_type: "promote".to_string(),
-                    target_memory_id: "mem_00000000000000curatedry001".to_string(),
+                    target_memory_id: Some("mem_00000000000000curatedry001".to_string()),
                     proposed_content: None,
                     proposed_confidence: Some(0.85),
                     proposed_trust_class: Some("agent_validated".to_string()),
@@ -2813,6 +2813,8 @@ mod tests {
                     status: Some("pending".to_string()),
                     created_at: Some("2026-04-30T10:00:00+00:00".to_string()),
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )
             .map_err(|error| error.to_string())?;
@@ -2994,7 +2996,7 @@ mod tests {
                     &CreateCurationCandidateInput {
                         workspace_id: workspace_id.clone(),
                         candidate_type: "promote".to_string(),
-                        target_memory_id: memory_id.to_string(),
+                        target_memory_id: Some(memory_id.to_string()),
                         proposed_content: None,
                         proposed_confidence: Some(0.82),
                         proposed_trust_class: Some("agent_validated".to_string()),
@@ -3005,6 +3007,8 @@ mod tests {
                         status: Some("pending".to_string()),
                         created_at: Some("2026-05-01T00:00:02Z".to_string()),
                         ttl_expires_at: None,
+                        derivation_source_refs_json: None,
+                        derivation_metadata_json: None,
                     },
                 )
                 .map_err(|error| error.to_string())?;

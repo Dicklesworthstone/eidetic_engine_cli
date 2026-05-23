@@ -3164,7 +3164,7 @@ fn propose_curation_candidate_for_remember(
                 &CreateCurationCandidateInput {
                     workspace_id: prepared.workspace_id.clone(),
                     candidate_type: CandidateType::Rule.as_str().to_owned(),
-                    target_memory_id: target_memory_id.clone(),
+                    target_memory_id: Some(target_memory_id.clone()),
                     proposed_content: Some(proposed_content.clone()),
                     proposed_confidence: Some(proposed_confidence),
                     proposed_trust_class: None,
@@ -3175,6 +3175,8 @@ fn propose_curation_candidate_for_remember(
                     status: Some(CandidateStatus::Pending.as_str().to_owned()),
                     created_at: None,
                     ttl_expires_at: None,
+                    derivation_source_refs_json: None,
+                    derivation_metadata_json: None,
                 },
             )?;
             connection.insert_audit(

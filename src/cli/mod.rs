@@ -23583,6 +23583,8 @@ where
             status: Some(candidate_status.as_str().to_string()),
             created_at: Some(args.created_at.clone()),
             ttl_expires_at: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         },
     );
     if args.allow_missing_target {
