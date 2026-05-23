@@ -1389,6 +1389,55 @@ mod tests {
     }
 
     #[test]
+    fn import_cursor_is_complete_truth_table() {
+        // bd-jlv54: pin every branch of the AND expression in is_complete.
+        // Default cursor (all zeros) -> false. Guards against a regression
+        // where `sessions_discovered > 0` is weakened to `>= 0`.
+        let empty = ImportCursor::new();
+        assert!(!empty.is_complete(), "default cursor must not be complete");
+
+        // discovered = 0 but imported > 0 -> still false (guard branch).
+        let mut imported_without_discovery = ImportCursor::new();
+        imported_without_discovery.sessions_imported = 5;
+        assert!(
+            !imported_without_discovery.is_complete(),
+            "imported>0 with discovered=0 must not be complete",
+        );
+
+        // Underfill: imported + skipped == discovered - 1 -> false.
+        let mut underfilled = ImportCursor::new();
+        underfilled.sessions_discovered = 3;
+        underfilled.sessions_imported = 1;
+        underfilled.sessions_skipped = 1;
+        assert!(
+            !underfilled.is_complete(),
+            "imported+skipped < discovered must not be complete",
+        );
+
+        // Exact boundary: imported + skipped == discovered -> true.
+        let mut boundary = ImportCursor::new();
+        boundary.sessions_discovered = 3;
+        boundary.sessions_imported = 2;
+        boundary.sessions_skipped = 1;
+        assert!(
+            boundary.is_complete(),
+            "imported+skipped == discovered must be complete",
+        );
+
+        // Overcount: imported + skipped > discovered -> still true.
+        // The predicate uses `>=`, not `==`, so over-reported counters
+        // (e.g. duplicate record_imported calls) keep is_complete true.
+        let mut overcounted = ImportCursor::new();
+        overcounted.sessions_discovered = 2;
+        overcounted.sessions_imported = 3;
+        overcounted.sessions_skipped = 1;
+        assert!(
+            overcounted.is_complete(),
+            "imported+skipped > discovered must remain complete",
+        );
+    }
+
+    #[test]
     fn import_session_result_predicates() {
         let imported = ImportSessionResult::Imported {
             source_path: "/s.jsonl".to_string(),
