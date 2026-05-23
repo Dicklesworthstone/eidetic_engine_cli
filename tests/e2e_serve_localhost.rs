@@ -938,6 +938,83 @@ fn serve_unknown_endpoint_returns_404_with_endpoint_discovery_error() -> TestRes
     Ok(())
 }
 
+// bd-17386: parse_serve_http_request enforces four HTTP-shape rules that
+// fire before endpoint dispatch can run — chunked rejection, POST without
+// Content-Length, body shorter than Content-Length, and body longer than
+// Content-Length (no keepalive). All four return 400 with the flat
+// ee.error.v2 envelope (NOT the SERVE_ENDPOINT_SCHEMA_V1 exchange wrapper)
+// because the request itself was unparseable. Pin each canonical message.
+#[test]
+fn serve_http_shape_violations_rejected_with_canonical_400_messages() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let cases: [(&str, String, &str); 4] = [
+        (
+            "req-shape-chunked",
+            format!(
+                "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nTransfer-Encoding: chunked\r\n\r\n"
+            ),
+            "Chunked uploads are not accepted by the first ee serve v2 slice.",
+        ),
+        (
+            "req-shape-post-no-content-length",
+            format!(
+                "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\n\r\n"
+            ),
+            "POST requests must include an explicit Content-Length.",
+        ),
+        (
+            "req-shape-body-shorter",
+            format!(
+                "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 10\r\n\r\nshort"
+            ),
+            "HTTP request body is shorter than Content-Length.",
+        ),
+        (
+            "req-shape-body-longer",
+            format!(
+                "POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\nextra"
+            ),
+            "HTTP request body contains bytes beyond Content-Length; keepalive is not supported.",
+        ),
+    ];
+    for (request_id, raw, expected_message) in cases {
+        let response = render_serve_transport_exchange(
+            request_id,
+            raw.as_bytes(),
+            &ServeLimits::default(),
+            Some(token),
+            0,
+        );
+        if !response.starts_with("HTTP/1.1 400 Bad Request\r\n") {
+            return Err(format!(
+                "case {request_id} expected 400 response, got {response}"
+            ));
+        }
+        let envelope = response_body_json(&response)?;
+        assert_eq!(
+            envelope["schema"].as_str(),
+            Some("ee.error.v2"),
+            "case {request_id} expected flat ee.error.v2 envelope, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["code"].as_str(),
+            Some("usage"),
+            "case {request_id} expected usage error code, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["severity"].as_str(),
+            Some("low"),
+            "case {request_id} expected low severity for usage error, got {envelope}"
+        );
+        assert_eq!(
+            envelope["error"]["message"].as_str(),
+            Some(expected_message),
+            "case {request_id} expected message {expected_message:?}, got {envelope}"
+        );
+    }
+    Ok(())
+}
+
 // bd-rpaqi: parse_serve_http_request rejects any method outside {GET, POST}
 // before endpoint dispatch can run. The error path uses the flat
 // serve_error_payload (NOT the SERVE_ENDPOINT_SCHEMA_V1 exchange envelope)
