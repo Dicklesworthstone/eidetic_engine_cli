@@ -62,6 +62,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         ee::curate::REFLECTION_REQUEST_SCHEMA,
         "ee.reflect.request.v1.json",
     ),
+    (
+        ee::curate::REFLECTION_RESULT_SCHEMA,
+        "ee.reflect.result.v1.json",
+    ),
     ("ee.graph.export.v1", "ee.graph.export.v1.json"),
     (
         "ee.graph.snapshot_prune.v1",
@@ -570,6 +574,73 @@ fn reflection_request_artifact_builder_output_matches_schema() -> TestResult {
         "ee reflect ingest <result.json> --workspace workspace-schema --json",
     )?;
     Ok(())
+}
+
+#[test]
+fn reflection_result_schema_documents_external_result_contract() -> TestResult {
+    let schema = read_json(&schema_path("ee.reflect.result.v1.json"))?;
+    ensure_json_str(
+        &schema,
+        "/properties/schema/const",
+        ee::curate::REFLECTION_RESULT_SCHEMA,
+    )?;
+    ensure_json_str(
+        &schema,
+        "/properties/challenge/$ref",
+        "#/$defs/challengeEcho",
+    )?;
+    ensure_json_str(
+        &schema,
+        "/$defs/challengeEcho/properties/algorithm/const",
+        "hmac-sha256",
+    )?;
+
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.reflect.result.v1 required must be an array".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for field in [
+        "requestId",
+        "requestHash",
+        "challenge",
+        "producer",
+        "reflectionKind",
+        "citedSourceIds",
+        "body",
+        "kindFields",
+        "selfReportedConfidence",
+    ] {
+        if !required.contains(&field) {
+            return Err(format!("ee.reflect.result.v1 required missing {field}"));
+        }
+    }
+
+    let document = json!({
+        "schema": ee::curate::REFLECTION_RESULT_SCHEMA,
+        "requestId": "reflect_req_0123456789abcdef",
+        "requestHash": format!("blake3:{}", "a".repeat(64)),
+        "challenge": {
+            "keyId": "reflect_key_1",
+            "algorithm": "hmac-sha256",
+            "hmac": "base64url:abc_DEF-123"
+        },
+        "producer": {
+            "kind": "agent_harness",
+            "id": "cod-search",
+            "version": "test"
+        },
+        "reflectionKind": "gaps",
+        "citedSourceIds": ["mem_a", "ev_b"],
+        "body": "The source package shows one durable knowledge gap.",
+        "kindFields": {
+            "gapCount": 1
+        },
+        "selfReportedConfidence": 0.72
+    });
+    validate_json_schema(&document, &schema, &schema, "$")
 }
 
 #[test]

@@ -8300,6 +8300,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: reflection_request_schema_definition,
         },
         SchemaEntry {
+            id: crate::curate::REFLECTION_RESULT_SCHEMA,
+            version: "1",
+            description: "External no-LLM reflection result artifact",
+            category: "reflect",
+            definition: reflection_result_schema_definition,
+        },
+        SchemaEntry {
             id: crate::graph::GRAPH_EXPORT_SCHEMA_V1,
             version: "1",
             description: "Graph export response envelope",
@@ -9171,6 +9178,10 @@ fn reflection_source_package_schema_definition() -> String {
 
 fn reflection_request_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.reflect.request.v1.json").to_string()
+}
+
+fn reflection_result_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.result.v1.json").to_string()
 }
 
 fn graph_export_response_schema_definition() -> String {

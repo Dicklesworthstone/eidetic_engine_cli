@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.result.v1.json",
+  "title": "ee.reflect.result.v1",
+  "description": "External no-LLM reflection result artifact submitted back to ee for validation and curation candidate creation.",
+  "type": "object",
+  "required": [
+    "schema",
+    "requestId",
+    "requestHash",
+    "challenge",
+    "producer",
+    "reflectionKind",
+    "citedSourceIds",
+    "body",
+    "kindFields",
+    "selfReportedConfidence"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.reflect.result.v1"},
+    "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
+    "requestHash": {"$ref": "#/$defs/blake3Hash"},
+    "challenge": {"$ref": "#/$defs/challengeEcho"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "reflectionKind": {"type": "string", "minLength": 1},
+    "citedSourceIds": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "body": {"type": "string", "minLength": 1},
+    "kindFields": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "selfReportedConfidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "requestId", "requestHash", "reflectionKind"],
+    "summary": ["schema", "requestId", "requestHash", "reflectionKind", "citedSourceIds", "selfReportedConfidence"],
+    "standard": ["schema", "requestId", "requestHash", "challenge", "producer", "reflectionKind", "citedSourceIds", "body", "kindFields", "selfReportedConfidence"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "challengeEcho": {
+      "type": "object",
+      "required": ["keyId", "algorithm", "hmac"],
+      "additionalProperties": false,
+      "properties": {
+        "keyId": {"type": "string", "minLength": 1},
+        "algorithm": {"type": "string", "const": "hmac-sha256"},
+        "hmac": {"type": "string", "pattern": "^base64url:[A-Za-z0-9_-]+$"}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "id": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}
