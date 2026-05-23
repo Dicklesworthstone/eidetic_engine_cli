@@ -1823,7 +1823,7 @@ fn redact_why_search_result_provenance_uri(value: String) -> String {
 
 fn redact_why_absolute_path_like_segments(input: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PATH_PREFIXES: &[&str] = &[
+    const UNIX_PATH_PREFIXES: &[&str] = &[
         "/home/",
         "/Users/",
         "/Volumes/",
@@ -1835,20 +1835,15 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
         "/workspace/",
         "/repo/",
         "/etc/",
-        "C:\\",
-        "D:\\",
     ];
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0usize;
     while cursor < input.len() {
         let remaining = &input[cursor..];
-        if let Some(prefix) = PATH_PREFIXES
-            .iter()
-            .find(|prefix| remaining.starts_with(**prefix))
-        {
+        if let Some(prefix_len) = why_path_prefix_len(remaining, UNIX_PATH_PREFIXES) {
             output.push_str(REDACTED_PATH);
-            cursor += prefix.len();
+            cursor += prefix_len;
             while cursor < input.len() {
                 let next = input[cursor..].chars().next().unwrap_or('\0');
                 if next.is_whitespace()
@@ -1870,6 +1865,32 @@ fn redact_why_absolute_path_like_segments(input: &str) -> String {
     }
 
     output
+}
+
+/// Length of an absolute-path-like prefix at the start of `remaining`, if any.
+///
+/// Matches one of the Unix prefixes verbatim, or any ASCII alphabetic drive
+/// letter followed by `:` and either `\` or `/` — covering both casing variants
+/// (`C:\`, `c:\`) and both Windows separator conventions (`C:\`, `C:/`). This
+/// mirrors `search_projection_path_prefix_len` introduced by bd-gbfzk for the
+/// search-projection redactor.
+fn why_path_prefix_len(remaining: &str, unix_prefixes: &[&str]) -> Option<usize> {
+    if let Some(prefix) = unix_prefixes
+        .iter()
+        .find(|prefix| remaining.starts_with(**prefix))
+    {
+        return Some(prefix.len());
+    }
+
+    let bytes = remaining.as_bytes();
+    if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && matches!(bytes.get(1), Some(b':'))
+        && matches!(bytes.get(2), Some(b'\\' | b'/'))
+    {
+        Some(3)
+    } else {
+        None
+    }
 }
 
 fn generic_unsupported_storage(
@@ -5091,6 +5112,20 @@ mod tests {
             result.is_none(),
             true,
             "find_embed_dedup_link must return None when no embed-dedup memory_link row exists for the memory",
+        )
+    }
+
+    #[test]
+    fn why_redacts_windows_drive_prefix_casing_and_separator_variants() -> TestResult {
+        let redacted = super::redact_why_absolute_path_like_segments(
+            r#"upper=C:\Users\alice\secret lower=c:\Users\alice\secret slash=Z:/Users/alice/secret mixed=d:/data/private done=ok"#,
+        );
+
+        ensure(
+            redacted,
+            r#"upper=[REDACTED_PATH] lower=[REDACTED_PATH] slash=[REDACTED_PATH] mixed=[REDACTED_PATH] done=ok"#
+                .to_owned(),
+            "Windows drive variants must all be redacted in why provenance URIs",
         )
     }
 }

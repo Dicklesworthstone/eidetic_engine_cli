@@ -4130,7 +4130,7 @@ fn redact_rule_public_source_ref(value: &str) -> String {
 
 fn redact_rule_public_path_like_segments(value: &str) -> String {
     const REDACTED_PATH: &str = "[REDACTED_PATH]";
-    const PREFIXES: &[&str] = &[
+    const UNIX_PREFIXES: &[&str] = &[
         "/Users/",
         "/Volumes/",
         "/private/",
@@ -4142,20 +4142,15 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
         "/workspace/",
         "/repo/",
         "/etc/",
-        "C:\\",
-        "D:\\",
     ];
 
     let mut output = String::with_capacity(value.len());
     let mut cursor = 0usize;
     while cursor < value.len() {
         let remaining = &value[cursor..];
-        if let Some(prefix) = PREFIXES
-            .iter()
-            .find(|prefix| remaining.starts_with(**prefix))
-        {
+        if let Some(prefix_len) = rule_public_path_prefix_len(remaining, UNIX_PREFIXES) {
             output.push_str(REDACTED_PATH);
-            cursor += prefix.len();
+            cursor += prefix_len;
             while cursor < value.len() {
                 let next = value[cursor..].chars().next().unwrap_or('\0');
                 if rule_public_path_boundary(next) {
@@ -4171,6 +4166,31 @@ fn redact_rule_public_path_like_segments(value: &str) -> String {
         cursor += next.len_utf8();
     }
     output
+}
+
+/// Length of an absolute-path-like prefix at the start of `remaining`, if any.
+///
+/// Matches one of the Unix prefixes verbatim, or any ASCII alphabetic drive
+/// letter followed by `:` and either `\` or `/`. This covers both casing
+/// variants (`C:\`, `c:\`) and both Windows separator conventions (`C:\`, `C:/`),
+/// mirroring `search_projection_path_prefix_len` from bd-gbfzk.
+fn rule_public_path_prefix_len(remaining: &str, unix_prefixes: &[&str]) -> Option<usize> {
+    if let Some(prefix) = unix_prefixes
+        .iter()
+        .find(|prefix| remaining.starts_with(**prefix))
+    {
+        return Some(prefix.len());
+    }
+
+    let bytes = remaining.as_bytes();
+    if bytes.first().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && matches!(bytes.get(1), Some(b':'))
+        && matches!(bytes.get(2), Some(b'\\' | b'/'))
+    {
+        Some(3)
+    } else {
+        None
+    }
 }
 
 fn rule_public_path_boundary(c: char) -> bool {
@@ -5077,6 +5097,22 @@ mod tests {
         ensure(
             err.message().contains("invalid rule ID"),
             "error should mention invalid rule ID",
+        )
+    }
+
+    #[test]
+    fn rule_public_path_redaction_covers_windows_drive_casing_and_separator_variants() -> TestResult
+    {
+        let redacted = super::redact_rule_public_path_like_segments(
+            r#"upper=C:\Users\alice\secret lower=c:\Users\alice\secret slash=Z:/Users/alice/secret mixed=d:/data/private done=ok"#,
+        );
+
+        ensure(
+            redacted
+                == *r#"upper=[REDACTED_PATH] lower=[REDACTED_PATH] slash=[REDACTED_PATH] mixed=[REDACTED_PATH] done=ok"#,
+            format!(
+                "rule public path redaction must cover Windows drive casing/separator variants; got: {redacted}"
+            ),
         )
     }
 }
