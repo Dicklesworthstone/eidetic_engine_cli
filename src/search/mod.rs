@@ -890,6 +890,18 @@ fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
         r#".\.config\gcloud\"#,
         "../.config/gcloud/",
         r#"..\.config\gcloud\"#,
+        ".config/gh/",
+        ".config\\gh\\",
+        "./.config/gh/",
+        r#".\.config\gh\"#,
+        "../.config/gh/",
+        r#"..\.config\gh\"#,
+        ".azure/",
+        ".azure\\",
+        "./.azure/",
+        r#".\.azure\"#,
+        "../.azure/",
+        r#"..\.azure\"#,
         ".docker/",
         ".docker\\",
         "./.docker/",
@@ -923,6 +935,17 @@ fn sensitive_relative_path_prefix_len(remaining: &str) -> Option<usize> {
         r#".\.pypirc"#,
         "../.pypirc",
         r#"..\.pypirc"#,
+        ".gem/credentials",
+        ".gem\\credentials",
+        "./.gem/credentials",
+        r#".\.gem\credentials"#,
+        "../.gem/credentials",
+        r#"..\.gem\credentials"#,
+        ".git-credentials",
+        "./.git-credentials",
+        r#".\.git-credentials"#,
+        "../.git-credentials",
+        r#"..\.git-credentials"#,
     ];
 
     for prefix in SENSITIVE_RELATIVE_PATH_PREFIXES {
@@ -3711,6 +3734,35 @@ mod tests {
         }
         assert!(
             redacted.contains("ordinary=docs/config.json"),
+            "ordinary relative paths should remain visible: {redacted}"
+        );
+    }
+
+    #[test]
+    fn search_projection_redacts_relative_cli_credential_stores() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"gh=.config/gh/hosts.yml win_gh=.\.config\gh\hosts.yml azure=.azure/accessTokens.json win_azure=..\.azure\azureProfile.json gem=.gem/credentials git=../.git-credentials ordinary=docs/hosts.yml next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"gh=[REDACTED_PATH] win_gh=[REDACTED_PATH] azure=[REDACTED_PATH] win_azure=[REDACTED_PATH] gem=[REDACTED_PATH] git=[REDACTED_PATH] ordinary=docs/hosts.yml next=done"#
+        );
+        for leaked in [
+            ".config/gh/hosts.yml",
+            r#".\.config\gh\hosts.yml"#,
+            ".azure/accessTokens.json",
+            r#"..\.azure\azureProfile.json"#,
+            ".gem/credentials",
+            "../.git-credentials",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked CLI credential path {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=docs/hosts.yml"),
             "ordinary relative paths should remain visible: {redacted}"
         );
     }
