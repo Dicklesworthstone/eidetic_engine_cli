@@ -877,6 +877,10 @@ fn starts_with_forward_slash_network_path(input: &str, cursor: usize) -> bool {
             .as_bytes()
             .get(cursor.saturating_sub(1))
             .is_some_and(|byte| *byte == b':')
+        || input
+            .as_bytes()
+            .get(cursor.saturating_sub(2)..cursor)
+            .is_some_and(|prefix| prefix == b":/")
     {
         return false;
     }
@@ -3641,6 +3645,29 @@ mod tests {
             assert!(
                 !redacted.contains(leaked),
                 "search projection redaction leaked OS or secret config root {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_preserves_file_url_authority_slashes_for_absolute_paths() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"home=file:///home/alice/.ssh/config etc=file:///etc/ssh/ssh_host_ed25519_key proc=file:///proc/self/environ volumes=file:///Volumes/USBNVME16TB/private/session.jsonl next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"home=file://[REDACTED_PATH] etc=file://[REDACTED_PATH] proc=file://[REDACTED_PATH] volumes=file://[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            "/home/alice/.ssh",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/proc/self/environ",
+            "/Volumes/USBNVME16TB/private",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked file URL path {leaked}: {redacted}"
             );
         }
     }
