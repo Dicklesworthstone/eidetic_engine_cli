@@ -49,6 +49,19 @@ After inspecting the packet:
   represented in `data.trackerIntegrity`; agents downgrade candidate safety
   when `brReadsAuthoritative` is false and must not auto-claim when
   `requiresCandidateDowngrade` is true.
+- `data.candidates[].decision` uses the bd-2z5ly.7.5 candidate decision
+  vocabulary: `safe_to_claim`, `already_owned`, `unsafe_due_to_conflict`,
+  `blocked_by_dependency`, `blocked_by_verification`,
+  `stale_but_reclaimable`, `stale_review`, `external_state_required`,
+  `release_operator_required`, `rollup_only`, `blocked_rollup`,
+  `coordinate_first`, `blocked`, `stale_or_advisory`, and `skip`.
+  Only `safe_to_claim` may drive `inspect_and_claim`; `stale_but_reclaimable`
+  may drive `reopen_stale_work` after explicit inspection; every other value is
+  diagnostic and must not emit claim or reopen commands.
+- Candidate arrays and each candidate's `unsafeReasons`, `staleReasons`, and
+  `sourceRefs` arrays are sorted deterministically before `packetId`
+  calculation. Decision vocabulary changes require schema, docs, fixture or
+  golden, and lifecycle-test updates in the same slice.
 - RCH topology and remote-required fallback failures are represented as
   verification blockers.
 - The packet never contains mail bodies, raw command output, source snippets, or

@@ -92,6 +92,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         ee::core::preflight::AGENT_OPERATING_CONTRACT_SCHEMA_V1,
         "ee.agent_operating_contract.v1.json",
     ),
+    (
+        "ee.swarm_slo.scorecard.v1",
+        "ee.swarm_slo.scorecard.v1.json",
+    ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
 ];
 
@@ -462,6 +466,46 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
             ));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
+    let schema_id = "ee.swarm_slo.scorecard.v1";
+    let schema = schema_doc(schema_id)?;
+    let cases = [
+        ("healthy_small", "healthy_small_checkout", "pass"),
+        ("crowded_checkout", "crowded_checkout", "warn"),
+        ("agent_mail_unavailable", "agent_mail_unavailable", "warn"),
+        ("bv_timeout_no_output", "bv_timeout_no_output", "fail"),
+        ("rch_topology_blocked", "rch_topology_blocked", "blocked"),
+    ];
+
+    for (fixture_name, scenario, verdict) in cases {
+        let fixture = read_json(&fixture_path(&format!(
+            "golden/swarm_slo_scorecard/{fixture_name}.json.golden"
+        )))?;
+        ensure_json_str(&fixture, "/schema", schema_id)?;
+        ensure_json_str(&fixture, "/workload/scenario", scenario)?;
+        ensure_json_str(
+            &fixture,
+            "/workload/traceSchema",
+            "ee.agent_workload_trace.v1",
+        )?;
+        ensure_json_str(&fixture, "/verdict/status", verdict)?;
+        for pointer in [
+            "/redaction/rawMailBodiesPresent",
+            "/redaction/rawMemoryBodiesPresent",
+            "/redaction/rawCommandOutputPresent",
+            "/redaction/privatePathsPresent",
+        ] {
+            ensure_json_bool(&fixture, pointer, false)?;
+        }
+        ensure_json_bool(&fixture, "/redaction/secretScanApplied", true)?;
+        validate_json_schema(&fixture, &schema, &schema, "$")
+            .map_err(|error| format!("swarm SLO scorecard {fixture_name}: {error}"))?;
+    }
+
     Ok(())
 }
 

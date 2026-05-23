@@ -71,16 +71,37 @@ inspect the malformed row, run `br doctor --json`, use
 `br --no-auto-import --allow-stale` for read-only fallback when needed, and only
 then claim or update tracker state.
 
-Candidate decisions are agent-facing safety states. `safe_to_claim` is the only
-decision that may produce an automatic `br update ... --status in_progress`
-claim command. Fresh owned work is reported as `already_owned`; stale work with
-deterministic missing reservation, commit, and mail-thread evidence is reported
-as `stale_but_reclaimable` and may only guide explicit reopen review through
-`recommendedAction.action = "reopen_stale_work"`. Stale work with weak or degraded
-evidence remains `stale_review`; dependency-blocked stale work remains
-`blocked_by_dependency`; compile-health blocked work remains
-`blocked_by_verification`. These distinctions let agents keep useful stale-work
-evidence visible without silently mutating tracker ownership.
+## Candidate decision vocabulary (bd-2z5ly.7.5)
+
+`candidates[].decision` is a stable diagnostic vocabulary. It explains the
+candidate's safety posture; it is not the same field as
+`recommendedAction.action`. Harnesses may claim only when the selected candidate
+is `safe_to_claim` and `recommendedAction.safeToClaim` is `true`.
+
+| Decision | Agent meaning | May drive recommended action? |
+| --- | --- | --- |
+| `safe_to_claim` | The candidate is open, unblocked, unowned, and conflict evidence is authoritative enough to claim after normal reservation/coordination steps. | Yes: `inspect_and_claim` only. |
+| `already_owned` | A fresh assignee, active claim, or authoritative coordination signal says another lane owns the work. | No; inspect or coordinate only. |
+| `unsafe_due_to_conflict` | Dirty files, reservations, or overlapping edit surfaces make an otherwise useful candidate unsafe for autonomous claim. | No; coordinate first. |
+| `blocked_by_dependency` | The candidate itself is blocked by another Bead or prerequisite. | No; work the blocker. |
+| `blocked_by_verification` | RCH, verifier-ledger, or remote-only proof posture prevents responsible progress on the candidate. | No; record blocker or choose static/docs work. |
+| `stale_but_reclaimable` | Deterministic age and inactivity evidence says a prior claim may be reopened after explicit inspection. | Yes: `reopen_stale_work`, never silent mutation. |
+| `stale_review` | Stale evidence exists but is too weak for reclaim guidance. | No; inspect manually. |
+| `external_state_required` | Progress needs a service, credential, upstream release, or operator state change outside the checkout. | No. |
+| `release_operator_required` | The candidate is gated by release authority, signing, publishing, or tagging decisions. | No. |
+| `rollup_only` | The item is an epic or parent used for context, not a claimable leaf. | No. |
+| `blocked_rollup` | The item is a blocked epic or parent and should only explain dependency context. | No. |
+| `coordinate_first` | Broad compatibility bucket for candidates that need human/agent coordination before a more precise decision is available. | No. |
+| `blocked` | Broad compatibility bucket for candidates that cannot proceed. | No. |
+| `stale_or_advisory` | Broad compatibility bucket for stale/advisory evidence that is not enough to reclaim. | No. |
+| `skip` | Duplicate, out-of-scope, or intentionally rejected candidate. | No. |
+
+Deterministic ordering is part of the contract: candidates sort by their stable
+struct keys, and each candidate's `unsafeReasons`, `staleReasons`, and
+`sourceRefs` arrays are sorted and deduplicated before `packetId` calculation.
+Adding, renaming, or reclassifying a decision requires updating the schema,
+this document, the agent UX document, relevant fixtures or goldens, and the
+`work_packet_candidate_decision_vocabulary_is_contractual` lifecycle test.
 
 Implementation contract:
 
@@ -90,8 +111,9 @@ Implementation contract:
   whether Beads, BV, Agent Mail, or RCH drove the advice.
 - Include RCH posture even for docs-first work so closeouts do not accidentally
   imply local Cargo fallback is allowed.
-- Keep command fields as templates. They are obligations for the next step, not
-  proof that the packet generator ran those commands.
+- Keep command templates display-only and prefer structured `commandAction`
+  argv fields for executable guidance. They are obligations for the next step,
+  not proof that the packet generator ran those commands.
 
 Non-goals: work packets do not claim Beads, reserve files, send Agent Mail,
 stage Git changes, run Cargo, delete files, schedule agents, or replace Beads,

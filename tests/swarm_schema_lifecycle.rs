@@ -1238,6 +1238,97 @@ fn work_packet_command_surfaces_reject_unsafe_command_drift() -> TestResult {
 }
 
 #[test]
+fn work_packet_candidate_decision_vocabulary_is_contractual() -> TestResult {
+    // bd-2z5ly.7.5: candidate decisions are an agent-facing safety
+    // vocabulary. The enum order is part of the contract because packet IDs
+    // depend on deterministic serialized payloads and consumers need stable
+    // docs/golden drift signals when a decision is added or reclassified.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+    let decision_enum = schema
+        .pointer("/definitions/candidateDecision/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.swarm.work_packet.v1 candidateDecision enum missing".to_owned())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| "candidateDecision enum entries must be strings".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let expected_decisions = vec![
+        "safe_to_claim",
+        "already_owned",
+        "unsafe_due_to_conflict",
+        "blocked_by_dependency",
+        "blocked_by_verification",
+        "stale_but_reclaimable",
+        "stale_review",
+        "external_state_required",
+        "release_operator_required",
+        "rollup_only",
+        "blocked_rollup",
+        "coordinate_first",
+        "blocked",
+        "stale_or_advisory",
+        "skip",
+    ];
+    if decision_enum != expected_decisions {
+        return Err(format!(
+            "candidateDecision enum drifted: expected {expected_decisions:?}, got {decision_enum:?}"
+        ));
+    }
+
+    let candidate_decision_ref = string_field(
+        schema,
+        "/definitions/candidate/properties/decision/$ref",
+        "ee.swarm.work_packet.v1 candidate decision",
+    )?;
+    if candidate_decision_ref != "#/definitions/candidateDecision" {
+        return Err(
+            "candidate.decision must reference the canonical candidateDecision definition".into(),
+        );
+    }
+
+    for doc_path in [
+        "docs/swarm/work_packet.md",
+        "docs/agent-ux/swarm-work-packet.md",
+    ] {
+        let text = read_text(&repo_root().join(doc_path))?;
+        for required in [
+            "bd-2z5ly.7.5",
+            "safe_to_claim",
+            "already_owned",
+            "unsafe_due_to_conflict",
+            "blocked_by_dependency",
+            "blocked_by_verification",
+            "stale_but_reclaimable",
+            "external_state_required",
+            "release_operator_required",
+            "rollup_only",
+            "blocked_rollup",
+            "stale_or_advisory",
+            "unsafeReasons",
+            "staleReasons",
+            "sourceRefs",
+        ] {
+            if !text.contains(required) {
+                return Err(format!(
+                    "{doc_path} must document candidate-decision marker {required}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult {
     // bd-2z5ly.8.1: when Agent Mail responds with healthLevel=green but
     // semantic_readiness.status=fail (for example malformed SQLite storage),

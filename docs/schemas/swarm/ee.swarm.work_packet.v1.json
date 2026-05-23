@@ -156,6 +156,27 @@
         }
       ]
     },
+    "candidateDecision": {
+      "type": "string",
+      "description": "bd-2z5ly.7.5: stable work-packet candidate-safety vocabulary. Only safe_to_claim can support an automatic claim recommendation. stale_but_reclaimable may support reopen_stale_work guidance but still requires explicit inspection. All other values are display-only diagnostics that must not emit claim or reopen commands. Candidate arrays, unsafeReasons, staleReasons, and sourceRefs are sorted deterministically by the producer before packetId calculation; adding, removing, or reclassifying a decision requires schema, docs, fixture, and lifecycle-test updates.",
+      "enum": [
+        "safe_to_claim",
+        "already_owned",
+        "unsafe_due_to_conflict",
+        "blocked_by_dependency",
+        "blocked_by_verification",
+        "stale_but_reclaimable",
+        "stale_review",
+        "external_state_required",
+        "release_operator_required",
+        "rollup_only",
+        "blocked_rollup",
+        "coordinate_first",
+        "blocked",
+        "stale_or_advisory",
+        "skip"
+      ]
+    },
     "recommendedAction": {
       "type": "object",
       "required": [
@@ -223,18 +244,7 @@
         "priority": {"type": ["integer", "null"]},
         "assignee": {"type": ["string", "null"]},
         "decision": {
-          "type": "string",
-          "enum": [
-            "safe_to_claim",
-            "already_owned",
-            "blocked_by_dependency",
-            "blocked_by_verification",
-            "stale_but_reclaimable",
-            "stale_review",
-            "coordinate_first",
-            "blocked",
-            "skip"
-          ]
+          "$ref": "#/definitions/candidateDecision"
         },
         "collisionRisk": {"type": "string", "enum": ["none", "low", "medium", "high", "unknown"]},
         "unsafeReasons": {"$ref": "#/definitions/stringArray"},
