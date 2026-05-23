@@ -238,3 +238,336 @@ pub fn graph_scale_total_budget_ms(node_count: usize, edge_count: usize) -> u64 
         .map(|decision| decision.target_budget_ms)
         .sum()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    type TestResult = Result<(), String>;
+
+    const ALL_ALGORITHMS: &[GraphScaleAlgorithm] = &[
+        GraphScaleAlgorithm::PersonalizedPageRank,
+        GraphScaleAlgorithm::Hits,
+        GraphScaleAlgorithm::PageRank,
+        GraphScaleAlgorithm::Betweenness,
+        GraphScaleAlgorithm::CommunicabilityBetweenness,
+        GraphScaleAlgorithm::KTruss,
+        GraphScaleAlgorithm::Louvain,
+        GraphScaleAlgorithm::OnionLayers,
+        GraphScaleAlgorithm::ArticulationPoints,
+        GraphScaleAlgorithm::GomoryHu,
+        GraphScaleAlgorithm::VoronoiCells,
+        GraphScaleAlgorithm::EgoGraph,
+        GraphScaleAlgorithm::TransitiveClosure,
+        GraphScaleAlgorithm::MinCostFlow,
+        GraphScaleAlgorithm::DominanceFrontiers,
+        GraphScaleAlgorithm::AllPairsLca,
+        GraphScaleAlgorithm::SimRank,
+    ];
+
+    const ALWAYS_EXACT_ALGORITHMS: &[GraphScaleAlgorithm] = &[
+        GraphScaleAlgorithm::PersonalizedPageRank,
+        GraphScaleAlgorithm::Hits,
+        GraphScaleAlgorithm::PageRank,
+        GraphScaleAlgorithm::KTruss,
+        GraphScaleAlgorithm::Louvain,
+        GraphScaleAlgorithm::OnionLayers,
+        GraphScaleAlgorithm::ArticulationPoints,
+        GraphScaleAlgorithm::VoronoiCells,
+        GraphScaleAlgorithm::EgoGraph,
+        GraphScaleAlgorithm::DominanceFrontiers,
+    ];
+
+    fn ensure(condition: bool, context: impl Into<String>) -> TestResult {
+        if condition {
+            Ok(())
+        } else {
+            Err(context.into())
+        }
+    }
+
+    fn ensure_equal<T: std::fmt::Debug + PartialEq>(
+        actual: T,
+        expected: T,
+        context: &str,
+    ) -> TestResult {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(format!("{context}: expected {expected:?}, got {actual:?}"))
+        }
+    }
+
+    fn synthetic_decision(action: GraphScaleAction) -> GraphScaleDecision {
+        GraphScaleDecision {
+            schema: GRAPH_SCALE_POLICY_SCHEMA_V1,
+            algorithm: GraphScaleAlgorithm::PageRank,
+            action,
+            node_count: 1,
+            edge_count: 0,
+            degraded_code: None,
+            cap: None,
+            target_budget_ms: 1,
+            reason: "unit test synthetic decision",
+        }
+    }
+
+    #[test]
+    fn algorithm_catalog_is_complete_unique_and_stable() -> TestResult {
+        ensure_equal(
+            graph_scale_algorithms(),
+            ALL_ALGORITHMS,
+            "graph_scale_algorithms catalog",
+        )?;
+
+        let mut names = BTreeSet::new();
+        for algorithm in graph_scale_algorithms() {
+            let name = algorithm.as_str();
+            ensure(!name.is_empty(), format!("{algorithm:?} as_str is empty"))?;
+            ensure(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                format!("{algorithm:?} as_str is not snake_case: {name}"),
+            )?;
+            ensure(
+                names.insert(name),
+                format!("duplicate algorithm name: {name}"),
+            )?;
+        }
+
+        ensure_equal(
+            names.len(),
+            ALL_ALGORITHMS.len(),
+            "unique algorithm name count",
+        )
+    }
+
+    #[test]
+    fn decisions_pin_schema_algorithm_inputs_and_budget_sum() -> TestResult {
+        let node_count = 123;
+        let edge_count = 456;
+        let decisions = graph_scale_decisions(node_count, edge_count);
+
+        ensure_equal(
+            decisions.len(),
+            ALL_ALGORITHMS.len(),
+            "decision count matches algorithm count",
+        )?;
+        for (decision, expected_algorithm) in decisions.iter().zip(ALL_ALGORITHMS.iter()) {
+            ensure_equal(
+                decision.schema,
+                GRAPH_SCALE_POLICY_SCHEMA_V1,
+                "decision schema",
+            )?;
+            ensure_equal(
+                decision.algorithm,
+                *expected_algorithm,
+                "decision algorithm order",
+            )?;
+            ensure_equal(decision.node_count, node_count, "decision node count")?;
+            ensure_equal(decision.edge_count, edge_count, "decision edge count")?;
+        }
+
+        let summed_budget = decisions
+            .iter()
+            .map(|decision| decision.target_budget_ms)
+            .sum::<u64>();
+        ensure_equal(
+            graph_scale_total_budget_ms(node_count, edge_count),
+            summed_budget,
+            "total budget equals decision budget sum",
+        )
+    }
+
+    #[test]
+    fn threshold_boundaries_are_strictly_greater_than_caps() -> TestResult {
+        let gomory_exact = graph_scale_decision(
+            GraphScaleAlgorithm::GomoryHu,
+            GOMORY_HU_SKIP_THRESHOLD_NODES,
+            1,
+        );
+        ensure_equal(
+            gomory_exact.action,
+            GraphScaleAction::RunExact,
+            "Gomory-Hu at threshold",
+        )?;
+        ensure_equal(gomory_exact.degraded_code, None, "Gomory-Hu exact code")?;
+        ensure_equal(
+            gomory_exact.cap,
+            Some(GOMORY_HU_SKIP_THRESHOLD_NODES),
+            "Gomory-Hu exact cap",
+        )?;
+
+        let gomory_skipped = graph_scale_decision(
+            GraphScaleAlgorithm::GomoryHu,
+            GOMORY_HU_SKIP_THRESHOLD_NODES + 1,
+            1,
+        );
+        ensure_equal(
+            gomory_skipped.action,
+            GraphScaleAction::Skip,
+            "Gomory-Hu above threshold",
+        )?;
+        ensure_equal(
+            gomory_skipped.degraded_code,
+            Some("graph_scale_gomory_hu_skipped"),
+            "Gomory-Hu degraded code",
+        )?;
+
+        let lca_exact = graph_scale_decision(
+            GraphScaleAlgorithm::AllPairsLca,
+            ALL_PAIRS_LCA_LAZY_THRESHOLD_NODES,
+            1,
+        );
+        ensure_equal(
+            lca_exact.action,
+            GraphScaleAction::RunExact,
+            "all-pairs LCA at threshold",
+        )?;
+        ensure_equal(lca_exact.degraded_code, None, "all-pairs LCA exact code")?;
+
+        let lca_lazy = graph_scale_decision(
+            GraphScaleAlgorithm::AllPairsLca,
+            ALL_PAIRS_LCA_LAZY_THRESHOLD_NODES + 1,
+            1,
+        );
+        ensure_equal(
+            lca_lazy.action,
+            GraphScaleAction::LazyOnDemand,
+            "all-pairs LCA above threshold",
+        )?;
+        ensure_equal(
+            lca_lazy.degraded_code,
+            Some("graph_scale_all_pairs_lca_lazy"),
+            "all-pairs LCA degraded code",
+        )?;
+
+        let simrank_exact = graph_scale_decision(
+            GraphScaleAlgorithm::SimRank,
+            SIMRANK_JACCARD_THRESHOLD_NODES,
+            1,
+        );
+        ensure_equal(
+            simrank_exact.action,
+            GraphScaleAction::RunExact,
+            "SimRank at threshold",
+        )?;
+        ensure_equal(simrank_exact.degraded_code, None, "SimRank exact code")?;
+
+        let simrank_jaccard = graph_scale_decision(
+            GraphScaleAlgorithm::SimRank,
+            SIMRANK_JACCARD_THRESHOLD_NODES + 1,
+            1,
+        );
+        ensure_equal(
+            simrank_jaccard.action,
+            GraphScaleAction::FallbackJaccard,
+            "SimRank above threshold",
+        )?;
+        ensure_equal(
+            simrank_jaccard.degraded_code,
+            Some("graph_scale_simrank_jaccard_fallback"),
+            "SimRank degraded code",
+        )
+    }
+
+    #[test]
+    fn always_exact_algorithms_remain_exact_at_large_scale() -> TestResult {
+        for algorithm in ALWAYS_EXACT_ALGORITHMS {
+            let decision = graph_scale_decision(*algorithm, 100_000, 250_000);
+            ensure_equal(
+                decision.action,
+                GraphScaleAction::RunExact,
+                &format!("{algorithm:?} action"),
+            )?;
+            ensure_equal(
+                decision.degraded_code,
+                None,
+                &format!("{algorithm:?} degraded code"),
+            )?;
+            ensure(
+                decision.runs_expensive_full_graph(),
+                format!("{algorithm:?} should run an exact full graph algorithm"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn expensive_full_graph_action_matrix_is_pinned() -> TestResult {
+        for action in [GraphScaleAction::RunExact, GraphScaleAction::PivotSample] {
+            ensure(
+                synthetic_decision(action).runs_expensive_full_graph(),
+                format!("{action:?} should be full-graph work"),
+            )?;
+        }
+
+        for action in [
+            GraphScaleAction::Skip,
+            GraphScaleAction::CapDepth,
+            GraphScaleAction::CapIterations,
+            GraphScaleAction::LazyOnDemand,
+            GraphScaleAction::FallbackJaccard,
+        ] {
+            ensure(
+                !synthetic_decision(action).runs_expensive_full_graph(),
+                format!("{action:?} should not be full-graph work"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_non_exact_actions_and_degraded_codes_are_pinned() -> TestResult {
+        let nodes = 100_000;
+        let edges = 250_000;
+
+        for algorithm in [
+            GraphScaleAlgorithm::Betweenness,
+            GraphScaleAlgorithm::CommunicabilityBetweenness,
+        ] {
+            let decision = graph_scale_decision(algorithm, nodes, edges);
+            ensure_equal(
+                decision.action,
+                GraphScaleAction::PivotSample,
+                &format!("{algorithm:?} action"),
+            )?;
+            ensure_equal(
+                decision.degraded_code,
+                Some("graph_scale_pivot_sampled"),
+                &format!("{algorithm:?} degraded code"),
+            )?;
+        }
+
+        let transitive = graph_scale_decision(GraphScaleAlgorithm::TransitiveClosure, nodes, edges);
+        ensure_equal(
+            transitive.action,
+            GraphScaleAction::CapDepth,
+            "transitive closure action",
+        )?;
+        ensure_equal(
+            transitive.degraded_code,
+            Some("causal_depth_capped"),
+            "transitive closure degraded code",
+        )?;
+        ensure_equal(
+            transitive.cap,
+            Some(CAUSAL_DEPTH_CAP),
+            "transitive closure cap",
+        )?;
+
+        let min_cost = graph_scale_decision(GraphScaleAlgorithm::MinCostFlow, nodes, edges);
+        ensure_equal(
+            min_cost.action,
+            GraphScaleAction::CapIterations,
+            "min-cost flow action",
+        )?;
+        ensure_equal(
+            min_cost.degraded_code,
+            Some("graph_scale_min_cost_flow_iteration_capped"),
+            "min-cost flow degraded code",
+        )
+    }
+}
