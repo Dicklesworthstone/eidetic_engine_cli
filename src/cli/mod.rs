@@ -40013,8 +40013,44 @@ where
     if args.foreground && cli.wants_json() {
         let token = read(EnvVar::ServeToken);
         let options = serve_startup_options_from_args(args);
-        return match serve_startup_response_json(&options, token.as_deref()) {
-            Ok(response) => write_stdout(stdout, &(response + "\n")),
+        let mut startup_written = false;
+        let result = crate::serve::serve_foreground_once(
+            &options,
+            token.as_deref(),
+            "cli-serve-foreground-once",
+            0,
+            |binding| {
+                let response = serve_bound_startup_response_json(&binding.metadata)?;
+                stdout
+                    .write_all(response.as_bytes())
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to write serve foreground startup response: {error}"
+                        ),
+                        repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                    })?;
+                stdout
+                    .write_all(b"\n")
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to terminate serve foreground startup response: {error}"
+                        ),
+                        repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                    })?;
+                stdout.flush().map_err(|error| DomainError::Storage {
+                    message: format!("Failed to flush serve foreground startup response: {error}"),
+                    repair: Some("Retry `ee serve --foreground --json`.".to_owned()),
+                })?;
+                startup_written = true;
+                Ok(())
+            },
+        );
+        return match result {
+            Ok(_) => ProcessExitCode::Success,
+            Err(error) if startup_written => {
+                let _ = writeln!(stderr, "error: {}", error.message());
+                error.exit_code()
+            }
             Err(error) => write_domain_error(&error, true, stdout, stderr),
         };
     }
@@ -40051,6 +40087,26 @@ fn serve_startup_response_json(
     .map_err(|error| DomainError::Storage {
         message: format!("Failed to serialize serve startup response: {error}"),
         repair: Some("Fix the serve startup response serializer.".to_owned()),
+    })
+}
+
+fn serve_bound_startup_response_json(
+    listener_metadata: &serde_json::Value,
+) -> Result<String, DomainError> {
+    let degraded = listener_metadata
+        .pointer("/startup/degraded")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    serde_json::to_string(&serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": listener_metadata,
+        "degraded": degraded,
+    }))
+    .map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize serve bound startup response: {error}"),
+        repair: Some("Fix the serve foreground startup response serializer.".to_owned()),
     })
 }
 

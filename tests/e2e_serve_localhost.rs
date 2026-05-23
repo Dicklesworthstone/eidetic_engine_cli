@@ -1,3 +1,7 @@
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream};
+use std::process::{Command, Stdio};
+
 use ee::serve::{SERVE_ENDPOINT_SCHEMA_V1, ServeLimits, render_serve_transport_exchange};
 use serde_json::Value as JsonValue;
 
@@ -64,6 +68,133 @@ fn response_sse_data_json(response: &str) -> Result<JsonValue, String> {
     }
 
     serde_json::from_str(data_lines[0]).map_err(|error| error.to_string())
+}
+
+#[test]
+fn serve_foreground_cli_accepts_one_real_status_request() -> TestResult {
+    let token = "01234567890123456789012345678901";
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args([
+            "serve",
+            "--foreground",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--json",
+        ])
+        .env("EE_SERVE_TOKEN", token)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn ee serve foreground: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "serve child stdout was not piped".to_owned())?;
+    let mut stdout_reader = BufReader::new(stdout);
+    let mut startup_line = String::new();
+    let startup_bytes = stdout_reader
+        .read_line(&mut startup_line)
+        .map_err(|error| format!("read serve startup line: {error}"))?;
+    if startup_bytes == 0 {
+        let _ = child.kill();
+        let status = child
+            .wait()
+            .map_err(|error| format!("wait for failed serve child: {error}"))?;
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        return Err(format!(
+            "serve child exited before startup JSON: status={status}, stderr={stderr}"
+        ));
+    }
+
+    let startup: JsonValue = serde_json::from_str(startup_line.trim())
+        .map_err(|error| format!("parse serve startup JSON: {error}; line={startup_line}"))?;
+    assert_eq!(startup["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(startup["success"].as_bool(), Some(true));
+    assert_eq!(
+        startup["data"]["schema"].as_str(),
+        Some(ee::serve::SERVE_STARTUP_SCHEMA_V1)
+    );
+    assert_eq!(
+        startup["data"]["startup"]["readiness"]["state"].as_str(),
+        Some("ready")
+    );
+    let port = startup["data"]["listener"]["boundPort"]
+        .as_u64()
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| format!("startup missing listener boundPort: {startup}"))?;
+    if port == 0 {
+        return Err(format!(
+            "serve listener must expose an OS-assigned port: {startup}"
+        ));
+    }
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .map_err(|error| format!("connect to serve listener on port {port}: {error}"))?;
+    let request = format!(
+        "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write serve request: {error}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("shutdown serve request writer: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read serve response: {error}"))?;
+    if !response.starts_with("HTTP/1.1 200 OK\r\n") {
+        return Err(format!("expected 200 response, got {response}"));
+    }
+    let envelope = response_body_json(&response)?;
+    assert_eq!(envelope["schema"].as_str(), Some(SERVE_ENDPOINT_SCHEMA_V1));
+    assert_eq!(envelope["request"]["endpoint"].as_str(), Some("status"));
+    let payload = &envelope["response"]["payload"];
+    assert_eq!(payload["schema"].as_str(), Some("ee.response.v2"));
+    assert_eq!(payload["success"].as_bool(), Some(true));
+    assert_eq!(payload["data"]["command"].as_str(), Some("status"));
+
+    let status = child
+        .wait()
+        .map_err(|error| format!("wait for serve child: {error}"))?;
+    if !status.success() {
+        let mut stderr = String::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_string(&mut stderr);
+        }
+        return Err(format!(
+            "serve child failed: status={status}, stderr={stderr}"
+        ));
+    }
+
+    let mut trailing_stdout = String::new();
+    stdout_reader
+        .read_to_string(&mut trailing_stdout)
+        .map_err(|error| format!("read trailing serve stdout: {error}"))?;
+    if !trailing_stdout.trim().is_empty() {
+        return Err(format!(
+            "serve foreground should emit one startup JSON line, got trailing stdout: {trailing_stdout}"
+        ));
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_string(&mut stderr)
+            .map_err(|error| format!("read serve stderr: {error}"))?;
+    }
+    if !stderr.trim().is_empty() {
+        return Err(format!(
+            "serve foreground stderr should be clean, got: {stderr}"
+        ));
+    }
+
+    Ok(())
 }
 
 #[test]
