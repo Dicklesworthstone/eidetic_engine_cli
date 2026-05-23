@@ -28,7 +28,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -91,7 +91,7 @@ use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
 static PACK_HASH_LOG_RUN_INDEX: AtomicU64 = AtomicU64::new(0);
 static PACK_SLOT_PROCESS_GATES: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
-static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<Mutex<Option<CachedContextProximityTree>>> =
+static CONTEXT_PROXIMITY_TREE_CACHE: OnceLock<RwLock<Option<CachedContextProximityTree>>> =
     OnceLock::new();
 const PACK_SLOT_RETRY_AFTER_MS: u64 = 250;
 #[allow(dead_code, reason = "staged for bd-ndzfg.3 L2 cache wiring")]
@@ -5768,7 +5768,7 @@ fn context_proximity_tree(
 
 fn cached_context_proximity_tree(generation: u64) -> Option<crate::graph::gomory_hu::GomoryHuTree> {
     let guard = context_proximity_tree_cache()
-        .lock()
+        .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .as_ref()
@@ -5778,13 +5778,13 @@ fn cached_context_proximity_tree(generation: u64) -> Option<crate::graph::gomory
 
 fn store_context_proximity_tree(generation: u64, tree: crate::graph::gomory_hu::GomoryHuTree) {
     let mut guard = context_proximity_tree_cache()
-        .lock()
+        .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     *guard = Some(CachedContextProximityTree { generation, tree });
 }
 
-fn context_proximity_tree_cache() -> &'static Mutex<Option<CachedContextProximityTree>> {
-    CONTEXT_PROXIMITY_TREE_CACHE.get_or_init(|| Mutex::new(None))
+fn context_proximity_tree_cache() -> &'static RwLock<Option<CachedContextProximityTree>> {
+    CONTEXT_PROXIMITY_TREE_CACHE.get_or_init(|| RwLock::new(None))
 }
 
 fn context_proximity_graph_generation(connection: &DbConnection) -> Result<u64, String> {
