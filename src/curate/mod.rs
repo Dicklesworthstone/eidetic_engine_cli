@@ -1180,8 +1180,36 @@ pub fn validate_reflection_source_package(
             package.total_source_count
         ),
     )?;
+    ensure_reflection_source_package_field(
+        package.sources.len() <= package.budget.max_sources,
+        "budget.maxSources",
+        format!(
+            "packaged source count {} exceeds maxSources {}",
+            package.sources.len(),
+            package.budget.max_sources
+        ),
+    )?;
 
+    let mut source_keys = BTreeSet::<(&'static str, &str)>::new();
     let total_excerpt_bytes = package.sources.iter().try_fold(0_usize, |total, source| {
+        ensure_reflection_source_package_field(
+            !source.id.trim().is_empty(),
+            "sources[].id",
+            "source id must not be empty".to_owned(),
+        )?;
+        ensure_reflection_source_package_field(
+            is_canonical_blake3_content_hash(source.content_hash.as_str()),
+            "sources[].contentHash",
+            format!(
+                "source `{}` content hash must be a canonical blake3 hash",
+                source.id
+            ),
+        )?;
+        ensure_reflection_source_package_field(
+            source_keys.insert((source.kind, source.id.as_str())),
+            "sources[]",
+            format!("duplicate source `{}` `{}`", source.kind, source.id),
+        )?;
         ensure_reflection_source_package_field(
             source.excerpt_bytes == source.excerpt.len(),
             "sources[].excerptBytes",
@@ -1190,6 +1218,31 @@ pub fn validate_reflection_source_package(
                 source.id,
                 source.excerpt.len(),
                 source.excerpt_bytes
+            ),
+        )?;
+        ensure_reflection_source_package_field(
+            source.excerpt_bytes <= package.budget.max_excerpt_bytes_per_source,
+            "budget.maxExcerptBytesPerSource",
+            format!(
+                "source `{}` excerpt bytes {} exceed maxExcerptBytesPerSource {}",
+                source.id, source.excerpt_bytes, package.budget.max_excerpt_bytes_per_source
+            ),
+        )?;
+        let expected_excerpt_hash = blake3_content_hash(source.excerpt.as_str());
+        ensure_reflection_source_package_field(
+            source.excerpt_hash == expected_excerpt_hash,
+            "sources[].excerptHash",
+            format!(
+                "source `{}` expected {}, got {}",
+                source.id, expected_excerpt_hash, source.excerpt_hash
+            ),
+        )?;
+        ensure_reflection_source_package_field(
+            !source.redaction_classes.is_empty(),
+            "sources[].redactionClasses",
+            format!(
+                "source `{}` must carry at least one redaction class",
+                source.id
             ),
         )?;
         Ok::<usize, DerivationSourcePackageError>(total + source.excerpt_bytes)
@@ -1202,6 +1255,38 @@ pub fn validate_reflection_source_package(
             package.total_excerpt_bytes
         ),
     )?;
+    ensure_reflection_source_package_field(
+        total_excerpt_bytes <= package.budget.max_total_excerpt_bytes,
+        "budget.maxTotalExcerptBytes",
+        format!(
+            "total excerpt bytes {total_excerpt_bytes} exceed maxTotalExcerptBytes {}",
+            package.budget.max_total_excerpt_bytes
+        ),
+    )?;
+
+    for omitted_source in &package.omitted_sources {
+        ensure_reflection_source_package_field(
+            !omitted_source.id.trim().is_empty(),
+            "omittedSources[].id",
+            "omitted source id must not be empty".to_owned(),
+        )?;
+        ensure_reflection_source_package_field(
+            is_canonical_blake3_content_hash(omitted_source.content_hash.as_str()),
+            "omittedSources[].contentHash",
+            format!(
+                "omitted source `{}` content hash must be a canonical blake3 hash",
+                omitted_source.id
+            ),
+        )?;
+        ensure_reflection_source_package_field(
+            source_keys.insert((omitted_source.kind, omitted_source.id.as_str())),
+            "omittedSources[]",
+            format!(
+                "duplicate source `{}` `{}`",
+                omitted_source.kind, omitted_source.id
+            ),
+        )?;
+    }
 
     let expected_redaction_summary = reflection_source_package_redaction_summary(
         package.sources.as_slice(),
@@ -5490,13 +5575,13 @@ mod tests {
         REFLECTION_SOURCE_REDACTION_SECRET_PATTERN, REFLECTION_SOURCE_SECRET_PLACEHOLDER,
         REFLECTION_TRUNCATE_PER_SOURCE_EXCERPT_BYTE_LIMIT, REVIEW_QUEUE_INVALID_TRANSITION_CODE,
         REVIEW_QUEUE_STATE_SCHEMA_V1, ReflectionSourceInput, ReflectionSourceMetadata,
-        ReflectionSourcePackageLimits, ReviewQueueState, SpecificityPlatform, SpecificityReport,
-        SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1, TraumaGuardDecision, TraumaGuardInput,
-        build_reflection_request_artifact, build_reflection_request_fingerprint,
-        build_reflection_source_package, candidate_embedding_text,
-        canonical_derivation_source_refs_json, canonical_reflection_request_artifact_json,
-        canonical_reflection_source_package_json, check_duplicate_rule,
-        check_duplicate_rule_with_config, evaluate_trauma_guard,
+        ReflectionSourcePackageLimits, ReflectionSourcePackageOmission, ReviewQueueState,
+        SpecificityPlatform, SpecificityReport, SpecificityTokenKind, TRAUMA_GUARD_SCHEMA_V1,
+        TraumaGuardDecision, TraumaGuardInput, build_reflection_request_artifact,
+        build_reflection_request_fingerprint, build_reflection_source_package,
+        candidate_embedding_text, canonical_derivation_source_refs_json,
+        canonical_reflection_request_artifact_json, canonical_reflection_source_package_json,
+        check_duplicate_rule, check_duplicate_rule_with_config, evaluate_trauma_guard,
         reflection_prompt_template_descriptor, reflection_response_schema_descriptor,
         reflection_result_schema_contract_json, render_reflection_prompt,
         render_reflection_request_prompt, specificity_score, subsystem_name, validate_candidate,
@@ -7072,6 +7157,51 @@ Then update src/policy/mod.rs on main."
             Err(
                 DerivationSourcePackageError::InvalidReflectionSourcePackage {
                     field: "totalExcerptBytes",
+                    ..
+                }
+            )
+        ));
+
+        let mut bad_excerpt_hash = package.clone();
+        bad_excerpt_hash.sources[0].excerpt_hash = format!("blake3:{}", "9".repeat(64));
+        assert!(matches!(
+            validate_reflection_source_package(&bad_excerpt_hash),
+            Err(
+                DerivationSourcePackageError::InvalidReflectionSourcePackage {
+                    field: "sources[].excerptHash",
+                    ..
+                }
+            )
+        ));
+
+        let mut bad_source_budget = package.clone();
+        bad_source_budget.budget.max_excerpt_bytes_per_source = 1;
+        assert!(matches!(
+            validate_reflection_source_package(&bad_source_budget),
+            Err(
+                DerivationSourcePackageError::InvalidReflectionSourcePackage {
+                    field: "budget.maxExcerptBytesPerSource",
+                    ..
+                }
+            )
+        ));
+
+        let mut bad_duplicate = package.clone();
+        bad_duplicate
+            .omitted_sources
+            .push(ReflectionSourcePackageOmission {
+                kind: bad_duplicate.sources[0].kind,
+                id: bad_duplicate.sources[0].id.clone(),
+                content_hash: bad_duplicate.sources[0].content_hash.clone(),
+                omission_reason: REFLECTION_OMIT_SOURCE_COUNT_LIMIT.to_owned(),
+            });
+        bad_duplicate.total_source_count += 1;
+        bad_duplicate.omitted_source_count += 1;
+        assert!(matches!(
+            validate_reflection_source_package(&bad_duplicate),
+            Err(
+                DerivationSourcePackageError::InvalidReflectionSourcePackage {
+                    field: "omittedSources[]",
                     ..
                 }
             )
