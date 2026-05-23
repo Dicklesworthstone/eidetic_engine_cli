@@ -19,6 +19,7 @@ pub mod audit_lane;
 pub mod backup;
 pub mod bayes;
 pub mod bayes_backfill;
+pub mod beads_integrity;
 pub mod budget;
 pub mod budget_delta_recommender;
 pub mod capabilities;
