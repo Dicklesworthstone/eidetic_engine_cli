@@ -37,6 +37,7 @@
 //!
 //! A forged signature produced from public inputs alone MUST fail verification.
 
+use std::cell::RefCell;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -75,6 +76,64 @@ pub const ED25519_ALGORITHM_V1: &str = "ee.ed25519.v1";
 
 /// Default key directory relative to user config.
 const KEY_DIR_NAME: &str = "ee/keys";
+
+thread_local! {
+    /// Test-only override for [`CertificateVerifyReport::checked_at`] (bd-1jvge).
+    ///
+    /// When set via [`with_verify_clock_override`], certificate verification
+    /// report constructors use this RFC3339 timestamp string instead of
+    /// `chrono::Utc::now()`, making golden/parity tests byte-stable. Production
+    /// code paths leave the override unset and observe wall-clock time as
+    /// before.
+    static VERIFY_CLOCK_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Return the `checked_at` timestamp for certificate verify reports.
+///
+/// Honors the [`with_verify_clock_override`] scope when set; otherwise returns
+/// `chrono::Utc::now().to_rfc3339()`. Centralizing this lets the eleven
+/// `CertificateVerifyReport` constructors share one source of truth for the
+/// verification timestamp.
+fn current_verify_timestamp() -> String {
+    VERIFY_CLOCK_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+}
+
+/// Run `f` with a deterministic `checked_at` timestamp for certificate verify
+/// reports (bd-1jvge).
+///
+/// Inside `f`, every `CertificateVerifyReport::{valid, not_found, expired,
+/// stale_payload_hash, stale_schema_version, failed_assumptions,
+/// hash_mismatch, revoked, invalid_status, attestation_mismatch,
+/// invalid_manifest}` constructor emits `timestamp` rather than the current
+/// wall clock. The previous override (if any) is restored when `f` returns,
+/// even on panic.
+///
+/// Intended for tests, manifest-backed contract tests, and deterministic
+/// golden-fixture generation. Production code paths must not call this — the
+/// CLI verify surface keeps wall-clock `checked_at` as declared volatile
+/// metadata.
+pub fn with_verify_clock_override<F, R>(timestamp: &str, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    struct Guard {
+        previous: Option<String>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let previous = self.previous.take();
+            VERIFY_CLOCK_OVERRIDE.with(|cell| {
+                *cell.borrow_mut() = previous;
+            });
+        }
+    }
+
+    let previous = VERIFY_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(timestamp.to_owned())));
+    let _guard = Guard { previous };
+    f()
+}
 
 /// Options for listing certificates.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -349,7 +408,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::Valid,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -369,7 +428,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::NotFound,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: false,
             payload_hash_fresh: false,
             schema_version_valid: false,
@@ -389,7 +448,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::Expired,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -409,7 +468,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::StalePayloadHash,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: false,
             payload_hash_fresh: false,
             schema_version_valid: true,
@@ -429,7 +488,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::StaleSchemaVersion,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: false,
@@ -449,7 +508,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::FailedAssumptions,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -469,7 +528,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::HashMismatch,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: false,
             payload_hash_fresh: false,
             schema_version_valid: true,
@@ -489,7 +548,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::Revoked,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -509,7 +568,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::InvalidStatus,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -533,7 +592,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::AttestationMismatch,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: true,
             payload_hash_fresh: true,
             schema_version_valid: true,
@@ -553,7 +612,7 @@ impl CertificateVerifyReport {
         Self {
             certificate_id: certificate_id.into(),
             result: VerificationResult::StaleSchemaVersion,
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: current_verify_timestamp(),
             hash_verified: false,
             payload_hash_fresh: false,
             schema_version_valid: false,
@@ -2340,6 +2399,68 @@ mod tests {
             &CERTIFICATE_LIST_SCHEMA_V1,
             &"ee.certificate.list.v1",
             "list schema",
+        )
+    }
+
+    /// bd-1jvge: with the verify clock override active, `CertificateVerifyReport`
+    /// constructors must emit `checked_at = <override>` instead of a wall-clock
+    /// timestamp, and two reports built with the same override must be
+    /// byte-identical.
+    #[test]
+    fn verify_clock_override_pins_checked_at_for_all_constructors() -> TestResult {
+        const FIXED: &str = "2026-01-01T00:00:00+00:00";
+        let id = "cert_clock_override_fixture";
+
+        with_verify_clock_override(FIXED, || -> TestResult {
+            let reports = [
+                CertificateVerifyReport::valid(id),
+                CertificateVerifyReport::not_found(id),
+                CertificateVerifyReport::expired(id),
+                CertificateVerifyReport::stale_payload_hash(id),
+                CertificateVerifyReport::stale_schema_version(id),
+                CertificateVerifyReport::failed_assumptions(id),
+                CertificateVerifyReport::hash_mismatch(id),
+                CertificateVerifyReport::revoked(id),
+                CertificateVerifyReport::invalid_status(id),
+                CertificateVerifyReport::attestation_mismatch(id, None, "msg"),
+                CertificateVerifyReport::invalid_manifest(id, "msg"),
+            ];
+            for (idx, report) in reports.iter().enumerate() {
+                ensure_equal(
+                    &report.checked_at,
+                    &FIXED.to_owned(),
+                    &format!("constructor #{idx} checked_at"),
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn verify_clock_override_yields_byte_stable_reports() -> TestResult {
+        const FIXED: &str = "2026-01-01T00:00:00+00:00";
+        let id = "cert_clock_override_stable";
+        let first = with_verify_clock_override(FIXED, || CertificateVerifyReport::valid(id));
+        let second = with_verify_clock_override(FIXED, || CertificateVerifyReport::valid(id));
+        ensure_equal(&first, &second, "two overridden reports must match")
+    }
+
+    #[test]
+    fn verify_clock_override_restores_previous_state_after_scope() -> TestResult {
+        const FIXED: &str = "2026-01-01T00:00:00+00:00";
+        let id = "cert_clock_override_restore";
+        with_verify_clock_override(FIXED, || -> TestResult {
+            let inner = CertificateVerifyReport::valid(id);
+            ensure_equal(&inner.checked_at, &FIXED.to_owned(), "inner uses override")
+        })?;
+        let outer = CertificateVerifyReport::valid(id);
+        ensure(
+            outer.checked_at != FIXED,
+            "outer must not retain the override",
+        )?;
+        ensure(
+            !outer.checked_at.is_empty(),
+            "outer must fall back to a real timestamp",
         )
     }
 
