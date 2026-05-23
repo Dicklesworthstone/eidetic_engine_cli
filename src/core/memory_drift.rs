@@ -962,7 +962,7 @@ fn build_memory_drift_report_with_connection(
         MemoryDriftReportMode::OneMemory => {
             let memory_id = options.memory_id.ok_or_else(|| DomainError::Usage {
                 message: "memory drift --mode one requires MEMORY_ID".to_owned(),
-                repair: Some("ee memory drift <MEMORY_ID> --json".to_owned()),
+                repair: Some("ee memory drift --help".to_owned()),
             })?;
             vec![memory_drift_report_one_memory(
                 connection,
