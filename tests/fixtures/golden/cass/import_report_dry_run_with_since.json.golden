@@ -1,0 +1,28 @@
+{
+  "command": "import cass",
+  "databasePath": null,
+  "dryRun": true,
+  "indexJobsQueued": 0,
+  "indexRequiredAction": "would_enqueue",
+  "ledgerId": null,
+  "schema": "ee.import.cass.v1",
+  "sessions": [
+    {
+      "indexJobId": null,
+      "messageCount": null,
+      "missingMetadata": [],
+      "sessionId": "session-ccc",
+      "sourcePath": "cass-fixture-source/session-ccc",
+      "spansImported": 12,
+      "status": "would_import"
+    }
+  ],
+  "sessionsDiscovered": 1,
+  "sessionsImported": 0,
+  "sessionsSkipped": 0,
+  "since": "90d",
+  "sourceId": "cass-fixture-source",
+  "spansImported": 0,
+  "status": "ok",
+  "workspacePath": "ws-fixture-02"
+}

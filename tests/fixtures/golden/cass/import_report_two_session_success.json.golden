@@ -1,0 +1,39 @@
+{
+  "command": "import cass",
+  "databasePath": "ws-fixture-01/ee.db",
+  "dryRun": false,
+  "indexJobsQueued": 1,
+  "indexRequiredAction": null,
+  "ledgerId": "ledger-fixture-01",
+  "schema": "ee.import.cass.v1",
+  "sessions": [
+    {
+      "indexJobId": "idx-job-aaa",
+      "messageCount": 42,
+      "missingMetadata": [],
+      "sessionId": "session-aaa",
+      "sourcePath": "cass-fixture-source/session-aaa",
+      "spansImported": 7,
+      "status": "imported"
+    },
+    {
+      "indexJobId": null,
+      "messageCount": 9,
+      "missingMetadata": [
+        "session_id_hint"
+      ],
+      "sessionId": "session-bbb",
+      "sourcePath": "cass-fixture-source/session-bbb",
+      "spansImported": 0,
+      "status": "skipped"
+    }
+  ],
+  "sessionsDiscovered": 2,
+  "sessionsImported": 1,
+  "sessionsSkipped": 1,
+  "since": null,
+  "sourceId": "cass-fixture-source",
+  "spansImported": 7,
+  "status": "ok",
+  "workspacePath": "ws-fixture-01"
+}
