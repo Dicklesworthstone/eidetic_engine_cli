@@ -13,7 +13,7 @@ data:
       severity: warning
       message: Selected workspace has no .ee state at tests/fixtures.
       errorCode: EE-E004
-      repair: ee --workspace . <command>
+      repair: ee --workspace . --help
     - name: database
       severity: warning
       message: Database file not found at tests/fixtures/.ee/ee.db.

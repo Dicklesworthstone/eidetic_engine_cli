@@ -3919,7 +3919,7 @@ fn memory_drift_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefReco
         evidence: evidence.into_iter().collect(),
         suggested_commands: vec![
             default_source_repair(SwarmBriefSourceKind::MemoryDrift).to_string(),
-            "ee why --help".to_string(),
+            "ee why <memory-id> --json".to_string(),
         ],
         must_not_do: vec![
             "Do not rely on stale memory provenance without revalidation.".to_string(),

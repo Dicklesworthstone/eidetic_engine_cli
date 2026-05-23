@@ -2965,7 +2965,7 @@ fn load_learning_snapshot(workspace: &Path) -> Result<LearningSnapshot, DomainEr
         .list_learning_observations(&workspace_id, None)
         .map_err(|error| DomainError::Storage {
             message: format!("Failed to list learning observations: {error}"),
-            repair: Some("ee learn observe --help".to_string()),
+            repair: Some("ee learn observe <experiment-id> --json".to_string()),
         })?;
     let curation_candidates = connection
         .list_curation_candidates(&workspace_id, None, None, None)
