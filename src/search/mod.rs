@@ -646,6 +646,16 @@ fn redact_search_projection_absolute_path_like_segments(input: &str) -> String {
         "/run/",
         "/var/lib/docker/",
         "/var/lib/kubelet/",
+        "/var/log/",
+        "/var/tmp/",
+        "/proc/",
+        "/sys/",
+        "/dev/",
+        "/etc/ssh/",
+        "/etc/kubernetes/",
+        "/etc/ssl/",
+        "/etc/letsencrypt/",
+        "/etc/secrets/",
         "/mnt/",
         "/media/",
         "/app/",
@@ -3602,6 +3612,35 @@ mod tests {
             assert!(
                 !redacted.contains(leaked),
                 "search projection redaction leaked runtime or ssh path {leaked}: {redacted}"
+            );
+        }
+    }
+
+    #[test]
+    fn search_projection_redacts_proc_sys_dev_and_secret_config_roots() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"proc=/proc/self/environ sys=/sys/kernel/security dev=/dev/shm/agent.sock log=/var/log/agent/secrets.log vartmp=/var/tmp/ee/session.json etcssh=/etc/ssh/ssh_host_ed25519_key kube=/etc/kubernetes/admin.conf ssl=/etc/ssl/private/server.key le=/etc/letsencrypt/live/example/privkey.pem secrets=/etc/secrets/token next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"proc=[REDACTED_PATH] sys=[REDACTED_PATH] dev=[REDACTED_PATH] log=[REDACTED_PATH] vartmp=[REDACTED_PATH] etcssh=[REDACTED_PATH] kube=[REDACTED_PATH] ssl=[REDACTED_PATH] le=[REDACTED_PATH] secrets=[REDACTED_PATH] next=done"#
+        );
+        for leaked in [
+            "/proc/self/environ",
+            "/sys/kernel/security",
+            "/dev/shm/agent.sock",
+            "/var/log/agent",
+            "/var/tmp/ee",
+            "/etc/ssh/ssh_host_ed25519_key",
+            "/etc/kubernetes/admin.conf",
+            "/etc/ssl/private",
+            "/etc/letsencrypt/live",
+            "/etc/secrets/token",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked OS or secret config root {leaked}: {redacted}"
             );
         }
     }
