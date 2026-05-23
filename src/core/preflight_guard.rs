@@ -3039,9 +3039,11 @@ action = "explode"
 
         for command in [
             "env -S 'cargo test --lib preflight_guard'",
+            "env -Scargo test --lib preflight_guard",
             "env --split-string='cargo check --all-targets'",
             "env -i --split-string 'cargo clippy --all-targets -- -D warnings'",
             "sudo /usr/bin/env -S 'CARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run'",
+            "sudo /usr/bin/env -SCARGO_TARGET_DIR=/tmp/cargo_target cargo test --workspace --no-run",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(
