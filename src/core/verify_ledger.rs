@@ -556,7 +556,7 @@ pub fn summarize_rch_verify_ledger_status_for_workspace(
     }
     let Ok(connection) = DbConnection::open_file(&database_path) else {
         return RchVerifyLedgerStatusReport::unavailable(
-            "unreadable",
+            "unavailable",
             "ee doctor --json",
             "RCH verifier ledger database could not be opened.",
         );
@@ -587,7 +587,7 @@ pub fn summarize_rch_verify_ledger_status_with_connection(
     summarize_rch_verify_ledger_status(connection, &workspace_id, now_rfc3339).unwrap_or_else(
         |_| {
             RchVerifyLedgerStatusReport::unavailable(
-                "query_failed",
+                "unavailable",
                 "ee verify rch blockers --workspace . --json",
                 "RCH verifier ledger could not query active blockers.",
             )

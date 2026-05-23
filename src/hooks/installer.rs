@@ -3,6 +3,7 @@
 //! Provides safe installation of ee hooks into agent harness hook directories.
 //! Supports dry-run mode, idempotent re-installation, and preservation of existing hooks.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -263,7 +264,32 @@ fn read_existing_hook_content(path: &Path) -> Result<String, ExistingHookStatus>
         }
     }
 
-    std::fs::read_to_string(path).map_err(|_| ExistingHookStatus::Unreadable)
+    read_limited_utf8_file(path, HOOK_CONTENT_INSPECT_LIMIT)
+        .map_err(|_| ExistingHookStatus::Unreadable)
+}
+
+fn read_limited_utf8_file(path: &Path, limit: usize) -> std::io::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut limited = file.take(limit.saturating_add(1) as u64);
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    limited.read_to_end(&mut bytes)?;
+
+    if bytes.len() > limit {
+        bytes.truncate(limit);
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            if error.error_len().is_none() {
+                bytes.truncate(error.valid_up_to());
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error.to_string(),
+                ));
+            }
+        }
+    }
+
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
 }
 
 /// Get the status of an existing hook.
@@ -1193,12 +1219,7 @@ fn read_bounded_hook_content(path: &Path, existing: ExistingHookStatus) -> Optio
     ) {
         return None;
     }
-    let content = read_existing_hook_content(path).ok()?;
-    if content.len() <= HOOK_CONTENT_INSPECT_LIMIT {
-        Some(content)
-    } else {
-        Some(content.chars().take(HOOK_CONTENT_INSPECT_LIMIT).collect())
-    }
+    read_existing_hook_content(path).ok()
 }
 
 fn read_plain_bounded_file(path: &Path) -> Option<String> {
@@ -1210,12 +1231,7 @@ fn read_plain_bounded_file(path: &Path) -> Option<String> {
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return None;
     }
-    let content = std::fs::read_to_string(path).ok()?;
-    if content.len() <= HOOK_CONTENT_INSPECT_LIMIT {
-        Some(content)
-    } else {
-        Some(content.chars().take(HOOK_CONTENT_INSPECT_LIMIT).collect())
-    }
+    read_limited_utf8_file(path, HOOK_CONTENT_INSPECT_LIMIT).ok()
 }
 
 fn hook_chain_targets(hook_dir: &Path, hook_name: &str, content: Option<&str>) -> Vec<String> {
@@ -1983,6 +1999,44 @@ mod tests {
             content.contains(EE_HOOK_MARKER),
             "should overwrite with force"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_hook_reader_caps_oversized_managed_hooks() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_path = temp.path().join("pre-commit");
+        let oversized = format!(
+            "{EE_HOOK_MARKER}\n{}",
+            "x".repeat(HOOK_CONTENT_INSPECT_LIMIT + 128)
+        );
+        fs::write(&hook_path, oversized).map_err(|e| e.to_string())?;
+
+        assert_eq!(
+            check_existing_hook(&hook_path),
+            ExistingHookStatus::ManagedByEe
+        );
+        let content = read_bounded_hook_content(&hook_path, ExistingHookStatus::ManagedByEe)
+            .ok_or_else(|| "expected bounded managed hook content".to_owned())?;
+
+        assert_eq!(content.len(), HOOK_CONTENT_INSPECT_LIMIT);
+        assert!(content.starts_with(EE_HOOK_MARKER));
+        Ok(())
+    }
+
+    #[test]
+    fn plain_bounded_reader_caps_before_utf8_decoding() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let path = temp.path().join("pre-commit.orig");
+        let mut bytes = vec![b'a'; HOOK_CONTENT_INSPECT_LIMIT - 1];
+        bytes.extend_from_slice(&[0xc3, 0xa9]);
+        fs::write(&path, bytes).map_err(|e| e.to_string())?;
+
+        let content = read_plain_bounded_file(&path)
+            .ok_or_else(|| "expected bounded plain hook content".to_owned())?;
+
+        assert_eq!(content.len(), HOOK_CONTENT_INSPECT_LIMIT - 1);
+        assert!(content.bytes().all(|byte| byte == b'a'));
         Ok(())
     }
 

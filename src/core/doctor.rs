@@ -40,7 +40,7 @@ use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
 use super::status::{
     FlightRecorderStatusReport, default_workspace_path, gather_flight_recorder_status,
-    gather_rch_worker_pressure, probe_cass_capability,
+    gather_rch_verify_ledger_status, gather_rch_worker_pressure, probe_cass_capability,
 };
 use super::swarm_brief::RchWorkerPressureReport;
 use super::tailscale_probe::{
@@ -49,6 +49,7 @@ use super::tailscale_probe::{
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
 use super::verify::{VerificationPostureReport, gather_verification_posture};
+use super::verify_ledger::RchVerifyLedgerStatusReport;
 
 pub const DEPENDENCY_DIAGNOSTICS_SCHEMA_V1: &str = "ee.diag.dependencies.v1";
 pub const FRANKEN_HEALTH_SCHEMA_V1: &str = "ee.doctor.franken_health.v1";
@@ -237,6 +238,8 @@ pub struct DoctorReport {
     pub rch_worker_pressure: RchWorkerPressureReport,
     /// Redaction-safe verification evidence reuse posture.
     pub verification_posture: VerificationPostureReport,
+    /// Redaction-safe durable RCH verifier blocker posture.
+    pub verification_ledger: RchVerifyLedgerStatusReport,
     /// Redaction-safe host calibration posture and budget-delta guidance.
     pub host_calibration: Option<HostCalibrationPostureReport>,
     /// Redaction-safe command flight-recorder posture.
@@ -263,6 +266,7 @@ impl DoctorReport {
         let qos_posture = gather_qos_posture(workspace_path);
         let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
         let verification_posture = gather_verification_posture(workspace_path);
+        let verification_ledger = gather_rch_verify_ledger_status(workspace_path);
         let host_calibration = gather_host_calibration_status(workspace_path);
         let flight_recorder = gather_flight_recorder_status(workspace_path);
         let checks = vec![
@@ -273,6 +277,7 @@ impl DoctorReport {
             check_flight_recorder(&flight_recorder),
             check_search_index(workspace_path),
             check_rch_worker_pressure(&rch_worker_pressure),
+            check_rch_verify_ledger(&verification_ledger),
             check_cass(),
         ];
 
@@ -292,6 +297,7 @@ impl DoctorReport {
             qos_posture,
             rch_worker_pressure,
             verification_posture,
+            verification_ledger,
             host_calibration,
             flight_recorder,
             checks,
@@ -2773,6 +2779,39 @@ fn check_rch_worker_pressure(report: &RchWorkerPressureReport) -> CheckResult {
     }
 }
 
+fn check_rch_verify_ledger(report: &RchVerifyLedgerStatusReport) -> CheckResult {
+    match report.status {
+        "active_blockers" => CheckResult {
+            name: "verification_ledger",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH verifier ledger has {} active blocker(s); local fallback refused: {}.",
+                report.active_blocker_count, report.local_fallback_refused
+            ),
+            error_code: None,
+            repair: Some("ee verify rch blockers --workspace . --json"),
+        },
+        "clear" => CheckResult::ok(
+            "verification_ledger",
+            "RCH verifier ledger has no active blockers.",
+        ),
+        "not_initialized" | "not_inspected" => CheckResult::ok(
+            "verification_ledger",
+            "RCH verifier ledger is not initialized for this workspace.",
+        ),
+        _ => CheckResult {
+            name: "verification_ledger",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "RCH verifier ledger could not be inspected (status: {}).",
+                report.status
+            ),
+            error_code: None,
+            repair: Some("ee doctor --workspace . --json"),
+        },
+    }
+}
+
 fn count_status(entries: &[DependencyContractEntry], status: &str) -> usize {
     entries
         .iter()
@@ -3527,6 +3566,7 @@ mod tests {
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             verification_posture: VerificationPostureReport::not_inspected(),
+            verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -3553,6 +3593,7 @@ mod tests {
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             verification_posture: VerificationPostureReport::not_inspected(),
+            verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -3594,6 +3635,7 @@ mod tests {
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             verification_posture: VerificationPostureReport::not_inspected(),
+            verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",
@@ -4176,6 +4218,7 @@ mod tests {
             qos_posture: super::gather_qos_posture(None),
             rch_worker_pressure: RchWorkerPressureReport::pressure_unknown(),
             verification_posture: VerificationPostureReport::not_inspected(),
+            verification_ledger: RchVerifyLedgerStatusReport::not_inspected(),
             host_calibration: None,
             flight_recorder: FlightRecorderStatusReport::disabled(PathBuf::from(
                 "obs/flight_recorder",

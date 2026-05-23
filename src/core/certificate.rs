@@ -132,6 +132,12 @@ thread_local! {
     /// code paths leave the override unset and observe wall-clock time as
     /// before.
     static VERIFY_CLOCK_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+
+    /// Test-only override for [`SignReport::signed_at`] (bd-262ho).
+    ///
+    /// Production signing continues to record wall-clock time; deterministic
+    /// tests and golden generation can scope this override around signing.
+    static SIGN_CLOCK_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Return the `checked_at` timestamp for certificate verify reports.
@@ -177,6 +183,40 @@ where
     }
 
     let previous = VERIFY_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(timestamp.to_owned())));
+    let _guard = Guard { previous };
+    f()
+}
+
+/// Return the `signed_at` timestamp for certificate sign reports.
+fn current_sign_timestamp() -> String {
+    SIGN_CLOCK_OVERRIDE
+        .with(|cell| cell.borrow().clone())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339())
+}
+
+/// Run `f` with a deterministic `signed_at` timestamp for certificate sign
+/// reports (bd-262ho).
+///
+/// Intended for tests and deterministic fixture generation. Production code
+/// paths must not call this; the CLI sign surface keeps wall-clock `signedAt`
+/// as declared volatile metadata.
+pub fn with_sign_clock_override<F, R>(timestamp: &str, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    struct Guard {
+        previous: Option<String>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let previous = self.previous.take();
+            SIGN_CLOCK_OVERRIDE.with(|cell| {
+                *cell.borrow_mut() = previous;
+            });
+        }
+    }
+
+    let previous = SIGN_CLOCK_OVERRIDE.with(|cell| cell.replace(Some(timestamp.to_owned())));
     let _guard = Guard { previous };
     f()
 }
@@ -1967,7 +2007,7 @@ impl SignReport {
             algorithm: String::new(),
             signer: String::new(),
             payload_hash: String::new(),
-            signed_at: chrono::Utc::now().to_rfc3339(),
+            signed_at: current_sign_timestamp(),
             success: false,
             message: message.into(),
         }
@@ -2393,7 +2433,7 @@ pub fn sign_certificate(options: &SignOptions) -> SignReport {
         algorithm: ED25519_ALGORITHM_V1.to_owned(),
         signer,
         payload_hash: payload_hash.to_owned(),
-        signed_at: chrono::Utc::now().to_rfc3339(),
+        signed_at: current_sign_timestamp(),
         success: true,
         message: "Certificate signed successfully".to_owned(),
     }
@@ -2630,6 +2670,92 @@ mod tests {
             !outer.checked_at.is_empty(),
             "outer must fall back to a real timestamp",
         )
+    }
+
+    #[test]
+    fn sign_clock_override_pins_signed_at_for_error_and_success() -> TestResult {
+        const FIXED: &str = "2026-02-01T00:00:00+00:00";
+        let error =
+            with_sign_clock_override(FIXED, || SignReport::error("cert_sign_error", "boom"));
+        ensure_equal(&error.signed_at, &FIXED.to_owned(), "error signed_at")?;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let key_path = dir.path().join("test_workspace.ed25519");
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&rng)
+            .map_err(|error| error.to_string())?;
+        fs::write(&key_path, pkcs8.as_ref()).map_err(|error| error.to_string())?;
+
+        let payload_hash = blake3::hash(b"signed payload").to_hex().to_string();
+        let manifest = serde_json::json!({
+            "schema": CERTIFICATE_MANIFEST_SCHEMA_V1,
+            "certificates": [
+                {
+                    "id": "cert_sign_success",
+                    "kind": "pack",
+                    "status": "valid",
+                    "workspaceId": "workspace_main",
+                    "issuedAt": "2026-05-01T00:00:00Z",
+                    "expiresAt": "2999-01-01T00:00:00Z",
+                    "payloadHash": payload_hash,
+                    "payloadSchema": CERTIFICATE_PAYLOAD_SCHEMA_V1,
+                    "assumptions": [{"valid": true}]
+                }
+            ]
+        });
+        let manifest_path = dir.path().join("certificates.json");
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())?;
+
+        let report = with_sign_clock_override(FIXED, || {
+            sign_certificate(&SignOptions {
+                certificate_id: "cert_sign_success".to_owned(),
+                manifest_path: Some(manifest_path),
+                key_path: Some(key_path),
+                workspace_path: None,
+            })
+        });
+
+        ensure(
+            report.success,
+            format!("sign should succeed: {}", report.message),
+        )?;
+        ensure_equal(&report.signed_at, &FIXED.to_owned(), "success signed_at")
+    }
+
+    #[test]
+    fn sign_clock_override_restores_previous_state_after_scope() -> TestResult {
+        const OUTER: &str = "2026-02-01T00:00:00+00:00";
+        const INNER: &str = "2026-02-02T00:00:00+00:00";
+
+        with_sign_clock_override(OUTER, || -> TestResult {
+            let outer_before = SignReport::error("cert_outer_before", "outer");
+            ensure_equal(
+                &outer_before.signed_at,
+                &OUTER.to_owned(),
+                "outer before nested scope",
+            )?;
+
+            with_sign_clock_override(INNER, || -> TestResult {
+                let inner = SignReport::error("cert_inner", "inner");
+                ensure_equal(&inner.signed_at, &INNER.to_owned(), "inner scope")
+            })?;
+
+            let outer_after = SignReport::error("cert_outer_after", "outer");
+            ensure_equal(
+                &outer_after.signed_at,
+                &OUTER.to_owned(),
+                "outer restored after nested scope",
+            )
+        })?;
+
+        let after = SignReport::error("cert_after", "after");
+        ensure(
+            after.signed_at != OUTER && after.signed_at != INNER,
+            "override must be cleared after scope",
+        )?;
+        ensure(!after.signed_at.is_empty(), "after scope timestamp")
     }
 
     #[test]

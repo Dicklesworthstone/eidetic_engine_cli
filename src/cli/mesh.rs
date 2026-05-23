@@ -2023,14 +2023,11 @@ where
         run_mesh_sync_supervisor(&snapshot, &supervisor_options).unwrap_or_else(|message| {
             MeshSyncSupervisorReport::runtime_error(&snapshot, &supervisor_options, &message)
         });
-    let mut degraded = snapshot.degraded.clone();
-    degraded.extend(supervisor.degraded.clone());
-    if !degraded
-        .iter()
-        .any(|item| item.code == MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE)
-    {
-        degraded.push(MeshCliDegradation::sync_once_network_deferred());
-    }
+    let degraded = mesh_sync_cli_degradations(
+        &snapshot.degraded,
+        &supervisor.degraded,
+        supervisor.contacted_peers,
+    );
     let report = MeshCliSyncReport {
         schema: MESH_CLI_SYNC_SCHEMA_V1,
         command: "mesh sync",
@@ -2049,6 +2046,23 @@ where
         degraded,
     };
     write_mesh_report(cli, &report, &render_mesh_sync_human(&report), stdout)
+}
+
+fn mesh_sync_cli_degradations(
+    snapshot_degraded: &[MeshCliDegradation],
+    supervisor_degraded: &[MeshCliDegradation],
+    contacted_peers: bool,
+) -> Vec<MeshCliDegradation> {
+    let mut degraded = snapshot_degraded.to_vec();
+    degraded.extend_from_slice(supervisor_degraded);
+    if !contacted_peers
+        && !degraded
+            .iter()
+            .any(|item| item.code == MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE)
+    {
+        degraded.push(MeshCliDegradation::sync_once_network_deferred());
+    }
+    degraded
 }
 
 fn run_mesh_sync_supervisor(
@@ -3757,6 +3771,35 @@ mod tests {
             MeshCommandMode::Cache
         );
         assert!(parse_env_mesh_mode(EnvVar::MeshMode, "online").is_err());
+    }
+
+    #[test]
+    fn mesh_sync_cli_degradations_do_not_add_deferred_after_peer_contact() {
+        let degraded = mesh_sync_cli_degradations(&[], &[], true);
+
+        assert!(
+            degraded
+                .iter()
+                .all(|item| item.code != MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE),
+            "contacted supervisor reports must not be overwritten with deferred fallback"
+        );
+    }
+
+    #[test]
+    fn mesh_sync_cli_degradations_add_deferred_when_no_peer_contact_happened() {
+        let degraded = mesh_sync_cli_degradations(&[], &[], false);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE);
+    }
+
+    #[test]
+    fn mesh_sync_cli_degradations_do_not_duplicate_supervisor_deferred_code() {
+        let supervisor_degraded = vec![MeshCliDegradation::sync_once_network_deferred()];
+        let degraded = mesh_sync_cli_degradations(&[], &supervisor_degraded, false);
+
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE);
     }
 
     #[test]

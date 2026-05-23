@@ -73,9 +73,7 @@ use super::tailscale_probe::{
     probe_tailscale_local_with_runners, tailscale_probe_timeout_ms_from_env_value,
 };
 use super::verify::{VerificationPostureReport, gather_verification_posture_with_connection};
-use super::verify_ledger::{
-    RchVerifyLedgerStatusReport, summarize_rch_verify_ledger_status,
-};
+use super::verify_ledger::{RchVerifyLedgerStatusReport, summarize_rch_verify_ledger_status};
 use super::{build_info, runtime_status};
 
 const GRAPH_SNAPSHOT_ASSET_NAME: &str = "graph_snapshot_artifact";

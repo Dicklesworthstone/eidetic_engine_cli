@@ -14,9 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::db::{
     MeshStorageStatus, StoredMeshImportLedgerEvent, StoredMeshPeer, StoredMeshPeerCursor,
 };
+use crate::mesh::anti_entropy_protocol::{
+    MeshAntiEntropyRetryPolicy, MeshRoundPeerOutcome, MeshSyncSummaryInput, build_sync_summary,
+};
 use crate::mesh::identity_change_guard::{
     AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
 };
+use crate::mesh::peer::{MESH_PEER_RECORD_SCHEMA_V1, MeshPeerRecord};
 use crate::mesh::repair_action_graph::{
     ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
     RepairAction, RepairActionGraph, build_repair_action_graph,
@@ -91,9 +95,9 @@ impl MeshCliDegradation {
         Self {
             code: MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE,
             severity: "info",
-            message: "Foreground sync --once did not contact peers because SRR6.7 anti-entropy transport is not implemented yet."
+            message: "Foreground sync --once did not contact peers because no usable foreground peer transport path was available."
                 .to_owned(),
-            repair: "Use `ee mesh export --out mesh-export.json` and `ee mesh import --file mesh-export.json` for local file exchange until peer sync lands."
+            repair: "Use `ee mesh export --out mesh-export.json` and `ee mesh import --file mesh-export.json` for local file exchange, or configure an enrolled peer transport before retrying sync."
                 .to_owned(),
         }
     }
@@ -597,10 +601,58 @@ impl MeshSyncSupervisorReport {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct MeshForegroundSyncRequest<'a> {
+    pub snapshot: &'a MeshForegroundSnapshot,
+    pub options: &'a MeshSyncSupervisorOptions,
+    pub peer: &'a MeshPeerRow,
+    pub peer_record: &'a MeshPeerRecord,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MeshForegroundSyncPeerOutcome {
+    pub contacted: bool,
+    pub events_accepted: u64,
+    pub events_duplicate: u64,
+    pub events_forked: u64,
+    pub ranges_requested: u64,
+    pub ranges_fulfilled: u64,
+    pub imported_event_count: u32,
+}
+
+pub trait MeshForegroundSyncTransport {
+    fn contact_peer(
+        &mut self,
+        request: MeshForegroundSyncRequest<'_>,
+    ) -> MeshForegroundSyncPeerOutcome;
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopMeshForegroundSyncTransport;
+
+impl MeshForegroundSyncTransport for NoopMeshForegroundSyncTransport {
+    fn contact_peer(
+        &mut self,
+        _request: MeshForegroundSyncRequest<'_>,
+    ) -> MeshForegroundSyncPeerOutcome {
+        MeshForegroundSyncPeerOutcome::default()
+    }
+}
+
 pub async fn run_mesh_sync_supervisor_supervised(
     cx: &Cx,
     snapshot: &MeshForegroundSnapshot,
     options: &MeshSyncSupervisorOptions,
+) -> Outcome<MeshSyncSupervisorReport, String> {
+    let mut transport = NoopMeshForegroundSyncTransport;
+    run_mesh_sync_supervisor_supervised_with_transport(cx, snapshot, options, &mut transport).await
+}
+
+pub async fn run_mesh_sync_supervisor_supervised_with_transport(
+    cx: &Cx,
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+    transport: &mut impl MeshForegroundSyncTransport,
 ) -> Outcome<MeshSyncSupervisorReport, String> {
     if let Err(message) = validate_mesh_sync_supervisor_options(options) {
         return Outcome::Err(message);
@@ -623,18 +675,21 @@ pub async fn run_mesh_sync_supervisor_supervised(
         }
     };
     let mut ticks = Vec::with_capacity(tick_capacity);
+    let mut contacted_peers = false;
 
     for tick in 1..=options.tick_limit {
         if let Some(cancelled) = mesh_sync_checkpoint(cx) {
             return cancelled;
         }
+        let round = run_mesh_sync_transport_round(snapshot, options, &budget, transport);
+        contacted_peers |= round.contacted_peers;
         ticks.push(MeshSyncSupervisorTickReport {
             tick,
-            health: supervisor_health(&budget, &backpressure).to_owned(),
-            contacted_peers: false,
-            anti_entropy_summary_count: snapshot.cursors.len(),
+            health: supervisor_health(&budget, &backpressure, contacted_peers).to_owned(),
+            contacted_peers: round.contacted_peers,
+            anti_entropy_summary_count: round.anti_entropy_summary_count,
             replay_path: "mesh_import_replay".to_owned(),
-            imported_event_count: snapshot.storage.imported_event_count,
+            imported_event_count: round.imported_event_count,
             degraded: degraded.clone(),
         });
 
@@ -647,26 +702,136 @@ pub async fn run_mesh_sync_supervisor_supervised(
         }
     }
 
-    if snapshot.mesh_enabled {
+    if snapshot.mesh_enabled && !contacted_peers {
         degraded.push(MeshCliDegradation::sync_once_network_deferred());
     }
 
     Outcome::Ok(MeshSyncSupervisorReport {
         schema: MESH_SYNC_SUPERVISOR_SCHEMA_V1,
         supervisor: "asupersync_foreground",
-        health: supervisor_health(&budget, &backpressure).to_owned(),
+        health: supervisor_health(&budget, &backpressure, contacted_peers).to_owned(),
         mode: snapshot.mode.clone(),
         daemonized: false,
         config: options.config(),
         peer_count,
         active_peer_count,
-        contacted_peers: false,
+        contacted_peers,
         local_commands_blocked: false,
         budget,
         backpressure,
         ticks,
         degraded,
     })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MeshForegroundSyncRound {
+    contacted_peers: bool,
+    anti_entropy_summary_count: usize,
+    imported_event_count: u32,
+}
+
+impl MeshForegroundSyncRound {
+    fn deferred(snapshot: &MeshForegroundSnapshot) -> Self {
+        Self {
+            contacted_peers: false,
+            anti_entropy_summary_count: snapshot.cursors.len(),
+            imported_event_count: snapshot.storage.imported_event_count,
+        }
+    }
+}
+
+fn run_mesh_sync_transport_round(
+    snapshot: &MeshForegroundSnapshot,
+    options: &MeshSyncSupervisorOptions,
+    budget: &MeshSyncBudgetStatus,
+    transport: &mut impl MeshForegroundSyncTransport,
+) -> MeshForegroundSyncRound {
+    if !snapshot.mesh_enabled || budget.exhausted {
+        return MeshForegroundSyncRound::deferred(snapshot);
+    }
+
+    let peer_limit = usize::try_from(options.peer_concurrency).unwrap_or(usize::MAX);
+    if peer_limit == 0 {
+        return MeshForegroundSyncRound::deferred(snapshot);
+    }
+
+    let mut eligible_peers = snapshot
+        .peers
+        .iter()
+        .filter_map(|peer| {
+            if !peer.enabled {
+                return None;
+            }
+            let peer_record = foreground_sync_peer_record(peer)?;
+            if !foreground_sync_peer_allowed(peer, &peer_record) {
+                return None;
+            }
+            Some((peer, peer_record))
+        })
+        .collect::<Vec<_>>();
+    eligible_peers.sort_by(|left, right| left.0.peer_id.cmp(&right.0.peer_id));
+
+    let mut peer_outcomes = Vec::new();
+    let mut imported_event_count = snapshot.storage.imported_event_count;
+    for (peer, peer_record) in eligible_peers.into_iter().take(peer_limit) {
+        let outcome = transport.contact_peer(MeshForegroundSyncRequest {
+            snapshot,
+            options,
+            peer,
+            peer_record: &peer_record,
+        });
+        if !outcome.contacted {
+            continue;
+        }
+        imported_event_count = imported_event_count.saturating_add(outcome.imported_event_count);
+        let mut peer_outcome = MeshRoundPeerOutcome::new(&peer.peer_id);
+        peer_outcome.events_accepted = outcome.events_accepted;
+        peer_outcome.events_duplicate = outcome.events_duplicate;
+        peer_outcome.events_forked = outcome.events_forked;
+        peer_outcome.ranges_requested = outcome.ranges_requested;
+        peer_outcome.ranges_fulfilled = outcome.ranges_fulfilled;
+        peer_outcomes.push(peer_outcome);
+    }
+
+    let summary = build_sync_summary(MeshSyncSummaryInput {
+        last_round_completed_at: None,
+        origins_tracked: snapshot.cursors.len(),
+        peer_outcomes,
+        retry_policy: MeshAntiEntropyRetryPolicy::default(),
+        current_attempts: 0,
+        next_retry_after: None,
+        blocked_ranges: Vec::new(),
+        degraded: Vec::new(),
+    });
+
+    let contacted_peers = summary.peer_count > 0;
+    MeshForegroundSyncRound {
+        contacted_peers,
+        anti_entropy_summary_count: if contacted_peers {
+            summary.peer_count
+        } else {
+            snapshot.cursors.len()
+        },
+        imported_event_count,
+    }
+}
+
+fn foreground_sync_peer_record(peer: &MeshPeerRow) -> Option<MeshPeerRecord> {
+    let policy_summary_json = peer.policy_summary_json.as_deref()?;
+    let value = serde_json::from_str::<serde_json::Value>(policy_summary_json).ok()?;
+    if value.get("schema").and_then(serde_json::Value::as_str) != Some(MESH_PEER_RECORD_SCHEMA_V1) {
+        return None;
+    }
+    serde_json::from_value(value).ok()
+}
+
+fn foreground_sync_peer_allowed(peer: &MeshPeerRow, record: &MeshPeerRecord) -> bool {
+    peer.peer_id == record.peer_id
+        && record.is_trusted()
+        && !record.endpoint.endpoint.trim().is_empty()
+        && record.capabilities.may_send.metadata
+        && record.capabilities.may_receive.metadata
 }
 
 fn validate_mesh_sync_supervisor_options(
@@ -789,11 +954,14 @@ fn mesh_sync_supervisor_degradations(
 fn supervisor_health(
     budget: &MeshSyncBudgetStatus,
     backpressure: &MeshSyncBackpressureStatus,
+    contacted_peers: bool,
 ) -> &'static str {
     if budget.exhausted {
         "budget_exhausted"
     } else if backpressure.backpressured {
         "backpressured"
+    } else if contacted_peers {
+        "synced"
     } else {
         "deferred"
     }
@@ -1713,11 +1881,17 @@ pub fn foreground_degradations(
 mod tests {
     use super::{
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
-        MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE, MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE,
-        MESH_WORKSPACE_UNINITIALIZED_CODE, MeshAutoStatusSignals, MeshCliDegradation,
-        MeshForegroundSnapshot, MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions,
-        REPAIR_ACTION_GRAPH_SCHEMA_V1, auto_enrollment_status_for_snapshot,
-        run_mesh_sync_supervisor_supervised,
+        MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
+        MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
+        MeshAutoStatusSignals, MeshCliDegradation, MeshForegroundSnapshot,
+        MeshForegroundSyncPeerOutcome, MeshForegroundSyncRequest, MeshForegroundSyncTransport,
+        MeshPeerRow, MeshStorageCounts, MeshSyncSupervisorOptions, REPAIR_ACTION_GRAPH_SCHEMA_V1,
+        auto_enrollment_status_for_snapshot, run_mesh_sync_supervisor_supervised,
+        run_mesh_sync_supervisor_supervised_with_transport,
+    };
+    use crate::mesh::peer::{
+        MESH_PEER_RECORD_SCHEMA_V1, MeshPeerCapabilities, MeshPeerCapabilityProfile,
+        MeshPeerEndpoint, MeshPeerHandshake, MeshPeerKey, MeshPeerRecord, MeshPeerState,
     };
     use asupersync::runtime::JoinError;
     use asupersync::{Budget, CancelReason, Cx, LabConfig, LabRuntime, Outcome};
@@ -1878,6 +2052,18 @@ mod tests {
 
         assert!(degraded.repair.contains("mesh-export.json"));
         assert!(
+            degraded
+                .message
+                .contains("no usable foreground peer transport path"),
+            "deferred sync diagnostic should name the current transport blocker: {}",
+            degraded.message
+        );
+        assert!(
+            !degraded.message.contains("not implemented"),
+            "deferred sync diagnostic must not claim closed protocol primitives are missing: {}",
+            degraded.message
+        );
+        assert!(
             !degraded.repair.contains('<') && !degraded.repair.contains('>'),
             "repair hint must not expose an unresolved metavariable: {}",
             degraded.repair
@@ -2002,6 +2188,51 @@ mod tests {
     }
 
     #[test]
+    fn sync_supervisor_no_transport_emits_deferred_without_peer_contact() -> TestResult {
+        let snapshot = sample_snapshot(vec![sample_peer("peer-a", true)]);
+
+        let report = run_supervisor_in_lab(snapshot, MeshSyncSupervisorOptions::default(), 612)?;
+
+        assert_eq!(report.health, "deferred");
+        assert!(!report.contacted_peers);
+        assert!(!report.ticks[0].contacted_peers);
+        assert!(
+            report
+                .degraded
+                .iter()
+                .any(|item| item.code == MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_supervisor_fake_transport_contacts_peer_without_deferred() -> TestResult {
+        let snapshot = sample_snapshot(vec![sample_trusted_sync_peer("peer-b")]);
+        let transport = FakeForegroundSyncTransport;
+
+        let report = run_supervisor_in_lab_with_transport(
+            snapshot,
+            MeshSyncSupervisorOptions::default(),
+            transport,
+            613,
+        )?;
+
+        assert_eq!(report.health, "synced");
+        assert!(report.contacted_peers);
+        assert!(report.ticks[0].contacted_peers);
+        assert_eq!(report.ticks[0].anti_entropy_summary_count, 1);
+        assert_eq!(report.ticks[0].imported_event_count, 4);
+        assert!(
+            report
+                .degraded
+                .iter()
+                .all(|item| item.code != MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE),
+            "successful fake transport contact should not retain deferred fallback"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn sync_supervisor_observes_lab_runtime_cancellation() -> TestResult {
         let mut lab = LabRuntime::new(LabConfig::new(612));
         let root = lab.state.create_root_region(Budget::INFINITE);
@@ -2074,6 +2305,23 @@ mod tests {
         options: MeshSyncSupervisorOptions,
         seed: u64,
     ) -> Result<super::MeshSyncSupervisorReport, String> {
+        run_supervisor_in_lab_with_transport(
+            snapshot,
+            options,
+            super::NoopMeshForegroundSyncTransport,
+            seed,
+        )
+    }
+
+    fn run_supervisor_in_lab_with_transport<T>(
+        snapshot: MeshForegroundSnapshot,
+        options: MeshSyncSupervisorOptions,
+        mut transport: T,
+        seed: u64,
+    ) -> Result<super::MeshSyncSupervisorReport, String>
+    where
+        T: MeshForegroundSyncTransport + 'static,
+    {
         let mut lab = LabRuntime::new(LabConfig::new(seed));
         let root = lab.state.create_root_region(Budget::INFINITE);
         let (task_id, mut handle) = lab
@@ -2082,7 +2330,13 @@ mod tests {
                 let Some(cx) = Cx::current() else {
                     return Outcome::Err("LabRuntime task should install Cx".to_owned());
                 };
-                run_mesh_sync_supervisor_supervised(&cx, &snapshot, &options).await
+                run_mesh_sync_supervisor_supervised_with_transport(
+                    &cx,
+                    &snapshot,
+                    &options,
+                    &mut transport,
+                )
+                .await
             })
             .map_err(|error| error.to_string())?;
         lab.scheduler.lock().schedule(task_id, 0);
@@ -2095,6 +2349,30 @@ mod tests {
         {
             Outcome::Ok(report) => Ok(report),
             other => Err(format!("mesh supervisor lab outcome was not ok: {other:?}")),
+        }
+    }
+
+    struct FakeForegroundSyncTransport;
+
+    impl MeshForegroundSyncTransport for FakeForegroundSyncTransport {
+        fn contact_peer(
+            &mut self,
+            request: MeshForegroundSyncRequest<'_>,
+        ) -> MeshForegroundSyncPeerOutcome {
+            assert_eq!(request.peer.peer_id, "peer-b");
+            assert_eq!(request.peer_record.peer_id, "peer-b");
+            assert!(request.peer_record.is_trusted());
+            assert_eq!(request.snapshot.workspace_id, "wsp_test");
+            assert_eq!(request.options.peer_concurrency, 1);
+            MeshForegroundSyncPeerOutcome {
+                contacted: true,
+                events_accepted: 1,
+                events_duplicate: 0,
+                events_forked: 0,
+                ranges_requested: 1,
+                ranges_fulfilled: 1,
+                imported_event_count: 1,
+            }
         }
     }
 
@@ -2131,5 +2409,45 @@ mod tests {
             last_seen_at: "2026-05-20T00:00:00Z".to_owned(),
             policy_summary_json: None,
         }
+    }
+
+    fn sample_trusted_sync_peer(peer_id: &str) -> MeshPeerRow {
+        let mut peer = sample_peer(peer_id, true);
+        let record = MeshPeerRecord {
+            schema: MESH_PEER_RECORD_SCHEMA_V1.to_owned(),
+            peer_id: peer_id.to_owned(),
+            alias: peer_id.to_owned(),
+            workspace_id: "wsp_peer".to_owned(),
+            endpoint: MeshPeerEndpoint {
+                tailscale_node_key: format!("{peer_id}-node"),
+                tailnet_id: "tailnet-test".to_owned(),
+                tailnet_display_name: Some("test tailnet".to_owned()),
+                endpoint: format!("https://{peer_id}.tailnet.test/ee/mesh"),
+                magic_dns_name: Some(format!("{peer_id}.tailnet.test")),
+            },
+            capabilities: MeshPeerCapabilities::from_profile(
+                MeshPeerCapabilityProfile::MetadataOnly,
+            ),
+            handshake: MeshPeerHandshake::granted(
+                "req-test",
+                "1.0",
+                format!("{peer_id}-node"),
+                vec!["mesh:metadata".to_owned()],
+            ),
+            key: MeshPeerKey {
+                generation: 1,
+                public_key_fingerprint: format!("{peer_id}-fingerprint"),
+                created_at: "2026-05-20T00:00:00Z".to_owned(),
+                rotated_at: None,
+                revoked_at: None,
+            },
+            state: MeshPeerState::Active,
+            enrolled_at: "2026-05-20T00:00:00Z".to_owned(),
+            revoked_at: None,
+            trust_established_by: "explicit_human_consent".to_owned(),
+        };
+        peer.policy_summary_json =
+            Some(serde_json::to_string(&record).expect("sample mesh peer record should serialize"));
+        peer
     }
 }

@@ -7159,6 +7159,36 @@ impl DbConnection {
         rows.iter().map(stored_evidence_span_from_row).collect()
     }
 
+    /// List evidence spans for a workspace in deterministic transcript order.
+    pub fn list_evidence_spans_for_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<StoredEvidenceSpan>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT id, workspace_id, session_id, memory_id, cass_span_id, span_kind, start_line, end_line, start_byte, end_byte, role, excerpt, content_hash, metadata_json, created_at, updated_at FROM evidence_spans WHERE workspace_id = ?1 ORDER BY session_id ASC, start_line ASC, end_line ASC, id ASC",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+
+        rows.iter().map(stored_evidence_span_from_row).collect()
+    }
+
+    /// Count evidence spans for a workspace.
+    pub fn count_evidence_spans_for_workspace(&self, workspace_id: &str) -> Result<usize> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT COUNT(*) FROM evidence_spans WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.to_string())],
+        )?;
+        let count = rows.first().map_or(Ok(0_i64), |row| {
+            required_i64(row, 0, DbOperation::Query, "evidence_span_count")
+        })?;
+        usize::try_from(count).map_err(|_| DbError::MalformedRow {
+            operation: DbOperation::Query,
+            message: format!("evidence_span_count {count} must fit usize"),
+        })
+    }
+
     /// List evidence spans linked to a memory in deterministic order.
     pub fn list_evidence_spans_for_memory(
         &self,
@@ -17648,11 +17678,10 @@ impl DbConnection {
                 Value::Text(row.source_state_hash.clone()),
                 optional_text_value(row.dirty_status_hash.as_deref()),
                 Value::Text(row.verification_attribution.clone()),
-                Value::Integer(if row.remote_required { 1 } else { 0 }),
+                Value::Int(if row.remote_required { 1 } else { 0 }),
                 optional_text_value(row.worker_id.as_deref()),
                 Value::Text(row.status.clone()),
-                row.exit_code
-                    .map_or(Value::Null, |code| Value::Integer(i64::from(code))),
+                row.exit_code.map_or(Value::Null, Value::Int),
                 optional_text_value(row.degraded_codes_json.as_deref()),
                 optional_text_value(row.stdout_tail_hash.as_deref()),
                 optional_text_value(row.stderr_tail_hash.as_deref()),
@@ -29594,7 +29623,7 @@ mod tests {
                 Value::Text(format!("cargo check --target-dir /tmp ({command_hash})")),
                 Value::Text(command_hash.to_string()),
                 Value::Text(source_state_hash.to_string()),
-                Value::Integer(if remote_required { 1 } else { 0 }),
+                Value::Int(if remote_required { 1 } else { 0 }),
                 worker,
                 Value::Text(status.to_string()),
                 degraded,

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::path::Path;
 
+use chrono::Utc;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -22,6 +23,8 @@ use crate::core::swarm_brief::{
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
     SwarmBriefThreadSummary, collect_swarm_brief,
 };
+use crate::core::verify_ledger::{RchVerifyRunView, list_rch_verify_blockers};
+use crate::db::DbConnection;
 
 pub const SWARM_NEXT_ACTION_SCHEMA_V1: &str = "ee.swarm_next_action.v1";
 pub const SWARM_NEXT_ACTION_REDACTION_STATUS: &str =
@@ -202,6 +205,10 @@ pub struct SwarmNextActionRecentFirstError {
     pub status: Option<String>,
     pub degraded_codes: Vec<String>,
     #[serde(skip)]
+    pub source_state_hash: Option<String>,
+    #[serde(skip)]
+    pub created_at: Option<String>,
+    #[serde(skip)]
     pub error_codes: Vec<String>,
     #[serde(skip)]
     pub remote_required: Option<bool>,
@@ -226,6 +233,13 @@ pub struct SwarmNextActionVerificationSummary {
     pub active_build_max_age_seconds: Option<u64>,
     pub queue_status: Option<String>,
     pub verifier_evidence: Vec<SwarmNextActionRecentFirstError>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct VerifierSuccessfulProof {
+    command_hash: String,
+    source_state_hash: String,
+    created_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -821,11 +835,41 @@ pub fn collect_swarm_work_packet_with_verifier_evidence(
 ) -> SwarmWorkPacket {
     let brief = collect_swarm_brief(options, runner);
     let tracker_integrity = collect_work_packet_tracker_integrity(options, runner, &brief);
+    let mut verifier_evidence = verifier_evidence.to_vec();
+    verifier_evidence.extend(collect_work_packet_ledger_verifier_evidence(
+        &options.workspace,
+    ));
     SwarmWorkPacket::from_swarm_brief_with_verifier_evidence_and_tracker_integrity(
         &brief,
-        verifier_evidence,
+        &verifier_evidence,
         tracker_integrity,
     )
+}
+
+fn collect_work_packet_ledger_verifier_evidence(
+    workspace: &Path,
+) -> Vec<SwarmNextActionRecentFirstError> {
+    let database_path = workspace.join(".ee").join("ee.db");
+    if !database_path.exists() {
+        return Vec::new();
+    }
+    let Ok(connection) = DbConnection::open_file(&database_path) else {
+        return Vec::new();
+    };
+    let canonical_workspace = workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf());
+    let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
+    let Ok(report) =
+        list_rch_verify_blockers(&connection, &workspace_id, None, &Utc::now().to_rfc3339())
+    else {
+        return Vec::new();
+    };
+    report
+        .blockers
+        .iter()
+        .map(verifier_evidence_from_ledger_blocker)
+        .collect()
 }
 
 fn collect_work_packet_tracker_integrity(
@@ -1973,9 +2017,61 @@ fn work_packet_observed_state_class(
 pub fn verifier_evidence_from_json(value: &Value) -> Vec<SwarmNextActionRecentFirstError> {
     let mut evidence = Vec::new();
     collect_verifier_evidence_items(value, &mut evidence);
+    let mut successes = Vec::new();
+    collect_verifier_success_items(value, &mut successes);
+    successes.sort();
+    successes.dedup();
+    evidence.retain(|item| !verifier_evidence_superseded_by_success(item, &successes));
     evidence.sort();
     evidence.dedup();
     evidence
+}
+
+fn verifier_evidence_from_ledger_blocker(
+    run: &RchVerifyRunView,
+) -> SwarmNextActionRecentFirstError {
+    let local_fallback_refused = run
+        .degraded_codes
+        .iter()
+        .any(|code| code == "rch_verify_local_fallback_refused");
+    let code = run
+        .degraded_codes
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "rch_verify_known_blocker_active".to_owned());
+    let known_blocker = run
+        .blocker_fingerprint
+        .as_ref()
+        .map(|fingerprint| SwarmWorkPacketKnownBlocker {
+            code,
+            fingerprint: fingerprint.clone(),
+            command_hash: Some(run.command_hash.clone()),
+            message: Some(
+                "Active durable verifier-ledger blocker; avoid duplicate RCH until retry_after or an exact-key successful proof clears it."
+                    .to_owned(),
+            ),
+            remediation_bead: run.remediation_bead.clone(),
+            retry_after: run.retry_after.clone(),
+            remote_required: run.remote_required,
+            local_fallback_refused,
+            degraded_codes: run.degraded_codes.clone(),
+        });
+    SwarmNextActionRecentFirstError {
+        file: "rch_verify_ledger".to_owned(),
+        line: None,
+        command_kind: Some(run.command_kind.clone()),
+        command: run.command_text.clone(),
+        command_hash: Some(run.command_hash.clone()),
+        status: Some(run.status.clone()),
+        degraded_codes: run.degraded_codes.clone(),
+        source_state_hash: Some(run.source_state_hash.clone()),
+        created_at: Some(run.created_at.clone()),
+        error_codes: Vec::new(),
+        remote_required: Some(run.remote_required),
+        local_fallback_refused,
+        retry_after: run.retry_after.clone(),
+        known_blocker,
+    }
 }
 
 fn collect_verifier_evidence_items(
@@ -2078,6 +2174,9 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
         &degraded_codes,
         &error_codes,
     );
+    let source_state_hash =
+        string_value_from_keys(object, &["source_state_hash", "sourceStateHash"]);
+    let created_at = string_value_from_keys(object, &["created_at", "createdAt"]);
     Some(SwarmNextActionRecentFirstError {
         file,
         line,
@@ -2086,12 +2185,87 @@ fn verifier_evidence_item(value: &Value) -> Option<SwarmNextActionRecentFirstErr
         command_hash,
         status,
         degraded_codes,
+        source_state_hash,
+        created_at,
         error_codes,
         remote_required,
         local_fallback_refused,
         retry_after,
         known_blocker,
     })
+}
+
+fn collect_verifier_success_items(value: &Value, successes: &mut Vec<VerifierSuccessfulProof>) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_verifier_success_items(item, successes);
+            }
+        }
+        Value::Object(object) => {
+            if let Some(item) = verifier_success_item(value) {
+                successes.push(item);
+            }
+            for key in ["runs", "proofs", "entries", "ledger", "items"] {
+                if let Some(nested) = object.get(key) {
+                    collect_verifier_success_items(nested, successes);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn verifier_success_item(value: &Value) -> Option<VerifierSuccessfulProof> {
+    let object = value.as_object()?;
+    let status = string_value_from_keys(object, &["status", "result", "outcome"])?;
+    if !matches!(
+        status.as_str(),
+        "passed" | "remote_pass" | "pass_without_remote_marker"
+    ) {
+        return None;
+    }
+    Some(VerifierSuccessfulProof {
+        command_hash: string_value_from_keys(object, &["command_hash", "commandHash"])?,
+        source_state_hash: string_value_from_keys(
+            object,
+            &["source_state_hash", "sourceStateHash"],
+        )?,
+        created_at: string_value_from_keys(object, &["created_at", "createdAt"]),
+    })
+}
+
+fn verifier_evidence_superseded_by_success(
+    evidence: &SwarmNextActionRecentFirstError,
+    successes: &[VerifierSuccessfulProof],
+) -> bool {
+    let (Some(command_hash), Some(source_state_hash)) = (
+        evidence.command_hash.as_deref(),
+        evidence.source_state_hash.as_deref(),
+    ) else {
+        return false;
+    };
+    successes.iter().any(|success| {
+        success.command_hash == command_hash
+            && success.source_state_hash == source_state_hash
+            && verifier_success_is_later(
+                evidence.created_at.as_deref(),
+                success.created_at.as_deref(),
+            )
+    })
+}
+
+fn verifier_success_is_later(
+    blocker_created_at: Option<&str>,
+    success_created_at: Option<&str>,
+) -> bool {
+    match (blocker_created_at, success_created_at) {
+        (Some(blocker_created_at), Some(success_created_at)) => {
+            success_created_at >= blocker_created_at
+        }
+        (Some(_), None) => false,
+        (None, _) => true,
+    }
 }
 
 fn verifier_evidence_is_environment_blocked(evidence: &SwarmNextActionRecentFirstError) -> bool {
@@ -2223,6 +2397,7 @@ fn known_blocker_from_json(
                 &["blocker_fingerprint", "blockerFingerprint", "fingerprint"],
             )
         })
+        .or_else(|| string_value_from_keys(object, &["blocker_fingerprint", "blockerFingerprint"]))
         .unwrap_or_else(|| {
             synthesized_known_blocker_fingerprint(
                 &code,
@@ -2242,6 +2417,7 @@ fn known_blocker_from_json(
             .and_then(|known_blocker| {
                 string_value_from_keys(known_blocker, &["remediation_bead", "remediationBead"])
             })
+            .or_else(|| string_value_from_keys(object, &["remediation_bead", "remediationBead"]))
             .or_else(|| {
                 error_codes
                     .iter()
@@ -3942,6 +4118,8 @@ mod tests {
             command_hash: Some("abc123".to_owned()),
             status: Some("remote_failure".to_owned()),
             degraded_codes: vec!["rch_verify_remote_command_failed".to_owned()],
+            source_state_hash: None,
+            created_at: None,
             error_codes: Vec::new(),
             remote_required: Some(true),
             local_fallback_refused: false,
@@ -4164,6 +4342,54 @@ mod tests {
     }
 
     #[test]
+    fn verifier_evidence_json_parser_drops_exact_key_blocker_after_later_success() {
+        let evidence = verifier_evidence_from_json(&serde_json::json!({
+            "runs": [
+                {
+                    "schema": "ee.rch.verify.v1",
+                    "status": "blocked",
+                    "command_text": "cargo test --lib verify_ledger -- --nocapture",
+                    "command_hash": "cmd123",
+                    "sourceStateHash": "src456",
+                    "createdAt": "2026-05-23T05:00:00Z",
+                    "remoteRequired": true,
+                    "blockerFingerprint": "sha256:blocked",
+                    "remediationBead": "bd-17c65.10.17.1.2",
+                    "retryAfter": "2026-05-23T07:00:00Z",
+                    "degradedCodes": [
+                        "rch_verify_topology_blocked",
+                        "rch_verify_local_fallback_refused"
+                    ]
+                },
+                {
+                    "schema": "ee.rch.verify.v1",
+                    "status": "passed",
+                    "commandHash": "cmd123",
+                    "sourceStateHash": "src456",
+                    "createdAt": "2026-05-23T05:30:00Z"
+                },
+                {
+                    "schema": "ee.rch.verify.v1",
+                    "status": "blocked",
+                    "commandHash": "cmd123",
+                    "sourceStateHash": "different-source",
+                    "createdAt": "2026-05-23T05:00:00Z",
+                    "blockerFingerprint": "sha256:still-blocked",
+                    "degradedCodes": ["rch_verify_topology_blocked"]
+                }
+            ]
+        }));
+
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].source_state_hash.as_deref(),
+            Some("different-source")
+        );
+        let known_blocker = evidence[0].known_blocker.as_ref().expect("known blocker");
+        assert_eq!(known_blocker.fingerprint, "sha256:still-blocked");
+    }
+
+    #[test]
     fn verifier_evidence_json_parser_extracts_rch_e327_without_first_error() {
         let evidence = verifier_evidence_from_json(&serde_json::json!({
             "schema": "ee.rch.verify.v1",
@@ -4357,6 +4583,8 @@ mod tests {
             command_hash: Some("abc123".to_owned()),
             status: Some("remote_failure".to_owned()),
             degraded_codes: vec!["rch_verify_remote_command_failed".to_owned()],
+            source_state_hash: None,
+            created_at: None,
             error_codes: Vec::new(),
             remote_required: Some(true),
             local_fallback_refused: false,

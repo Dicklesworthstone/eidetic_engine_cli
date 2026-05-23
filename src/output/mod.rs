@@ -3419,6 +3419,7 @@ pub fn render_status_json(report: &StatusReport) -> String {
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         render_verification_posture_json(d, &report.verification_posture);
+        render_rch_verify_ledger_status_json(d, &report.verification_ledger);
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         render_memory_health_json(d, &report.memory_health);
         render_curation_health_json(d, &report.curation_health);
@@ -3638,6 +3639,17 @@ fn render_verification_posture_json(
             .to_owned()
     });
     parent.field_raw("verificationPosture", &rendered);
+}
+
+fn render_rch_verify_ledger_status_json(
+    parent: &mut JsonBuilder,
+    report: &crate::core::verify_ledger::RchVerifyLedgerStatusReport,
+) {
+    let rendered = serde_json::to_string(report).unwrap_or_else(|_| {
+        r#"{"schema":"ee.rch.verify.ledger_status.v1","status":"serialization_failed","ledgerAvailable":false,"activeBlockerCount":0,"localFallbackRefused":false,"localFallbackRefusedCount":0,"oldestRetryAfter":null,"newestRetryAfter":null,"blockerRefs":[],"recoveryActions":[]}"#
+            .to_owned()
+    });
+    parent.field_raw("verificationLedger", &rendered);
 }
 
 fn render_host_calibration_posture_json(
@@ -4439,6 +4451,7 @@ pub fn render_status_json_with_meta(
         render_memory_health_json(d, &report.memory_health);
         render_flight_recorder_status_json(d, &report.flight_recorder);
         render_verification_posture_json(d, &report.verification_posture);
+        render_rch_verify_ledger_status_json(d, &report.verification_ledger);
         render_graph_compute_json(d, &report.graph_compute);
         render_graph_snapshot_artifact_json(d, &report.graph_snapshot_artifact);
         render_search_status_json(d, &report.lexical_ram_tier);
@@ -4485,7 +4498,7 @@ pub fn render_status_human(report: &StatusReport) -> String {
             )
         });
     format!(
-        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nverification posture: {} (recent reusable: {}, stale: {}, in flight: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
+        "ee status\n\n{}storage: {}\nshard fanout: {}\nsearch: {}\nmesh: {}\nagent detection: {}\nrch worker pressure: {} (usable: {}, blocked: {})\nverification posture: {} (recent reusable: {}, stale: {}, in flight: {})\nverification ledger: {} (active blockers: {}, local fallback refused: {})\nruntime: {} ({} {})\n\nNext:\n  ee status --json\n",
         workspace_line,
         report.capabilities.storage.as_str(),
         report.shard_fanout.posture.as_str(),
@@ -4501,6 +4514,9 @@ pub fn render_status_human(report: &StatusReport) -> String {
         report
             .verification_posture
             .in_flight_equivalent_command_count,
+        report.verification_ledger.status,
+        report.verification_ledger.active_blocker_count,
+        report.verification_ledger.local_fallback_refused,
         report.capabilities.runtime.as_str(),
         report.runtime.engine,
         report.runtime.profile
@@ -4678,6 +4694,7 @@ pub fn render_doctor_json(report: &DoctorReport) -> String {
         render_qos_status_json(d, &report.qos_posture, false);
         render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
         render_verification_posture_json(d, &report.verification_posture);
+        render_rch_verify_ledger_status_json(d, &report.verification_ledger);
         render_host_calibration_posture_json(d, report.host_calibration.as_ref());
         d.field_raw("meshAutoEnrollment", &mesh_auto_enrollment);
         d.field_array_of_objects("checks", &report.checks, |obj, check| {
@@ -4757,6 +4774,12 @@ pub fn render_doctor_human(report: &DoctorReport) -> String {
         report
             .verification_posture
             .in_flight_equivalent_command_count
+    ));
+    output.push_str(&format!(
+        "verification ledger: {} (active blockers: {}, local fallback refused: {})\n",
+        report.verification_ledger.status,
+        report.verification_ledger.active_blocker_count,
+        report.verification_ledger.local_fallback_refused
     ));
     output.push_str(&format!(
         "mesh auto-enrollment: {} (ok: {}, warning: {}, fail: {}, skipped: {}, actions: {})\n",
@@ -8263,6 +8286,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: curate_candidates_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::curate::REFLECTION_SOURCE_PACKAGE_SCHEMA,
+            version: "1",
+            description: "Redacted and bounded source package for reflection request artifacts",
+            category: "reflect",
+            definition: reflection_source_package_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::curate::REFLECTION_REQUEST_SCHEMA,
+            version: "1",
+            description: "Canonical no-LLM reflection request artifact",
+            category: "reflect",
+            definition: reflection_request_schema_definition,
+        },
+        SchemaEntry {
             id: crate::graph::GRAPH_EXPORT_SCHEMA_V1,
             version: "1",
             description: "Graph export response envelope",
@@ -9126,6 +9163,14 @@ fn export_response_schema_definition() -> String {
 
 fn curate_candidates_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
+}
+
+fn reflection_source_package_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.source_package.v1.json").to_string()
+}
+
+fn reflection_request_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.request.v1.json").to_string()
 }
 
 fn graph_export_response_schema_definition() -> String {
@@ -11997,6 +12042,7 @@ pub fn render_status_json_filtered(report: &StatusReport, profile: FieldProfile)
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
             render_verification_posture_json(d, &report.verification_posture);
+            render_rch_verify_ledger_status_json(d, &report.verification_ledger);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             d.field_object("capabilities", |c| {
                 c.field_str("runtime", report.capabilities.runtime.as_str());
@@ -12161,6 +12207,7 @@ pub fn render_doctor_json_filtered(report: &DoctorReport, profile: FieldProfile)
             render_qos_status_json(d, &report.qos_posture, profile.include_verbose_details());
             render_rch_worker_pressure_json(d, &report.rch_worker_pressure);
             render_verification_posture_json(d, &report.verification_posture);
+            render_rch_verify_ledger_status_json(d, &report.verification_ledger);
             render_host_calibration_posture_json(d, report.host_calibration.as_ref());
             if let Some(mesh_auto_enrollment) = mesh_auto_enrollment.as_deref() {
                 d.field_raw("meshAutoEnrollment", mesh_auto_enrollment);

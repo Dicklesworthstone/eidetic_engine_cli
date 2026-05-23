@@ -773,6 +773,10 @@ Return distilled output for the requested reflection kind using schema ee.reflec
 Do not include private reasoning. Do not ask ee or the harness to take follow-up actions.
 ";
 const REFLECTION_RESULT_SCHEMA_CONTRACT: &str = r#"{"schema":"ee.reflect.result.v1","required":["requestId","requestHash","challenge","producer","reflectionKind","citedSourceIds","body","kindFields","selfReportedConfidence"],"rules":["citedSourceIds must be a subset of request source ids","body is distilled output only","kindFields carries kind-specific structured fields","selfReportedConfidence is informational only"]}"#;
+const REFLECTION_REQUEST_NEXT_COMMAND_KIND_INGEST: &str = "reflect_ingest_result";
+const REFLECTION_REQUEST_NEXT_COMMAND_WHEN: &str =
+    "after an external producer writes an ee.reflect.result.v1 artifact for this request";
+const REFLECTION_REQUEST_NEXT_COMMAND_SAFETY: &str = "validates the external result and creates only a pending curation candidate; ee does not call an LLM or auto-apply the result";
 const DEFAULT_REFLECTION_MAX_SOURCES: usize = 8;
 const DEFAULT_REFLECTION_MAX_TOTAL_EXCERPT_BYTES: usize = 8 * 1024;
 const DEFAULT_REFLECTION_MAX_EXCERPT_BYTES_PER_SOURCE: usize = 1024;
@@ -968,6 +972,15 @@ pub struct ReflectionRequestFingerprint {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestNextCommand {
+    pub kind: &'static str,
+    pub command: String,
+    pub when: &'static str,
+    pub safety: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReflectionRequestArtifact {
     pub schema: &'static str,
     pub request_id: String,
@@ -977,6 +990,7 @@ pub struct ReflectionRequestArtifact {
     pub source_package_hash: String,
     pub prompt_template: ReflectionPromptTemplateDescriptor,
     pub response_schema: ReflectionResponseSchemaDescriptor,
+    pub next_commands: Vec<ReflectionRequestNextCommand>,
     pub source_package: ReflectionSourcePackage,
 }
 
@@ -1295,6 +1309,7 @@ pub fn build_reflection_request_artifact(
     validate_reflection_source_package(&source_package)?;
     let fingerprint =
         build_reflection_request_fingerprint(workspace_id, reflection_kind, &source_package)?;
+    let next_commands = reflection_request_next_commands(&fingerprint);
     Ok(ReflectionRequestArtifact {
         schema: REFLECTION_REQUEST_SCHEMA,
         request_id: reflection_request_id_from_hash(fingerprint.request_hash.as_str()),
@@ -1304,6 +1319,7 @@ pub fn build_reflection_request_artifact(
         source_package_hash: fingerprint.source_package_hash,
         prompt_template: fingerprint.prompt_template,
         response_schema: fingerprint.response_schema,
+        next_commands,
         source_package,
     })
 }
@@ -1369,6 +1385,11 @@ pub fn validate_reflection_request_artifact(
             expected_fingerprint.request_hash, artifact.request_hash
         ),
     )?;
+    ensure_reflection_request_artifact_field(
+        artifact.next_commands == reflection_request_next_commands(&expected_fingerprint),
+        "nextCommands",
+        "commands do not match the deterministic reflection request next actions".to_owned(),
+    )?;
     let expected_request_id = reflection_request_id_from_hash(artifact.request_hash.as_str());
     ensure_reflection_request_artifact_field(
         artifact.request_id == expected_request_id,
@@ -1399,6 +1420,31 @@ fn reflection_request_id_from_hash(request_hash: &str) -> String {
         .take(16)
         .collect::<String>();
     format!("reflect_req_{suffix}")
+}
+
+fn reflection_request_next_commands(
+    fingerprint: &ReflectionRequestFingerprint,
+) -> Vec<ReflectionRequestNextCommand> {
+    vec![ReflectionRequestNextCommand {
+        kind: REFLECTION_REQUEST_NEXT_COMMAND_KIND_INGEST,
+        command: format!(
+            "ee reflect ingest <result.json> --workspace {} --json",
+            shell_quote_reflection_command_arg(fingerprint.workspace_id.as_str())
+        ),
+        when: REFLECTION_REQUEST_NEXT_COMMAND_WHEN,
+        safety: REFLECTION_REQUEST_NEXT_COMMAND_SAFETY,
+    }]
+}
+
+fn shell_quote_reflection_command_arg(value: &str) -> String {
+    if value
+        .bytes()
+        .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-' | b':' | b'@'))
+    {
+        return value.to_owned();
+    }
+
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn render_reflection_prompt(
@@ -7211,12 +7257,51 @@ Then update src/policy/mod.rs on main."
             artifact.response_schema,
             reflection_response_schema_descriptor()
         );
+        assert_eq!(artifact.next_commands.len(), 1);
+        assert_eq!(artifact.next_commands[0].kind, "reflect_ingest_result");
+        assert_eq!(
+            artifact.next_commands[0].command,
+            "ee reflect ingest <result.json> --workspace workspace-artifact --json"
+        );
+        assert!(
+            artifact.next_commands[0]
+                .safety
+                .contains("does not call an LLM")
+        );
 
         let artifact_json = canonical_reflection_request_artifact_json(&artifact)
             .map_err(|error| error.to_string())?;
         assert!(artifact_json.contains("\"schema\":\"ee.reflect.request.v1\""));
+        assert!(artifact_json.contains("\"nextCommands\""));
         assert!(artifact_json.contains("\"sourcePackage\""));
         assert!(artifact_json.contains("\"redactionSummary\""));
+        validate_reflection_request_artifact(&artifact).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_artifact_shell_quotes_workspace_next_command() -> TestResult {
+        let source_hash = format!("blake3:{}", "a".repeat(64));
+        let package = build_reflection_source_package(
+            &[ReflectionSourceInput::new(
+                DerivationSourceRef::new(
+                    DerivationSourceKind::Memory,
+                    "mem_request_quoted_workspace",
+                    source_hash.as_str(),
+                ),
+                "Request artifact with a shell-sensitive workspace id.",
+                None,
+            )],
+            ReflectionSourcePackageLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let artifact = build_reflection_request_artifact("workspace with 'quote'", "gaps", package)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            artifact.next_commands[0].command,
+            "ee reflect ingest <result.json> --workspace 'workspace with '\\''quote'\\''' --json"
+        );
         validate_reflection_request_artifact(&artifact).map_err(|error| error.to_string())?;
         Ok(())
     }
@@ -7274,6 +7359,18 @@ Then update src/policy/mod.rs on main."
             Err(
                 DerivationSourcePackageError::InvalidReflectionRequestArtifact {
                     field: "requestId",
+                    ..
+                }
+            )
+        ));
+
+        let mut bad_next_command = artifact.clone();
+        bad_next_command.next_commands[0].command = "ee reflect unsafe-apply".to_owned();
+        assert!(matches!(
+            validate_reflection_request_artifact(&bad_next_command),
+            Err(
+                DerivationSourcePackageError::InvalidReflectionRequestArtifact {
+                    field: "nextCommands",
                     ..
                 }
             )

@@ -30,15 +30,31 @@ const SECRET_PATTERNS: &[&str] = &[
     "api_key",
     "apikey",
     "api-key",
+    "api.key",
     "token",
     "bearer",
     "authorization",
     "credential",
     "private_key",
+    "privatekey",
+    "private-key",
+    "private.key",
     "access_key",
+    "accesskey",
+    "access-key",
+    "access.key",
     "secret_key",
+    "secretkey",
+    "secret-key",
+    "secret.key",
     "database_url",
+    "databaseurl",
+    "database-url",
+    "database.url",
     "connection_string",
+    "connectionstring",
+    "connection-string",
+    "connection.string",
     "-----begin",
 ];
 
@@ -1483,6 +1499,34 @@ mod tests {
                 .iter()
                 .any(|entry| entry.code == "artifact_secret_redacted"),
             "secret degradation",
+        )
+    }
+
+    #[test]
+    fn artifact_secret_patterns_cover_key_casing_variants() -> TestResult {
+        let cases = [
+            ("snake", "private_key=redaction-fixture"),
+            ("camel", "privateKey=redaction-fixture"),
+            ("kebab", "private-key=redaction-fixture"),
+            ("screaming", "PRIVATE_KEY=redaction-fixture"),
+            ("dot", "private.key=redaction-fixture"),
+            ("api dot", "api.key=redaction-fixture"),
+            ("database camel", "databaseUrl=redaction-fixture"),
+            ("database dot", "database.url=redaction-fixture"),
+            ("connection camel", "connectionString=redaction-fixture"),
+            ("connection dot", "connection.string=redaction-fixture"),
+        ];
+
+        for (label, content) in cases {
+            ensure(
+                contains_secret_pattern(content),
+                format!("secret pattern missed {label} variant"),
+            )?;
+        }
+
+        ensure(
+            !contains_secret_pattern("ordinary artifact snippet with no sensitive marker"),
+            "ordinary artifact snippet should not be redacted",
         )
     }
 

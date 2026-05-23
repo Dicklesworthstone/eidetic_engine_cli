@@ -12,7 +12,7 @@
     "fields": {"type": "string"},
     "data": {
       "type": "object",
-      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "hostCalibration", "meshAutoEnrollment", "checks"],
+      "required": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "checks"],
       "additionalProperties": false,
       "properties": {
         "command": {"type": "string", "const": "doctor"},
@@ -24,6 +24,7 @@
         "qos": {"$ref": "#/$defs/qosStatus"},
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
         "verificationPosture": {"$ref": "#/$defs/verificationPosture"},
+        "verificationLedger": {"$ref": "#/$defs/verificationLedger"},
         "hostCalibration": {"$ref": "ee.host_calibration.posture.v1.json"},
         "meshAutoEnrollment": {"$ref": "#/$defs/meshAutoEnrollment"},
         "checks": {
@@ -46,8 +47,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "hostCalibration", "meshAutoEnrollment"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "hostCalibration", "meshAutoEnrollment", "checks"],
+    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment"],
+    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "checks"],
     "full": ["*"]
   },
   "$defs": {
@@ -232,6 +233,55 @@
             }
           }
         }
+      }
+    },
+    "verificationLedger": {
+      "type": "object",
+      "required": ["schema", "status", "ledgerAvailable", "activeBlockerCount", "localFallbackRefused", "localFallbackRefusedCount", "oldestRetryAfter", "newestRetryAfter", "blockerRefs", "recoveryActions"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.rch.verify.ledger_status.v1"},
+        "status": {"type": "string", "enum": ["not_inspected", "not_initialized", "unavailable", "clear", "active_blockers", "serialization_failed"]},
+        "ledgerAvailable": {"type": "boolean"},
+        "activeBlockerCount": {"type": "integer", "minimum": 0},
+        "localFallbackRefused": {"type": "boolean"},
+        "localFallbackRefusedCount": {"type": "integer", "minimum": 0},
+        "oldestRetryAfter": {"type": ["string", "null"]},
+        "newestRetryAfter": {"type": ["string", "null"]},
+        "blockerRefs": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {"$ref": "#/$defs/verificationLedgerBlockerRef"}
+        },
+        "recoveryActions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/verificationLedgerRecoveryAction"}
+        }
+      }
+    },
+    "verificationLedgerBlockerRef": {
+      "type": "object",
+      "required": ["commandHash", "status", "blockerFingerprint", "remediationBead", "retryAfter", "degradedCodes", "verificationAttribution"],
+      "additionalProperties": false,
+      "properties": {
+        "commandHash": {"type": "string", "minLength": 1},
+        "status": {"type": "string"},
+        "blockerFingerprint": {"type": "string", "minLength": 1},
+        "remediationBead": {"type": ["string", "null"]},
+        "retryAfter": {"type": ["string", "null"]},
+        "degradedCodes": {"type": "array", "items": {"type": "string"}},
+        "verificationAttribution": {"type": "string"}
+      }
+    },
+    "verificationLedgerRecoveryAction": {
+      "type": "object",
+      "required": ["priority", "kind", "command", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string"},
+        "command": {"type": "string"},
+        "message": {"type": "string"}
       }
     },
     "rchWorkerPressure": {

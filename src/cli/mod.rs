@@ -241,6 +241,11 @@ use crate::core::verify::{
     default_rch_cargo_closure_requirements, record_verification_evidence,
     verification_closure_guidance_from_ledger, verification_response_json,
 };
+use crate::core::verify_ledger::{
+    RchVerifyBlockersReport, RchVerifyIngestReport, RchVerifyLedgerError,
+    RchVerifyLedgerParseError, RchVerifyRunsReport, ingest_rch_verify_v1, list_rch_verify_blockers,
+    list_rch_verify_runs,
+};
 use crate::core::why::{WhyOptions, explain_memory};
 use crate::core::witness_retention::{
     WITNESS_PRUNE_REPORT_SCHEMA_V1, WitnessAction, WitnessRetentionPolicy,
@@ -4527,6 +4532,9 @@ pub enum VerifyCommand {
     /// Query reusable verification evidence without launching a build.
     #[command(subcommand)]
     Broker(VerifyBrokerCommand),
+    /// Ingest and query durable RCH verifier proof evidence.
+    #[command(subcommand)]
+    Rch(VerifyRchCommand),
     /// Render redaction-safe closeout proof from retained verification evidence.
     #[command(subcommand)]
     Closeout(VerifyCloseoutCommand),
@@ -4540,6 +4548,17 @@ pub enum VerifyCommand {
 pub enum VerifyBrokerCommand {
     /// Look up reusable, stale, in-progress, or known-blocker verification evidence.
     Lookup(VerifyBrokerLookupArgs),
+}
+
+/// Subcommands for `ee verify rch`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum VerifyRchCommand {
+    /// Ingest one ee.rch.verify.v1 proof into the durable verification ledger.
+    Ingest(VerifyRchIngestArgs),
+    /// List active RCH verification blockers without running Cargo or rch.
+    Blockers(VerifyRchBlockersArgs),
+    /// List stored RCH verification runs without running Cargo or rch.
+    Runs(VerifyRchRunsArgs),
 }
 
 /// Subcommands for `ee verify closeout`.
@@ -4627,6 +4646,47 @@ pub struct VerifyCloseoutCapsuleArgs {
     /// Allow rendering even when the run source hash differs from --source-hash.
     #[arg(long = "allow-source-mismatch", action = ArgAction::SetTrue)]
     pub allow_source_mismatch: bool,
+}
+
+/// Arguments for `ee verify rch ingest`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyRchIngestArgs {
+    /// Path to an `ee.rch.verify.v1` proof JSON file, or `-` for stdin.
+    #[arg(
+        long = "from-json",
+        alias = "input",
+        alias = "file",
+        value_name = "PATH|-"
+    )]
+    pub from_json: String,
+    /// Explicit database path.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify rch runs`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyRchRunsArgs {
+    /// Filter by Beads issue ID.
+    #[arg(long = "bead-id", value_name = "BEAD")]
+    pub bead_id: Option<String>,
+    /// Filter by normalized command hash.
+    #[arg(long = "command-hash", value_name = "HASH")]
+    pub command_hash: Option<String>,
+    /// Explicit database path.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+}
+
+/// Arguments for `ee verify rch blockers`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct VerifyRchBlockersArgs {
+    /// Filter by Beads issue ID.
+    #[arg(long = "bead-id", value_name = "BEAD")]
+    pub bead_id: Option<String>,
+    /// Explicit database path.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee verification ingest`.
@@ -10687,6 +10747,15 @@ where
         Some(Command::Verify(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
         }
+        Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Ingest(ref args)))) => {
+            handle_verify_rch_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Runs(ref args)))) => {
+            handle_verify_rch_runs(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Blockers(ref args)))) => {
+            handle_verify_rch_blockers(&cli, args, stdout, stderr)
+        }
         Some(Command::Verify(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
         }
@@ -10704,6 +10773,15 @@ where
         }
         Some(Command::Verification(VerifyCommand::Ingest(ref args))) => {
             handle_verification_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Ingest(ref args)))) => {
+            handle_verify_rch_ingest(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Runs(ref args)))) => {
+            handle_verify_rch_runs(&cli, args, stdout, stderr)
+        }
+        Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Blockers(ref args)))) => {
+            handle_verify_rch_blockers(&cli, args, stdout, stderr)
         }
         Some(Command::Verification(VerifyCommand::Proofs(ref args))) => {
             handle_verify_proofs(&cli, args, stdout, stderr)
@@ -33554,6 +33632,330 @@ fn github_actions_check_run_like(value: &serde_json::Value) -> bool {
                 .is_some())
 }
 
+fn handle_verify_rch_ingest<W, E>(
+    cli: &Cli,
+    args: &VerifyRchIngestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let input = match read_rch_verify_json_input(&args.from_json) {
+        Ok(input) => input,
+        Err(error) => {
+            let domain_error = rch_verify_usage_error(
+                "rch_verify_input_unreadable",
+                error,
+                "pass --from-json <path> or --from-json -",
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&input) {
+        Ok(value) => value,
+        Err(error) => {
+            let domain_error = rch_verify_usage_error(
+                "rch_verify_json_malformed",
+                format!("RCH verifier proof input is not valid JSON: {error}"),
+                "provide one ee.rch.verify.v1 JSON object",
+            );
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let (connection, workspace_id, _) =
+        match open_preflight_token_database(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    match ingest_rch_verify_v1(&connection, &workspace_id, &value, &created_at) {
+        Ok(report) => write_verify_rch_report(
+            cli,
+            "verify rch ingest",
+            &report,
+            render_verify_rch_ingest_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = rch_verify_ledger_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_verify_rch_runs<W, E>(
+    cli: &Cli,
+    args: &VerifyRchRunsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some((connection, workspace_id)) =
+        (match open_verify_rch_ledger_database_for_read(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        })
+    else {
+        let report = RchVerifyRunsReport {
+            schema: crate::core::verify_ledger::RCH_VERIFY_LEDGER_RUNS_REPORT_SCHEMA_V1,
+            runs: Vec::new(),
+            run_count: 0,
+        };
+        return write_verify_rch_report(
+            cli,
+            "verify rch runs",
+            &report,
+            render_verify_rch_runs_human(&report),
+            stdout,
+        );
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    match list_rch_verify_runs(
+        &connection,
+        &workspace_id,
+        args.bead_id.as_deref(),
+        args.command_hash.as_deref(),
+        &now,
+    ) {
+        Ok(report) => write_verify_rch_report(
+            cli,
+            "verify rch runs",
+            &report,
+            render_verify_rch_runs_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = rch_verify_ledger_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn handle_verify_rch_blockers<W, E>(
+    cli: &Cli,
+    args: &VerifyRchBlockersArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let Some((connection, workspace_id)) =
+        (match open_verify_rch_ledger_database_for_read(cli, args.database.as_deref()) {
+            Ok(opened) => opened,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        })
+    else {
+        let report = RchVerifyBlockersReport {
+            schema: crate::core::verify_ledger::RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1,
+            blockers: Vec::new(),
+            blocker_count: 0,
+        };
+        return write_verify_rch_report(
+            cli,
+            "verify rch blockers",
+            &report,
+            render_verify_rch_blockers_human(&report),
+            stdout,
+        );
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    match list_rch_verify_blockers(&connection, &workspace_id, args.bead_id.as_deref(), &now) {
+        Ok(report) => write_verify_rch_report(
+            cli,
+            "verify rch blockers",
+            &report,
+            render_verify_rch_blockers_human(&report),
+            stdout,
+        ),
+        Err(error) => {
+            let domain_error = rch_verify_ledger_error_to_domain(error);
+            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+        }
+    }
+}
+
+fn read_rch_verify_json_input(from_json: &str) -> Result<String, String> {
+    if from_json == "-" {
+        let mut input = String::new();
+        io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|error| format!("Failed to read RCH verifier proof from stdin: {error}"))?;
+        return Ok(input);
+    }
+    fs::read_to_string(from_json)
+        .map_err(|error| format!("Failed to read RCH verifier proof '{from_json}': {error}"))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerifyRchCliReport<'a, T>
+where
+    T: serde::Serialize,
+{
+    command: &'static str,
+    #[serde(flatten)]
+    report: &'a T,
+}
+
+fn write_verify_rch_report<W, T>(
+    cli: &Cli,
+    command: &'static str,
+    report: &T,
+    human_summary: String,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+    T: serde::Serialize,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &human_summary)
+        }
+        output::Renderer::Toon => {
+            let data = serde_json::json!(VerifyRchCliReport { command, report });
+            let json = verify_rch_response_json(data).to_string();
+            write_stdout(stdout, &(output::render_toon_from_json(&json) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let data = serde_json::json!(VerifyRchCliReport { command, report });
+            let json = verify_rch_response_json(data);
+            write_stdout(stdout, &(json.to_string() + "\n"))
+        }
+    }
+}
+
+fn verify_rch_response_json(data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": data,
+        "degraded": [],
+    })
+}
+
+fn render_verify_rch_ingest_human(report: &RchVerifyIngestReport) -> String {
+    format!(
+        "verify rch ingest\n  Outcome: {}\n  Inserted: {}\n  Duplicate: {}\n  Run: {}\n  Status: {}\n",
+        report.outcome,
+        report.inserted_count,
+        report.duplicate_count,
+        report.run.id,
+        report.run.status
+    )
+}
+
+fn render_verify_rch_runs_human(report: &RchVerifyRunsReport) -> String {
+    format!("verify rch runs\n  Runs: {}\n", report.run_count)
+}
+
+fn render_verify_rch_blockers_human(report: &RchVerifyBlockersReport) -> String {
+    format!(
+        "verify rch blockers\n  Active blockers: {}\n",
+        report.blocker_count
+    )
+}
+
+fn rch_verify_usage_error(
+    code: &'static str,
+    message: impl Into<String>,
+    repair: impl Into<String>,
+) -> DomainError {
+    let repair = repair.into();
+    DomainError::UsageCodeWithDetails {
+        code,
+        message: message.into(),
+        repair: Some(repair.clone()),
+        details_json: serde_json::json!({
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "flag",
+                    "rationale": "RCH verifier ledger commands consume an existing verifier JSON artifact and never run cargo or rch.",
+                    "flagName": "--from-json",
+                    "valueHint": "<path>|-",
+                    "example": "ee verify rch ingest --from-json proof.json --json",
+                    "resultsIn": "The verifier proof is parsed and stored in the local verification ledger."
+                }
+            ],
+            "repairHint": repair,
+        })
+        .to_string(),
+    }
+}
+
+fn rch_verify_ledger_error_to_domain(error: RchVerifyLedgerError) -> DomainError {
+    match error {
+        RchVerifyLedgerError::Parse(source) => rch_verify_parse_error_to_domain(source),
+        RchVerifyLedgerError::Storage(source) => DomainError::Storage {
+            message: format!("Failed to access RCH verifier ledger: {source}"),
+            repair: Some("ee doctor --json".to_owned()),
+        },
+    }
+}
+
+fn rch_verify_parse_error_to_domain(error: RchVerifyLedgerParseError) -> DomainError {
+    DomainError::UsageCodeWithDetails {
+        code: "rch_verify_proof_invalid",
+        message: error.to_string(),
+        repair: Some("provide an ee.rch.verify.v1 proof produced by scripts/rch_verify.sh".to_owned()),
+        details_json: serde_json::json!({
+            "expectedSchema": crate::core::verify_ledger::RCH_VERIFY_LEDGER_SCHEMA_V1,
+            "recovery": [
+                {
+                    "priority": 1,
+                    "kind": "command",
+                    "rationale": "Generate a verifier artifact first; ingestion is read/write storage only and never launches RCH itself.",
+                    "command": "./scripts/rch_verify.sh --bead-id <id> --summary --no-write -- cargo test --lib <filter>",
+                    "resultsIn": "An ee.rch.verify.v1 JSON artifact suitable for ee verify rch ingest."
+                }
+            ]
+        })
+        .to_string(),
+    }
+}
+
+fn open_verify_rch_ledger_database_for_read(
+    cli: &Cli,
+    database: Option<&Path>,
+) -> Result<Option<(DbConnection, String)>, DomainError> {
+    let workspace = cli.resolve_workspace();
+    let database_path = database
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| workspace.join(".ee").join("ee.db"));
+    if !database_path.exists() {
+        return Ok(None);
+    }
+    let connection =
+        DbConnection::open_file(&database_path).map_err(|error| DomainError::Storage {
+            message: format!("Failed to open RCH verifier ledger database: {error}"),
+            repair: Some("ee status --json".to_owned()),
+        })?;
+    let workspace_path = workspace.to_string_lossy().into_owned();
+    let workspace_id = connection
+        .get_workspace_by_path(&workspace_path)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to query workspace row: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?
+        .map(|row| row.id)
+        .unwrap_or_else(|| workspace_core::stable_workspace_id(&workspace));
+    Ok(Some((connection, workspace_id)))
+}
+
 fn handle_verify_proofs<W, E>(
     cli: &Cli,
     args: &VerifyProofsArgs,
@@ -43736,9 +44138,11 @@ const VERIFICATION_SUBCOMMANDS: &[&str] = &[
     "record",
     "proofs",
     "broker",
+    "rch",
     "closeout",
     "closure-guidance",
 ];
+const VERIFICATION_RCH_SUBCOMMANDS: &[&str] = &["ingest", "blockers", "runs"];
 const WORKSPACE_SUBCOMMANDS: &[&str] = &["resolve", "list", "alias", "hygiene"];
 
 /// Read-only normalized representation of a CLI invocation.
@@ -44244,6 +44648,13 @@ impl NormalizedInvocation {
                 Command::Verify(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verify ingest".to_string(),
                     VerifyCommand::Record(_) => "verify record".to_string(),
+                    VerifyCommand::Rch(VerifyRchCommand::Ingest(_)) => {
+                        "verify rch ingest".to_string()
+                    }
+                    VerifyCommand::Rch(VerifyRchCommand::Runs(_)) => "verify rch runs".to_string(),
+                    VerifyCommand::Rch(VerifyRchCommand::Blockers(_)) => {
+                        "verify rch blockers".to_string()
+                    }
                     VerifyCommand::Proofs(_) => "verify proofs".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verify broker lookup".to_string()
@@ -44256,6 +44667,15 @@ impl NormalizedInvocation {
                 Command::Verification(verify) => match verify {
                     VerifyCommand::Ingest(_) => "verification ingest".to_string(),
                     VerifyCommand::Record(_) => "verification record".to_string(),
+                    VerifyCommand::Rch(VerifyRchCommand::Ingest(_)) => {
+                        "verification rch ingest".to_string()
+                    }
+                    VerifyCommand::Rch(VerifyRchCommand::Runs(_)) => {
+                        "verification rch runs".to_string()
+                    }
+                    VerifyCommand::Rch(VerifyRchCommand::Blockers(_)) => {
+                        "verification rch blockers".to_string()
+                    }
                     VerifyCommand::Proofs(_) => "verification proofs".to_string(),
                     VerifyCommand::Broker(VerifyBrokerCommand::Lookup(_)) => {
                         "verification broker lookup".to_string()
@@ -44401,6 +44821,7 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "task-frame subgoal" => Some(TASK_FRAME_SUBGOAL_SUBCOMMANDS),
         "tripwire" => Some(TRIPWIRE_SUBCOMMANDS),
         "verification" | "verify" => Some(VERIFICATION_SUBCOMMANDS),
+        "verification rch" | "verify rch" => Some(VERIFICATION_RCH_SUBCOMMANDS),
         "workspace" => Some(WORKSPACE_SUBCOMMANDS),
         _ => None,
     }
@@ -48042,6 +48463,195 @@ mod tests {
             "command hash",
         )?;
         ensure(record.is_authoritative_pass(), "RCH proof is authoritative")
+    }
+
+    #[test]
+    fn parser_accepts_verify_rch_subcommands() -> TestResult {
+        let ingest =
+            Cli::try_parse_from(["ee", "verify", "rch", "ingest", "--from-json", "proof.json"])
+                .map(|cli| cli.command)
+                .map_err(|error| {
+                    format!("failed to parse verify rch ingest: {:?}", error.kind())
+                })?;
+        match ingest {
+            Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Ingest(args)))) => {
+                ensure_equal(&args.from_json, &"proof.json".to_owned(), "from-json")?;
+            }
+            other => return Err(format!("expected verify rch ingest, got {other:?}")),
+        }
+
+        let runs = Cli::try_parse_from([
+            "ee",
+            "verify",
+            "rch",
+            "runs",
+            "--bead-id",
+            "bd-17awb",
+            "--command-hash",
+            "abc123",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| format!("failed to parse verify rch runs: {:?}", error.kind()))?;
+        match runs {
+            Some(Command::Verify(VerifyCommand::Rch(VerifyRchCommand::Runs(args)))) => {
+                ensure_equal(&args.bead_id, &Some("bd-17awb".to_owned()), "bead id")?;
+                ensure_equal(
+                    &args.command_hash,
+                    &Some("abc123".to_owned()),
+                    "command hash",
+                )?;
+            }
+            other => return Err(format!("expected verify rch runs, got {other:?}")),
+        }
+
+        let blockers = Cli::try_parse_from([
+            "ee",
+            "verification",
+            "rch",
+            "blockers",
+            "--bead-id",
+            "bd-17awb",
+        ])
+        .map(|cli| cli.command)
+        .map_err(|error| {
+            format!(
+                "failed to parse verification rch blockers: {:?}",
+                error.kind()
+            )
+        })?;
+        match blockers {
+            Some(Command::Verification(VerifyCommand::Rch(VerifyRchCommand::Blockers(args)))) => {
+                ensure_equal(&args.bead_id, &Some("bd-17awb".to_owned()), "bead id")
+            }
+            other => Err(format!("expected verification rch blockers, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn verify_rch_ingest_and_blockers_round_trip_json() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        fs::create_dir_all(&ee_dir).map_err(|error| format!("create .ee dir: {error}"))?;
+        let database_path = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| format!("open test db: {error}"))?;
+        connection
+            .migrate()
+            .map_err(|error| format!("migrate test db: {error}"))?;
+
+        let proof_path = tempdir.path().join("rch-proof.json");
+        let proof = serde_json::json!({
+            "schema": crate::core::verify_ledger::RCH_VERIFY_LEDGER_SCHEMA_V1,
+            "command_text": "cargo test --lib verify_ledger -- --nocapture",
+            "command_kind": "cargo_test",
+            "bead_id": "bd-17awb",
+            "success": false,
+            "exit_code": 1,
+            "remote_required": true,
+            "worker_id": "vmi1227854",
+            "degraded_codes": [
+                "rch_verify_topology_blocked",
+                "rch_verify_local_fallback_refused"
+            ],
+            "source_state": {
+                "verification_attribution": "live_dirty_checkout",
+                "git_head": "29f6e4d8377cf19389594fba70fee2a61b6b22d8",
+                "git_tree": "a2f58a6888cddea0cd09c74a601a1317a5830d90",
+                "dirty_status_hash": "sha256:dc7764a78395ff854476eaf0618c4860d09c38c575c8385a6475762f2330aaad"
+            },
+            "known_blocker": {
+                "blocker_fingerprint": "sha256:594f17fc0b12643d47ef561957b1beeb8620c23d934e90d454eb15395bf04e49",
+                "remediation_bead": "bd-17c65.10.17.1.2",
+                "retry_after": "2999-01-01T00:00:00Z"
+            }
+        });
+        fs::write(&proof_path, proof.to_string())
+            .map_err(|error| format!("write proof fixture: {error}"))?;
+        let workspace_arg = workspace.to_string_lossy().into_owned();
+        let proof_arg = proof_path.to_string_lossy().into_owned();
+
+        let (ingest_exit, ingest_stdout, ingest_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace_arg,
+            "verify",
+            "rch",
+            "ingest",
+            "--from-json",
+            &proof_arg,
+        ]);
+        ensure_equal(
+            &ingest_exit,
+            &ProcessExitCode::Success,
+            "verify rch ingest exit",
+        )?;
+        ensure(ingest_stderr.is_empty(), "verify rch ingest stderr clean")?;
+        let ingest_json: serde_json::Value = serde_json::from_str(&ingest_stdout)
+            .map_err(|error| format!("verify rch ingest stdout must parse: {error}"))?;
+        ensure_equal(
+            &ingest_json["schema"],
+            &serde_json::json!("ee.response.v2"),
+            "ingest envelope",
+        )?;
+        ensure_equal(
+            &ingest_json["data"]["schema"],
+            &serde_json::json!(
+                crate::core::verify_ledger::RCH_VERIFY_LEDGER_INGEST_REPORT_SCHEMA_V1
+            ),
+            "ingest data schema",
+        )?;
+        ensure_equal(
+            &ingest_json["data"]["outcome"],
+            &serde_json::json!("inserted"),
+            "ingest outcome",
+        )?;
+        ensure_equal(
+            &ingest_json["data"]["run"]["status"],
+            &serde_json::json!("blocked"),
+            "ingest run status",
+        )?;
+
+        let (blockers_exit, blockers_stdout, blockers_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace_arg,
+            "verify",
+            "rch",
+            "blockers",
+            "--bead-id",
+            "bd-17awb",
+        ]);
+        ensure_equal(
+            &blockers_exit,
+            &ProcessExitCode::Success,
+            "verify rch blockers exit",
+        )?;
+        ensure(
+            blockers_stderr.is_empty(),
+            "verify rch blockers stderr clean",
+        )?;
+        let blockers_json: serde_json::Value = serde_json::from_str(&blockers_stdout)
+            .map_err(|error| format!("verify rch blockers stdout must parse: {error}"))?;
+        ensure_equal(
+            &blockers_json["data"]["schema"],
+            &serde_json::json!(
+                crate::core::verify_ledger::RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1
+            ),
+            "blockers data schema",
+        )?;
+        ensure_equal(
+            &blockers_json["data"]["blockerCount"],
+            &serde_json::json!(1),
+            "active blocker count",
+        )?;
+        ensure_equal(
+            &blockers_json["data"]["blockers"][0]["remediationBead"],
+            &serde_json::json!("bd-17c65.10.17.1.2"),
+            "blocker remediation bead",
+        )
     }
 
     #[test]

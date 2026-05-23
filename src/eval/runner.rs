@@ -4,6 +4,7 @@
 //! runs queries, and computes retrieval metrics (P@k, nDCG@k, MRR).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,8 @@ pub const STRUCTURAL_RECALL_EXPECTATIONS_SCHEMA_V1: &str =
 
 /// Default fixture directory relative to project root.
 pub const DEFAULT_FIXTURE_DIR: &str = "tests/fixtures/eval";
+
+const EVAL_FIXTURE_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// A discovered fixture with its metadata.
 #[derive(Clone, Debug)]
@@ -1283,8 +1286,27 @@ fn read_eval_fixture_file(
     label: &'static str,
 ) -> Result<String, DomainError> {
     ensure_eval_fixture_regular_file(path, operation)?;
-    std::fs::read_to_string(path).map_err(|e| DomainError::Storage {
+    let file = std::fs::File::open(path).map_err(|e| DomainError::Storage {
         message: format!("Failed to read {label} {}: {e}", path.display()),
+        repair: None,
+    })?;
+    let mut limited = file.take(EVAL_FIXTURE_FILE_MAX_BYTES.saturating_add(1));
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|e| DomainError::Storage {
+            message: format!("Failed to read {label} {}: {e}", path.display()),
+            repair: None,
+        })?;
+    if bytes.len() as u64 > EVAL_FIXTURE_FILE_MAX_BYTES {
+        return Err(eval_fixture_file_too_large_error(
+            path,
+            operation,
+            bytes.len() as u64,
+        ));
+    }
+    String::from_utf8(bytes).map_err(|e| DomainError::Storage {
+        message: format!("Failed to read {label} {} as UTF-8: {e}", path.display()),
         repair: None,
     })
 }
@@ -1295,7 +1317,16 @@ fn ensure_eval_fixture_regular_file(
 ) -> Result<(), DomainError> {
     ensure_eval_fixture_path_has_no_symlink_components(path, operation)?;
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => {
+            if metadata.len() > EVAL_FIXTURE_FILE_MAX_BYTES {
+                return Err(eval_fixture_file_too_large_error(
+                    path,
+                    operation,
+                    metadata.len(),
+                ));
+            }
+            Ok(())
+        }
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to {operation} {} because it is not a regular file.",
@@ -1308,6 +1339,20 @@ fn ensure_eval_fixture_regular_file(
             message: format!("Failed to inspect fixture file {}: {error}", path.display()),
             repair: None,
         }),
+    }
+}
+
+fn eval_fixture_file_too_large_error(
+    path: &Path,
+    operation: &'static str,
+    len: u64,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Refusing to {operation} {} because it is {len} bytes, above the {EVAL_FIXTURE_FILE_MAX_BYTES}-byte cap.",
+            path.display()
+        ),
+        repair: Some("Reduce the eval fixture JSON size or split it into smaller fixtures.".into()),
     }
 }
 
@@ -2173,6 +2218,27 @@ mod tests {
         )
     }
 
+    #[test]
+    fn load_scenario_rejects_oversized_scenario_before_parse() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let scenario_path = tempdir.path().join("scenario.json");
+        std::fs::write(
+            &scenario_path,
+            vec![b'{'; EVAL_FIXTURE_FILE_MAX_BYTES as usize + 1],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = load_scenario(&scenario_path)
+            .map(|scenario| format!("unexpected scenario: {scenario:?}"))
+            .expect_err("oversized scenario file should reject before parse");
+
+        ensure(
+            error.to_string().contains("byte cap"),
+            true,
+            "oversized scenario file error",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn source_memory_counts_rejects_symlinked_source_file() -> TestResult {
@@ -2209,6 +2275,27 @@ mod tests {
             error.to_string().contains("not a regular file"),
             true,
             "non-regular source memory file error",
+        )
+    }
+
+    #[test]
+    fn source_memory_counts_rejects_oversized_source_before_parse() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = tempdir.path().join("source_memory.json");
+        std::fs::write(
+            &source_path,
+            vec![b'{'; EVAL_FIXTURE_FILE_MAX_BYTES as usize + 1],
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = source_memory_counts(&source_path)
+            .map(|counts| format!("unexpected counts: {counts:?}"))
+            .expect_err("oversized source memory file should reject before parse");
+
+        ensure(
+            error.to_string().contains("byte cap"),
+            true,
+            "oversized source memory file error",
         )
     }
 

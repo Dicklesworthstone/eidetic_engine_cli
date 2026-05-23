@@ -13,6 +13,7 @@
     "sourcePackageHash",
     "promptTemplate",
     "responseSchema",
+    "nextCommands",
     "sourcePackage"
   ],
   "additionalProperties": false,
@@ -25,12 +26,17 @@
     "sourcePackageHash": {"$ref": "#/$defs/blake3Hash"},
     "promptTemplate": {"$ref": "#/$defs/promptTemplate"},
     "responseSchema": {"$ref": "#/$defs/responseSchema"},
+    "nextCommands": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/nextCommand"}
+    },
     "sourcePackage": {"$ref": "#/$defs/sourcePackage"}
   },
   "field_presets": {
     "minimal": ["schema", "requestId", "requestHash", "reflectionKind"],
-    "summary": ["schema", "requestId", "requestHash", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema"],
-    "standard": ["schema", "requestId", "requestHash", "workspaceId", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema", "sourcePackage"],
+    "summary": ["schema", "requestId", "requestHash", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema", "nextCommands"],
+    "standard": ["schema", "requestId", "requestHash", "workspaceId", "reflectionKind", "sourcePackageHash", "promptTemplate", "responseSchema", "nextCommands", "sourcePackage"],
     "full": ["*"]
   },
   "$defs": {
@@ -54,6 +60,23 @@
       "properties": {
         "id": {"type": "string", "const": "ee.reflect.result.v1"},
         "hash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "nextCommand": {
+      "type": "object",
+      "required": ["kind", "command", "when", "safety"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "reflect_ingest_result"
+        },
+        "command": {
+          "type": "string",
+          "pattern": "^ee reflect ingest <result\\.json> --workspace .+ --json$"
+        },
+        "when": {"type": "string", "minLength": 1},
+        "safety": {"type": "string", "minLength": 1}
       }
     },
     "sourcePackage": {

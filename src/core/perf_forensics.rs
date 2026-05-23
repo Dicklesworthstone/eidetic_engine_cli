@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize, Serializer};
@@ -27,6 +28,8 @@ const ARTIFACT_SUMMARY_SCHEMA: &str = "ee.perf.artifact_summary.v1";
 const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
 const BYTES_PER_TOKEN_ESTIMATE: u64 = 4;
 const BULKY_JSON_RESPONSE_BYTES: u64 = 16 * 1024;
+const PERF_ARTIFACT_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const PERF_TRACE_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 fn default_artifact_summary_schema() -> String {
     ARTIFACT_SUMMARY_SCHEMA.to_owned()
@@ -1182,13 +1185,8 @@ fn aggregate_explain_latency_degraded(
 /// Load a normalized perf artifact summary from a JSON file.
 pub fn read_perf_artifact_summary(path: &Path) -> Result<models::ArtifactSummary, DomainError> {
     validate_perf_artifact_path(path)?;
-    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Could not read perf artifact summary {}: {error}",
-            path.display()
-        ),
-        repair: Some("Verify the file is readable and retry.".to_owned()),
-    })?;
+    let body =
+        read_perf_file_to_string(path, "perf artifact summary", PERF_ARTIFACT_FILE_MAX_BYTES)?;
     serde_json::from_str(&body).map_err(|error| DomainError::Usage {
         message: format!("Malformed perf artifact summary JSON: {error}"),
         repair: Some("Re-run with an ee.perf.artifact_summary.v1 JSON file.".to_owned()),
@@ -1200,13 +1198,8 @@ fn read_latency_artifact_summary(
     path: &Path,
 ) -> Result<models::ArtifactSummary, DomainError> {
     validate_perf_artifact_path(path)?;
-    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Could not read perf artifact summary {}: {error}",
-            path.display()
-        ),
-        repair: Some("Verify the file is readable and retry.".to_owned()),
-    })?;
+    let body =
+        read_perf_file_to_string(path, "perf artifact summary", PERF_ARTIFACT_FILE_MAX_BYTES)?;
     match serde_json::from_str::<models::ArtifactSummary>(&body) {
         Ok(artifact) => Ok(artifact),
         Err(summary_error) => explain_performance_artifact_summary(surface, path, &body)
@@ -1282,13 +1275,7 @@ fn merge_j1_latency_log(
     artifact: &mut models::ArtifactSummary,
 ) -> Result<Vec<ExplainLatencyDegradation>, DomainError> {
     validate_perf_log_path(path)?;
-    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Could not read perf latency log {}: {error}",
-            path.display()
-        ),
-        repair: Some("Verify the ee.test_event.v1 JSONL log is readable and retry.".to_owned()),
-    })?;
+    let body = read_perf_file_to_string(path, "perf latency log", PERF_TRACE_FILE_MAX_BYTES)?;
     if artifact.content_hash.is_none() {
         artifact.content_hash = Some(format!("j1:{}", blake3::hash(body.as_bytes()).to_hex()));
     }
@@ -1330,6 +1317,52 @@ fn merge_j1_latency_log(
     Ok(degraded)
 }
 
+fn read_perf_file_to_string(
+    path: &Path,
+    label: &'static str,
+    max_bytes: u64,
+) -> Result<String, DomainError> {
+    let file = fs::File::open(path).map_err(|error| DomainError::Storage {
+        message: format!("Could not read {label} {}: {error}", path.display()),
+        repair: Some("Verify the file is readable and retry.".to_owned()),
+    })?;
+    let mut limited = file.take(max_bytes.saturating_add(1));
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Could not read {label} {}: {error}", path.display()),
+            repair: Some("Verify the file is readable and retry.".to_owned()),
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(perf_file_too_large_error(
+            path,
+            label,
+            bytes.len() as u64,
+            max_bytes,
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| DomainError::Usage {
+        message: format!("Malformed {label} {}: {error}", path.display()),
+        repair: Some("Use UTF-8 encoded JSON or JSONL perf evidence.".to_owned()),
+    })
+}
+
+fn perf_file_too_large_error(
+    path: &Path,
+    label: &'static str,
+    len: u64,
+    max_bytes: u64,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Refusing to read {label} {} because it is {len} bytes, above the {max_bytes}-byte cap.",
+            path.display()
+        ),
+        repair: Some("Reduce the perf evidence size or split it into smaller files.".to_owned()),
+    }
+}
+
 fn validate_perf_log_path(path: &Path) -> Result<(), DomainError> {
     if let Some(symlink_path) =
         first_existing_symlink_component(path).map_err(|error| DomainError::Storage {
@@ -1360,6 +1393,14 @@ fn validate_perf_log_path(path: &Path) -> Result<(), DomainError> {
             message: format!("Unsupported perf latency log path: {}", path.display()),
             repair: Some("Pass a JSONL file, not a directory or special file.".to_owned()),
         });
+    }
+    if metadata.len() > PERF_TRACE_FILE_MAX_BYTES {
+        return Err(perf_file_too_large_error(
+            path,
+            "perf latency log",
+            metadata.len(),
+            PERF_TRACE_FILE_MAX_BYTES,
+        ));
     }
     if !matches!(
         path.extension().and_then(|extension| extension.to_str()),
@@ -1459,6 +1500,14 @@ fn validate_perf_artifact_path(path: &Path) -> Result<(), DomainError> {
             message: format!("Unsupported perf artifact extension: {}", path.display()),
             repair: Some("Use a .json normalized perf artifact summary.".to_owned()),
         });
+    }
+    if metadata.len() > PERF_ARTIFACT_FILE_MAX_BYTES {
+        return Err(perf_file_too_large_error(
+            path,
+            "perf artifact",
+            metadata.len(),
+            PERF_ARTIFACT_FILE_MAX_BYTES,
+        ));
     }
     Ok(())
 }
@@ -1745,13 +1794,7 @@ fn read_prompt_budget_trace_events(
     path: &Path,
 ) -> Result<(String, Vec<PromptBudgetTraceEvent>, usize), DomainError> {
     validate_prompt_budget_trace_path(path)?;
-    let body = fs::read_to_string(path).map_err(|error| DomainError::Storage {
-        message: format!(
-            "Could not read prompt-budget trace {}: {error}",
-            path.display()
-        ),
-        repair: Some("Verify the trace JSONL file is readable and retry.".to_owned()),
-    })?;
+    let body = read_perf_file_to_string(path, "prompt-budget trace", PERF_TRACE_FILE_MAX_BYTES)?;
     let trace_hash = format!("blake3:{}", blake3::hash(body.as_bytes()).to_hex());
     let mut events = Vec::new();
     let mut malformed_lines = 0usize;
@@ -1841,6 +1884,14 @@ fn validate_prompt_budget_trace_path(path: &Path) -> Result<(), DomainError> {
             message: format!("Unsupported prompt-budget trace path: {}", path.display()),
             repair: Some("Pass a JSONL file, not a directory or special file.".to_owned()),
         });
+    }
+    if metadata.len() > PERF_TRACE_FILE_MAX_BYTES {
+        return Err(perf_file_too_large_error(
+            path,
+            "prompt-budget trace",
+            metadata.len(),
+            PERF_TRACE_FILE_MAX_BYTES,
+        ));
     }
     if !matches!(
         path.extension().and_then(|extension| extension.to_str()),
@@ -2948,6 +2999,24 @@ mod tests {
     }
 
     #[test]
+    fn read_perf_artifact_summary_rejects_oversized_file_before_parse() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let summary_path = tempdir.path().join("summary.json");
+        std::fs::File::create(&summary_path)
+            .expect("summary")
+            .set_len(PERF_ARTIFACT_FILE_MAX_BYTES + 1)
+            .expect("oversized summary");
+
+        let error = read_perf_artifact_summary(&summary_path)
+            .expect_err("oversized perf artifact should reject before parse");
+
+        assert!(
+            error.to_string().contains("byte cap"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn subsystem_owner_inference() {
         assert_eq!(
             SubsystemOwner::infer_from_metric("search_elapsed_ms"),
@@ -3155,6 +3224,42 @@ mod tests {
             degradation.code == models::degradation::PERF_LATENCY_EVIDENCE_MISSING_CODE
                 && degradation.severity == Severity::Medium
         }));
+    }
+
+    #[test]
+    fn explain_latency_report_rejects_oversized_j1_log_before_parse() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let log_path = tempdir.path().join("j1.jsonl");
+        std::fs::File::create(&log_path)
+            .expect("log")
+            .set_len(PERF_TRACE_FILE_MAX_BYTES + 1)
+            .expect("oversized log");
+
+        let error = explain_latency_report(PerfLatencySurface::Search, None, Some(&log_path))
+            .expect_err("oversized perf latency log should reject before parse");
+
+        assert!(
+            error.to_string().contains("byte cap"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn prompt_budget_report_rejects_oversized_trace_before_parse() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let trace_path = tempdir.path().join("trace.jsonl");
+        std::fs::File::create(&trace_path)
+            .expect("trace")
+            .set_len(PERF_TRACE_FILE_MAX_BYTES + 1)
+            .expect("oversized trace");
+
+        let error = prompt_budget_report(&trace_path)
+            .expect_err("oversized prompt-budget trace should reject before parse");
+
+        assert!(
+            error.to_string().contains("byte cap"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

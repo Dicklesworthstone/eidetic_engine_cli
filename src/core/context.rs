@@ -62,8 +62,7 @@ use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
     SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_context_search_with_read_connection_seeded_and_audit_connection,
-    search_degraded_data_json,
+    query_observation_json, run_context_search_with_preloaded_memories, search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -1225,44 +1224,47 @@ fn run_context_pack_with_performance_inner(
     let search_start = Instant::now();
     let mut context_write_connection = DbConnection::open_file(&database_path).ok();
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
-    let mut search_report =
-        match run_context_search_with_read_connection_seeded_and_audit_connection(
-            &SearchOptions {
-                workspace_path: options.workspace_path.clone(),
-                database_path: Some(database_path.clone()),
-                index_dir: options.index_dir.clone(),
-                query: request.query.clone(),
-                limit: request.candidate_pool,
-                speed: options.speed,
-                explain: false,
-                as_of: context_validity_reference_time(options, &effective_filters),
-                include_tombstoned: options.include_tombstoned,
-                include_expired: context_include_expired(options, &effective_filters),
-                include_future: context_include_future(options, &effective_filters),
-                include_stale: context_include_stale(options, &effective_filters),
-                // Context packing owns relevance and budget filtering after retrieval.
-                // Keep the default candidate pool broad so an exact single-memory match
-                // is not dropped by the interactive search command's presentation floor.
-                // An explicit caller floor still applies for diagnostic/e2e paths.
-                relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
-                dedup_mode: crate::core::search::SearchDedupMode::DocId,
-                source_mode: crate::core::search::SearchSourceMode::Hybrid,
-                strict_source_mode: false,
-                memory_scope: options.memory_scope,
-                strict_scope: options.strict_scope,
-            },
-            read_connection,
-            context_write_connection.as_ref(),
-            determinism,
-        ) {
-            Ok(report) => report,
-            Err(SearchError::NoIndex) => missing_index_search_report(
-                &request.query,
-                request.candidate_pool,
-                runtime_profile.clone(),
-            ),
-            Err(error) => return Err(ContextPackError::Search(error)),
-        };
+    let mut search_preloaded_memories = BTreeMap::new();
+    let mut search_report = match run_context_search_with_preloaded_memories(
+        &SearchOptions {
+            workspace_path: options.workspace_path.clone(),
+            database_path: Some(database_path.clone()),
+            index_dir: options.index_dir.clone(),
+            query: request.query.clone(),
+            limit: request.candidate_pool,
+            speed: options.speed,
+            explain: false,
+            as_of: context_validity_reference_time(options, &effective_filters),
+            include_tombstoned: options.include_tombstoned,
+            include_expired: context_include_expired(options, &effective_filters),
+            include_future: context_include_future(options, &effective_filters),
+            include_stale: context_include_stale(options, &effective_filters),
+            // Context packing owns relevance and budget filtering after retrieval.
+            // Keep the default candidate pool broad so an exact single-memory match
+            // is not dropped by the interactive search command's presentation floor.
+            // An explicit caller floor still applies for diagnostic/e2e paths.
+            relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
+            dedup_mode: crate::core::search::SearchDedupMode::DocId,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: options.memory_scope,
+            strict_scope: options.strict_scope,
+        },
+        read_connection,
+        context_write_connection.as_ref(),
+        determinism,
+    ) {
+        Ok(context_search) => {
+            search_preloaded_memories = context_search.preloaded_memories;
+            context_search.report
+        }
+        Err(SearchError::NoIndex) => missing_index_search_report(
+            &request.query,
+            request.candidate_pool,
+            runtime_profile.clone(),
+        ),
+        Err(error) => return Err(ContextPackError::Search(error)),
+    };
     trace.index_status_checks = trace.index_status_checks.saturating_add(1);
     trace.record_elapsed("search", search_start);
 
@@ -1380,6 +1382,7 @@ fn run_context_pack_with_performance_inner(
         &effective_filters,
         options.include_tombstoned,
         &mut degraded,
+        Some(&search_preloaded_memories),
     );
     if candidate_metrics.tag_filtered_candidates > 0 {
         trace.filter_input_count = trace.filter_input_count.max(candidate_filter_input_count);
@@ -4533,6 +4536,7 @@ fn candidates_from_search_with_metrics(
     filters: &crate::models::QueryFilters,
     include_tombstoned: bool,
     degraded: &mut Vec<ContextResponseDegradation>,
+    preloaded_memories: Option<&BTreeMap<String, StoredMemory>>,
 ) -> (Vec<PackCandidate>, CandidateResolutionMetrics) {
     let mut metrics = CandidateResolutionMetrics {
         search_hits: search_report.results.len(),
@@ -4597,8 +4601,14 @@ fn candidates_from_search_with_metrics(
     let memory_ids_refs: Vec<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
 
     // Phase 2: Batch load all memories and tags.
-    let (memories, tags_map) = load_candidate_batch_maps(connection, &memory_ids_refs, degraded);
-    metrics.memory_batch_reads = usize::from(!memory_ids_refs.is_empty());
+    let (memories, tags_map, used_preloaded_memories) = load_candidate_batch_maps_with_preloaded(
+        connection,
+        &memory_ids_refs,
+        preloaded_memories,
+        degraded,
+    );
+    metrics.memory_batch_reads =
+        usize::from(!memory_ids_refs.is_empty() && !used_preloaded_memories);
     metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
 
     // Phase 3: Build candidates from preloaded data.
@@ -7034,22 +7044,75 @@ fn load_candidate_batch_maps(
     BTreeMap<String, StoredMemory>,
     BTreeMap<String, Vec<String>>,
 ) {
-    if memory_ids.is_empty() {
-        return (BTreeMap::new(), BTreeMap::new());
+    let (memories, tags_map, _) =
+        load_candidate_batch_maps_with_preloaded(connection, memory_ids, None, degraded);
+    (memories.into_owned(), tags_map)
+}
+
+enum CandidateMemoryBatch<'a> {
+    Owned(BTreeMap<String, StoredMemory>),
+    Borrowed(&'a BTreeMap<String, StoredMemory>),
+}
+
+impl CandidateMemoryBatch<'_> {
+    fn get(&self, memory_id: &str) -> Option<&StoredMemory> {
+        match self {
+            Self::Owned(memories) => memories.get(memory_id),
+            Self::Borrowed(memories) => memories.get(memory_id),
+        }
     }
 
-    let memories = match connection.get_memories_batch(memory_ids) {
-        Ok(memories) => memories,
-        Err(error) => {
-            push_degradation(
-                degraded,
-                "context_candidate_memory_batch_unavailable",
-                ContextResponseSeverity::Medium,
-                format!("Context candidate memories could not be batch-loaded: {error}"),
-                Some("ee status --json".to_string()),
-            );
-            BTreeMap::new()
+    fn into_owned(self) -> BTreeMap<String, StoredMemory> {
+        match self {
+            Self::Owned(memories) => memories,
+            Self::Borrowed(memories) => memories.clone(),
         }
+    }
+}
+
+fn load_candidate_batch_maps_with_preloaded<'a>(
+    connection: &DbConnection,
+    memory_ids: &[&str],
+    preloaded_memories: Option<&'a BTreeMap<String, StoredMemory>>,
+    degraded: &mut Vec<ContextResponseDegradation>,
+) -> (
+    CandidateMemoryBatch<'a>,
+    BTreeMap<String, Vec<String>>,
+    bool,
+) {
+    if memory_ids.is_empty() {
+        return (
+            CandidateMemoryBatch::Owned(BTreeMap::new()),
+            BTreeMap::new(),
+            true,
+        );
+    }
+
+    let unique_memory_ids = memory_ids.iter().copied().collect::<BTreeSet<&str>>();
+    let preloaded_covers_all = preloaded_memories
+        .map(|preloaded| {
+            unique_memory_ids
+                .iter()
+                .all(|memory_id| preloaded.contains_key(*memory_id))
+        })
+        .unwrap_or(false);
+
+    let memories = if let Some(preloaded) = preloaded_memories.filter(|_| preloaded_covers_all) {
+        CandidateMemoryBatch::Borrowed(preloaded)
+    } else {
+        CandidateMemoryBatch::Owned(match connection.get_memories_batch(memory_ids) {
+            Ok(memories) => memories,
+            Err(error) => {
+                push_degradation(
+                    degraded,
+                    "context_candidate_memory_batch_unavailable",
+                    ContextResponseSeverity::Medium,
+                    format!("Context candidate memories could not be batch-loaded: {error}"),
+                    Some("ee status --json".to_string()),
+                );
+                BTreeMap::new()
+            }
+        })
     };
 
     let tags_map = match connection.get_memory_tags_batch(memory_ids) {
@@ -7066,11 +7129,11 @@ fn load_candidate_batch_maps(
         }
     };
 
-    (memories, tags_map)
+    (memories, tags_map, preloaded_covers_all)
 }
 
 struct PreloadedCandidateSource<'a> {
-    memories: &'a BTreeMap<String, StoredMemory>,
+    memories: &'a CandidateMemoryBatch<'a>,
     tags_map: &'a BTreeMap<String, Vec<String>>,
     workspace_path: &'a Path,
     query: &'a str,
@@ -9816,6 +9879,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut degraded,
+            None,
         );
 
         assert!(candidates.is_empty());
@@ -9961,6 +10025,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut degraded,
+            None,
         );
 
         assert_eq!(metrics.search_hits, 2);
@@ -10095,6 +10160,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut degraded,
+            None,
         );
 
         assert_eq!(metrics.search_hits, 2);
@@ -10230,6 +10296,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut first_degraded,
+            None,
         );
         let mut second_degraded = Vec::new();
         let (second_candidates, second_metrics) = super::candidates_from_search_with_metrics(
@@ -10239,6 +10306,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut second_degraded,
+            None,
         );
 
         assert_eq!(first_candidates.len(), 3);
@@ -11287,6 +11355,7 @@ pub fn unrelated_context() -> u64 {
             &crate::models::QueryFilters::default(),
             false,
             &mut degraded,
+            None,
         );
         let draft = assemble_draft_with_profile(
             ContextPackProfile::Balanced,

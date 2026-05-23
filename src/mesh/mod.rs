@@ -12,6 +12,7 @@
 //! descriptions (SRR6.46.* under bd-36bbk).
 
 pub mod admission;
+pub mod anti_entropy_protocol;
 pub mod audit;
 pub mod auto_enrollment;
 pub mod auto_enrollment_safety;

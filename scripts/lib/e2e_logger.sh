@@ -110,7 +110,7 @@ while i + 1 < len(sys.argv):
     k = sys.argv[i]
     v = sys.argv[i+1]
     # Top-level columns vs free-form fields.
-    if k in ("command", "stdin_hash", "stdout_hash", "stderr_excerpt"):
+    if k in ("command", "stdin_hash", "stdout_hash", "stderr_hash", "stderr_excerpt"):
         event[k] = v
     elif k == "exit_code":
         try: event[k] = int(v)
@@ -244,13 +244,15 @@ e2e_log_command() {
     ended=$(python3 -c "import time; print(time.monotonic_ns())")
     local elapsed_ms
     elapsed_ms=$(python3 -c "print(($ended - $started) / 1_000_000.0)")
-    local stdout_hash stderr_excerpt
+    local stdout_hash stderr_hash stderr_excerpt
     stdout_hash=$(_e2e_hash_file "$out_file")
+    stderr_hash=$(_e2e_hash_file "$err_file")
     stderr_excerpt=$(head -c "$EE_TEST_LOG_STDERR_CAP" "$err_file")
     _e2e_emit_event "command_end" \
         "command" "$label" \
         "args" "$args_str" \
         "stdout_hash" "$stdout_hash" \
+        "stderr_hash" "$stderr_hash" \
         "stderr_excerpt" "$stderr_excerpt" \
         "exit_code" "$rc" \
         "elapsed_ms" "$elapsed_ms"

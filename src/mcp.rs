@@ -8,7 +8,7 @@
 //!
 //! MCP is a thin adapter layer over the same core services used by the CLI:
 //! - No business logic duplication
-//! - Same response contracts (ee.response.v1)
+//! - Same response contracts (ee.response.v2)
 //! - Same error codes and degradation paths
 //!
 //! # Protocol
@@ -529,7 +529,7 @@ fn render_pre_task_context_prompt(arguments: &Value) -> Result<String, String> {
         .map_or_else(|| "4000".to_string(), |value| value.to_string());
 
     Ok(format!(
-        "Prepare for this task with ee before editing.\n\nTask:\n{task}\n\nUse the read-only MCP tool `ee_context` or the CLI command below:\n`ee --workspace {workspace} --json context {task:?} --profile {profile} --max-tokens {max_tokens}`\n\nRead the returned `ee.response.v1` envelope, summarize the highest-confidence procedural rules, relevant failures, decisions, provenance, and degraded capabilities, then proceed with the task. Keep machine JSON separate from human diagnostics."
+        "Prepare for this task with ee before editing.\n\nTask:\n{task}\n\nUse the read-only MCP tool `ee_context` or the CLI command below:\n`ee --workspace {workspace} --json context {task:?} --profile {profile} --max-tokens {max_tokens}`\n\nRead the returned `ee.response.v2` envelope, summarize the highest-confidence procedural rules, relevant failures, decisions, provenance, and degraded capabilities, then proceed with the task. Keep machine JSON separate from human diagnostics."
     ))
 }
 
@@ -2576,7 +2576,7 @@ mod tests {
         assert!(resource_uris.contains(&"ee://agent-docs"));
         assert!(resource_uris.contains(&"ee://agent-docs/guide"));
         assert!(resource_uris.contains(&"ee://schemas"));
-        assert!(resource_uris.contains(&"ee://schemas/ee.response.v1"));
+        assert!(resource_uris.contains(&"ee://schemas/ee.response.v2"));
         assert!(resource_uris.contains(&"ee://workspace/status"));
         Ok(())
     }
@@ -2889,7 +2889,7 @@ mod tests {
 
     #[test]
     fn tool_result_redacts_stderr_even_when_stdout_is_json() -> Result<(), String> {
-        let stdout = "{\"schema\":\"ee.response.v1\",\"success\":true}".to_string();
+        let stdout = "{\"schema\":\"ee.response.v2\",\"success\":true}".to_string();
         let raw_stderr = "warning: ignored /Users/alice/private/repo/.ee/config.toml".to_string();
         let response = cli_tool_result(
             json!(1),

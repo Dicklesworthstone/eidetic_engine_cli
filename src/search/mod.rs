@@ -756,13 +756,35 @@ fn search_projection_path_prefix_len(
 }
 
 fn search_projection_unix_prefix_matches(remaining: &str, prefix: &str) -> bool {
-    if matches!(prefix, "/Users/" | "/Volumes/") {
+    if is_case_insensitive_macos_search_path_prefix(prefix) {
         remaining
             .get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
     } else {
         remaining.starts_with(prefix)
     }
+}
+
+fn is_case_insensitive_macos_search_path_prefix(prefix: &str) -> bool {
+    matches!(
+        prefix,
+        "/Users/"
+            | "/Volumes/"
+            | "/var/run/"
+            | "/var/log/"
+            | "/var/tmp/"
+            | "/var/folders/"
+            | "/private/var/run/"
+            | "/private/var/log/"
+            | "/private/var/tmp/"
+            | "/private/var/folders/"
+            | "/private/etc/ssh/"
+            | "/private/etc/kubernetes/"
+            | "/private/etc/ssl/"
+            | "/private/etc/letsencrypt/"
+            | "/private/etc/secrets/"
+            | "/private/tmp/"
+    )
 }
 
 fn starts_with_search_projection_file_host_ref(remaining: &str) -> bool {
@@ -3891,6 +3913,40 @@ mod tests {
                 "search projection redaction leaked macOS private root {leaked}: {redacted}"
             );
         }
+    }
+
+    #[test]
+    fn search_projection_redacts_case_insensitive_macos_private_roots() {
+        let redacted = super::redact_search_projection_absolute_path_like_segments(
+            r#"run=/PRIVATE/VAR/RUN/agent.sock log=/PRIVATE/VAR/LOG/agent/secrets.log vartmp=/PRIVATE/VAR/TMP/ee/session.json folders=/VAR/FOLDERS/vt/n2xyn/T/tmp.stderr pfolders=/PRIVATE/VAR/FOLDERS/vt/n2xyn/T/tmp.stdout etcssh=/PRIVATE/ETC/SSH/ssh_host_ed25519_key kube=/PRIVATE/ETC/KUBERNETES/admin.conf ssl=/PRIVATE/ETC/SSL/private/server.key le=/PRIVATE/ETC/LETSENCRYPT/live/example/privkey.pem secrets=/PRIVATE/ETC/SECRETS/token ptmp=/PRIVATE/TMP/ee.sock ordinary=notes/PRIVATE.md next=done"#,
+        );
+
+        assert_eq!(
+            redacted,
+            r#"run=[REDACTED_PATH] log=[REDACTED_PATH] vartmp=[REDACTED_PATH] folders=[REDACTED_PATH] pfolders=[REDACTED_PATH] etcssh=[REDACTED_PATH] kube=[REDACTED_PATH] ssl=[REDACTED_PATH] le=[REDACTED_PATH] secrets=[REDACTED_PATH] ptmp=[REDACTED_PATH] ordinary=notes/PRIVATE.md next=done"#
+        );
+        for leaked in [
+            "/PRIVATE/VAR/RUN/agent.sock",
+            "/PRIVATE/VAR/LOG/agent",
+            "/PRIVATE/VAR/TMP/ee",
+            "/VAR/FOLDERS/vt",
+            "/PRIVATE/VAR/FOLDERS/vt",
+            "/PRIVATE/ETC/SSH/ssh_host_ed25519_key",
+            "/PRIVATE/ETC/KUBERNETES/admin.conf",
+            "/PRIVATE/ETC/SSL/private",
+            "/PRIVATE/ETC/LETSENCRYPT/live",
+            "/PRIVATE/ETC/SECRETS/token",
+            "/PRIVATE/TMP/ee.sock",
+        ] {
+            assert!(
+                !redacted.contains(leaked),
+                "search projection redaction leaked mixed-case macOS private root {leaked}: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("ordinary=notes/PRIVATE.md"),
+            "ordinary relative text should remain visible: {redacted}"
+        );
     }
 
     #[test]
