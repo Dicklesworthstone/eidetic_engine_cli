@@ -10172,32 +10172,119 @@ fn create_derived_apply_injected_error(
             repair: Some("test failure injection".to_owned()),
         },
         CreateDerivedApplyInjectedFailureKind::SqliteBusy => {
-            let error = create_derived_apply_injected_db_error(
+            // bd-2d3i5: route the synthetic canonical `DbError` through the
+            // SAME named production `.map_err` for `phase` so the resulting
+            // `DomainError` exercises the real mapping (message prefix +
+            // repair hint) instead of a hand-rolled bypass wrapper.
+            let db_error = create_derived_apply_injected_db_error(
                 phase,
                 "database is busy during create-derived apply",
             );
-            DomainError::Storage {
-                message: format!(
-                    "Injected create-derived apply storage busy at phase {phase} for candidate {}: {error}",
-                    stored.id
-                ),
-                repair: Some("retry after the writer releases the database lock".to_owned()),
-            }
+            route_create_derived_injected_db_error_to_phase_mapping(phase, db_error).unwrap_or_else(
+                || DomainError::Storage {
+                    message: format!(
+                        "Injected create-derived apply storage busy at unmapped phase {phase} for candidate {}.",
+                        stored.id
+                    ),
+                    repair: Some("retry after the writer releases the database lock".to_owned()),
+                },
+            )
         }
         CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout => {
-            let error = create_derived_apply_injected_db_error(
+            // bd-2d3i5: same canonical routing as the busy case, with a
+            // DbError message that carries the "advisory lock"+"timeout"
+            // substrings so the production error envelope still surfaces
+            // the `advisory_lock_timeout` degraded code via the renderer
+            // path at src/output/mod.rs:12140-12150.
+            let db_error = create_derived_apply_injected_db_error(
                 phase,
-                "database is locked during create-derived apply",
+                "advisory lock timeout: database is locked during create-derived apply",
             );
-            DomainError::Storage {
-                message: format!(
-                    "advisory lock timeout while waiting for create-derived apply phase {phase} for candidate {}: {error}",
-                    stored.id
-                ),
-                repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
-            }
+            route_create_derived_injected_db_error_to_phase_mapping(phase, db_error).unwrap_or_else(
+                || DomainError::Storage {
+                    message: format!(
+                        "advisory lock timeout: unmapped create-derived apply phase {phase} for candidate {}.",
+                        stored.id
+                    ),
+                    repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                },
+            )
         }
     }
+}
+
+/// Production `.map_err` closures for every `DbConnection` call made by
+/// `persist_create_derived_candidate_application_inner`. Extracted as named
+/// functions so the bd-2d3i5 busy/lock test injection can route a synthetic
+/// canonical `DbError::SqlModel { ... QueryErrorKind::Deadlock ... }` through
+/// the SAME mapping production uses, instead of bypassing it with a
+/// hand-rolled `DomainError::Storage` wrapper.
+fn map_create_derived_insert_memory_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to create derived memory: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    }
+}
+
+fn map_create_derived_insert_memory_link_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to create derived memory provenance link: {error}"),
+        repair: Some("ee memory link <memory-id> --json".to_owned()),
+    }
+}
+
+fn map_create_derived_attach_evidence_span_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to attach derived evidence span: {error}"),
+        repair: Some("ee import cass --workspace . --json".to_owned()),
+    }
+}
+
+fn map_create_derived_insert_search_index_job_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to queue derived memory indexing: {error}"),
+        repair: Some("ee index rebuild --workspace .".to_owned()),
+    }
+}
+
+fn map_create_derived_mark_candidate_applied_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to mark create-derived curation candidate applied: {error}"),
+        repair: Some("ee curate candidates --json".to_owned()),
+    }
+}
+
+fn map_create_derived_insert_audit_db_error(error: DbError) -> DomainError {
+    DomainError::Storage {
+        message: format!("Failed to write derived memory create audit entry: {error}"),
+        repair: Some("ee doctor".to_owned()),
+    }
+}
+
+/// Dispatch a synthetic injected `DbError` through the same named
+/// production map closure that the matching `DbConnection` call uses,
+/// so bd-2d3i5 busy/lock injection exercises the canonical mapping path.
+#[cfg(test)]
+fn route_create_derived_injected_db_error_to_phase_mapping(
+    phase: &'static str,
+    error: DbError,
+) -> Option<DomainError> {
+    let mapped = match phase {
+        "before_insert_memory" => map_create_derived_insert_memory_db_error(error),
+        "before_insert_memory_link" => map_create_derived_insert_memory_link_db_error(error),
+        "before_attach_evidence_span_to_memory_if_unlinked" => {
+            map_create_derived_attach_evidence_span_db_error(error)
+        }
+        "before_insert_search_index_job" => {
+            map_create_derived_insert_search_index_job_db_error(error)
+        }
+        "before_mark_curation_candidate_applied" => {
+            map_create_derived_mark_candidate_applied_db_error(error)
+        }
+        "before_insert_audit" => map_create_derived_insert_audit_db_error(error),
+        _ => return None,
+    };
+    Some(mapped)
 }
 
 #[cfg(test)]
@@ -10273,19 +10360,13 @@ fn persist_create_derived_candidate_application_inner(
     maybe_inject_create_derived_apply_failure(stored, "before_insert_memory")?;
     connection
         .insert_memory(&derived_create.memory_id, &derived_create.memory)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to create derived memory: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
+        .map_err(map_create_derived_insert_memory_db_error)?;
     maybe_inject_create_derived_apply_failure(stored, "after_memory_insert")?;
     for link in &derived_create.links {
         maybe_inject_create_derived_apply_failure(stored, "before_insert_memory_link")?;
         connection
             .insert_memory_link(&link.link_id, &link.link)
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to create derived memory provenance link: {error}"),
-                repair: Some("ee memory link <memory-id> --json".to_owned()),
-            })?;
+            .map_err(map_create_derived_insert_memory_link_db_error)?;
     }
     maybe_inject_create_derived_apply_failure(stored, "after_derived_links")?;
     for evidence_ref in &derived_create.evidence_refs {
@@ -10300,10 +10381,8 @@ fn persist_create_derived_candidate_application_inner(
                 evidence_ref.content_hash.as_str(),
                 derived_create.memory_id.as_str(),
             )
-            .map_err(|error| DomainError::Storage {
-                message: format!("Failed to attach derived evidence span: {error}"),
-                repair: Some("ee import cass --workspace . --json".to_owned()),
-            })? {
+            .map_err(map_create_derived_attach_evidence_span_db_error)?
+        {
             EvidenceSpanMemoryAttachResult::Attached
             | EvidenceSpanMemoryAttachResult::AlreadyAttachedToRequestedMemory => {}
             EvidenceSpanMemoryAttachResult::AlreadyAttachedToDifferentMemory => {
@@ -10336,19 +10415,13 @@ fn persist_create_derived_candidate_application_inner(
     maybe_inject_create_derived_apply_failure(stored, "before_insert_search_index_job")?;
     connection
         .insert_search_index_job(&derived_create.index_job_id, &derived_create.index_job)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to queue derived memory indexing: {error}"),
-            repair: Some("ee index rebuild --workspace .".to_owned()),
-        })?;
+        .map_err(map_create_derived_insert_search_index_job_db_error)?;
     maybe_inject_create_derived_apply_failure(stored, "after_search_job_enqueue")?;
     maybe_inject_create_derived_apply_failure(stored, "before_candidate_applied")?;
     maybe_inject_create_derived_apply_failure(stored, "before_mark_curation_candidate_applied")?;
     let marked_applied = connection
         .mark_curation_candidate_applied(workspace_id, &stored.id, applied_at)
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to mark create-derived curation candidate applied: {error}"),
-            repair: Some("ee curate candidates --json".to_owned()),
-        })?;
+        .map_err(map_create_derived_mark_candidate_applied_db_error)?;
     if !marked_applied {
         return Err(DomainError::Storage {
             message: format!(
@@ -10374,10 +10447,7 @@ fn persist_create_derived_candidate_application_inner(
                 details: Some(derived_create.audit_details.clone()),
             },
         )
-        .map_err(|error| DomainError::Storage {
-            message: format!("Failed to write derived memory create audit entry: {error}"),
-            repair: Some("ee doctor".to_owned()),
-        })?;
+        .map_err(map_create_derived_insert_audit_db_error)?;
     tracing::info!(
         target: "ee::curate::transition",
         candidate_id = %stored.id,
@@ -16569,6 +16639,62 @@ mod tests {
         )
     }
 
+    /// bd-2d3i5: every busy/lock injection at a real `DbConnection`-call
+    /// phase must surface the production `.map_err` shape (message prefix
+    /// and repair hint) — proving the synthetic canonical `DbError` flowed
+    /// through the same named mapping function production uses, instead
+    /// of bypassing it with a hand-rolled wrapper.
+    fn assert_canonical_busy_lock_mapping_for_phase(
+        phase: &'static str,
+        error: &DomainError,
+    ) -> TestResult {
+        let expected = match phase {
+            "before_insert_memory" => Some(("Failed to create derived memory: ", "ee doctor")),
+            "before_insert_memory_link" => Some((
+                "Failed to create derived memory provenance link: ",
+                "ee memory link <memory-id> --json",
+            )),
+            "before_attach_evidence_span_to_memory_if_unlinked" => Some((
+                "Failed to attach derived evidence span: ",
+                "ee import cass --workspace . --json",
+            )),
+            "before_insert_search_index_job" => Some((
+                "Failed to queue derived memory indexing: ",
+                "ee index rebuild --workspace .",
+            )),
+            "before_mark_curation_candidate_applied" => Some((
+                "Failed to mark create-derived curation candidate applied: ",
+                "ee curate candidates --json",
+            )),
+            "before_insert_audit" => Some((
+                "Failed to write derived memory create audit entry: ",
+                "ee doctor",
+            )),
+            _ => None,
+        };
+        let Some((expected_prefix, expected_repair)) = expected else {
+            // Non-call phases (synthetic-storage-only, e.g. `after_memory_insert`,
+            // `before_candidate_applied`) do not flow through a `.map_err`
+            // closure, so canonical-mapping enforcement does not apply.
+            return Ok(());
+        };
+        let message = error.message();
+        if !message.starts_with(expected_prefix) {
+            return Err(format!(
+                "phase {phase} busy/lock injection must surface the production \
+                 .map_err prefix `{expected_prefix}` so the canonical mapping is \
+                 exercised; got message: {message}"
+            ));
+        }
+        match error.repair() {
+            Some(repair) if repair == expected_repair => Ok(()),
+            other => Err(format!(
+                "phase {phase} busy/lock injection must carry the production \
+                 .map_err repair `{expected_repair}`; got: {other:?}"
+            )),
+        }
+    }
+
     fn assert_create_derived_apply_failure_rolls_back_with_kind(
         phase: &'static str,
         id_offset: u128,
@@ -16638,6 +16764,7 @@ mod tests {
                     "busy injection should surface canonical sqlite busy text: {}",
                     error.message()
                 );
+                assert_canonical_busy_lock_mapping_for_phase(phase, &error)?;
             }
             super::CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout => {
                 assert!(
@@ -16651,6 +16778,7 @@ mod tests {
                     json.contains(ADVISORY_LOCK_TIMEOUT_CODE),
                     "advisory lock timeout envelope should include degraded code: {json}"
                 );
+                assert_canonical_busy_lock_mapping_for_phase(phase, &error)?;
             }
         }
         assert_eq!(
