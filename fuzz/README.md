@@ -10,7 +10,8 @@ agent-generated input should produce structured errors, never panics.
   run for 600 seconds.
 - `search_query_parser` drives arbitrary text through the agent-facing search
   query parser and checks fixed-point display plus outside-quote separator
-  canonicalization. CI sweeps should run for 600 seconds.
+  canonicalization. CI smoke runs use 30 seconds; longer sweeps should run for
+  600 seconds.
 - `jsonl_header_parser` drives arbitrary UTF-8 and lossy byte input through
   the JSONL export-header parser.
 - `cass_import_jsonl` exercises CASS sessions/view JSON envelope decoders.
@@ -38,7 +39,15 @@ cargo fuzz run insights_section_dispatch -- -max_total_time=300 -print_final_sta
 cargo fuzz run proximity_arg_parser -- -max_total_time=300 -print_final_stats=1
 cargo fuzz run ppr_weight_clamp -- -max_total_time=300 -print_final_stats=1
 cargo fuzz run insights_json_decode -- -max_total_time=300 -print_final_stats=1
+cargo fuzz run search_query_parser -- -max_total_time=30 -print_final_stats=1
+cargo fuzz run search_query_parser -- -max_total_time=300 -print_final_stats=1
 cargo fuzz run cass_envelope_decoder -- -max_total_time=600 -print_final_stats=1
+```
+
+CI smoke mode runs the 30-second query-parser sweep through:
+
+```bash
+./scripts/verify.sh --fuzz-smoke
 ```
 
 Nightly or pre-release runs should use `-max_total_time=900`. Keep crash

@@ -29,6 +29,11 @@ fn assert_clauses_canonical(parsed: &ParsedSearchQuery) {
 }
 
 fn assert_display_canonical(displayed: &str, parsed: &ParsedSearchQuery) {
+    assert!(
+        !displayed.chars().any(char::is_control),
+        "displayed query must not contain raw control characters: {displayed:?}"
+    );
+
     if parsed.is_empty() {
         assert!(
             displayed.is_empty(),
