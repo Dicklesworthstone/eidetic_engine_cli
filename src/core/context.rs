@@ -4433,7 +4433,17 @@ fn hash_labeled_bool(hasher: &mut blake3::Hasher, label: &str, value: bool) {
     hash_labeled_bytes(hasher, label, &[u8::from(value)]);
 }
 
-fn compute_pack_hash(
+/// Compute the canonical context-pack hash for a draft + request +
+/// degraded set, using default output options.
+///
+/// Exposed (bd-8k08y) so the arena parity harness in
+/// `tests/arena_parity_golden.rs` can drive the response/hash path
+/// directly rather than only asserting `PackDraft` and
+/// `render_context_markdown` byte-equality. The hash is deterministic
+/// over `(request, draft, degraded, default ContextPackOutputOptions,
+/// no coordination, no read snapshot)`; arena allocation strategy does
+/// not participate in any of those inputs.
+pub fn compute_pack_hash(
     request: &ContextRequest,
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],

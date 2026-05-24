@@ -22,11 +22,13 @@
 
 use std::str::FromStr;
 
+use ee::core::context::compute_pack_hash;
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
+use ee::output::render_context_response_json;
 use ee::pack::{
-    ArenaMode, ContextPackProfile, ContextRequest, ContextRequestInput, PackAssemblyOptions,
-    PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection, TokenBudget,
-    assemble_draft_with_profile_and_options_seeded, render_context_markdown,
+    ArenaMode, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
+    PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection,
+    TokenBudget, assemble_draft_with_profile_and_options_seeded, render_context_markdown,
 };
 use ee::runtime::determinism::Deterministic;
 use uuid::Uuid;
@@ -388,6 +390,60 @@ fn assert_arena_parity_for_profile(
         ));
     }
 
+    // bd-8k08y: pin hash + ContextResponse JSON byte parity in addition
+    // to PackDraft + markdown. `compute_pack_hash` (exposed by bd-8k08y
+    // in src/core/context.rs) drives the same hash inputs that
+    // `run_context_pack` uses for `pack.hash`; `render_context_response_json`
+    // is the same JSON renderer the CLI emits. Without these, a future
+    // arena change could shift hash inputs, omission ordering inside
+    // the JSON envelope, or rendered-text encoding without the
+    // PackDraft+markdown gate catching it.
+    let hash_disabled = compute_pack_hash(&request, &disabled, &[]);
+    let hash_request_scoped = compute_pack_hash(&request, &request_scoped, &[]);
+    if hash_disabled != hash_request_scoped {
+        return Err(format!(
+            "{label}/{profile:?}: compute_pack_hash byte-differs across arena modes \
+             (disabled={hash_disabled}, request_scoped={hash_request_scoped})"
+        ));
+    }
+
+    // Attach the just-computed pack.hash to each draft before building
+    // the response so the JSON envelope includes a hash field for
+    // byte-equality assertion. The response is built per-mode so the
+    // JSON renderer touches every per-mode-derived field.
+    let mut draft_for_response_disabled = disabled.clone();
+    draft_for_response_disabled.hash = Some(hash_disabled.clone());
+    let response_disabled =
+        ContextResponse::new(request.clone(), draft_for_response_disabled, Vec::new()).map_err(
+            |error| format!("{label}/{profile:?}: ContextResponse::new (disabled): {error:?}"),
+        )?;
+    let mut draft_for_response_request_scoped = request_scoped.clone();
+    draft_for_response_request_scoped.hash = Some(hash_request_scoped.clone());
+    let response_request_scoped =
+        ContextResponse::new(request, draft_for_response_request_scoped, Vec::new()).map_err(
+            |error| {
+                format!("{label}/{profile:?}: ContextResponse::new (request_scoped): {error:?}")
+            },
+        )?;
+
+    let json_disabled = render_context_response_json(&response_disabled);
+    let json_request_scoped = render_context_response_json(&response_request_scoped);
+    if json_disabled != json_request_scoped {
+        let mismatch_index = json_disabled
+            .as_bytes()
+            .iter()
+            .zip(json_request_scoped.as_bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(usize::MAX);
+        return Err(format!(
+            "{label}/{profile:?}: render_context_response_json byte-differs across arena modes \
+             (disabled={} bytes, request_scoped={} bytes, first-mismatch-index={})",
+            json_disabled.len(),
+            json_request_scoped.len(),
+            mismatch_index
+        ));
+    }
+
     Ok(())
 }
 
@@ -572,8 +628,82 @@ fn arena_parity_determinism_repeated_calls_balanced() -> TestResult {
                  calls produced different markdown rendering"
             ));
         }
+
+        // bd-8k08y: within-mode determinism on hash + ContextResponse JSON
+        // surfaces too. A regression that breaks hash determinism inside
+        // one mode (without changing parity across modes) would not be
+        // caught by the cross-mode parity helper.
+        let hash_first = compute_pack_hash(&request, &first, &[]);
+        let hash_second = compute_pack_hash(&request, &second, &[]);
+        if hash_first != hash_second {
+            return Err(format!(
+                "determinism broken within arena_mode={arena_mode:?}: \
+                 compute_pack_hash returned different values across repeats \
+                 (first={hash_first}, second={hash_second})"
+            ));
+        }
+        let mut first_with_hash = first.clone();
+        first_with_hash.hash = Some(hash_first.clone());
+        let response_first = ContextResponse::new(request.clone(), first_with_hash, Vec::new())
+            .map_err(|error| {
+                format!("determinism harness ContextResponse::new (first): {error:?}")
+            })?;
+        let mut second_with_hash = second.clone();
+        second_with_hash.hash = Some(hash_second.clone());
+        let response_second =
+            ContextResponse::new(request, second_with_hash, Vec::new()).map_err(|error| {
+                format!("determinism harness ContextResponse::new (second): {error:?}")
+            })?;
+        let json_first = render_context_response_json(&response_first);
+        let json_second = render_context_response_json(&response_second);
+        if json_first != json_second {
+            return Err(format!(
+                "determinism broken within arena_mode={arena_mode:?}: \
+                 render_context_response_json bytes differ across repeats \
+                 ({} vs {} bytes)",
+                json_first.len(),
+                json_second.len()
+            ));
+        }
     }
     Ok(())
+}
+
+#[test]
+fn arena_parity_context_response_hash_and_json_provenance_heavy() -> TestResult {
+    // bd-8k08y (cod_3 R3): freeze arena parity on the heaviest hash +
+    // JSON-envelope surface. `assert_arena_parity_for_profile` now
+    // drives `compute_pack_hash` and `render_context_response_json`
+    // for both modes; this test pins those assertions on the
+    // provenance-heavy fixture cod_3's review flagged, with the
+    // Thorough profile and a generous budget so the rendered JSON
+    // includes every per-item provenance URI.
+    let candidates = fixture_provenance_heavy()?;
+    assert_arena_parity_for_profile(
+        "context_response_hash_and_json_provenance_heavy",
+        ContextPackProfile::Thorough,
+        "show evidence for arena policy decisions",
+        6_000,
+        &candidates,
+        0xc0_d3_8k_08,
+    )
+}
+
+#[test]
+fn arena_parity_context_response_hash_and_json_budget_pressured() -> TestResult {
+    // bd-8k08y: pin hash + JSON parity under budget pressure, where
+    // the JSON envelope carries an `omitted[]` array whose order
+    // matters for byte equality. Budget-pressured fixture is
+    // sanity-checked elsewhere to actually produce omissions.
+    let candidates = fixture_budget_pressured()?;
+    assert_arena_parity_for_profile(
+        "context_response_hash_and_json_budget_pressured",
+        ContextPackProfile::Balanced,
+        "summarize prior arena-mode decisions and failures",
+        500,
+        &candidates,
+        0xc0_d3_8k_09,
+    )
 }
 
 #[test]
