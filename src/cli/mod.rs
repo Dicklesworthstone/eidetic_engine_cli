@@ -14798,6 +14798,24 @@ where
     .to_string()
 }
 
+/// `ee.response.v2`-envelope variant of `workspace_response_json` (bd-1ctyu).
+///
+/// Use for diagnostic surfaces (`ee diag artifacts --json`, `ee diag
+/// build-admission --json`) that have migrated to the v2 envelope while still
+/// emitting the same inner `data` schema. Behavior is otherwise identical to
+/// `workspace_response_json`.
+fn workspace_response_json_v2<T>(report: &T) -> String
+where
+    T: serde::Serialize,
+{
+    serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report,
+    })
+    .to_string()
+}
+
 fn active_response_schema_stdout(text: &str) -> Result<Cow<'_, str>, DomainError> {
     let selector = ACTIVE_FIELD_SELECTOR.with(|selector| selector.borrow().clone());
     let schema_version = ACTIVE_RESPONSE_SCHEMA_VERSION.with(Cell::get);
@@ -21477,13 +21495,13 @@ where
         }
         output::Renderer::Toon => write_stdout(
             stdout,
-            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+            &(output::render_toon_from_json(&workspace_response_json_v2(&report)) + "\n"),
         ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+            write_stdout(stdout, &(workspace_response_json_v2(&report) + "\n"))
         }
     }
 }
@@ -21522,13 +21540,13 @@ where
         }
         output::Renderer::Toon => write_stdout(
             stdout,
-            &(output::render_toon_from_json(&workspace_response_json(&report)) + "\n"),
+            &(output::render_toon_from_json(&workspace_response_json_v2(&report)) + "\n"),
         ),
         output::Renderer::Json
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            write_stdout(stdout, &(workspace_response_json(&report) + "\n"))
+            write_stdout(stdout, &(workspace_response_json_v2(&report) + "\n"))
         }
     }
 }
@@ -37431,19 +37449,17 @@ where
                 );
                 write_stdout(stdout, &(toon + "\n"))
             }
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => {
-            write_stdout(
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
                 stdout,
                 &(output::ResponseEnvelope::success()
                     .data_raw(&report.data_json())
                     .finish()
                     + "\n"),
-            )
-        }
-    },
+            ),
+        },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -53537,10 +53553,16 @@ mod tests {
 
     #[test]
     fn diag_artifacts_json_contract() -> TestResult {
+        // bd-1ctyu: response envelope migrated from ee.response.v1 -> v2.
+        // Data schema and mutationPolicy are preserved.
         let (exit, stdout, stderr) = invoke(&["ee", "diag", "artifacts", "--json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "diag artifacts exit")?;
         ensure(stderr.is_empty(), "diag artifacts stderr must be empty")?;
-        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v2\"", "response schema")?;
+        ensure(
+            !stdout.contains("\"schema\":\"ee.response.v1\""),
+            "must not regress to v1 envelope",
+        )?;
         ensure_contains(
             &stdout,
             "\"schema\":\"ee.artifact_retention.diagnostics.v1\"",
@@ -53577,7 +53599,13 @@ mod tests {
             stderr.is_empty(),
             "diag build-admission stderr must be empty",
         )?;
-        ensure_contains(&stdout, "\"schema\":\"ee.response.v1\"", "response schema")?;
+        // bd-1ctyu: response envelope migrated from ee.response.v1 -> v2.
+        // Data schema and mutationPolicy are preserved.
+        ensure_contains(&stdout, "\"schema\":\"ee.response.v2\"", "response schema")?;
+        ensure(
+            !stdout.contains("\"schema\":\"ee.response.v1\""),
+            "must not regress to v1 envelope",
+        )?;
         ensure_contains(
             &stdout,
             "\"schema\":\"ee.build_admission.diagnostics.v1\"",
