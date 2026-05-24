@@ -13231,6 +13231,67 @@ mod tests {
     }
 
     #[test]
+    fn reflection_diagnostics_redact_invalid_request_material_sentinels() -> TestResult {
+        let material = reflection_request_ledger_material_fixture(
+            "wsp_reflection_core",
+            "reflect_req_redaction_sentinel",
+        );
+        let raw_request_id = "reflect_req_real_looking but invalid";
+        let raw_request_hash =
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let stored = StoredReflectionRequestLedger {
+            request_id: raw_request_id.to_owned(),
+            request_hash: raw_request_hash.to_owned(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        let now = parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidMaterial"
+        );
+
+        let diagnostic = reflection_request_ledger_diagnostic_from_stored(
+            stored,
+            &now,
+            Path::new("/tmp/reflection-workspace"),
+            Some("reflect-key-v1"),
+        );
+
+        assert_eq!(
+            diagnostic.request_id,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL
+        );
+        assert_eq!(
+            diagnostic.request_hash,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL
+        );
+
+        let diagnostic_json =
+            serde_json::to_string(&diagnostic).map_err(|error| error.to_string())?;
+        assert!(diagnostic_json.contains("[REDACTED:invalid-reflection-request-id]"));
+        assert!(diagnostic_json.contains("[REDACTED:invalid-reflection-hash]"));
+        assert!(!diagnostic_json.contains(raw_request_id));
+        assert!(!diagnostic_json.contains(raw_request_hash));
+        Ok(())
+    }
+
+    #[test]
     fn reflection_core_detects_malformed_consumed_lifecycle() -> TestResult {
         let material = reflection_request_ledger_material_fixture(
             "wsp_reflection_core",
