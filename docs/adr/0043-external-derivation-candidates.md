@@ -513,43 +513,59 @@ have a discoverable test file. They are tracked by bd-17pa6
 (reality-check follow-up from bd-2xxao) so a reviewer can audit
 gap-closure progress instead of trusting the prose above.
 
-- **Failure-mode fixtures** under `tests/fixtures/failure_modes/`:
-  `derived_sources_invalid.json`,
-  `derived_target_required_for_mutation.json`, and
-  `derived_target_forbidden_for_create.json` — none exist on disk.
+**Closed since bd-17pa6 opened:**
+- ~~**Failure-mode fixtures**~~ — landed alongside bd-1vnvl
+  (`tests/fixtures/failure_modes/derived_sources_invalid.json`,
+  `derived_target_required_for_mutation.json`,
+  `derived_target_forbidden_for_create.json` all present).
+- ~~**Audit-row schema reference**~~ — pinned by
+  `derived_memory_created_audit_schema_is_referenced_from_curate_source`
+  in `tests/derived_memory_candidate_contracts.rs`. The static check
+  asserts `ee.audit.derived_memory_created.v1` appears at least twice
+  in `src/core/curate.rs`. The runtime apply-path assertion (audit
+  row actually emitted with that schema) is still open below.
+- ~~**Candidate-type contract test**~~ — pinned by
+  `candidate_type_*` tests in `tests/derived_memory_candidate_contracts.rs`
+  (all/as_str/FromStr roundtrip, parse-error expected-list message,
+  requires_content, requires_target_memory exclusion).
+- ~~**Provenance URI contract test**~~ — pinned by
+  `provenance_uri_accepts_five_documented_schemes` and
+  `provenance_uri_rejects_unregistered_scheme_with_named_error` in
+  `tests/derived_memory_candidate_contracts.rs`. The type-level
+  guarantee follows because `PackProvenance::new` takes a typed
+  `ProvenanceUri`, so the registry boundary is enforced at construction.
+
+**Still open:**
 - **Memory-source DerivedFrom link unit test**: no test currently
   asserts that a `create_derived_memory` candidate with memory source
   refs creates N `DerivedFrom` links (`MemoryLinkRelation::DerivedFrom`)
-  and skips evidence-span attachment for those sources.
-- **Audit-row schema assertion**: no test currently asserts the
-  apply path writes a `memory.create` audit row whose `details.schema`
-  equals `ee.audit.derived_memory_created.v1`. The schema string is
-  referenced from `src/core/curate.rs` but not from any test file.
+  and skips evidence-span attachment for those sources. Needs DB
+  setup + curate apply.
+- **Audit-row schema runtime assertion**: no test currently asserts
+  the apply path actually writes a `memory.create` audit row whose
+  `details.schema` equals `ee.audit.derived_memory_created.v1`. The
+  static reference check above lets a future rename trip a focused
+  failure, but does not assert the emission path. Needs DB +
+  curate apply + audit-table query.
 - **List/sort unit tests**: duplicate grouping, TTL/structural decay
   adjustment, and `--target` filtering for `target_memory_id = NULL`
-  candidates lack a dedicated test.
-- **Candidate-type contract test**: `CandidateType::all`, `as_str`,
-  `FromStr`, `requires_content`, the parse-error expected-list message,
-  and the DB CHECK all include `create_derived_memory` exactly once
-  and keep `paraphrase_dedup_proposal` — no test currently pins this.
-- **Provenance URI contract test**: derived-memory creation never
-  writes an unregistered provenance URI scheme — no test currently
-  pins this.
+  candidates lack a dedicated test. Needs DB + list path.
 - **Per-validator rejection unit tests**: empty source list,
   duplicate source refs, missing `contentHash`, cross-workspace
   source, tombstoned memory source, evidence span already linked
   elsewhere, malformed `derivation_source_refs_json`, missing
   `memorySpec`, and non-null target on `create_derived_memory` each
   rejected with stable degraded codes — only the broad propose-derived
-  E2E + Usage validators are pinned today.
+  E2E + Usage validators are pinned today. Needs DB + validator path.
 - **Atomicity test**: simulated failure during apply (search-index
   enqueue forced to error) leaves the candidate in its pre-apply
   state and leaves no orphan memory, link, evidence-attachment,
-  audit, or search-index rows — no test currently pins this.
+  audit, or search-index rows — no test currently pins this. Needs
+  DB + fault-injection harness.
 
-bd-17pa6 is the dedicated gap-closure tracker; closing it should
-land focused tests for each item above and remove them from this
-gaps list.
+bd-17pa6 is the dedicated gap-closure tracker; closing it lands
+focused tests for each remaining item above and removes them from
+this gaps list.
 
 ## Open questions deferred
 
