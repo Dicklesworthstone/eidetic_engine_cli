@@ -319,10 +319,12 @@ defense.
 `ee review session --propose` bootstrap candidates become
 `create_derived_memory` rows with `evidence_span` source refs. This matches the
 live bootstrap path: the skipped candidates carry CASS evidence span IDs, not
-memory IDs. The acceptance gate for this slice is that the inline TODO at
-`src/core/curate.rs:1653` is deleted and bootstrap candidates persist + flow
-through `ee curate candidates` + `ee curate validate` + `ee curate apply`.
-bd-2d32o is referenced as the precursor in the bead that implements this slice.
+memory IDs. The acceptance gate for this slice — that bootstrap candidates
+persist and flow through `ee curate candidates` + `ee curate validate` +
+`ee curate apply` — is met by the closed implementation (the prior inline
+TODO in `src/core/curate.rs` has since been deleted; `CandidateType::CreateDerivedMemory`
+is the live struct definition). bd-2d32o is referenced as the precursor in
+the bead that implemented this slice.
 
 The producer output changes too: `ee.review.session.v1` must stop emitting the
 empty-string `targetMemoryId` sentinel for bootstrap candidates. Bootstrap
@@ -498,7 +500,9 @@ schema, and the contract test for the extended candidate envelope passes.
 ## References
 
 - bd-2d32o (closed) — bootstrap candidate FK blocker; precursor.
-- `src/core/curate.rs:1653` — inline TODO this ADR retires.
+- The bootstrap-candidate inline TODO this ADR retired has been deleted from
+  `src/core/curate.rs`; `CandidateType::CreateDerivedMemory` is the live
+  enum variant the ADR introduced.
 - `src/curate/mod.rs:363` — `CandidateType` enum extended by this ADR.
 - `src/db/mod.rs:5133` — `curation_candidates` target FK rebuilt by this ADR.
 - `src/db/mod.rs:14157` — `MemoryLinkRelation::DerivedFrom` used unchanged.
