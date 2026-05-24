@@ -46,6 +46,9 @@ mod cass_client_extra_env;
 #[path = "contracts/cass_import_guidance_from_inventory.rs"]
 mod cass_import_guidance_from_inventory;
 
+#[path = "contracts/doctor_integrity_status_severity_canary_as_str.rs"]
+mod doctor_integrity_status_severity_canary_as_str;
+
 #[path = "contracts/cass_exit_code_constants.rs"]
 mod cass_exit_code_constants;
 
