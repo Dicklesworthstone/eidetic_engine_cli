@@ -253,7 +253,7 @@
         "kind": {
           "type": "string",
           "enum": [
-            "ingest_reflection_result",
+            "inspect_pending_reflection_request",
             "rerun_reflection_request",
             "inspect_existing_candidate",
             "configure_reflection_hmac_key",

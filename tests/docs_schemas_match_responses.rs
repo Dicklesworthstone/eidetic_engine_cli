@@ -708,11 +708,15 @@ fn reflection_request_artifact_builder_output_matches_schema() -> TestResult {
         "/responseSchema/id",
         ee::curate::REFLECTION_RESULT_SCHEMA,
     )?;
-    ensure_json_str(&document, "/nextCommands/0/kind", "reflect_ingest_result")?;
+    ensure_json_str(
+        &document,
+        "/nextCommands/0/kind",
+        "reflect_request_ledger_diagnostics",
+    )?;
     ensure_json_str(
         &document,
         "/nextCommands/0/command",
-        "ee reflect ingest <result.json> --workspace workspace-schema --json",
+        "ee reflect request-ledger diagnostics --workspace workspace-schema --status pending --json",
     )?;
 
     let key = ReflectionHmacKeyMaterial::new("reflect_key_schema", b"schema-test-hmac-key")

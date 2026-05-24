@@ -5448,7 +5448,6 @@ fn reflection_propose_source_refs(
 fn reflection_propose_next_commands(workspace_path: &Path) -> Vec<String> {
     let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
     vec![
-        format!("ee reflect ingest <result.json> --workspace {workspace_arg} --json"),
         format!(
             "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status pending --json"
         ),
@@ -5974,9 +5973,11 @@ fn reflection_request_ledger_recovery(
     match posture {
         "pending" => vec![ReflectionRequestLedgerDiagnosticRecovery {
             priority: 1,
-            kind: "ingest_reflection_result",
-            message: "Complete the external reflection result and ingest it once.",
-            command: format!("ee reflect ingest <result-path> --workspace {workspace_arg} --json"),
+            kind: "inspect_pending_reflection_request",
+            message: "Inspect pending reflection requests; result ingestion is not implemented yet.",
+            command: format!(
+                "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status pending --json"
+            ),
         }],
         "expiredPending" | "expired" => vec![ReflectionRequestLedgerDiagnosticRecovery {
             priority: 1,
@@ -11974,10 +11975,12 @@ mod tests {
                     privacy: vec!["store ledger hash only"],
                 }),
                 next_commands: vec![ReflectionRequestNextCommand {
-                    kind: "ingest",
-                    command: "ee reflect ingest path/to/result.json --json".to_owned(),
+                    kind: "reflect_request_ledger_diagnostics",
+                    command:
+                        "ee reflect request-ledger diagnostics --workspace . --status pending --json"
+                            .to_owned(),
                     when: "after an external producer writes a result artifact",
-                    safety: "idempotent replay",
+                    safety: "read-only diagnostics",
                 }],
                 source_package,
             },
@@ -12451,7 +12454,7 @@ mod tests {
         assert_eq!(current_row.source_content_hash_count, 1);
         assert_eq!(
             current_row.recovery.first().map(|action| action.kind),
-            Some("ingest_reflection_result")
+            Some("inspect_pending_reflection_request")
         );
 
         let expired_row = report

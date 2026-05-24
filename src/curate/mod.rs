@@ -781,10 +781,10 @@ Return distilled output for the requested reflection kind using schema ee.reflec
 Do not include private reasoning. Do not ask ee or the harness to take follow-up actions.
 ";
 const REFLECTION_RESULT_SCHEMA_CONTRACT: &str = r#"{"schema":"ee.reflect.result.v1","required":["requestId","requestHash","challenge","producer","reflectionKind","citedSourceIds","body","kindFields","selfReportedConfidence"],"rules":["citedSourceIds must be a subset of request source ids","body is distilled output only","body must not contain private reasoning markers, instructions, or secret material","kindFields carries kind-specific structured fields","selfReportedConfidence is informational only"]}"#;
-const REFLECTION_REQUEST_NEXT_COMMAND_KIND_INGEST: &str = "reflect_ingest_result";
+const REFLECTION_REQUEST_NEXT_COMMAND_KIND_DIAGNOSTICS: &str = "reflect_request_ledger_diagnostics";
 const REFLECTION_REQUEST_NEXT_COMMAND_WHEN: &str =
-    "after an external producer writes an ee.reflect.result.v1 artifact for this request";
-const REFLECTION_REQUEST_NEXT_COMMAND_SAFETY: &str = "validates the external result and creates only a pending curation candidate; ee does not call an LLM or auto-apply the result";
+    "after reviewing or producing an ee.reflect.result.v1 artifact for this request";
+const REFLECTION_REQUEST_NEXT_COMMAND_SAFETY: &str = "inspects pending reflection request ledger rows without mutating curation state; ee does not call an LLM or auto-apply the result";
 const DEFAULT_REFLECTION_MAX_SOURCES: usize = 8;
 const DEFAULT_REFLECTION_MAX_TOTAL_EXCERPT_BYTES: usize = 8 * 1024;
 const DEFAULT_REFLECTION_MAX_EXCERPT_BYTES_PER_SOURCE: usize = 1024;
@@ -3919,9 +3919,9 @@ fn reflection_request_next_commands(
     fingerprint: &ReflectionRequestFingerprint,
 ) -> Vec<ReflectionRequestNextCommand> {
     vec![ReflectionRequestNextCommand {
-        kind: REFLECTION_REQUEST_NEXT_COMMAND_KIND_INGEST,
+        kind: REFLECTION_REQUEST_NEXT_COMMAND_KIND_DIAGNOSTICS,
         command: format!(
-            "ee reflect ingest <result.json> --workspace {} --json",
+            "ee reflect request-ledger diagnostics --workspace {} --status pending --json",
             shell_quote_reflection_command_arg(fingerprint.workspace_id.as_str())
         ),
         when: REFLECTION_REQUEST_NEXT_COMMAND_WHEN,
@@ -9824,10 +9824,13 @@ Then update src/policy/mod.rs on main."
             reflection_response_schema_descriptor()
         );
         assert_eq!(artifact.next_commands.len(), 1);
-        assert_eq!(artifact.next_commands[0].kind, "reflect_ingest_result");
+        assert_eq!(
+            artifact.next_commands[0].kind,
+            "reflect_request_ledger_diagnostics"
+        );
         assert_eq!(
             artifact.next_commands[0].command,
-            "ee reflect ingest <result.json> --workspace workspace-artifact --json"
+            "ee reflect request-ledger diagnostics --workspace workspace-artifact --status pending --json"
         );
         assert!(
             artifact.next_commands[0]
@@ -10161,7 +10164,7 @@ Then update src/policy/mod.rs on main."
 
         assert_eq!(
             artifact.next_commands[0].command,
-            "ee reflect ingest <result.json> --workspace 'workspace with '\\''quote'\\''' --json"
+            "ee reflect request-ledger diagnostics --workspace 'workspace with '\\''quote'\\''' --status pending --json"
         );
         validate_reflection_request_artifact(&artifact).map_err(|error| error.to_string())?;
         Ok(())

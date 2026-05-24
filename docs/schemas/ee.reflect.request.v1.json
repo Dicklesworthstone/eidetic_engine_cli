@@ -118,11 +118,11 @@
       "properties": {
         "kind": {
           "type": "string",
-          "const": "reflect_ingest_result"
+          "const": "reflect_request_ledger_diagnostics"
         },
         "command": {
           "type": "string",
-          "pattern": "^ee reflect ingest <result\\.json> --workspace .+ --json$"
+          "pattern": "^ee reflect request-ledger diagnostics --workspace .+ --status pending --json$"
         },
         "when": {"type": "string", "minLength": 1},
         "safety": {"type": "string", "minLength": 1}
