@@ -1,0 +1,41 @@
+{
+  "schema": "ee.git_ahead_snapshot.v1",
+  "state": "mixed_author_ahead",
+  "headRef": "main",
+  "upstreamRef": "origin/main",
+  "aheadCount": 2,
+  "behindCount": 0,
+  "commits": [
+    {
+      "hash": "bbbbbbbbbbbbbbbb",
+      "shortHash": "bbbbbbbbbbbb",
+      "author": "Alice",
+      "subject": "feat: first owner (bd-2gc7r.1)",
+      "beadRefs": [
+        "bd-2gc7r.1"
+      ]
+    },
+    {
+      "hash": "aaaaaaaaaaaaaaaa",
+      "shortHash": "aaaaaaaaaaaa",
+      "author": "Bob",
+      "subject": "test: second owner (bd-other.2)",
+      "beadRefs": [
+        "bd-other.2"
+      ]
+    }
+  ],
+  "authors": [
+    "Alice",
+    "Bob"
+  ],
+  "beadRefs": [
+    "bd-2gc7r.1",
+    "bd-other.2"
+  ],
+  "mixedAuthorAhead": true,
+  "mixedBeadAhead": true,
+  "ambiguousAhead": false,
+  "peerOwnedAheadRisk": true,
+  "degraded": []
+}
