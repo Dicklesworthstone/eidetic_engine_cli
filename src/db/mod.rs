@@ -19541,10 +19541,11 @@ mod tests {
         CreateRecorderRunInput, CreateReflectionRequestLedgerInput, CreateTaskEpisodeInput,
         CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
         DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
-        Migration, MigrationRecord, MigrationTableColumn, ReflectionRequestLedgerIngestOutcome,
+        Migration, MigrationRecord, MigrationTableColumn,
+        ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestLedgerIngestOutcome,
         ReflectionRequestReplayStatus, StoredEpisodeAction, UpdateProceduralRuleLifecycleInput,
         WalCheckpointMode, file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
-        lock_file_write_owner_gate, subsystem_name,
+        lock_file_write_owner_gate, sqlite_u32_column, sqlite_u64_column, subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
