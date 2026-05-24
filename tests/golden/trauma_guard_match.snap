@@ -3,6 +3,25 @@
   "command": "rm -rf /tmp/work",
   "exitCode": 7,
   "checkedAt": "2026-05-15T00:00:00+00:00",
+  "repairCommandAssessment": {
+    "command": "rm -rf /tmp/work",
+    "riskClass": "destructive_or_irreversible_repair",
+    "preflightCommand": "ee preflight check --cmd 'rm -rf /tmp/work' --workspace . --json",
+    "requiresHumanApproval": true,
+    "mutatesExternalState": false,
+    "mutatesTrackerState": false,
+    "privacyClass": "command_only",
+    "nextAction": "policy_denied",
+    "ruleId": "repair_safety:destructive_or_irreversible_repair",
+    "source": "repair_action_safety",
+    "reasonCode": "destructive_or_irreversible_repair_command",
+    "evidence": [
+      "destructive_command_pattern"
+    ],
+    "preconditions": [
+      "explicit_human_approval_required"
+    ]
+  },
   "matches": [
     {
       "ruleId": "builtin:rm_rf_root",

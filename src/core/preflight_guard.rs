@@ -22,7 +22,7 @@ use toml_edit::{DocumentMut, Item};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::tripwire::glob_match;
 use crate::db::StoredMemory;
-use crate::models::DomainError;
+use crate::models::{DomainError, RecoveryKind, RepairActionRiskClass, repair_action_safety};
 
 /// Stable schema string for the JSON payload returned by `ee preflight <cmd>`.
 pub const PREFLIGHT_GUARD_SCHEMA_V1: &str = "ee.preflight.guard.v1";
@@ -70,6 +70,61 @@ pub enum GuardAction {
     Warn,
     /// Halt with policy-denied exit code unless an authoritative bypass is supplied.
     Halt,
+}
+
+/// Next action an agent should take for a repair command before execution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairCommandNextAction {
+    /// The command is read-only or an idempotent refresh and can be run as-is.
+    RunDirectly,
+    /// Run the emitted `preflightCommand` first, then follow its result.
+    RunPreflightFirst,
+    /// Coordinate with other agents or shared-state owners before running.
+    CoordinateFirst,
+    /// Stop and ask the human/operator before running.
+    AskHuman,
+    /// No command is safely runnable by an agent.
+    ManualOnly,
+    /// Policy-denied without the explicit destructive-command approval flow.
+    PolicyDenied,
+}
+
+impl RepairCommandNextAction {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunDirectly => "run_directly",
+            Self::RunPreflightFirst => "run_preflight_first",
+            Self::CoordinateFirst => "coordinate_first",
+            Self::AskHuman => "ask_human",
+            Self::ManualOnly => "manual_only",
+            Self::PolicyDenied => "policy_denied",
+        }
+    }
+}
+
+/// Repair-command safety assessment for preflight-facing consumers.
+///
+/// This is a classifier only: it never executes the command. It lets repair
+/// surfaces pass command-shaped hints through a stable policy vocabulary before
+/// an agent decides whether to run `ee preflight check`, coordinate, or stop.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepairCommandPreflightAssessment {
+    pub command: Option<String>,
+    pub risk_class: &'static str,
+    pub preflight_command: Option<String>,
+    pub requires_human_approval: bool,
+    pub mutates_external_state: bool,
+    pub mutates_tracker_state: bool,
+    pub privacy_class: &'static str,
+    pub next_action: RepairCommandNextAction,
+    pub rule_id: &'static str,
+    pub source: &'static str,
+    pub reason_code: &'static str,
+    pub evidence: Vec<&'static str>,
+    pub preconditions: Vec<&'static str>,
 }
 
 impl GuardAction {
@@ -2150,6 +2205,102 @@ fn recovery_guidance_for_match(matched: &GuardMatch) -> &'static str {
     }
 }
 
+/// Classify a concrete repair command for preflight-facing consumers.
+#[must_use]
+pub fn classify_repair_command_for_preflight(command: &str) -> RepairCommandPreflightAssessment {
+    classify_repair_action_for_preflight(RecoveryKind::Command, Some(command))
+}
+
+/// Classify a repair action before an agent decides whether it may run.
+#[must_use]
+pub fn classify_repair_action_for_preflight(
+    kind: RecoveryKind,
+    command: Option<&str>,
+) -> RepairCommandPreflightAssessment {
+    let safety = repair_action_safety(kind, command);
+    let (next_action, rule_id, reason_code) = repair_command_preflight_policy(
+        safety.risk_class,
+        safety.preflight_command.is_some(),
+        safety.requires_human_approval,
+    );
+
+    RepairCommandPreflightAssessment {
+        command: command.map(str::to_owned),
+        risk_class: safety.risk_class.as_str(),
+        preflight_command: safety.preflight_command,
+        requires_human_approval: safety.requires_human_approval,
+        mutates_external_state: safety.mutates_external_state,
+        mutates_tracker_state: safety.mutates_tracker_state,
+        privacy_class: safety.privacy_class,
+        next_action,
+        rule_id,
+        source: "repair_action_safety",
+        reason_code,
+        evidence: safety.evidence,
+        preconditions: safety.preconditions,
+    }
+}
+
+fn repair_command_preflight_policy(
+    risk_class: RepairActionRiskClass,
+    has_preflight_command: bool,
+    requires_human_approval: bool,
+) -> (RepairCommandNextAction, &'static str, &'static str) {
+    match risk_class {
+        RepairActionRiskClass::ReadOnlyProbe => (
+            RepairCommandNextAction::RunDirectly,
+            "repair_safety:read_only_probe",
+            "read_only_probe_command",
+        ),
+        RepairActionRiskClass::IdempotentRefresh => (
+            if requires_human_approval {
+                RepairCommandNextAction::AskHuman
+            } else if has_preflight_command {
+                RepairCommandNextAction::RunPreflightFirst
+            } else {
+                RepairCommandNextAction::RunDirectly
+            },
+            "repair_safety:idempotent_refresh",
+            "idempotent_refresh_command",
+        ),
+        RepairActionRiskClass::MutatingLocalRepair => (
+            if requires_human_approval {
+                RepairCommandNextAction::AskHuman
+            } else if has_preflight_command {
+                RepairCommandNextAction::RunPreflightFirst
+            } else {
+                RepairCommandNextAction::RunDirectly
+            },
+            "repair_safety:mutating_local_repair",
+            "mutating_local_repair_command",
+        ),
+        RepairActionRiskClass::MutatingExternalCoordinationRepair => (
+            if requires_human_approval {
+                RepairCommandNextAction::AskHuman
+            } else {
+                RepairCommandNextAction::CoordinateFirst
+            },
+            "repair_safety:mutating_external_coordination_repair",
+            "external_coordination_repair_command",
+        ),
+        RepairActionRiskClass::ApprovalRequiredRepair => (
+            RepairCommandNextAction::AskHuman,
+            "repair_safety:approval_required_repair",
+            "approval_required_repair_command",
+        ),
+        RepairActionRiskClass::DestructiveOrIrreversibleRepair => (
+            RepairCommandNextAction::PolicyDenied,
+            "repair_safety:destructive_or_irreversible_repair",
+            "destructive_or_irreversible_repair_command",
+        ),
+        RepairActionRiskClass::UnavailableOrManualOnly => (
+            RepairCommandNextAction::ManualOnly,
+            "repair_safety:unavailable_or_manual_only",
+            "manual_only_repair",
+        ),
+    }
+}
+
 /// Evaluate the guard for `options.command`, applying any caller-supplied
 /// bypass tokens. Returns a stable report; the caller maps `exit_code` onto
 /// the process exit value.
@@ -2493,6 +2644,85 @@ mod tests {
         assert_eq!(report.exit_code, 0);
         assert_eq!(report.matches.len(), 1);
         assert_eq!(report.matches[0].action, GuardAction::Warn);
+    }
+
+    #[test]
+    fn repair_preflight_classifier_marks_read_only_probes_runnable() {
+        let assessment = classify_repair_command_for_preflight("br sync --status");
+        assert_eq!(assessment.risk_class, "read_only_probe");
+        assert_eq!(assessment.next_action, RepairCommandNextAction::RunDirectly);
+        assert_eq!(assessment.rule_id, "repair_safety:read_only_probe");
+        assert_eq!(assessment.source, "repair_action_safety");
+        assert_eq!(assessment.reason_code, "read_only_probe_command");
+        assert!(!assessment.requires_human_approval);
+        assert!(!assessment.mutates_external_state);
+        assert!(!assessment.mutates_tracker_state);
+        assert!(assessment.preflight_command.is_none());
+    }
+
+    #[test]
+    fn repair_preflight_classifier_coordinates_tracker_mutations() {
+        let assessment = classify_repair_command_for_preflight("br sync --flush-only");
+        assert_eq!(
+            assessment.risk_class,
+            "mutating_external_coordination_repair"
+        );
+        assert_eq!(
+            assessment.next_action,
+            RepairCommandNextAction::CoordinateFirst
+        );
+        assert_eq!(
+            assessment.rule_id,
+            "repair_safety:mutating_external_coordination_repair"
+        );
+        assert!(assessment.mutates_external_state);
+        assert!(assessment.mutates_tracker_state);
+        assert!(assessment.preflight_command.is_some());
+    }
+
+    #[test]
+    fn repair_preflight_classifier_requires_human_for_agent_mail_repair() {
+        let assessment = classify_repair_command_for_preflight("am doctor repair --yes");
+        assert_eq!(
+            assessment.risk_class,
+            "mutating_external_coordination_repair"
+        );
+        assert_eq!(assessment.next_action, RepairCommandNextAction::AskHuman);
+        assert!(assessment.requires_human_approval);
+        assert!(assessment.mutates_external_state);
+        assert!(assessment.preflight_command.is_some());
+        assert_eq!(assessment.privacy_class, "bounded_command_no_raw_state");
+    }
+
+    #[test]
+    fn repair_preflight_classifier_denies_destructive_repairs() {
+        let removal_command = format!("{} {}", "rm", "-rf target");
+        let assessment = classify_repair_command_for_preflight(&removal_command);
+        assert_eq!(assessment.risk_class, "destructive_or_irreversible_repair");
+        assert_eq!(
+            assessment.next_action,
+            RepairCommandNextAction::PolicyDenied
+        );
+        assert_eq!(
+            assessment.rule_id,
+            "repair_safety:destructive_or_irreversible_repair"
+        );
+        assert!(assessment.requires_human_approval);
+        assert!(assessment.preflight_command.is_some());
+    }
+
+    #[test]
+    fn repair_preflight_classifier_marks_manual_only_repairs() {
+        let assessment = classify_repair_action_for_preflight(RecoveryKind::None, None);
+        assert_eq!(assessment.risk_class, "unavailable_or_manual_only");
+        assert_eq!(assessment.next_action, RepairCommandNextAction::ManualOnly);
+        assert_eq!(
+            assessment.rule_id,
+            "repair_safety:unavailable_or_manual_only"
+        );
+        assert!(assessment.requires_human_approval);
+        assert!(assessment.command.is_none());
+        assert!(assessment.preflight_command.is_none());
     }
 
     #[test]

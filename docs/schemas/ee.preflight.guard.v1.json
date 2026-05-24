@@ -9,6 +9,7 @@
     "command",
     "exitCode",
     "checkedAt",
+    "repairCommandAssessment",
     "matches",
     "matchedMemories",
     "degraded"
@@ -32,6 +33,81 @@
       "format": "date-time",
       "description": "RFC 3339 timestamp at which the guard ran."
     },
+    "repairCommandAssessment": {
+      "type": "object",
+      "description": "Repair-action safety assessment for the exact command string. This classifier never executes the command; agents use it to decide whether to run directly, preflight first, coordinate, ask a human, or stop.",
+      "required": [
+        "command",
+        "riskClass",
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+        "privacyClass",
+        "nextAction",
+        "ruleId",
+        "source",
+        "reasonCode",
+        "evidence",
+        "preconditions"
+      ],
+      "properties": {
+        "command": {
+          "type": ["string", "null"],
+          "description": "The classified repair command, or null for manual-only repairs."
+        },
+        "riskClass": {
+          "type": "string",
+          "enum": [
+            "read_only_probe",
+            "idempotent_refresh",
+            "mutating_local_repair",
+            "mutating_external_coordination_repair",
+            "approval_required_repair",
+            "destructive_or_irreversible_repair",
+            "unavailable_or_manual_only"
+          ]
+        },
+        "preflightCommand": {
+          "type": ["string", "null"],
+          "description": "Concrete ee preflight check command to run before the repair command when present."
+        },
+        "requiresHumanApproval": {"type": "boolean"},
+        "mutatesExternalState": {"type": "boolean"},
+        "mutatesTrackerState": {"type": "boolean"},
+        "privacyClass": {"type": "string"},
+        "nextAction": {
+          "type": "string",
+          "enum": [
+            "run_directly",
+            "run_preflight_first",
+            "coordinate_first",
+            "ask_human",
+            "manual_only",
+            "policy_denied"
+          ]
+        },
+        "ruleId": {
+          "type": "string",
+          "description": "Stable repair-safety rule id that selected nextAction."
+        },
+        "source": {
+          "type": "string",
+          "description": "Classifier source. Currently repair_action_safety."
+        },
+        "reasonCode": {
+          "type": "string",
+          "description": "Bounded explanation code suitable for logs."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
     "matches": {
       "type": "array",
       "items": {
@@ -48,7 +124,7 @@
           },
           "action": {
             "type": "string",
-            "enum": ["block", "warn", "log"],
+            "enum": ["halt", "warn"],
             "description": "How the rule classifies this match."
           },
           "message": {

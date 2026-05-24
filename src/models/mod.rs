@@ -821,6 +821,9 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("rch status")
         || command_lower.starts_with("rch check")
         || command_lower.starts_with("rch queue")
+        || command_lower.starts_with("cargo fmt --check")
+        || command_lower.starts_with("cargo metadata")
+        || command_lower.starts_with("cargo tree")
         || command_lower.contains("doctor check")
     {
         RepairActionSafety {
@@ -1912,6 +1915,15 @@ mod tests {
             super::RepairActionRiskClass::ReadOnlyProbe
         );
         assert!(!git_status.mutates_external_state);
+
+        let cargo_fmt_check =
+            super::repair_action_safety(super::RecoveryKind::Command, Some("cargo fmt --check"));
+        assert_eq!(
+            cargo_fmt_check.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!cargo_fmt_check.requires_human_approval);
+        assert!(!cargo_fmt_check.mutates_external_state);
 
         let index_rebuild = super::repair_action_safety(
             super::RecoveryKind::Migration,
