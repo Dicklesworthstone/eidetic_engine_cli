@@ -20,6 +20,8 @@
 // file is green: any arena implementation that changes public output
 // fails one of these focused tests before broad CI even runs.
 
+use std::str::FromStr;
+
 use ee::models::{MemoryId, ProvenanceUri, UnitScore};
 use ee::pack::{
     ArenaMode, ContextPackProfile, ContextRequest, ContextRequestInput, PackAssemblyOptions,
