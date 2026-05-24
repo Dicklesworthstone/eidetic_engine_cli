@@ -23,11 +23,14 @@ use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
     DerivationSourceRef, PreparedReflectionRequest, ReflectionHmacKeyConfig,
-    ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
-    ReflectionResultIngestDecision, ReflectionResultReplayGate, ReviewQueueState,
+    ReflectionRequestArtifact, ReflectionRequestLedgerMaterial, ReflectionRequestLifecycleConfig,
+    ReflectionResultCandidateMaterial, ReflectionResultIngestDecision, ReflectionResultReplayGate,
+    ReflectionSourceInput, ReflectionSourceMetadata, ReflectionSourcePackageLimits,
+    ReviewQueueState, build_reflection_request_artifact, build_reflection_source_package,
     canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
-    resolve_derivation_memory_scores, validate_candidate, validate_candidate_trust_evidence,
-    validate_reflection_request_matches_ledger_material, validate_review_queue_transition,
+    prepare_reflection_request_with_config, resolve_derivation_memory_scores, validate_candidate,
+    validate_candidate_trust_evidence, validate_reflection_request_matches_ledger_material,
+    validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
@@ -59,6 +62,8 @@ pub const CURATE_CANDIDATES_SCHEMA_V1: &str = "ee.curate.candidates.v1";
 pub const CURATE_VALIDATE_SCHEMA_V1: &str = "ee.curate.validate.v1";
 /// Stable schema for `ee curate apply` response data.
 pub const CURATE_APPLY_SCHEMA_V1: &str = "ee.curate.apply.v1";
+/// Stable schema for `ee curate show` response data (bd-18z8x).
+pub const CURATE_SHOW_SCHEMA_V1: &str = "ee.curate.show.v1";
 /// Stable schema for peer-origin evidence folded into curation candidates.
 pub const CURATE_PEER_EVIDENCE_SCHEMA_V1: &str = "ee.curate.peer_evidence.v1";
 /// Stable schema for explicit curation lifecycle review commands.
@@ -75,6 +80,8 @@ pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
 pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
+/// Stable schema for reflect request proposal reports.
+pub const REFLECTION_PROPOSE_SCHEMA_V1: &str = "ee.reflect.propose.v1";
 /// Stable schema for reflection request ledger diagnostics.
 pub const REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1: &str =
     "ee.reflect.request_ledger.diagnostics.v1";
@@ -151,6 +158,17 @@ pub struct CurateValidateOptions<'a> {
     pub actor: Option<&'a str>,
     /// Validate and report without mutating the curation candidate.
     pub dry_run: bool,
+}
+
+/// Options for read-only inspection of a single curation candidate (bd-18z8x).
+#[derive(Clone, Debug)]
+pub struct CurateShowOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Candidate ID using the `curate_*` storage ID format.
+    pub candidate_id: &'a str,
 }
 
 /// Options for applying one approved curation candidate.
@@ -424,6 +442,71 @@ pub struct CurateApplyReport {
     #[serde(serialize_with = "serialize_curate_apply_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
+}
+
+/// Read-only inspect/preview report for a single curation candidate (bd-18z8x).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub candidate_id: String,
+    pub candidate: CurateCandidateSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_application: Option<CurateShowPlannedApplication>,
+    /// Always false: `ee curate show` never writes to the database.
+    pub durable_mutation: bool,
+    pub next_action: String,
+    pub next_commands: Vec<String>,
+}
+
+/// Planned mutation preview for `ee curate show`. Populated for
+/// `create_derived_memory` candidates; absent for target-mutating kinds
+/// that surface their preview through `ee curate apply --dry-run`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowPlannedApplication {
+    /// Mirrors `ApplyDecision.application.status`
+    /// (`ready` / `blocked` / `already_applied`).
+    pub status: String,
+    /// Mirrors `ApplyDecision.application.decision`
+    /// (`create_derived_memory` / `idempotent_replay` / ...).
+    pub decision: String,
+    pub candidate_type: String,
+    pub target_memory_id: Option<String>,
+    pub created_memory_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_memory: Option<CurateApplyMemoryState>,
+    pub planned_derived_from_links: Vec<CurateShowPlannedDerivedLink>,
+    pub planned_evidence_attachments: Vec<CurateShowPlannedEvidenceAttachment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planned_search_index_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_schema_preview: Option<String>,
+    pub errors: Vec<CurateValidationIssue>,
+    pub warnings: Vec<CurateValidationIssue>,
+}
+
+/// Planned `DerivedFrom` link the apply transaction would insert.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowPlannedDerivedLink {
+    pub link_id: String,
+    pub dst_memory_id: String,
+    pub relation: String,
+    pub source_content_hash: String,
+}
+
+/// Planned evidence-span attachment the apply transaction would perform.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateShowPlannedEvidenceAttachment {
+    pub evidence_span_id: String,
+    pub content_hash: String,
 }
 
 /// Result of an explicit curation review lifecycle command.
@@ -3380,6 +3463,167 @@ pub fn validate_curation_candidate(
     })
 }
 
+/// Inspect a single curation candidate read-only (bd-18z8x).
+///
+/// Loads the candidate, builds its standard summary, and for
+/// `create_derived_memory` candidates additionally evaluates the planned
+/// apply mutation (without persisting) so callers can see the prospective
+/// `DerivedFrom` link plan, evidence-attachment plan, search-index job,
+/// audit schema, and any validation errors that would block apply.
+///
+/// Never writes to the database. The `durable_mutation` field is always
+/// `false` and no audit row is created.
+pub fn show_curation_candidate(
+    options: &CurateShowOptions<'_>,
+) -> Result<CurateShowReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let candidate_id = validate_curate_candidate_id(options.candidate_id)?;
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let stored = connection
+        .get_curation_candidate(&prepared.workspace_id, &candidate_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load curation candidate: {error}"),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "curation candidate".to_owned(),
+            id: candidate_id.clone(),
+            repair: Some("ee curate candidates --json".to_owned()),
+        })?;
+
+    let planned_application = match CandidateType::from_str(&stored.candidate_type) {
+        Ok(CandidateType::CreateDerivedMemory) => {
+            let now = Utc::now().to_rfc3339();
+            let prompt_injection_guard = crate::core::config_surface::get_config(
+                &crate::core::config_surface::ConfigSurfaceOptions {
+                    workspace_root: options.workspace_path.to_path_buf(),
+                    config_path: None,
+                },
+                crate::config::TRUST_PROMPT_INJECTION_GUARD_KEY,
+            )
+            .map(|c| c.value == "true")
+            .unwrap_or(true);
+            let decision = evaluate_create_derived_candidate_for_apply(
+                &connection,
+                &stored,
+                &now,
+                prompt_injection_guard,
+            );
+            Some(planned_application_from_decision(&stored, &decision))
+        }
+        _ => None,
+    };
+
+    let candidate = candidate_summary_from_database(&connection, stored, &prepared.workspace_path)?;
+
+    let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let candidate_arg = shell_quote_command_arg(&candidate.id);
+    let mut next_commands = Vec::new();
+    if candidate.requires_validate {
+        next_commands.push(format!(
+            "ee curate validate {candidate_arg} --workspace {workspace_arg} --json"
+        ));
+    }
+    if candidate.requires_apply {
+        next_commands.push(format!(
+            "ee curate apply {candidate_arg} --workspace {workspace_arg} --json"
+        ));
+    }
+    if candidate.requires_validate || candidate.requires_apply {
+        next_commands.push(format!(
+            "ee curate reject {candidate_arg} --workspace {workspace_arg} --json"
+        ));
+    }
+    if let Some(created_id) = planned_application
+        .as_ref()
+        .and_then(|planned| planned.created_memory_id.as_deref())
+        && candidate.status == CandidateStatus::Applied.as_str()
+    {
+        let created_arg = shell_quote_command_arg(created_id);
+        next_commands.push(format!(
+            "ee why {created_arg} --workspace {workspace_arg} --json"
+        ));
+    }
+
+    let next_action = candidate.next_action.clone();
+    Ok(CurateShowReport {
+        schema: CURATE_SHOW_SCHEMA_V1,
+        command: "curate show",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        candidate_id,
+        candidate,
+        planned_application,
+        durable_mutation: false,
+        next_action,
+        next_commands,
+    })
+}
+
+fn planned_application_from_decision(
+    stored: &StoredCurationCandidate,
+    decision: &ApplyDecision,
+) -> CurateShowPlannedApplication {
+    let derived = decision.derived_create.as_ref();
+    let planned_links = derived
+        .map(|input| {
+            input
+                .links
+                .iter()
+                .map(|link| {
+                    let source_content_hash = link
+                        .link
+                        .metadata_json
+                        .as_deref()
+                        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                        .and_then(|value| {
+                            value
+                                .get("sourceContentHash")
+                                .and_then(|hash| hash.as_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_default();
+                    CurateShowPlannedDerivedLink {
+                        link_id: link.link_id.clone(),
+                        dst_memory_id: link.link.dst_memory_id.clone(),
+                        relation: link.link.relation.as_str().to_owned(),
+                        source_content_hash,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let planned_attachments = derived
+        .map(|input| {
+            input
+                .evidence_refs
+                .iter()
+                .map(|reference| CurateShowPlannedEvidenceAttachment {
+                    evidence_span_id: reference.id.clone(),
+                    content_hash: reference.content_hash.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    CurateShowPlannedApplication {
+        status: decision.application.status.clone(),
+        decision: decision.application.decision.clone(),
+        candidate_type: stored.candidate_type.clone(),
+        target_memory_id: decision.application.target_memory_id.clone(),
+        created_memory_id: decision.application.created_memory_id.clone(),
+        created_memory: decision.application.created_memory.clone(),
+        planned_derived_from_links: planned_links,
+        planned_evidence_attachments: planned_attachments,
+        planned_search_index_job_id: derived.map(|input| input.index_job_id.clone()),
+        audit_schema_preview: derived.map(|_| "ee.audit.derived_memory_created.v1".to_owned()),
+        errors: decision.application.errors.clone(),
+        warnings: decision.application.warnings.clone(),
+    }
+}
+
 /// Apply one approved curation candidate to its target memory.
 pub fn apply_curation_candidate(
     options: &CurateApplyOptions<'_>,
@@ -4803,6 +5047,403 @@ pub fn propose_derived_candidate(
         persisted,
         next_commands,
     })
+}
+
+/// Options for `ee reflect propose`.
+#[derive(Clone, Debug)]
+pub struct ReflectionProposeOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub reflection_kind: &'a str,
+    pub source_ids: &'a [String],
+    pub source_memory_ids: &'a [String],
+    pub source_evidence_span_ids: &'a [String],
+    pub created_at: Option<&'a str>,
+    pub limits: ReflectionSourcePackageLimits,
+    pub dry_run: bool,
+    pub hmac_key_config: Option<ReflectionHmacKeyConfig>,
+    pub lifecycle_config: Option<ReflectionRequestLifecycleConfig>,
+}
+
+/// Report returned by `ee reflect propose`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionProposeReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub reflection_kind: String,
+    pub request_id: String,
+    pub request_hash: String,
+    pub source_package_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub hmac_key_id: String,
+    pub source_refs: Vec<ProposeDerivedSourceRef>,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub persisted: bool,
+    pub ledger_outcome: Option<ReflectionRequestDurableLedgerOutcome>,
+    pub request: ReflectionRequestArtifact,
+    pub next_commands: Vec<String>,
+}
+
+/// Create an external reflection request artifact and persist its non-secret
+/// replay ledger row.
+pub fn propose_reflection_request(
+    options: &ReflectionProposeOptions<'_>,
+) -> Result<ReflectionProposeReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+
+    let reflection_kind = options.reflection_kind.trim();
+    if reflection_kind.is_empty() {
+        return Err(curate_usage_error(
+            "reflect propose --kind must not be empty".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    if options.source_ids.is_empty()
+        && options.source_memory_ids.is_empty()
+        && options.source_evidence_span_ids.is_empty()
+    {
+        return Err(curate_usage_error(
+            "reflect propose must cite at least one --source, --source-memory, or --source-evidence-span"
+                .to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    validate_reflection_propose_limits(options.limits)?;
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let mut source_inputs = Vec::new();
+    for raw_id in options.source_ids {
+        source_inputs.push(resolve_reflection_source(
+            &connection,
+            &prepared.workspace_id,
+            raw_id,
+        )?);
+    }
+    for raw_id in options.source_memory_ids {
+        source_inputs.push(resolve_reflection_memory_source(
+            &connection,
+            &prepared.workspace_id,
+            raw_id,
+        )?);
+    }
+    for raw_id in options.source_evidence_span_ids {
+        source_inputs.push(resolve_reflection_evidence_span_source(
+            &connection,
+            &prepared.workspace_id,
+            raw_id,
+        )?);
+    }
+
+    let source_package = build_reflection_source_package(&source_inputs, options.limits)
+        .map_err(reflection_request_package_domain_error)?;
+    let request = build_reflection_request_artifact(
+        prepared.workspace_id.as_str(),
+        reflection_kind,
+        source_package,
+    )
+    .map_err(reflection_request_package_domain_error)?;
+
+    let created_at = options
+        .created_at
+        .map(str::to_owned)
+        .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+    let key_config = options
+        .hmac_key_config
+        .clone()
+        .unwrap_or_else(ReflectionHmacKeyConfig::from_env_registry);
+    let lifecycle_config = match options.lifecycle_config {
+        Some(config) => config,
+        None => ReflectionRequestLifecycleConfig::from_env_registry().map_err(|error| {
+            DomainError::Configuration {
+                message: format!("{}: {error}", error.code()),
+                repair: Some(error.recovery().to_owned()),
+            }
+        })?,
+    };
+    let prepared_request = prepare_reflection_request_with_config(
+        request,
+        &created_at,
+        &key_config,
+        &lifecycle_config,
+    )
+    .map_err(|error| DomainError::Configuration {
+        message: format!("{}: {error}", error.code()),
+        repair: Some(error.recovery().to_owned()),
+    })?;
+
+    let ledger_outcome = if options.dry_run {
+        None
+    } else {
+        Some(persist_prepared_reflection_request_ledger(
+            &connection,
+            &prepared_request,
+        )?)
+    };
+    let durable_mutation = matches!(
+        ledger_outcome,
+        Some(ReflectionRequestDurableLedgerOutcome::Inserted)
+    );
+    let persisted = !options.dry_run;
+    let source_refs = reflection_propose_source_refs(&prepared_request.artifact);
+    let next_commands = reflection_propose_next_commands(&prepared.workspace_path);
+
+    Ok(ReflectionProposeReport {
+        schema: REFLECTION_PROPOSE_SCHEMA_V1,
+        command: "reflect propose",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        reflection_kind: prepared_request.ledger_material.reflection_kind.clone(),
+        request_id: prepared_request.ledger_material.request_id.clone(),
+        request_hash: prepared_request.ledger_material.request_hash.clone(),
+        source_package_hash: prepared_request.ledger_material.source_package_hash.clone(),
+        created_at: prepared_request.ledger_material.created_at.clone(),
+        expires_at: prepared_request.ledger_material.expires_at.clone(),
+        hmac_key_id: prepared_request.ledger_material.challenge_key_id.clone(),
+        source_refs,
+        dry_run: options.dry_run,
+        durable_mutation,
+        persisted,
+        ledger_outcome,
+        request: prepared_request.artifact,
+        next_commands,
+    })
+}
+
+fn validate_reflection_propose_limits(
+    limits: ReflectionSourcePackageLimits,
+) -> Result<(), DomainError> {
+    if limits.max_sources == 0 {
+        return Err(curate_usage_error(
+            "reflect propose --max-sources must be greater than zero".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    if limits.max_total_excerpt_bytes == 0 {
+        return Err(curate_usage_error(
+            "reflect propose --max-total-excerpt-bytes must be greater than zero".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    if limits.max_excerpt_bytes_per_source == 0 {
+        return Err(curate_usage_error(
+            "reflect propose --max-excerpt-bytes-per-source must be greater than zero".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_reflection_source(
+    connection: &DbConnection,
+    workspace_id: &str,
+    raw_id: &str,
+) -> Result<ReflectionSourceInput, DomainError> {
+    let id = raw_id.trim();
+    if id.is_empty() {
+        return Err(curate_usage_error(
+            "reflect propose --source ids must not be empty".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+
+    let memory = connection
+        .get_memory(id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load reflection source memory {id}: {error}"),
+            repair: Some(format!("ee memory show {id} --json")),
+        })?;
+    let evidence_span = connection
+        .get_evidence_span(id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load reflection source evidence span {id}: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?;
+
+    match (memory, evidence_span) {
+        (Some(memory), None) => reflection_source_input_from_memory(memory, workspace_id),
+        (None, Some(span)) => reflection_source_input_from_evidence_span(span, workspace_id),
+        (Some(_), Some(_)) => Err(curate_usage_error(
+            format!(
+                "reflect propose --source {id} is ambiguous; use --source-memory or --source-evidence-span"
+            ),
+            "ee reflect propose --help",
+        )),
+        (None, None) => Err(DomainError::NotFound {
+            resource: "reflection source memory_or_evidence_span".to_owned(),
+            id: id.to_owned(),
+            repair: Some("ee memory list --json".to_owned()),
+        }),
+    }
+}
+
+fn resolve_reflection_memory_source(
+    connection: &DbConnection,
+    workspace_id: &str,
+    raw_id: &str,
+) -> Result<ReflectionSourceInput, DomainError> {
+    let id = raw_id.trim();
+    if id.is_empty() {
+        return Err(curate_usage_error(
+            "reflect propose --source-memory ids must not be empty".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    let memory = connection
+        .get_memory(id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load reflection source memory {id}: {error}"),
+            repair: Some(format!("ee memory show {id} --json")),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "memory".to_owned(),
+            id: id.to_owned(),
+            repair: Some(format!("ee memory show {id} --json")),
+        })?;
+    reflection_source_input_from_memory(memory, workspace_id)
+}
+
+fn resolve_reflection_evidence_span_source(
+    connection: &DbConnection,
+    workspace_id: &str,
+    raw_id: &str,
+) -> Result<ReflectionSourceInput, DomainError> {
+    let id = raw_id.trim();
+    if id.is_empty() {
+        return Err(curate_usage_error(
+            "reflect propose --source-evidence-span ids must not be empty".to_owned(),
+            "ee reflect propose --help",
+        ));
+    }
+    let span = connection
+        .get_evidence_span(id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load reflection source evidence span {id}: {error}"),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "evidence_span".to_owned(),
+            id: id.to_owned(),
+            repair: Some("ee import cass --workspace . --json".to_owned()),
+        })?;
+    reflection_source_input_from_evidence_span(span, workspace_id)
+}
+
+fn reflection_source_input_from_memory(
+    memory: StoredMemory,
+    workspace_id: &str,
+) -> Result<ReflectionSourceInput, DomainError> {
+    if memory.workspace_id != workspace_id {
+        return Err(curate_usage_error(
+            format!(
+                "reflect propose source memory {} belongs to workspace {}, not {}",
+                memory.id, memory.workspace_id, workspace_id
+            ),
+            "ee reflect propose --help",
+        ));
+    }
+    if memory.tombstoned_at.is_some() {
+        return Err(curate_usage_error(
+            format!("reflect propose source memory {} is tombstoned", memory.id),
+            "ee memory show --json",
+        ));
+    }
+    let content_hash = memory_content_hash(memory.content.as_str());
+    Ok(ReflectionSourceInput::new(
+        DerivationSourceRef::new(
+            DerivationSourceKind::Memory,
+            memory.id.clone(),
+            content_hash,
+        ),
+        memory.content,
+        Some(format!("ee-memory://{}", memory.id)),
+    )
+    .with_metadata(ReflectionSourceMetadata::memory(memory.level, memory.kind)))
+}
+
+fn reflection_source_input_from_evidence_span(
+    span: StoredEvidenceSpan,
+    workspace_id: &str,
+) -> Result<ReflectionSourceInput, DomainError> {
+    if span.workspace_id != workspace_id {
+        return Err(curate_usage_error(
+            format!(
+                "reflect propose source evidence span {} belongs to workspace {}, not {}",
+                span.id, span.workspace_id, workspace_id
+            ),
+            "ee reflect propose --help",
+        ));
+    }
+    Ok(ReflectionSourceInput::new(
+        DerivationSourceRef::new(
+            DerivationSourceKind::EvidenceSpan,
+            span.id.clone(),
+            span.content_hash,
+        ),
+        span.excerpt,
+        Some(format!("ee-evidence-span://{}", span.id)),
+    )
+    .with_metadata(ReflectionSourceMetadata::evidence_span(span.span_kind)))
+}
+
+fn reflection_request_package_domain_error(
+    error: crate::curate::DerivationSourcePackageError,
+) -> DomainError {
+    DomainError::Usage {
+        message: format!("Invalid reflection request source package: {error}"),
+        repair: Some("ee reflect propose --help".to_owned()),
+    }
+}
+
+fn reflection_propose_source_refs(
+    artifact: &ReflectionRequestArtifact,
+) -> Vec<ProposeDerivedSourceRef> {
+    let mut refs = artifact
+        .source_package
+        .sources
+        .iter()
+        .map(|source| ProposeDerivedSourceRef {
+            kind: source.kind.to_owned(),
+            id: source.id.clone(),
+            content_hash: source.content_hash.clone(),
+        })
+        .chain(
+            artifact
+                .source_package
+                .omitted_sources
+                .iter()
+                .map(|source| ProposeDerivedSourceRef {
+                    kind: source.kind.to_owned(),
+                    id: source.id.clone(),
+                    content_hash: source.content_hash.clone(),
+                }),
+        )
+        .collect::<Vec<_>>();
+    refs.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    refs
+}
+
+fn reflection_propose_next_commands(workspace_path: &Path) -> Vec<String> {
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    vec![
+        format!("ee reflect ingest <result.json> --workspace {workspace_arg} --json"),
+        format!(
+            "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status pending --json"
+        ),
+        format!("ee curate candidates --status pending --workspace {workspace_arg} --json"),
+    ]
 }
 
 /// Convert outbound reflection request material into the durable ledger insert input.
@@ -10899,16 +11540,17 @@ mod tests {
         CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CandidateType,
         CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
         CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
-        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1,
+        REFLECTION_PROPOSE_SCHEMA_V1, REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+        REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
+        REVIEW_WORKSPACE_SCHEMA_V1, ReflectionProposeOptions,
         ReflectionRequestDurableLedgerOutcome, ReflectionRequestLedgerDiagnosticsOptions,
         ReflectionResultDurableIngestOutcome, ReviewSessionCandidate, ReviewSessionOptions,
         ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
         build_bootstrap_session_candidates, build_review_session_candidates,
         candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
         list_reflection_request_ledger_diagnostics, persist_prepared_reflection_request_ledger,
-        persist_reflection_result_ingest_decision, reflection_hmac_key_diagnostic_from_config,
-        reflection_request_ledger_input_from_material,
+        persist_reflection_result_ingest_decision, propose_reflection_request,
+        reflection_hmac_key_diagnostic_from_config, reflection_request_ledger_input_from_material,
         reflection_request_ledger_material_from_stored, reflection_result_candidate_id,
         reflection_result_candidate_input_from_material,
         reflection_result_replay_gate_from_db_status, review_curation_candidate,
@@ -10921,10 +11563,10 @@ mod tests {
         REFLECTION_SOURCE_REDACTION_POLICY_ID, ReflectionHmacKeyConfig,
         ReflectionPromptTemplateDescriptor, ReflectionRequestArtifact,
         ReflectionRequestCallerHints, ReflectionRequestChallenge, ReflectionRequestLedgerMaterial,
-        ReflectionRequestLifecycle, ReflectionRequestNextCommand,
+        ReflectionRequestLifecycle, ReflectionRequestLifecycleConfig, ReflectionRequestNextCommand,
         ReflectionResponseSchemaDescriptor, ReflectionResultCandidateMaterial,
         ReflectionResultIngestDecision, ReflectionResultReplayGate, ReflectionSourcePackage,
-        ReflectionSourcePackageBudget, ReflectionSourcePackageEntry,
+        ReflectionSourcePackageBudget, ReflectionSourcePackageEntry, ReflectionSourcePackageLimits,
         ReflectionSourcePackageRedactionSummary,
     };
     use crate::db::{
@@ -11362,6 +12004,130 @@ mod tests {
         assert_eq!(
             repair.as_deref(),
             Some("Re-run ee reflect propose to create a fresh request artifact and ledger row.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_propose_persists_challenged_request_ledger_without_secret_material() -> TestResult
+    {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let key_path = workspace_path.join("reflect.key");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x2401)).to_string();
+        let source_content = "Reflect over request ledger replay protection.";
+        fs::write(&key_path, b"super-secret-reflection-key").map_err(|error| error.to_string())?;
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-propose-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: source_content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.8,
+                    utility: 0.7,
+                    importance: 0.6,
+                    provenance_uri: None,
+                    trust_class: "human_explicit".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        drop(connection);
+
+        let source_ids = Vec::<String>::new();
+        let source_memory_ids = vec![memory_id.clone()];
+        let source_evidence_span_ids = Vec::<String>::new();
+        let options = ReflectionProposeOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            reflection_kind: "gaps",
+            source_ids: &source_ids,
+            source_memory_ids: &source_memory_ids,
+            source_evidence_span_ids: &source_evidence_span_ids,
+            created_at: Some("2026-05-24T00:00:00Z"),
+            limits: ReflectionSourcePackageLimits::default(),
+            dry_run: false,
+            hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                Some("reflect-key-test".to_owned()),
+                Some(key_path.clone()),
+            )),
+            lifecycle_config: Some(
+                ReflectionRequestLifecycleConfig::new(3600, 60)
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+
+        let report = propose_reflection_request(&options).map_err(|error| error.to_string())?;
+        assert_eq!(report.schema, REFLECTION_PROPOSE_SCHEMA_V1);
+        assert_eq!(report.command, "reflect propose");
+        assert_eq!(report.workspace_id, workspace_id);
+        assert_eq!(report.reflection_kind, "gaps");
+        assert_eq!(report.created_at, "2026-05-24T00:00:00Z");
+        assert_eq!(report.expires_at, "2026-05-24T01:00:00Z");
+        assert_eq!(report.hmac_key_id, "reflect-key-test");
+        assert_eq!(report.source_refs.len(), 1);
+        assert_eq!(report.source_refs[0].id, memory_id.as_str());
+        assert!(report.persisted);
+        assert!(report.durable_mutation);
+        assert_eq!(
+            report.ledger_outcome,
+            Some(ReflectionRequestDurableLedgerOutcome::Inserted)
+        );
+        assert_eq!(report.request.schema, REFLECTION_REQUEST_SCHEMA);
+        let challenge = report
+            .request
+            .challenge
+            .as_ref()
+            .ok_or_else(|| "expected request challenge".to_owned())?;
+        assert_eq!(challenge.key_id, "reflect-key-test");
+        assert_ne!(challenge.hmac, "super-secret-reflection-key");
+        let report_json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        assert!(!report_json.contains("super-secret-reflection-key"));
+        assert!(!report_json.contains(key_path.to_string_lossy().as_ref()));
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let stored = connection
+            .get_reflection_request_ledger(&report.workspace_id, &report.request_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected persisted reflection request ledger row".to_owned())?;
+        assert_eq!(stored.status, "pending");
+        assert_eq!(stored.request_hash, report.request_hash);
+        assert_eq!(stored.challenge_key_id, "reflect-key-test");
+        assert_ne!(stored.challenge_hash, challenge.hmac);
+        assert!(
+            stored.source_refs_json.contains(&memory_id),
+            "source refs should retain cited memory id: {}",
+            stored.source_refs_json
+        );
+
+        let duplicate = propose_reflection_request(&options).map_err(|error| error.to_string())?;
+        assert!(duplicate.persisted);
+        assert!(!duplicate.durable_mutation);
+        assert_eq!(
+            duplicate.ledger_outcome,
+            Some(ReflectionRequestDurableLedgerOutcome::Duplicate)
         );
         Ok(())
     }
@@ -14332,6 +15098,108 @@ mod tests {
     }
 
     #[test]
+    fn show_curation_candidate_previews_pending_derived_candidate_read_only() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_180_1)).to_string();
+        let evidence_source_id = evidence_id(0x6_180_2);
+        let candidate_id = curate_id(0x6_180_3);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        let pre_candidate = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "seed must produce a pending candidate".to_owned())?;
+        assert_eq!(pre_candidate.status, "pending");
+        let pre_audit_count = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        let pre_memory_count = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .len();
+
+        let report = show_curation_candidate(&super::CurateShowOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.schema, super::CURATE_SHOW_SCHEMA_V1);
+        assert_eq!(report.command, "curate show");
+        assert!(!report.durable_mutation, "show must never mutate");
+        assert_eq!(report.candidate.id, candidate_id);
+        assert_eq!(report.candidate.status, "pending");
+        assert!(report.candidate.target_memory_id.is_none());
+
+        let planned = report
+            .planned_application
+            .as_ref()
+            .ok_or_else(|| "derived candidate must surface plannedApplication".to_owned())?;
+        assert_eq!(planned.candidate_type, "create_derived_memory");
+        assert!(
+            planned
+                .errors
+                .iter()
+                .any(|issue| issue.code == "candidate_requires_validation"),
+            "pending candidate plannedApplication must report validation gate: {:?}",
+            planned.errors
+        );
+
+        let validate_command = format!("ee curate validate {candidate_id}");
+        assert!(
+            report
+                .next_commands
+                .iter()
+                .any(|command| command.starts_with(&validate_command)
+                    && command.contains("--workspace ")
+                    && command.contains("--json")),
+            "next_commands must include copyable validate command: {:?}",
+            report.next_commands
+        );
+
+        let post_candidate = connection
+            .get_curation_candidate(&workspace_id, &candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "show must not delete the candidate".to_owned())?;
+        assert_eq!(
+            post_candidate.status, "pending",
+            "show must leave candidate status unchanged"
+        );
+        let post_audit_count = connection
+            .list_audit_entries(Some(&workspace_id), None)
+            .map_err(|error| error.to_string())?
+            .len();
+        assert_eq!(
+            post_audit_count, pre_audit_count,
+            "show must not write audit rows"
+        );
+        let post_memory_count = connection
+            .list_memories(&workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .len();
+        assert_eq!(
+            post_memory_count, pre_memory_count,
+            "show must not insert memories"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn validate_curation_candidate_approves_pending_and_writes_audit() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -15490,6 +16358,17 @@ mod tests {
             error.message().contains(phase),
             "error should name injected phase {phase}: {}",
             error.message()
+        );
+        assert_eq!(
+            error.code(),
+            "storage",
+            "phase {phase} should surface the stable `storage` code so failure-mode \
+             tooling can route every create-derived rollback consistently"
+        );
+        assert!(
+            error.repair().is_some(),
+            "phase {phase} should expose a repair string so agents have a recovery \
+             hint instead of an opaque storage failure"
         );
 
         let stored = connection
