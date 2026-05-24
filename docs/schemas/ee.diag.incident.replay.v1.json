@@ -1,0 +1,268 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.diag.incident.replay.v1.json",
+  "title": "ee.diag.incident.replay.v1",
+  "description": "Read-only deterministic replay of a swarm-incident fixture (bd-3tend). Anchors the OUTPUT envelope shape emitted by `ee diag incident --fixture <path> --json`. The command never mutates live services; `sideEffectFree` is always true and `mutationPolicy` is fixed. Captures the full sanitized `recoveryActions[].repairSafety` object shape introduced by bd-3c02c -> bd-xbqyn -> be891ea0.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "fixture",
+    "sideEffectFree",
+    "mutationPolicy",
+    "posture",
+    "dominantStatus",
+    "substratePosture",
+    "statusCounts",
+    "substrates",
+    "degraded",
+    "recoveryActions",
+    "redactionExpectations",
+    "assertions",
+    "artifacts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.diag.incident.replay.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "diag incident"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "fixture": {
+      "type": "object",
+      "required": ["path", "schema", "scenarioId", "fixedClock", "purpose"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": ["string", "null"]
+        },
+        "scenarioId": {
+          "type": ["string", "null"]
+        },
+        "fixedClock": {
+          "type": ["string", "null"]
+        },
+        "purpose": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true,
+      "description": "Always true: `ee diag incident` is a deterministic fixture replay with no live-service calls."
+    },
+    "mutationPolicy": {
+      "type": "string",
+      "const": "read_only_fixture_replay_no_live_services_no_mutation"
+    },
+    "posture": {
+      "type": "string",
+      "enum": ["blocked", "degraded_recoverable", "ok"]
+    },
+    "dominantStatus": {
+      "type": "string",
+      "enum": [
+        "blocked",
+        "unavailable",
+        "stale",
+        "degraded",
+        "ok",
+        "not_applicable",
+        "unknown"
+      ]
+    },
+    "substratePosture": {
+      "type": "object",
+      "description": "Map of substrate name -> sanitized status string (one of the dominantStatus enum members).",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "statusCounts": {
+      "type": "object",
+      "description": "Histogram of status -> count over substratePosture.",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "substrates": {
+      "type": "object",
+      "description": "Verbatim substrates block from the input fixture (passed through after substratePosture sanitation).",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/jsonValue"
+      },
+      "description": "Verbatim expectedDegraded array from the input fixture."
+    },
+    "recoveryActions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/recoveryAction"
+      }
+    },
+    "redactionExpectations": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "assertions": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    }
+  },
+  "$defs": {
+    "recoveryAction": {
+      "type": "object",
+      "required": [
+        "priority",
+        "kind",
+        "summary",
+        "command",
+        "manualStep",
+        "evidence",
+        "destructive",
+        "preconditions",
+        "repairSafety"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "type": ["integer", "null"]
+        },
+        "kind": {
+          "type": ["string", "null"]
+        },
+        "summary": {
+          "type": ["string", "null"]
+        },
+        "command": {
+          "type": ["string", "null"]
+        },
+        "manualStep": {
+          "type": ["string", "null"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Sanitized evidence list. Falls back to ['incident_fixture_recovery_action'] when input is empty/missing/scalar/non-string-array."
+        },
+        "destructive": {
+          "type": "boolean"
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Sanitized preconditions list. Falls back to [] when input is missing/scalar/non-string-array."
+        },
+        "repairSafety": {
+          "$ref": "#/$defs/repairSafety"
+        }
+      }
+    },
+    "repairSafety": {
+      "type": "object",
+      "description": "Sanitized safety envelope per bd-3c02c/bd-xbqyn/be891ea0. Either echoes the action's explicit repairSafety object (with evidence/preconditions arrays normalized) or substitutes a manual-only fallback.",
+      "required": [
+        "riskClass",
+        "preflightCommand",
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+        "privacyClass",
+        "nextAction",
+        "ruleId",
+        "source",
+        "reasonCode",
+        "evidence",
+        "preconditions"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "riskClass": {
+          "type": "string"
+        },
+        "preflightCommand": {
+          "type": ["string", "null"]
+        },
+        "requiresHumanApproval": {
+          "type": "boolean"
+        },
+        "mutatesExternalState": {
+          "type": "boolean"
+        },
+        "mutatesTrackerState": {
+          "type": "boolean"
+        },
+        "privacyClass": {
+          "type": "string"
+        },
+        "nextAction": {
+          "type": "string"
+        },
+        "ruleId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "reasonCode": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

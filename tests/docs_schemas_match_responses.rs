@@ -73,6 +73,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.curate.candidates.v1", "ee.curate.candidates.v1.json"),
     (CURATE_SHOW_SCHEMA_V1, "ee.curate.show.v1.json"),
     (
+        "ee.diag.incident.replay.v1",
+        "ee.diag.incident.replay.v1.json",
+    ),
+    (
         ee::curate::REFLECTION_SOURCE_PACKAGE_SCHEMA,
         "ee.reflect.source_package.v1.json",
     ),
@@ -1481,6 +1485,174 @@ fn curate_show_report_matches_schema() -> TestResult {
             "plannedDerivedFromLinks must surface at least one link in this fixture".to_string(),
         );
     }
+    Ok(())
+}
+
+#[test]
+fn diag_incident_replay_response_matches_schema() -> TestResult {
+    // bd-3tend: anchor the OUTPUT envelope shape that `ee diag incident
+    // --fixture <path> --json` emits via `diag_incident_response`. The
+    // chain bd-3c02c -> bd-xbqyn -> be891ea0 has extended this shape
+    // three times (default repair safety, half-fix review, sanitize repair
+    // safety) without publishing the JSON schema. This test pins:
+    //   - top-level envelope fields (schema, command, version, fixture,
+    //     sideEffectFree, mutationPolicy, posture, dominantStatus,
+    //     substratePosture, statusCounts, substrates, degraded,
+    //     recoveryActions, redactionExpectations, assertions, artifacts);
+    //   - the recoveryActions[] shape with the full repairSafety object
+    //     introduced by be891ea0 (riskClass, preflightCommand,
+    //     requiresHumanApproval, mutatesExternalState, mutatesTrackerState,
+    //     privacyClass, nextAction, ruleId, source, reasonCode, evidence,
+    //     preconditions);
+    //   - and the sanitization fallback (manual-only with
+    //     reasonCode=incident_repair_safety_missing) for actions that
+    //     arrive without an explicit repairSafety object.
+    //
+    // The sample mirrors the public payload `diag_incident_response`
+    // would emit for a real disk_pressure_external_target_ok fixture
+    // plus a synthetic action that omits repairSafety to exercise the
+    // default fallback branch.
+    let sample = json!({
+        "schema": "ee.diag.incident.replay.v1",
+        "command": "diag incident",
+        "version": "0.0.0-test",
+        "fixture": {
+            "path": "tests/fixtures/swarm_incidents/disk_pressure_external_target_ok.json",
+            "schema": "ee.swarm_incident.v1",
+            "scenarioId": "disk_pressure_external_target_ok",
+            "fixedClock": "2026-05-15T00:00:00Z",
+            "purpose": "Internal workspace volume is near the admission threshold."
+        },
+        "sideEffectFree": true,
+        "mutationPolicy": "read_only_fixture_replay_no_live_services_no_mutation",
+        "posture": "degraded_recoverable",
+        "dominantStatus": "degraded",
+        "substratePosture": {
+            "agentMail": "not_applicable",
+            "beads": "ok",
+            "rch": "not_applicable",
+            "disk": "degraded",
+            "hotPath": "not_applicable"
+        },
+        "statusCounts": {
+            "degraded": 1,
+            "not_applicable": 3,
+            "ok": 1
+        },
+        "substrates": {
+            "disk": {
+                "status": "degraded",
+                "evidence": ["workspace free bytes below build admission threshold"],
+                "degradedCodes": ["build_admission_denied"],
+                "metrics": {"workspaceFreeBytes": 536870912}
+            }
+        },
+        "degraded": [
+            {
+                "code": "build_admission_denied",
+                "severity": "medium",
+                "surface": "diag incident",
+                "reason": "Workspace free space below safe admission floor."
+            }
+        ],
+        "recoveryActions": [
+            {
+                "priority": 1,
+                "kind": "observe",
+                "summary": "Collect disk posture without deleting files.",
+                "command": "ee diag build-admission --workspace . --json",
+                "manualStep": null,
+                "evidence": ["build_admission_denied"],
+                "destructive": false,
+                "preconditions": [],
+                "repairSafety": {
+                    "riskClass": "read_only_probe",
+                    "preflightCommand": null,
+                    "requiresHumanApproval": false,
+                    "mutatesExternalState": false,
+                    "mutatesTrackerState": false,
+                    "privacyClass": "synthetic_incident_fixture",
+                    "nextAction": "run_directly",
+                    "ruleId": "repair_safety:read_only_probe",
+                    "source": "repair_action_safety",
+                    "reasonCode": "incident_disk_admission_observe",
+                    "evidence": ["build_admission_denied"],
+                    "preconditions": []
+                }
+            },
+            {
+                "priority": 2,
+                "kind": "manual",
+                "summary": "Coordinate manually because repairSafety was missing.",
+                "command": null,
+                "manualStep": "Review the incident fixture before running any repair command.",
+                "evidence": ["incident_fixture_recovery_action"],
+                "destructive": false,
+                "preconditions": [],
+                "repairSafety": {
+                    "riskClass": "unavailable_or_manual_only",
+                    "preflightCommand": null,
+                    "requiresHumanApproval": false,
+                    "mutatesExternalState": false,
+                    "mutatesTrackerState": false,
+                    "privacyClass": "synthetic_incident_fixture",
+                    "nextAction": "manual_only",
+                    "ruleId": "repair_safety:unavailable_or_manual_only",
+                    "source": "repair_action_safety",
+                    "reasonCode": "incident_repair_safety_missing",
+                    "evidence": [],
+                    "preconditions": []
+                }
+            }
+        ],
+        "redactionExpectations": {
+            "pathPolicy": "redact_home",
+            "secretPolicy": "no_secrets",
+            "allowedHostLabels": []
+        },
+        "assertions": {
+            "deterministic": true,
+            "noLiveServices": true,
+            "noLocalCargo": true,
+            "noDeletion": true,
+            "noMutation": true
+        },
+        "artifacts": [
+            {
+                "path": "tests/fixtures/swarm_incidents/disk_pressure_external_target_ok.json",
+                "kind": "fixture"
+            }
+        ]
+    });
+    let schema = schema_doc("ee.diag.incident.replay.v1")?;
+
+    validate_json_schema(&sample, &schema, &schema, "$")?;
+    ensure_json_str(&sample, "/schema", "ee.diag.incident.replay.v1")?;
+    ensure_json_str(&sample, "/command", "diag incident")?;
+    ensure_json_bool(&sample, "/sideEffectFree", true)?;
+    ensure_json_str(
+        &sample,
+        "/mutationPolicy",
+        "read_only_fixture_replay_no_live_services_no_mutation",
+    )?;
+    ensure_json_str(
+        &sample,
+        "/recoveryActions/0/repairSafety/reasonCode",
+        "incident_disk_admission_observe",
+    )?;
+    // Sanitization fallback: an action with no explicit repairSafety must
+    // surface the manual-only default carrying the standardized reasonCode
+    // and an empty evidence array (bd-3c02c default + bd-xbqyn cleanup).
+    ensure_json_str(
+        &sample,
+        "/recoveryActions/1/repairSafety/reasonCode",
+        "incident_repair_safety_missing",
+    )?;
+    ensure_json_str(
+        &sample,
+        "/recoveryActions/1/repairSafety/nextAction",
+        "manual_only",
+    )?;
     Ok(())
 }
 
