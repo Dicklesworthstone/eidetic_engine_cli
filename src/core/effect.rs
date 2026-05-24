@@ -1148,6 +1148,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("db migrations", "List database migrations"),
             CommandEffect::read_only_db("curate candidates", "List curation candidates"),
+            CommandEffect::read_only_db(
+                "curate show",
+                "Inspect a single curation candidate read-only with apply preview",
+            ),
             CommandEffect::read_only_db("curate validate", "Validate curation candidate"),
             CommandEffect::read_only("demo list", "List demo manifests"),
             CommandEffect::read_only_db("demo show", "Show persisted demo audit rows"),
@@ -1282,6 +1286,12 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("rationale list", "List safe rationale traces"),
             CommandEffect::read_only_db("rationale show", "Show a safe rationale trace"),
+            CommandEffect::append_only_write(
+                "reflect propose",
+                vec!["reflection_request_ledger"],
+                "requestHash",
+                "Create an external reflection request artifact and non-secret replay ledger row",
+            ),
             CommandEffect::read_only_db(
                 "reflect request-ledger diagnostics",
                 "Inspect reflection request ledger diagnostics without exposing secret payloads",

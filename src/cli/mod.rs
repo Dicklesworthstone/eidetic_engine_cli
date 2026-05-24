@@ -76,13 +76,14 @@ use crate::core::context_delta::{
 use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
-    CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions, CurateUntombstoneOptions,
-    CurateValidateOptions, CurateValidateReport, ReflectionRequestLedgerDiagnosticsOptions,
-    ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
+    CurateReviewOptions, CurateReviewReport, CurateShowOptions, CurateShowReport,
+    CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions, CurateValidateReport,
+    ReflectionProposeOptions, ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions,
+    ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
     list_curation_candidates, list_reflection_request_ledger_diagnostics,
-    review_curation_candidate, review_session_proposals, run_curate_retire, run_curate_tombstone,
-    run_curate_untombstone, run_curation_disposition, run_review_workspace,
-    validate_curation_candidate,
+    propose_reflection_request, review_curation_candidate, review_session_proposals,
+    run_curate_retire, run_curate_tombstone, run_curate_untombstone, run_curation_disposition,
+    run_review_workspace, show_curation_candidate, validate_curation_candidate,
 };
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::disk_pressure::{
@@ -7023,6 +7024,8 @@ pub struct NoteArgs {
 pub enum CurateCommand {
     /// List curation candidates awaiting review.
     Candidates(CurateCandidatesArgs),
+    /// Read-only inspect/preview of a single curation candidate (bd-18z8x).
+    Show(CurateShowArgs),
     /// Validate one curation candidate and record the review decision.
     Validate(CurateValidateArgs),
     /// Apply one approved curation candidate to its target memory.
@@ -7160,6 +7163,17 @@ pub struct CurateCandidatesArgs {
     /// Group likely duplicate candidates together in queue output.
     #[arg(long, action = ArgAction::SetTrue)]
     pub group_duplicates: bool,
+}
+
+/// Arguments for `ee curate show` (bd-18z8x).
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct CurateShowArgs {
+    /// Curation candidate ID from `ee curate candidates`.
+    pub candidate_id: String,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
 }
 
 /// Arguments for `ee curate validate`.
@@ -10735,6 +10749,9 @@ where
         },
         Some(Command::Curate(CurateCommand::Candidates(ref args))) => {
             handle_curate_candidates(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::Show(ref args))) => {
+            handle_curate_show(&cli, args, stdout, stderr)
         }
         Some(Command::Curate(CurateCommand::Validate(ref args))) => {
             handle_curate_validate(&cli, args, stdout, stderr)
@@ -36892,6 +36909,57 @@ where
     }
 }
 
+fn handle_curate_show<W, E>(
+    cli: &Cli,
+    args: &CurateShowArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "curate show", stdout, stderr) {
+        return exit_code;
+    }
+
+    let workspace_path = cli.resolve_workspace();
+    let options = CurateShowOptions {
+        workspace_path: &workspace_path,
+        database_path: args.database.as_deref(),
+        candidate_id: &args.candidate_id,
+    };
+
+    match show_curation_candidate(&options) {
+        Ok(report) => write_curate_show_report(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn write_curate_show_report<W>(
+    cli: &Cli,
+    report: &CurateShowReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &output::render_curate_show_human(report))
+        }
+        output::Renderer::Toon => {
+            write_stdout(stdout, &(output::render_curate_show_toon(report) + "\n"))
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(output::render_curate_show_json(report) + "\n"))
+        }
+    }
+}
+
 fn handle_curate_validate<W, E>(
     cli: &Cli,
     args: &CurateValidateArgs,
@@ -44627,6 +44695,7 @@ const COORDINATION_SUBCOMMANDS: &[&str] = &["evidence"];
 const COORDINATION_EVIDENCE_SUBCOMMANDS: &[&str] = &["ingest"];
 const CURATE_SUBCOMMANDS: &[&str] = &[
     "candidates",
+    "show",
     "validate",
     "apply",
     "accept",
@@ -44637,6 +44706,7 @@ const CURATE_SUBCOMMANDS: &[&str] = &[
     "retire",
     "tombstone",
     "untombstone",
+    "propose-derived",
 ];
 const DEMO_SUBCOMMANDS: &[&str] = &["list", "run", "verify"];
 const DIAG_SUBCOMMANDS: &[&str] = &[
@@ -44912,6 +44982,7 @@ impl NormalizedInvocation {
                 },
                 Command::Curate(curate) => match curate {
                     CurateCommand::Candidates(_) => "curate candidates".to_string(),
+                    CurateCommand::Show(_) => "curate show".to_string(),
                     CurateCommand::Validate(_) => "curate validate".to_string(),
                     CurateCommand::Apply(_) => "curate apply".to_string(),
                     CurateCommand::Accept(_) => "curate accept".to_string(),

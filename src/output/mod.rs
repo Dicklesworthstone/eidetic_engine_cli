@@ -12,7 +12,7 @@ use crate::core::check::CheckReport;
 use crate::core::context::ContextPackOutputOptions;
 use crate::core::curate::{
     CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
-    CurateValidateReport,
+    CurateShowReport, CurateValidateReport,
 };
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
@@ -7477,6 +7477,82 @@ pub fn render_curate_apply_toon(report: &CurateApplyReport) -> String {
     render_toon_from_json(&render_curate_apply_json(report))
 }
 
+/// Render a curation show/preview report as JSON (`ee.response.v2` envelope).
+#[must_use]
+pub fn render_curate_show_json(report: &CurateShowReport) -> String {
+    let data_raw = serde_json::to_string(report)
+        .unwrap_or_else(|_| "{\"schema\":\"ee.curate.show.v1\"}".to_owned());
+    ResponseEnvelope::success().data_raw(&data_raw).finish()
+}
+
+/// Render a curation show/preview report as human-readable text.
+#[must_use]
+pub fn render_curate_show_human(report: &CurateShowReport) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Curation candidate {} ({})",
+        report.candidate.id, report.candidate.candidate_type
+    ));
+    lines.push(format!(
+        "  status: {}  review_state: {}",
+        report.candidate.status, report.candidate.review_state
+    ));
+    if let Some(target) = report.candidate.target_memory_id.as_deref() {
+        lines.push(format!("  targetMemoryId: {target}"));
+    } else {
+        lines.push("  targetMemoryId: (none — create-derived candidate)".to_owned());
+    }
+    if let Some(planned) = &report.planned_application {
+        lines.push(format!(
+            "  plannedApplication: status={} decision={}",
+            planned.status, planned.decision
+        ));
+        if let Some(id) = planned.created_memory_id.as_deref() {
+            lines.push(format!("    plannedCreatedMemoryId: {id}"));
+        }
+        lines.push(format!(
+            "    plannedDerivedFromLinkCount: {}",
+            planned.planned_derived_from_links.len()
+        ));
+        lines.push(format!(
+            "    plannedEvidenceAttachmentCount: {}",
+            planned.planned_evidence_attachments.len()
+        ));
+        if let Some(job) = planned.planned_search_index_job_id.as_deref() {
+            lines.push(format!("    plannedSearchIndexJobId: {job}"));
+        }
+        if let Some(audit) = planned.audit_schema_preview.as_deref() {
+            lines.push(format!("    auditSchemaPreview: {audit}"));
+        }
+        if !planned.errors.is_empty() {
+            lines.push("    plannedApplication errors:".to_owned());
+            for issue in &planned.errors {
+                lines.push(format!("      - {}: {}", issue.code, issue.message));
+            }
+        }
+        if !planned.warnings.is_empty() {
+            lines.push("    plannedApplication warnings:".to_owned());
+            for issue in &planned.warnings {
+                lines.push(format!("      - {}: {}", issue.code, issue.message));
+            }
+        }
+    }
+    if !report.next_commands.is_empty() {
+        lines.push("  nextCommands:".to_owned());
+        for command in &report.next_commands {
+            lines.push(format!("    - {command}"));
+        }
+    }
+    lines.push(format!("  nextAction: {}", report.next_action));
+    lines.join("\n") + "\n"
+}
+
+/// Render a curation show/preview report as TOON.
+#[must_use]
+pub fn render_curate_show_toon(report: &CurateShowReport) -> String {
+    render_toon_from_json(&render_curate_show_json(report))
+}
+
 /// Render a curation review lifecycle report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_review_json(report: &CurateReviewReport) -> String {
@@ -11183,10 +11259,16 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         name: "reflect",
         description: "Create and inspect external reflection request handshakes",
         available: true,
-        subcommands: &[SubcommandEntry {
-            name: "request-ledger diagnostics",
-            description: "Inspect request ledger integrity and replay posture",
-        }],
+        subcommands: &[
+            SubcommandEntry {
+                name: "propose",
+                description: "Create a request artifact and replay ledger row",
+            },
+            SubcommandEntry {
+                name: "request-ledger diagnostics",
+                description: "Inspect request ledger integrity and replay posture",
+            },
+        ],
         args: &[],
     },
     CommandEntry {
