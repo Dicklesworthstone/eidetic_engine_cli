@@ -16062,6 +16062,99 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_rejects_create_derived_tombstoned_source_memory_race() -> TestResult
+    {
+        // bd-39by4: source memory drift between validate and apply.
+        // Mirror of `apply_curation_candidate_rejects_create_derived_memory_hash_drift`
+        // but for the tombstone race: a peer agent retires the source between
+        // validate and apply. The apply path must recheck `tombstoned_at` inside
+        // its read of the source and fail closed with `derived_source_memory_tombstoned`
+        // + recovery hint, leaving no partial state.
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x6_500_1)).to_string();
+        let evidence_source_id = evidence_id(0x6_500_2);
+        let candidate_id = curate_id(0x6_500_3);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &memory_id,
+            &evidence_source_id,
+            &candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        // Peer agent tombstones the source memory after our candidate has been
+        // approved but before our apply transaction starts.
+        let tombstoned = connection
+            .tombstone_memory(&memory_id)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            tombstoned,
+            "tombstone_memory must mark the source memory before the race apply"
+        );
+
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.application.status, "blocked");
+        assert_eq!(report.application.decision, "unchanged");
+        let tombstoned_issue = report
+            .application
+            .errors
+            .iter()
+            .find(|issue| issue.code == "derived_source_memory_tombstoned")
+            .ok_or_else(|| {
+                format!(
+                    "apply report must surface derived_source_memory_tombstoned: {:?}",
+                    report.application.errors
+                )
+            })?;
+        assert!(
+            !tombstoned_issue.repair.is_empty(),
+            "tombstone race error must carry a recovery hint: {tombstoned_issue:?}"
+        );
+        assert!(!report.mutation.persisted);
+        assert_eq!(report.mutation.from_status, "approved");
+        assert_eq!(report.mutation.to_status, "approved");
+        assert!(report.mutation.audit_id.is_none());
+
+        // Source memory still counts in include_tombstoned listings, so the
+        // expected total remains 1 (no derived memory was created).
+        assert_no_create_derived_apply_side_effects(
+            &connection,
+            &workspace_id,
+            &candidate_id,
+            &memory_id,
+            &evidence_source_id,
+            None,
+            1,
+            "tombstoned source memory race",
+        )
+    }
+
+    #[test]
     fn apply_curation_candidate_rejects_create_derived_evidence_attachment_drift() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
