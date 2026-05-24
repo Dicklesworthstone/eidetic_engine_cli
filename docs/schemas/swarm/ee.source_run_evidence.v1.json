@@ -1,0 +1,253 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidetic-engine/schemas/swarm/ee.source_run_evidence.v1.json",
+  "title": "ee.source_run_evidence.v1",
+  "description": "Redaction-safe evidence record for one bounded external coordination or verification source run.",
+  "type": "object",
+  "required": [
+    "schema",
+    "runId",
+    "capturedAt",
+    "source",
+    "command",
+    "policy",
+    "timing",
+    "status",
+    "exit",
+    "output",
+    "degraded",
+    "recovery",
+    "artifacts",
+    "redaction",
+    "provenanceHash",
+    "producer"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.source_run_evidence.v1"},
+    "runId": {"type": "string"},
+    "capturedAt": {"type": ["string", "null"], "format": "date-time"},
+    "source": {
+      "type": "object",
+      "required": ["kind", "sourceId", "operation"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["agent_mail", "beads", "bv", "cass", "rch", "git", "ee", "swarm_collector", "shell", "other"]
+        },
+        "sourceId": {"type": "string"},
+        "operation": {"type": "string"}
+      }
+    },
+    "command": {
+      "type": "object",
+      "required": ["display", "argv", "argvRedaction", "commandHash", "normalizedArgvHash"],
+      "additionalProperties": false,
+      "properties": {
+        "display": {"type": ["string", "null"]},
+        "argv": {"type": "array", "items": {"type": "string"}},
+        "argvRedaction": {"type": "string", "enum": ["literal_safe", "redacted", "hash_only"]},
+        "commandHash": {"type": "string"},
+        "normalizedArgvHash": {"type": "string"}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "required": ["requiredMode", "onFailure", "failClosedReason"],
+      "additionalProperties": false,
+      "properties": {
+        "requiredMode": {
+          "type": "string",
+          "enum": ["best_effort_coordination", "required_coordination", "remote_verification_required", "mutation_guard", "read_only_evidence"]
+        },
+        "onFailure": {"type": "string", "enum": ["continue_degraded", "fail_closed"]},
+        "failClosedReason": {"type": ["string", "null"]}
+      }
+    },
+    "timing": {
+      "type": "object",
+      "required": ["startedAt", "finishedAt", "timeoutMs", "elapsedMs"],
+      "additionalProperties": false,
+      "properties": {
+        "startedAt": {"type": ["string", "null"], "format": "date-time"},
+        "finishedAt": {"type": ["string", "null"], "format": "date-time"},
+        "timeoutMs": {"type": "integer", "minimum": 1},
+        "elapsedMs": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "status": {
+      "type": "string",
+      "enum": ["passed", "failed", "timed_out", "spawn_failed", "parse_failed", "stale_source", "malformed_store", "blocked"]
+    },
+    "exit": {
+      "type": "object",
+      "required": ["exitCode", "signal", "killedOwnChild", "killedPeerProcesses"],
+      "additionalProperties": false,
+      "properties": {
+        "exitCode": {"type": ["integer", "null"]},
+        "signal": {"type": ["string", "null"]},
+        "killedOwnChild": {"type": "boolean"},
+        "killedPeerProcesses": {"type": "boolean", "const": false}
+      }
+    },
+    "output": {
+      "type": "object",
+      "required": [
+        "stdoutBytes",
+        "stderrBytes",
+        "stdoutTail",
+        "stderrTail",
+        "tailBytesMax",
+        "stdoutHash",
+        "stderrExcerptHash",
+        "redacted"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "stdoutBytes": {"type": "integer", "minimum": 0},
+        "stderrBytes": {"type": "integer", "minimum": 0},
+        "stdoutTail": {"type": ["string", "null"]},
+        "stderrTail": {"type": ["string", "null"]},
+        "tailBytesMax": {"type": "integer", "minimum": 0},
+        "stdoutHash": {"type": ["string", "null"]},
+        "stderrExcerptHash": {"type": ["string", "null"]},
+        "redacted": {"type": "boolean"}
+      }
+    },
+    "degraded": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "repair"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {"type": "string"},
+          "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+          "message": {"type": "string"},
+          "repair": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "recovery": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["priority", "kind", "command", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "priority": {"type": "integer", "minimum": 1},
+          "kind": {
+            "type": "string",
+            "enum": ["retry", "retry_with_longer_timeout", "use_static_fallback", "repair_substrate_after_approval", "manual_coordination", "fail_closed", "skip_source"]
+          },
+          "command": {"type": ["string", "null"]},
+          "message": {"type": "string"}
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["kind", "reference", "contentHash", "redactionStatus"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string", "enum": ["bead", "verification", "support_bundle", "log_excerpt", "other"]},
+          "reference": {"type": "string"},
+          "contentHash": {"type": "string"},
+          "redactionStatus": {"type": "string", "enum": ["id_only", "redacted_summary", "hash_only"]}
+        }
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "required": ["rawBodiesIncluded", "rawEnvIncluded", "secretScanApplied", "pathPolicy"],
+      "additionalProperties": false,
+      "properties": {
+        "rawBodiesIncluded": {"type": "boolean", "const": false},
+        "rawEnvIncluded": {"type": "boolean", "const": false},
+        "secretScanApplied": {"type": "boolean"},
+        "pathPolicy": {"type": "string", "enum": ["none", "redact_home", "hash_paths", "labels_only"]}
+      }
+    },
+    "provenanceHash": {"type": "string"},
+    "producer": {"$ref": "ee.producer.metadata.v1.json"}
+  },
+  "examples": [
+    {
+      "schema": "ee.source_run_evidence.v1",
+      "runId": "source_run_agent_mail_20260524_000001",
+      "capturedAt": "2026-05-24T05:04:00Z",
+      "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check"},
+      "command": {
+        "display": "agent-mail health_check",
+        "argv": ["mcp_agent_mail.health_check"],
+        "argvRedaction": "literal_safe",
+        "commandHash": "blake3:8e01e52e854b3ebaf808a4d9a13b2ad82464b1207612066df00d8355d5f8dca6",
+        "normalizedArgvHash": "blake3:ca04f1b794394366028cfad3f5a2b3ce4ff2d195d902f8aa70f4e70c1d903f56"
+      },
+      "policy": {"requiredMode": "best_effort_coordination", "onFailure": "continue_degraded", "failClosedReason": null},
+      "timing": {"startedAt": "2026-05-24T05:04:00Z", "finishedAt": "2026-05-24T05:04:01Z", "timeoutMs": 5000, "elapsedMs": 548},
+      "status": "malformed_store",
+      "exit": {"exitCode": null, "signal": null, "killedOwnChild": false, "killedPeerProcesses": false},
+      "output": {
+        "stdoutBytes": 0,
+        "stderrBytes": 286,
+        "stdoutTail": null,
+        "stderrTail": "sqlite backing store malformed; raw database page content omitted",
+        "tailBytesMax": 512,
+        "stdoutHash": null,
+        "stderrExcerptHash": "blake3:ad251871f9fbe77ce09070b1b67d682ac6d1cb5f4b4fd807c064ca41ceaf4b59",
+        "redacted": true
+      },
+      "degraded": [
+        {
+          "code": "coordination_source_malformed_store",
+          "severity": "high",
+          "message": "Agent Mail backing store was malformed, so coordination fell back to Beads and local git evidence.",
+          "repair": "Run Agent Mail repair only after explicit human approval because it may mutate the coordination database."
+        }
+      ],
+      "recovery": [
+        {
+          "priority": 1,
+          "kind": "manual_coordination",
+          "command": null,
+          "message": "Use Beads status and direct git state until Agent Mail is repaired."
+        },
+        {
+          "priority": 2,
+          "kind": "repair_substrate_after_approval",
+          "command": "am doctor repair --yes",
+          "message": "Repair Agent Mail only after the human approves the mutating repair command."
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "bead",
+          "reference": "bd-12v87.1",
+          "contentHash": "blake3:0eafc6c4e6c13f9f65f4be9f9ddf6fb4450c6713996f68c3d7bbf468e4f7e5e1",
+          "redactionStatus": "id_only"
+        }
+      ],
+      "redaction": {"rawBodiesIncluded": false, "rawEnvIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "provenanceHash": "blake3:0c9cad06f83d37ecf7ff74f206dc65075f2b920098d494f3c29f578c0dce0f15",
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_watchdog",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "source-run-watchdog-20260524", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-24T05:04:01Z"
+      }
+    }
+  ],
+  "x-ee-status": {
+    "shipped": false,
+    "tracking_bead": "bd-12v87.1",
+    "available_in_build": false,
+    "feature_flag": null,
+    "expected_version": "0.3.0"
+  },
+  "x-ee-doc": "docs/swarm/source_run_evidence.md"
+}

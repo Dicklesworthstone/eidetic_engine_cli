@@ -100,6 +100,13 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        id: "ee.source_run_evidence.v1",
+        file_name: "ee.source_run_evidence.v1.json",
+        doc_path: "docs/swarm/source_run_evidence.md",
+        tracking_bead: "bd-12v87.1",
+        shipped: true,
+    },
+    SchemaCase {
         id: "ee.resource.profile.v1",
         file_name: "ee.resource.profile.v1.json",
         doc_path: "docs/swarm/resource_profile.md",
@@ -232,6 +239,12 @@ const DRIFT_CASES: &[DriftCase] = &[
         command: "ee coordination evidence ingest --stdin --json",
         json_path: ".data.evidence",
         fixture_manifest_key: "ee.coordination_fallback_evidence.v1",
+    },
+    DriftCase {
+        schema_id: "ee.source_run_evidence.v1",
+        command: "planned source-run watchdog evidence",
+        json_path: ".examples[\"ee.source_run_evidence.v1\"]",
+        fixture_manifest_key: "ee.source_run_evidence.v1",
     },
     DriftCase {
         schema_id: "ee.resource.profile.v1",
@@ -395,6 +408,20 @@ fn schema_case_by_id(schema_id: &str) -> Result<SchemaCase, String> {
         .ok_or_else(|| format!("schema case missing for {schema_id}"))
 }
 
+fn string_array_at(value: &Value, pointer: &str, context: &str) -> Result<Vec<String>, String> {
+    value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{context} missing array {pointer}"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToOwned::to_owned)
+                .ok_or_else(|| format!("{context} has non-string item in {pointer}"))
+        })
+        .collect()
+}
+
 #[test]
 fn swarm_schema_catalog_is_complete_and_canonical() -> TestResult {
     let actual_files = fs::read_dir(swarm_schema_dir())
@@ -478,6 +505,170 @@ fn swarm_schema_catalog_is_complete_and_canonical() -> TestResult {
                 case.file_name
             ));
         }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn source_run_evidence_contract_covers_watchdog_policy() -> TestResult {
+    let schema_case = schema_case_by_id("ee.source_run_evidence.v1")?;
+    let schema = schema_doc(schema_case)?;
+    let required = string_array_at(&schema, "/required", schema_case.id)?;
+    let expected_required = [
+        "schema",
+        "runId",
+        "capturedAt",
+        "source",
+        "command",
+        "policy",
+        "timing",
+        "status",
+        "exit",
+        "output",
+        "degraded",
+        "recovery",
+        "artifacts",
+        "redaction",
+        "provenanceHash",
+        "producer",
+    ];
+    if required != expected_required {
+        return Err(format!(
+            "{} required field order drifted\nactual: {required:?}\nexpected: {expected_required:?}",
+            schema_case.id
+        ));
+    }
+
+    let status_values = string_array_at(&schema, "/properties/status/enum", schema_case.id)?;
+    let expected_statuses = [
+        "passed",
+        "failed",
+        "timed_out",
+        "spawn_failed",
+        "parse_failed",
+        "stale_source",
+        "malformed_store",
+        "blocked",
+    ];
+    for expected in expected_statuses {
+        if !status_values.iter().any(|value| value == expected) {
+            return Err(format!("{} missing status {expected}", schema_case.id));
+        }
+    }
+
+    let severity_values = string_array_at(
+        &schema,
+        "/properties/degraded/items/properties/severity/enum",
+        schema_case.id,
+    )?;
+    let expected_severities = ["info", "low", "warning", "medium", "high", "critical"];
+    if severity_values != expected_severities {
+        return Err(format!(
+            "{} degraded severity vocabulary drifted\nactual: {severity_values:?}\nexpected: {expected_severities:?}",
+            schema_case.id
+        ));
+    }
+
+    let recovery_required = string_array_at(
+        &schema,
+        "/properties/recovery/items/required",
+        schema_case.id,
+    )?;
+    let expected_recovery_required = ["priority", "kind", "command", "message"];
+    if recovery_required != expected_recovery_required {
+        return Err(format!(
+            "{} recovery[] shape drifted\nactual: {recovery_required:?}\nexpected: {expected_recovery_required:?}",
+            schema_case.id
+        ));
+    }
+
+    if bool_field(
+        &schema,
+        "/properties/redaction/properties/rawBodiesIncluded/const",
+        schema_case.id,
+    )? {
+        return Err(format!(
+            "{} must not allow raw mail/body content",
+            schema_case.id
+        ));
+    }
+    if bool_field(
+        &schema,
+        "/properties/redaction/properties/rawEnvIncluded/const",
+        schema_case.id,
+    )? {
+        return Err(format!(
+            "{} must not allow raw environment dumps",
+            schema_case.id
+        ));
+    }
+    if bool_field(
+        &schema,
+        "/properties/exit/properties/killedPeerProcesses/const",
+        schema_case.id,
+    )? {
+        return Err(format!(
+            "{} must not allow killing peer processes",
+            schema_case.id
+        ));
+    }
+
+    let examples = fixture_examples()?;
+    let example = examples
+        .get(schema_case.id)
+        .ok_or_else(|| format!("fixture manifest missing {}", schema_case.id))?;
+    let argv_redaction = string_field(
+        example,
+        "/command/argvRedaction",
+        "source run fixture example",
+    )?;
+    if argv_redaction != "literal_safe" {
+        return Err(format!(
+            "source run fixture argvRedaction must be literal_safe, got {argv_redaction}"
+        ));
+    }
+    let on_failure = string_field(example, "/policy/onFailure", "source run fixture example")?;
+    if on_failure != "continue_degraded" {
+        return Err(format!(
+            "source run fixture onFailure must be continue_degraded, got {on_failure}"
+        ));
+    }
+    let example_status = string_field(example, "/status", "source run fixture example")?;
+    if example_status != "malformed_store" {
+        return Err(format!(
+            "source run fixture status must be malformed_store, got {example_status}"
+        ));
+    }
+    let provenance_hash = string_field(example, "/provenanceHash", "source run fixture example")?;
+    if !provenance_hash.starts_with("blake3:") {
+        return Err(format!(
+            "source run fixture provenanceHash must be deterministic blake3, got {provenance_hash}"
+        ));
+    }
+    let command_hash = string_field(
+        example,
+        "/command/commandHash",
+        "source run fixture example",
+    )?;
+    let argv_hash = string_field(
+        example,
+        "/command/normalizedArgvHash",
+        "source run fixture example",
+    )?;
+    if !command_hash.starts_with("blake3:") || !argv_hash.starts_with("blake3:") {
+        return Err("source run fixture command hashes must be deterministic blake3".into());
+    }
+    if bool_field(
+        example,
+        "/redaction/rawBodiesIncluded",
+        "source run fixture example",
+    )? || bool_field(
+        example,
+        "/redaction/rawEnvIncluded",
+        "source run fixture example",
+    )? {
+        return Err("source run fixture must not include raw bodies or env dumps".into());
     }
 
     Ok(())

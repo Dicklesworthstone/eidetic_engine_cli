@@ -190,6 +190,72 @@
         "observedAt": "2026-05-15T11:21:00Z"
       }
     },
+    "ee.source_run_evidence.v1": {
+      "schema": "ee.source_run_evidence.v1",
+      "runId": "source_run_agent_mail_20260524_000001",
+      "capturedAt": "2026-05-24T05:04:00Z",
+      "source": {"kind": "agent_mail", "sourceId": "mcp-agent-mail", "operation": "health_check"},
+      "command": {
+        "display": "agent-mail health_check",
+        "argv": ["mcp_agent_mail.health_check"],
+        "argvRedaction": "literal_safe",
+        "commandHash": "blake3:8e01e52e854b3ebaf808a4d9a13b2ad82464b1207612066df00d8355d5f8dca6",
+        "normalizedArgvHash": "blake3:ca04f1b794394366028cfad3f5a2b3ce4ff2d195d902f8aa70f4e70c1d903f56"
+      },
+      "policy": {"requiredMode": "best_effort_coordination", "onFailure": "continue_degraded", "failClosedReason": null},
+      "timing": {"startedAt": "2026-05-24T05:04:00Z", "finishedAt": "2026-05-24T05:04:01Z", "timeoutMs": 5000, "elapsedMs": 548},
+      "status": "malformed_store",
+      "exit": {"exitCode": null, "signal": null, "killedOwnChild": false, "killedPeerProcesses": false},
+      "output": {
+        "stdoutBytes": 0,
+        "stderrBytes": 286,
+        "stdoutTail": null,
+        "stderrTail": "sqlite backing store malformed; raw database page content omitted",
+        "tailBytesMax": 512,
+        "stdoutHash": null,
+        "stderrExcerptHash": "blake3:ad251871f9fbe77ce09070b1b67d682ac6d1cb5f4b4fd807c064ca41ceaf4b59",
+        "redacted": true
+      },
+      "degraded": [
+        {
+          "code": "coordination_source_malformed_store",
+          "severity": "high",
+          "message": "Agent Mail backing store was malformed, so coordination fell back to Beads and local git evidence.",
+          "repair": "Run Agent Mail repair only after explicit human approval because it may mutate the coordination database."
+        }
+      ],
+      "recovery": [
+        {
+          "priority": 1,
+          "kind": "manual_coordination",
+          "command": null,
+          "message": "Use Beads status and direct git state until Agent Mail is repaired."
+        },
+        {
+          "priority": 2,
+          "kind": "repair_substrate_after_approval",
+          "command": "am doctor repair --yes",
+          "message": "Repair Agent Mail only after the human approves the mutating repair command."
+        }
+      ],
+      "artifacts": [
+        {
+          "kind": "bead",
+          "reference": "bd-12v87.1",
+          "contentHash": "blake3:0eafc6c4e6c13f9f65f4be9f9ddf6fb4450c6713996f68c3d7bbf468e4f7e5e1",
+          "redactionStatus": "id_only"
+        }
+      ],
+      "redaction": {"rawBodiesIncluded": false, "rawEnvIncluded": false, "secretScanApplied": true, "pathPolicy": "labels_only"},
+      "provenanceHash": "blake3:0c9cad06f83d37ecf7ff74f206dc65075f2b920098d494f3c29f578c0dce0f15",
+      "producer": {
+        "schema": "ee.producer.metadata.v1",
+        "sourceSystem": "coordination_watchdog",
+        "identity": {"status": "unknown", "agentName": null, "harness": null, "model": null},
+        "run": {"runId": "source-run-watchdog-20260524", "sessionId": null, "workspaceFingerprint": "repo:25e38e130474e7f0292de2a3"},
+        "observedAt": "2026-05-24T05:04:01Z"
+      }
+    },
     "ee.resource.profile.v1": {
       "schema": "ee.resource.profile.v1",
       "profile": "swarm_heavy",
