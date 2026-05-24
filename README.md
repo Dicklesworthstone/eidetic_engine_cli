@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="./ee_illustration.webp" alt="Eidetic Engine illustration" width="720">
+
 # Eidetic Engine (`ee`)
 
 **Durable, local-first, explainable memory for coding agents.**
@@ -10,20 +12,16 @@
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
-**Current install path: source build**
+**Install**
 
 ```bash
-git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
-cd eidetic_engine_cli
-cargo build --release
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
 ```
 
-**Planned release installer: not published yet**
-
-```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
-  | EE_VERSION=v0.1.0 bash
-```
+Verifies checksums, drops the `ee` binary into `~/.local/bin`, installs shell
+completions, and auto-configures the Claude Code / Codex / Gemini agent hooks
+if those harnesses are detected. Pass `--help` (e.g. `bash install.sh --help`)
+for offline tarballs, proxy options, `--no-gum`, and `--force` reinstall.
 
 </div>
 
