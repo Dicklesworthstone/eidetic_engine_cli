@@ -30,7 +30,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -113,7 +113,7 @@ const CONTEXT_CHANGED_SYMBOL_ADJACENCY_LINE_WINDOW: u32 = 20;
 #[derive(Clone, Debug)]
 struct CachedContextProximityTree {
     generation: u64,
-    tree: crate::graph::gomory_hu::GomoryHuTree,
+    tree: Arc<crate::graph::gomory_hu::GomoryHuTree>,
 }
 
 #[derive(Debug)]
@@ -5660,7 +5660,7 @@ fn apply_proximity_to_seed_scores(
             let cut = if seed_id == candidate_id {
                 Some(0.0)
             } else {
-                crate::graph::gomory_hu::query_min_cut(&tree, &candidate_id, &seed_id)
+                crate::graph::gomory_hu::query_min_cut(tree.as_ref(), &candidate_id, &seed_id)
             };
             if let Some(cut) = cut.filter(|cut| cut.is_finite() && *cut >= 0.0) {
                 best = Some(best.map_or(cut, |current: f64| current.max(cut)));
@@ -6148,7 +6148,7 @@ enum ContextProximityTreeError {
 
 fn context_proximity_tree(
     connection: &DbConnection,
-) -> Result<crate::graph::gomory_hu::GomoryHuTree, ContextProximityTreeError> {
+) -> Result<Arc<crate::graph::gomory_hu::GomoryHuTree>, ContextProximityTreeError> {
     let generation = context_proximity_graph_generation(connection).ok();
     if let Some(generation) = generation {
         if let Some(tree) = cached_context_proximity_tree(generation) {
@@ -6157,27 +6157,31 @@ fn context_proximity_tree(
     }
 
     let graph = context_proximity_graph(connection).map_err(ContextProximityTreeError::Graph)?;
-    let tree = crate::graph::gomory_hu::build_gomory_hu_tree(&graph)
-        .map_err(|error| ContextProximityTreeError::GomoryHu(error.to_string()))?;
+    let tree = Arc::new(
+        crate::graph::gomory_hu::build_gomory_hu_tree(&graph)
+            .map_err(|error| ContextProximityTreeError::GomoryHu(error.to_string()))?,
+    );
 
     if let Some(generation) = generation {
-        store_context_proximity_tree(generation, tree.clone());
+        store_context_proximity_tree(generation, Arc::clone(&tree));
     }
 
     Ok(tree)
 }
 
-fn cached_context_proximity_tree(generation: u64) -> Option<crate::graph::gomory_hu::GomoryHuTree> {
+fn cached_context_proximity_tree(
+    generation: u64,
+) -> Option<Arc<crate::graph::gomory_hu::GomoryHuTree>> {
     let guard = context_proximity_tree_cache()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     guard
         .as_ref()
         .filter(|cached| cached.generation == generation)
-        .map(|cached| cached.tree.clone())
+        .map(|cached| Arc::clone(&cached.tree))
 }
 
-fn store_context_proximity_tree(generation: u64, tree: crate::graph::gomory_hu::GomoryHuTree) {
+fn store_context_proximity_tree(generation: u64, tree: Arc<crate::graph::gomory_hu::GomoryHuTree>) {
     let mut guard = context_proximity_tree_cache()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
