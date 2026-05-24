@@ -22,6 +22,8 @@
 //! EE-006 / EE-016. Strict scope: this module must not depend on any
 //! of those landing first.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
@@ -73,7 +75,9 @@ use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
     DbConnection, StoredAgentContextProfileForPack, StoredMemory,
 };
-use crate::models::degradation::{GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE};
+use crate::models::degradation::{
+    GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
+};
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
     AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri,
@@ -910,18 +914,57 @@ fn trace_pack_dna_explain_orchestration(
     pack_dna_degraded_code: &str,
     graph_task_count: u64,
 ) {
+    trace_pack_dna_explain_orchestration_with_timeout(
+        graph_explain_start,
+        pack_dna_degraded_code,
+        graph_task_count,
+        0,
+    );
+}
+
+fn trace_pack_dna_explain_orchestration_with_timeout(
+    graph_explain_start: Instant,
+    pack_dna_degraded_code: &str,
+    graph_task_count: u64,
+    pack_dna_timeout_ms: u64,
+) {
     tracing::debug!(
         target: "ee::context::pack_dna",
         explain_enabled = true,
         selection_latency_ms = 0_u64,
         graph_explain_latency_ms = elapsed_millis_u64(graph_explain_start),
         overlap_latency_ms = 0_u64,
-        pack_dna_timeout_ms = 0_u64,
+        pack_dna_timeout_ms = pack_dna_timeout_ms,
         pack_dna_degraded_code = pack_dna_degraded_code,
         graph_task_count = graph_task_count,
         graph_merge_order_key = PACK_DNA_SERIAL_MERGE_ORDER_KEY,
         "pack DNA explain orchestration completed on serial path"
     );
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTEXT_PACK_DNA_COMPUTE_ERROR: RefCell<Option<crate::graph::GraphError>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_context_pack_dna_compute_error(error: Option<crate::graph::GraphError>) {
+    CONTEXT_PACK_DNA_COMPUTE_ERROR.with(|slot| {
+        *slot.borrow_mut() = error;
+    });
+}
+
+fn compute_context_pack_dna(
+    projection: &crate::graph::MemoryGraphProjection,
+    input: &crate::graph::pack_dna::PackDnaInput,
+) -> crate::graph::GraphResult<crate::graph::pack_dna::PackDna> {
+    #[cfg(test)]
+    {
+        if let Some(error) = CONTEXT_PACK_DNA_COMPUTE_ERROR.with(|slot| slot.borrow_mut().take()) {
+            return Err(error);
+        }
+    }
+    crate::graph::pack_dna::compute_pack_dna(projection, input)
 }
 
 pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
@@ -1032,8 +1075,42 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         ego_radius: crate::graph::pack_dna::DEFAULT_PACK_DNA_EGO_RADIUS,
         ppr_neighbor_limit: crate::graph::pack_dna::DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT,
     };
-    let pack_dna = match crate::graph::pack_dna::compute_pack_dna(&projection, &input) {
+    let pack_dna = match compute_context_pack_dna(&projection, &input) {
         Ok(pack_dna) => pack_dna,
+        Err(crate::graph::GraphError::AlgorithmTimeout { timeout_ms, .. }) => {
+            let pack_dna = crate::graph::pack_dna::PackDna {
+                schema: crate::graph::pack_dna::PACK_DNA_SCHEMA_V1,
+                snapshot_version: projection.snapshot_version,
+                pack_memory_count: input.pack_memory_ids.len(),
+                query_seed_count: input.query_seed_weights.len(),
+                trust_anchor_count: input.trust_anchor_memory_ids.len(),
+                dominator: None,
+                community_of_mass: None,
+                ego_subgraph: None,
+                ppr_neighbors: Vec::new(),
+                degraded: vec![crate::graph::pack_dna::pack_dna_timeout_degradation(
+                    timeout_ms,
+                )],
+            };
+            for degradation in &pack_dna.degraded {
+                push_degradation(
+                    &mut response.data.degraded,
+                    &degradation.code,
+                    context_severity_from_pack_dna(&degradation.severity),
+                    degradation.message.clone(),
+                    Some(degradation.repair.clone()),
+                );
+            }
+            trace_pack_dna_explain_orchestration_with_timeout(
+                graph_explain_start,
+                GRAPH_PACK_DNA_TIMEOUT_CODE,
+                PACK_DNA_SERIAL_GRAPH_TASK_COUNT,
+                timeout_ms,
+            );
+            response.data.pack_dna =
+                Some(serde_json::to_value(&pack_dna).unwrap_or(serde_json::Value::Null));
+            return;
+        }
         Err(error) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
             push_degradation(
@@ -9609,6 +9686,107 @@ pub fn unrelated_context() -> u64 {
         assert_eq!(
             disabled.repair.as_deref(),
             Some("ee config set graph.feature.pack_dna.enabled true")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_dna_timeout_emits_cataloged_degradation() -> Result<(), String> {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join(".ee").join("ee.db");
+        write_context_graph_config(workspace_path, "[graph.feature.pack_dna]\nenabled = true\n")?;
+
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(905)).to_string();
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(906));
+        let connection =
+            DbConnection::open(DatabaseConfig::file(&database_path)).map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("context pack dna timeout fixture".to_string()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id.to_string(),
+                &CreateMemoryInput {
+                    workspace_id,
+                    level: "semantic".to_string(),
+                    kind: "fact".to_string(),
+                    content: "Graph-rich Pack DNA timeout fixture.".to_string(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: TrustClass::HumanExplicit.as_str().to_string(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let mut response = context_response_with_pack_item(memory_id)?;
+        super::set_context_pack_dna_compute_error(Some(
+            crate::graph::GraphError::AlgorithmTimeout {
+                algorithm: "pack_dna".to_string(),
+                timeout_ms: 125,
+            },
+        ));
+        super::attach_pack_dna_to_context_response(&database_path, &mut response);
+        super::set_context_pack_dna_compute_error(None);
+
+        let timeout = response
+            .data
+            .degraded
+            .iter()
+            .find(|entry| entry.code == crate::models::degradation::GRAPH_PACK_DNA_TIMEOUT_CODE)
+            .ok_or_else(|| "expected graph_pack_dna_timeout degradation".to_string())?;
+        assert_eq!(timeout.severity, ContextResponseSeverity::Low);
+        assert!(
+            timeout
+                .message
+                .contains("Pack DNA graph explanation timed out")
+        );
+        assert!(
+            timeout
+                .message
+                .contains("ordinary context pack items remain usable")
+        );
+        assert_eq!(
+            timeout.repair.as_deref(),
+            Some(
+                "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA."
+            )
+        );
+        assert!(
+            response
+                .data
+                .degraded
+                .iter()
+                .all(|entry| entry.code != "context_graph_snapshot_unavailable"),
+            "timeout must not be collapsed to generic graph snapshot unavailable"
+        );
+
+        let pack_dna =
+            response.data.pack_dna.as_ref().ok_or_else(|| {
+                "timeout should still expose Pack DNA degraded payload".to_string()
+            })?;
+        assert_eq!(
+            pack_dna["degraded"][0]["code"],
+            serde_json::json!(crate::models::degradation::GRAPH_PACK_DNA_TIMEOUT_CODE)
+        );
+        assert_eq!(
+            pack_dna["degraded"][0]["sources"],
+            serde_json::json!(["pack_dna"])
         );
         Ok(())
     }
