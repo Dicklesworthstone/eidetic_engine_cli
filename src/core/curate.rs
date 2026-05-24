@@ -491,6 +491,16 @@ pub struct CurateShowPlannedApplication {
     pub warnings: Vec<CurateValidationIssue>,
 }
 
+impl CurateShowReport {
+    /// Serialize response data without the outer response envelope (bd-3080b).
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            serialization_failed_report(CURATE_SHOW_SCHEMA_V1, self.command, "status")
+        })
+    }
+}
+
 /// Planned `DerivedFrom` link the apply transaction would insert.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -10072,13 +10082,48 @@ fn persist_candidate_application_inner(
 
 #[cfg(test)]
 thread_local! {
-    static CURATE_DERIVED_APPLY_FAIL_PHASE: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    static CURATE_DERIVED_APPLY_FAIL_PHASE: RefCell<Option<(&'static str, CreateDerivedApplyInjectedFailureKind)>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CreateDerivedApplyInjectedFailureKind {
+    SyntheticStorage,
+    SqliteBusy,
+    AdvisoryLockTimeout,
 }
 
 #[cfg(test)]
 fn set_create_derived_apply_fail_phase(phase: Option<&'static str>) {
+    set_create_derived_apply_fail_phase_with_kind(
+        phase,
+        CreateDerivedApplyInjectedFailureKind::SyntheticStorage,
+    );
+}
+
+#[cfg(test)]
+fn set_create_derived_apply_busy_fail_phase(phase: Option<&'static str>) {
+    set_create_derived_apply_fail_phase_with_kind(
+        phase,
+        CreateDerivedApplyInjectedFailureKind::SqliteBusy,
+    );
+}
+
+#[cfg(test)]
+fn set_create_derived_apply_advisory_lock_fail_phase(phase: Option<&'static str>) {
+    set_create_derived_apply_fail_phase_with_kind(
+        phase,
+        CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout,
+    );
+}
+
+#[cfg(test)]
+fn set_create_derived_apply_fail_phase_with_kind(
+    phase: Option<&'static str>,
+    kind: CreateDerivedApplyInjectedFailureKind,
+) {
     CURATE_DERIVED_APPLY_FAIL_PHASE.with(|slot| {
-        *slot.borrow_mut() = phase;
+        *slot.borrow_mut() = phase.map(|phase| (phase, kind));
     });
 }
 
@@ -10090,9 +10135,11 @@ fn maybe_inject_create_derived_apply_failure(
     let _ = (stored, phase);
     #[cfg(test)]
     {
-        let should_fail =
-            CURATE_DERIVED_APPLY_FAIL_PHASE.with(|slot| *slot.borrow() == Some(phase));
-        if should_fail {
+        let failure_kind = CURATE_DERIVED_APPLY_FAIL_PHASE.with(|slot| {
+            slot.borrow()
+                .and_then(|(candidate_phase, kind)| (candidate_phase == phase).then_some(kind))
+        });
+        if let Some(failure_kind) = failure_kind {
             tracing::warn!(
                 target: "ee::curate::transition",
                 candidate_id = %stored.id,
@@ -10100,16 +10147,76 @@ fn maybe_inject_create_derived_apply_failure(
                 failing_phase = phase,
                 "curate create-derived failure injection"
             );
-            return Err(DomainError::Storage {
-                message: format!(
-                    "Injected create-derived apply failure at phase {phase} for candidate {}.",
-                    stored.id
-                ),
-                repair: Some("test failure injection".to_owned()),
-            });
+            return Err(create_derived_apply_injected_error(
+                stored,
+                phase,
+                failure_kind,
+            ));
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+fn create_derived_apply_injected_error(
+    stored: &StoredCurationCandidate,
+    phase: &'static str,
+    kind: CreateDerivedApplyInjectedFailureKind,
+) -> DomainError {
+    match kind {
+        CreateDerivedApplyInjectedFailureKind::SyntheticStorage => DomainError::Storage {
+            message: format!(
+                "Injected create-derived apply failure at phase {phase} for candidate {}.",
+                stored.id
+            ),
+            repair: Some("test failure injection".to_owned()),
+        },
+        CreateDerivedApplyInjectedFailureKind::SqliteBusy => {
+            let error = create_derived_apply_injected_db_error(
+                phase,
+                "database is busy during create-derived apply",
+            );
+            DomainError::Storage {
+                message: format!(
+                    "Injected create-derived apply storage busy at phase {phase} for candidate {}: {error}",
+                    stored.id
+                ),
+                repair: Some("retry after the writer releases the database lock".to_owned()),
+            }
+        }
+        CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout => {
+            let error = create_derived_apply_injected_db_error(
+                phase,
+                "database is locked during create-derived apply",
+            );
+            DomainError::Storage {
+                message: format!(
+                    "advisory lock timeout while waiting for create-derived apply phase {phase} for candidate {}: {error}",
+                    stored.id
+                ),
+                repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn create_derived_apply_injected_db_error(phase: &'static str, message: &str) -> DbError {
+    DbError::SqlModel {
+        operation: DbOperation::Execute,
+        source: Box::new(sqlmodel_core::Error::Query(
+            sqlmodel_core::error::QueryError {
+                kind: sqlmodel_core::error::QueryErrorKind::Deadlock,
+                sql: None,
+                sqlstate: None,
+                message: format!("{message} ({phase})"),
+                detail: None,
+                hint: None,
+                position: None,
+                source: None,
+            },
+        )),
+    }
 }
 
 fn persist_create_derived_candidate_application_inner(
@@ -10163,6 +10270,7 @@ fn persist_create_derived_candidate_application_inner(
         });
     }
 
+    maybe_inject_create_derived_apply_failure(stored, "before_insert_memory")?;
     connection
         .insert_memory(&derived_create.memory_id, &derived_create.memory)
         .map_err(|error| DomainError::Storage {
@@ -10171,6 +10279,7 @@ fn persist_create_derived_candidate_application_inner(
         })?;
     maybe_inject_create_derived_apply_failure(stored, "after_memory_insert")?;
     for link in &derived_create.links {
+        maybe_inject_create_derived_apply_failure(stored, "before_insert_memory_link")?;
         connection
             .insert_memory_link(&link.link_id, &link.link)
             .map_err(|error| DomainError::Storage {
@@ -10180,6 +10289,10 @@ fn persist_create_derived_candidate_application_inner(
     }
     maybe_inject_create_derived_apply_failure(stored, "after_derived_links")?;
     for evidence_ref in &derived_create.evidence_refs {
+        maybe_inject_create_derived_apply_failure(
+            stored,
+            "before_attach_evidence_span_to_memory_if_unlinked",
+        )?;
         match connection
             .attach_evidence_span_to_memory_if_unlinked(
                 workspace_id,
@@ -10220,6 +10333,7 @@ fn persist_create_derived_candidate_application_inner(
         }
     }
     maybe_inject_create_derived_apply_failure(stored, "after_evidence_attachment")?;
+    maybe_inject_create_derived_apply_failure(stored, "before_insert_search_index_job")?;
     connection
         .insert_search_index_job(&derived_create.index_job_id, &derived_create.index_job)
         .map_err(|error| DomainError::Storage {
@@ -10228,6 +10342,7 @@ fn persist_create_derived_candidate_application_inner(
         })?;
     maybe_inject_create_derived_apply_failure(stored, "after_search_job_enqueue")?;
     maybe_inject_create_derived_apply_failure(stored, "before_candidate_applied")?;
+    maybe_inject_create_derived_apply_failure(stored, "before_mark_curation_candidate_applied")?;
     let marked_applied = connection
         .mark_curation_candidate_applied(workspace_id, &stored.id, applied_at)
         .map_err(|error| DomainError::Storage {
@@ -10244,6 +10359,7 @@ fn persist_create_derived_candidate_application_inner(
         });
     }
     maybe_inject_create_derived_apply_failure(stored, "before_audit_write")?;
+    maybe_inject_create_derived_apply_failure(stored, "before_insert_audit")?;
 
     let audit_id = generate_audit_id();
     connection
@@ -11577,7 +11693,9 @@ mod tests {
         MemoryLinkSource, ReflectionRequestReplayStatus, StoredCurationCandidate,
         StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession, audit_actions,
     };
-    use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
+    use crate::models::degradation::{
+        ADVISORY_LOCK_TIMEOUT_CODE, GRAPH_CURATE_DISCONNECTED_GRAPH_CODE,
+    };
     use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
 
     type TestResult = Result<(), String>;
@@ -15994,6 +16112,34 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_rolls_back_create_derived_busy_lock_failures() -> TestResult {
+        for (index, phase) in [
+            "before_insert_memory",
+            "before_insert_memory_link",
+            "before_attach_evidence_span_to_memory_if_unlinked",
+            "before_insert_search_index_job",
+            "before_mark_curation_candidate_applied",
+            "before_insert_audit",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let index = u128::try_from(index).map_err(|error| error.to_string())?;
+            assert_create_derived_apply_failure_rolls_back_with_kind(
+                phase,
+                0x100 + index * 2,
+                super::CreateDerivedApplyInjectedFailureKind::SqliteBusy,
+            )?;
+            assert_create_derived_apply_failure_rolls_back_with_kind(
+                phase,
+                0x100 + index * 2 + 1,
+                super::CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_rejects_create_derived_memory_hash_drift() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -16416,6 +16562,18 @@ mod tests {
         phase: &'static str,
         id_offset: u128,
     ) -> TestResult {
+        assert_create_derived_apply_failure_rolls_back_with_kind(
+            phase,
+            id_offset,
+            super::CreateDerivedApplyInjectedFailureKind::SyntheticStorage,
+        )
+    }
+
+    fn assert_create_derived_apply_failure_rolls_back_with_kind(
+        phase: &'static str,
+        id_offset: u128,
+        failure_kind: super::CreateDerivedApplyInjectedFailureKind,
+    ) -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
         let database_path = workspace_path.join("ee.db");
@@ -16445,7 +16603,17 @@ mod tests {
         })
         .map_err(|error| error.message())?;
 
-        super::set_create_derived_apply_fail_phase(Some(phase));
+        match failure_kind {
+            super::CreateDerivedApplyInjectedFailureKind::SyntheticStorage => {
+                super::set_create_derived_apply_fail_phase(Some(phase));
+            }
+            super::CreateDerivedApplyInjectedFailureKind::SqliteBusy => {
+                super::set_create_derived_apply_busy_fail_phase(Some(phase));
+            }
+            super::CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout => {
+                super::set_create_derived_apply_advisory_lock_fail_phase(Some(phase));
+            }
+        }
         let result = apply_curation_candidate(&super::CurateApplyOptions {
             workspace_path,
             database_path: Some(&database_path),
@@ -16462,6 +16630,29 @@ mod tests {
             "error should name injected phase {phase}: {}",
             error.message()
         );
+        match failure_kind {
+            super::CreateDerivedApplyInjectedFailureKind::SyntheticStorage => {}
+            super::CreateDerivedApplyInjectedFailureKind::SqliteBusy => {
+                assert!(
+                    error.message().contains("database is busy"),
+                    "busy injection should surface canonical sqlite busy text: {}",
+                    error.message()
+                );
+            }
+            super::CreateDerivedApplyInjectedFailureKind::AdvisoryLockTimeout => {
+                assert!(
+                    error.message().contains("advisory lock timeout")
+                        && error.message().contains("database is locked"),
+                    "lock timeout injection should surface advisory-lock and sqlite lock text: {}",
+                    error.message()
+                );
+                let json = crate::output::error_response_json(&error);
+                assert!(
+                    json.contains(ADVISORY_LOCK_TIMEOUT_CODE),
+                    "advisory lock timeout envelope should include degraded code: {json}"
+                );
+            }
+        }
         assert_eq!(
             error.code(),
             "storage",
