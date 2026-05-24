@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # J3 — Epic G: learn/curate implementation e2e driver.
 #
-# Asserts the shipped G1 (learn summary aggregates from audit_log) and G2
-# work, records TODOs for the remaining curation pipeline, and asserts the G9
-# lifecycle transition paths owned by learn/curate.
+# Asserts the shipped G1 (learn summary aggregates from audit_log), G2,
+# G3/G4 curation proposal surfaces, G5 clustering, G7 auto-link honesty, G8
+# read-surface audit rows, and the G9 lifecycle transition paths owned by
+# learn/curate.
 #
-# Shipped (real assertions):  G1, G2, G5, G9 lifecycle transition audit
-# Not yet shipped (todo):     G3, G4, G7, G8
+# Shipped (real assertions):  G1, G2, G3, G4, G5, G7, G8, G9 lifecycle transition audit
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,13 +48,108 @@ e2e_log_note "g1_learn_summary_memories_created=$MEM_CREATED"
 e2e_log_assert_num "$MEM_CREATED" -ge 0 "g1_memories_created_is_numeric"
 
 # ------------------------------------------------------------
-# G3-G9 — TODOs.
+# G3 (shipped) — `ee remember` auto-proposes a curation candidate once a
+# repeated tagged rule cluster reaches the proposal threshold.
 # ------------------------------------------------------------
-todo_assert "g3_remember_enqueues_propose_candidate" "bd-17c65.7.3" \
-    "ee remember does not yet enqueue propose_curation_candidate(memory_id, workspace_id)."
+G3_CANDIDATE_ID=""
+G3_TARGET_ID=""
+G3_MEMBER_COUNT=0
+G3_FINAL_STATUS=""
 
-todo_assert "g4_curate_candidates_surfaces_auto_proposed" "bd-17c65.7.4" \
-    "ee curate candidates does not yet show auto-proposed candidates with evidence."
+for index in 0 1 2; do
+    G3_REMEMBER_JSON=$(ee_workspace remember \
+        "G3 cargo release rule $index: run cargo fmt --check before release." \
+        --level procedural \
+        --kind rule \
+        --tags g3-auto-propose,cargo,release \
+        --json 2>/dev/null || true)
+
+    if ! printf '%s' "$G3_REMEMBER_JSON" | jq . >/dev/null 2>&1; then
+        e2e_log_assert_eq "false" "true" "g3_remember_json_parses"
+        continue
+    fi
+
+    G3_STATUS=$(printf '%s' "$G3_REMEMBER_JSON" \
+        | jq -r '.data.curation_candidate_status // empty' 2>/dev/null || true)
+    e2e_log_note "g3_remember_index=$index curation_candidate_status=$G3_STATUS"
+
+    if [ "$index" -eq 2 ]; then
+        G3_FINAL_STATUS="$G3_STATUS"
+        G3_CANDIDATE_ID=$(printf '%s' "$G3_REMEMBER_JSON" \
+            | jq -r '.data.curation_candidate.candidate_id // .data.curation_candidate.candidateId // empty' \
+            2>/dev/null || true)
+        G3_TARGET_ID=$(printf '%s' "$G3_REMEMBER_JSON" \
+            | jq -r '.data.curation_candidate.target_memory_id // .data.curation_candidate.targetMemoryId // empty' \
+            2>/dev/null || true)
+        G3_MEMBER_COUNT=$(printf '%s' "$G3_REMEMBER_JSON" \
+            | jq -r '[(.data.curation_candidate.member_memory_ids[]?, .data.curation_candidate.memberMemoryIds[]?)] | unique | length' \
+            2>/dev/null || echo 0)
+    fi
+done
+
+e2e_log_assert_eq "$G3_FINAL_STATUS" "proposed" \
+    "g3_remember_enqueues_propose_candidate"
+e2e_log_assert_eq "${G3_CANDIDATE_ID:+present}" "present" \
+    "g3_remember_candidate_id_present"
+e2e_log_assert_num "$G3_MEMBER_COUNT" -ge 3 \
+    "g3_remember_candidate_has_cluster_members"
+
+# ------------------------------------------------------------
+# G4 (shipped) — `ee curate candidates` surfaces auto-proposed candidates with
+# evidence, proposal source, priority, and proposed procedural rule metadata.
+# ------------------------------------------------------------
+G4_CANDIDATES_JSON=$(ee_workspace curate candidates --type rule --status pending --json 2>/dev/null || true)
+if ! printf '%s' "$G4_CANDIDATES_JSON" | jq . >/dev/null 2>&1; then
+    e2e_log_assert_eq "false" "true" "g4_curate_candidates_json_parses"
+else
+    G4_MATCH_COUNT=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '[.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id)] | length' \
+        2>/dev/null || echo 0)
+    G4_PROPOSAL_SOURCE=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .proposalSource // .proposal_source // empty' \
+        2>/dev/null | head -n 1 || true)
+    G4_PROPOSED_LEVEL=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .proposedLevel // .proposed_level // empty' \
+        2>/dev/null | head -n 1 || true)
+    G4_PROPOSED_KIND=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .proposedKind // .proposed_kind // empty' \
+        2>/dev/null | head -n 1 || true)
+    G4_SOURCE_TYPE=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .source.sourceType // .source.source_type // empty' \
+        2>/dev/null | head -n 1 || true)
+    G4_MEMBER_ID_COUNT=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '[.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | (.memberMemoryIds[]?, .member_memory_ids[]?)] | unique | length' \
+        2>/dev/null || echo 0)
+    G4_SUPPORT_COUNT=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .evidenceSummary.supportCount // .evidence_summary.support_count // 0' \
+        2>/dev/null | head -n 1 || echo 0)
+    G4_PRIORITY=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .priority // empty' \
+        2>/dev/null | head -n 1 || true)
+    G4_AUDIT_PROPOSED_BY=$(printf '%s' "$G4_CANDIDATES_JSON" \
+        | jq -r --arg id "$G3_CANDIDATE_ID" '.data.candidates[]? | select((.candidateId // .candidate_id // .id // "") == $id) | .audit.proposedBy // .audit.proposed_by // empty' \
+        2>/dev/null | head -n 1 || true)
+
+    e2e_log_note "g4_candidate_id=$G3_CANDIDATE_ID target=$G3_TARGET_ID priority=$G4_PRIORITY"
+    e2e_log_assert_num "$G4_MATCH_COUNT" -ge 1 \
+        "g4_curate_candidates_surfaces_auto_proposed"
+    e2e_log_assert_eq "$G4_PROPOSAL_SOURCE" "auto_propose_from_cluster" \
+        "g4_curate_candidate_proposal_source"
+    e2e_log_assert_eq "$G4_PROPOSED_LEVEL" "procedural" \
+        "g4_curate_candidate_proposed_level"
+    e2e_log_assert_eq "$G4_PROPOSED_KIND" "rule" \
+        "g4_curate_candidate_proposed_kind"
+    e2e_log_assert_eq "$G4_SOURCE_TYPE" "agent_inference" \
+        "g4_curate_candidate_source_type"
+    e2e_log_assert_num "$G4_MEMBER_ID_COUNT" -ge 3 \
+        "g4_curate_candidate_member_memory_ids"
+    e2e_log_assert_num "$G4_SUPPORT_COUNT" -ge 3 \
+        "g4_curate_candidate_evidence_summary"
+    e2e_log_assert_eq "${G4_PRIORITY:+present}" "present" \
+        "g4_curate_candidate_priority_present"
+    e2e_log_assert_eq "$G4_AUDIT_PROPOSED_BY" "auto_proposer:v1" \
+        "g4_curate_candidate_audit_proposed_by"
+fi
 
 # ------------------------------------------------------------
 # G5 (shipped) — `ee learn cluster` uses deterministic average-linkage
@@ -103,11 +198,62 @@ else
         "g5_learn_cluster_logs_per_cluster_event"
 fi
 
-todo_assert "g7_auto_link_behavior_clarified" "bd-17c65.7.6" \
-    "ee remember auto-link currently always returns no_workflow regardless of context."
+# ------------------------------------------------------------
+# G7 (shipped) — workflow-less remember output honestly reports that auto-link
+# is not applicable and points callers at explicit `ee memory link`.
+# ------------------------------------------------------------
+G7_REMEMBER_JSON=$(ee_workspace remember \
+    "G7 workflow-less auto-link honesty marker." \
+    --level episodic \
+    --kind fact \
+    --json 2>/dev/null || true)
+if ! printf '%s' "$G7_REMEMBER_JSON" | jq . >/dev/null 2>&1; then
+    e2e_log_assert_eq "false" "true" "g7_remember_json_parses"
+    G7_MEMORY_ID=""
+else
+    G7_MEMORY_ID=$(printf '%s' "$G7_REMEMBER_JSON" \
+        | jq -r '.data.memory_id // .data.memoryId // empty' 2>/dev/null || true)
+    G7_AUTO_LINK_STATUS=$(printf '%s' "$G7_REMEMBER_JSON" \
+        | jq -r '.data.auto_link_status // .data.autoLinkStatus // empty' 2>/dev/null || true)
+    G7_AUTO_LINK_COUNT=$(printf '%s' "$G7_REMEMBER_JSON" \
+        | jq -r '[.data.auto_links[]?, .data.autoLinks[]?] | length' 2>/dev/null || echo 0)
+    G7_AUTO_LINK_DEGRADATION_COUNT=$(printf '%s' "$G7_REMEMBER_JSON" \
+        | jq -r '[(.data.auto_link_degradations[]?, .data.autoLinkDegradations[]?)] | map(select(.code == "auto_link_disabled")) | length' \
+        2>/dev/null || echo 0)
 
-todo_assert "g8_audit_log_instrumentation_complete" "bd-17c65.7.7" \
-    "Not every memory-mutating surface writes audit events for L3/G1 to read."
+    e2e_log_assert_eq "$G7_AUTO_LINK_STATUS" "no_workflow_required" \
+        "g7_auto_link_behavior_clarified"
+    e2e_log_assert_num "$G7_AUTO_LINK_COUNT" -eq 0 \
+        "g7_auto_link_does_not_create_workflowless_links"
+    e2e_log_assert_num "$G7_AUTO_LINK_DEGRADATION_COUNT" -ge 1 \
+        "g7_auto_link_disabled_degradation_present"
+fi
+
+# ------------------------------------------------------------
+# G8 (shipped) — read surfaces write audit rows that L3 decay and G1 summary
+# can consume as memory-access signals.
+# ------------------------------------------------------------
+if [ -z "${G7_MEMORY_ID:-}" ]; then
+    e2e_log_assert_eq "$G7_MEMORY_ID" "non-empty" "g8_audit_seed_memory_created"
+else
+    ee_workspace memory show "$G7_MEMORY_ID" --json >/dev/null 2>&1 || true
+    G8_AUDIT_JSON=$(ee_workspace audit timeline --action memory.show --limit 20 --json 2>/dev/null || true)
+    if ! printf '%s' "$G8_AUDIT_JSON" | jq . >/dev/null 2>&1; then
+        e2e_log_assert_eq "false" "true" "g8_audit_timeline_json_parses"
+    else
+        G8_MEMORY_SHOW_COUNT=$(printf '%s' "$G8_AUDIT_JSON" \
+            | jq -r --arg id "$G7_MEMORY_ID" '[.entries[]? | select((.mutation_kind // .mutationKind // "") == "memory.show" and (.target_id // .targetId // "") == $id)] | length' \
+            2>/dev/null || echo 0)
+        G8_MEMORY_TARGET_COUNT=$(printf '%s' "$G8_AUDIT_JSON" \
+            | jq -r --arg id "$G7_MEMORY_ID" '[.entries[]? | select((.target_type // .targetType // "") == "memory" and (.target_id // .targetId // "") == $id)] | length' \
+            2>/dev/null || echo 0)
+
+        e2e_log_assert_num "$G8_MEMORY_SHOW_COUNT" -ge 1 \
+            "g8_memory_show_audit_action_present"
+        e2e_log_assert_num "$G8_MEMORY_TARGET_COUNT" -ge 1 \
+            "g8_memory_show_audit_targets_memory"
+    fi
+fi
 
 # ------------------------------------------------------------
 # G9 — lifecycle transitions write canonical memory.level_transition audit rows.
