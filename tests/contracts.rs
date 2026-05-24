@@ -49,6 +49,9 @@ mod cass_import_guidance_from_inventory;
 #[path = "contracts/doctor_integrity_status_severity_canary_as_str.rs"]
 mod doctor_integrity_status_severity_canary_as_str;
 
+#[path = "contracts/doctor_mesh_auto_enrollment_check_status.rs"]
+mod doctor_mesh_auto_enrollment_check_status;
+
 #[path = "contracts/cass_exit_code_constants.rs"]
 mod cass_exit_code_constants;
 
