@@ -3369,8 +3369,20 @@ fn reflection_result_cited_source_refs(
                 ),
             }
         })?;
+        let source_kind = match source.kind {
+            "memory" => DerivationSourceKind::Memory,
+            "evidence_span" => DerivationSourceKind::EvidenceSpan,
+            other => {
+                return Err(ReflectionResultValidationError::InvalidResultField {
+                    field: "citedSourceIds",
+                    message: format!(
+                        "cited source id `{source_id}` has unsupported kind `{other}`"
+                    ),
+                });
+            }
+        };
         source_refs.push(DerivationSourceRef::new(
-            source.kind,
+            source_kind,
             source.id.clone(),
             source.content_hash.clone(),
         ));
