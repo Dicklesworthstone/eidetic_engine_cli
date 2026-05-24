@@ -18602,6 +18602,25 @@ pub enum ReflectionRequestCandidateConsumptionOutcome {
     },
 }
 
+/// Counts for reflection request ledger rows eligible for retention compaction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReflectionRequestLedgerRetentionCounts {
+    pub consumed_eligible_count: usize,
+    pub expired_pending_eligible_count: usize,
+    pub expired_status_eligible_count: usize,
+    pub rejected_eligible_count: usize,
+}
+
+impl ReflectionRequestLedgerRetentionCounts {
+    #[must_use]
+    pub fn total_eligible_count(self) -> usize {
+        self.consumed_eligible_count
+            + self.expired_pending_eligible_count
+            + self.expired_status_eligible_count
+            + self.rejected_eligible_count
+    }
+}
+
 const REFLECTION_REQUEST_LEDGER_DIAGNOSTIC_LIMIT_MAX: u32 = 500;
 
 impl DbConnection {
@@ -18800,6 +18819,68 @@ impl DbConnection {
             .take(limit as usize)
             .map(|(_, stored)| stored)
             .collect())
+    }
+
+    /// Count rows that retention maintenance would compact in dry-run mode.
+    pub fn reflection_request_ledger_retention_counts(
+        &self,
+        workspace_id: &str,
+        consumed_cutoff: &str,
+        expired_cutoff: &str,
+    ) -> Result<ReflectionRequestLedgerRetentionCounts> {
+        validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
+        let consumed_cutoff = parse_reflection_rfc3339(consumed_cutoff, "consumed_cutoff")?;
+        let expired_cutoff = parse_reflection_rfc3339(expired_cutoff, "expired_cutoff")?;
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT status, created_at, expires_at, consumed_at \
+             FROM reflection_request_ledger WHERE workspace_id = ?1",
+            &[Value::Text(workspace_id.trim().to_owned())],
+        )?;
+
+        let mut counts = ReflectionRequestLedgerRetentionCounts::default();
+        for row in &rows {
+            let status = required_text(row, 0, DbOperation::Query, "status")?;
+            let created_at = required_text(row, 1, DbOperation::Query, "created_at")?;
+            let expires_at = required_text(row, 2, DbOperation::Query, "expires_at")?;
+            let consumed_at = optional_text(row, 3)?;
+
+            match status {
+                "consumed" => {
+                    if consumed_at
+                        .and_then(|value| parse_reflection_rfc3339(value, "consumed_at").ok())
+                        .is_some_and(|timestamp| timestamp <= consumed_cutoff)
+                    {
+                        counts.consumed_eligible_count += 1;
+                    }
+                }
+                "pending" => {
+                    if parse_reflection_rfc3339(expires_at, "expires_at")
+                        .is_ok_and(|timestamp| timestamp <= expired_cutoff)
+                    {
+                        counts.expired_pending_eligible_count += 1;
+                    }
+                }
+                "expired" => {
+                    if parse_reflection_rfc3339(expires_at, "expires_at")
+                        .is_ok_and(|timestamp| timestamp <= expired_cutoff)
+                    {
+                        counts.expired_status_eligible_count += 1;
+                    }
+                }
+                "rejected" => {
+                    if parse_reflection_rfc3339(created_at, "created_at")
+                        .is_ok_and(|timestamp| timestamp <= expired_cutoff)
+                    {
+                        counts.rejected_eligible_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(counts)
     }
 
     /// Mark a pending reflection request as consumed by a derived curation

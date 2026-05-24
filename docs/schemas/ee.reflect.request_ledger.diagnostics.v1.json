@@ -16,6 +16,7 @@
     "returnedCount",
     "expiredPendingCount",
     "durableMutation",
+    "retention",
     "hmacKey",
     "requests",
     "expiredPending",
@@ -71,6 +72,9 @@
       "type": "boolean",
       "const": false
     },
+    "retention": {
+      "$ref": "#/$defs/retentionReport"
+    },
     "hmacKey": {
       "$ref": "#/$defs/hmacKeyDiagnostic"
     },
@@ -92,12 +96,149 @@
     }
   },
   "field_presets": {
-    "minimal": ["schema", "returnedCount", "expiredPendingCount", "hmacKey", "nextAction"],
-    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "hmacKey", "nextAction"],
-    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "hmacKey", "requests", "expiredPending", "nextAction"],
+    "minimal": ["schema", "returnedCount", "expiredPendingCount", "retention", "hmacKey", "nextAction"],
+    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "retention", "hmacKey", "nextAction"],
+    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "retention", "hmacKey", "requests", "expiredPending", "nextAction"],
     "full": ["*"]
   },
   "$defs": {
+    "retentionReport": {
+      "type": "object",
+      "required": [
+        "requestTtlSeconds",
+        "consumedRetentionDays",
+        "expiredRetentionDays",
+        "consumedCutoff",
+        "expiredCutoff",
+        "dryRun",
+        "durableMutation",
+        "eligibleForCompactionCount",
+        "consumedEligibleCount",
+        "expiredPendingEligibleCount",
+        "expiredStatusEligibleCount",
+        "rejectedEligibleCount",
+        "maintenanceCommand",
+        "retainedAuditFields",
+        "compactedSensitiveFields",
+        "schemaMigrationSafety"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requestTtlSeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "consumedRetentionDays": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expiredRetentionDays": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "consumedCutoff": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiredCutoff": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dryRun": {
+          "type": "boolean",
+          "const": true
+        },
+        "durableMutation": {
+          "type": "boolean",
+          "const": false
+        },
+        "eligibleForCompactionCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "consumedEligibleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expiredPendingEligibleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expiredStatusEligibleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectedEligibleCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maintenanceCommand": {
+          "type": "string",
+          "minLength": 1
+        },
+        "retainedAuditFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "compactedSensitiveFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "schemaMigrationSafety": {
+          "$ref": "#/$defs/schemaMigrationSafety"
+        }
+      }
+    },
+    "schemaMigrationSafety": {
+      "type": "object",
+      "required": [
+        "table",
+        "schemaVersions",
+        "requiresDryRunBeforeMutation",
+        "physicalDeletionAllowedByDefault",
+        "preservedIdentityFields",
+        "repairCommand"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "table": {
+          "type": "string",
+          "const": "reflection_request_ledger"
+        },
+        "schemaVersions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "requiresDryRunBeforeMutation": {
+          "type": "boolean",
+          "const": true
+        },
+        "physicalDeletionAllowedByDefault": {
+          "type": "boolean",
+          "const": false
+        },
+        "preservedIdentityFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "repairCommand": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
     "hmacKeyDiagnostic": {
       "type": "object",
       "required": ["keyPathConfigured", "status", "recovery"],

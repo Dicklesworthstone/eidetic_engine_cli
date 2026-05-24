@@ -26,7 +26,8 @@ use ee::core::curate::{
     REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
     ReflectionProposeReport, ReflectionRequestDurableLedgerOutcome,
     ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
-    ReflectionRequestLedgerDiagnosticsReport,
+    ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerMigrationSafety,
+    ReflectionRequestLedgerRetentionReport,
 };
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
@@ -1131,6 +1132,51 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
         returned_count: 6,
         expired_pending_count: 1,
         durable_mutation: false,
+        retention: ReflectionRequestLedgerRetentionReport {
+            request_ttl_seconds: 86_400,
+            consumed_retention_days: 30,
+            expired_retention_days: 7,
+            consumed_cutoff: "2026-04-24T00:30:00Z".to_owned(),
+            expired_cutoff: "2026-05-17T00:30:00Z".to_owned(),
+            dry_run: true,
+            durable_mutation: false,
+            eligible_for_compaction_count: 3,
+            consumed_eligible_count: 1,
+            expired_pending_eligible_count: 0,
+            expired_status_eligible_count: 1,
+            rejected_eligible_count: 1,
+            maintenance_command:
+                "ee reflect request-ledger diagnostics --workspace /tmp/schema --json".to_owned(),
+            retained_audit_fields: vec![
+                "requestId",
+                "requestHash",
+                "sourcePackageHash",
+                "status",
+                "consumedResultHash",
+            ],
+            compacted_sensitive_fields: vec![
+                "sourcePackage.sources[].excerpt",
+                "challenge.hmac",
+                "hmacKeyMaterial",
+            ],
+            schema_migration_safety: ReflectionRequestLedgerMigrationSafety {
+                table: "reflection_request_ledger",
+                schema_versions: vec![
+                    "V063_reflection_request_ledger",
+                    "V064_consumed_result_hash",
+                ],
+                requires_dry_run_before_mutation: true,
+                physical_deletion_allowed_by_default: false,
+                preserved_identity_fields: vec![
+                    "request_id",
+                    "request_hash",
+                    "workspace_id",
+                    "status",
+                    "consumed_result_hash",
+                ],
+                repair_command: "ee doctor --workspace /tmp/schema --json".to_owned(),
+            },
+        },
         hmac_key: ReflectionHmacKeyDiagnostic {
             active_key_id: None,
             key_path_configured: false,
@@ -1165,6 +1211,23 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
     )?;
     ensure_json_bool(&document, "/durableMutation", false)?;
+    ensure_json_bool(&document, "/retention/dryRun", true)?;
+    ensure_json_bool(&document, "/retention/durableMutation", false)?;
+    ensure_json_str(
+        &document,
+        "/retention/consumedCutoff",
+        "2026-04-24T00:30:00Z",
+    )?;
+    ensure_json_bool(
+        &document,
+        "/retention/schemaMigrationSafety/requiresDryRunBeforeMutation",
+        true,
+    )?;
+    ensure_json_bool(
+        &document,
+        "/retention/schemaMigrationSafety/physicalDeletionAllowedByDefault",
+        false,
+    )?;
     ensure_json_str(
         &document,
         "/hmacKey/status",

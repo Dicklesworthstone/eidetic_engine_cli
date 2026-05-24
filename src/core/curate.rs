@@ -17,6 +17,7 @@ use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
 use serde::{Serialize, Serializer};
 
+use crate::config::env_registry::{EnvVar, read};
 use crate::config::{ConfigFile, GRAPH_FEATURE_STRUCTURAL_DECAY_ENABLED_KEY};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::curate::{
@@ -841,10 +842,45 @@ pub struct ReflectionRequestLedgerDiagnosticsReport {
     pub returned_count: usize,
     pub expired_pending_count: usize,
     pub durable_mutation: bool,
+    pub retention: ReflectionRequestLedgerRetentionReport,
     pub hmac_key: ReflectionHmacKeyDiagnostic,
     pub requests: Vec<ReflectionRequestLedgerDiagnostic>,
     pub expired_pending: Vec<ReflectionRequestLedgerDiagnostic>,
     pub next_action: String,
+}
+
+/// Read-only retention and lifecycle maintenance plan for reflection requests.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerRetentionReport {
+    pub request_ttl_seconds: u64,
+    pub consumed_retention_days: u64,
+    pub expired_retention_days: u64,
+    pub consumed_cutoff: String,
+    pub expired_cutoff: String,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub eligible_for_compaction_count: usize,
+    pub consumed_eligible_count: usize,
+    pub expired_pending_eligible_count: usize,
+    pub expired_status_eligible_count: usize,
+    pub rejected_eligible_count: usize,
+    pub maintenance_command: String,
+    pub retained_audit_fields: Vec<&'static str>,
+    pub compacted_sensitive_fields: Vec<&'static str>,
+    pub schema_migration_safety: ReflectionRequestLedgerMigrationSafety,
+}
+
+/// Migration safety posture for ledger retention and schema evolution.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerMigrationSafety {
+    pub table: &'static str,
+    pub schema_versions: Vec<&'static str>,
+    pub requires_dry_run_before_mutation: bool,
+    pub physical_deletion_allowed_by_default: bool,
+    pub preserved_identity_fields: Vec<&'static str>,
+    pub repair_command: String,
 }
 
 /// Redacted HMAC key posture for reflection request diagnostics.
@@ -922,6 +958,14 @@ impl ReflectionRequestLedgerDiagnosticsReport {
         }
         output.push_str(&format!("  now: {}\n", self.now));
         output.push_str(&format!("  persisted: {}\n", self.durable_mutation));
+        output.push_str(&format!(
+            "  retention dry-run: {} eligible for compaction (consumed={} expiredPending={} expired={} rejected={})\n",
+            self.retention.eligible_for_compaction_count,
+            self.retention.consumed_eligible_count,
+            self.retention.expired_pending_eligible_count,
+            self.retention.expired_status_eligible_count,
+            self.retention.rejected_eligible_count
+        ));
         output.push_str(&format!("  hmac key: {}\n", self.hmac_key.status));
         if let Some(action) = self.hmac_key.recovery.first() {
             output.push_str(&format!("    key next: {}\n", action.command));
@@ -965,9 +1009,10 @@ impl ReflectionRequestLedgerDiagnosticsReport {
     #[must_use]
     pub fn toon_summary(&self) -> String {
         format!(
-            "REFLECTION_REQUEST_LEDGER_DIAGNOSTICS|returned={}|expired_pending={}|status={}|key_status={}|mutated={}",
+            "REFLECTION_REQUEST_LEDGER_DIAGNOSTICS|returned={}|expired_pending={}|retention_eligible={}|status={}|key_status={}|mutated={}",
             self.returned_count,
             self.expired_pending_count,
+            self.retention.eligible_for_compaction_count,
             self.status_filter.as_deref().unwrap_or("all"),
             self.hmac_key.status,
             self.durable_mutation
@@ -1882,6 +1927,12 @@ pub fn list_reflection_request_ledger_diagnostics(
     } else {
         Vec::new()
     };
+    let retention = reflection_request_ledger_retention_report(
+        &connection,
+        &prepared.workspace_id,
+        &prepared.workspace_path,
+        &now,
+    )?;
 
     let owned_hmac_key_config;
     let hmac_key_config = if let Some(config) = options.hmac_key_config {
@@ -1935,11 +1986,160 @@ pub fn list_reflection_request_ledger_diagnostics(
         returned_count: requests.len(),
         expired_pending_count: expired_pending.len(),
         durable_mutation: false,
+        retention,
         hmac_key,
         requests,
         expired_pending,
         next_action,
     })
+}
+
+fn reflection_request_ledger_retention_report(
+    connection: &DbConnection,
+    workspace_id: &str,
+    workspace_path: &Path,
+    now: &DateTime<Utc>,
+) -> Result<ReflectionRequestLedgerRetentionReport, DomainError> {
+    let request_ttl_seconds =
+        reflection_env_u64(EnvVar::ReflectionRequestTtlSeconds, "request TTL seconds")?;
+    let consumed_retention_days = reflection_env_u64(
+        EnvVar::ReflectionConsumedRetentionDays,
+        "consumed request retention days",
+    )?;
+    let expired_retention_days = reflection_env_u64(
+        EnvVar::ReflectionExpiredRetentionDays,
+        "expired request retention days",
+    )?;
+    let consumed_cutoff =
+        reflection_retention_cutoff(now, consumed_retention_days, "consumed request retention")?;
+    let expired_cutoff =
+        reflection_retention_cutoff(now, expired_retention_days, "expired request retention")?;
+    let counts = connection
+        .reflection_request_ledger_retention_counts(
+            workspace_id,
+            consumed_cutoff.as_str(),
+            expired_cutoff.as_str(),
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to compute reflection request retention dry-run: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+
+    Ok(ReflectionRequestLedgerRetentionReport {
+        request_ttl_seconds,
+        consumed_retention_days,
+        expired_retention_days,
+        consumed_cutoff,
+        expired_cutoff,
+        dry_run: true,
+        durable_mutation: false,
+        eligible_for_compaction_count: counts.total_eligible_count(),
+        consumed_eligible_count: counts.consumed_eligible_count,
+        expired_pending_eligible_count: counts.expired_pending_eligible_count,
+        expired_status_eligible_count: counts.expired_status_eligible_count,
+        rejected_eligible_count: counts.rejected_eligible_count,
+        maintenance_command: format!(
+            "ee reflect request-ledger diagnostics --workspace {workspace_arg} --json"
+        ),
+        retained_audit_fields: vec![
+            "requestId",
+            "requestHash",
+            "reflectionKind",
+            "sourcePackageHash",
+            "sourceRefCount",
+            "sourceContentHashCount",
+            "promptTemplateHash",
+            "responseSchemaHash",
+            "createdAt",
+            "expiresAt",
+            "challengeKeyId",
+            "challengeHash",
+            "status",
+            "posture",
+            "consumedCandidateId",
+            "consumedAt",
+            "consumedResultHash",
+        ],
+        compacted_sensitive_fields: vec![
+            "sourcePackage.sources[].excerpt",
+            "sourcePackage.sources[].provenanceUri",
+            "challenge.hmac",
+            "hmacKeyMaterial",
+            "retainedDebugArtifacts",
+        ],
+        schema_migration_safety: ReflectionRequestLedgerMigrationSafety {
+            table: "reflection_request_ledger",
+            schema_versions: vec![
+                "V063_reflection_request_ledger",
+                "V064_consumed_result_hash",
+            ],
+            requires_dry_run_before_mutation: true,
+            physical_deletion_allowed_by_default: false,
+            preserved_identity_fields: vec![
+                "request_id",
+                "request_hash",
+                "workspace_id",
+                "source_package_hash",
+                "source_content_hashes_json",
+                "created_at",
+                "expires_at",
+                "status",
+                "consumed_candidate_id",
+                "consumed_at",
+                "consumed_result_hash",
+            ],
+            repair_command: format!("ee doctor --workspace {workspace_arg} --json"),
+        },
+    })
+}
+
+fn reflection_env_u64(var: EnvVar, label: &'static str) -> Result<u64, DomainError> {
+    read(var)
+        .or_else(|| var.default_value().map(str::to_owned))
+        .ok_or_else(|| DomainError::Configuration {
+            message: format!("Missing reflection {label} default."),
+            repair: Some("Run ee doctor --json to inspect configuration.".to_owned()),
+        })?
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Invalid reflection {label}: {error}"),
+            repair: Some(
+                "Use a non-negative integer value for reflection retention settings.".to_owned(),
+            ),
+        })
+}
+
+fn reflection_retention_cutoff(
+    now: &DateTime<Utc>,
+    retention_days: u64,
+    label: &'static str,
+) -> Result<String, DomainError> {
+    let retention_seconds =
+        retention_days
+            .checked_mul(24 * 60 * 60)
+            .ok_or_else(|| DomainError::Configuration {
+                message: format!("Reflection {label} exceeds supported duration range."),
+                repair: Some("Use a smaller reflection retention window.".to_owned()),
+            })?;
+    let retention_seconds =
+        i64::try_from(retention_seconds).map_err(|_| DomainError::Configuration {
+            message: format!("Reflection {label} exceeds supported duration range."),
+            repair: Some("Use a smaller reflection retention window.".to_owned()),
+        })?;
+    let duration = chrono::Duration::try_seconds(retention_seconds).ok_or_else(|| {
+        DomainError::Configuration {
+            message: format!("Reflection {label} exceeds supported duration range."),
+            repair: Some("Use a smaller reflection retention window.".to_owned()),
+        }
+    })?;
+    now.checked_sub_signed(duration)
+        .ok_or_else(|| DomainError::Configuration {
+            message: format!("Reflection {label} cutoff is outside supported time range."),
+            repair: Some("Use a smaller reflection retention window.".to_owned()),
+        })
+        .map(|cutoff| cutoff.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 /// List curation candidates for the selected workspace.
@@ -12409,6 +12609,56 @@ mod tests {
             )
             .map_err(|error| error.to_string())?;
 
+        let mut old_consumed =
+            reflection_request_ledger_input_from_material(&current.ledger_material);
+        old_consumed.request_hash =
+            "blake3:5555555555555555555555555555555555555555555555555555555555555555".to_owned();
+        old_consumed.created_at = "2026-03-31T00:00:00Z".to_owned();
+        old_consumed.expires_at = "2026-04-01T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0006", &old_consumed)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE reflection_request_ledger \
+                 SET status = 'consumed', consumed_at = '2026-04-02T00:00:00Z', \
+                     consumed_result_hash = 'blake3:4444444444444444444444444444444444444444444444444444444444444444' \
+                 WHERE request_id = 'reflect_req_corediag0006'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut old_expired =
+            reflection_request_ledger_input_from_material(&current.ledger_material);
+        old_expired.request_hash =
+            "blake3:4444444444444444444444444444444444444444444444444444444444444444".to_owned();
+        old_expired.created_at = "2026-03-30T00:00:00Z".to_owned();
+        old_expired.expires_at = "2026-04-01T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0007", &old_expired)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE reflection_request_ledger SET status = 'expired' \
+                 WHERE request_id = 'reflect_req_corediag0007'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let mut old_rejected =
+            reflection_request_ledger_input_from_material(&current.ledger_material);
+        old_rejected.request_hash =
+            "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1".to_owned();
+        old_rejected.created_at = "2026-04-01T00:00:00Z".to_owned();
+        old_rejected.expires_at = "2026-04-02T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0008", &old_rejected)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE reflection_request_ledger SET status = 'rejected' \
+                 WHERE request_id = 'reflect_req_corediag0008'",
+            )
+            .map_err(|error| error.to_string())?;
+
         let key_path = workspace_path.join("reflection-diagnostics.key");
         std::fs::write(&key_path, b"reflection diagnostics secret key material")
             .map_err(|error| error.to_string())?;
@@ -12436,6 +12686,42 @@ mod tests {
         assert_eq!(report.returned_count, 5);
         assert_eq!(report.expired_pending_count, 1);
         assert!(!report.durable_mutation);
+        assert!(report.retention.dry_run);
+        assert!(!report.retention.durable_mutation);
+        assert_eq!(report.retention.request_ttl_seconds, 86_400);
+        assert_eq!(report.retention.consumed_retention_days, 30);
+        assert_eq!(report.retention.expired_retention_days, 7);
+        assert_eq!(report.retention.consumed_cutoff, "2026-04-24T00:30:00Z");
+        assert_eq!(report.retention.expired_cutoff, "2026-05-17T00:30:00Z");
+        assert_eq!(report.retention.eligible_for_compaction_count, 3);
+        assert_eq!(report.retention.consumed_eligible_count, 1);
+        assert_eq!(report.retention.expired_pending_eligible_count, 0);
+        assert_eq!(report.retention.expired_status_eligible_count, 1);
+        assert_eq!(report.retention.rejected_eligible_count, 1);
+        assert!(
+            report
+                .retention
+                .retained_audit_fields
+                .contains(&"requestHash")
+        );
+        assert!(
+            report
+                .retention
+                .compacted_sensitive_fields
+                .contains(&"challenge.hmac")
+        );
+        assert!(
+            report
+                .retention
+                .schema_migration_safety
+                .requires_dry_run_before_mutation
+        );
+        assert!(
+            !report
+                .retention
+                .schema_migration_safety
+                .physical_deletion_allowed_by_default
+        );
         assert_eq!(report.hmac_key.status, "ready");
         assert_eq!(
             report.hmac_key.active_key_id.as_deref(),
