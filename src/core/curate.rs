@@ -5577,7 +5577,9 @@ pub fn reflection_result_replay_gate_from_db_status(
             existing_candidate_id,
         },
         ReflectionRequestReplayStatus::UnavailableStatus { status } => {
-            ReflectionResultReplayGate::UnavailableStatus { status }
+            ReflectionResultReplayGate::UnavailableStatus {
+                ledger_status: status,
+            }
         }
     }
 }
@@ -5641,7 +5643,7 @@ pub enum ReflectionResultDurableIngestOutcome {
         existing_candidate_id: Option<String>,
     },
     UnavailableStatus {
-        status: String,
+        ledger_status: String,
     },
 }
 
@@ -5718,7 +5720,9 @@ fn reflection_result_durable_outcome_from_db(
             existing_candidate_id,
         },
         ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus { status } => {
-            ReflectionResultDurableIngestOutcome::UnavailableStatus { status }
+            ReflectionResultDurableIngestOutcome::UnavailableStatus {
+                ledger_status: status,
+            }
         }
     }
 }
@@ -12093,7 +12097,7 @@ mod tests {
                 },
             ),
             ReflectionResultReplayGate::UnavailableStatus {
-                status: "revoked".to_owned(),
+                ledger_status: "revoked".to_owned(),
             }
         );
         assert_eq!(

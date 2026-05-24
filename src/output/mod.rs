@@ -12,7 +12,7 @@ use crate::core::check::CheckReport;
 use crate::core::context::ContextPackOutputOptions;
 use crate::core::curate::{
     CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
-    CurateShowReport, CurateValidateReport,
+    CurateShowReport, CurateValidateReport, ReflectionProposeReport,
 };
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
@@ -7457,6 +7457,20 @@ pub fn render_curate_validate_toon(report: &CurateValidateReport) -> String {
     render_toon_from_json(&render_curate_validate_json(report))
 }
 
+/// Render a reflection proposal report as JSON (`ee.response.v2` envelope).
+#[must_use]
+pub fn render_reflect_propose_json(report: &ReflectionProposeReport) -> String {
+    let data_raw = serde_json::to_string(report)
+        .unwrap_or_else(|_| r#"{"schema":"ee.reflect.propose.v1"}"#.to_owned());
+    ResponseEnvelope::success().data_raw(&data_raw).finish()
+}
+
+/// Render a reflection proposal report as TOON.
+#[must_use]
+pub fn render_reflect_propose_toon(report: &ReflectionProposeReport) -> String {
+    render_toon_from_json(&render_reflect_propose_json(report))
+}
+
 /// Render a curation apply report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_apply_json(report: &CurateApplyReport) -> String {
@@ -8488,6 +8502,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: reflection_result_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::REFLECTION_PROPOSE_SCHEMA_V1,
+            version: "1",
+            description: "Reflect propose data report with request artifact and ledger outcome",
+            category: "reflect",
+            definition: reflection_propose_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::curate::REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
             version: "1",
             description: "Read-only reflection request ledger diagnostics report",
@@ -9385,6 +9406,10 @@ fn reflection_challenge_binding_schema_definition() -> String {
 
 fn reflection_result_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.reflect.result.v1.json").to_string()
+}
+
+fn reflection_propose_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.propose.v1.json").to_string()
 }
 
 fn reflection_request_ledger_diagnostics_schema_definition() -> String {

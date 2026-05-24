@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.propose.v1.json",
+  "title": "ee.reflect.propose.v1",
+  "description": "Data payload returned by ee reflect propose. The nested request field is an ee.reflect.request.v1 artifact and should be validated against its own schema.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "reflectionKind",
+    "requestId",
+    "requestHash",
+    "sourcePackageHash",
+    "createdAt",
+    "expiresAt",
+    "hmacKeyId",
+    "sourceRefs",
+    "dryRun",
+    "durableMutation",
+    "persisted",
+    "ledgerOutcome",
+    "request",
+    "nextCommands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.reflect.propose.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "reflect propose"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspacePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databasePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "reflectionKind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "requestHash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "sourcePackageHash": {
+      "$ref": "#/$defs/blake3Hash"
+    },
+    "createdAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expiresAt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "hmacKeyId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceRef"
+      }
+    },
+    "dryRun": {
+      "type": "boolean"
+    },
+    "durableMutation": {
+      "type": "boolean"
+    },
+    "persisted": {
+      "type": "boolean"
+    },
+    "ledgerOutcome": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/ledgerOutcome"}
+      ]
+    },
+    "request": {
+      "type": "object",
+      "description": "The ee.reflect.request.v1 artifact emitted for the external producer. Its full schema is docs/schemas/ee.reflect.request.v1.json.",
+      "required": [
+        "schema",
+        "requestId",
+        "requestHash",
+        "workspaceId",
+        "reflectionKind",
+        "sourcePackageHash"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      },
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.reflect.request.v1"
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requestHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "workspaceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reflectionKind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourcePackageHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["requestId", "requestHash", "expiresAt"],
+    "summary": ["command", "workspaceId", "reflectionKind", "requestId", "requestHash", "sourceRefs", "persisted", "nextCommands"],
+    "standard": ["command", "version", "workspaceId", "reflectionKind", "requestId", "requestHash", "sourcePackageHash", "createdAt", "expiresAt", "hmacKeyId", "sourceRefs", "dryRun", "durableMutation", "persisted", "ledgerOutcome", "nextCommands"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "sourceRef": {
+      "type": "object",
+      "required": ["kind", "id", "contentHash"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["memory", "evidence_span"]
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "contentHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "ledgerOutcome": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["inserted", "duplicate"]
+        }
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

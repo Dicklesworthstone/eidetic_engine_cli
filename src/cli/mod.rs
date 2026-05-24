@@ -37441,28 +37441,17 @@ where
                 }
                 write_stdout(stdout, &human)
             }
-            output::Renderer::Toon => {
-                let toon = format!(
-                    "REFLECT_PROPOSE|request_id={}|request_hash={}|sources={}|persisted={}|dry_run={}",
-                    report.request_id,
-                    report.request_hash,
-                    report.source_refs.len(),
-                    report.persisted,
-                    report.dry_run,
-                );
-                write_stdout(stdout, &(toon + "\n"))
-            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_reflect_propose_toon(&report) + "\n"),
+            ),
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let envelope = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": true,
-                    "data": report,
-                });
-                write_stdout(stdout, &(envelope.to_string() + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_reflect_propose_json(&report) + "\n"),
+            ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }

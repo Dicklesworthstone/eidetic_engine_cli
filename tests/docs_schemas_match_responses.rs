@@ -22,7 +22,9 @@ use ee::core::curate::{
     CurateCandidateValidation, CurateCandidatesFilter, CurateCandidatesReport,
     CurateShowPlannedApplication, CurateShowPlannedDerivedLink,
     CurateShowPlannedEvidenceAttachment, CurateShowReport, CurateValidationIssue,
+    ProposeDerivedSourceRef, REFLECTION_PROPOSE_SCHEMA_V1,
     REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
+    ReflectionProposeReport, ReflectionRequestDurableLedgerOutcome,
     ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
     ReflectionRequestLedgerDiagnosticsReport,
 };
@@ -46,7 +48,8 @@ use ee::models::{
 };
 use ee::output::{
     error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
-    render_memory_list_json, render_memory_show_json, render_schema_export_json,
+    render_memory_list_json, render_memory_show_json, render_reflect_propose_json,
+    render_schema_export_json,
 };
 use serde_json::{Value, json};
 
@@ -84,6 +87,7 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
         ee::curate::REFLECTION_RESULT_SCHEMA,
         "ee.reflect.result.v1.json",
     ),
+    (REFLECTION_PROPOSE_SCHEMA_V1, "ee.reflect.propose.v1.json"),
     (
         REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
         "ee.reflect.request_ledger.diagnostics.v1.json",
@@ -841,6 +845,93 @@ fn reflection_result_schema_documents_external_result_contract() -> TestResult {
         "selfReportedConfidence": 0.72
     });
     validate_json_schema(&document, &schema, &schema, "$")
+}
+
+#[test]
+fn reflection_propose_report_matches_schema_and_v2_envelope() -> TestResult {
+    let hash = |digit: char| format!("blake3:{}", digit.to_string().repeat(64));
+    let source_hash = hash('1');
+    let source_ref =
+        DerivationSourceRef::new(DerivationSourceKind::Memory, "mem_schema", &source_hash);
+    let source = ReflectionSourceInput::new(
+        source_ref,
+        "The source package shows one durable knowledge gap.",
+        Some("memory://mem_schema".to_owned()),
+    )
+    .with_metadata(ReflectionSourceMetadata::memory("procedural", "rule"));
+    let source_package = build_reflection_source_package(
+        &[source],
+        ReflectionSourcePackageLimits {
+            max_sources: 4,
+            max_total_excerpt_bytes: 4096,
+            max_excerpt_bytes_per_source: 512,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let request = build_reflection_request_artifact("ws_schema", "gaps", source_package)
+        .map_err(|error| error.to_string())?;
+    let key = ReflectionHmacKeyMaterial::new("reflect_key_schema", b"schema-test-hmac-key")
+        .map_err(|error| error.to_string())?;
+    let request = attach_reflection_request_challenge_with_key(
+        request,
+        "2026-05-24T00:00:00Z",
+        "2026-05-24T01:00:00Z",
+        &key,
+    )
+    .map_err(|error| error.to_string())?;
+    let report = ReflectionProposeReport {
+        schema: REFLECTION_PROPOSE_SCHEMA_V1,
+        command: "reflect propose",
+        version: "0.0.0-test",
+        workspace_id: "ws_schema".to_owned(),
+        workspace_path: "/tmp/schema".to_owned(),
+        database_path: "/tmp/schema/.ee/ee.db".to_owned(),
+        reflection_kind: "gaps".to_owned(),
+        request_id: request.request_id.clone(),
+        request_hash: request.request_hash.clone(),
+        source_package_hash: request.source_package_hash.clone(),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        hmac_key_id: "reflect_key_schema".to_owned(),
+        source_refs: vec![ProposeDerivedSourceRef {
+            kind: "memory".to_owned(),
+            id: "mem_schema".to_owned(),
+            content_hash: source_hash,
+        }],
+        dry_run: false,
+        durable_mutation: true,
+        persisted: true,
+        ledger_outcome: Some(ReflectionRequestDurableLedgerOutcome::Inserted),
+        request,
+        next_commands: vec![
+            "ee reflect request-ledger diagnostics --workspace /tmp/schema --json".to_owned(),
+        ],
+    };
+
+    let document = serde_json::to_value(&report)
+        .map_err(|error| format!("reflect propose report must serialize: {error}"))?;
+    let schema = schema_doc(REFLECTION_PROPOSE_SCHEMA_V1)?;
+    validate_json_schema(&document, &schema, &schema, "$")?;
+    ensure_json_str(&document, "/schema", REFLECTION_PROPOSE_SCHEMA_V1)?;
+    ensure_json_bool(&document, "/durableMutation", true)?;
+    ensure_json_str(&document, "/ledgerOutcome/status", "inserted")?;
+    ensure_json_str(
+        &document,
+        "/request/schema",
+        ee::curate::REFLECTION_REQUEST_SCHEMA,
+    )?;
+
+    let envelope: Value = serde_json::from_str(&render_reflect_propose_json(&report))
+        .map_err(|error| format!("reflect propose envelope must parse: {error}"))?;
+    let response_schema = schema_doc(RESPONSE_SCHEMA_V2)?;
+    validate_json_schema(&envelope, &response_schema, &response_schema, "$")?;
+    ensure_json_str(&envelope, "/schema", RESPONSE_SCHEMA_V2)?;
+    ensure_json_bool(&envelope, "/success", true)?;
+    let data = envelope
+        .get("data")
+        .ok_or_else(|| "reflect propose envelope missing data".to_owned())?;
+    validate_json_schema(data, &schema, &schema, "$.data")?;
+    ensure_json_str(&envelope, "/data/schema", REFLECTION_PROPOSE_SCHEMA_V1)
 }
 
 #[test]

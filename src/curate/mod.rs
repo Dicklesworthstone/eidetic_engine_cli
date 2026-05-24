@@ -1109,7 +1109,7 @@ pub enum ReflectionResultReplayGate {
         existing_candidate_id: Option<String>,
     },
     UnavailableStatus {
-        status: String,
+        ledger_status: String,
     },
 }
 
@@ -3107,8 +3107,10 @@ pub fn reflection_result_ingest_decision(
         } => Err(ReflectionResultIngestError::MismatchedReplay {
             existing_candidate_id,
         }),
-        ReflectionResultReplayGate::UnavailableStatus { status } => {
-            Err(ReflectionResultIngestError::UnavailableLedgerStatus { status })
+        ReflectionResultReplayGate::UnavailableStatus { ledger_status } => {
+            Err(ReflectionResultIngestError::UnavailableLedgerStatus {
+                status: ledger_status,
+            })
         }
         ReflectionResultReplayGate::AcceptedReplay { candidate_id } => {
             validate_reflection_result_shape_and_identity(request, result)
@@ -11111,7 +11113,7 @@ Then update src/policy/mod.rs on main."
             &result,
             &ledger_material,
             ReflectionResultReplayGate::UnavailableStatus {
-                status: "invalid_material".to_owned(),
+                ledger_status: "invalid_material".to_owned(),
             },
             &key,
             "2026-05-24T00:30:00Z",
