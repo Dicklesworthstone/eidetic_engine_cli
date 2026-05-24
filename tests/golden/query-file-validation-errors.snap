@@ -1,0 +1,46 @@
+---
+source: tests/conformance/query_v1_matrix.rs
+assertion: ee.query.v1 query-file validation errors return stable machine-readable envelopes
+schema:
+  query_file: ee.query.v1
+  envelope: ee.error.v2
+  parser: src/cli/mod.rs::parse_query_document
+  loader: src/cli/mod.rs::load_query_file
+contracts:
+  - Missing file at --query-file path returns MissingFile with a structured error envelope
+  - Malformed JSON body returns MalformedJson with the JSON parse position and a fix hint
+  - Unknown or missing schema version returns InvalidFile/InvalidVersion before any further parsing
+  - Empty or whitespace-only query text is rejected, never silently coerced to a wildcard
+  - Future timestamps in time.* / asOf produce structured rejections rather than overflow
+  - budget.maxTokens=0 (and other zero budgets) reject the request before any pack work
+  - Wrong type for tags (array of non-strings) is rejected with a stable machine error path
+  - Wrong type for tags (string instead of object) is rejected with a distinct stable error
+  - Unknown top-level fields surface as low-severity `query_unknown_field` degradations, not silent drops
+  - Unknown graph subfields return MalformedJson with field-path provenance
+  - Symlink and parent-dir traversal paths to --query-file are rejected as UnsafePath
+  - Files exceeding QUERY_FILE_MAX_BYTES are rejected with InvalidFile and a size-hint repair
+evidence:
+  - tests/conformance/query_v1_matrix.rs::matrix_error_malformed_json
+  - tests/conformance/query_v1_matrix.rs::matrix_error_unknown_version
+  - tests/conformance/query_v1_matrix.rs::matrix_error_empty_query_text
+  - tests/conformance/query_v1_matrix.rs::matrix_error_whitespace_query_text
+  - tests/conformance/query_v1_matrix.rs::matrix_error_invalid_timestamp_format
+  - tests/conformance/query_v1_matrix.rs::matrix_error_zero_budget_max_tokens
+  - tests/conformance/query_v1_matrix.rs::matrix_error_query_file_not_found
+  - tests/conformance/query_v1_matrix.rs::matrix_error_tags_wrong_type_array
+  - tests/conformance/query_v1_matrix.rs::matrix_error_tags_wrong_type_string
+  - tests/e2e_query_file_validation.rs::query_file_with_invalid_tags_array_returns_error
+  - tests/e2e_query_file_validation.rs::query_file_with_unknown_graph_field_returns_malformed_error
+  - tests/e2e_query_file_validation.rs::query_file_with_malformed_json_returns_error
+  - tests/e2e_query_file_validation.rs::query_file_missing_returns_error
+  - tests/property_eql_query_parsing.rs::parse_eql_query_never_panics_on_arbitrary_json
+  - tests/property_eql_query_parsing.rs::parse_eql_query_never_panics_on_known_key_garbage
+  - tests/property_eql_query_parsing.rs::parse_eql_query_rejects_blank_query_text
+  - tests/property_eql_query_parsing.rs::parse_eql_query_rejects_zero_limit
+  - tests/property_eql_query_parsing.rs::parse_eql_query_rejects_unknown_top_level_field
+  - tests/property_eql_query_parsing.rs::parse_eql_query_rejects_non_string_query_field
+  - tests/property_eql_query_parsing.rs::parse_eql_query_rejects_non_object_root
+  - src/cli/mod.rs::validate_query_file_path
+  - src/cli/mod.rs::parse_query_document
+  - src/models/query.rs::parse_eql_query
+  - bd-2s3e9

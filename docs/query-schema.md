@@ -621,5 +621,5 @@ These fields are recognized and validated but not wired through to pack/search e
 
 - [x] `--query-file` CLI plumbing (implemented)
 - [x] Add JSON Schema export to `ee schema export ee.query.v1`
-- [ ] Add golden fixtures for query validation
-- [ ] Add property tests for query parsing
+- [x] Add golden fixtures for query validation (`tests/golden/query-file-validation-errors.snap` — bd-2s3e9)
+- [x] Add property tests for query parsing (`tests/property_eql_query_parsing.rs` — bd-2s3e9)
