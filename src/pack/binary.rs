@@ -510,3 +510,77 @@ fn hex_bytes(bytes: &[u8]) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PACK_BINARY_HEADER_LEN, PACK_BINARY_ITEM_TABLE_ENTRY_LEN, PACK_BINARY_TRAILER_LEN,
+        serialize_pack_binary,
+    };
+
+    fn fixture_json() -> &'static str {
+        r#"{"schema":"ee.response.v2","success":true,"data":{"pack":{"items":[]}}}"#
+    }
+
+    fn fixture_items() -> [&'static [u8]; 3] {
+        [b"alpha", b"bravo", b"charlie"]
+    }
+
+    // bd-2dz4o: pin the 20-byte trailer (canonical_json_offset u64, canonical_json_len
+    // u64, reserved u32) as a byte-level invariant. A future writer that repurposes the
+    // reserved u32 or swaps offset/len would silently pass the existing parser-reject
+    // tests in tests/pack_binary_format_unit.rs but trips this pin at the byte layer.
+    #[test]
+    fn trailer_layout_matches_canonical_offset_len_and_reserved_zero() {
+        let json = fixture_json();
+        let items = fixture_items();
+        let item_slices: Vec<&[u8]> = items.iter().copied().collect();
+        let frame = serialize_pack_binary(json, &item_slices, 0);
+
+        let trailer_start = frame.len() - PACK_BINARY_TRAILER_LEN;
+        let trailer = &frame[trailer_start..];
+        assert_eq!(trailer.len(), PACK_BINARY_TRAILER_LEN);
+
+        let raw_offset = u64::from_le_bytes(trailer[0..8].try_into().expect("offset bytes"));
+        let raw_len = u64::from_le_bytes(trailer[8..16].try_into().expect("len bytes"));
+        let raw_reserved = u32::from_le_bytes(trailer[16..20].try_into().expect("reserved bytes"));
+
+        let table_len = items.len() * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+        let items_blob_bytes: usize = items.iter().map(|item| item.len()).sum();
+        let expected_offset = (PACK_BINARY_HEADER_LEN + table_len + items_blob_bytes) as u64;
+
+        assert_eq!(
+            raw_offset, expected_offset,
+            "canonical_json_offset position"
+        );
+        assert_eq!(
+            raw_len,
+            json.as_bytes().len() as u64,
+            "canonical_json_len value"
+        );
+        assert_eq!(raw_reserved, 0, "trailer reserved u32 must remain 0");
+    }
+
+    // bd-2dz4o: pin per-item-table-entry reserved u32 (bytes 12..16 of each 16-byte
+    // slot) as zero. If a writer ever starts encoding metadata into the reserved
+    // padding, this pin fires so the change is explicit rather than a silent drift.
+    #[test]
+    fn item_table_reserved_u32_is_zero_for_every_entry() {
+        let items = fixture_items();
+        let item_slices: Vec<&[u8]> = items.iter().copied().collect();
+        let frame = serialize_pack_binary(fixture_json(), &item_slices, 0);
+
+        for (index, _) in items.iter().enumerate() {
+            let entry_start = PACK_BINARY_HEADER_LEN + index * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+            let reserved = u32::from_le_bytes(
+                frame[entry_start + 12..entry_start + 16]
+                    .try_into()
+                    .expect("entry reserved bytes"),
+            );
+            assert_eq!(
+                reserved, 0,
+                "item table entry {index} reserved u32 must be 0"
+            );
+        }
+    }
+}
