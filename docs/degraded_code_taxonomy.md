@@ -37,6 +37,27 @@ A degraded entry's `code` is classified into one of three buckets:
   build-time half is reported once (via capabilities); the
   response-time half stays per-call.
 
+## Repair Action Risk Classes
+
+Agent-facing recovery actions can include command strings. Those commands are
+not automatically safe just because they are concrete. When a recovery or
+fallback action names a command, emit or derive the shared repair-action safety
+metadata so agents can branch mechanically instead of parsing prose.
+
+| Risk class | Agent may run? | Preflight | Human approval | Beads / Agent Mail mutation | Log privacy |
+| --- | --- | --- | --- | --- | --- |
+| `read_only_probe` | Yes, when the command uses structured argv or an already-safe shell form. | Not required. | Not required. | Must not mutate local files, Beads, Agent Mail, RCH daemon state, workers, or git history. | Use bounded command metadata only. |
+| `idempotent_refresh` | Yes, when the workspace or derived-asset target is explicit. | Not required unless `preflightCommand` is present. | Not required. | Must not mutate Beads or Agent Mail; may rebuild local derived assets only. | Use bounded command metadata and derived-asset evidence codes. |
+| `mutating_local_repair` | Yes after reviewing recovery details. | Required when `preflightCommand` is present. | Not required unless also marked by policy. | Must not mutate Beads or Agent Mail; may mutate source-of-truth local state for the selected workspace. | Use bounded command metadata; omit raw database errors and full file listings. |
+| `mutating_external_coordination_repair` | Only after coordinating with active agents. | Required when `preflightCommand` is present. | Required when `requiresHumanApproval` is true. | May mutate Beads, Agent Mail, RCH daemon/worker state, or another shared coordination substrate. | Use tracker or coordination metadata only; no raw mail bodies. |
+| `approval_required_repair` | No, not autonomously. | Run preflight only after approval if a command is still intended. | Required before execution. | Unknown until reviewed; assume shared state could be affected. | Log only the command shape and review evidence. |
+| `destructive_or_irreversible_repair` | No. | Required as part of the explicit approval flow. | Required for the exact command, following `AGENTS.md`. | May delete, rewrite history, destroy state, or otherwise be irreversible. | Log the command and approval evidence only; never include secrets or dumps. |
+| `unavailable_or_manual_only` | No command is agent-runnable. | Not applicable. | Required if an operator chooses a manual repair. | Unknown until a human-defined repair exists. | Use `manualStep`, bounded evidence codes, and Beads updates. |
+
+Safety metadata must be redaction-safe: no raw mail bodies, full dirty-file
+listings, stack traces, secrets, or unbounded local database errors. Use bounded
+evidence codes and preconditions instead.
+
 ## Categorization rules (canonical)
 
 1. Suffix `_unimplemented` always means `build_time` (the feature

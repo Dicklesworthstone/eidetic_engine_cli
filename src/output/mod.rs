@@ -2881,9 +2881,27 @@ fn pack_concurrent_limit_reached_recovery_actions() -> Vec<RecoveryAction> {
 }
 
 fn build_recovery_action_fields(obj: &mut JsonBuilder, action: &RecoveryAction) {
+    let safety = action.safety();
     obj.field_u32("priority", u32::from(action.priority));
     obj.field_str("kind", action.kind.as_str());
     obj.field_str("rationale", &action.rationale);
+    obj.field_str("riskClass", safety.risk_class.as_str());
+    if let Some(preflight_command) = &safety.preflight_command {
+        obj.field_str("preflightCommand", preflight_command);
+    }
+    obj.field_bool("requiresHumanApproval", safety.requires_human_approval);
+    obj.field_bool("mutatesExternalState", safety.mutates_external_state);
+    obj.field_bool("mutatesTrackerState", safety.mutates_tracker_state);
+    obj.field_str("privacyClass", safety.privacy_class);
+    if let Some(manual_step) = safety.manual_step {
+        obj.field_str("manualStep", manual_step);
+    }
+    if !safety.evidence.is_empty() {
+        obj.field_array_of_strs("evidence", &safety.evidence);
+    }
+    if !safety.preconditions.is_empty() {
+        obj.field_array_of_strs("preconditions", &safety.preconditions);
+    }
     if let Some(name) = &action.env_name {
         obj.field_str("envName", name);
     }

@@ -70,7 +70,16 @@
     },
     "recoveryAction": {
       "type": "object",
-      "required": ["priority", "kind", "rationale"],
+      "required": [
+        "priority",
+        "kind",
+        "rationale",
+        "riskClass",
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+        "privacyClass"
+      ],
       "additionalProperties": false,
       "properties": {
         "priority": {"type": "integer", "minimum": 0, "maximum": 255},
@@ -84,6 +93,7 @@
             "rebuild",
             "permission",
             "migration",
+            "command",
             "broaden",
             "narrow",
             "seed",
@@ -91,6 +101,32 @@
           ]
         },
         "rationale": {"type": "string"},
+        "riskClass": {
+          "type": "string",
+          "enum": [
+            "read_only_probe",
+            "idempotent_refresh",
+            "mutating_local_repair",
+            "mutating_external_coordination_repair",
+            "approval_required_repair",
+            "destructive_or_irreversible_repair",
+            "unavailable_or_manual_only"
+          ]
+        },
+        "preflightCommand": {"type": "string"},
+        "requiresHumanApproval": {"type": "boolean"},
+        "mutatesExternalState": {"type": "boolean"},
+        "mutatesTrackerState": {"type": "boolean"},
+        "privacyClass": {"type": "string"},
+        "manualStep": {"type": "string"},
+        "evidence": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "preconditions": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
         "envName": {"type": "string"},
         "valueHint": {"type": "string"},
         "configPath": {"type": "string"},

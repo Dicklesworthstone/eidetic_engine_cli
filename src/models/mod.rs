@@ -631,6 +631,277 @@ impl RecoveryKind {
     }
 }
 
+/// Risk class for an agent-facing repair or recovery action.
+///
+/// These strings are part of the JSON contract used by agents to decide
+/// whether a remediation hint is runnable, needs preflight, needs human
+/// approval, or is only a manual handoff.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepairActionRiskClass {
+    /// Pure inspection; does not mutate local state, trackers, mail, git, or workers.
+    ReadOnlyProbe,
+    /// Rebuilds or refreshes derived/idempotent local state.
+    IdempotentRefresh,
+    /// Mutates durable local state but not external coordination systems.
+    MutatingLocalRepair,
+    /// Mutates coordination/tracker systems such as Beads, Agent Mail, or RCH daemon state.
+    MutatingExternalCoordinationRepair,
+    /// Requires explicit human approval before an agent should run it.
+    ApprovalRequiredRepair,
+    /// Destructive, irreversible, or history-rewriting action.
+    DestructiveOrIrreversibleRepair,
+    /// No safe agent-runnable command exists; use a manual/operator path.
+    UnavailableOrManualOnly,
+}
+
+impl RepairActionRiskClass {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnlyProbe => "read_only_probe",
+            Self::IdempotentRefresh => "idempotent_refresh",
+            Self::MutatingLocalRepair => "mutating_local_repair",
+            Self::MutatingExternalCoordinationRepair => "mutating_external_coordination_repair",
+            Self::ApprovalRequiredRepair => "approval_required_repair",
+            Self::DestructiveOrIrreversibleRepair => "destructive_or_irreversible_repair",
+            Self::UnavailableOrManualOnly => "unavailable_or_manual_only",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepairActionSafety {
+    pub risk_class: RepairActionRiskClass,
+    pub preflight_command: Option<String>,
+    pub requires_human_approval: bool,
+    pub mutates_external_state: bool,
+    pub mutates_tracker_state: bool,
+    pub privacy_class: &'static str,
+    pub manual_step: Option<&'static str>,
+    pub evidence: Vec<&'static str>,
+    pub preconditions: Vec<&'static str>,
+}
+
+fn quote_for_preflight_command(command: &str) -> String {
+    format!("'{}'", command.replace('\'', "'\\''"))
+}
+
+fn preflight_command_for(command: &str) -> String {
+    format!(
+        "ee preflight check --cmd {} --workspace . --json",
+        quote_for_preflight_command(command)
+    )
+}
+
+fn command_matches_any(command: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| command.contains(needle))
+}
+
+#[must_use]
+pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> RepairActionSafety {
+    let Some(command) = command else {
+        return match kind {
+            RecoveryKind::Config => RepairActionSafety {
+                risk_class: RepairActionRiskClass::MutatingLocalRepair,
+                preflight_command: None,
+                requires_human_approval: false,
+                mutates_external_state: false,
+                mutates_tracker_state: false,
+                privacy_class: "path_and_key_only",
+                manual_step: Some("Review the config edit before applying it."),
+                evidence: vec!["recovery_kind_config"],
+                preconditions: vec!["config_path_must_be_explicit"],
+            },
+            RecoveryKind::None => RepairActionSafety {
+                risk_class: RepairActionRiskClass::UnavailableOrManualOnly,
+                preflight_command: None,
+                requires_human_approval: true,
+                mutates_external_state: false,
+                mutates_tracker_state: false,
+                privacy_class: "no_command",
+                manual_step: Some("No agent-runnable repair command is available."),
+                evidence: vec!["recovery_kind_none"],
+                preconditions: vec!["operator_decision_required"],
+            },
+            _ => RepairActionSafety {
+                risk_class: RepairActionRiskClass::ReadOnlyProbe,
+                preflight_command: None,
+                requires_human_approval: false,
+                mutates_external_state: false,
+                mutates_tracker_state: false,
+                privacy_class: "metadata_only",
+                manual_step: None,
+                evidence: vec!["recovery_kind_without_command"],
+                preconditions: Vec::new(),
+            },
+        };
+    };
+
+    let command_lower = command.to_ascii_lowercase();
+    let mut safety = if command_matches_any(
+        &command_lower,
+        &[
+            "rm -rf",
+            "git clean",
+            "git reset --hard",
+            "git checkout ",
+            "git rebase",
+            "mkfs",
+            "diskutil erase",
+        ],
+    ) {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::DestructiveOrIrreversibleRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: true,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "command_only",
+            manual_step: Some("Stop and obtain explicit human approval for the exact command."),
+            evidence: vec!["destructive_command_pattern"],
+            preconditions: vec!["explicit_human_approval_required"],
+        }
+    } else if command_lower.contains("am doctor repair")
+        || command_lower.contains("mcp_agent_mail.cli doctor repair")
+        || command_lower.starts_with("rch daemon restart")
+        || command_lower.starts_with("rch workers probe")
+        || command_lower.starts_with("rch workers capabilities --refresh")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::MutatingExternalCoordinationRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: command_lower.contains("doctor repair"),
+            mutates_external_state: true,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: Some("Coordinate before mutating shared coordination or worker state."),
+            evidence: vec!["external_coordination_repair_command"],
+            preconditions: vec!["shared_state_coordination_required"],
+        }
+    } else if command_lower.starts_with("br sync --status") {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::ReadOnlyProbe,
+            preflight_command: None,
+            requires_human_approval: false,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "tracker_metadata_only",
+            manual_step: None,
+            evidence: vec!["beads_status_probe_command"],
+            preconditions: Vec::new(),
+        }
+    } else if command_lower.starts_with("br sync")
+        || command_lower.starts_with("br update")
+        || command_lower.starts_with("br close")
+        || command_lower.starts_with("br reopen")
+        || command_lower.starts_with("br comments add")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::MutatingExternalCoordinationRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: false,
+            mutates_external_state: true,
+            mutates_tracker_state: true,
+            privacy_class: "tracker_metadata_only",
+            manual_step: Some("Announce tracker mutation through the bead thread."),
+            evidence: vec!["beads_mutation_command"],
+            preconditions: vec!["bead_id_must_be_explicit"],
+        }
+    } else if command_lower.starts_with("ee index status")
+        || command_lower.starts_with("ee doctor --json")
+        || command_lower.starts_with("ee doctor --robot")
+        || command_lower.starts_with("ee doctor --capabilities")
+        || command_lower.starts_with("ee doctor --list-runs")
+        || command_lower.starts_with("ee doctor --gc-plan")
+        || command_lower.starts_with("ee migrate status")
+        || command_lower.starts_with("ee memory list")
+        || command_lower.starts_with("ee preflight check")
+        || command_lower.starts_with("git status")
+        || command_lower.starts_with("git diff")
+        || command_lower.starts_with("rch status")
+        || command_lower.starts_with("rch check")
+        || command_lower.starts_with("rch queue")
+        || command_lower.contains("doctor check")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::ReadOnlyProbe,
+            preflight_command: None,
+            requires_human_approval: false,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: None,
+            evidence: vec!["read_only_probe_command"],
+            preconditions: Vec::new(),
+        }
+    } else if command_lower.starts_with("ee index rebuild")
+        || command_lower.starts_with("ee index reembed")
+        || command_lower.starts_with("ee graph centrality-refresh")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::IdempotentRefresh,
+            preflight_command: None,
+            requires_human_approval: false,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: None,
+            evidence: vec!["derived_asset_refresh_command"],
+            preconditions: vec!["workspace_must_be_explicit"],
+        }
+    } else if command_lower.starts_with("ee migrate run")
+        || command_lower.starts_with("ee init")
+        || command_lower.starts_with("ee db migrate")
+        || command_lower.starts_with("ee doctor --fix")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::MutatingLocalRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: false,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: Some("Review the dry-run or recovery details before applying."),
+            evidence: vec!["local_state_repair_command"],
+            preconditions: vec!["workspace_must_be_explicit"],
+        }
+    } else if command_lower.starts_with("brew install")
+        || command_lower.starts_with("cargo install")
+        || command_lower.starts_with("cargo build")
+    {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::MutatingLocalRepair,
+            preflight_command: None,
+            requires_human_approval: false,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: None,
+            evidence: vec!["local_toolchain_or_install_command"],
+            preconditions: vec!["use_rch_for_cargo_when_applicable"],
+        }
+    } else {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::ApprovalRequiredRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: true,
+            mutates_external_state: false,
+            mutates_tracker_state: false,
+            privacy_class: "bounded_command_no_raw_state",
+            manual_step: Some("Classify this repair before running it."),
+            evidence: vec!["unknown_repair_command"],
+            preconditions: vec!["human_or_policy_review_required"],
+        }
+    };
+
+    if matches!(kind, RecoveryKind::Install | RecoveryKind::Rebuild) {
+        safety
+            .preconditions
+            .push("toolchain_or_feature_profile_must_match_request");
+    }
+    safety
+}
+
 /// One concrete recovery action attached to an error envelope.
 ///
 /// Fields are intentionally optional: each `RecoveryKind` populates only
@@ -664,6 +935,11 @@ pub struct RecoveryAction {
 }
 
 impl RecoveryAction {
+    #[must_use]
+    pub fn safety(&self) -> RepairActionSafety {
+        repair_action_safety(self.kind, self.command.as_deref())
+    }
+
     /// Construct an env-var-set recovery.
     #[must_use]
     pub fn env(
@@ -801,12 +1077,51 @@ impl RecoveryAction {
     #[must_use]
     pub fn data_json(&self) -> serde_json::Value {
         let mut action = serde_json::Map::new();
+        let safety = self.safety();
         action.insert("priority".to_owned(), serde_json::json!(self.priority));
         action.insert("kind".to_owned(), serde_json::json!(self.kind.as_str()));
         action.insert(
             "rationale".to_owned(),
             serde_json::json!(self.rationale.as_str()),
         );
+        action.insert(
+            "riskClass".to_owned(),
+            serde_json::json!(safety.risk_class.as_str()),
+        );
+        if let Some(preflight_command) = &safety.preflight_command {
+            action.insert(
+                "preflightCommand".to_owned(),
+                serde_json::json!(preflight_command),
+            );
+        }
+        action.insert(
+            "requiresHumanApproval".to_owned(),
+            serde_json::json!(safety.requires_human_approval),
+        );
+        action.insert(
+            "mutatesExternalState".to_owned(),
+            serde_json::json!(safety.mutates_external_state),
+        );
+        action.insert(
+            "mutatesTrackerState".to_owned(),
+            serde_json::json!(safety.mutates_tracker_state),
+        );
+        action.insert(
+            "privacyClass".to_owned(),
+            serde_json::json!(safety.privacy_class),
+        );
+        if let Some(manual_step) = safety.manual_step {
+            action.insert("manualStep".to_owned(), serde_json::json!(manual_step));
+        }
+        if !safety.evidence.is_empty() {
+            action.insert("evidence".to_owned(), serde_json::json!(safety.evidence));
+        }
+        if !safety.preconditions.is_empty() {
+            action.insert(
+                "preconditions".to_owned(),
+                serde_json::json!(safety.preconditions),
+            );
+        }
         if let Some(name) = &self.env_name {
             action.insert("envName".to_owned(), serde_json::json!(name));
         }
@@ -1487,10 +1802,154 @@ mod tests {
         assert_eq!(super::RecoveryKind::Rebuild.as_str(), "rebuild");
         assert_eq!(super::RecoveryKind::Permission.as_str(), "permission");
         assert_eq!(super::RecoveryKind::Migration.as_str(), "migration");
+        assert_eq!(super::RecoveryKind::Command.as_str(), "command");
         assert_eq!(super::RecoveryKind::Broaden.as_str(), "broaden");
         assert_eq!(super::RecoveryKind::Narrow.as_str(), "narrow");
         assert_eq!(super::RecoveryKind::Seed.as_str(), "seed");
         assert_eq!(super::RecoveryKind::None.as_str(), "none");
+    }
+
+    #[test]
+    fn repair_action_risk_class_wire_names_are_stable() {
+        assert_eq!(
+            super::RepairActionRiskClass::ReadOnlyProbe.as_str(),
+            "read_only_probe"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::IdempotentRefresh.as_str(),
+            "idempotent_refresh"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::MutatingLocalRepair.as_str(),
+            "mutating_local_repair"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::MutatingExternalCoordinationRepair.as_str(),
+            "mutating_external_coordination_repair"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::ApprovalRequiredRepair.as_str(),
+            "approval_required_repair"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::DestructiveOrIrreversibleRepair.as_str(),
+            "destructive_or_irreversible_repair"
+        );
+        assert_eq!(
+            super::RepairActionRiskClass::UnavailableOrManualOnly.as_str(),
+            "unavailable_or_manual_only"
+        );
+    }
+
+    #[test]
+    fn repair_action_safety_classifies_representative_commands() {
+        let read_only = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("am doctor check --verbose"),
+        );
+        assert_eq!(
+            read_only.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!read_only.requires_human_approval);
+        assert!(!read_only.mutates_external_state);
+
+        let agent_mail_repair = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("am doctor repair --yes"),
+        );
+        assert_eq!(
+            agent_mail_repair.risk_class,
+            super::RepairActionRiskClass::MutatingExternalCoordinationRepair
+        );
+        assert!(agent_mail_repair.requires_human_approval);
+        assert!(agent_mail_repair.mutates_external_state);
+        assert!(agent_mail_repair.preflight_command.is_some());
+
+        let beads_sync_status =
+            super::repair_action_safety(super::RecoveryKind::Command, Some("br sync --status"));
+        assert_eq!(
+            beads_sync_status.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!beads_sync_status.requires_human_approval);
+        assert!(!beads_sync_status.mutates_external_state);
+        assert!(!beads_sync_status.mutates_tracker_state);
+        assert!(beads_sync_status.preflight_command.is_none());
+
+        let beads_sync =
+            super::repair_action_safety(super::RecoveryKind::Command, Some("br sync --flush-only"));
+        assert_eq!(
+            beads_sync.risk_class,
+            super::RepairActionRiskClass::MutatingExternalCoordinationRepair
+        );
+        assert!(beads_sync.mutates_external_state);
+        assert!(beads_sync.mutates_tracker_state);
+
+        let index_status = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("ee index status --workspace . --json"),
+        );
+        assert_eq!(
+            index_status.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+
+        let preflight_check = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("ee preflight check --cmd 'echo ok' --json"),
+        );
+        assert_eq!(
+            preflight_check.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!preflight_check.mutates_external_state);
+
+        let git_status =
+            super::repair_action_safety(super::RecoveryKind::Command, Some("git status --short"));
+        assert_eq!(
+            git_status.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!git_status.mutates_external_state);
+
+        let index_rebuild = super::repair_action_safety(
+            super::RecoveryKind::Migration,
+            Some("ee index rebuild --workspace ."),
+        );
+        assert_eq!(
+            index_rebuild.risk_class,
+            super::RepairActionRiskClass::IdempotentRefresh
+        );
+
+        let destructive =
+            super::repair_action_safety(super::RecoveryKind::Command, Some("git clean -fd"));
+        assert_eq!(
+            destructive.risk_class,
+            super::RepairActionRiskClass::DestructiveOrIrreversibleRepair
+        );
+        assert!(destructive.requires_human_approval);
+        assert!(!destructive.mutates_external_state);
+        assert!(destructive.preflight_command.is_some());
+
+        let file_removal_command = format!("{} {}", "rm", "-rf target");
+        let destructive_file_removal =
+            super::repair_action_safety(super::RecoveryKind::Command, Some(&file_removal_command));
+        assert_eq!(
+            destructive_file_removal.risk_class,
+            super::RepairActionRiskClass::DestructiveOrIrreversibleRepair
+        );
+        assert!(destructive_file_removal.requires_human_approval);
+        assert!(!destructive_file_removal.mutates_external_state);
+        assert!(destructive_file_removal.preflight_command.is_some());
+
+        let manual = super::repair_action_safety(super::RecoveryKind::None, None);
+        assert_eq!(
+            manual.risk_class,
+            super::RepairActionRiskClass::UnavailableOrManualOnly
+        );
+        assert!(manual.requires_human_approval);
+        assert!(manual.manual_step.is_some());
     }
 
     #[test]
@@ -1561,6 +2020,10 @@ mod tests {
         let first_json = actions[0].data_json();
         assert_eq!(first_json["kind"], "rebuild");
         assert_eq!(first_json["command"], "ee index reembed --workspace .");
+        assert_eq!(first_json["riskClass"], "idempotent_refresh");
+        assert_eq!(first_json["requiresHumanApproval"], false);
+        assert_eq!(first_json["mutatesExternalState"], false);
+        assert_eq!(first_json["mutatesTrackerState"], false);
         assert_eq!(
             first_json["resultsIn"],
             "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."

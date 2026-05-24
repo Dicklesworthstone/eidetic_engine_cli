@@ -15,6 +15,14 @@ expression: value
           "priority": 1,
           "kind": "migration",
           "rationale": "Inspect drift details before deciding repair path.",
+          "riskClass": "read_only_probe",
+          "requiresHumanApproval": false,
+          "mutatesExternalState": false,
+          "mutatesTrackerState": false,
+          "privacyClass": "bounded_command_no_raw_state",
+          "evidence": [
+            "read_only_probe_command"
+          ],
           "command": "ee migrate status --workspace . --json"
         }
       ]
