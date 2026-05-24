@@ -343,6 +343,9 @@ mod failure_mode_fixtures;
 #[path = "contracts/failure_mode_repair_string.rs"]
 mod failure_mode_repair_string;
 
+#[path = "contracts/repair_safety_conformance.rs"]
+mod repair_safety_conformance;
+
 #[path = "contracts/br_concurrent_read_race.rs"]
 mod br_concurrent_read_race;
 
