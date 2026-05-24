@@ -509,11 +509,12 @@ schema, and the contract test for the extended candidate envelope passes.
 ### Verification gaps
 
 The following obligations are documented contracts but do not yet
-have a discoverable test file. They are tracked by bd-17pa6
-(reality-check follow-up from bd-2xxao) so a reviewer can audit
-gap-closure progress instead of trusting the prose above.
+have a discoverable test file. bd-17pa6 (the initial reality-check
+follow-up from bd-2xxao) closed the unit/static items below; the
+remaining DB-required items are tracked by bd-8k69m so a reviewer
+can audit gap-closure progress instead of trusting the prose above.
 
-**Closed since bd-17pa6 opened:**
+**Closed by bd-17pa6:**
 - ~~**Failure-mode fixtures**~~ — landed alongside bd-1vnvl
   (`tests/fixtures/failure_modes/derived_sources_invalid.json`,
   `derived_target_required_for_mutation.json`,
@@ -563,9 +564,9 @@ gap-closure progress instead of trusting the prose above.
   audit, or search-index rows — no test currently pins this. Needs
   DB + fault-injection harness.
 
-bd-17pa6 is the dedicated gap-closure tracker; closing it lands
-focused tests for each remaining item above and removes them from
-this gaps list.
+bd-8k69m is the dedicated gap-closure tracker for the remaining
+DB-required items; closing it lands focused tests for each item
+above and removes them from this gaps list.
 
 ## Open questions deferred
 
