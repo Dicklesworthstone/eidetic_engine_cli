@@ -1094,18 +1094,18 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
         }],
     };
     let invalid_material = ReflectionRequestLedgerDiagnostic {
-        request_id: "reflect_req_diag0000007".to_owned(),
-        request_hash: hash('b'),
+        request_id: "[REDACTED:invalid-reflection-request-id]".to_owned(),
+        request_hash: "[REDACTED:invalid-reflection-hash]".to_owned(),
         reflection_kind: "gaps".to_owned(),
-        source_package_hash: hash('c'),
+        source_package_hash: "[REDACTED:invalid-reflection-hash]".to_owned(),
         source_ref_count: 1,
         source_content_hash_count: 1,
-        prompt_template_hash: hash('d'),
-        response_schema_hash: hash('e'),
+        prompt_template_hash: "[REDACTED:invalid-reflection-hash]".to_owned(),
+        response_schema_hash: "[REDACTED:invalid-reflection-hash]".to_owned(),
         created_at: "2026-05-24T00:00:00Z".to_owned(),
         expires_at: "2026-05-24T01:00:00Z".to_owned(),
         challenge_key_id: "reflect_key_schema".to_owned(),
-        challenge_hash: hash('f'),
+        challenge_hash: "[REDACTED:invalid-reflection-hash]".to_owned(),
         status: "pending".to_owned(),
         posture: "invalidMaterial",
         consumed_candidate_id: None,
@@ -1178,6 +1178,21 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
     ensure_json_str(&document, "/requests/4/expiresAt", "not-a-time")?;
     ensure_json_str(&document, "/requests/4/posture", "invalidLifecycle")?;
     ensure_json_str(&document, "/requests/5/posture", "invalidMaterial")?;
+    ensure_json_str(
+        &document,
+        "/requests/5/requestId",
+        "[REDACTED:invalid-reflection-request-id]",
+    )?;
+    ensure_json_str(
+        &document,
+        "/requests/5/requestHash",
+        "[REDACTED:invalid-reflection-hash]",
+    )?;
+    ensure_json_str(
+        &document,
+        "/requests/5/challengeHash",
+        "[REDACTED:invalid-reflection-hash]",
+    )?;
     ensure_json_str(&document, "/expiredPending/0/posture", "expiredPending")?;
     Ok(())
 }

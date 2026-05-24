@@ -161,18 +161,17 @@
       "additionalProperties": false,
       "properties": {
         "requestId": {
-          "type": "string",
-          "pattern": "^reflect_req_[A-Za-z0-9_:-]+$"
+          "$ref": "#/$defs/requestIdOrRedacted"
         },
         "requestHash": {
-          "$ref": "#/$defs/blake3Hash"
+          "$ref": "#/$defs/blake3HashOrRedacted"
         },
         "reflectionKind": {
           "type": "string",
           "minLength": 1
         },
         "sourcePackageHash": {
-          "$ref": "#/$defs/blake3Hash"
+          "$ref": "#/$defs/blake3HashOrRedacted"
         },
         "sourceRefCount": {
           "type": "integer",
@@ -183,10 +182,10 @@
           "minimum": 0
         },
         "promptTemplateHash": {
-          "$ref": "#/$defs/blake3Hash"
+          "$ref": "#/$defs/blake3HashOrRedacted"
         },
         "responseSchemaHash": {
-          "$ref": "#/$defs/blake3Hash"
+          "$ref": "#/$defs/blake3HashOrRedacted"
         },
         "createdAt": {
           "type": "string",
@@ -201,7 +200,7 @@
           "minLength": 1
         },
         "challengeHash": {
-          "$ref": "#/$defs/blake3Hash"
+          "$ref": "#/$defs/blake3HashOrRedacted"
         },
         "status": {
           "type": "string",
@@ -273,6 +272,29 @@
     "blake3Hash": {
       "type": "string",
       "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "requestIdOrRedacted": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^reflect_req_[A-Za-z0-9_:-]+$"
+        },
+        {
+          "type": "string",
+          "const": "[REDACTED:invalid-reflection-request-id]"
+        }
+      ]
+    },
+    "blake3HashOrRedacted": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        {
+          "type": "string",
+          "const": "[REDACTED:invalid-reflection-hash]"
+        }
+      ]
     }
   }
 }

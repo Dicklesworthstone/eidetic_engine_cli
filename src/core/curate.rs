@@ -85,9 +85,9 @@ pub const REFLECTION_PROPOSE_SCHEMA_V1: &str = "ee.reflect.propose.v1";
 /// Stable schema for reflection request ledger diagnostics.
 pub const REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1: &str =
     "ee.reflect.request_ledger.diagnostics.v1";
-const REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL: &str = "reflect_req_invalid_material";
-const REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL: &str =
-    "blake3:0000000000000000000000000000000000000000000000000000000000000000";
+const REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL: &str =
+    "[REDACTED:invalid-reflection-request-id]";
+const REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL: &str = "[REDACTED:invalid-reflection-hash]";
 pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
@@ -12719,6 +12719,9 @@ mod tests {
             bad_id_diagnostic.request_id,
             super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL
         );
+        assert!(!reflection_diagnostic_request_id_is_canonical(
+            super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL
+        ));
         let bad_id_json =
             serde_json::to_string(&bad_id_diagnostic).map_err(|error| error.to_string())?;
         assert!(bad_id_json.contains("reflect propose"));
@@ -12744,6 +12747,9 @@ mod tests {
             diagnostic.request_hash,
             super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL
         );
+        assert!(!reflection_diagnostic_blake3_hash_is_canonical(
+            super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL
+        ));
         assert_eq!(
             diagnostic.recovery.first().map(|action| action.kind),
             Some("repair_or_recreate_request")
