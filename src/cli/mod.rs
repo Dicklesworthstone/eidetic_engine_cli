@@ -40129,7 +40129,77 @@ struct DemoCommandContext<'a> {
     cwd_override: Option<&'a PathBuf>,
 }
 
+fn attach_demo_preflight_memory_matches(
+    ctx: &DemoCommandContext<'_>,
+    report: &mut PreflightGuardReport,
+) {
+    if report.matches.is_empty() {
+        return;
+    }
+    match ctx.conn.list_memories(ctx.workspace_id, None, false) {
+        Ok(memories) => {
+            report.matched_memories = match_trauma_guard_memories(&report.command, &memories);
+            if report.matched_memories.is_empty() {
+                report.degraded.push(no_risk_memories_degradation());
+            }
+        }
+        Err(error) => {
+            let mut degraded = no_risk_memories_degradation();
+            degraded.message = format!("Failed to query preflight risk memories: {error}");
+            report.degraded.push(degraded);
+        }
+    }
+}
+
+fn preflight_demo_command(ctx: &DemoCommandContext<'_>) -> Result<(), DomainError> {
+    let registry = PreflightGuardRegistry::load(ctx.workspace)?;
+    let options = PreflightGuardOptions {
+        command: ctx.command.command.clone(),
+        workspace: ctx.workspace.to_path_buf(),
+        bypass_tokens: Vec::new(),
+        bypass_secret: None,
+    };
+    let mut report = run_preflight_guard(&registry, &options);
+    attach_demo_preflight_memory_matches(ctx, &mut report);
+    if report.exit_code != ProcessExitCode::PolicyDenied as u32 {
+        return Ok(());
+    }
+
+    let audit_options = RecordPreflightHaltAuditOptions {
+        workspace_id: ctx.workspace_id.to_owned(),
+        actor: Some("ee demo run".to_owned()),
+        command: report.command.clone(),
+        matches: report.matches.clone(),
+        matched_memories: report.matched_memories.clone(),
+        exit_code: report.exit_code,
+        checked_at: report.checked_at.clone(),
+    };
+    if let Err(error) = record_preflight_halt_audit(ctx.conn, &audit_options) {
+        tracing::error!(%error, "failed to record demo preflight halt audit");
+    }
+
+    let match_summary = report
+        .matches
+        .first()
+        .map(|matched| format!("{}: {}", matched.rule_id, matched.message))
+        .unwrap_or_else(|| "policy denied by preflight guard".to_owned());
+    Err(DomainError::PolicyDeniedWithDetails {
+        message: format!(
+            "demo command rejected by trauma guard preflight before shell execution: {match_summary}"
+        ),
+        repair: Some(
+            "Run `ee preflight check --cmd <command> --json` and request explicit human authorization before bypassing."
+                .to_owned(),
+        ),
+        details_json: serde_json::json!({
+            "preflight": report.to_json(),
+        })
+        .to_string(),
+    })
+}
+
 fn execute_demo_command(ctx: DemoCommandContext<'_>) -> Result<DemoCommandExecution, DomainError> {
+    preflight_demo_command(&ctx)?;
     validate_demo_command_safe(&ctx.command.command)?;
     let effective_cwd = effective_demo_cwd(ctx.workspace, ctx.command, ctx.cwd_override);
     let step_dir = ctx

@@ -4542,6 +4542,12 @@ demos:
         "skipped demo step must not write artifact",
     )?;
 
+    let unsafe_target = Path::new("/tmp/test_target");
+    ensure(
+        !unsafe_target.exists(),
+        "refusing to run destructive-demo fixture because /tmp/test_target already exists",
+    )?;
+
     fs::write(
         workspace.join("demo.yaml"),
         "\
@@ -4550,9 +4556,9 @@ version: 1
 demos:
   - id: demo_00000000000000000000000011
     title: unsafe command
-    description: destructive commands are rejected before execution
+    description: destructive commands are rejected by trauma guard before execution
     commands:
-      - command: \"rm -rf target\"
+      - command: \"rm -rf /tmp/test_target\"
         expected_exit_code: 0
 ",
     )
@@ -4576,6 +4582,40 @@ demos:
         "/error/code",
         json!("policy_denied"),
         "unsafe demo error code",
+    )?;
+    ensure(
+        unsafe_run
+            .parsed
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.contains("trauma guard preflight")),
+        format!(
+            "unsafe demo error message must name trauma guard preflight: {}",
+            unsafe_run.parsed
+        ),
+    )?;
+    ensure_json_pointer(
+        &unsafe_run.parsed,
+        "/error/details/preflight/command",
+        json!("rm -rf /tmp/test_target"),
+        "unsafe demo preflight command",
+    )?;
+    ensure_json_pointer(
+        &unsafe_run.parsed,
+        "/error/details/preflight/exitCode",
+        json!(7),
+        "unsafe demo preflight exit code",
+    )?;
+    ensure(
+        unsafe_run
+            .parsed
+            .pointer("/error/details/preflight/matches")
+            .and_then(Value::as_array)
+            .is_some_and(|matches| !matches.is_empty()),
+        format!(
+            "unsafe demo must include preflight guard matches: {}",
+            unsafe_run.parsed
+        ),
     )
 }
 
