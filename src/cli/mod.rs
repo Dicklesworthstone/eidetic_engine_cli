@@ -39636,6 +39636,7 @@ const DEMO_SHOW_SIDE_EFFECT: &str = "read-only audit ledger inspection; no demo 
 const DEMO_VERIFY_SIDE_EFFECT: &str =
     "read-only artifact verification; no command execution or artifact write";
 const DEMO_OUTPUT_VERIFY_MAX_BYTES: usize = 1024 * 1024;
+const DEMO_ENV_OVERRIDE_REDACTION: &str = "[REDACTED]";
 
 fn demo_workspace_path(cli: &Cli) -> PathBuf {
     cli.resolve_workspace()
@@ -39702,8 +39703,8 @@ fn select_demo_refs<'a>(
 fn sorted_env_overrides(entry: &DemoEntry) -> BTreeMap<String, String> {
     entry
         .env_overrides
-        .iter()
-        .map(|(key, value)| (key.clone(), value.clone()))
+        .keys()
+        .map(|key| (key.clone(), DEMO_ENV_OVERRIDE_REDACTION.to_owned()))
         .collect()
 }
 
