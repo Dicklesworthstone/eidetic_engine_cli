@@ -1,0 +1,349 @@
+---
+source: tests/conformance.rs
+expression: case_catalog(&base_cases)
+---
+[
+  {
+    "id": "ENV-INIT",
+    "surface": "init",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "init"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-REMEMBER",
+    "surface": "remember",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "remember",
+      "Conformance harness memory used to exercise ee.response.v2.",
+      "--level",
+      "procedural",
+      "--kind",
+      "rule"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-SEARCH",
+    "surface": "search",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "search",
+      "conformance response envelope"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-CONTEXT",
+    "surface": "context",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "context",
+      "conformance response envelope",
+      "--max-tokens",
+      "1200"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-WHY",
+    "surface": "why",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "why",
+      "[MEMORY_ID]"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-STATUS",
+    "surface": "status",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "status"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DOCTOR",
+    "surface": "doctor",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "doctor",
+      "--quick"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-CONTEXT-STORAGE-ERROR",
+    "surface": "context missing database",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "context",
+      "missing database recovery contract"
+    ],
+    "expected": "error",
+    "schemaFile": "ee.error.v2.json",
+    "enforcement": "required",
+    "requireRecovery": true
+  },
+  {
+    "id": "ENV-CURATE-SHOW",
+    "surface": "curate show",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "curate",
+      "show",
+      "cand_missing_conformance"
+    ],
+    "expected": "error",
+    "schemaFile": "ee.error.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-REFLECT-PROPOSE",
+    "surface": "reflect propose",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "reflect",
+      "propose",
+      "--kind",
+      "gaps",
+      "--source-memory",
+      "[MEMORY_ID]",
+      "--dry-run"
+    ],
+    "expected": "error",
+    "schemaFile": "ee.error.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-REFLECT-LEDGER-DIAGNOSTICS",
+    "surface": "reflect request-ledger diagnostics",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "reflect",
+      "request-ledger",
+      "diagnostics",
+      "--now",
+      "2026-05-24T00:00:00Z",
+      "--limit",
+      "3"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": {
+      "knownGap": "bd-1wfvv",
+      "reason": "handler still wraps diagnostics in ee.response.v1"
+    },
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-SWARM-BRIEF",
+    "surface": "swarm brief",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "swarm",
+      "brief",
+      "--sources",
+      "none",
+      "--command-timeout-ms",
+      "10"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-SWARM-NEXT-ACTION",
+    "surface": "swarm next-action",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "swarm",
+      "next-action",
+      "--sources",
+      "none",
+      "--command-timeout-ms",
+      "10"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": {
+      "knownGap": "bd-iky0b",
+      "reason": "renderer still wraps next-action in ee.response.v1"
+    },
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-SWARM-WORK-PACKET",
+    "surface": "swarm work-packet",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "swarm",
+      "work-packet",
+      "--sources",
+      "none",
+      "--command-timeout-ms",
+      "10"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-STREAMS",
+    "surface": "diag streams",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "streams"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-PLAN-CACHE",
+    "surface": "diag plan-cache",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "plan-cache"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-DEPENDENCIES",
+    "surface": "diag dependencies",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "dependencies"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-HOST-PROFILE",
+    "surface": "diag host-profile",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "host-profile"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": "required",
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-ARTIFACTS",
+    "surface": "diag artifacts",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "artifacts"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": {
+      "knownGap": "bd-1ctyu",
+      "reason": "diag artifacts still emits ee.response.v1"
+    },
+    "requireRecovery": false
+  },
+  {
+    "id": "ENV-DIAG-BUILD-ADMISSION",
+    "surface": "diag build-admission",
+    "args": [
+      "--json",
+      "--workspace",
+      "[WORKSPACE]",
+      "diag",
+      "build-admission",
+      "--min-free-bytes",
+      "0",
+      "--artifact-destination",
+      "target/sync-down"
+    ],
+    "expected": "success",
+    "schemaFile": "ee.response.v2.json",
+    "enforcement": {
+      "knownGap": "bd-1ctyu",
+      "reason": "diag build-admission still emits ee.response.v1"
+    },
+    "requireRecovery": false
+  }
+]

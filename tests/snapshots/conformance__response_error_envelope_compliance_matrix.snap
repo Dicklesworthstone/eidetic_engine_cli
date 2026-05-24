@@ -1,0 +1,26 @@
+---
+source: tests/conformance.rs
+expression: expected_conformance_matrix(&base_cases)
+---
+| subcommand | envelope | schema file | recovery required | enforcement |
+| --- | --- | --- | --- | --- |
+| init | success | ee.response.v2.json | no | required |
+| remember | success | ee.response.v2.json | no | required |
+| search | success | ee.response.v2.json | no | required |
+| context | success | ee.response.v2.json | no | required |
+| why | success | ee.response.v2.json | no | required |
+| status | success | ee.response.v2.json | no | required |
+| doctor | success | ee.response.v2.json | no | required |
+| context missing database | error | ee.error.v2.json | yes | required |
+| curate show | error | ee.error.v2.json | no | required |
+| reflect propose | error | ee.error.v2.json | no | required |
+| reflect request-ledger diagnostics | success | ee.response.v2.json | no | known gap bd-1wfvv |
+| swarm brief | success | ee.response.v2.json | no | required |
+| swarm next-action | success | ee.response.v2.json | no | known gap bd-iky0b |
+| swarm work-packet | success | ee.response.v2.json | no | required |
+| diag streams | success | ee.response.v2.json | no | required |
+| diag plan-cache | success | ee.response.v2.json | no | required |
+| diag dependencies | success | ee.response.v2.json | no | required |
+| diag host-profile | success | ee.response.v2.json | no | required |
+| diag artifacts | success | ee.response.v2.json | no | known gap bd-1ctyu |
+| diag build-admission | success | ee.response.v2.json | no | known gap bd-1ctyu |
