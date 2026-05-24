@@ -20,6 +20,8 @@
 //! * `--status garbage_status` -> Usage `"unknown candidate status
 //!   `garbage_status`"` with the full vocabulary listed (pending,
 //!   approved, rejected, expired, applied)
+//! * `--target-memory garbage` -> Usage `"invalid target memory ID"`
+//!   + repair `"ee curate candidates --help"`
 //! * Missing database -> Storage repair `"ee init --workspace ."`
 //! * Happy path on empty workspace -> success envelope with empty
 //!   candidates array
@@ -235,6 +237,30 @@ fn curate_candidates_rejects_unknown_status_with_vocabulary_message() -> TestRes
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn curate_candidates_rejects_invalid_target_memory_id_with_usage_repair() -> TestResult {
+    let workspace = unique_workspace("bad-target-memory")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+
+    let (output, parsed) = run_candidates(&workspace_arg, &["--target-memory", "garbage"])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "ee curate candidates --target-memory garbage must fail; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    assert_error_with_repair(
+        &parsed,
+        &["invalid target memory ID", "garbage"],
+        &["ee curate candidates --help"],
+    )
 }
 
 #[test]

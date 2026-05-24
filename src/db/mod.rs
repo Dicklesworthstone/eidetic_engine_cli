@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, SecondsFormat, Utc};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, flock};
@@ -40,6 +41,8 @@ pub const AUDIT_ROW_HASH_VERSION: &str = "ee.audit.row_hash.v1";
 pub const MIGRATION_DRIFT_ERROR_ID: &str = "EE-E040";
 pub const MIGRATION_DRIFT_ERROR_CODE: &str = "migration_drift";
 pub const PACK_REPLAY_LEDGER_SCHEMA_V1: &str = "ee.pack_replay_ledger.v1";
+pub const PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1: &str = "ee.pack_replay_ledger.compressed.v1";
+pub const PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1: &str = "zstd_frame_v1";
 pub const PACK_REPLAY_LEDGER_MISSING: &str = "pack_replay_ledger_missing";
 pub const PACK_REPLAY_LEDGER_MALFORMED: &str = "pack_replay_ledger_malformed";
 pub const PACK_REPLAY_LEDGER_HASH_MISMATCH: &str = "pack_replay_ledger_hash_mismatch";
@@ -5442,6 +5445,114 @@ CREATE INDEX idx_curation_candidates_v062_ttl_policy
     "blake3:v062_create_derived_curation_candidates_2026_05_23",
 );
 
+/// V063: Durable reflection request replay ledger (bd-ogqf6).
+///
+/// External reflection requests cross a trust boundary: ee emits a bounded,
+/// redacted source package, an HMAC challenge, and a requested result schema,
+/// then later accepts at most one matching result as a curation candidate.
+/// This table stores the non-secret replay surface needed to make that flow
+/// auditable and idempotent without persisting raw HMAC key material.
+///
+/// Storage shape:
+/// * `request_id` remains pattern-flexible because the reflection artifact
+///   currently uses `reflect_req_*` IDs while the bead's follow-up wiring may
+///   move generation to UUIDv7.
+/// * `request_hash` is unique and canonical BLAKE3, collapsing repeated
+///   ingestion of the same outbound request.
+/// * source refs and content hashes are JSON-validated and further checked by
+///   repository helpers for non-empty, deterministic, canonical hash content.
+/// * challenge storage is only `challenge_key_id` plus `challenge_hash`
+///   (BLAKE3 of the emitted challenge token), never the HMAC key material.
+/// * consumption is single-accept: a pending request may transition to
+///   `consumed` once, linked to the derived curation candidate row.
+pub const V063_REFLECTION_REQUEST_LEDGER: Migration = Migration::new(
+    63,
+    "reflection_request_ledger",
+    r#"
+CREATE TABLE reflection_request_ledger (
+    request_id TEXT PRIMARY KEY CHECK (
+        length(trim(request_id)) > 0 AND length(request_id) <= 128
+    ),
+    request_hash TEXT NOT NULL UNIQUE CHECK (
+        request_hash GLOB 'blake3:*' AND length(request_hash) = 71
+    ),
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    reflection_kind TEXT NOT NULL CHECK (
+        length(trim(reflection_kind)) > 0 AND length(reflection_kind) <= 128
+    ),
+    source_package_hash TEXT NOT NULL CHECK (
+        source_package_hash GLOB 'blake3:*' AND length(source_package_hash) = 71
+    ),
+    source_refs_json TEXT NOT NULL CHECK (
+        length(trim(source_refs_json)) > 0
+        AND length(source_refs_json) <= 32768
+        AND json_valid(source_refs_json)
+    ),
+    source_content_hashes_json TEXT NOT NULL CHECK (
+        length(trim(source_content_hashes_json)) > 0
+        AND length(source_content_hashes_json) <= 16384
+        AND json_valid(source_content_hashes_json)
+    ),
+    prompt_template_hash TEXT NOT NULL CHECK (
+        prompt_template_hash GLOB 'blake3:*' AND length(prompt_template_hash) = 71
+    ),
+    response_schema_hash TEXT NOT NULL CHECK (
+        response_schema_hash GLOB 'blake3:*' AND length(response_schema_hash) = 71
+    ),
+    created_at TEXT NOT NULL CHECK (length(trim(created_at)) > 0),
+    expires_at TEXT NOT NULL CHECK (length(trim(expires_at)) > 0),
+    challenge_key_id TEXT NOT NULL CHECK (
+        length(trim(challenge_key_id)) > 0 AND length(challenge_key_id) <= 256
+    ),
+    challenge_hash TEXT NOT NULL CHECK (
+        challenge_hash GLOB 'blake3:*' AND length(challenge_hash) = 71
+    ),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (
+        status IN ('pending', 'consumed', 'expired', 'rejected')
+    ),
+    consumed_candidate_id TEXT REFERENCES curation_candidates(id) ON DELETE SET NULL
+        CHECK (
+            consumed_candidate_id IS NULL
+            OR (consumed_candidate_id GLOB 'curate_*' AND length(consumed_candidate_id) = 33)
+        ),
+    consumed_at TEXT CHECK (consumed_at IS NULL OR length(trim(consumed_at)) > 0)
+);
+
+CREATE INDEX idx_reflection_request_ledger_v063_workspace_status
+    ON reflection_request_ledger(workspace_id, status, expires_at, request_id);
+CREATE INDEX idx_reflection_request_ledger_v063_expires
+    ON reflection_request_ledger(expires_at)
+    WHERE status = 'pending';
+CREATE INDEX idx_reflection_request_ledger_v063_consumed_candidate
+    ON reflection_request_ledger(consumed_candidate_id)
+    WHERE consumed_candidate_id IS NOT NULL;
+"#,
+    "blake3:v063_reflection_request_ledger_2026_05_24",
+);
+
+/// V064: Store accepted reflection result hashes for replay idempotency.
+///
+/// V063 records the candidate that consumed a request, but a later ingest path
+/// also needs to distinguish byte-identical replay from a mismatched second
+/// result. This column stores only a canonical BLAKE3 result-artifact hash, not
+/// the result body or raw challenge token.
+pub const V064_REFLECTION_REQUEST_RESULT_REPLAY_HASH: Migration = Migration::new(
+    64,
+    "reflection_request_result_replay_hash",
+    r#"
+ALTER TABLE reflection_request_ledger
+    ADD COLUMN consumed_result_hash TEXT CHECK (
+        consumed_result_hash IS NULL
+        OR (consumed_result_hash GLOB 'blake3:*' AND length(consumed_result_hash) = 71)
+    );
+
+CREATE INDEX idx_reflection_request_ledger_v064_consumed_result_hash
+    ON reflection_request_ledger(workspace_id, consumed_result_hash)
+    WHERE consumed_result_hash IS NOT NULL;
+"#,
+    "blake3:v064_reflection_request_result_replay_hash_2026_05_24",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5506,6 +5617,8 @@ pub const MIGRATIONS: &[Migration] = &[
     V060_ANTI_PATTERN_CURATION_CANDIDATES,
     V061_RCH_VERIFY_LEDGER,
     V062_CREATE_DERIVED_CURATION_CANDIDATES,
+    V063_REFLECTION_REQUEST_LEDGER,
+    V064_REFLECTION_REQUEST_RESULT_REPLAY_HASH,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -15105,6 +15218,24 @@ struct PackSelectionLedger {
     ledger_hash: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompressedPackSelectionLedger {
+    schema: String,
+    ledger_hash: String,
+    compression: PackSelectionLedgerCompression,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackSelectionLedgerCompression {
+    algorithm: String,
+    compressed_payload_base64: String,
+    compressed_byte_len: u64,
+    uncompressed_byte_len: u64,
+    uncompressed_hash: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PackLedgerRequest {
@@ -15199,6 +15330,8 @@ const PACK_ITEM_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_ITEM_INSERT_VALUE_COUNT;
 const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
     PACK_INSERT_MAX_BIND_PARAMS / PACK_OMISSION_INSERT_VALUE_COUNT;
+const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
+const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
 
 impl DbConnection {
     /// Insert a pack record with its items and omissions.
@@ -15403,6 +15536,20 @@ fn build_pack_selection_ledger(
     omissions: &[CreatePackOmissionInput],
     created_at: &str,
 ) -> Result<(String, String)> {
+    let (ledger_json, ledger_hash) =
+        build_uncompressed_pack_selection_ledger(id, input, items, omissions, created_at)?;
+    let stored_ledger_json = store_pack_selection_ledger_json(&ledger_json, &ledger_hash)?;
+
+    Ok((stored_ledger_json, ledger_hash))
+}
+
+fn build_uncompressed_pack_selection_ledger(
+    id: &str,
+    input: &CreatePackRecordInput,
+    items: &[CreatePackItemInput],
+    omissions: &[CreatePackOmissionInput],
+    created_at: &str,
+) -> Result<(String, String)> {
     let mut selected_items = items
         .iter()
         .map(pack_ledger_selected_item)
@@ -15480,6 +15627,38 @@ fn build_pack_selection_ledger(
     let ledger_json = pack_ledger_json(&ledger, "pack selection ledger")?;
 
     Ok((ledger_json, ledger_hash))
+}
+
+fn store_pack_selection_ledger_json(ledger_json: &str, ledger_hash: &str) -> Result<String> {
+    if ledger_json.len() < PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES {
+        return Ok(ledger_json.to_string());
+    }
+
+    let compressed =
+        zstd::bulk::compress(ledger_json.as_bytes(), PACK_REPLAY_LEDGER_COMPRESSION_LEVEL)
+            .map_err(|source| DbError::MalformedRow {
+                operation: DbOperation::Execute,
+                message: format!("pack selection ledger compression failed: {source}"),
+            })?;
+    let compressed_byte_len = compressed.len() as u64;
+    let envelope = CompressedPackSelectionLedger {
+        schema: PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1.to_string(),
+        ledger_hash: ledger_hash.to_string(),
+        compression: PackSelectionLedgerCompression {
+            algorithm: PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1.to_string(),
+            compressed_payload_base64: BASE64_STANDARD.encode(&compressed),
+            compressed_byte_len,
+            uncompressed_byte_len: ledger_json.len() as u64,
+            uncompressed_hash: blake3_text_hash(ledger_json),
+        },
+    };
+    let compressed_json = pack_ledger_json(&envelope, "compressed pack selection ledger")?;
+
+    if compressed_json.len() < ledger_json.len() {
+        Ok(compressed_json)
+    } else {
+        Ok(ledger_json.to_string())
+    }
 }
 
 fn latest_schema_version() -> u32 {
@@ -15583,7 +15762,19 @@ pub fn pack_ledger_degradation(
 }
 
 pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
-    let Some(raw_ledger) = record.ledger_json.as_deref() else {
+    parse_pack_ledger_fields(
+        &record.id,
+        record.ledger_json.as_deref(),
+        record.ledger_hash.as_deref(),
+    )
+}
+
+pub fn parse_pack_ledger_fields(
+    pack_id: &str,
+    raw_ledger: Option<&str>,
+    expected_hash: Option<&str>,
+) -> ParsedPackLedger {
+    let Some(raw_ledger) = raw_ledger else {
         return ParsedPackLedger {
             status: PackLedgerStatus::Missing,
             ledger: None,
@@ -15592,32 +15783,22 @@ pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
                 "Pack selection ledger is missing for this pack record.",
                 "medium",
                 Some("Rebuild the pack with a binary that persists selection ledgers."),
-                serde_json::json!({"packId": record.id}),
+                serde_json::json!({"packId": pack_id}),
             )],
         };
     };
 
-    let parsed = match serde_json::from_str::<serde_json::Value>(raw_ledger) {
+    let parsed = match decode_pack_ledger_value(pack_id, raw_ledger) {
         Ok(value) => value,
-        Err(error) => {
+        Err(degraded) => {
             return ParsedPackLedger {
                 status: PackLedgerStatus::Malformed,
                 ledger: None,
-                degraded: vec![pack_ledger_degradation(
-                    PACK_REPLAY_LEDGER_MALFORMED,
-                    "Pack selection ledger is malformed and cannot be replayed.",
-                    "high",
-                    Some("Inspect the pack record and rebuild the pack if possible."),
-                    serde_json::json!({
-                        "packId": record.id,
-                        "parseError": error.to_string(),
-                    }),
-                )],
+                degraded: vec![degraded],
             };
         }
     };
 
-    let expected_hash = record.ledger_hash.as_deref();
     let actual_hash = parsed
         .get("ledgerHash")
         .and_then(serde_json::Value::as_str)
@@ -15632,7 +15813,7 @@ pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
                 "high",
                 Some("Treat this replay as diagnostic only and inspect the database."),
                 serde_json::json!({
-                    "packId": record.id,
+                    "packId": pack_id,
                     "recordLedgerHash": expected_hash,
                     "ledgerHash": actual_hash,
                 }),
@@ -15645,6 +15826,217 @@ pub fn parse_stored_pack_ledger(record: &StoredPackRecord) -> ParsedPackLedger {
         ledger: Some(parsed),
         degraded: Vec::new(),
     }
+}
+
+pub fn pack_ledger_storage_summary(raw_ledger: Option<&str>) -> serde_json::Value {
+    let Some(raw_ledger) = raw_ledger else {
+        return serde_json::json!({
+            "mode": "missing",
+            "schema": null,
+            "algorithm": null,
+            "compressedBytes": null,
+            "uncompressedBytes": null,
+            "payloadIncluded": false,
+        });
+    };
+    let raw_bytes = raw_ledger.len() as u64;
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_ledger) else {
+        return serde_json::json!({
+            "mode": "malformed",
+            "schema": null,
+            "algorithm": null,
+            "compressedBytes": null,
+            "uncompressedBytes": raw_bytes,
+            "payloadIncluded": false,
+        });
+    };
+    let schema = parsed.get("schema").and_then(serde_json::Value::as_str);
+    if schema == Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1) {
+        let compression = parsed
+            .get("compression")
+            .unwrap_or(&serde_json::Value::Null);
+        return serde_json::json!({
+            "mode": "compressed_in_row",
+            "schema": schema,
+            "ledgerHash": parsed.get("ledgerHash").and_then(serde_json::Value::as_str),
+            "algorithm": compression.get("algorithm").and_then(serde_json::Value::as_str),
+            "compressedBytes": compression.get("compressedByteLen").and_then(serde_json::Value::as_u64),
+            "uncompressedBytes": compression.get("uncompressedByteLen").and_then(serde_json::Value::as_u64),
+            "uncompressedHash": compression.get("uncompressedHash").and_then(serde_json::Value::as_str),
+            "payloadIncluded": false,
+        });
+    }
+
+    serde_json::json!({
+        "mode": "uncompressed_in_row",
+        "schema": schema,
+        "algorithm": null,
+        "compressedBytes": null,
+        "uncompressedBytes": raw_bytes,
+        "payloadIncluded": false,
+    })
+}
+
+fn decode_pack_ledger_value(
+    pack_id: &str,
+    raw_ledger: &str,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw_ledger).map_err(|error| {
+        malformed_pack_ledger_degradation(
+            pack_id,
+            serde_json::json!({
+                "packId": pack_id,
+                "parseError": error.to_string(),
+            }),
+        )
+    })?;
+    if parsed.get("schema").and_then(serde_json::Value::as_str)
+        != Some(PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1)
+    {
+        return Ok(parsed);
+    }
+
+    decode_compressed_pack_ledger_value(pack_id, parsed)
+}
+
+fn decode_compressed_pack_ledger_value(
+    pack_id: &str,
+    envelope_value: serde_json::Value,
+) -> std::result::Result<serde_json::Value, serde_json::Value> {
+    let envelope = serde_json::from_value::<CompressedPackSelectionLedger>(envelope_value)
+        .map_err(|error| {
+            compressed_pack_ledger_degradation(
+                pack_id,
+                "compressedEnvelope",
+                format!("compressed ledger envelope is malformed: {error}"),
+            )
+        })?;
+    if envelope.compression.algorithm != PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1 {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "algorithm",
+            format!(
+                "unsupported compression algorithm {}",
+                envelope.compression.algorithm
+            ),
+        ));
+    }
+    let compressed = BASE64_STANDARD
+        .decode(&envelope.compression.compressed_payload_base64)
+        .map_err(|error| {
+            compressed_pack_ledger_degradation(
+                pack_id,
+                "base64",
+                format!("compressed ledger payload is not base64: {error}"),
+            )
+        })?;
+    if compressed.len() as u64 != envelope.compression.compressed_byte_len {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "compressedByteLen",
+            format!(
+                "compressed byte length mismatch expected={} actual={}",
+                envelope.compression.compressed_byte_len,
+                compressed.len()
+            ),
+        ));
+    }
+    let capacity = usize::try_from(envelope.compression.uncompressed_byte_len).map_err(|_| {
+        compressed_pack_ledger_degradation(
+            pack_id,
+            "uncompressedByteLen",
+            format!(
+                "uncompressed byte length does not fit usize: {}",
+                envelope.compression.uncompressed_byte_len
+            ),
+        )
+    })?;
+    let uncompressed = zstd::bulk::decompress(&compressed, capacity).map_err(|error| {
+        compressed_pack_ledger_degradation(
+            pack_id,
+            "zstd",
+            format!("compressed ledger payload could not be decompressed: {error}"),
+        )
+    })?;
+    if uncompressed.len() as u64 != envelope.compression.uncompressed_byte_len {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "uncompressedByteLen",
+            format!(
+                "uncompressed byte length mismatch expected={} actual={}",
+                envelope.compression.uncompressed_byte_len,
+                uncompressed.len()
+            ),
+        ));
+    }
+    let actual_hash = blake3_bytes_hash(&uncompressed);
+    if actual_hash != envelope.compression.uncompressed_hash {
+        return Err(compressed_pack_ledger_degradation(
+            pack_id,
+            "uncompressedHash",
+            format!(
+                "uncompressed hash mismatch expected={} actual={actual_hash}",
+                envelope.compression.uncompressed_hash
+            ),
+        ));
+    }
+    let uncompressed_json = String::from_utf8(uncompressed).map_err(|error| {
+        compressed_pack_ledger_degradation(
+            pack_id,
+            "utf8",
+            format!("uncompressed ledger is not valid UTF-8: {error}"),
+        )
+    })?;
+    serde_json::from_str::<serde_json::Value>(&uncompressed_json).map_err(|error| {
+        malformed_pack_ledger_degradation(
+            pack_id,
+            serde_json::json!({
+                "packId": pack_id,
+                "compression": {
+                    "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
+                    "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
+                    "stage": "uncompressedJson",
+                    "error": error.to_string(),
+                },
+            }),
+        )
+    })
+}
+
+fn malformed_pack_ledger_degradation(
+    pack_id: &str,
+    details: serde_json::Value,
+) -> serde_json::Value {
+    let mut details = details;
+    if details.get("packId").is_none() {
+        details["packId"] = serde_json::Value::String(pack_id.to_string());
+    }
+    pack_ledger_degradation(
+        PACK_REPLAY_LEDGER_MALFORMED,
+        "Pack selection ledger is malformed and cannot be replayed.",
+        "high",
+        Some("Inspect the pack record and rebuild the pack if possible."),
+        details,
+    )
+}
+
+fn compressed_pack_ledger_degradation(
+    pack_id: &str,
+    stage: &str,
+    error: String,
+) -> serde_json::Value {
+    malformed_pack_ledger_degradation(
+        pack_id,
+        serde_json::json!({
+            "packId": pack_id,
+            "compression": {
+                "schema": PACK_REPLAY_LEDGER_COMPRESSED_SCHEMA_V1,
+                "algorithm": PACK_REPLAY_LEDGER_COMPRESSION_ALGORITHM_ZSTD_V1,
+                "stage": stage,
+                "error": error,
+            },
+        }),
+    )
 }
 
 pub fn pack_ledger_core_value<'a>(
@@ -15697,7 +16089,11 @@ fn pack_ledger_json<T: Serialize>(value: &T, context: &str) -> Result<String> {
 }
 
 fn blake3_text_hash(value: &str) -> String {
-    format!("blake3:{}", blake3::hash(value.as_bytes()).to_hex())
+    blake3_bytes_hash(value.as_bytes())
+}
+
+fn blake3_bytes_hash(value: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(value).to_hex())
 }
 
 fn append_multi_row_placeholders(sql: &mut String, row_count: usize, values_per_row: usize) {
@@ -18120,6 +18516,689 @@ fn optional_text_value(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |raw| Value::Text(raw.to_string()))
 }
 
+/// Input for persisting one outbound reflection request in the replay ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateReflectionRequestLedgerInput {
+    pub workspace_id: String,
+    pub request_hash: String,
+    pub reflection_kind: String,
+    pub source_package_hash: String,
+    pub source_refs_json: String,
+    pub source_content_hashes_json: String,
+    pub prompt_template_hash: String,
+    pub response_schema_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub challenge_key_id: String,
+    pub challenge_hash: String,
+}
+
+/// One stored reflection request ledger row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoredReflectionRequestLedger {
+    pub request_id: String,
+    pub request_hash: String,
+    pub workspace_id: String,
+    pub reflection_kind: String,
+    pub source_package_hash: String,
+    pub source_refs_json: String,
+    pub source_content_hashes_json: String,
+    pub prompt_template_hash: String,
+    pub response_schema_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub challenge_key_id: String,
+    pub challenge_hash: String,
+    pub status: String,
+    pub consumed_candidate_id: Option<String>,
+    pub consumed_at: Option<String>,
+    pub consumed_result_hash: Option<String>,
+}
+
+/// Outcome of inserting a reflection request ledger row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReflectionRequestLedgerIngestOutcome {
+    Inserted,
+    Duplicate,
+}
+
+/// Replay posture for a submitted reflection result against the request ledger.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflectionRequestReplayStatus {
+    Missing,
+    Pending,
+    Expired {
+        expires_at: String,
+    },
+    AcceptedReplay {
+        candidate_id: String,
+    },
+    MismatchedReplay {
+        existing_candidate_id: Option<String>,
+    },
+    UnavailableStatus {
+        status: String,
+    },
+}
+
+/// Outcome of atomically creating a reflection-derived curation candidate and
+/// consuming the matching request ledger row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReflectionRequestCandidateConsumptionOutcome {
+    InsertedAndConsumed,
+    AcceptedReplay {
+        candidate_id: String,
+    },
+    Expired {
+        expires_at: String,
+    },
+    MismatchedReplay {
+        existing_candidate_id: Option<String>,
+    },
+    Missing,
+    UnavailableStatus {
+        status: String,
+    },
+}
+
+const REFLECTION_REQUEST_LEDGER_DIAGNOSTIC_LIMIT_MAX: u32 = 500;
+
+impl DbConnection {
+    /// Insert one outbound reflection request into the replay ledger.
+    ///
+    /// The unique `request_hash` makes repeated emission idempotent. A reused
+    /// `request_id` with different request content is rejected as malformed
+    /// rather than being treated as a duplicate.
+    pub fn insert_reflection_request_ledger(
+        &self,
+        request_id: &str,
+        input: &CreateReflectionRequestLedgerInput,
+    ) -> Result<ReflectionRequestLedgerIngestOutcome> {
+        validate_reflection_request_ledger_insert(request_id, input)?;
+
+        let changes_before = self.changes_total()?;
+        self.execute_for(
+            DbOperation::Execute,
+            "INSERT OR IGNORE INTO reflection_request_ledger (\
+                 request_id, request_hash, workspace_id, reflection_kind, source_package_hash, \
+                 source_refs_json, source_content_hashes_json, prompt_template_hash, \
+                 response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
+                 status, consumed_candidate_id, consumed_at\
+             ) VALUES (\
+                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending', NULL, NULL\
+             )",
+            &[
+                Value::Text(request_id.trim().to_owned()),
+                Value::Text(input.request_hash.trim().to_owned()),
+                Value::Text(input.workspace_id.trim().to_owned()),
+                Value::Text(input.reflection_kind.trim().to_owned()),
+                Value::Text(input.source_package_hash.trim().to_owned()),
+                Value::Text(input.source_refs_json.clone()),
+                Value::Text(input.source_content_hashes_json.clone()),
+                Value::Text(input.prompt_template_hash.trim().to_owned()),
+                Value::Text(input.response_schema_hash.trim().to_owned()),
+                Value::Text(input.created_at.trim().to_owned()),
+                Value::Text(input.expires_at.trim().to_owned()),
+                Value::Text(input.challenge_key_id.trim().to_owned()),
+                Value::Text(input.challenge_hash.trim().to_owned()),
+            ],
+        )?;
+        let changes_after = self.changes_total()?;
+        if changes_after > changes_before {
+            return Ok(ReflectionRequestLedgerIngestOutcome::Inserted);
+        }
+
+        if let Some(existing) =
+            self.get_reflection_request_ledger(&input.workspace_id, request_id)?
+        {
+            if existing.request_hash == input.request_hash {
+                return Ok(ReflectionRequestLedgerIngestOutcome::Duplicate);
+            }
+            return Err(malformed_reflection_request_ledger_input(
+                "request_id already exists with a different request_hash",
+            ));
+        }
+        if self
+            .get_reflection_request_ledger_by_hash(&input.workspace_id, &input.request_hash)?
+            .is_some()
+        {
+            return Ok(ReflectionRequestLedgerIngestOutcome::Duplicate);
+        }
+
+        Err(malformed_reflection_request_ledger_input(
+            "reflection request ledger insert was ignored by SQLite without a matching row",
+        ))
+    }
+
+    /// Get one reflection request ledger row by workspace and request id.
+    pub fn get_reflection_request_ledger(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+    ) -> Result<Option<StoredReflectionRequestLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT request_id, request_hash, workspace_id, reflection_kind, source_package_hash, \
+             source_refs_json, source_content_hashes_json, prompt_template_hash, \
+             response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
+             status, consumed_candidate_id, consumed_at, consumed_result_hash \
+             FROM reflection_request_ledger WHERE workspace_id = ?1 AND request_id = ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(request_id.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_reflection_request_ledger_from_row)
+            .transpose()
+    }
+
+    /// Get one reflection request ledger row by workspace and request hash.
+    pub fn get_reflection_request_ledger_by_hash(
+        &self,
+        workspace_id: &str,
+        request_hash: &str,
+    ) -> Result<Option<StoredReflectionRequestLedger>> {
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT request_id, request_hash, workspace_id, reflection_kind, source_package_hash, \
+             source_refs_json, source_content_hashes_json, prompt_template_hash, \
+             response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
+             status, consumed_candidate_id, consumed_at, consumed_result_hash \
+             FROM reflection_request_ledger WHERE workspace_id = ?1 AND request_hash = ?2",
+            &[
+                Value::Text(workspace_id.to_owned()),
+                Value::Text(request_hash.to_owned()),
+            ],
+        )?;
+        rows.first()
+            .map(stored_reflection_request_ledger_from_row)
+            .transpose()
+    }
+
+    /// List reflection request ledger rows for bounded diagnostic views.
+    pub fn list_reflection_request_ledger_for_diagnostics(
+        &self,
+        workspace_id: &str,
+        status: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<StoredReflectionRequestLedger>> {
+        validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
+        let status = validate_reflection_request_ledger_status_filter(status)?;
+        let limit = validate_reflection_request_ledger_diagnostic_limit(limit)?;
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT request_id, request_hash, workspace_id, reflection_kind, source_package_hash, \
+             source_refs_json, source_content_hashes_json, prompt_template_hash, \
+             response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
+             status, consumed_candidate_id, consumed_at, consumed_result_hash \
+             FROM reflection_request_ledger \
+             WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) \
+             ORDER BY expires_at ASC, created_at ASC, request_id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.trim().to_owned()),
+                status.map_or(Value::Null, Value::Text),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter()
+            .map(stored_reflection_request_ledger_from_row)
+            .collect()
+    }
+
+    /// List pending reflection request ledger rows that are expired at `now`.
+    pub fn list_expired_reflection_request_ledger_for_diagnostics(
+        &self,
+        workspace_id: &str,
+        now: &str,
+        limit: u32,
+    ) -> Result<Vec<StoredReflectionRequestLedger>> {
+        validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
+        parse_reflection_rfc3339(now, "now")?;
+        let limit = validate_reflection_request_ledger_diagnostic_limit(limit)?;
+
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT request_id, request_hash, workspace_id, reflection_kind, source_package_hash, \
+             source_refs_json, source_content_hashes_json, prompt_template_hash, \
+             response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
+             status, consumed_candidate_id, consumed_at, consumed_result_hash \
+             FROM reflection_request_ledger \
+             WHERE workspace_id = ?1 AND status = 'pending' AND expires_at <= ?2 \
+             ORDER BY expires_at ASC, created_at ASC, request_id ASC LIMIT ?3",
+            &[
+                Value::Text(workspace_id.trim().to_owned()),
+                Value::Text(now.trim().to_owned()),
+                Value::BigInt(i64::from(limit)),
+            ],
+        )?;
+        rows.iter()
+            .map(stored_reflection_request_ledger_from_row)
+            .collect()
+    }
+
+    /// Mark a pending reflection request as consumed by a derived curation
+    /// candidate. Returns false if the request is missing, already consumed, or
+    /// expired at `consumed_at`.
+    pub fn mark_reflection_request_consumed(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        candidate_id: &str,
+        result_hash: &str,
+        consumed_at: &str,
+    ) -> Result<bool> {
+        validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
+        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_candidate_id(candidate_id)?;
+        validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
+        parse_reflection_rfc3339(consumed_at, "consumed_at")?;
+
+        let affected = self.execute_for(
+            DbOperation::Execute,
+            "UPDATE reflection_request_ledger \
+             SET status = 'consumed', consumed_candidate_id = ?1, consumed_result_hash = ?2, consumed_at = ?3 \
+             WHERE workspace_id = ?4 AND request_id = ?5 AND status = 'pending' \
+             AND expires_at > ?3",
+            &[
+                Value::Text(candidate_id.to_owned()),
+                Value::Text(result_hash.trim().to_owned()),
+                Value::Text(consumed_at.trim().to_owned()),
+                Value::Text(workspace_id.trim().to_owned()),
+                Value::Text(request_id.trim().to_owned()),
+            ],
+        )?;
+        Ok(affected > 0)
+    }
+
+    /// Resolve whether a submitted result can proceed, is a byte-identical
+    /// replay, or conflicts with an already-consumed request.
+    pub fn reflection_request_replay_status(
+        &self,
+        workspace_id: &str,
+        request_id: &str,
+        result_hash: &str,
+        now: &str,
+    ) -> Result<ReflectionRequestReplayStatus> {
+        validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
+        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
+        let now = parse_reflection_rfc3339(now, "now")?;
+
+        let Some(stored) = self.get_reflection_request_ledger(workspace_id, request_id)? else {
+            return Ok(ReflectionRequestReplayStatus::Missing);
+        };
+        match stored.status.as_str() {
+            "pending" => {
+                let expires = parse_reflection_rfc3339(&stored.expires_at, "expires_at")?;
+                if expires <= now {
+                    Ok(ReflectionRequestReplayStatus::Expired {
+                        expires_at: stored.expires_at,
+                    })
+                } else {
+                    Ok(ReflectionRequestReplayStatus::Pending)
+                }
+            }
+            "consumed" => {
+                if stored.consumed_result_hash.as_deref() == Some(result_hash.trim()) {
+                    if let Some(candidate_id) = stored.consumed_candidate_id {
+                        return Ok(ReflectionRequestReplayStatus::AcceptedReplay { candidate_id });
+                    }
+                }
+                Ok(ReflectionRequestReplayStatus::MismatchedReplay {
+                    existing_candidate_id: stored.consumed_candidate_id,
+                })
+            }
+            other => Ok(ReflectionRequestReplayStatus::UnavailableStatus {
+                status: other.to_owned(),
+            }),
+        }
+    }
+
+    /// Insert the derived reflection result candidate and consume the matching
+    /// request ledger row in one transaction.
+    ///
+    /// If the ledger row is missing, expired, already consumed, or otherwise
+    /// unavailable, no candidate row is inserted. Byte-identical replays return
+    /// the original candidate id without creating a duplicate.
+    pub fn insert_reflection_result_candidate_and_consume_ledger(
+        &self,
+        request_id: &str,
+        candidate_id: &str,
+        candidate: &CreateCurationCandidateInput,
+        result_hash: &str,
+        consumed_at: &str,
+    ) -> Result<ReflectionRequestCandidateConsumptionOutcome> {
+        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_candidate_id(candidate_id)?;
+        validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
+        parse_reflection_rfc3339(consumed_at, "consumed_at")?;
+
+        self.with_transaction(|| {
+            match self.reflection_request_replay_status(
+                &candidate.workspace_id,
+                request_id,
+                result_hash,
+                consumed_at,
+            )? {
+                ReflectionRequestReplayStatus::Missing => {
+                    Ok(ReflectionRequestCandidateConsumptionOutcome::Missing)
+                }
+                ReflectionRequestReplayStatus::Expired { expires_at } => {
+                    Ok(ReflectionRequestCandidateConsumptionOutcome::Expired { expires_at })
+                }
+                ReflectionRequestReplayStatus::AcceptedReplay { candidate_id } => {
+                    Ok(ReflectionRequestCandidateConsumptionOutcome::AcceptedReplay {
+                        candidate_id,
+                    })
+                }
+                ReflectionRequestReplayStatus::MismatchedReplay {
+                    existing_candidate_id,
+                } => Ok(
+                    ReflectionRequestCandidateConsumptionOutcome::MismatchedReplay {
+                        existing_candidate_id,
+                    },
+                ),
+                ReflectionRequestReplayStatus::UnavailableStatus { status } => {
+                    Ok(ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus { status })
+                }
+                ReflectionRequestReplayStatus::Pending => {
+                    self.insert_curation_candidate(candidate_id, candidate)?;
+                    let consumed = self.mark_reflection_request_consumed(
+                        &candidate.workspace_id,
+                        request_id,
+                        candidate_id,
+                        result_hash,
+                        consumed_at,
+                    )?;
+                    if consumed {
+                        Ok(ReflectionRequestCandidateConsumptionOutcome::InsertedAndConsumed)
+                    } else {
+                        Err(malformed_reflection_request_ledger_input(
+                            "pending reflection request became unavailable during candidate consumption",
+                        ))
+                    }
+                }
+            }
+        })
+    }
+}
+
+fn validate_reflection_request_ledger_insert(
+    request_id: &str,
+    input: &CreateReflectionRequestLedgerInput,
+) -> Result<()> {
+    validate_reflection_required_text(request_id, "request_id", 128)?;
+    validate_reflection_required_text(&input.workspace_id, "workspace_id", 128)?;
+    validate_reflection_required_text(&input.reflection_kind, "reflection_kind", 128)?;
+    validate_reflection_required_text(&input.challenge_key_id, "challenge_key_id", 256)?;
+    validate_reflection_blake3_hash(&input.request_hash, "request_hash")?;
+    validate_reflection_blake3_hash(&input.source_package_hash, "source_package_hash")?;
+    validate_reflection_blake3_hash(&input.prompt_template_hash, "prompt_template_hash")?;
+    validate_reflection_blake3_hash(&input.response_schema_hash, "response_schema_hash")?;
+    validate_reflection_blake3_hash(&input.challenge_hash, "challenge_hash")?;
+    validate_reflection_json_bounds(&input.source_refs_json, "source_refs_json", 32768)?;
+    validate_reflection_source_refs_json(&input.source_refs_json)?;
+    validate_reflection_json_bounds(
+        &input.source_content_hashes_json,
+        "source_content_hashes_json",
+        16384,
+    )?;
+    validate_reflection_source_content_hashes_json(&input.source_content_hashes_json)?;
+
+    let created = parse_reflection_rfc3339(&input.created_at, "created_at")?;
+    let expires = parse_reflection_rfc3339(&input.expires_at, "expires_at")?;
+    if expires <= created {
+        return Err(malformed_reflection_request_ledger_input(
+            "expires_at must be later than created_at",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_reflection_required_text(
+    value: &str,
+    field: &'static str,
+    max_len: usize,
+) -> Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "{field} must not be empty"
+        )));
+    }
+    if trimmed.len() > max_len {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "{field} must be at most {max_len} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_reflection_blake3_hash(value: &str, field: &'static str) -> Result<()> {
+    if is_canonical_blake3_content_hash(value.trim()) {
+        Ok(())
+    } else {
+        Err(malformed_reflection_request_ledger_input(&format!(
+            "{field} must be a canonical blake3 hash"
+        )))
+    }
+}
+
+fn validate_reflection_json_bounds(value: &str, field: &'static str, max_len: usize) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "{field} must not be empty"
+        )));
+    }
+    if value.len() > max_len {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "{field} must be at most {max_len} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_reflection_source_refs_json(raw: &str) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        malformed_reflection_request_ledger_input(&format!(
+            "source_refs_json must be valid JSON: {error}"
+        ))
+    })?;
+    let refs = parsed.as_array().ok_or_else(|| {
+        malformed_reflection_request_ledger_input("source_refs_json must be a JSON array")
+    })?;
+    if refs.is_empty() {
+        return Err(malformed_reflection_request_ledger_input(
+            "source_refs_json must include at least one source",
+        ));
+    }
+
+    let mut seen = BTreeSet::<(String, String)>::new();
+    for source_ref in refs {
+        let object = source_ref.as_object().ok_or_else(|| {
+            malformed_reflection_request_ledger_input("each source ref must be a JSON object")
+        })?;
+        let kind = reflection_trimmed_json_string(object.get("kind"), "reflection source kind")?;
+        if !matches!(kind, "memory" | "evidence_span") {
+            return Err(malformed_reflection_request_ledger_input(
+                "reflection source kind must be memory or evidence_span",
+            ));
+        }
+        let id = reflection_trimmed_json_string(object.get("id"), "reflection source id")?;
+        let content_hash = reflection_trimmed_json_string(
+            object.get("contentHash"),
+            "reflection source contentHash",
+        )?;
+        if !is_canonical_blake3_content_hash(content_hash) {
+            return Err(malformed_reflection_request_ledger_input(
+                "reflection source contentHash must be a canonical blake3 hash",
+            ));
+        }
+        if !seen.insert((kind.to_owned(), id.to_owned())) {
+            return Err(malformed_reflection_request_ledger_input(
+                "source_refs_json must not contain duplicate sources",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_reflection_source_content_hashes_json(raw: &str) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        malformed_reflection_request_ledger_input(&format!(
+            "source_content_hashes_json must be valid JSON: {error}"
+        ))
+    })?;
+    let values = parsed.as_array().ok_or_else(|| {
+        malformed_reflection_request_ledger_input("source_content_hashes_json must be a JSON array")
+    })?;
+    if values.is_empty() {
+        return Err(malformed_reflection_request_ledger_input(
+            "source_content_hashes_json must include at least one hash",
+        ));
+    }
+
+    let mut canonical = Vec::with_capacity(values.len());
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let Some(hash) = value.as_str().map(str::trim) else {
+            return Err(malformed_reflection_request_ledger_input(
+                "source_content_hashes_json entries must be strings",
+            ));
+        };
+        if !is_canonical_blake3_content_hash(hash) {
+            return Err(malformed_reflection_request_ledger_input(
+                "source_content_hashes_json entries must be canonical blake3 hashes",
+            ));
+        }
+        if !seen.insert(hash.to_owned()) {
+            return Err(malformed_reflection_request_ledger_input(
+                "source_content_hashes_json must not contain duplicate hashes",
+            ));
+        }
+        canonical.push(hash.to_owned());
+    }
+
+    let sorted = seen.into_iter().collect::<Vec<_>>();
+    if canonical != sorted {
+        return Err(malformed_reflection_request_ledger_input(
+            "source_content_hashes_json must be sorted in ascending canonical order",
+        ));
+    }
+    Ok(())
+}
+
+fn reflection_trimmed_json_string<'a>(
+    value: Option<&'a serde_json::Value>,
+    label: &'static str,
+) -> Result<&'a str> {
+    let value = value.and_then(serde_json::Value::as_str).ok_or_else(|| {
+        malformed_reflection_request_ledger_input(&format!("{label} must be a string"))
+    })?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "{label} must not be empty"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_reflection_candidate_id(candidate_id: &str) -> Result<()> {
+    let candidate_id = candidate_id.trim();
+    if candidate_id.starts_with("curate_") && candidate_id.len() == 33 {
+        Ok(())
+    } else {
+        Err(malformed_reflection_request_ledger_input(
+            "consumed_candidate_id must be a 33-character curate_* id",
+        ))
+    }
+}
+
+fn validate_reflection_request_ledger_status_filter(
+    status: Option<&str>,
+) -> Result<Option<String>> {
+    status
+        .map(|raw| {
+            let status = raw.trim();
+            if matches!(status, "pending" | "consumed" | "expired" | "rejected") {
+                Ok(Some(status.to_owned()))
+            } else {
+                Err(malformed_reflection_request_ledger_input(
+                    "status filter must be pending, consumed, expired, or rejected",
+                ))
+            }
+        })
+        .unwrap_or(Ok(None))
+}
+
+fn validate_reflection_request_ledger_diagnostic_limit(limit: u32) -> Result<u32> {
+    if limit == 0 {
+        return Err(malformed_reflection_request_ledger_input(
+            "diagnostic limit must be greater than zero",
+        ));
+    }
+    if limit > REFLECTION_REQUEST_LEDGER_DIAGNOSTIC_LIMIT_MAX {
+        return Err(malformed_reflection_request_ledger_input(&format!(
+            "diagnostic limit must be at most {REFLECTION_REQUEST_LEDGER_DIAGNOSTIC_LIMIT_MAX}"
+        )));
+    }
+    Ok(limit)
+}
+
+fn parse_reflection_rfc3339(
+    value: &str,
+    field: &'static str,
+) -> Result<DateTime<chrono::FixedOffset>> {
+    DateTime::parse_from_rfc3339(value.trim()).map_err(|error| {
+        malformed_reflection_request_ledger_input(&format!("{field} must be RFC3339: {error}"))
+    })
+}
+
+fn malformed_reflection_request_ledger_input(message: &str) -> DbError {
+    DbError::MalformedRow {
+        operation: DbOperation::Execute,
+        message: format!("invalid reflection request ledger input: {message}"),
+    }
+}
+
+fn stored_reflection_request_ledger_from_row(row: &Row) -> Result<StoredReflectionRequestLedger> {
+    Ok(StoredReflectionRequestLedger {
+        request_id: required_text(row, 0, DbOperation::Query, "request_id")?.to_string(),
+        request_hash: required_text(row, 1, DbOperation::Query, "request_hash")?.to_string(),
+        workspace_id: required_text(row, 2, DbOperation::Query, "workspace_id")?.to_string(),
+        reflection_kind: required_text(row, 3, DbOperation::Query, "reflection_kind")?.to_string(),
+        source_package_hash: required_text(row, 4, DbOperation::Query, "source_package_hash")?
+            .to_string(),
+        source_refs_json: required_text(row, 5, DbOperation::Query, "source_refs_json")?
+            .to_string(),
+        source_content_hashes_json: required_text(
+            row,
+            6,
+            DbOperation::Query,
+            "source_content_hashes_json",
+        )?
+        .to_string(),
+        prompt_template_hash: required_text(row, 7, DbOperation::Query, "prompt_template_hash")?
+            .to_string(),
+        response_schema_hash: required_text(row, 8, DbOperation::Query, "response_schema_hash")?
+            .to_string(),
+        created_at: required_text(row, 9, DbOperation::Query, "created_at")?.to_string(),
+        expires_at: required_text(row, 10, DbOperation::Query, "expires_at")?.to_string(),
+        challenge_key_id: required_text(row, 11, DbOperation::Query, "challenge_key_id")?
+            .to_string(),
+        challenge_hash: required_text(row, 12, DbOperation::Query, "challenge_hash")?.to_string(),
+        status: required_text(row, 13, DbOperation::Query, "status")?.to_string(),
+        consumed_candidate_id: optional_text(row, 14)?.map(str::to_string),
+        consumed_at: optional_text(row, 15)?.map(str::to_string),
+        consumed_result_hash: optional_text(row, 16)?.map(str::to_string),
+    })
+}
+
 fn stored_rch_verify_run_from_row(row: &Row) -> Result<StoredRchVerifyRun> {
     Ok(StoredRchVerifyRun {
         id: required_text(row, 0, DbOperation::Query, "id")?.to_string(),
@@ -18195,14 +19274,16 @@ mod tests {
     use sqlmodel_core::{Row, Value};
 
     use super::{
-        CreateArtifactInput, CreateArtifactLinkInput, CreateGraphAlgorithmResultInput,
-        CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, CreateProceduralRuleInput,
-        CreateRecorderEventInput, CreateRecorderRunInput, CreateTaskEpisodeInput,
+        CreateArtifactInput, CreateArtifactLinkInput, CreateCurationCandidateInput,
+        CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput,
+        CreateGraphSnapshotInput, CreateProceduralRuleInput, CreateRecorderEventInput,
+        CreateRecorderRunInput, CreateReflectionRequestLedgerInput, CreateTaskEpisodeInput,
         CreateWorkspaceInput, DatabaseConfig, DatabaseLocation, DatabaseOpenMode, DbConnection,
         DbError, DbOperation, GraphSnapshotStatus, GraphSnapshotType, MIGRATION_TABLE_NAME,
-        Migration, MigrationRecord, MigrationTableColumn, StoredEpisodeAction,
-        UpdateProceduralRuleLifecycleInput, WalCheckpointMode, file_write_owner_depth_for_test,
-        file_write_owner_gate_address_for_test, lock_file_write_owner_gate, subsystem_name,
+        Migration, MigrationRecord, MigrationTableColumn, ReflectionRequestLedgerIngestOutcome,
+        ReflectionRequestReplayStatus, StoredEpisodeAction, UpdateProceduralRuleLifecycleInput,
+        WalCheckpointMode, file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
+        lock_file_write_owner_gate, subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
@@ -28066,6 +29147,159 @@ mod tests {
     }
 
     #[test]
+    fn compressed_pack_selection_ledger_replays_to_canonical_json() -> TestResult {
+        use base64::Engine as _;
+
+        let pack_id = "pack_000000000000000000000zstd1";
+        let items = (1..=96)
+            .map(|rank| {
+                let memory_id = format!("mem_{rank:026}");
+                let mut item = pack_item_input(pack_id, &memory_id, rank);
+                item.why = format!(
+                    "Selected repeated compression fixture memory {rank}: {}",
+                    "release formatting guardrail ".repeat(12)
+                );
+                item.provenance_json = format!(
+                    r#"{{"schema":"ee.pack_item.provenance.v1","entries":[{{"uri":"file://AGENTS.md#L42","note":"{}"}}]}}"#,
+                    "project release compression fixture ".repeat(8)
+                );
+                item
+            })
+            .collect::<Vec<_>>();
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "prepare release with many repeated formatting guardrails".to_string(),
+            profile: "thorough".to_string(),
+            max_tokens: 8000,
+            used_tokens: 4800,
+            item_count: items.len() as u32,
+            omitted_count: 0,
+            pack_hash: "blake3:compressed-pack".to_string(),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let created_at = "2026-05-24T00:00:00Z";
+        let (canonical_json, ledger_hash) = super::build_uncompressed_pack_selection_ledger(
+            pack_id,
+            &input,
+            &items,
+            &[],
+            created_at,
+        )?;
+        let stored_json = super::store_pack_selection_ledger_json(&canonical_json, &ledger_hash)?;
+        let storage = super::pack_ledger_storage_summary(Some(&stored_json));
+
+        ensure_equal(
+            &storage["mode"],
+            &serde_json::json!("compressed_in_row"),
+            "large ledger storage mode",
+        )?;
+        ensure_equal(
+            &storage["payloadIncluded"],
+            &serde_json::json!(false),
+            "storage summary omits compressed payload",
+        )?;
+        ensure(
+            !storage.to_string().contains("compressedPayloadBase64"),
+            "storage summary must not expose raw compressed bytes",
+        )?;
+
+        let envelope: super::CompressedPackSelectionLedger = serde_json::from_str(&stored_json)
+            .map_err(|error| TestFailure::new(format!("compressed envelope malformed: {error}")))?;
+        let compressed = super::BASE64_STANDARD
+            .decode(&envelope.compression.compressed_payload_base64)
+            .map_err(|error| TestFailure::new(format!("compressed payload not base64: {error}")))?;
+        let uncompressed =
+            zstd::bulk::decompress(&compressed, canonical_json.len()).map_err(|error| {
+                TestFailure::new(format!("compressed payload failed to decompress: {error}"))
+            })?;
+        let replayed_json = String::from_utf8(uncompressed)
+            .map_err(|error| TestFailure::new(format!("replayed ledger not UTF-8: {error}")))?;
+        ensure_equal(
+            &replayed_json,
+            &canonical_json,
+            "decompressed ledger must be byte-identical to canonical JSON",
+        )?;
+
+        let parsed =
+            super::parse_pack_ledger_fields(pack_id, Some(&stored_json), Some(&ledger_hash));
+        ensure_equal(
+            &parsed.status,
+            &super::PackLedgerStatus::Available,
+            "compressed ledger status",
+        )?;
+        ensure_equal(
+            &parsed
+                .ledger
+                .as_ref()
+                .and_then(|ledger| ledger.get("ledgerHash"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+            &serde_json::json!(ledger_hash),
+            "parsed compressed ledger hash",
+        )
+    }
+
+    #[test]
+    fn compressed_pack_selection_ledger_corruption_is_malformed_not_hash_mismatch() -> TestResult {
+        let pack_id = "pack_000000000000000000000zstd2";
+        let items = (1..=96)
+            .map(|rank| {
+                let memory_id = format!("mem_{rank:026}");
+                let mut item = pack_item_input(pack_id, &memory_id, rank);
+                item.why = "repeated release formatting guardrail ".repeat(16);
+                item
+            })
+            .collect::<Vec<_>>();
+        let input = super::CreatePackRecordInput {
+            workspace_id: "wsp_01234567890123456789012345".to_string(),
+            query: "prepare release with corrupt compressed ledger".to_string(),
+            profile: "thorough".to_string(),
+            max_tokens: 8000,
+            used_tokens: 4800,
+            item_count: items.len() as u32,
+            omitted_count: 0,
+            pack_hash: "blake3:compressed-pack-corrupt".to_string(),
+            degraded_json: None,
+            created_by: Some("ee context".to_string()),
+        };
+        let (canonical_json, ledger_hash) = super::build_uncompressed_pack_selection_ledger(
+            pack_id,
+            &input,
+            &items,
+            &[],
+            "2026-05-24T00:00:00Z",
+        )?;
+        let stored_json = super::store_pack_selection_ledger_json(&canonical_json, &ledger_hash)?;
+        let mut envelope: super::CompressedPackSelectionLedger = serde_json::from_str(&stored_json)
+            .map_err(|error| TestFailure::new(format!("compressed envelope malformed: {error}")))?;
+        envelope.compression.compressed_payload_base64 = "not base64".to_string();
+        let corrupt_json = super::pack_ledger_json(&envelope, "corrupt compressed ledger")?;
+
+        let parsed =
+            super::parse_pack_ledger_fields(pack_id, Some(&corrupt_json), Some(&ledger_hash));
+        ensure_equal(
+            &parsed.status,
+            &super::PackLedgerStatus::Malformed,
+            "corrupt compressed ledger status",
+        )?;
+        ensure_equal(
+            &parsed.degraded[0]["code"],
+            &serde_json::json!(super::PACK_REPLAY_LEDGER_MALFORMED),
+            "corrupt compressed ledger code",
+        )?;
+        ensure_equal(
+            &parsed.degraded[0]["details"]["compression"]["stage"],
+            &serde_json::json!("base64"),
+            "corrupt compressed ledger stage",
+        )?;
+        ensure(
+            parsed.ledger.is_none(),
+            "corrupt compressed ledger must not be treated as a hash-mismatched valid ledger",
+        )
+    }
+
+    #[test]
     fn insert_empty_pack_record_persists_empty_selection_ledger() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
@@ -30451,5 +31685,673 @@ mod tests {
             &"anti_pattern_proposal",
             "v060 anti_pattern_proposal candidate type preserved",
         )
+    }
+
+    fn reflection_hash(hex_digit: char) -> String {
+        format!("blake3:{}", hex_digit.to_string().repeat(64))
+    }
+
+    fn reflection_source_refs_json() -> String {
+        serde_json::json!([
+            {
+                "kind": "memory",
+                "id": "mem_reflection_ledger_source1",
+                "contentHash": reflection_hash('a')
+            },
+            {
+                "kind": "evidence_span",
+                "id": "ev_reflection_ledger_source2",
+                "contentHash": reflection_hash('b')
+            }
+        ])
+        .to_string()
+    }
+
+    fn reflection_source_hashes_json() -> String {
+        serde_json::json!([reflection_hash('a'), reflection_hash('b')]).to_string()
+    }
+
+    fn reflection_request_ledger_input() -> CreateReflectionRequestLedgerInput {
+        CreateReflectionRequestLedgerInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            request_hash: reflection_hash('1'),
+            reflection_kind: "gaps".to_owned(),
+            source_package_hash: reflection_hash('2'),
+            source_refs_json: reflection_source_refs_json(),
+            source_content_hashes_json: reflection_source_hashes_json(),
+            prompt_template_hash: reflection_hash('3'),
+            response_schema_hash: reflection_hash('4'),
+            created_at: "2026-05-24T00:00:00Z".to_owned(),
+            expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            challenge_key_id: "reflect_key_active".to_owned(),
+            challenge_hash: reflection_hash('5'),
+        }
+    }
+
+    fn insert_reflection_consumption_candidate(
+        connection: &DbConnection,
+        candidate_id: &str,
+        source_id: &str,
+    ) -> TestResult {
+        let input =
+            reflection_result_candidate_input(source_id, Some("approved"), "2026-05-24T00:10:00Z");
+        connection.insert_curation_candidate(candidate_id, &input)?;
+        Ok(())
+    }
+
+    fn reflection_result_candidate_input(
+        source_id: &str,
+        status: Option<&str>,
+        created_at: &str,
+    ) -> CreateCurationCandidateInput {
+        CreateCurationCandidateInput {
+            workspace_id: "wsp_01234567890123456789012345".to_owned(),
+            candidate_type: "create_derived_memory".to_owned(),
+            target_memory_id: None,
+            proposed_content: Some("Derived reflection result candidate.".to_owned()),
+            proposed_confidence: Some(0.74),
+            proposed_trust_class: Some("agent_assertion".to_owned()),
+            source_type: "agent_inference".to_owned(),
+            source_id: Some(source_id.to_owned()),
+            reason: "external reflection result accepted the request challenge".to_owned(),
+            confidence: 0.82,
+            status: status.map(str::to_owned),
+            created_at: Some(created_at.to_owned()),
+            ttl_expires_at: None,
+            derivation_source_refs_json: Some(reflection_source_refs_json()),
+            derivation_metadata_json: Some(
+                serde_json::json!({
+                    "memorySpec": {"level": "semantic", "kind": "gap"},
+                    "producer": {"producer": "external_reflection"}
+                })
+                .to_string(),
+            ),
+        }
+    }
+
+    #[test]
+    fn v063_reflection_request_ledger_table_exists_and_indexes_present() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let tables = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reflection_request_ledger'",
+            &[],
+        )?;
+        ensure_equal(
+            &tables.len(),
+            &1_usize,
+            "reflection_request_ledger table must exist",
+        )?;
+
+        let indexes = connection.query(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'reflection_request_ledger' ORDER BY name",
+            &[],
+        )?;
+        let index_names: Vec<String> = indexes
+            .iter()
+            .filter_map(|row| row.get(0).and_then(|v| v.as_str()).map(str::to_owned))
+            .collect();
+
+        for expected in [
+            "idx_reflection_request_ledger_v063_consumed_candidate",
+            "idx_reflection_request_ledger_v063_expires",
+            "idx_reflection_request_ledger_v063_workspace_status",
+            "idx_reflection_request_ledger_v064_consumed_result_hash",
+        ] {
+            ensure(
+                index_names.iter().any(|name| name == expected),
+                format!("index {expected} must exist; found {index_names:?}"),
+            )?;
+        }
+
+        let columns = connection.query("PRAGMA table_info(reflection_request_ledger)", &[])?;
+        let column_names: Vec<String> = columns
+            .iter()
+            .filter_map(|row| row.get(1).and_then(|v| v.as_str()).map(str::to_owned))
+            .collect();
+        ensure(
+            column_names
+                .iter()
+                .any(|name| name == "consumed_result_hash"),
+            format!("consumed_result_hash column must exist; found {column_names:?}"),
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_insert_roundtrips_and_dedups() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let input = reflection_request_ledger_input();
+
+        let inserted =
+            connection.insert_reflection_request_ledger("reflect_req_0123456789abcdef", &input)?;
+        ensure_equal(
+            &(inserted as i64),
+            &(ReflectionRequestLedgerIngestOutcome::Inserted as i64),
+            "first reflection request ledger insert reports Inserted",
+        )?;
+
+        let stored = connection
+            .get_reflection_request_ledger(
+                "wsp_01234567890123456789012345",
+                "reflect_req_0123456789abcdef",
+            )?
+            .ok_or_else(|| TestFailure::new("reflection request ledger row missing"))?;
+        ensure_equal(
+            &stored.request_hash,
+            &input.request_hash,
+            "request hash round-trips",
+        )?;
+        ensure_equal(&stored.status, &"pending".to_owned(), "row starts pending")?;
+        ensure(
+            stored.consumed_candidate_id.is_none(),
+            "new request is not consumed",
+        )?;
+        ensure(
+            stored.challenge_hash.starts_with("blake3:"),
+            "ledger stores only a challenge hash",
+        )?;
+        ensure(
+            !stored.challenge_hash.contains("base64url:"),
+            "ledger does not store raw challenge HMAC tokens",
+        )?;
+
+        let duplicate =
+            connection.insert_reflection_request_ledger("reflect_req_0123456789abcdef", &input)?;
+        ensure_equal(
+            &(duplicate as i64),
+            &(ReflectionRequestLedgerIngestOutcome::Duplicate as i64),
+            "same request id and hash dedup",
+        )?;
+
+        let same_hash_different_id =
+            connection.insert_reflection_request_ledger("reflect_req_fedcba9876543210", &input)?;
+        ensure_equal(
+            &(same_hash_different_id as i64),
+            &(ReflectionRequestLedgerIngestOutcome::Duplicate as i64),
+            "same request hash with a different id dedups",
+        )?;
+
+        let mut conflicting = input;
+        conflicting.request_hash = reflection_hash('6');
+        let conflict = connection
+            .insert_reflection_request_ledger("reflect_req_0123456789abcdef", &conflicting);
+        ensure(
+            conflict.is_err(),
+            "same request id with different request hash is rejected",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_lists_rows_for_diagnostics() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let mut early = reflection_request_ledger_input();
+        early.created_at = "2026-05-24T00:00:00Z".to_owned();
+        early.expires_at = "2026-05-24T00:30:00Z".to_owned();
+        connection.insert_reflection_request_ledger("reflect_req_diag000000001", &early)?;
+
+        let mut later = reflection_request_ledger_input();
+        later.request_hash = reflection_hash('6');
+        later.created_at = "2026-05-24T00:05:00Z".to_owned();
+        later.expires_at = "2026-05-24T00:45:00Z".to_owned();
+        connection.insert_reflection_request_ledger("reflect_req_diag000000002", &later)?;
+
+        let mut consumed = reflection_request_ledger_input();
+        consumed.request_hash = reflection_hash('7');
+        consumed.created_at = "2026-05-24T00:10:00Z".to_owned();
+        consumed.expires_at = "2026-05-24T01:00:00Z".to_owned();
+        connection.insert_reflection_request_ledger("reflect_req_diag000000003", &consumed)?;
+        insert_reflection_consumption_candidate(
+            &connection,
+            "curate_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "reflect_req_diag000000003",
+        )?;
+        let consumed_transition = connection.mark_reflection_request_consumed(
+            "wsp_01234567890123456789012345",
+            "reflect_req_diag000000003",
+            "curate_bbbbbbbbbbbbbbbbbbbbbbbbbb",
+            &reflection_hash('8'),
+            "2026-05-24T00:20:00Z",
+        )?;
+        ensure(
+            consumed_transition,
+            "diagnostic fixture consumes the third request",
+        )?;
+
+        let pending = connection.list_reflection_request_ledger_for_diagnostics(
+            "wsp_01234567890123456789012345",
+            Some("pending"),
+            10,
+        )?;
+        let pending_ids: Vec<&str> = pending.iter().map(|row| row.request_id.as_str()).collect();
+        ensure_equal(
+            &pending_ids,
+            &vec!["reflect_req_diag000000001", "reflect_req_diag000000002"],
+            "pending diagnostics rows are expiry ordered and deterministic",
+        )?;
+
+        let consumed_rows = connection.list_reflection_request_ledger_for_diagnostics(
+            "wsp_01234567890123456789012345",
+            Some("consumed"),
+            10,
+        )?;
+        ensure_equal(
+            &consumed_rows.len(),
+            &1_usize,
+            "consumed status filter returns one row",
+        )?;
+        ensure_equal(
+            &consumed_rows[0].consumed_candidate_id,
+            &Some("curate_bbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()),
+            "consumed diagnostic row includes the candidate link",
+        )?;
+
+        let limited = connection.list_reflection_request_ledger_for_diagnostics(
+            "wsp_01234567890123456789012345",
+            None,
+            2,
+        )?;
+        let limited_ids: Vec<&str> = limited.iter().map(|row| row.request_id.as_str()).collect();
+        ensure_equal(
+            &limited_ids,
+            &vec!["reflect_req_diag000000001", "reflect_req_diag000000002"],
+            "unfiltered diagnostics respect the requested limit",
+        )?;
+
+        let expired_pending = connection.list_expired_reflection_request_ledger_for_diagnostics(
+            "wsp_01234567890123456789012345",
+            "2026-05-24T00:35:00Z",
+            10,
+        )?;
+        let expired_ids: Vec<&str> = expired_pending
+            .iter()
+            .map(|row| row.request_id.as_str())
+            .collect();
+        ensure_equal(
+            &expired_ids,
+            &vec!["reflect_req_diag000000001"],
+            "expired diagnostics derive stale pending rows without reporting consumed rows",
+        )?;
+        ensure(
+            connection
+                .list_expired_reflection_request_ledger_for_diagnostics(
+                    "wsp_01234567890123456789012345",
+                    "not-a-time",
+                    10,
+                )
+                .is_err(),
+            "expired diagnostic listing rejects invalid timestamps before querying",
+        )?;
+
+        let other_workspace = connection.list_reflection_request_ledger_for_diagnostics(
+            "wsp_other_01234567890123456789",
+            None,
+            10,
+        )?;
+        ensure(
+            other_workspace.is_empty(),
+            "diagnostic list is scoped to the requested workspace",
+        )?;
+        ensure(
+            connection
+                .list_reflection_request_ledger_for_diagnostics(
+                    "wsp_01234567890123456789012345",
+                    Some("lost"),
+                    10,
+                )
+                .is_err(),
+            "unknown reflection ledger statuses are rejected before querying",
+        )?;
+        ensure(
+            connection
+                .list_reflection_request_ledger_for_diagnostics(
+                    "wsp_01234567890123456789012345",
+                    None,
+                    0,
+                )
+                .is_err(),
+            "diagnostic listing requires an explicit non-zero limit",
+        )?;
+        ensure(
+            connection
+                .list_reflection_request_ledger_for_diagnostics(
+                    "wsp_01234567890123456789012345",
+                    None,
+                    501,
+                )
+                .is_err(),
+            "diagnostic listing rejects unbounded large limits",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_consumes_once_with_candidate_link() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let input = reflection_request_ledger_input();
+        connection.insert_reflection_request_ledger("reflect_req_0123456789abcdef", &input)?;
+
+        let candidate_id = "curate_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+        connection.insert_curation_candidate(
+            candidate_id,
+            &CreateCurationCandidateInput {
+                workspace_id: "wsp_01234567890123456789012345".to_owned(),
+                candidate_type: "create_derived_memory".to_owned(),
+                target_memory_id: None,
+                proposed_content: Some("Derived reflection result candidate.".to_owned()),
+                proposed_confidence: Some(0.74),
+                proposed_trust_class: Some("agent_validated".to_owned()),
+                source_type: "agent_inference".to_owned(),
+                source_id: Some("reflect_req_0123456789abcdef".to_owned()),
+                reason: "external reflection result accepted the request challenge".to_owned(),
+                confidence: 0.82,
+                status: Some("approved".to_owned()),
+                created_at: Some("2026-05-24T00:10:00Z".to_owned()),
+                ttl_expires_at: None,
+                derivation_source_refs_json: Some(reflection_source_refs_json()),
+                derivation_metadata_json: Some(
+                    serde_json::json!({
+                        "memorySpec": {"level": "procedural", "kind": "rule"},
+                        "producer": {"producer": "external_reflection"}
+                    })
+                    .to_string(),
+                ),
+            },
+        )?;
+
+        let consumed = connection.mark_reflection_request_consumed(
+            "wsp_01234567890123456789012345",
+            "reflect_req_0123456789abcdef",
+            candidate_id,
+            &reflection_hash('8'),
+            "2026-05-24T00:15:00Z",
+        )?;
+        ensure(consumed, "pending reflection request is consumed once")?;
+
+        let stored = connection
+            .get_reflection_request_ledger(
+                "wsp_01234567890123456789012345",
+                "reflect_req_0123456789abcdef",
+            )?
+            .ok_or_else(|| TestFailure::new("consumed reflection request missing"))?;
+        ensure_equal(
+            &stored.status,
+            &"consumed".to_owned(),
+            "status transitions to consumed",
+        )?;
+        ensure_equal(
+            &stored.consumed_candidate_id,
+            &Some(candidate_id.to_owned()),
+            "consumption records the curation candidate id",
+        )?;
+        ensure_equal(
+            &stored.consumed_at,
+            &Some("2026-05-24T00:15:00Z".to_owned()),
+            "consumption records timestamp",
+        )?;
+        ensure_equal(
+            &stored.consumed_result_hash,
+            &Some(reflection_hash('8')),
+            "consumption records the accepted result hash",
+        )?;
+
+        let same_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            "reflect_req_0123456789abcdef",
+            &reflection_hash('8'),
+            "2026-05-24T00:16:00Z",
+        )?;
+        ensure_equal(
+            &same_replay,
+            &ReflectionRequestReplayStatus::AcceptedReplay {
+                candidate_id: candidate_id.to_owned(),
+            },
+            "same result hash returns the existing candidate for idempotent replay",
+        )?;
+
+        let mismatched_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            "reflect_req_0123456789abcdef",
+            &reflection_hash('9'),
+            "2026-05-24T00:16:00Z",
+        )?;
+        ensure_equal(
+            &mismatched_replay,
+            &ReflectionRequestReplayStatus::MismatchedReplay {
+                existing_candidate_id: Some(candidate_id.to_owned()),
+            },
+            "different result hash fails closed as a mismatched replay",
+        )?;
+
+        let second = connection.mark_reflection_request_consumed(
+            "wsp_01234567890123456789012345",
+            "reflect_req_0123456789abcdef",
+            candidate_id,
+            &reflection_hash('8'),
+            "2026-05-24T00:16:00Z",
+        )?;
+        ensure(!second, "consumed reflection request is not accepted twice")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_result_candidate_insert_consumes_ledger_atomically() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let request_id = "reflect_req_atomic000001";
+        let input = reflection_request_ledger_input();
+        connection.insert_reflection_request_ledger(request_id, &input)?;
+
+        let candidate_id = format!("curate_{}", "c".repeat(26));
+        let candidate = reflection_result_candidate_input(
+            "reflect_result_atomic",
+            None,
+            "2026-05-24T00:20:00Z",
+        );
+        let result_hash = reflection_hash('8');
+        let outcome = connection.insert_reflection_result_candidate_and_consume_ledger(
+            request_id,
+            &candidate_id,
+            &candidate,
+            &result_hash,
+            "2026-05-24T00:20:00Z",
+        )?;
+        ensure_equal(
+            &outcome,
+            &ReflectionRequestCandidateConsumptionOutcome::InsertedAndConsumed,
+            "first accepted reflection result inserts candidate and consumes request",
+        )?;
+
+        let stored_candidate = connection
+            .get_curation_candidate("wsp_01234567890123456789012345", &candidate_id)?
+            .ok_or_else(|| TestFailure::new("reflection candidate was not inserted"))?;
+        ensure_equal(
+            &stored_candidate.status,
+            &"pending".to_owned(),
+            "candidate keeps the curation queue default pending status",
+        )?;
+
+        let stored_ledger = connection
+            .get_reflection_request_ledger("wsp_01234567890123456789012345", request_id)?
+            .ok_or_else(|| TestFailure::new("reflection request ledger row missing"))?;
+        ensure_equal(
+            &stored_ledger.status,
+            &"consumed".to_owned(),
+            "atomic ingest marks the request consumed",
+        )?;
+        ensure_equal(
+            &stored_ledger.consumed_candidate_id,
+            &Some(candidate_id.clone()),
+            "consumed ledger row points at the inserted candidate",
+        )?;
+        ensure_equal(
+            &stored_ledger.consumed_result_hash,
+            &Some(result_hash.clone()),
+            "consumed ledger row records the accepted result hash",
+        )?;
+
+        let duplicate_candidate_id = format!("curate_{}", "d".repeat(26));
+        let replay = connection.insert_reflection_result_candidate_and_consume_ledger(
+            request_id,
+            &duplicate_candidate_id,
+            &candidate,
+            &result_hash,
+            "2026-05-24T00:21:00Z",
+        )?;
+        ensure_equal(
+            &replay,
+            &ReflectionRequestCandidateConsumptionOutcome::AcceptedReplay {
+                candidate_id: candidate_id.clone(),
+            },
+            "byte-identical replay returns the original candidate id",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate("wsp_01234567890123456789012345", &duplicate_candidate_id)?
+                .is_none(),
+            "byte-identical replay does not insert a duplicate candidate",
+        )?;
+
+        let mismatch_candidate_id = format!("curate_{}", "e".repeat(26));
+        let mismatched = connection.insert_reflection_result_candidate_and_consume_ledger(
+            request_id,
+            &mismatch_candidate_id,
+            &candidate,
+            &reflection_hash('9'),
+            "2026-05-24T00:22:00Z",
+        )?;
+        ensure_equal(
+            &mismatched,
+            &ReflectionRequestCandidateConsumptionOutcome::MismatchedReplay {
+                existing_candidate_id: Some(candidate_id),
+            },
+            "different result hash fails closed against an already-consumed request",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate("wsp_01234567890123456789012345", &mismatch_candidate_id)?
+                .is_none(),
+            "mismatched replay does not insert a candidate",
+        )?;
+
+        let mut expired_input = reflection_request_ledger_input();
+        expired_input.request_hash = reflection_hash('a');
+        expired_input.expires_at = "2026-05-24T00:05:00Z".to_owned();
+        let expired_request_id = "reflect_req_atomic_expired";
+        connection.insert_reflection_request_ledger(expired_request_id, &expired_input)?;
+        let expired_candidate_id = format!("curate_{}", "f".repeat(26));
+        let expired = connection.insert_reflection_result_candidate_and_consume_ledger(
+            expired_request_id,
+            &expired_candidate_id,
+            &candidate,
+            &reflection_hash('b'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &expired,
+            &ReflectionRequestCandidateConsumptionOutcome::Expired {
+                expires_at: "2026-05-24T00:05:00Z".to_owned(),
+            },
+            "expired pending requests reject candidate creation",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate("wsp_01234567890123456789012345", &expired_candidate_id)?
+                .is_none(),
+            "expired pending requests leave no candidate row behind",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_rejects_bad_replay_inputs() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let input = reflection_request_ledger_input();
+
+        let mut bad_expiry = input.clone();
+        bad_expiry.expires_at = "2026-05-24T00:00:00Z".to_owned();
+        ensure(
+            connection
+                .insert_reflection_request_ledger("reflect_req_0123456789abcdef", &bad_expiry)
+                .is_err(),
+            "expiry must be later than creation",
+        )?;
+
+        let mut bad_challenge_hash = input.clone();
+        bad_challenge_hash.challenge_hash = "base64url:not-a-ledger-hash".to_owned();
+        ensure(
+            connection
+                .insert_reflection_request_ledger(
+                    "reflect_req_badchallenge000",
+                    &bad_challenge_hash,
+                )
+                .is_err(),
+            "raw challenge tokens are rejected in favor of blake3 challenge hashes",
+        )?;
+
+        let mut unsorted_hashes = input;
+        unsorted_hashes.request_hash = reflection_hash('7');
+        unsorted_hashes.source_content_hashes_json =
+            serde_json::json!([reflection_hash('b'), reflection_hash('a')]).to_string();
+        ensure(
+            connection
+                .insert_reflection_request_ledger("reflect_req_unsorted0000", &unsorted_hashes)
+                .is_err(),
+            "source content hashes must be sorted and duplicate-free",
+        )?;
+
+        let pending_input = reflection_request_ledger_input();
+        connection
+            .insert_reflection_request_ledger("reflect_req_expirycheck000", &pending_input)?;
+        let pending_status = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            "reflect_req_expirycheck000",
+            &reflection_hash('8'),
+            "2026-05-24T00:30:00Z",
+        )?;
+        ensure_equal(
+            &pending_status,
+            &ReflectionRequestReplayStatus::Pending,
+            "unexpired pending request can still accept its first result",
+        )?;
+        let expired_status = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            "reflect_req_expirycheck000",
+            &reflection_hash('8'),
+            "2026-05-24T01:00:00Z",
+        )?;
+        ensure_equal(
+            &expired_status,
+            &ReflectionRequestReplayStatus::Expired {
+                expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            },
+            "expired pending request is not eligible for first acceptance",
+        )?;
+
+        connection.close()?;
+        Ok(())
     }
 }

@@ -5,7 +5,7 @@
 //!
 //! NO MOCKS. Real ee binary, real FrankenSQLite, real Frankensearch indexes.
 
-use ee::db::{DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1};
+use ee::db::{DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1, parse_stored_pack_ledger};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -174,12 +174,17 @@ fn assert_pack_ledger_persisted(
         .ledger_hash
         .as_ref()
         .ok_or_else(|| format!("pack record {} missing ledger_hash", record.id))?;
-    let ledger_json = record
+    let _ledger_json = record
         .ledger_json
         .as_ref()
         .ok_or_else(|| format!("pack record {} missing ledger_json", record.id))?;
-    let ledger: serde_json::Value = serde_json::from_str(ledger_json)
-        .map_err(|error| format!("pack ledger JSON malformed: {error}"))?;
+    let parsed_ledger = parse_stored_pack_ledger(record);
+    let ledger = parsed_ledger.ledger.as_ref().ok_or_else(|| {
+        format!(
+            "pack ledger could not be replayed: {:?}",
+            parsed_ledger.degraded
+        )
+    })?;
 
     ensure(
         ledger_hash.starts_with("blake3:"),

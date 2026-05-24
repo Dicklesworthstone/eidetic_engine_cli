@@ -22,18 +22,22 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
-    DerivationSourceRef, ReviewQueueState, canonical_derivation_metadata_json,
-    canonical_derivation_source_refs_json, resolve_derivation_memory_scores, validate_candidate,
-    validate_candidate_trust_evidence, validate_review_queue_transition,
+    DerivationSourceRef, ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
+    ReflectionResultIngestDecision, ReflectionResultReplayGate, ReviewQueueState,
+    canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
+    resolve_derivation_memory_scores, validate_candidate, validate_candidate_trust_evidence,
+    validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
     CreateCurationCandidateInput, CreateMemoryInput, CreateMemoryLinkInput,
     CreateProceduralRuleInput, CreateProcedureEventInput, CreateProcedureInput,
-    CreateSearchIndexJobInput, CurationCandidateReviewUpdate, DbConnection, DbError, DbOperation,
-    EvidenceSpanMemoryAttachResult, MemoryLevelTransitionAuditInput, MemoryLinkRelation,
-    MemoryLinkSource, SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy,
-    StoredEvidenceSpan, StoredMemory, StoredMemoryLink, StoredSession, audit_actions,
+    CreateReflectionRequestLedgerInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate,
+    DbConnection, DbError, DbOperation, EvidenceSpanMemoryAttachResult,
+    MemoryLevelTransitionAuditInput, MemoryLinkRelation, MemoryLinkSource,
+    ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestReplayStatus,
+    SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy, StoredEvidenceSpan,
+    StoredMemory, StoredMemoryLink, StoredReflectionRequestLedger, StoredSession, audit_actions,
     default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::graph::decay::{
@@ -3214,6 +3218,16 @@ pub fn apply_curation_candidate(
         application.status = "would_apply".to_owned();
     }
 
+    let mut next_action = decision.next_action;
+    if !options.dry_run
+        && application.errors.is_empty()
+        && (persisted || application.status == "already_applied")
+        && let Some(created_memory_id) = application.created_memory_id.as_deref()
+    {
+        next_action =
+            why_next_action_for_created_memory(created_memory_id, &prepared.workspace_path);
+    }
+
     Ok(CurateApplyReport {
         schema: CURATE_APPLY_SCHEMA_V1,
         command: "curate apply",
@@ -3241,7 +3255,7 @@ pub fn apply_curation_candidate(
         dry_run: options.dry_run,
         durable_mutation: persisted,
         degraded: Vec::new(),
-        next_action: decision.next_action,
+        next_action,
     })
 }
 
@@ -4201,7 +4215,7 @@ pub struct ProposeDerivedReport {
     pub dry_run: bool,
     pub durable_mutation: bool,
     pub persisted: bool,
-    pub next_actions: Vec<String>,
+    pub next_commands: Vec<String>,
 }
 
 /// Build a deterministic create-derived-memory candidate package from
@@ -4483,10 +4497,12 @@ pub fn propose_derived_candidate(
         }
     }
 
-    let next_actions = vec![
-        format!("ee curate validate {candidate_id} --json"),
-        format!("ee curate apply {candidate_id} --json"),
-        "ee curate candidates --status pending --json".to_owned(),
+    let workspace_arg = shell_quote_command_arg(&prepared.workspace_path.display().to_string());
+    let candidate_arg = shell_quote_command_arg(&candidate_id);
+    let next_commands = vec![
+        format!("ee curate validate {candidate_arg} --workspace {workspace_arg} --json"),
+        format!("ee curate apply {candidate_arg} --workspace {workspace_arg} --json"),
+        format!("ee curate candidates --status pending --workspace {workspace_arg} --json"),
     ];
 
     Ok(ProposeDerivedReport {
@@ -4507,8 +4523,251 @@ pub fn propose_derived_candidate(
         dry_run: options.dry_run,
         durable_mutation,
         persisted,
-        next_actions,
+        next_commands,
     })
+}
+
+/// Convert outbound reflection request material into the durable ledger insert input.
+#[must_use]
+pub fn reflection_request_ledger_input_from_material(
+    material: &ReflectionRequestLedgerMaterial,
+) -> CreateReflectionRequestLedgerInput {
+    CreateReflectionRequestLedgerInput {
+        workspace_id: material.workspace_id.trim().to_owned(),
+        request_hash: material.request_hash.trim().to_owned(),
+        reflection_kind: material.reflection_kind.trim().to_owned(),
+        source_package_hash: material.source_package_hash.trim().to_owned(),
+        source_refs_json: material.source_refs_json.clone(),
+        source_content_hashes_json: material.source_content_hashes_json.clone(),
+        prompt_template_hash: material.prompt_template_hash.trim().to_owned(),
+        response_schema_hash: material.response_schema_hash.trim().to_owned(),
+        created_at: material.created_at.trim().to_owned(),
+        expires_at: material.expires_at.trim().to_owned(),
+        challenge_key_id: material.challenge_key_id.trim().to_owned(),
+        challenge_hash: material.challenge_hash.trim().to_owned(),
+    }
+}
+
+/// Rehydrate pure reflection ledger material from a stored DB ledger row.
+#[must_use]
+pub fn reflection_request_ledger_material_from_stored(
+    stored: &StoredReflectionRequestLedger,
+) -> ReflectionRequestLedgerMaterial {
+    ReflectionRequestLedgerMaterial {
+        request_id: stored.request_id.clone(),
+        request_hash: stored.request_hash.clone(),
+        workspace_id: stored.workspace_id.clone(),
+        reflection_kind: stored.reflection_kind.clone(),
+        source_package_hash: stored.source_package_hash.clone(),
+        source_refs_json: stored.source_refs_json.clone(),
+        source_content_hashes_json: stored.source_content_hashes_json.clone(),
+        prompt_template_hash: stored.prompt_template_hash.clone(),
+        response_schema_hash: stored.response_schema_hash.clone(),
+        created_at: stored.created_at.clone(),
+        expires_at: stored.expires_at.clone(),
+        challenge_key_id: stored.challenge_key_id.clone(),
+        challenge_hash: stored.challenge_hash.clone(),
+    }
+}
+
+/// Map the DB replay posture to the pure reflection ingest gate.
+#[must_use]
+pub fn reflection_result_replay_gate_from_db_status(
+    status: ReflectionRequestReplayStatus,
+) -> ReflectionResultReplayGate {
+    match status {
+        ReflectionRequestReplayStatus::Missing => ReflectionResultReplayGate::Missing,
+        ReflectionRequestReplayStatus::Pending => ReflectionResultReplayGate::Pending,
+        ReflectionRequestReplayStatus::Expired { expires_at } => {
+            ReflectionResultReplayGate::Expired { expires_at }
+        }
+        ReflectionRequestReplayStatus::AcceptedReplay { candidate_id } => {
+            ReflectionResultReplayGate::AcceptedReplay { candidate_id }
+        }
+        ReflectionRequestReplayStatus::MismatchedReplay {
+            existing_candidate_id,
+        } => ReflectionResultReplayGate::MismatchedReplay {
+            existing_candidate_id,
+        },
+        ReflectionRequestReplayStatus::UnavailableStatus { status } => {
+            ReflectionResultReplayGate::UnavailableStatus { status }
+        }
+    }
+}
+
+/// Deterministic candidate id for one reflection result hash.
+#[must_use]
+pub fn reflection_result_candidate_id(
+    workspace_id: &str,
+    request_id: &str,
+    result_hash: &str,
+) -> String {
+    deterministic_curate_id(&[
+        workspace_id.trim(),
+        "reflection_result",
+        request_id.trim(),
+        result_hash.trim(),
+    ])
+}
+
+/// Convert pure reflection candidate material into the DB curation insert input.
+#[must_use]
+pub fn reflection_result_candidate_input_from_material(
+    workspace_id: &str,
+    material: &ReflectionResultCandidateMaterial,
+    created_at: &str,
+) -> CreateCurationCandidateInput {
+    CreateCurationCandidateInput {
+        workspace_id: workspace_id.trim().to_owned(),
+        candidate_type: material.candidate_type.to_owned(),
+        target_memory_id: material.target_memory_id.clone(),
+        proposed_content: Some(material.proposed_content.clone()),
+        proposed_confidence: Some(material.proposed_confidence),
+        proposed_trust_class: Some(material.proposed_trust_class.to_owned()),
+        source_type: material.source_type.to_owned(),
+        source_id: Some(material.source_id.clone()),
+        reason: material.reason.clone(),
+        confidence: material.confidence,
+        status: Some(CandidateStatus::Pending.as_str().to_owned()),
+        created_at: Some(created_at.trim().to_owned()),
+        ttl_expires_at: None,
+        derivation_source_refs_json: Some(material.derivation_source_refs_json.clone()),
+        derivation_metadata_json: Some(material.derivation_metadata_json.clone()),
+    }
+}
+
+/// Durable result of applying a reflection ingest decision to curation storage.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum ReflectionResultDurableIngestOutcome {
+    Inserted {
+        candidate_id: String,
+    },
+    IdempotentReplay {
+        candidate_id: String,
+    },
+    MissingLedger,
+    Expired {
+        expires_at: String,
+    },
+    MismatchedReplay {
+        existing_candidate_id: Option<String>,
+    },
+    UnavailableStatus {
+        status: String,
+    },
+}
+
+/// Persist a pure reflection ingest decision through the atomic DB replay API.
+pub fn persist_reflection_result_ingest_decision(
+    connection: &DbConnection,
+    workspace_id: &str,
+    request_id: &str,
+    decision: &ReflectionResultIngestDecision,
+    consumed_at: &str,
+) -> Result<ReflectionResultDurableIngestOutcome, DomainError> {
+    match decision {
+        ReflectionResultIngestDecision::IdempotentReplay { candidate_id, .. } => {
+            Ok(ReflectionResultDurableIngestOutcome::IdempotentReplay {
+                candidate_id: candidate_id.clone(),
+            })
+        }
+        ReflectionResultIngestDecision::CreateCandidate {
+            result_hash,
+            candidate,
+        } => {
+            let candidate_id =
+                reflection_result_candidate_id(workspace_id, request_id, result_hash);
+            let input = reflection_result_candidate_input_from_material(
+                workspace_id,
+                candidate,
+                consumed_at,
+            );
+            let outcome = connection
+                .insert_reflection_result_candidate_and_consume_ledger(
+                    request_id,
+                    &candidate_id,
+                    &input,
+                    result_hash,
+                    consumed_at,
+                )
+                .map_err(|error| DomainError::Storage {
+                    message: format!("Failed to persist reflection result ingest: {error}"),
+                    repair: Some(
+                        "Re-run ee reflect propose for the source request, then retry ingest."
+                            .to_owned(),
+                    ),
+                })?;
+            Ok(reflection_result_durable_outcome_from_db(
+                outcome,
+                candidate_id,
+            ))
+        }
+    }
+}
+
+fn reflection_result_durable_outcome_from_db(
+    outcome: ReflectionRequestCandidateConsumptionOutcome,
+    inserted_candidate_id: String,
+) -> ReflectionResultDurableIngestOutcome {
+    match outcome {
+        ReflectionRequestCandidateConsumptionOutcome::InsertedAndConsumed => {
+            ReflectionResultDurableIngestOutcome::Inserted {
+                candidate_id: inserted_candidate_id,
+            }
+        }
+        ReflectionRequestCandidateConsumptionOutcome::AcceptedReplay { candidate_id } => {
+            ReflectionResultDurableIngestOutcome::IdempotentReplay { candidate_id }
+        }
+        ReflectionRequestCandidateConsumptionOutcome::Missing => {
+            ReflectionResultDurableIngestOutcome::MissingLedger
+        }
+        ReflectionRequestCandidateConsumptionOutcome::Expired { expires_at } => {
+            ReflectionResultDurableIngestOutcome::Expired { expires_at }
+        }
+        ReflectionRequestCandidateConsumptionOutcome::MismatchedReplay {
+            existing_candidate_id,
+        } => ReflectionResultDurableIngestOutcome::MismatchedReplay {
+            existing_candidate_id,
+        },
+        ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus { status } => {
+            ReflectionResultDurableIngestOutcome::UnavailableStatus { status }
+        }
+    }
+}
+
+fn shell_quote_command_arg(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value.bytes().all(|byte| {
+        matches!(
+            byte,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'_'
+                | b'-'
+                | b'.'
+                | b'/'
+                | b':'
+                | b'@'
+                | b'+'
+                | b'='
+        )
+    }) {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn why_next_action_for_created_memory(memory_id: &str, workspace_path: &Path) -> String {
+    format!(
+        "ee why {} --workspace {} --json",
+        shell_quote_command_arg(memory_id),
+        shell_quote_command_arg(&workspace_path.display().to_string())
+    )
 }
 
 fn persist_workspace_review_candidate(
@@ -9929,19 +10188,28 @@ mod tests {
         CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
         CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
         REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
-        REVIEW_WORKSPACE_SCHEMA_V1, ReviewSessionCandidate, ReviewSessionOptions,
-        ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
-        build_bootstrap_session_candidates, build_review_session_candidates,
-        candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
-        review_curation_candidate, review_session_proposals, run_curation_disposition,
-        run_review_workspace, stable_workspace_id, validate_curation_candidate,
+        REVIEW_WORKSPACE_SCHEMA_V1, ReflectionResultDurableIngestOutcome, ReviewSessionCandidate,
+        ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
+        apply_curation_candidate, build_bootstrap_session_candidates,
+        build_review_session_candidates, candidate_summary_from_stored,
+        evaluate_candidate_for_validation, list_curation_candidates,
+        persist_reflection_result_ingest_decision, reflection_request_ledger_input_from_material,
+        reflection_request_ledger_material_from_stored, reflection_result_candidate_id,
+        reflection_result_candidate_input_from_material,
+        reflection_result_replay_gate_from_db_status, review_curation_candidate,
+        review_session_proposals, run_curation_disposition, run_review_workspace,
+        stable_workspace_id, validate_curation_candidate,
+    };
+    use crate::curate::{
+        CandidateSource, ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
+        ReflectionResultIngestDecision, ReflectionResultReplayGate,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
         CreateMemoryInput, CreateMemoryLinkInput, CreateProceduralRuleInput, CreateSessionInput,
         CreateWorkspaceInput, DbConnection, EvidenceSpanMemoryAttachResult, MemoryLinkRelation,
-        MemoryLinkSource, StoredCurationCandidate, StoredEvidenceSpan, StoredSession,
-        audit_actions,
+        MemoryLinkSource, ReflectionRequestReplayStatus, StoredCurationCandidate,
+        StoredEvidenceSpan, StoredReflectionRequestLedger, StoredSession, audit_actions,
     };
     use crate::models::degradation::GRAPH_CURATE_DISCONNECTED_GRAPH_CODE;
     use crate::models::{CandidateId, DomainError, EvidenceId, MemoryId, RuleId, SessionId};
@@ -10027,6 +10295,376 @@ mod tests {
             .get(name)
             .map(String::as_str)
             .ok_or_else(|| format!("event missing field {name}; fields={:?}", event.fields))
+    }
+
+    #[test]
+    fn reflection_core_bridges_ledger_material_and_replay_status() -> TestResult {
+        let material = ReflectionRequestLedgerMaterial {
+            request_id: "reflect_req_0123456789abcdef".to_owned(),
+            request_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            workspace_id: "wsp_reflection_core".to_owned(),
+            reflection_kind: "summary".to_owned(),
+            source_package_hash:
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            source_refs_json: r#"[{"kind":"memory","id":"mem_a","contentHash":"blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}]"#
+                .to_owned(),
+            source_content_hashes_json: r#"["blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]"#
+                .to_owned(),
+            prompt_template_hash:
+                "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            response_schema_hash:
+                "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_owned(),
+            created_at: "2026-05-24T00:00:00Z".to_owned(),
+            expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            challenge_key_id: "reflect-key-v1".to_owned(),
+            challenge_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+        };
+
+        let ledger_input = reflection_request_ledger_input_from_material(&material);
+        assert_eq!(ledger_input.workspace_id, material.workspace_id.as_str());
+        assert_eq!(ledger_input.request_hash, material.request_hash.as_str());
+        assert_eq!(
+            ledger_input.reflection_kind,
+            material.reflection_kind.as_str()
+        );
+        assert_eq!(
+            ledger_input.source_refs_json,
+            material.source_refs_json.as_str()
+        );
+        assert_eq!(
+            ledger_input.source_content_hashes_json,
+            material.source_content_hashes_json.as_str()
+        );
+        assert_eq!(
+            ledger_input.challenge_hash,
+            material.challenge_hash.as_str()
+        );
+
+        let stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        assert_eq!(
+            reflection_request_ledger_material_from_stored(&stored),
+            material
+        );
+
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(ReflectionRequestReplayStatus::Pending),
+            ReflectionResultReplayGate::Pending
+        );
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(ReflectionRequestReplayStatus::Expired {
+                expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            }),
+            ReflectionResultReplayGate::Expired {
+                expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            }
+        );
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(
+                ReflectionRequestReplayStatus::AcceptedReplay {
+                    candidate_id: "curate_replay".to_owned(),
+                },
+            ),
+            ReflectionResultReplayGate::AcceptedReplay {
+                candidate_id: "curate_replay".to_owned(),
+            }
+        );
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(
+                ReflectionRequestReplayStatus::MismatchedReplay {
+                    existing_candidate_id: Some("curate_existing".to_owned()),
+                },
+            ),
+            ReflectionResultReplayGate::MismatchedReplay {
+                existing_candidate_id: Some("curate_existing".to_owned()),
+            }
+        );
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(
+                ReflectionRequestReplayStatus::UnavailableStatus {
+                    status: "revoked".to_owned(),
+                },
+            ),
+            ReflectionResultReplayGate::UnavailableStatus {
+                status: "revoked".to_owned(),
+            }
+        );
+        assert_eq!(
+            reflection_result_replay_gate_from_db_status(ReflectionRequestReplayStatus::Missing),
+            ReflectionResultReplayGate::Missing
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_bridges_result_candidate_material_to_db_input() -> TestResult {
+        let material = ReflectionResultCandidateMaterial {
+            candidate_type: CandidateType::CreateDerivedMemory.as_str(),
+            target_memory_id: None,
+            proposed_content:
+                "Derived memory: keep reflection result ingestion atomic with ledger consumption."
+                    .to_owned(),
+            proposed_confidence: 0.74,
+            proposed_trust_class: "agent_assertion",
+            source_type: CandidateSource::AgentInference.as_str(),
+            source_id: "reflect_result_0123456789abcdef".to_owned(),
+            reason: "Reflection result cites 2 request sources and proposes a derived memory."
+                .to_owned(),
+            confidence: 0.74,
+            derivation_source_refs_json: r#"[{"kind":"memory","id":"mem_a","contentHash":"blake3:1111111111111111111111111111111111111111111111111111111111111111"},{"kind":"evidence_span","id":"ev_a","contentHash":"blake3:2222222222222222222222222222222222222222222222222222222222222222"}]"#
+                .to_owned(),
+            derivation_metadata_json: r#"{"memorySpec":{"level":"semantic","kind":"summary"},"producer":{"producer":"reflection_result"}}"#
+                .to_owned(),
+        };
+
+        let result_hash = "blake3:3333333333333333333333333333333333333333333333333333333333333333";
+        let candidate_id = reflection_result_candidate_id(
+            "wsp_reflection_core",
+            "reflect_req_0123456789abcdef",
+            result_hash,
+        );
+        assert!(candidate_id.starts_with("curate_"));
+        assert_eq!(
+            candidate_id,
+            reflection_result_candidate_id(
+                " wsp_reflection_core ",
+                " reflect_req_0123456789abcdef ",
+                " blake3:3333333333333333333333333333333333333333333333333333333333333333 ",
+            )
+        );
+        assert_ne!(
+            candidate_id,
+            reflection_result_candidate_id(
+                "wsp_reflection_core",
+                "reflect_req_0123456789abcdef",
+                "blake3:4444444444444444444444444444444444444444444444444444444444444444",
+            )
+        );
+
+        let input = reflection_result_candidate_input_from_material(
+            " wsp_reflection_core ",
+            &material,
+            " 2026-05-24T00:30:00Z ",
+        );
+
+        assert_eq!(input.workspace_id, "wsp_reflection_core");
+        assert_eq!(input.candidate_type, "create_derived_memory");
+        assert_eq!(input.target_memory_id, None);
+        assert_eq!(
+            input.proposed_content.as_deref(),
+            Some(material.proposed_content.as_str())
+        );
+        assert_eq!(input.proposed_confidence, Some(0.74));
+        assert_eq!(
+            input.proposed_trust_class.as_deref(),
+            Some("agent_assertion")
+        );
+        assert_eq!(input.source_type, "agent_inference");
+        assert_eq!(
+            input.source_id.as_deref(),
+            Some("reflect_result_0123456789abcdef")
+        );
+        assert_eq!(input.reason, material.reason.as_str());
+        assert_eq!(input.confidence, 0.74);
+        assert_eq!(input.status.as_deref(), Some("pending"));
+        assert_eq!(input.created_at.as_deref(), Some("2026-05-24T00:30:00Z"));
+        assert_eq!(input.ttl_expires_at, None);
+        assert_eq!(
+            input.derivation_source_refs_json.as_deref(),
+            Some(material.derivation_source_refs_json.as_str())
+        );
+        assert_eq!(
+            input.derivation_metadata_json.as_deref(),
+            Some(material.derivation_metadata_json.as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_persists_ingest_decision_once() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let request_id = "reflect_req_corepersist0001";
+        let result_hash = "blake3:3333333333333333333333333333333333333333333333333333333333333333";
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-core-persist-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let ledger_material = ReflectionRequestLedgerMaterial {
+            request_id: request_id.to_owned(),
+            request_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            workspace_id: workspace_id.clone(),
+            reflection_kind: "summary".to_owned(),
+            source_package_hash:
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            source_refs_json: r#"[{"kind":"memory","id":"mem_a","contentHash":"blake3:1111111111111111111111111111111111111111111111111111111111111111"},{"kind":"evidence_span","id":"ev_a","contentHash":"blake3:2222222222222222222222222222222222222222222222222222222222222222"}]"#
+                .to_owned(),
+            source_content_hashes_json: r#"["blake3:1111111111111111111111111111111111111111111111111111111111111111","blake3:2222222222222222222222222222222222222222222222222222222222222222"]"#
+                .to_owned(),
+            prompt_template_hash:
+                "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            response_schema_hash:
+                "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_owned(),
+            created_at: "2026-05-24T00:00:00Z".to_owned(),
+            expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            challenge_key_id: "reflect-key-v1".to_owned(),
+            challenge_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+        };
+        connection
+            .insert_reflection_request_ledger(
+                request_id,
+                &reflection_request_ledger_input_from_material(&ledger_material),
+            )
+            .map_err(|error| error.to_string())?;
+
+        let candidate_material = ReflectionResultCandidateMaterial {
+            candidate_type: CandidateType::CreateDerivedMemory.as_str(),
+            target_memory_id: None,
+            proposed_content:
+                "Derived memory: persist reflection ingest decisions through the replay ledger."
+                    .to_owned(),
+            proposed_confidence: 0.74,
+            proposed_trust_class: "agent_assertion",
+            source_type: CandidateSource::AgentInference.as_str(),
+            source_id: "reflect_result_corepersist0001".to_owned(),
+            reason: "Reflection result cites 2 request sources and proposes a derived memory."
+                .to_owned(),
+            confidence: 0.74,
+            derivation_source_refs_json: ledger_material.source_refs_json.clone(),
+            derivation_metadata_json: r#"{"memorySpec":{"level":"semantic","kind":"summary"},"producer":{"producer":"reflection_result"}}"#
+                .to_owned(),
+        };
+        let decision = ReflectionResultIngestDecision::CreateCandidate {
+            result_hash: result_hash.to_owned(),
+            candidate: candidate_material,
+        };
+        let expected_candidate_id =
+            reflection_result_candidate_id(&workspace_id, request_id, result_hash);
+
+        let inserted = persist_reflection_result_ingest_decision(
+            &connection,
+            &workspace_id,
+            request_id,
+            &decision,
+            "2026-05-24T00:30:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            inserted,
+            ReflectionResultDurableIngestOutcome::Inserted {
+                candidate_id: expected_candidate_id.clone()
+            }
+        );
+
+        let stored_candidate = connection
+            .get_curation_candidate(&workspace_id, &expected_candidate_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected persisted reflection candidate".to_owned())?;
+        assert_eq!(stored_candidate.status, "pending");
+        assert_eq!(
+            stored_candidate.source_id.as_deref(),
+            Some("reflect_result_corepersist0001")
+        );
+        assert_eq!(
+            stored_candidate.derivation_source_refs_json.as_deref(),
+            Some(ledger_material.source_refs_json.as_str())
+        );
+
+        let consumed_ledger = connection
+            .get_reflection_request_ledger(&workspace_id, request_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected consumed reflection ledger row".to_owned())?;
+        assert_eq!(consumed_ledger.status, "consumed");
+        assert_eq!(
+            consumed_ledger.consumed_candidate_id.as_deref(),
+            Some(expected_candidate_id.as_str())
+        );
+        assert_eq!(
+            consumed_ledger.consumed_result_hash.as_deref(),
+            Some(result_hash)
+        );
+
+        let replay = persist_reflection_result_ingest_decision(
+            &connection,
+            &workspace_id,
+            request_id,
+            &decision,
+            "2026-05-24T00:31:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            replay,
+            ReflectionResultDurableIngestOutcome::IdempotentReplay {
+                candidate_id: expected_candidate_id.clone()
+            }
+        );
+        let candidates = connection
+            .list_curation_candidates(
+                &workspace_id,
+                Some(CandidateType::CreateDerivedMemory.as_str()),
+                None,
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+        assert_eq!(candidates.len(), 1);
+
+        let preaccepted = persist_reflection_result_ingest_decision(
+            &connection,
+            &workspace_id,
+            request_id,
+            &ReflectionResultIngestDecision::IdempotentReplay {
+                result_hash: result_hash.to_owned(),
+                candidate_id: "curate_preaccepted0000000000".to_owned(),
+            },
+            "2026-05-24T00:32:00Z",
+        )
+        .map_err(|error| error.to_string())?;
+        assert_eq!(
+            preaccepted,
+            ReflectionResultDurableIngestOutcome::IdempotentReplay {
+                candidate_id: "curate_preaccepted0000000000".to_owned()
+            }
+        );
+        Ok(())
     }
 
     fn enable_structural_decay_feature(workspace_path: &Path) -> TestResult {

@@ -1,0 +1,5 @@
+ 100 1 00:03:11 /Users/jemanuel/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo test --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml --lib import_cursor
+ 101 1 00:00:09 lsd --inode --long /Volumes/USBNVME16TB/temp_agent_space/cargo-target/debug/deps/
+ 102 1 00:10:00 /bin/zsh -c eval 'cargo metadata --format-version=1 --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml'
+ 103 1 00:01:00 scripts/rch_verify.sh -- cargo test --lib support_bundle_tripwire_probe
+ 104 1 00:05:00 /usr/bin/rustc --crate-name ee /Users/jemanuel/projects/eidetic_engine_cli/src/lib.rs

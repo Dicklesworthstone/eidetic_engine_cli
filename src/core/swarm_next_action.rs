@@ -1216,6 +1216,11 @@ fn work_packet_candidates(
                 unsafe_reasons.sort();
                 unsafe_reasons.dedup();
             }
+            if decision == "release_operator_required" {
+                unsafe_reasons.extend(candidate_release_operator_reasons(candidate));
+                unsafe_reasons.sort();
+                unsafe_reasons.dedup();
+            }
             let stale_reasons = stale.map_or_else(Vec::new, |proposal| proposal.evidence.clone());
             SwarmWorkPacketCandidate {
                 id: candidate.id.clone(),
@@ -1408,6 +1413,14 @@ fn work_packet_candidate_decision(
     if !candidate.blocked_by.is_empty() {
         return "blocked_by_dependency";
     }
+    match candidate.status.as_str() {
+        "blocked" => return "blocked_by_dependency",
+        "deferred" => return "external_state_required",
+        _ => {}
+    }
+    if !candidate_release_operator_reasons(candidate).is_empty() {
+        return "release_operator_required";
+    }
     if candidate.blocked_by_compile_health {
         return "blocked_by_verification";
     }
@@ -1429,6 +1442,33 @@ fn work_packet_candidate_decision(
         Some("no_action_recommended") => "blocked",
         _ => "safe_to_claim",
     }
+}
+
+fn candidate_release_operator_reasons(candidate: &SwarmNextActionCandidate) -> Vec<String> {
+    let title = candidate.title.to_ascii_lowercase();
+    let mut reasons = BTreeSet::new();
+    if title.contains("publish-dep:") || title.contains("upstream-publish:") {
+        reasons.insert("release_operator_required:dependency_publish");
+    }
+    if title.contains("crates.io") || title.contains("cargo publish") {
+        reasons.insert("release_operator_required:crates_io_publish");
+    }
+    if title.contains("homebrew") || title.contains("publish_flip") {
+        reasons.insert("release_operator_required:distribution_publish");
+    }
+    if title.contains("tag recovery")
+        || title.contains("signed release")
+        || title.contains("release signing")
+    {
+        reasons.insert("release_operator_required:release_authority");
+    }
+    if title.contains("operator approval")
+        || title.contains("credential-required")
+        || title.contains("credentials")
+    {
+        reasons.insert("release_operator_required:operator_approval");
+    }
+    reasons.into_iter().map(str::to_owned).collect()
 }
 
 fn work_packet_candidate_conflict_present(
@@ -6050,6 +6090,204 @@ mod tests {
         );
         assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
         assert_eq!(packet.recommended_action.action, "coordinate_before_claim");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+    }
+
+    #[test]
+    fn work_packet_blocks_bv_picks_with_blocked_or_deferred_beads_status() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut blocked_candidate = candidate(
+            "bd-blocked-rollup",
+            "BV stale rollup should not be claimable",
+            "bv_top_pick",
+            Some(1),
+        );
+        blocked_candidate.status = "blocked".to_owned();
+        let mut deferred_candidate = candidate(
+            "bd-deferred-rollup",
+            "BV deferred rollup should wait for external state",
+            "bv_top_pick",
+            Some(2),
+        );
+        deferred_candidate.status = "deferred".to_owned();
+        let snapshot = snapshot_with_candidates(vec![blocked_candidate, deferred_candidate]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let by_id = packet
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.id.as_str(), candidate))
+            .collect::<BTreeMap<_, _>>();
+        let blocked = by_id
+            .get("bd-blocked-rollup")
+            .expect("blocked candidate visible");
+        let deferred = by_id
+            .get("bd-deferred-rollup")
+            .expect("deferred candidate visible");
+
+        assert_eq!(blocked.source, "bv_top_pick");
+        assert_eq!(blocked.decision, "blocked_by_dependency");
+        assert!(
+            blocked
+                .source_refs
+                .contains(&"br://bd-blocked-rollup".to_owned())
+        );
+        assert!(
+            blocked
+                .source_refs
+                .contains(&"bv://top-pick/bd-blocked-rollup".to_owned())
+        );
+        assert_eq!(deferred.decision, "external_state_required");
+        assert!(
+            deferred
+                .source_refs
+                .contains(&"br://bd-deferred-rollup".to_owned())
+        );
+        assert!(
+            deferred
+                .source_refs
+                .contains(&"bv://top-pick/bd-deferred-rollup".to_owned())
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+    }
+
+    #[test]
+    fn work_packet_blocks_bv_false_ready_parent_from_brief_sources() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut blocked_parent = bead("bd-blocked-parent", "Blocked rollup parent", 1);
+        blocked_parent.status = "blocked".to_owned();
+        blocked_parent.assignee = Some("cod-core".to_owned());
+        blocked_parent.source_bucket = "blocked".to_owned();
+        brief.beads.blocked = vec![blocked_parent];
+        brief.bv = Some(SwarmBriefBvSummary {
+            actionable_count: Some(1),
+            blocked_count: Some(1),
+            in_progress_count: Some(0),
+            track_count: None,
+            top_picks: vec![SwarmBriefBvPick {
+                id: "bd-blocked-parent".to_owned(),
+                title: "Blocked rollup parent".to_owned(),
+                score_milli: Some(950),
+                action_hint: Some("br update bd-blocked-parent --status in_progress".to_owned()),
+                blocked_by: Vec::new(),
+            }],
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+
+        assert_eq!(snapshot.inputs.ready_bead_count, 0);
+        assert_eq!(snapshot.inputs.blocked_bead_count, 1);
+        assert_eq!(snapshot.candidates.len(), 1);
+        assert_eq!(snapshot.candidates[0].source, "bv_top_pick");
+        assert_eq!(snapshot.candidates[0].status, "blocked");
+        assert_eq!(snapshot.candidates[0].assignee.as_deref(), Some("cod-core"));
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidate = &packet.candidates[0];
+
+        assert_eq!(candidate.id, "bd-blocked-parent");
+        assert_eq!(candidate.source, "bv_top_pick");
+        assert_eq!(candidate.status, "blocked");
+        assert_eq!(candidate.decision, "blocked_by_dependency");
+        assert!(
+            candidate
+                .source_refs
+                .contains(&"br://bd-blocked-parent".to_owned())
+        );
+        assert!(
+            candidate
+                .source_refs
+                .contains(&"bv://top-pick/bd-blocked-parent".to_owned())
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .all(|command| !command.contains("br update"))
+        );
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
+    }
+
+    #[test]
+    fn work_packet_marks_release_operator_lanes_unclaimable() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut release_candidate = candidate(
+            "bd-release",
+            "publish-dep:fnx-runtime 0.1.0 crates.io workflow",
+            "bv_top_pick",
+            Some(2),
+        );
+        release_candidate.score_milli = Some(950);
+        let local_candidate = candidate(
+            "bd-safe-local",
+            "docs: local schema cleanup",
+            "beads_ready",
+            Some(2),
+        );
+        let snapshot = snapshot_with_candidates(vec![release_candidate, local_candidate]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let candidates = packet
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.id.as_str(), candidate))
+            .collect::<BTreeMap<_, _>>();
+        let release = candidates
+            .get("bd-release")
+            .expect("release lane remains visible");
+
+        assert_eq!(
+            packet
+                .candidates
+                .iter()
+                .map(|candidate| candidate.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-release", "bd-safe-local"]
+        );
+        assert_eq!(release.source, "bv_top_pick");
+        assert_eq!(release.decision, "release_operator_required");
+        assert!(
+            release
+                .unsafe_reasons
+                .contains(&"release_operator_required:dependency_publish".to_owned())
+        );
+        assert!(
+            release
+                .unsafe_reasons
+                .contains(&"release_operator_required:crates_io_publish".to_owned())
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert!(
+            packet
+                .recommended_action
+                .suggested_commands
+                .iter()
+                .all(|command| !command.contains("br update"))
+        );
         assert!(
             packet
                 .recommended_action

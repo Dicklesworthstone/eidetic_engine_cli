@@ -20,7 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ee::db::{DatabaseConfig, DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1};
+use ee::db::{
+    DatabaseConfig, DbConnection, PACK_REPLAY_LEDGER_SCHEMA_V1, parse_stored_pack_ledger,
+};
 use ee::policy::redact_secret_like_content;
 
 type TestResult = Result<(), String>;
@@ -508,7 +510,7 @@ fn assert_context_pack_ledgers_persisted(
             &Some("ee context"),
             "context pack ledger created_by",
         )?;
-        let ledger_json = record
+        let _ledger_json = record
             .ledger_json
             .as_ref()
             .ok_or_else(|| format!("pack record {} missing ledger_json", record.id))?;
@@ -524,8 +526,13 @@ fn assert_context_pack_ledgers_persisted(
             ),
         )?;
 
-        let ledger: JsonValue = serde_json::from_str(ledger_json)
-            .map_err(|error| format!("pack record {} ledger JSON malformed: {error}", record.id))?;
+        let parsed_ledger = parse_stored_pack_ledger(record);
+        let ledger = parsed_ledger.ledger.as_ref().ok_or_else(|| {
+            format!(
+                "pack record {} ledger could not be replayed: {:?}",
+                record.id, parsed_ledger.degraded
+            )
+        })?;
         ensure_equal(
             &ledger.pointer("/schema"),
             &Some(&json!(PACK_REPLAY_LEDGER_SCHEMA_V1)),

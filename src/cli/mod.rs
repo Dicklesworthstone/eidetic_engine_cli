@@ -586,6 +586,44 @@ impl Cli {
     }
 }
 
+fn unsupported_mermaid_format_error(command: &str) -> DomainError {
+    let details_json = serde_json::json!({
+        "command": command,
+        "requestedFormat": "mermaid",
+        "expectedCapability": "unsupported",
+        "capabilityMatrix": "tests/renderer_command_capabilities.toml",
+        "jsonOverride": true,
+    })
+    .to_string();
+
+    DomainError::UsageWithDetails {
+        message: format!(
+            "`ee {command} --format mermaid` is unsupported; this command has no Mermaid diagram renderer."
+        ),
+        repair: Some(format!(
+            "Use `ee --workspace . --json {command} ...` for the canonical machine contract, or add an explicit Mermaid renderer before marking `{command}` as diagram-capable in tests/renderer_command_capabilities.toml."
+        )),
+        details_json,
+    }
+}
+
+fn reject_unsupported_mermaid_format<W, E>(
+    cli: &Cli,
+    command: &str,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> Option<ProcessExitCode>
+where
+    W: Write,
+    E: Write,
+{
+    if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+        let error = unsupported_mermaid_format_error(command);
+        return Some(write_domain_error(&error, true, stdout, stderr));
+    }
+    None
+}
+
 thread_local! {
     static ACTIVE_RESPONSE_SCHEMA_VERSION: Cell<output::ResponseSchemaVersion> =
         const { Cell::new(output::ResponseSchemaVersion::V1) };
@@ -6918,7 +6956,7 @@ pub enum CurateCommand {
     /// more existing memories or evidence spans. The command is
     /// propose-only: it inserts a pending candidate carrying canonical
     /// source refs and a memorySpec, then surfaces `ee curate validate`
-    /// / `ee curate apply` as next actions. It never creates the
+    /// / `ee curate apply` as nextCommands. It never creates the
     /// derived memory or attaches spans directly. See bd-kxm0c.
     #[command(name = "propose-derived")]
     ProposeDerived(CurateProposeDerivedArgs),
@@ -10720,6 +10758,11 @@ where
             handle_situation_explain(&cli, args, stdout, stderr)
         }
         Some(Command::Status(ref args)) => {
+            if let Some(exit_code) =
+                reject_unsupported_mermaid_format(&cli, "status", stdout, stderr)
+            {
+                return exit_code;
+            }
             let timing_capture = crate::models::TimingCapture::start();
             let (workspace_path, workspace_source) =
                 resolve_workspace_for_cli(cli.workspace.as_deref());
@@ -26512,9 +26555,9 @@ where
         Ok(report) => {
             // bd-1rrz5: `--format mermaid` short-circuits the standard
             // renderer to emit a deterministic, paste-friendly diagram
-            // of the neighborhood. JSON remains the canonical machine
-            // contract via `--format json`.
-            if matches!(cli.format, OutputFormat::Mermaid) {
+            // of the neighborhood. JSON/robot modes remain the canonical
+            // machine contract and override the requested text format.
+            if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
                 return write_stdout(stdout, &(graph_neighborhood_mermaid_output(&report) + "\n"));
             }
             match cli.renderer() {
@@ -26681,6 +26724,10 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "memory show", stdout, stderr) {
+        return exit_code;
+    }
+
     let workspace = cli.resolve_workspace();
 
     let database_path = args
@@ -27360,21 +27407,28 @@ where
         return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
     }
 
-    match cli.renderer() {
-        output::Renderer::Human | output::Renderer::Markdown => {
-            write_stdout(stdout, &output::render_memory_history_human(&report))
+    if cli.format == OutputFormat::Mermaid && !cli.json && !cli.robot {
+        write_stdout(
+            stdout,
+            &(output::render_memory_history_mermaid(&report) + "\n"),
+        )
+    } else {
+        match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &output::render_memory_history_human(&report))
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_memory_history_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_memory_history_json(&report) + "\n"),
+            ),
         }
-        output::Renderer::Toon => write_stdout(
-            stdout,
-            &(output::render_memory_history_toon(&report) + "\n"),
-        ),
-        output::Renderer::Json
-        | output::Renderer::Jsonl
-        | output::Renderer::Compact
-        | output::Renderer::Hook => write_stdout(
-            stdout,
-            &(output::render_memory_history_json(&report) + "\n"),
-        ),
     }
 }
 
@@ -33360,6 +33414,10 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "search", stdout, stderr) {
+        return exit_code;
+    }
+
     let workspace_path = cli.resolve_workspace();
     let recalibration = if args.recalibrate_now {
         match recalibrate_search_score_calibration(&workspace_path, args.database.as_deref()) {
@@ -34929,6 +34987,15 @@ fn format_why_human(report: &crate::core::why::WhyReport) -> String {
                 output.push_str(&format!("  Latest pack: {}\n", pack.pack_id));
                 output.push_str(&format!("  Query: {}\n", pack.query));
                 output.push_str(&format!("  Rank: {}\n", pack.rank));
+                let ledger_mode = pack
+                    .ledger_storage
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                output.push_str(&format!(
+                    "  Pack ledger: {} ({})\n",
+                    pack.ledger_status, ledger_mode
+                ));
                 output.push_str(&format!("  Pack why: {}\n", pack.why));
             }
             None => output.push_str("  Latest pack: none recorded\n"),
@@ -35261,6 +35328,9 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
                 "utility": score_json_value(pack.utility),
                 "why": pack.why,
                 "packHash": pack.pack_hash,
+                "ledgerHash": pack.ledger_hash,
+                "ledgerStatus": pack.ledger_status,
+                "ledgerStorage": pack.ledger_storage,
                 "selectedAt": pack.selected_at,
             })
         });
@@ -36657,6 +36727,12 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) =
+        reject_unsupported_mermaid_format(cli, "curate candidates", stdout, stderr)
+    {
+        return exit_code;
+    }
+
     let workspace_path = cli.resolve_workspace();
     if args.all && args.status.is_some() {
         return write_domain_error(
@@ -36728,6 +36804,12 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) =
+        reject_unsupported_mermaid_format(cli, "curate validate", stdout, stderr)
+    {
+        return exit_code;
+    }
+
     let workspace_path = cli.resolve_workspace();
     let options = CurateValidateOptions {
         workspace_path: &workspace_path,
@@ -36779,6 +36861,11 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(exit_code) = reject_unsupported_mermaid_format(cli, "curate apply", stdout, stderr)
+    {
+        return exit_code;
+    }
+
     let workspace_path = cli.resolve_workspace();
     let options = CurateApplyOptions {
         workspace_path: &workspace_path,
@@ -37096,7 +37183,7 @@ where
                 ));
                 human.push_str(&format!("  persisted: {}\n", report.persisted));
                 human.push_str("\nNext:\n");
-                for next in &report.next_actions {
+                for next in &report.next_commands {
                     human.push_str(&format!("  {next}\n"));
                 }
                 write_stdout(stdout, &human)
@@ -47127,6 +47214,9 @@ mod tests {
                     utility: 0.8,
                     why: "release preparation needs formatting guardrail".to_string(),
                     pack_hash: "blake3:pack".to_string(),
+                    ledger_hash: None,
+                    ledger_status: "missing".to_string(),
+                    ledger_storage: serde_json::json!({"mode": "missing"}),
                     selected_at: "2026-05-04T12:01:00Z".to_string(),
                 }),
             },
@@ -51618,6 +51708,154 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Usage, "invalid format exit")?;
         ensure(stdout.is_empty(), "invalid non-machine format stdout")?;
         ensure_contains(&stderr, "invalid value", "invalid format stderr")
+    }
+
+    #[test]
+    fn unsupported_mermaid_requests_return_structured_usage_errors() -> TestResult {
+        let cases: &[(&[&str], &str)] = &[
+            (
+                &["ee", "--format", "mermaid", "search", "release"],
+                "search",
+            ),
+            (&["ee", "--format", "mermaid", "status"], "status"),
+            (
+                &[
+                    "ee",
+                    "--format",
+                    "mermaid",
+                    "memory",
+                    "show",
+                    "mem_renderer",
+                ],
+                "memory show",
+            ),
+            (
+                &["ee", "--format", "mermaid", "curate", "candidates"],
+                "curate candidates",
+            ),
+            (
+                &[
+                    "ee",
+                    "--format",
+                    "mermaid",
+                    "curate",
+                    "validate",
+                    "cand_renderer",
+                ],
+                "curate validate",
+            ),
+            (
+                &[
+                    "ee",
+                    "--format",
+                    "mermaid",
+                    "curate",
+                    "apply",
+                    "cand_renderer",
+                ],
+                "curate apply",
+            ),
+        ];
+
+        for (args, command) in cases {
+            let (exit, stdout, stderr) = invoke(args);
+            let first_line = stdout.lines().next().unwrap_or_default();
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Usage,
+                &format!("command=`{}` exit", args.join(" ")),
+            )?;
+            ensure(
+                stderr.is_empty(),
+                format!(
+                    "command=`{}` expected structured stdout error and empty stderr; stderr={stderr:?}",
+                    args.join(" ")
+                ),
+            )?;
+            ensure(
+                first_line.starts_with("{\"schema\":\"ee.error.v2\""),
+                format!(
+                    "command=`{}` expected ee.error.v2 first line, got {first_line:?}",
+                    args.join(" ")
+                ),
+            )?;
+            let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+                format!(
+                    "command=`{}` expected parseable JSON error: {error}; stdout={stdout:?}",
+                    args.join(" ")
+                )
+            })?;
+            ensure_equal(
+                &parsed["error"]["code"].as_str(),
+                &Some("usage"),
+                &format!("command=`{}` error code", args.join(" ")),
+            )?;
+            let message = parsed["error"]["message"].as_str().unwrap_or_default();
+            ensure(
+                message.contains(&format!("`ee {command} --format mermaid` is unsupported")),
+                format!(
+                    "command=`{}` expected command-specific unsupported message; got {message:?}",
+                    args.join(" ")
+                ),
+            )?;
+            ensure_equal(
+                &parsed["error"]["details"]["command"].as_str(),
+                &Some(*command),
+                &format!("command=`{}` details.command", args.join(" ")),
+            )?;
+            ensure_equal(
+                &parsed["error"]["details"]["requestedFormat"].as_str(),
+                &Some("mermaid"),
+                &format!("command=`{}` details.requestedFormat", args.join(" ")),
+            )?;
+            ensure_equal(
+                &parsed["error"]["details"]["expectedCapability"].as_str(),
+                &Some("unsupported"),
+                &format!("command=`{}` details.expectedCapability", args.join(" ")),
+            )?;
+            ensure_equal(
+                &parsed["error"]["details"]["capabilityMatrix"].as_str(),
+                &Some("tests/renderer_command_capabilities.toml"),
+                &format!("command=`{}` details.capabilityMatrix", args.join(" ")),
+            )?;
+            ensure_contains(
+                &stdout,
+                "tests/renderer_command_capabilities.toml",
+                &format!("command=`{}` matrix reference", args.join(" ")),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_mermaid_guard_preserves_json_and_robot_precedence() -> TestResult {
+        for mode_flag in ["--json", "--robot"] {
+            let (exit, stdout, stderr) =
+                invoke(&["ee", "--format", "mermaid", mode_flag, "status"]);
+            ensure_equal(
+                &exit,
+                &ProcessExitCode::Success,
+                &format!("status {mode_flag} --format mermaid exit"),
+            )?;
+            ensure(
+                stderr.is_empty(),
+                format!("status {mode_flag} --format mermaid stderr={stderr:?}"),
+            )?;
+            ensure(
+                !stdout.contains("does not support `--format mermaid`"),
+                format!("status {mode_flag} should not hit unsupported Mermaid guard"),
+            )?;
+            let parsed: serde_json::Value = serde_json::from_str(&stdout).map_err(|error| {
+                format!("status {mode_flag} should emit JSON: {error}; stdout={stdout:?}")
+            })?;
+            ensure(
+                parsed.get("error").is_none(),
+                format!("status {mode_flag} should emit success JSON, got {parsed}"),
+            )?;
+        }
+
+        Ok(())
     }
 
     #[test]

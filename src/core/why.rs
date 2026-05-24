@@ -35,6 +35,7 @@ use crate::models::{
     VerificationEvidenceRecord,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
+use serde_json::Value as JsonValue;
 use sqlmodel_core::{Row, Value};
 
 /// Why a memory was stored with certain characteristics.
@@ -268,6 +269,12 @@ pub struct PackSelectionExplanation {
     pub why: String,
     /// Persisted pack hash.
     pub pack_hash: String,
+    /// Persisted selection-ledger hash when available.
+    pub ledger_hash: Option<String>,
+    /// Selection-ledger replay status for the pack row.
+    pub ledger_status: String,
+    /// Redaction-safe storage posture for the persisted selection ledger.
+    pub ledger_storage: JsonValue,
     /// Pack creation timestamp.
     pub selected_at: String,
 }
@@ -2539,7 +2546,7 @@ fn latest_pack_selection(
 ) -> Result<Option<PackSelectionExplanation>, String> {
     let rows = conn
         .query(
-            "SELECT pi.pack_id, pr.query, pr.profile, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pr.pack_hash, pr.created_at \
+            "SELECT pi.pack_id, pr.query, pr.profile, pi.rank, pi.section, pi.estimated_tokens, pi.relevance, pi.utility, pi.why, pr.pack_hash, pr.created_at, pr.ledger_json, pr.ledger_hash \
              FROM pack_items pi \
              JOIN pack_records pr ON pr.id = pi.pack_id \
              WHERE pi.memory_id = ?1 \
@@ -2553,8 +2560,24 @@ fn latest_pack_selection(
 }
 
 fn pack_selection_from_row(row: &Row) -> Result<PackSelectionExplanation, String> {
+    let pack_id = required_text(row, 0, "pack_id")?;
+    let ledger_json = row
+        .get(11)
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let ledger_hash = row
+        .get(12)
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let parsed_ledger = crate::db::parse_pack_ledger_fields(
+        &pack_id,
+        ledger_json.as_deref(),
+        ledger_hash.as_deref(),
+    );
+    let ledger_storage = crate::db::pack_ledger_storage_summary(ledger_json.as_deref());
+
     Ok(PackSelectionExplanation {
-        pack_id: required_text(row, 0, "pack_id")?,
+        pack_id,
         query: required_text(row, 1, "query")?,
         profile: required_text(row, 2, "profile")?,
         rank: required_u32(row, 3, "rank")?,
@@ -2564,6 +2587,9 @@ fn pack_selection_from_row(row: &Row) -> Result<PackSelectionExplanation, String
         utility: required_f32(row, 7, "utility")?,
         why: required_text(row, 8, "why")?,
         pack_hash: required_text(row, 9, "pack_hash")?,
+        ledger_hash,
+        ledger_status: parsed_ledger.status.as_str().to_string(),
+        ledger_storage,
         selected_at: required_text(row, 10, "created_at")?,
     })
 }
@@ -3391,6 +3417,9 @@ mod tests {
             utility: 0.8,
             why: "selected because it matches the release task".to_string(),
             pack_hash: "hash".to_string(),
+            ledger_hash: None,
+            ledger_status: "missing".to_string(),
+            ledger_storage: serde_json::json!({"mode": "missing"}),
             selected_at: "2026-04-29T12:00:00Z".to_string(),
         };
         let report = build_report(

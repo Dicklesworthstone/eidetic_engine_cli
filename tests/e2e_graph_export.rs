@@ -15,7 +15,7 @@
 //!   types (memory_links, session_graph, procedure_graph,
 //!   evidence_graph, composite).
 //! * `--graph-type memory_links` on a freshly-init'd workspace with
-//!   no snapshot -> Graph error with repair pointing at
+//!   no snapshot -> degraded success with a repair pointing at
 //!   `ee graph centrality-refresh` so the user knows the next action.
 
 #![cfg(unix)]
@@ -157,11 +157,10 @@ fn graph_export_rejects_unknown_graph_type_with_usage_error_listing_valid_types(
 }
 
 #[test]
-fn graph_export_surfaces_graph_error_with_centrality_refresh_repair_when_snapshot_missing()
--> TestResult {
+fn graph_export_no_snapshot_returns_degraded_refresh_repair() -> TestResult {
     // Init the workspace so the database exists, but skip
     // `ee graph snapshot refresh` / `ee graph centrality-refresh`.
-    // The export call must fail with a Graph error whose repair
+    // The export call returns a degraded success report whose repair
     // tells the user to run centrality-refresh first. This pins the
     // documented next-action surface for the "no snapshot" branch
     // that future reworks of handle_graph_export must not lose.
@@ -174,22 +173,33 @@ fn graph_export_surfaces_graph_error_with_centrality_refresh_repair_when_snapsho
 
     let (output, parsed) = run_graph_export(&workspace_arg, &["--graph-type", "memory_links"])?;
     ensure(
-        !output.status.success(),
+        output.status.success(),
         format!(
-            "graph export on a workspace with no snapshot must fail; stdout: {}",
+            "graph export on a workspace with no snapshot must return degraded success; stdout: {}",
             String::from_utf8_lossy(&output.stdout)
         ),
     )?;
-    let error = &parsed["error"];
     ensure(
-        error.is_object(),
-        format!("response must include an error object; got {parsed}"),
+        parsed["success"].as_bool() == Some(true),
+        format!("response must be a success envelope; got {parsed}"),
     )?;
-    let repair = error["repair"].as_str().unwrap_or_default();
+    let data = &parsed["data"];
+    ensure(
+        data["status"].as_str() == Some("no_snapshot"),
+        format!("data.status must be no_snapshot; got {data}"),
+    )?;
+    ensure(
+        data["degraded"][0]["code"].as_str() == Some("graph_snapshot_missing"),
+        format!(
+            "data.degraded must include graph_snapshot_missing; got {}",
+            data["degraded"]
+        ),
+    )?;
+    let repair = data["degraded"][0]["repair"].as_str().unwrap_or_default();
     ensure(
         repair.contains("ee graph centrality-refresh"),
         format!(
-            "error repair must point at `ee graph centrality-refresh` so the user knows the next action; got {repair}"
+            "degraded repair must point at `ee graph centrality-refresh` so the user knows the next action; got {repair}"
         ),
     )?;
     Ok(())

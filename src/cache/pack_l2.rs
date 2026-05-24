@@ -7,14 +7,18 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 pub const PACK_L2_CACHE_ENTRY_SCHEMA_V1: &str = "ee.pack.l2_cache.entry.v1";
+pub const PACK_L2_CACHE_ENTRY_SCHEMA_V2: &str = "ee.pack.l2_cache.entry.v2";
 pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 pub const DEFAULT_MAX_ENTRY_BYTES: u64 = 1024 * 1024;
+const PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1: &str = "zstd_frame_v1";
+const PACK_L2_COMPRESSION_LEVEL: i32 = 3;
 const DEFAULT_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -179,29 +183,18 @@ impl PackL2Cache {
             }));
         }
 
-        let entry = match serde_json::from_slice::<PackL2CacheEntry>(&bytes) {
+        let entry = match decode_pack_l2_cache_entry(&bytes) {
             Ok(entry) => entry,
-            Err(error) => {
+            Err(reason) => {
                 remove_cache_entry_best_effort(&path);
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
                     key: key.to_owned(),
                     path,
-                    reason: PackL2CacheMissReason::Corrupt(error.to_string()),
+                    reason,
                 }));
             }
         };
 
-        if entry.schema != PACK_L2_CACHE_ENTRY_SCHEMA_V1 {
-            remove_cache_entry_best_effort(&path);
-            return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
-                key: key.to_owned(),
-                path,
-                reason: PackL2CacheMissReason::Corrupt(format!(
-                    "unexpected schema {}",
-                    entry.schema
-                )),
-            }));
-        }
         if entry.key != key {
             remove_cache_entry_best_effort(&path);
             return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
@@ -233,6 +226,7 @@ impl PackL2Cache {
             stored_at_epoch_seconds: entry.stored_at_epoch_seconds,
             pack_json: entry.pack_json,
             byte_len,
+            compression: entry.compression,
         }))
     }
 
@@ -270,6 +264,8 @@ impl PackL2Cache {
                 key: key.to_owned(),
                 path,
                 byte_len,
+                uncompressed_byte_len: byte_len,
+                compression: None,
                 outcome: PackL2WriteOutcome::SkippedTooLarge {
                     max_entry_bytes: self.options.max_entry_bytes,
                 },
@@ -292,6 +288,113 @@ impl PackL2Cache {
             key: key.to_owned(),
             path,
             byte_len,
+            uncompressed_byte_len: byte_len,
+            compression: None,
+            outcome: PackL2WriteOutcome::Stored,
+            eviction,
+        })
+    }
+
+    pub fn put_compressed(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        self.put_compressed_with_dictionary_at(
+            key,
+            pack_json,
+            None,
+            system_time_seconds(SystemTime::now())?,
+        )
+    }
+
+    pub fn put_compressed_at(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        self.put_compressed_with_dictionary_at(key, pack_json, None, stored_at_epoch_seconds)
+    }
+
+    pub fn put_compressed_with_dictionary_at(
+        &self,
+        key: &str,
+        pack_json: &JsonValue,
+        dictionary: Option<&PackL2CompressionDictionary>,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<PackL2WriteReport, PackL2CacheError> {
+        let path = self.entry_path(key);
+        let uncompressed =
+            serde_json::to_vec(pack_json).map_err(|source| PackL2CacheError::Json {
+                path: path.clone(),
+                operation: "serialize_uncompressed",
+                source,
+            })?;
+        let uncompressed_byte_len = uncompressed.len() as u64;
+        let compression_start = Instant::now();
+        let compressed = zstd_compress(&uncompressed, dictionary)?;
+        let compression_latency_ms = elapsed_millis(compression_start.elapsed());
+        let compressed_byte_len = compressed.len() as u64;
+        let entry = PackL2CacheEntryV2 {
+            schema: PACK_L2_CACHE_ENTRY_SCHEMA_V2.to_owned(),
+            key: key.to_owned(),
+            stored_at_epoch_seconds,
+            compression: PackL2CacheCompressionPayload {
+                algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+                compressed_payload_base64: BASE64_STANDARD.encode(&compressed),
+                compressed_byte_len,
+                uncompressed_byte_len,
+                uncompressed_hash: blake3_hash(&uncompressed),
+                dictionary: dictionary.map(PackL2CacheCompressionDictionaryRef::from_dictionary),
+            },
+        };
+        let bytes = serde_json::to_vec(&entry).map_err(|source| PackL2CacheError::Json {
+            path: path.clone(),
+            operation: "serialize_compressed",
+            source,
+        })?;
+        let byte_len = bytes.len() as u64;
+        let body_hash_prefix = body_hash_prefix(&bytes);
+        let path = self.entry_path_for_body_hash(key, &body_hash_prefix);
+        let compression_report = PackL2CompressionWriteReport {
+            algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+            dictionary_id: dictionary.map(|dictionary| dictionary.id.clone()),
+            compressed_bytes: compressed_byte_len,
+            uncompressed_bytes: uncompressed_byte_len,
+            compression_latency_ms,
+        };
+        if byte_len > self.options.max_entry_bytes {
+            return Ok(PackL2WriteReport {
+                key: key.to_owned(),
+                path,
+                byte_len,
+                uncompressed_byte_len,
+                compression: Some(compression_report),
+                outcome: PackL2WriteOutcome::SkippedTooLarge {
+                    max_entry_bytes: self.options.max_entry_bytes,
+                },
+                eviction: PackL2EvictionReport::default(),
+            });
+        }
+
+        ensure_cache_dir(&self.root)?;
+        let temp_path = self.temp_path(key, &body_hash_prefix, stored_at_epoch_seconds);
+        ensure_no_symlink_components(&path, "inspect_entry")?;
+        ensure_no_symlink_components(&temp_path, "inspect_temp")?;
+
+        write_synced_file(&temp_path, &bytes)?;
+        publish_cache_entry_temp_file(&temp_path, &path)?;
+        touch_cache_entry_mtime_best_effort(&path, stored_at_epoch_seconds);
+        sync_directory(&self.root)?;
+        let eviction = self.evict_best_effort_at(stored_at_epoch_seconds)?;
+
+        Ok(PackL2WriteReport {
+            key: key.to_owned(),
+            path,
+            byte_len,
+            uncompressed_byte_len,
+            compression: Some(compression_report),
             outcome: PackL2WriteOutcome::Stored,
             eviction,
         })
@@ -468,6 +571,16 @@ pub struct PackL2CacheHit {
     pub stored_at_epoch_seconds: u64,
     pub pack_json: JsonValue,
     pub byte_len: u64,
+    pub compression: Option<PackL2CompressionHit>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackL2CompressionHit {
+    pub algorithm: String,
+    pub dictionary_id: Option<String>,
+    pub compressed_bytes: u64,
+    pub uncompressed_bytes: u64,
+    pub decompression_latency_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -480,11 +593,31 @@ pub struct PackL2CacheMiss {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackL2CacheMissReason {
     NotFound,
-    Expired { stored_at_epoch_seconds: u64 },
+    Expired {
+        stored_at_epoch_seconds: u64,
+    },
     Corrupt(String),
-    BodyHashMismatch { expected: String, actual: String },
-    KeyMismatch { stored_key: String },
-    TooLarge { byte_len: u64, max_entry_bytes: u64 },
+    BodyHashMismatch {
+        expected: String,
+        actual: String,
+    },
+    KeyMismatch {
+        stored_key: String,
+    },
+    TooLarge {
+        byte_len: u64,
+        max_entry_bytes: u64,
+    },
+    CompressionDictionaryMissing {
+        dictionary_id: String,
+    },
+    CompressionDictionaryCorrupt {
+        dictionary_id: String,
+        message: String,
+    },
+    CompressionDecode {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -492,8 +625,26 @@ pub struct PackL2WriteReport {
     pub key: String,
     pub path: PathBuf,
     pub byte_len: u64,
+    pub uncompressed_byte_len: u64,
+    pub compression: Option<PackL2CompressionWriteReport>,
     pub outcome: PackL2WriteOutcome,
     pub eviction: PackL2EvictionReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackL2CompressionWriteReport {
+    pub algorithm: String,
+    pub dictionary_id: Option<String>,
+    pub compressed_bytes: u64,
+    pub uncompressed_bytes: u64,
+    pub compression_latency_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackL2CompressionDictionary {
+    pub id: String,
+    pub byte_hash: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -523,6 +674,10 @@ pub enum PackL2CacheError {
         operation: &'static str,
         source: serde_json::Error,
     },
+    Compression {
+        operation: &'static str,
+        source: io::Error,
+    },
     TimeBeforeUnixEpoch {
         source: std::time::SystemTimeError,
     },
@@ -549,6 +704,12 @@ impl fmt::Display for PackL2CacheError {
                 "failed to {operation} pack L2 cache JSON at {}: {source}",
                 path.display()
             ),
+            Self::Compression { operation, source } => {
+                write!(
+                    formatter,
+                    "failed to {operation} pack L2 cache entry: {source}"
+                )
+            }
             Self::TimeBeforeUnixEpoch { source } => {
                 write!(formatter, "system time predates Unix epoch: {source}")
             }
@@ -561,9 +722,25 @@ impl std::error::Error for PackL2CacheError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
+            Self::Compression { source, .. } => Some(source),
             Self::TimeBeforeUnixEpoch { source } => Some(source),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PackL2CacheEntryEnvelope {
+    schema: String,
+    stored_at_epoch_seconds: u64,
+}
+
+#[derive(Debug)]
+struct DecodedPackL2CacheEntry {
+    key: String,
+    stored_at_epoch_seconds: u64,
+    pack_json: JsonValue,
+    compression: Option<PackL2CompressionHit>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -573,6 +750,46 @@ struct PackL2CacheEntry {
     key: String,
     stored_at_epoch_seconds: u64,
     pack_json: JsonValue,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackL2CacheEntryV2 {
+    schema: String,
+    key: String,
+    stored_at_epoch_seconds: u64,
+    compression: PackL2CacheCompressionPayload,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackL2CacheCompressionPayload {
+    algorithm: String,
+    compressed_payload_base64: String,
+    compressed_byte_len: u64,
+    uncompressed_byte_len: u64,
+    uncompressed_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dictionary: Option<PackL2CacheCompressionDictionaryRef>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PackL2CacheCompressionDictionaryRef {
+    dictionary_id: String,
+    dictionary_byte_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dictionary_bytes_base64: Option<String>,
+}
+
+impl PackL2CacheCompressionDictionaryRef {
+    fn from_dictionary(dictionary: &PackL2CompressionDictionary) -> Self {
+        Self {
+            dictionary_id: dictionary.id.clone(),
+            dictionary_byte_hash: dictionary.byte_hash.clone(),
+            dictionary_bytes_base64: Some(BASE64_STANDARD.encode(&dictionary.bytes)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -618,6 +835,177 @@ fn record_eviction_candidate_removed(
     *bytes_current = bytes_current.saturating_sub(candidate.byte_len);
 }
 
+fn decode_pack_l2_cache_entry(
+    bytes: &[u8],
+) -> Result<DecodedPackL2CacheEntry, PackL2CacheMissReason> {
+    let envelope = serde_json::from_slice::<PackL2CacheEntryEnvelope>(bytes)
+        .map_err(|error| PackL2CacheMissReason::Corrupt(error.to_string()))?;
+    match envelope.schema.as_str() {
+        PACK_L2_CACHE_ENTRY_SCHEMA_V1 => {
+            let entry = serde_json::from_slice::<PackL2CacheEntry>(bytes)
+                .map_err(|error| PackL2CacheMissReason::Corrupt(error.to_string()))?;
+            Ok(DecodedPackL2CacheEntry {
+                key: entry.key,
+                stored_at_epoch_seconds: entry.stored_at_epoch_seconds,
+                pack_json: entry.pack_json,
+                compression: None,
+            })
+        }
+        PACK_L2_CACHE_ENTRY_SCHEMA_V2 => decode_compressed_pack_l2_cache_entry(bytes),
+        schema => Err(PackL2CacheMissReason::Corrupt(format!(
+            "unexpected schema {schema}"
+        ))),
+    }
+}
+
+fn decode_compressed_pack_l2_cache_entry(
+    bytes: &[u8],
+) -> Result<DecodedPackL2CacheEntry, PackL2CacheMissReason> {
+    let entry = serde_json::from_slice::<PackL2CacheEntryV2>(bytes)
+        .map_err(|error| PackL2CacheMissReason::Corrupt(error.to_string()))?;
+    if entry.compression.algorithm != PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1 {
+        return Err(PackL2CacheMissReason::Corrupt(format!(
+            "unsupported compression algorithm {}",
+            entry.compression.algorithm
+        )));
+    }
+    let compressed = BASE64_STANDARD
+        .decode(&entry.compression.compressed_payload_base64)
+        .map_err(|error| PackL2CacheMissReason::CompressionDecode {
+            message: format!("compressed payload is not base64: {error}"),
+        })?;
+    if compressed.len() as u64 != entry.compression.compressed_byte_len {
+        return Err(PackL2CacheMissReason::CompressionDecode {
+            message: format!(
+                "compressed byte length mismatch expected={} actual={}",
+                entry.compression.compressed_byte_len,
+                compressed.len()
+            ),
+        });
+    }
+    let dictionary_bytes = decode_pack_l2_dictionary_bytes(entry.compression.dictionary.as_ref())?;
+    let capacity = usize::try_from(entry.compression.uncompressed_byte_len).map_err(|_| {
+        PackL2CacheMissReason::CompressionDecode {
+            message: format!(
+                "uncompressed byte length does not fit usize: {}",
+                entry.compression.uncompressed_byte_len
+            ),
+        }
+    })?;
+    let decompress_start = Instant::now();
+    let uncompressed = zstd_decompress(&compressed, capacity, dictionary_bytes.as_deref())
+        .map_err(|source| PackL2CacheMissReason::CompressionDecode {
+            message: source.to_string(),
+        })?;
+    let decompression_latency_ms = elapsed_millis(decompress_start.elapsed());
+    if uncompressed.len() as u64 != entry.compression.uncompressed_byte_len {
+        return Err(PackL2CacheMissReason::CompressionDecode {
+            message: format!(
+                "uncompressed byte length mismatch expected={} actual={}",
+                entry.compression.uncompressed_byte_len,
+                uncompressed.len()
+            ),
+        });
+    }
+    let actual_hash = blake3_hash(&uncompressed);
+    if actual_hash != entry.compression.uncompressed_hash {
+        return Err(PackL2CacheMissReason::CompressionDecode {
+            message: format!(
+                "uncompressed hash mismatch expected={} actual={actual_hash}",
+                entry.compression.uncompressed_hash
+            ),
+        });
+    }
+    let pack_json = serde_json::from_slice::<JsonValue>(&uncompressed).map_err(|error| {
+        PackL2CacheMissReason::CompressionDecode {
+            message: format!("decompressed pack JSON is malformed: {error}"),
+        }
+    })?;
+    Ok(DecodedPackL2CacheEntry {
+        key: entry.key,
+        stored_at_epoch_seconds: entry.stored_at_epoch_seconds,
+        pack_json,
+        compression: Some(PackL2CompressionHit {
+            algorithm: entry.compression.algorithm,
+            dictionary_id: entry
+                .compression
+                .dictionary
+                .map(|dictionary| dictionary.dictionary_id),
+            compressed_bytes: compressed.len() as u64,
+            uncompressed_bytes: uncompressed.len() as u64,
+            decompression_latency_ms,
+        }),
+    })
+}
+
+fn decode_pack_l2_dictionary_bytes(
+    dictionary: Option<&PackL2CacheCompressionDictionaryRef>,
+) -> Result<Option<Vec<u8>>, PackL2CacheMissReason> {
+    let Some(dictionary) = dictionary else {
+        return Ok(None);
+    };
+    let Some(encoded) = &dictionary.dictionary_bytes_base64 else {
+        return Err(PackL2CacheMissReason::CompressionDictionaryMissing {
+            dictionary_id: dictionary.dictionary_id.clone(),
+        });
+    };
+    let bytes = BASE64_STANDARD.decode(encoded).map_err(|error| {
+        PackL2CacheMissReason::CompressionDictionaryCorrupt {
+            dictionary_id: dictionary.dictionary_id.clone(),
+            message: format!("dictionary bytes are not base64: {error}"),
+        }
+    })?;
+    let actual_hash = blake3_hash(&bytes);
+    if actual_hash != dictionary.dictionary_byte_hash {
+        return Err(PackL2CacheMissReason::CompressionDictionaryCorrupt {
+            dictionary_id: dictionary.dictionary_id.clone(),
+            message: format!(
+                "dictionary byte hash mismatch expected={} actual={actual_hash}",
+                dictionary.dictionary_byte_hash
+            ),
+        });
+    }
+    Ok(Some(bytes))
+}
+
+fn zstd_compress(
+    payload: &[u8],
+    dictionary: Option<&PackL2CompressionDictionary>,
+) -> Result<Vec<u8>, PackL2CacheError> {
+    let mut compressor = match dictionary {
+        Some(dictionary) => {
+            zstd::bulk::Compressor::with_dictionary(PACK_L2_COMPRESSION_LEVEL, &dictionary.bytes)
+        }
+        None => zstd::bulk::Compressor::new(PACK_L2_COMPRESSION_LEVEL),
+    }
+    .map_err(|source| PackL2CacheError::Compression {
+        operation: "initialize_compressor",
+        source,
+    })?;
+    compressor
+        .compress(payload)
+        .map_err(|source| PackL2CacheError::Compression {
+            operation: "compress",
+            source,
+        })
+}
+
+fn zstd_decompress(
+    payload: &[u8],
+    capacity: usize,
+    dictionary: Option<&[u8]>,
+) -> io::Result<Vec<u8>> {
+    let mut decompressor = match dictionary {
+        Some(dictionary) => zstd::bulk::Decompressor::with_dictionary(dictionary)?,
+        None => zstd::bulk::Decompressor::new()?,
+    };
+    decompressor.decompress(payload, capacity)
+}
+
+fn elapsed_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn cache_file_name(key: &str) -> String {
     format!("{}.json", cache_file_stem(key))
 }
@@ -632,6 +1020,10 @@ fn cache_file_stem(key: &str) -> String {
 
 fn body_hash_prefix(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_owned()
+}
+
+fn blake3_hash(bytes: &[u8]) -> String {
+    format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
 
 fn body_hashed_file_name_matches(file_name: &str, key_stem: &str) -> bool {
@@ -691,7 +1083,7 @@ fn cache_entry_stored_at(path: &Path) -> Option<u64> {
         return None;
     }
     let bytes = read_cache_entry_file(path).ok()?;
-    serde_json::from_slice::<PackL2CacheEntry>(&bytes)
+    serde_json::from_slice::<PackL2CacheEntryEnvelope>(&bytes)
         .ok()
         .map(|entry| entry.stored_at_epoch_seconds)
 }
@@ -920,6 +1312,20 @@ mod tests {
         Ok(path)
     }
 
+    fn raw_compressed_entry_bytes(
+        key: &str,
+        payload: PackL2CacheCompressionPayload,
+        stored_at_epoch_seconds: u64,
+    ) -> Result<Vec<u8>, String> {
+        serde_json::to_vec(&PackL2CacheEntryV2 {
+            schema: PACK_L2_CACHE_ENTRY_SCHEMA_V2.to_owned(),
+            key: key.to_owned(),
+            stored_at_epoch_seconds,
+            compression: payload,
+        })
+        .map_err(|error| error.to_string())
+    }
+
     fn modified_epoch_seconds(path: &Path) -> Result<u64, String> {
         let modified = fs::metadata(path)
             .map_err(|error| error.to_string())?
@@ -982,6 +1388,57 @@ mod tests {
     }
 
     #[test]
+    fn compressed_v2_roundtrip_returns_stored_pack_json() -> TestResult {
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let pack = json!({
+            "schema": "ee.pack_l2.test_payload.v1",
+            "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"items\":[\"mem_1\"]}}"
+        });
+
+        let report = cache
+            .put_compressed_at("blake3:compressed-key", &pack, 100)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.outcome, PackL2WriteOutcome::Stored);
+        let compression = report
+            .compression
+            .as_ref()
+            .ok_or_else(|| "compressed write should report compression metadata".to_owned())?;
+        assert_eq!(compression.algorithm, PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1);
+        assert!(compression.compressed_bytes > 0);
+        assert!(compression.uncompressed_bytes > 0);
+        assert_eq!(report.uncompressed_byte_len, compression.uncompressed_bytes);
+
+        let lookup = cache
+            .get_at("blake3:compressed-key", 120)
+            .map_err(|error| error.to_string())?;
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.pack_json, pack);
+                let hit_compression = hit.compression.ok_or_else(|| {
+                    "compressed hit should report compression metadata".to_owned()
+                })?;
+                assert_eq!(
+                    hit_compression.algorithm,
+                    PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1
+                );
+                assert_eq!(
+                    hit_compression.compressed_bytes,
+                    compression.compressed_bytes
+                );
+                assert_eq!(
+                    hit_compression.uncompressed_bytes,
+                    compression.uncompressed_bytes
+                );
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!("compressed v2 entry should hit: {miss:?}"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn empty_or_boundary_entry_at_exactly_max_entry_bytes_is_cached() -> TestResult {
         let key = "blake3:exact-entry-cap";
         let stored_at_epoch_seconds = 100;
@@ -1004,6 +1461,45 @@ mod tests {
         assert_eq!(
             hit_json(cache.get_at(key, 120).map_err(|error| error.to_string())?)?,
             pack
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_v2_entry_at_max_entry_bytes_plus_one_is_skipped_with_event() -> TestResult {
+        let key = "blake3:compressed-oversized-entry";
+        let stored_at_epoch_seconds = 100;
+        let pack = json!({"hash": "entry-cap", "items": [{"id": "mem_oversized"}]});
+        let (_temp, baseline_cache) =
+            cache_with_options(PackL2CacheOptions::new(4096, Duration::from_secs(60)))?;
+        let baseline_report = baseline_cache
+            .put_compressed_at(key, &pack, stored_at_epoch_seconds)
+            .map_err(|error| error.to_string())?;
+        let max_entry_bytes = baseline_report
+            .byte_len
+            .checked_sub(1)
+            .ok_or_else(|| "compressed test entry should have non-zero length".to_owned())?;
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(4096, Duration::from_secs(60))
+                .with_max_entry_bytes(max_entry_bytes),
+        )?;
+
+        let report = cache
+            .put_compressed_at(key, &pack, stored_at_epoch_seconds)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(report.byte_len, baseline_report.byte_len);
+        assert_eq!(
+            report.outcome,
+            PackL2WriteOutcome::SkippedTooLarge { max_entry_bytes }
+        );
+        assert!(
+            report.compression.is_some(),
+            "skipped compressed entries should still report compression accounting"
+        );
+        assert!(
+            !report.path.exists(),
+            "oversized compressed entries should not publish a cache file"
         );
         Ok(())
     }
@@ -1216,6 +1712,140 @@ mod tests {
         assert!(
             !corrupt_path.exists(),
             "bad body-hash candidate should be invalidated before trying the valid fallback"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_v2_missing_dictionary_returns_typed_miss_and_removes_entry() -> TestResult {
+        let key = "blake3:missing-dictionary";
+        let payload = PackL2CacheCompressionPayload {
+            algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+            compressed_payload_base64: BASE64_STANDARD.encode(b"not-used-before-dictionary-check"),
+            compressed_byte_len: b"not-used-before-dictionary-check".len() as u64,
+            uncompressed_byte_len: 128,
+            uncompressed_hash: blake3_hash(b"not-present"),
+            dictionary: Some(PackL2CacheCompressionDictionaryRef {
+                dictionary_id: "zstd_dict_missing".to_owned(),
+                dictionary_byte_hash: "blake3:missing".to_owned(),
+                dictionary_bytes_base64: None,
+            }),
+        };
+        let bytes = raw_compressed_entry_bytes(key, payload, 100)?;
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let path = write_raw_entry(&cache, key, &bytes)?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            lookup,
+            PackL2CacheLookup::Miss(PackL2CacheMiss {
+                key: key.to_owned(),
+                path: path.clone(),
+                reason: PackL2CacheMissReason::CompressionDictionaryMissing {
+                    dictionary_id: "zstd_dict_missing".to_owned()
+                },
+            })
+        );
+        assert!(
+            !path.exists(),
+            "missing-dictionary compressed entries should be invalidated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_v2_corrupt_dictionary_returns_typed_miss_and_removes_entry() -> TestResult {
+        let key = "blake3:corrupt-dictionary";
+        let dictionary_bytes = b"dictionary bytes with the wrong recorded hash";
+        let payload = PackL2CacheCompressionPayload {
+            algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+            compressed_payload_base64: BASE64_STANDARD.encode(b"not-used-before-dictionary-check"),
+            compressed_byte_len: b"not-used-before-dictionary-check".len() as u64,
+            uncompressed_byte_len: 128,
+            uncompressed_hash: blake3_hash(b"not-present"),
+            dictionary: Some(PackL2CacheCompressionDictionaryRef {
+                dictionary_id: "zstd_dict_corrupt".to_owned(),
+                dictionary_byte_hash: blake3_hash(b"different dictionary bytes"),
+                dictionary_bytes_base64: Some(BASE64_STANDARD.encode(dictionary_bytes)),
+            }),
+        };
+        let bytes = raw_compressed_entry_bytes(key, payload, 100)?;
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        let path = write_raw_entry(&cache, key, &bytes)?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Miss(PackL2CacheMiss {
+                reason:
+                    PackL2CacheMissReason::CompressionDictionaryCorrupt {
+                        dictionary_id,
+                        message,
+                    },
+                ..
+            }) => {
+                assert_eq!(dictionary_id, "zstd_dict_corrupt");
+                assert!(
+                    message.contains("dictionary byte hash mismatch"),
+                    "corrupt dictionary miss should explain the hash mismatch: {message}"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "corrupt dictionary should return a typed miss; got {other:?}"
+                ));
+            }
+        }
+        assert!(
+            !path.exists(),
+            "corrupt-dictionary compressed entries should be invalidated"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_v2_corrupt_body_does_not_mask_valid_fallback() -> TestResult {
+        let key = "blake3:compressed-multi-candidate";
+        let pack = json!({"hash": "valid-fallback", "items": [{"id": "mem_valid"}]});
+        let valid_bytes = raw_entry_bytes(key, pack.clone(), 100)?;
+        let payload = PackL2CacheCompressionPayload {
+            algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+            compressed_payload_base64: BASE64_STANDARD.encode(b"not-a-zstd-frame"),
+            compressed_byte_len: b"not-a-zstd-frame".len() as u64,
+            uncompressed_byte_len: 64,
+            uncompressed_hash: blake3_hash(b"not-a-json-payload"),
+            dictionary: None,
+        };
+        let corrupt_bytes = raw_compressed_entry_bytes(key, payload, 100)?;
+        let (_temp, cache) = cache(4096, Duration::from_secs(60))?;
+        ensure_cache_dir(cache.root()).map_err(|error| error.to_string())?;
+
+        let corrupt_path = cache.entry_path_for_body_hash(key, &body_hash_prefix(&corrupt_bytes));
+        fs::write(&corrupt_path, corrupt_bytes).map_err(|error| error.to_string())?;
+        let valid_path = cache.entry_path(key);
+        fs::write(&valid_path, valid_bytes).map_err(|error| error.to_string())?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Hit(hit) => {
+                assert_eq!(hit.path, valid_path);
+                assert_eq!(hit.pack_json, pack);
+                assert!(
+                    hit.compression.is_none(),
+                    "valid fallback in this fixture is a legacy v1 entry"
+                );
+            }
+            PackL2CacheLookup::Miss(miss) => {
+                return Err(format!(
+                    "valid fallback should hit after bad compressed candidate: {miss:?}"
+                ));
+            }
+        }
+        assert!(
+            !corrupt_path.exists(),
+            "bad compressed candidate should be invalidated before trying the valid fallback"
         );
         Ok(())
     }

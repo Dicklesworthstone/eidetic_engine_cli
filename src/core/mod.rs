@@ -48,6 +48,7 @@ pub mod effect;
 pub mod explanation_latency_budget;
 pub mod feedback;
 pub mod focus;
+pub mod git_ahead;
 pub mod graph_audit;
 pub mod graph_memory_budget;
 pub mod graph_telemetry;

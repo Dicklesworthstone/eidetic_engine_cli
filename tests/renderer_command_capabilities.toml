@@ -1,0 +1,194 @@
+# Command-level renderer capability matrix.
+#
+# Owned by bd-2ulvu.1. This inventory complements the field-level
+# renderer parity matrix in tests/renderer_parity_matrix.rs. It records
+# what each command promises for every public output format so future
+# tests can distinguish explicit Mermaid diagram support from accidental
+# Markdown/human fallback.
+#
+# Capability values:
+# - canonical: canonical machine contract for the command
+# - machine: machine-readable renderer derived from the canonical contract
+# - human_text: intentional human-readable text renderer
+# - diagram: explicit Mermaid diagram renderer
+# - json_override: JSON/robot mode intentionally overrides the requested format
+# - unsupported: non-machine requests must return an explicit structured usage
+#   error; --json/--robot still override to the canonical machine contract
+#
+# Matrix entries are deliberately representative, not exhaustive. Add a command
+# here whenever a command claims a non-JSON format, gains a custom renderer branch,
+# or appears in agent-facing docs as format-aware.
+
+[[command]]
+name = "context"
+owner = "src/core/context.rs"
+notes = "Context defaults to Markdown for agent prompt text and has an explicit Mermaid pack-topology renderer."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["flowchart", "pack", "provenance"]
+
+[[command]]
+name = "search"
+owner = "src/search"
+notes = "Search is JSON-first; Markdown/Human are textual result summaries. Mermaid is not a diagram surface."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+
+[[command]]
+name = "why"
+owner = "src/core/why.rs"
+notes = "Why has an explicit Mermaid explanation graph plus JSON as the canonical contract."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["flowchart", "memory", "storage", "retrieval"]
+
+[[command]]
+name = "status"
+owner = "src/core/status.rs"
+notes = "Status is a diagnostic record with human and machine renderers; Mermaid is not a diagram surface."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+
+[[command]]
+name = "doctor"
+owner = "src/core/doctor.rs"
+notes = "The primary doctor report has an explicit Mermaid repair graph. Submodes such as --fix-plan remain ordinary text/JSON unless added separately."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["flowchart", "doctor", "repair"]
+
+[[command]]
+name = "memory show"
+owner = "src/core/memory.rs"
+notes = "Memory show is a single-record view. It has no meaningful diagram renderer today."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+
+[[command]]
+name = "memory history"
+owner = "src/core/memory.rs"
+notes = "Memory history has an explicit Mermaid audit-timeline renderer added after bd-1rrz5 exposed silent fallback drift."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["flowchart", "memory", "audit_id", "records"]
+
+[[command]]
+name = "graph export"
+owner = "src/graph"
+notes = "Graph export owns a graph snapshot diagram and advertises text/vnd.mermaid for Mermaid output."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["flowchart", "graph", "snapshot"]
+
+[[command]]
+name = "graph neighborhood"
+owner = "src/graph"
+notes = "Graph neighborhood owns a focused Mermaid neighborhood diagram with deterministic node and edge labels."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "diagram"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+mermaid_markers = ["graph LR", "schema", "memoryId"]
+
+[[command]]
+name = "curate candidates"
+owner = "src/core/curate.rs"
+notes = "Candidate listing is a queue/list surface. Diagram output belongs to specific curation plans, not the list view."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+
+[[command]]
+name = "curate validate"
+owner = "src/core/curate.rs"
+notes = "Validation emits structured review state and recovery guidance. Mermaid is unsupported until a validation-flow diagram is explicitly designed."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true
+
+[[command]]
+name = "curate apply"
+owner = "src/core/curate.rs"
+notes = "Apply is a mutation result surface. Mermaid must stay unsupported unless it remains a non-mutating render of already-computed apply evidence."
+formats.human = "human_text"
+formats.markdown = "human_text"
+formats.mermaid = "unsupported"
+formats.json = "canonical"
+formats.toon = "machine"
+formats.jsonl = "machine"
+formats.compact = "machine"
+formats.hook = "machine"
+json_override = true

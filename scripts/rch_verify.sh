@@ -6,6 +6,8 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
 usage() {
     cat <<'EOF'
 Usage: scripts/rch_verify.sh [options] -- <verifier command...>
@@ -73,6 +75,7 @@ KNOWN_BLOCKER_TTL_SECONDS="${RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS:-21600}"
 KNOWN_BLOCKER_MAX_ENTRIES="${RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES:-128}"
 KNOWN_BLOCKER_JSON="null"
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
+LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
 if [ -z "${RCH_BIN:-}" ] && [ -x "$DEFAULT_RCH_BIN" ]; then
     RCH_BIN="$DEFAULT_RCH_BIN"
@@ -215,6 +218,108 @@ json_quote() {
 
 json_object_not_run() {
     printf '{"status":"not_run","admitted":null,"ee_bin":null,"min_free_bytes":null,"checks":[],"degraded_codes":[],"message":null}'
+}
+
+local_cargo_processes_not_run_json() {
+    local reason="${1:-not requested}"
+    LOCAL_CARGO_PROCESSES_REASON="$reason" python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "schema": "ee.rch_local_cargo_tripwire.v1",
+    "mode": "probe_processes",
+    "status": "not_run",
+    "count": 0,
+    "processes": [],
+    "detectedLocalBuilds": [],
+    "reason": os.environ.get("LOCAL_CARGO_PROCESSES_REASON") or "not requested",
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+local_cargo_processes_unavailable_json() {
+    local reason="${1:-local cargo tripwire unavailable}"
+    LOCAL_CARGO_PROCESSES_REASON="$reason" python3 - <<'PY'
+import json
+import os
+
+payload = {
+    "schema": "ee.rch_local_cargo_tripwire.v1",
+    "mode": "probe_processes",
+    "status": "unavailable",
+    "count": 0,
+    "processes": [],
+    "detectedLocalBuilds": [],
+    "reason": os.environ.get("LOCAL_CARGO_PROCESSES_REASON") or "local cargo tripwire unavailable",
+}
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+compute_local_cargo_processes_json() {
+    if [ -n "${RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON:-}" ]; then
+        printf '%s\n' "$RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON"
+        return 0
+    fi
+    if [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-1}" = "0" ]; then
+        local_cargo_processes_not_run_json "disabled by RCH_VERIFY_LOCAL_CARGO_SCAN=0"
+        return 0
+    fi
+    if [ "$INCLUDE_SUMMARY" -ne 1 ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ]; then
+        local_cargo_processes_not_run_json "only scanned for --summary unless RCH_VERIFY_LOCAL_CARGO_SCAN=1"
+        return 0
+    fi
+    if [ -n "${RCH_VERIFY_FAKE_OUTPUT:-}" ] && [ "${RCH_VERIFY_LOCAL_CARGO_SCAN:-0}" != "1" ]; then
+        local_cargo_processes_not_run_json "fake RCH transcript without explicit local Cargo scan"
+        return 0
+    fi
+
+    local tripwire="$SCRIPT_DIR/check-local-cargo-tripwire.sh"
+    if [ ! -r "$tripwire" ]; then
+        local_cargo_processes_unavailable_json "check-local-cargo-tripwire.sh is not readable"
+        return 0
+    fi
+
+    local output exit_code
+    set +e
+    output="$(bash "$tripwire" --probe-processes --json 2>/dev/null)"
+    exit_code=$?
+    set -e
+    if [ -z "$output" ]; then
+        local_cargo_processes_unavailable_json "check-local-cargo-tripwire.sh emitted no JSON"
+        return 0
+    fi
+    LOCAL_CARGO_PROCESSES_OUTPUT="$output" \
+    LOCAL_CARGO_PROCESSES_EXIT_CODE="$exit_code" \
+    python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("LOCAL_CARGO_PROCESSES_OUTPUT", "")
+exit_code = int(os.environ.get("LOCAL_CARGO_PROCESSES_EXIT_CODE") or "0")
+try:
+    payload = json.loads(raw)
+except Exception:
+    payload = {
+        "schema": "ee.rch_local_cargo_tripwire.v1",
+        "mode": "probe_processes",
+        "status": "unavailable",
+        "count": 0,
+        "processes": [],
+        "detectedLocalBuilds": [],
+        "reason": "check-local-cargo-tripwire.sh emitted invalid JSON",
+        "exit_code": exit_code,
+    }
+else:
+    payload.setdefault("schema", "ee.rch_local_cargo_tripwire.v1")
+    payload.setdefault("mode", "probe_processes")
+    payload.setdefault("processes", [])
+    payload.setdefault("detectedLocalBuilds", [])
+    payload["exit_code"] = exit_code
+print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 csv_json_array() {
@@ -440,6 +545,12 @@ extract_worker_id() {
         -e 's/^.*Selected worker: \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) .*/\1/p' \
         -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) (.*/\1/p' \
         -e 's/^\[RCH\] remote \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) failed.*/\1/p' \
+        | tail -n 1
+}
+
+extract_dependency_planner_worker_id() {
+    sed -n \
+        -e 's/^.*Dependency planner fail-open on \([A-Za-z0-9_.-][A-Za-z0-9_.-]*\) \[RCH-E[0-9][0-9][0-9]\].*/\1/p' \
         | tail -n 1
 }
 
@@ -1438,7 +1549,7 @@ emit_json() {
     shift 5
     local degraded_codes_json
     degraded_codes_json="$(json_array "$@")"
-    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json
+    local command_json rch_invocation_json command_text_json remote_env_json stdout_json stderr_json requested_workers_json configured_workers_json daemon_workers_json build_admission_json rch_runtime_json known_blocker_json local_cargo_processes_json
     command_json="$(json_array "${COMMAND[@]}")"
     rch_invocation_json="$(json_array "${RCH_INVOCATION[@]}")"
     remote_env_json="$(json_array "${ENV_OVERRIDES[@]}")"
@@ -1449,6 +1560,7 @@ emit_json() {
     configured_workers_json="$(csv_json_array "${CONFIGURED_WORKERS_CSV:-}")"
     daemon_workers_json="$(csv_json_array "${DAEMON_WORKERS_CSV:-}")"
     build_admission_json="${BUILD_ADMISSION_JSON:-$(json_object_not_run)}"
+    local_cargo_processes_json="${LOCAL_CARGO_PROCESSES_JSON:-$(local_cargo_processes_not_run_json)}"
     if [ -n "${RCH_RUNTIME_JSON:-}" ]; then
         rch_runtime_json="$RCH_RUNTIME_JSON"
     else
@@ -1463,7 +1575,7 @@ emit_json() {
     fi
     local json_payload
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -1812,6 +1924,14 @@ exit_code = proof.get("exit_code")
 degraded = list(proof.get("degraded_codes") or [])
 source_state_degraded = list(proof.get("source_state_degraded_codes") or [])
 source_state_code_set = set(source_state_degraded)
+local_cargo_processes = proof.get("local_cargo_processes") or {}
+try:
+    local_cargo_process_count = int(local_cargo_processes.get("count") or 0)
+except (TypeError, ValueError):
+    local_cargo_process_count = 0
+if local_cargo_process_count > 0 and "rch_verify_local_cargo_processes_present" not in degraded:
+    degraded.append("rch_verify_local_cargo_processes_present")
+    proof["degraded_codes"] = degraded
 
 worker_state_code_set = {
     "rch_verify_known_blocker_active",
@@ -1923,6 +2043,19 @@ if runtime.get("status") not in (None, "not_checked"):
         f" client=`{runtime.get('client_version') or 'unknown'}`"
         f" daemon=`{runtime.get('daemon_version') or 'unknown'}`"
     )
+local_cargo_status = local_cargo_processes.get("status")
+if local_cargo_status not in (None, "not_run"):
+    local_cargo_lock_count = sum(
+        1
+        for process in local_cargo_processes.get("processes") or []
+        if process.get("packageCacheLockHeld") is True
+        or process.get("packageCacheLockState") == "held"
+    )
+    summary_lines.append(
+        f"- local_cargo_processes: `{local_cargo_status}`"
+        f" count=`{local_cargo_process_count}`"
+        f" package_cache_locks=`{local_cargo_lock_count}`"
+    )
 for key in ("requested_workers", "configured_workers", "daemon_workers"):
     workers = proof.get(key) or []
     if workers:
@@ -2030,6 +2163,8 @@ if event_log_path:
             "build_admission_status": build_admission.get("status"),
             "build_admission_admitted": build_admission.get("admitted"),
             "rch_runtime": proof.get("rch_runtime"),
+            "local_cargo_process_status": local_cargo_processes.get("status"),
+            "local_cargo_process_count": local_cargo_process_count,
             "fake_rch_invoked": fake_invocation_count > 0,
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
@@ -2061,6 +2196,7 @@ REQUESTED_WORKERS_CSV="${RCH_WORKERS:-}"
 CONFIGURED_WORKERS_CSV=""
 DAEMON_WORKERS_CSV=""
 BUILD_ADMISSION_JSON="$(json_object_not_run)"
+LOCAL_CARGO_PROCESSES_JSON="$(compute_local_cargo_processes_json)"
 
 if contains_forbidden_text "${COMMAND[@]}"; then
     RCH_INVOCATION=()
@@ -2229,6 +2365,7 @@ if [ -n "${RCH_VERIFY_FAKE_ELAPSED_MS:-}" ]; then
 fi
 
 worker_id="$(printf '%s' "$combined_output" | extract_worker_id)"
+planner_worker_id="$(printf '%s' "$combined_output" | extract_dependency_planner_worker_id)"
 disk_full_worker=""
 retried_after_disk_full=0
 retry_worker=""
@@ -2263,6 +2400,12 @@ if [ -n "$worker_id" ]; then
     WORKER_ID_JSON="$(json_quote "$worker_id")"
     allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"
     if [ -n "$allowed_workers_csv" ] && ! csv_contains "$allowed_workers_csv" "$worker_id"; then
+        worker_filter_ignored=1
+    fi
+fi
+if [ -n "$planner_worker_id" ]; then
+    allowed_workers_csv="${REQUESTED_WORKERS_CSV:-$CONFIGURED_WORKERS_CSV}"
+    if [ -n "$allowed_workers_csv" ] && ! csv_contains "$allowed_workers_csv" "$planner_worker_id"; then
         worker_filter_ignored=1
     fi
 fi

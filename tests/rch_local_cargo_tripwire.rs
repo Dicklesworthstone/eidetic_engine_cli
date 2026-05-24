@@ -12,6 +12,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
@@ -62,6 +63,32 @@ fn classify(command: &str) -> Result<(i32, Value), String> {
         &[],
     );
     Ok((code, parsed))
+}
+
+fn probe_with_ps_fixture(
+    ps_fixture: &str,
+    package_cache_pids: &str,
+) -> Result<(i32, Value), String> {
+    let fixture_path = std::env::temp_dir().join(format!(
+        "ee-rch-local-cargo-tripwire-{}-{}.ps",
+        std::process::id(),
+        ps_fixture.len()
+    ));
+    fs::write(&fixture_path, ps_fixture).map_err(|e| format!("write ps fixture: {e}"))?;
+    let output = Command::new("sh")
+        .arg(script_path())
+        .arg("--probe-processes")
+        .arg("--ps-file")
+        .arg(&fixture_path)
+        .arg("--package-cache-pids")
+        .arg(package_cache_pids)
+        .arg("--json")
+        .output()
+        .map_err(|e| format!("spawn probe: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Value = serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("parse probe json: {e}; stdout={stdout}"))?;
+    Ok((output.status.code().unwrap_or(-1), parsed))
 }
 
 #[test]
@@ -223,6 +250,54 @@ fn empty_command_is_allowed() -> TestResult {
     let (code, report) = classify("")?;
     if code != 0 || report["allowed"].as_str() != Some("allowed") {
         return Err(format!("expected allowed for empty command; got {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn process_probe_reports_manifest_workspace_and_package_cache_lock() -> TestResult {
+    let fixture = "\
+ 41311 1 01:12:03 cargo test --lib import_cursor --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 7193 1 02:33:44 cargo metadata --format-version=1 --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml
+ 8 1 00:00:01 cargo metadata --manifest-path /tmp/other/Cargo.toml
+";
+    let (code, report) = probe_with_ps_fixture(fixture, "7193")?;
+    if code != 1 {
+        return Err(format!(
+            "expected probe exit 1 with local processes; got {code}: {report}"
+        ));
+    }
+    if report["mode"] != "probe_processes" || report["status"] != "bypass_detected" {
+        return Err(format!("unexpected probe envelope: {report}"));
+    }
+    let processes = report["processes"]
+        .as_array()
+        .ok_or_else(|| format!("missing processes array: {report}"))?;
+    if processes.len() != 2 {
+        return Err(format!("expected two eidetic processes, got {processes:?}"));
+    }
+    if processes[0]["pid"] != "7193" || processes[1]["pid"] != "41311" {
+        return Err(format!("processes were not sorted by pid: {processes:?}"));
+    }
+    if processes[0]["manifestPath"] != "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml"
+        || processes[0]["workspacePath"] != "/Users/jemanuel/projects/eidetic_engine_cli"
+    {
+        return Err(format!("manifest/workspace path missing: {}", processes[0]));
+    }
+    if processes[0]["packageCacheLockState"] != "held"
+        || processes[0]["packageCacheLockHeld"] != true
+        || processes[0]["policyStatus"] != "local_cargo_read_only_lock_holder"
+    {
+        return Err(format!(
+            "package-cache lock holder not reported: {}",
+            processes[0]
+        ));
+    }
+    if processes[1]["policyStatus"] != "local_cargo_disallowed" {
+        return Err(format!(
+            "compile cargo process not classified: {}",
+            processes[1]
+        ));
     }
     Ok(())
 }

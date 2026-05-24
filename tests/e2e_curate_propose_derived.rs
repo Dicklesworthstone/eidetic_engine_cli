@@ -4,7 +4,7 @@
 //!
 //! * `--dry-run` builds a canonical create_derived_memory candidate
 //!   package without mutating the database (target_memory_id=null,
-//!   source_refs sorted by (kind, id), nextActions point to the
+//!   source_refs sorted by (kind, id), nextCommands point to the
 //!   ordinary curate validate/apply path).
 //! * Non-dry-run inserts a pending candidate visible via
 //!   `ee curate candidates --status pending --json`.
@@ -39,6 +39,25 @@ fn run_ee(args: &[&str]) -> Result<Output, String> {
         .args(args)
         .output()
         .map_err(|error| format!("failed to run ee {}: {error}", args.join(" ")))
+}
+
+fn run_copyable_ee_command(command: &str) -> Result<Output, String> {
+    let ee_path = PathBuf::from(env!("CARGO_BIN_EXE_ee"));
+    let ee_dir = ee_path
+        .parent()
+        .ok_or_else(|| format!("ee binary path has no parent: {}", ee_path.display()))?;
+    let mut paths = vec![ee_dir.to_path_buf()];
+    if let Some(current_path) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&current_path));
+    }
+    let path = std::env::join_paths(paths).map_err(|error| error.to_string())?;
+
+    Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .env("PATH", path)
+        .output()
+        .map_err(|error| format!("failed to run copied command `{command}`: {error}"))
 }
 
 fn unique_workspace(prefix: &str) -> Result<PathBuf, String> {
@@ -180,25 +199,50 @@ fn assert_envelope_shape(
             .is_some_and(|id| id.starts_with("curate_")),
         format!("candidateId must start with curate_; got {data}"),
     )?;
-    let next_actions = data["nextActions"]
+    ensure(
+        data.get("nextActions").is_none(),
+        format!("propose-derived must expose nextCommands, not nextActions; got {data}"),
+    )?;
+    let next_commands = data["nextCommands"]
         .as_array()
-        .ok_or_else(|| format!("nextActions must be an array; got {data}"))?;
+        .ok_or_else(|| format!("nextCommands must be an array; got {data}"))?;
     let candidate_id = data["candidateId"].as_str().unwrap_or("");
     ensure(
-        next_actions.iter().any(|next| {
-            next.as_str()
-                .is_some_and(|s| s.contains("ee curate validate") && s.contains(candidate_id))
+        next_commands.iter().any(|next| {
+            next.as_str().is_some_and(|s| {
+                s.starts_with("ee curate validate ")
+                    && s.contains(candidate_id)
+                    && s.contains("--workspace ")
+                    && s.contains("--json")
+            })
         }),
-        format!("nextActions must include `ee curate validate <id>`; got {next_actions:?}"),
+        format!(
+            "nextCommands must include copyable `ee curate validate <id>`; got {next_commands:?}"
+        ),
     )?;
     ensure(
-        next_actions.iter().any(|next| {
-            next.as_str()
-                .is_some_and(|s| s.contains("ee curate apply") && s.contains(candidate_id))
+        next_commands.iter().any(|next| {
+            next.as_str().is_some_and(|s| {
+                s.starts_with("ee curate apply ")
+                    && s.contains(candidate_id)
+                    && s.contains("--workspace ")
+                    && s.contains("--json")
+            })
         }),
-        format!("nextActions must include `ee curate apply <id>`; got {next_actions:?}"),
+        format!("nextCommands must include copyable `ee curate apply <id>`; got {next_commands:?}"),
     )?;
     Ok(())
+}
+
+fn next_command(data: &Value, prefix: &str) -> Result<String, String> {
+    data["nextCommands"]
+        .as_array()
+        .ok_or_else(|| format!("nextCommands must be an array; got {data}"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|command| command.starts_with(prefix))
+        .map(str::to_owned)
+        .ok_or_else(|| format!("nextCommands missing prefix `{prefix}`; got {data}"))
 }
 
 #[test]
@@ -363,6 +407,63 @@ fn curate_propose_derived_inserts_pending_candidate_and_is_idempotent() -> TestR
     ensure(
         second_data["durableMutation"] == Value::Bool(false),
         format!("second invocation must report durableMutation=false; got {second_data}"),
+    )?;
+
+    let validate_command = next_command(first_data, "ee curate validate ")?;
+    let validate = run_copyable_ee_command(&validate_command)?;
+    ensure(
+        validate.status.success(),
+        format!(
+            "copied validate command must succeed; command={validate_command}; stdout={} stderr={}",
+            String::from_utf8_lossy(&validate.stdout),
+            String::from_utf8_lossy(&validate.stderr)
+        ),
+    )?;
+    let validate_json: Value =
+        serde_json::from_slice(&validate.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        validate_json["data"]["nextAction"]
+            .as_str()
+            .is_some_and(|next| next.contains("ee curate apply")),
+        format!("validate nextAction must point at apply; got {validate_json}"),
+    )?;
+
+    let apply_command = next_command(first_data, "ee curate apply ")?;
+    let apply = run_copyable_ee_command(&apply_command)?;
+    ensure(
+        apply.status.success(),
+        format!(
+            "copied apply command must succeed; command={apply_command}; stdout={} stderr={}",
+            String::from_utf8_lossy(&apply.stdout),
+            String::from_utf8_lossy(&apply.stderr)
+        ),
+    )?;
+    let apply_json: Value =
+        serde_json::from_slice(&apply.stdout).map_err(|error| error.to_string())?;
+    let created_memory_id = apply_json["data"]["application"]["createdMemoryId"]
+        .as_str()
+        .ok_or_else(|| format!("apply output must expose createdMemoryId; got {apply_json}"))?;
+    let why_command = apply_json["data"]["nextAction"]
+        .as_str()
+        .ok_or_else(|| format!("apply output must expose nextAction; got {apply_json}"))?;
+    ensure(
+        why_command.starts_with("ee why ") && why_command.contains(created_memory_id),
+        format!("apply nextAction must be a copyable why command; got {why_command}"),
+    )?;
+
+    let why = run_copyable_ee_command(why_command)?;
+    ensure(
+        why.status.success(),
+        format!(
+            "copied why command must succeed; command={why_command}; stdout={} stderr={}",
+            String::from_utf8_lossy(&why.stdout),
+            String::from_utf8_lossy(&why.stderr)
+        ),
+    )?;
+    let why_json: Value = serde_json::from_slice(&why.stdout).map_err(|error| error.to_string())?;
+    ensure(
+        why_json["data"]["memoryId"].as_str() == Some(created_memory_id),
+        format!("why output must describe created memory {created_memory_id}; got {why_json}"),
     )?;
     Ok(())
 }

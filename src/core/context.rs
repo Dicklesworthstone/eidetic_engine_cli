@@ -44,7 +44,7 @@ use crate::cache::hotset::{
 use crate::cache::pack_l2::{
     DEFAULT_MAX_BYTES as PACK_L2_DEFAULT_MAX_BYTES, PackL2Cache, PackL2CacheError,
     PackL2CacheLookup, PackL2CacheMiss, PackL2CacheMissReason, PackL2CacheOptions,
-    PackL2WriteOutcome,
+    PackL2CompressionHit, PackL2WriteOutcome,
 };
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
@@ -3600,6 +3600,10 @@ fn context_pack_l2_try_hit(
                         key = %l2_context.key,
                         path = %hit.path.display(),
                         byte_len = hit.byte_len,
+                        compressed_bytes = hit.compression.as_ref().map(|compression| compression.compressed_bytes).unwrap_or(0),
+                        uncompressed_bytes = hit.compression.as_ref().map(|compression| compression.uncompressed_bytes).unwrap_or(hit.byte_len),
+                        decompression_latency_ms = hit.compression.as_ref().map(|compression| compression.decompression_latency_ms).unwrap_or(0),
+                        dictionary_id = hit.compression.as_ref().and_then(|compression| compression.dictionary_id.as_deref()).unwrap_or("none"),
                         stored_at_epoch_seconds = hit.stored_at_epoch_seconds,
                     );
                     return Some(ContextPackPerformanceRun {
@@ -3611,6 +3615,7 @@ fn context_pack_l2_try_hit(
                             trace,
                             &l2_context.key,
                             hit.byte_len,
+                            hit.compression.as_ref(),
                         ),
                     });
                 }
@@ -3643,6 +3648,7 @@ fn context_pack_l2_try_hit(
                 command,
                 key = %l2_context.key,
                 reason = %pack_l2_miss_reason(&miss.reason),
+                fallback_reason = %pack_l2_miss_reason(&miss.reason),
             );
         }
         Err(error) => {
@@ -3667,7 +3673,7 @@ fn context_pack_l2_store(
         "responseJson": rendered,
     });
 
-    match l2_context.cache.put(&l2_context.key, &payload) {
+    match l2_context.cache.put_compressed(&l2_context.key, &payload) {
         Ok(report) => {
             tracing::info!(
                 target: "ee::pack_l2",
@@ -3675,6 +3681,10 @@ fn context_pack_l2_store(
                 key = %l2_context.key,
                 path = %report.path.display(),
                 byte_len = report.byte_len,
+                compressed_bytes = report.compression.as_ref().map(|compression| compression.compressed_bytes).unwrap_or(0),
+                uncompressed_bytes = report.uncompressed_byte_len,
+                compression_latency_ms = report.compression.as_ref().map(|compression| compression.compression_latency_ms).unwrap_or(0),
+                dictionary_id = report.compression.as_ref().and_then(|compression| compression.dictionary_id.as_deref()).unwrap_or("none"),
                 outcome = %pack_l2_write_outcome(&report.outcome),
                 evicted = report.eviction.removed,
                 bytes_removed = report.eviction.bytes_removed,
@@ -3970,6 +3980,7 @@ fn context_pack_l2_hit_performance_json(
     trace: &ContextPerformanceTrace,
     key: &str,
     byte_len: u64,
+    compression: Option<&PackL2CompressionHit>,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
@@ -3998,6 +4009,15 @@ fn context_pack_l2_hit_performance_json(
                 "tier": "l2",
                 "key": key,
                 "byteLen": byte_len,
+                "compressed": compression.is_some(),
+                "compressedBytes": compression.map(|compression| compression.compressed_bytes),
+                "uncompressedBytes": compression
+                    .map(|compression| compression.uncompressed_bytes)
+                    .unwrap_or(byte_len),
+                "dictionaryId": compression
+                    .and_then(|compression| compression.dictionary_id.as_deref()),
+                "decompressionLatencyMs": compression
+                    .map(|compression| compression.decompression_latency_ms),
                 "selectedItemsUnaffected": true,
             },
             "timings": trace.timings.iter().map(performance_timing_json).collect::<Vec<_>>(),
@@ -4013,6 +4033,9 @@ fn pack_l2_miss_is_corruption(miss: &PackL2CacheMiss) -> bool {
         PackL2CacheMissReason::Corrupt(_)
             | PackL2CacheMissReason::BodyHashMismatch { .. }
             | PackL2CacheMissReason::KeyMismatch { .. }
+            | PackL2CacheMissReason::CompressionDictionaryMissing { .. }
+            | PackL2CacheMissReason::CompressionDictionaryCorrupt { .. }
+            | PackL2CacheMissReason::CompressionDecode { .. }
     )
 }
 
@@ -4033,6 +4056,18 @@ fn pack_l2_miss_reason(reason: &PackL2CacheMissReason) -> String {
             byte_len,
             max_entry_bytes,
         } => format!("too_large byte_len={byte_len} max_entry_bytes={max_entry_bytes}"),
+        PackL2CacheMissReason::CompressionDictionaryMissing { dictionary_id } => {
+            format!("compression_dictionary_missing dictionary_id={dictionary_id}")
+        }
+        PackL2CacheMissReason::CompressionDictionaryCorrupt {
+            dictionary_id,
+            message,
+        } => {
+            format!("compression_dictionary_corrupt dictionary_id={dictionary_id} {message}")
+        }
+        PackL2CacheMissReason::CompressionDecode { message } => {
+            format!("compression_decode {message}")
+        }
     }
 }
 
@@ -10603,7 +10638,7 @@ pub fn unrelated_context() -> u64 {
             .insert_memory(
                 &memory_id,
                 &CreateMemoryInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run cargo fmt --check before release.".to_owned(),
@@ -10713,7 +10748,7 @@ pub fn unrelated_context() -> u64 {
             .insert_memory(
                 &memory_id,
                 &CreateMemoryInput {
-                    workspace_id,
+                    workspace_id: workspace_id.clone(),
                     level: "procedural".to_owned(),
                     kind: "rule".to_owned(),
                     content: "Run cargo fmt --check before release.".to_owned(),
@@ -10765,6 +10800,41 @@ pub fn unrelated_context() -> u64 {
         assert!(
             fresh.cached_json.is_none(),
             "first run should assemble fresh output"
+        );
+        let workspace_cache_dir =
+            cache_root.join(super::pack_l2_workspace_component(&workspace_id));
+        let cache_entry_paths = std::fs::read_dir(&workspace_cache_dir)
+            .map_err(|error| error.to_string())?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(
+            cache_entry_paths.len(),
+            1,
+            "first run should publish exactly one L2 cache entry"
+        );
+        let cache_entry_json = std::fs::read(&cache_entry_paths[0])
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .map_err(|error| error.to_string())
+            })?;
+        assert_eq!(
+            cache_entry_json
+                .get("schema")
+                .and_then(serde_json::Value::as_str),
+            Some(crate::cache::pack_l2::PACK_L2_CACHE_ENTRY_SCHEMA_V2),
+            "context L2 store should use the compressed v2 entry schema"
+        );
+        assert!(
+            cache_entry_json
+                .pointer("/compression/compressedPayloadBase64")
+                .and_then(serde_json::Value::as_str)
+                .is_some(),
+            "compressed v2 entry should carry compressed payload bytes"
         );
         let cached = super::run_context_pack(&options).map_err(|error| error.to_string())?;
         assert!(

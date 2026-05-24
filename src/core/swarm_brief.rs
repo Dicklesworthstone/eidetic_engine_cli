@@ -59,6 +59,8 @@ const BEADS_UNAVAILABLE_CODE: &str = "beads_unavailable";
 const BEADS_COMMAND_TIMEOUT_CODE: &str = "beads_command_timeout";
 const BEADS_NO_OUTPUT_CODE: &str = "beads_no_output";
 const BEADS_TRACKER_STALE_CODE: &str = "beads_tracker_stale";
+const BV_COMMAND_TIMEOUT_CODE: &str = "bv_command_timeout";
+const BV_NO_OUTPUT_CODE: &str = "bv_no_output";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
@@ -1446,6 +1448,18 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BvSourceAdapter<'_,
             .runner
             .run("bv", &args, &options.workspace, options.command_timeout_ms)
         {
+            Ok(output) if output.stdout.trim().is_empty() => {
+                let degradation =
+                    bv_no_output_degradation("bv --robot-triage --robot-triage-by-track");
+                SwarmBriefSourceOutput {
+                    snapshot: SwarmBriefSourceSnapshot::unavailable(
+                        SwarmBriefSourceKind::Bv,
+                        provenance,
+                        degradation,
+                    ),
+                    contribution: SwarmBriefContribution::None,
+                }
+            }
             Ok(output) => match parse_bv_triage_json(&output.stdout) {
                 Ok(summary) => {
                     let item_count = summary.top_picks.len();
@@ -1476,9 +1490,8 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BvSourceAdapter<'_,
                 }
             },
             Err(error) => {
-                let degradation = error.to_degradation(
-                    SwarmBriefSourceKind::Bv,
-                    BV_UNAVAILABLE_CODE,
+                let degradation = bv_command_error_to_degradation(
+                    &error,
                     "bv --robot-triage --robot-triage-by-track",
                 );
                 SwarmBriefSourceOutput {
@@ -1492,6 +1505,41 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for BvSourceAdapter<'_,
             }
         }
     }
+}
+
+fn bv_command_error_to_degradation(
+    error: &SwarmBriefCommandError,
+    repair: impl Into<String>,
+) -> SwarmBriefDegradation {
+    let repair = repair.into();
+    match error {
+        SwarmBriefCommandError::TimedOut { timeout_ms } => SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Bv,
+            BV_COMMAND_TIMEOUT_CODE,
+            format!(
+                "BV robot source command timed out after {timeout_ms} ms; use bounded retry or stale-safe Beads fallback instead of waiting indefinitely."
+            ),
+            Some(bv_bounded_retry_repair(&repair)),
+        ),
+        _ => error.to_degradation(SwarmBriefSourceKind::Bv, BV_UNAVAILABLE_CODE, repair),
+    }
+}
+
+fn bv_no_output_degradation(repair: impl Into<String>) -> SwarmBriefDegradation {
+    let repair = repair.into();
+    SwarmBriefDegradation::warning(
+        SwarmBriefSourceKind::Bv,
+        BV_NO_OUTPUT_CODE,
+        "BV robot source command returned no output; use bounded retry or stale-safe Beads fallback instead of waiting indefinitely."
+            .to_owned(),
+        Some(bv_bounded_retry_repair(&repair)),
+    )
+}
+
+fn bv_bounded_retry_repair(bv_command: &str) -> String {
+    format!(
+        "Retry `{bv_command}` with the configured command timeout, or fall back to `br --no-auto-import --allow-stale ready --json`."
+    )
 }
 
 pub struct AgentMailSnapshotFileAdapter;
@@ -9835,6 +9883,49 @@ mod tests {
         );
         assert!(degraded[0].message.contains("no output"));
         assert!(degraded[0].message.contains("advisory only"));
+    }
+
+    #[test]
+    fn bv_timeout_uses_specific_source_health_code() {
+        let error = SwarmBriefCommandError::TimedOut { timeout_ms: 1_500 };
+        let degradation =
+            bv_command_error_to_degradation(&error, "bv --robot-triage --robot-triage-by-track");
+
+        assert_eq!(degradation.code, BV_COMMAND_TIMEOUT_CODE);
+        assert_eq!(degradation.source, SwarmBriefSourceKind::Bv);
+        assert!(degradation.message.contains("timed out after 1500 ms"));
+        assert!(degradation.message.contains("waiting indefinitely"));
+        let repair = degradation.repair.as_deref().unwrap_or_default();
+        assert!(repair.contains("bv --robot-triage --robot-triage-by-track"));
+        assert!(repair.contains("br --no-auto-import --allow-stale ready --json"));
+    }
+
+    #[test]
+    fn bv_empty_stdout_uses_specific_source_health_code() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default().with_output(
+            "bv",
+            &["--robot-triage", "--robot-triage-by-track"],
+            "",
+        );
+
+        let output = BvSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.source, SwarmBriefSourceKind::Bv);
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Unavailable);
+        assert_eq!(output.snapshot.degraded.len(), 1);
+        assert_eq!(output.snapshot.degraded[0].code, BV_NO_OUTPUT_CODE);
+        assert!(output.snapshot.degraded[0].message.contains("no output"));
+        let repair = output.snapshot.degraded[0]
+            .repair
+            .as_deref()
+            .unwrap_or_default();
+        assert!(repair.contains("bv --robot-triage --robot-triage-by-track"));
+        assert!(repair.contains("br --no-auto-import --allow-stale ready --json"));
+        match output.contribution {
+            SwarmBriefContribution::None => {}
+            _ => panic!("empty bv stdout must not contribute a healthy summary"),
+        }
     }
 
     #[test]

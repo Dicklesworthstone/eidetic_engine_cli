@@ -19,6 +19,9 @@
 //! * `--format mermaid` with `--limit 1` truncates the edge list
 //!   deterministically and emits a "limited output" comment naming
 //!   the surviving edge count so an agent knows to rerun.
+//! * `--json --format mermaid` and `--robot --format mermaid` keep
+//!   the canonical JSON contract instead of accidentally taking the
+//!   diagram branch.
 
 #![cfg(unix)]
 
@@ -153,6 +156,41 @@ fn run_neighborhood_mermaid(
     run_ee(&args)
 }
 
+fn run_neighborhood_mermaid_machine_mode(
+    workspace_arg: &str,
+    center: &str,
+    mode_flag: &str,
+) -> Result<(Output, Value), String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        mode_flag,
+        "--format",
+        "mermaid",
+        "graph",
+        "neighborhood",
+        center,
+    ])?;
+    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        let first_line = first_stdout_line(&output);
+        format!(
+            "ee graph neighborhood {mode_flag} --format mermaid expected canonical JSON override, \
+             but stdout was not JSON: {error}; first output line: {first_line:?}"
+        )
+    })?;
+    Ok((output, parsed))
+}
+
+fn first_stdout_line(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect()
+}
+
 fn assert_common_header(stdout: &str, center: &str) -> TestResult {
     ensure(
         stdout.starts_with("%%{init: {\"flowchart\":"),
@@ -174,6 +212,80 @@ fn assert_common_header(stdout: &str, center: &str) -> TestResult {
         stdout.ends_with('\n'),
         format!("mermaid output must end with a newline; got: {stdout:.50?}"),
     )?;
+    Ok(())
+}
+
+#[test]
+fn graph_neighborhood_machine_modes_override_format_mermaid() -> TestResult {
+    let workspace = unique_workspace("machine-override")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let center = remember(
+        &workspace_arg,
+        "Pin-test graph-neighborhood JSON override for Mermaid requests.",
+    )?;
+
+    for mode_flag in ["--json", "--robot"] {
+        let (output, parsed) =
+            run_neighborhood_mermaid_machine_mode(&workspace_arg, &center, mode_flag)?;
+        let first_line = first_stdout_line(&output);
+        ensure(
+            output.status.success(),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; status failed; \
+                 first output line={first_line:?}; stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        ensure(
+            output.stderr.is_empty(),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; stderr must be empty; \
+                 first output line={first_line:?}; stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        ensure(
+            parsed["schema"].as_str() == Some("ee.graph.neighborhood.v1"),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; schema drifted; \
+                 first output line={first_line:?}; got {parsed}"
+            ),
+        )?;
+        ensure(
+            parsed["success"].as_bool() == Some(true),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected success=true; first output line={first_line:?}; got {parsed}"
+            ),
+        )?;
+        ensure(
+            parsed["data"]["memoryId"].as_str() == Some(center.as_str()),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected JSON data.memoryId to echo the center id; \
+                 first output line={first_line:?}; got {}",
+                parsed["data"]
+            ),
+        )?;
+        ensure(
+            !first_line.starts_with("%%{init:")
+                && !first_line.starts_with("graph LR")
+                && !first_line.starts_with("Neighborhood for"),
+            format!(
+                "command=`ee graph neighborhood {mode_flag} --format mermaid`; \
+                 expected JSON override, not Mermaid or human fallback; \
+                 first output line={first_line:?}"
+            ),
+        )?;
+    }
+
     Ok(())
 }
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# E2E smoke (bd-2z5ly.9, bd-13dmm.4): proves that swarm work-packet generation
-# and command-action consumption stay advisory — no `br update`, no `br sync`,
-# no edits to `.beads/`, no staged git changes, no Agent Mail writes, and no
-# Cargo/RCH execution while parsing safe argv metadata.
+# E2E smoke (bd-2z5ly.4, bd-2z5ly.9, bd-13dmm.4): proves that swarm
+# work-packet generation and command-action consumption stay advisory — no
+# `br update`, no `br sync`, no edits to `.beads/`, no staged git changes, no
+# Agent Mail writes, and no Cargo/RCH execution while parsing safe argv metadata.
 #
 # Strategy: build a sandbox workspace under $artifact_root/work that
 # contains a copy of `.beads/` (and a synthetic merge artifact + a
@@ -13,9 +13,9 @@
 # the real repo, so the snapshot/diff harness measures only the system
 # under test.
 #
-# The shim refuses anything other than read-only `br ready` /
-# `br doctor` / `br list` invocations so an accidental mutation in the
-# packet collector trips the script immediately rather than corrupting
+# The shim refuses anything other than read-only `br ready` / `br doctor` /
+# `br list` / `br show` / `br comments` invocations so an accidental mutation
+# in the packet collector trips the script immediately rather than corrupting
 # the tracker.
 #
 # This script does NOT invoke Cargo. Real-Cargo verification is RCH-only per

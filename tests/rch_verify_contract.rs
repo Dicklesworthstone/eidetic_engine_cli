@@ -1849,6 +1849,84 @@ printf '[RCH] remote css (1.0s)\n'
 }
 
 #[test]
+fn summary_reports_local_cargo_process_fixture_without_using_local_cargo() -> TestResult {
+    let local_cargo_report = r#"{
+        "schema":"ee.rch_local_cargo_tripwire.v1",
+        "mode":"probe_processes",
+        "status":"bypass_detected",
+        "count":1,
+        "processes":[{
+            "pid":"7193",
+            "ppid":"1",
+            "elapsed":"02:33:44",
+            "command_kind":"cargo",
+            "subcommand":"metadata",
+            "cwd":"-",
+            "manifestPath":"/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml",
+            "workspacePath":"/Users/jemanuel/projects/eidetic_engine_cli",
+            "packageCacheLockState":"held",
+            "packageCacheLockHeld":true,
+            "policyStatus":"local_cargo_read_only_lock_holder",
+            "command":"cargo metadata --manifest-path /Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml",
+            "reason":"read-only cargo metadata process holds the Cargo package-cache lock and can block RCH verification"
+        }],
+        "detectedLocalBuilds":[],
+        "localBuildPolicy":{"policy":"rch_only","status":"blocked","commandScope":"active_process_scan"}
+    }"#;
+    let (status, stdout, stderr) = run_script_with_env(
+        &[
+            "--summary",
+            "--skip-build-admission",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "local_cargo_process_fixture",
+        ],
+        &[
+            ("RCH_VERIFY_LOCAL_CARGO_PROCESSES_JSON", local_cargo_report),
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "Selected worker: css\n[RCH] remote css (0.1s)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "0"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "77"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "css"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "css"),
+        ],
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "local-cargo fixture summary should pass remotely with warning; stdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse local cargo report: {error}"))?;
+    if report["status"] != "remote_pass" {
+        return Err(format!("local-cargo warning changed RCH status: {report}"));
+    }
+    if report["local_cargo_processes"]["count"] != 1
+        || report["local_cargo_processes"]["processes"][0]["packageCacheLockHeld"] != true
+    {
+        return Err(format!("local cargo process report missing: {report}"));
+    }
+    if !degraded_contains(&report, "rch_verify_local_cargo_processes_present")? {
+        return Err(format!("local cargo degraded code missing: {report}"));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    if !summary
+        .contains("local_cargo_processes: `bypass_detected` count=`1` package_cache_locks=`1`")
+    {
+        return Err(format!(
+            "summary missing local cargo process line: {summary}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn build_admission_auto_candidate_skips_empty_version_binary() -> TestResult {
     let target_dir = unique_tmp_path("rch-admission-candidates");
     let debug_dir = target_dir.join("debug");
@@ -1956,6 +2034,84 @@ fn synthetic_local_fallback_refusal_is_not_worker_id() -> TestResult {
     ] {
         if !degraded.iter().any(|code| code == expected) {
             return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn synthetic_dependency_planner_ignores_requested_worker_reports_filter_ignored() -> TestResult {
+    let (status, stdout, _stderr) = run_script_with_env(
+        &[
+            "--bead-id",
+            "bd-3bhcb",
+            "--summary",
+            "--no-write",
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "semantic_readiness",
+            "--",
+            "--nocapture",
+        ],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "  2026-05-24T03:50:43.878558Z  WARN rch::hook: Dependency planner fail-open on vmi1227854 [RCH-E327]: refusing remote Cargo execution and falling back local (Path dependency topology policy failed.)\n[RCH] local (dependency preflight RCH-E327: Path dependency topology policy failed.)\n[RCH] remote required; refusing local fallback (dependency preflight failed)",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "31080"),
+            ("RCH_WORKERS", "vmi1264463"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854,vmi1264463"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854,vmi1264463"),
+        ],
+    )?;
+    if status.success() {
+        return Err("planner worker pin mismatch should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse planner mismatch report: {error}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!("expected RCH environment failure: {report}"));
+    }
+    if !report["worker_id"].is_null() {
+        return Err(format!(
+            "dependency planner worker should not masquerade as remote worker id: {report}"
+        ));
+    }
+    for expected in [
+        "rch_verify_topology_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing",
+        "rch_verify_worker_filter_ignored",
+    ] {
+        if !degraded_contains(&report, expected)? {
+            return Err(format!("missing {expected} in degraded codes: {report}"));
+        }
+    }
+    if !worker_degraded_contains(&report, "rch_verify_worker_filter_ignored")? {
+        return Err(format!(
+            "planner mismatch should be listed as worker-state degradation: {report}"
+        ));
+    }
+    if report["requested_workers"] != serde_json::json!(["vmi1264463"])
+        || report["configured_workers"] != serde_json::json!(["vmi1227854", "vmi1264463"])
+    {
+        return Err(format!("worker inventory arrays missing: {report}"));
+    }
+    let summary = report["summary_markdown"]
+        .as_str()
+        .ok_or_else(|| "summary missing".to_owned())?;
+    for expected in [
+        "worker_state_degraded_codes:",
+        "rch_verify_worker_filter_ignored",
+        "rch_verify_topology_blocked",
+        "rch_verify_local_fallback_refused",
+        "rch_verify_remote_marker_missing",
+    ] {
+        if !summary.contains(expected) {
+            return Err(format!("summary missing {expected}: {summary}"));
         }
     }
     Ok(())

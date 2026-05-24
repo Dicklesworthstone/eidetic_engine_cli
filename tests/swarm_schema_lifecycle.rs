@@ -1589,6 +1589,303 @@ fn work_packet_agent_mail_semantic_readiness_gate_is_contractual() -> TestResult
 }
 
 #[test]
+fn work_packet_agent_mail_database_contention_timeout_is_contractual() -> TestResult {
+    // bd-2z5ly.3.1: Agent Mail timeout/database-contention is distinct from
+    // degraded_read_only and semantic_readiness_failed. The fixture pins the
+    // non-authoritative coordination posture without preserving raw stderr,
+    // inbox contents, mailbox paths, PIDs, or live process details.
+    let case = SCHEMA_CASES
+        .iter()
+        .copied()
+        .find(|case| case.id == "ee.swarm.work_packet.v1")
+        .ok_or_else(|| "ee.swarm.work_packet.v1 schema case missing".to_owned())?;
+    let schema = schema_doc(case)?;
+    let agent_mail = schema
+        .pointer("/definitions/agentMail")
+        .ok_or_else(|| "agentMail definition missing".to_owned())?;
+    let status_enum = agent_mail
+        .pointer("/properties/status/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "agentMail.status enum missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    if !status_enum.contains("unavailable") {
+        return Err("agentMail.status enum must include unavailable".into());
+    }
+
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("agent_mail_database_contention_timeout.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "database contention fixture")?
+        != "ee.swarm.work_packet.v1"
+    {
+        return Err("database contention fixture schema drifted".into());
+    }
+    if string_field(
+        &fixture,
+        "/observedStateClass",
+        "database contention fixture",
+    )? != "agent_mail_database_contention_timeout"
+    {
+        return Err("database contention fixture must use a distinct observedStateClass".into());
+    }
+
+    let fixture_agent_mail = fixture
+        .pointer("/coordination/agentMail")
+        .ok_or_else(|| "database contention fixture missing coordination.agentMail".to_owned())?;
+    if string_field(
+        fixture_agent_mail,
+        "/status",
+        "database contention fixture agentMail",
+    )? != "unavailable"
+    {
+        return Err("database contention fixture must set agentMail.status=unavailable".into());
+    }
+    if fixture_agent_mail.pointer("/healthLevel") != Some(&Value::Null) {
+        return Err(
+            "database contention fixture must not invent a healthLevel after timeout".into(),
+        );
+    }
+    if fixture_agent_mail
+        .pointer("/reservationAuthoritative")
+        .and_then(Value::as_bool)
+        != Some(false)
+        || fixture_agent_mail
+            .pointer("/inboxAuthoritative")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err(
+            "database contention fixture must mark reservation/inbox as non-authoritative".into(),
+        );
+    }
+
+    let degraded_codes = fixture_agent_mail
+        .pointer("/degradedCodes")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "database contention fixture missing degradedCodes".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "agent_mail_database_contention_timeout",
+        "agent_mail_unavailable",
+    ] {
+        if !degraded_codes.contains(expected) {
+            return Err(format!(
+                "database contention fixture missing degraded code {expected}"
+            ));
+        }
+    }
+
+    let recommended_safe = fixture
+        .pointer("/recommendedAction/safeToClaim")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            "database contention fixture missing recommendedAction.safeToClaim".to_owned()
+        })?;
+    if recommended_safe {
+        return Err("database contention fixture must not recommend safeToClaim=true".into());
+    }
+    let candidate_decision = string_field(
+        &fixture,
+        "/candidates/0/decision",
+        "database contention fixture candidate",
+    )?;
+    if candidate_decision == "safe_to_claim" {
+        return Err(
+            "database contention fixture must not classify the candidate as safe_to_claim".into(),
+        );
+    }
+
+    let fallback_actions = fixture_agent_mail
+        .pointer("/fallbackActions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "database contention fixture missing fallbackActions".to_owned())?;
+    let kinds = fallback_actions
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            string_field(action, "/kind", &format!("fallbackActions[{index}]")).map(str::to_owned)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let expected_kinds = vec![
+        "beads_comment".to_owned(),
+        "manual_coordination".to_owned(),
+        "retry_later".to_owned(),
+        "switch_to_static_work".to_owned(),
+    ];
+    if kinds != expected_kinds {
+        return Err(format!(
+            "database contention fallback actions drifted: {kinds:?}"
+        ));
+    }
+
+    let rendered = serde_json::to_string(&fixture)
+        .map_err(|error| format!("serialize database contention fixture: {error}"))?;
+    let lowered = rendered.to_ascii_lowercase();
+    for forbidden in [
+        "/private/",
+        "/users/",
+        "/var/",
+        "\"pid\"",
+        "pid ",
+        "raw stderr",
+        "raw stdout",
+        "mail body",
+        "message-id:",
+        "subject:",
+        "from:",
+        ".sqlite-shm",
+        ".sqlite-wal",
+        "page 283",
+        "btree page",
+        "stack trace",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "database contention fixture leaked forbidden detail {forbidden}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn work_packet_bv_timeout_no_output_is_contractual() -> TestResult {
+    // bd-2z5ly.3.2: BV robot-source timeout/no-output must be a
+    // bounded degraded source, not an omitted source, a healthy empty
+    // recommendation, or a reason to wait indefinitely. The fixture pins
+    // stale-safe Beads fallback and prevents interactive `bv` suggestions.
+    let fixture_path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join("bv_timeout_no_output.json");
+    let fixture = read_json(&fixture_path)?;
+    if string_field(&fixture, "/schema", "bv timeout fixture")? != "ee.swarm.work_packet.v1" {
+        return Err("bv timeout fixture schema drifted".into());
+    }
+    if string_field(&fixture, "/observedStateClass", "bv timeout fixture")?
+        != "bv_timeout_no_output"
+    {
+        return Err("bv timeout fixture must use observedStateClass=bv_timeout_no_output".into());
+    }
+    if fixture
+        .pointer("/recommendedAction/safeToClaim")
+        .and_then(Value::as_bool)
+        != Some(false)
+    {
+        return Err("bv timeout fixture must not recommend safeToClaim=true".into());
+    }
+    if string_field(
+        &fixture,
+        "/candidates/0/decision",
+        "bv timeout fixture candidate",
+    )? != "blocked"
+    {
+        return Err("bv timeout fixture must block stale fallback candidates".into());
+    }
+
+    let source_provenance = fixture
+        .pointer("/sourceProvenance")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv timeout fixture missing sourceProvenance".to_owned())?;
+    let bv_source = source_provenance
+        .iter()
+        .find(|source| source.pointer("/source").and_then(Value::as_str) == Some("bv"))
+        .ok_or_else(|| "bv timeout fixture missing BV source provenance".to_owned())?;
+    if string_field(bv_source, "/status", "bv source provenance")? != "degraded"
+        || string_field(bv_source, "/freshness", "bv source provenance")? != "timeout_no_output"
+    {
+        return Err(format!(
+            "bv source provenance must be degraded/timeout_no_output, got {bv_source}"
+        ));
+    }
+
+    let degraded = fixture
+        .pointer("/degraded")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv timeout fixture missing degraded list".to_owned())?;
+    let degraded_codes = degraded
+        .iter()
+        .filter_map(|entry| entry.pointer("/code").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for expected in ["bv_command_timeout", "bv_no_output"] {
+        if !degraded_codes.contains(expected) {
+            return Err(format!(
+                "bv timeout fixture missing degraded code {expected}"
+            ));
+        }
+    }
+
+    let recommended_reasons = fixture
+        .pointer("/recommendedAction/reasons")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv timeout fixture missing recommendedAction.reasons".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "bv_timeout_no_output",
+        "fallback_rows_not_authoritative",
+        "graph_triage_not_authoritative",
+    ] {
+        if !recommended_reasons.contains(expected) {
+            return Err(format!("bv timeout fixture missing reason {expected}"));
+        }
+    }
+
+    let rendered =
+        serde_json::to_string(&fixture).map_err(|error| format!("serialize fixture: {error}"))?;
+    let lowered = rendered.to_ascii_lowercase();
+    for forbidden in [
+        "/users/",
+        "/private/",
+        "/var/",
+        "\"pid\"",
+        "pid ",
+        "raw stdout",
+        "raw stderr",
+        "mail body",
+        "message-id:",
+        "subject:",
+        "from:",
+        "file content",
+        "stack trace",
+    ] {
+        if lowered.contains(forbidden) {
+            return Err(format!(
+                "bv timeout fixture leaked forbidden detail {forbidden}"
+            ));
+        }
+    }
+
+    let command_strings = fixture
+        .pointer("/recommendedAction/suggestedCommands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "bv timeout fixture missing suggestedCommands".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    if !command_strings.contains(&"br --no-auto-import --allow-stale ready --json") {
+        return Err("bv timeout fixture must recommend stale-safe Beads fallback".into());
+    }
+    for command in command_strings {
+        if command == "bv" {
+            return Err("bv timeout fixture must not recommend bare interactive bv".into());
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn swarm_schema_availability_matches_bead_state() -> TestResult {
     let issue_states = latest_issue_states()?;
     for case in SCHEMA_CASES {

@@ -18,7 +18,7 @@
 #
 # Usage:
 #   scripts/check-local-cargo-tripwire.sh --cmd '<command-line>' [--json]
-#   scripts/check-local-cargo-tripwire.sh --probe-processes [--json]
+#   scripts/check-local-cargo-tripwire.sh --probe-processes [--ps-file <fixture>] [--package-cache-pids <csv>] [--json]
 #   scripts/check-local-cargo-tripwire.sh --self-test
 #
 # Exit codes: 0 = allowed/clean, 1 = bypass detected, 2 = usage error.
@@ -31,6 +31,8 @@ JSON_OUTPUT=false
 SELF_TEST=false
 MODE="cmd_classify"
 CMD=""
+PS_FIXTURE=""
+PACKAGE_CACHE_PIDS_FIXTURE=""
 
 usage() {
     sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
@@ -41,6 +43,26 @@ while [ $# -gt 0 ]; do
         --json) JSON_OUTPUT=true; shift ;;
         --self-test) SELF_TEST=true; shift ;;
         --probe-processes) MODE="probe_processes"; shift ;;
+        --ps-file)
+            shift
+            if [ $# -eq 0 ]; then
+                printf -- '--ps-file requires a value\n' >&2
+                usage >&2
+                exit 2
+            fi
+            PS_FIXTURE="$1"
+            shift
+            ;;
+        --package-cache-pids)
+            shift
+            if [ $# -eq 0 ]; then
+                printf -- '--package-cache-pids requires a value\n' >&2
+                usage >&2
+                exit 2
+            fi
+            PACKAGE_CACHE_PIDS_FIXTURE="$1"
+            shift
+            ;;
         --cmd)
             shift
             if [ $# -eq 0 ]; then
@@ -68,6 +90,7 @@ FORBIDDEN_CARGO_SUBCOMMANDS="build check test bench clippy doc run install rustc
 # walks live processes, we use these to bound false positives to the
 # eidetic_engine_cli tree.
 REPO_PATH_HINTS="eidetic_engine_cli /data/projects/eidetic_engine_cli /Users/jemanuel/projects/eidetic_engine_cli"
+READ_ONLY_CARGO_SUBCOMMANDS="metadata locate-project pkgid tree"
 
 classify_command() {
     # Returns a single line "<allowed>\t<reason>\t<subcommand>\t<detail>"
@@ -162,9 +185,9 @@ probe_processes() {
     # process tree because ps -eo ppid is racy on macOS during fork.
     #
     # Output rows:
-    # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<cwd>\t<short-command>\t<flagged-reason>
+    # <pid>\t<ppid>\t<elapsed>\t<command-kind>\t<subcommand>\t<cwd>\t<manifest>\t<workspace>\t<package-cache-lock>\t<policy-status>\t<short-command>\t<flagged-reason>
     local ps_output
-    ps_output=$(ps -eo pid=,ppid=,etime=,command= 2>/dev/null || true)
+    ps_output=$(process_scan_ps_output 2>/dev/null || true)
     if [ -z "$ps_output" ]; then
         return 0
     fi
@@ -180,11 +203,7 @@ probe_processes() {
         cmd=$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+//')
         [ -n "$pid" ] || continue
         [ -n "$cmd" ] || continue
-        # Skip lines that are not cargo/rustc invocations.
-        case "$cmd" in
-            *cargo*|*rustc*|*rustdoc*) ;;
-            *) continue ;;
-        esac
+        command_mentions_rust_tool "$cmd" || continue
         # Skip our own shell + the ps invocation above.
         case "$cmd" in
             *check-local-cargo-tripwire*|*ps[[:space:]]-eo*) continue ;;
@@ -195,15 +214,7 @@ probe_processes() {
             *scripts/rch_verify.sh*) continue ;;
         esac
         local cwd="-"
-        if command -v lsof >/dev/null 2>&1 && command -v perl >/dev/null 2>&1; then
-            # lsof can hang on busy or wedged processes. Keep process
-            # evidence bounded by letting SIGALRM terminate the lsof child.
-            cwd=$(perl -e 'alarm shift; exec @ARGV' 2 lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-            [ -n "$cwd" ] || cwd="-"
-        elif command -v lsof >/dev/null 2>&1; then
-            cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-            [ -n "$cwd" ] || cwd="-"
-        fi
+        cwd=$(process_cwd "$pid")
         # Only flag processes operating on this repo.
         local matches_repo=false
         for hint in $REPO_PATH_HINTS; do
@@ -220,15 +231,210 @@ probe_processes() {
         if printf '%s' "$cmd" | grep -Eq '(^|[[:space:]/])rch[[:space:]]+exec'; then
             continue
         fi
-        local command_kind="cargo"
-        case "$cmd" in
-            *rustdoc*) command_kind="rustdoc" ;;
-            *rustc*) command_kind="rustc" ;;
-            *cargo*) command_kind="cargo" ;;
+        local command_kind
+        local subcommand
+        local manifest_path
+        local workspace_path
+        local package_cache_lock_state
+        local policy_status
+        local reason
+        command_kind=$(command_kind_from_command "$cmd")
+        subcommand=$(cargo_subcommand_from_command "$cmd")
+        manifest_path=$(manifest_path_from_command "$cmd" "$cwd")
+        workspace_path=$(workspace_path_from_manifest "$manifest_path" "$cwd")
+        package_cache_lock_state=$(package_cache_lock_state "$pid")
+        policy_status=$(active_process_policy_status "$command_kind" "$subcommand" "$package_cache_lock_state")
+        reason=$(active_process_reason "$command_kind" "$subcommand" "$package_cache_lock_state")
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$cwd" \
+            "$manifest_path" "$workspace_path" "$package_cache_lock_state" \
+            "$policy_status" "$(printf '%s' "$cmd" | cut -c1-200)" "$reason"
+    done | sort -n -k1,1
+}
+
+process_scan_ps_output() {
+    if [ -n "$PS_FIXTURE" ]; then
+        cat "$PS_FIXTURE"
+        return
+    fi
+    ps -eo pid=,ppid=,etime=,command=
+}
+
+bounded_lsof() {
+    if ! command -v lsof >/dev/null 2>&1; then
+        return 127
+    fi
+    if command -v perl >/dev/null 2>&1; then
+        perl -e 'alarm shift; exec @ARGV' 2 lsof "$@"
+    else
+        lsof "$@"
+    fi
+}
+
+process_cwd() {
+    local pid="$1"
+    local cwd="-"
+    if [ -z "$PS_FIXTURE" ]; then
+        cwd=$(bounded_lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
+    fi
+    [ -n "$cwd" ] || cwd="-"
+    printf '%s\n' "$cwd"
+}
+
+command_mentions_rust_tool() {
+    printf '%s' "$1" | grep -Eq "(^|[[:space:]/'\"(;])cargo([[:space:]]|$)|(^|[[:space:]/'\"(;])rustc([[:space:]]|$)|(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"
+}
+
+command_kind_from_command() {
+    local cmd="$1"
+    if printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/'\"(;])rustdoc([[:space:]]|$)"; then
+        printf 'rustdoc\n'
+    elif printf '%s' "$cmd" | grep -Eq "(^|[[:space:]/'\"(;])rustc([[:space:]]|$)"; then
+        printf 'rustc\n'
+    else
+        printf 'cargo\n'
+    fi
+}
+
+cargo_subcommand_from_command() {
+    printf '%s\n' "$1" | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                token = $i
+                gsub(/^[^A-Za-z0-9_\/.-]+/, "", token)
+                gsub(/[^A-Za-z0-9_\/.-]+$/, "", token)
+                if (token == "cargo" || token ~ /\/cargo$/) {
+                    if (i + 1 <= NF) {
+                        next_token = $(i + 1)
+                        gsub(/^[^A-Za-z0-9_-]+/, "", next_token)
+                        gsub(/[^A-Za-z0-9_-]+$/, "", next_token)
+                        print next_token
+                        exit
+                    }
+                }
+            }
+        }
+    '
+}
+
+manifest_path_from_command() {
+    local cmd="$1"
+    local cwd="$2"
+    local manifest
+    manifest=$(printf '%s\n' "$cmd" | awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "--manifest-path" && i + 1 <= NF) {
+                    value = $(i + 1)
+                    gsub(/^[^A-Za-z0-9_\/.-]+/, "", value)
+                    gsub(/[^A-Za-z0-9_\/.-]+$/, "", value)
+                    print value
+                    exit
+                }
+                if ($i ~ /^--manifest-path=/) {
+                    sub(/^--manifest-path=/, "", $i)
+                    gsub(/^[^A-Za-z0-9_\/.-]+/, "", $i)
+                    gsub(/[^A-Za-z0-9_\/.-]+$/, "", $i)
+                    print $i
+                    exit
+                }
+            }
+        }
+    ')
+    if [ -z "$manifest" ] && [ "$cwd" != "-" ]; then
+        case "$cwd" in
+            "$PWD"*) manifest="$PWD/Cargo.toml" ;;
         esac
-        printf '%s\t%s\t%s\t%s\t%s\t%s\tlocal cargo/rustc process targeting this repo without rch exec\n' \
-            "$pid" "$ppid" "$elapsed" "$command_kind" "$cwd" "$(printf '%s' "$cmd" | cut -c1-200)"
+    fi
+    [ -n "$manifest" ] || manifest="-"
+    printf '%s\n' "$manifest"
+}
+
+workspace_path_from_manifest() {
+    local manifest_path="$1"
+    local cwd="$2"
+    case "$manifest_path" in
+        */Cargo.toml)
+            dirname "$manifest_path"
+            return
+            ;;
+    esac
+    if [ "$cwd" != "-" ]; then
+        printf '%s\n' "$cwd"
+    else
+        printf '%s\n' "$PWD"
+    fi
+}
+
+package_cache_lock_state() {
+    local pid="$1"
+    if [ -n "$PACKAGE_CACHE_PIDS_FIXTURE" ]; then
+        if printf '%s\n' "$PACKAGE_CACHE_PIDS_FIXTURE" | tr ', ' '\n\n' | grep -Fxq "$pid"; then
+            printf 'held\n'
+        else
+            printf 'not_observed\n'
+        fi
+        return
+    fi
+    if [ -n "$PS_FIXTURE" ]; then
+        printf 'unavailable\n'
+        return
+    fi
+    local cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+    local lock_path="$cargo_home/.package-cache"
+    if [ ! -e "$lock_path" ]; then
+        printf 'unavailable\n'
+        return
+    fi
+    if bounded_lsof -a -p "$pid" "$lock_path" >/dev/null 2>&1; then
+        printf 'held\n'
+    else
+        printf 'not_observed\n'
+    fi
+}
+
+is_read_only_cargo_subcommand() {
+    local subcommand="$1"
+    for allowed in $READ_ONLY_CARGO_SUBCOMMANDS; do
+        if [ "$subcommand" = "$allowed" ]; then
+            return 0
+        fi
     done
+    return 1
+}
+
+active_process_policy_status() {
+    local command_kind="$1"
+    local subcommand="$2"
+    local package_cache_lock_state="$3"
+    if [ "$command_kind" != "cargo" ]; then
+        printf 'local_rust_tool_disallowed\n'
+    elif is_read_only_cargo_subcommand "$subcommand"; then
+        if [ "$package_cache_lock_state" = "held" ]; then
+            printf 'local_cargo_read_only_lock_holder\n'
+        else
+            printf 'local_cargo_read_only_observed\n'
+        fi
+    else
+        printf 'local_cargo_disallowed\n'
+    fi
+}
+
+active_process_reason() {
+    local command_kind="$1"
+    local subcommand="$2"
+    local package_cache_lock_state="$3"
+    if [ "$command_kind" != "cargo" ]; then
+        printf 'local %s process targeting this repo without rch exec\n' "$command_kind"
+    elif is_read_only_cargo_subcommand "$subcommand"; then
+        if [ "$package_cache_lock_state" = "held" ]; then
+            printf 'read-only cargo %s process holds the Cargo package-cache lock and can block RCH verification\n' "$subcommand"
+        else
+            printf 'read-only cargo %s process targeting this repo; verify it is not being used as fallback proof\n' "$subcommand"
+        fi
+    else
+        printf 'local cargo %s process targeting this repo without rch exec\n' "$subcommand"
+    fi
 }
 
 emit_human_cmd() {
@@ -326,10 +532,10 @@ emit_human_probe() {
         return 0
     fi
     printf '[rch tripwire] %d local cargo/rustc process(es) running without rch exec wrapper:\n' "$count"
-    printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind cwd short_cmd reason; do
+    printf '%s' "$body" | while IFS=$(printf '\t') read -r pid ppid elapsed command_kind subcommand cwd manifest_path workspace_path package_cache_lock_state policy_status short_cmd reason; do
         [ -n "$pid" ] || continue
-        printf '  - pid=%s ppid=%s elapsed=%s kind=%s cwd=%s reason=%s\n      command: %s\n' \
-            "$pid" "$ppid" "$elapsed" "$command_kind" "$cwd" "$reason" "$short_cmd"
+        printf '  - pid=%s ppid=%s elapsed=%s kind=%s subcommand=%s policy=%s cwd=%s manifest=%s package_cache_lock=%s reason=%s\n      command: %s\n' \
+            "$pid" "$ppid" "$elapsed" "$command_kind" "$subcommand" "$policy_status" "$cwd" "$manifest_path" "$package_cache_lock_state" "$reason" "$short_cmd"
     done
     printf '  suggestion: investigate the offending shell; never automatically kill processes here.\n'
 }
@@ -393,14 +599,20 @@ emit_json_probe() {
         processes_json=$(printf '%s' "$body" |
             jq -R -s '
                 split("\n")
-                | map(select(length > 0) | split("\t") | select(length >= 7) | {
+                | map(select(length > 0) | split("\t") | select(length >= 12) | {
                     pid:.[0],
                     ppid:.[1],
                     elapsed:.[2],
                     command_kind:.[3],
-                    cwd:.[4],
-                    command:.[5],
-                    reason:.[6]
+                    subcommand:.[4],
+                    cwd:.[5],
+                    manifestPath:.[6],
+                    workspacePath:.[7],
+                    packageCacheLockState:.[8],
+                    packageCacheLockHeld:(if .[8] == "held" then true elif .[8] == "not_observed" then false else null end),
+                    policyStatus:.[9],
+                    command:.[10],
+                    reason:.[11]
                 })
             ')
     fi
@@ -419,12 +631,17 @@ emit_json_probe() {
             --argjson processes "$processes_json" \
             --argjson disk_context "$disk_context" \
             '($processes | map({
-                policyStatus:"local_cargo_disallowed",
+                policyStatus:.policyStatus,
                 pid:.pid,
                 ppid:.ppid,
                 elapsed:.elapsed,
                 commandKind:.command_kind,
+                subcommand:.subcommand,
                 cwd:.cwd,
+                manifestPath:.manifestPath,
+                workspacePath:.workspacePath,
+                packageCacheLockState:.packageCacheLockState,
+                packageCacheLockHeld:.packageCacheLockHeld,
                 command:.command,
                 reason:.reason
             })) as $detected |
@@ -580,8 +797,27 @@ run_self_test() {
             avoid_shell_command_substitution) ;;
             *) printf 'self-test FAILED: command substitution repair action must be avoid_shell_command_substitution; got %s\n' "$repair_kind" >&2; exit 1 ;;
         esac
+        local old_ps_fixture="$PS_FIXTURE"
+        local old_package_cache_pids_fixture="$PACKAGE_CACHE_PIDS_FIXTURE"
+        PS_FIXTURE="tests/fixtures/rch_local_cargo_tripwire/process_scan_ps_fixture.txt"
+        PACKAGE_CACHE_PIDS_FIXTURE="102"
+        fixture_body=$(probe_processes | sort -n -k1,1)
+        fixture_count=$(printf '%s' "$fixture_body" | grep -c . || true)
+        fixture_report=$(emit_json_probe "$fixture_body" "$fixture_count")
+        PS_FIXTURE="$old_ps_fixture"
+        PACKAGE_CACHE_PIDS_FIXTURE="$old_package_cache_pids_fixture"
+        if ! printf '%s' "$fixture_report" | jq -e '
+            .count == 3
+            and ([.processes[].command] | map(contains("lsd")) | any | not)
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_read_only_lock_holder" and .subcommand == "metadata" and .packageCacheLockHeld == true)
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_cargo_disallowed" and .subcommand == "test" and .manifestPath == "/Users/jemanuel/projects/eidetic_engine_cli/Cargo.toml")
+            and any(.detectedLocalBuilds[]; .policyStatus == "local_rust_tool_disallowed" and .commandKind == "rustc")
+        ' >/dev/null; then
+            printf 'self-test FAILED: process scan fixture did not produce expected classifications; got %s\n' "$fixture_report" >&2
+            exit 1
+        fi
     fi
-    printf 'self-test PASSED: 16 classifier cases and JSON repair action produced expected outcomes\n'
+    printf 'self-test PASSED: 16 classifier cases, JSON repair action, and process fixture produced expected outcomes\n'
     exit 0
 }
 
@@ -612,7 +848,7 @@ case "$MODE" in
         exit 0
         ;;
     probe_processes)
-        BODY=$(probe_processes || true)
+        BODY=$(probe_processes | sort -n -k1,1 || true)
         if [ -n "$BODY" ]; then
             COUNT=$(printf '%s' "$BODY" | grep -c . || true)
         else

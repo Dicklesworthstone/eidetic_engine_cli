@@ -122,6 +122,24 @@ fn run_expire(
     Ok((output, parsed))
 }
 
+fn tombstone_memory(workspace_arg: &str, memory_id: &str) -> TestResult {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--json",
+        "curate",
+        "tombstone",
+        memory_id,
+    ])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ee curate tombstone {memory_id} must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
 fn assert_error_with_repair(
     parsed: &Value,
     message_needles: &[&str],
@@ -316,6 +334,81 @@ fn memory_expire_happy_path_returns_expired_envelope_with_audit() -> TestResult 
     ensure(
         data["valid_to"].is_string(),
         format!("happy-path valid_to must be set after expire; got {data}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn memory_expire_rejects_tombstoned_memory_without_include_tombstoned() -> TestResult {
+    let workspace = unique_workspace("tombstone-policy")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let memory_id = remember(
+        &workspace_arg,
+        "Pin-test memory-expire tombstone-policy target.",
+    )?;
+    tombstone_memory(&workspace_arg, &memory_id)?;
+
+    let (output, parsed) = run_expire(&workspace_arg, &memory_id, &[])?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "ee memory expire on tombstoned memory without --include-tombstoned must fail; stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ),
+    )?;
+    assert_error_with_repair(
+        &parsed,
+        &["Memory is tombstoned and cannot be expired."],
+        &["Use ee memory show to inspect the tombstoned memory."],
+    )
+}
+
+#[test]
+fn memory_expire_include_tombstoned_reports_already_expired_no_change() -> TestResult {
+    let workspace = unique_workspace("tombstone-idempotent")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let memory_id = remember(
+        &workspace_arg,
+        "Pin-test memory-expire tombstone-idempotent target.",
+    )?;
+    tombstone_memory(&workspace_arg, &memory_id)?;
+
+    let (output, parsed) = run_expire(&workspace_arg, &memory_id, &["--include-tombstoned"])?;
+    ensure(
+        output.status.success(),
+        format!(
+            "ee memory expire --include-tombstoned on tombstoned memory must succeed; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let data = &parsed["data"];
+    ensure(
+        data["status"].as_str() == Some("already_expired"),
+        format!("include-tombstoned status must be already_expired; got {data}"),
+    )?;
+    ensure(
+        data["persisted"] == Value::Bool(false),
+        format!("include-tombstoned persisted must be false; got {data}"),
+    )?;
+    ensure(
+        data["changed"] == Value::Bool(false),
+        format!("include-tombstoned changed must be false; got {data}"),
+    )?;
+    ensure(
+        data["idempotency"].as_str() == Some("no_change"),
+        format!("include-tombstoned idempotency must be no_change; got {data}"),
+    )?;
+    ensure(
+        data["tombstoned_at"].is_string(),
+        format!("include-tombstoned tombstoned_at must be preserved; got {data}"),
     )?;
     Ok(())
 }

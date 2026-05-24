@@ -195,6 +195,19 @@ fn curate_tombstone_returns_not_found_for_unknown_memory_id() -> TestResult {
         error.is_object(),
         format!("response must include an error object; got {parsed}"),
     )?;
+    ensure(
+        error["code"].as_str() == Some("not_found"),
+        format!("unknown memory must return not_found; got {error}"),
+    )?;
+    let message = error["message"].as_str().unwrap_or_default();
+    ensure(
+        message.contains("memory"),
+        format!("not-found message must reference memory; got {message}"),
+    )?;
+    ensure(
+        error["details"]["resource"].as_str() == Some("memory"),
+        format!("not-found details.resource must be memory; got {error}"),
+    )?;
     let repair = error["repair"].as_str().unwrap_or_default();
     ensure(
         repair.contains("ee memory list --json"),

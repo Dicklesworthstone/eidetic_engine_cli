@@ -24,14 +24,18 @@ use ee::core::memory::{
 };
 use ee::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1;
 use ee::curate::{
-    DerivationSourceKind, DerivationSourceRef, ReflectionSourceInput, ReflectionSourceMetadata,
-    ReflectionSourcePackageLimits, build_reflection_request_artifact,
-    build_reflection_source_package, canonical_reflection_request_artifact_json,
+    DerivationSourceKind, DerivationSourceRef, ReflectionChallengeBinding,
+    ReflectionHmacKeyMaterial, ReflectionSourceInput, ReflectionSourceMetadata,
+    ReflectionSourcePackageLimits, attach_reflection_request_challenge_with_key,
+    build_reflection_request_artifact, build_reflection_source_package,
+    canonical_reflection_challenge_binding_json, canonical_reflection_request_artifact_json,
     canonical_reflection_source_package_json, validate_reflection_request_artifact,
 };
 use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
-use ee::models::{DomainError, IMPORT_CASS_SCHEMA_V1, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2};
+use ee::models::{
+    DomainError, IMPORT_CASS_SCHEMA_V1, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2,
+};
 use ee::output::{
     error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
     render_memory_list_json, render_memory_show_json, render_schema_export_json,
@@ -44,6 +48,7 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.response.v2", "ee.response.v2.json"),
     ("ee.error.v2", "ee.error.v2.json"),
     ("ee.pack.v2", "ee.pack.v2.json"),
+    (QUERY_SCHEMA_V1, "ee.query.v1.json"),
     ("ee.search.v1", "ee.search.v1.json"),
     ("ee.memory.show.v1", "ee.memory.show.v1.json"),
     ("ee.memory.list.v1", "ee.memory.list.v1.json"),
@@ -61,6 +66,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     (
         ee::curate::REFLECTION_REQUEST_SCHEMA,
         "ee.reflect.request.v1.json",
+    ),
+    (
+        ee::curate::REFLECTION_CHALLENGE_BINDING_SCHEMA,
+        "ee.reflect.challenge_binding.v1.json",
     ),
     (
         ee::curate::REFLECTION_RESULT_SCHEMA,
@@ -474,14 +483,63 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
     let schema_id = "ee.swarm_slo.scorecard.v1";
     let schema = schema_doc(schema_id)?;
     let cases = [
-        ("healthy_small", "healthy_small_checkout", "pass"),
-        ("crowded_checkout", "crowded_checkout", "warn"),
-        ("agent_mail_unavailable", "agent_mail_unavailable", "warn"),
-        ("bv_timeout_no_output", "bv_timeout_no_output", "fail"),
-        ("rch_topology_blocked", "rch_topology_blocked", "blocked"),
+        (
+            "healthy_small",
+            "healthy_small_checkout",
+            "pass",
+            "none",
+            "/sourceHealth/agentMail/status",
+            "ok",
+            None,
+        ),
+        (
+            "crowded_checkout",
+            "crowded_checkout",
+            "warn",
+            "recoverable",
+            "/sourceHealth/workspace/status",
+            "degraded",
+            Some("coordination_warn_crowded_checkout"),
+        ),
+        (
+            "agent_mail_unavailable",
+            "agent_mail_unavailable",
+            "warn",
+            "recoverable",
+            "/sourceHealth/agentMail/status",
+            "unavailable",
+            Some("agent_mail_unavailable"),
+        ),
+        (
+            "bv_timeout_no_output",
+            "bv_timeout_no_output",
+            "fail",
+            "required",
+            "/sourceHealth/bv/status",
+            "timeout",
+            Some("bv_timeout_no_output"),
+        ),
+        (
+            "rch_topology_blocked",
+            "rch_topology_blocked",
+            "blocked",
+            "blocked",
+            "/sourceHealth/rch/status",
+            "blocked",
+            Some("rch_topology_blocked"),
+        ),
     ];
 
-    for (fixture_name, scenario, verdict) in cases {
+    for (
+        fixture_name,
+        scenario,
+        verdict,
+        expected_degradation_posture,
+        source_status_pointer,
+        source_status,
+        primary_failure_code,
+    ) in cases
+    {
         let fixture = read_json(&fixture_path(&format!(
             "golden/swarm_slo_scorecard/{fixture_name}.json.golden"
         )))?;
@@ -489,10 +547,32 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
         ensure_json_str(&fixture, "/workload/scenario", scenario)?;
         ensure_json_str(
             &fixture,
+            "/workload/expectedDegradationPosture",
+            expected_degradation_posture,
+        )?;
+        ensure_json_str(
+            &fixture,
             "/workload/traceSchema",
             "ee.agent_workload_trace.v1",
         )?;
         ensure_json_str(&fixture, "/verdict/status", verdict)?;
+        ensure_json_str(&fixture, source_status_pointer, source_status)?;
+        if let Some(expected_failure_code) = primary_failure_code {
+            let has_failure_code = fixture
+                .pointer("/failureReasons")
+                .and_then(Value::as_array)
+                .is_some_and(|failure_reasons| {
+                    failure_reasons.iter().any(|failure_reason| {
+                        failure_reason.pointer("/code").and_then(Value::as_str)
+                            == Some(expected_failure_code)
+                    })
+                });
+            if !has_failure_code {
+                return Err(format!(
+                    "{fixture_name} must include primary failure code {expected_failure_code}"
+                ));
+            }
+        }
         for pointer in [
             "/redaction/rawMailBodiesPresent",
             "/redaction/rawMemoryBodiesPresent",
@@ -617,6 +697,69 @@ fn reflection_request_artifact_builder_output_matches_schema() -> TestResult {
         "/nextCommands/0/command",
         "ee reflect ingest <result.json> --workspace workspace-schema --json",
     )?;
+
+    let key = ReflectionHmacKeyMaterial::new("reflect_key_schema", b"schema-test-hmac-key")
+        .map_err(|error| error.to_string())?;
+    let challenged = attach_reflection_request_challenge_with_key(
+        artifact,
+        "2026-05-24T00:00:00Z",
+        "2026-05-24T01:00:00Z",
+        &key,
+    )
+    .map_err(|error| error.to_string())?;
+    validate_reflection_request_artifact(&challenged).map_err(|error| error.to_string())?;
+    let challenged_json = canonical_reflection_request_artifact_json(&challenged)
+        .map_err(|error| error.to_string())?;
+    let challenged_document: Value =
+        serde_json::from_str(&challenged_json).map_err(|error| error.to_string())?;
+    validate_json_schema(&challenged_document, &schema, &schema, "$")?;
+    ensure_json_str(
+        &challenged_document,
+        "/callerHints/challengeBindingSchema",
+        ee::curate::REFLECTION_CHALLENGE_BINDING_SCHEMA,
+    )?;
+
+    let source_content_hashes = challenged
+        .source_package
+        .sources
+        .iter()
+        .map(|source| source.content_hash.as_str())
+        .collect::<Vec<_>>();
+    let challenge = challenged
+        .challenge
+        .as_ref()
+        .ok_or_else(|| "challenged request missing challenge".to_owned())?;
+    let challenge_binding_json =
+        canonical_reflection_challenge_binding_json(ReflectionChallengeBinding {
+            request_id: challenged.request_id.as_str(),
+            request_hash: challenged.request_hash.as_str(),
+            workspace_id: challenged.workspace_id.as_str(),
+            reflection_kind: challenged.reflection_kind.as_str(),
+            source_package_hash: challenged.source_package_hash.as_str(),
+            source_content_hashes: source_content_hashes.as_slice(),
+            response_schema_hash: challenged.response_schema.hash.as_str(),
+            expires_at: challenged
+                .expires_at
+                .as_deref()
+                .ok_or_else(|| "challenged request missing expiresAt".to_owned())?,
+            key_id: challenge.key_id.as_str(),
+        })
+        .map_err(|error| error.to_string())?;
+    let challenge_binding_document: Value =
+        serde_json::from_str(&challenge_binding_json).map_err(|error| error.to_string())?;
+    let challenge_binding_schema = read_json(&schema_path("ee.reflect.challenge_binding.v1.json"))?;
+    validate_json_schema(
+        &challenge_binding_document,
+        &challenge_binding_schema,
+        &challenge_binding_schema,
+        "$",
+    )?;
+    ensure_json_str(
+        &challenge_binding_document,
+        "/schema",
+        ee::curate::REFLECTION_CHALLENGE_BINDING_SCHEMA,
+    )?;
+    ensure_json_str(&challenge_binding_document, "/algorithm", "hmac-sha256")?;
     Ok(())
 }
 

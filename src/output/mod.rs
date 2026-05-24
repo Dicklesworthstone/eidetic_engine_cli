@@ -7158,6 +7158,79 @@ pub fn render_memory_history_human(report: &MemoryHistoryReport) -> String {
     output
 }
 
+/// Render a memory history report as a deterministic Mermaid diagram.
+#[must_use]
+pub fn render_memory_history_mermaid(report: &MemoryHistoryReport) -> String {
+    let mut output = String::from("flowchart TD\n");
+    output.push_str(&format!(
+        "  %% command: memory history (memoryId={}, entries={}, total={}, truncated={})\n",
+        escape_mermaid_label(&report.memory_id),
+        report.entries.len(),
+        report.total_count,
+        report.truncated
+    ));
+    if report.is_tombstoned {
+        output.push_str("  %% tombstoned: true\n");
+    }
+
+    output.push_str(&format!(
+        "  memory[\"memory: {}\"]\n",
+        escape_mermaid_label(&report.memory_id)
+    ));
+
+    if report.entries.is_empty() {
+        output.push_str("  empty[\"no history entries\"]\n");
+        output.push_str("  memory -.-> empty\n");
+        return output;
+    }
+
+    for (index, entry) in report.entries.iter().enumerate() {
+        let node_id = format!("history{}", index + 1);
+        let label = format!("{}: {}", entry.timestamp, entry.action);
+        output.push_str(&format!(
+            "  {}[\"{}\"]\n",
+            node_id,
+            escape_mermaid_label(&label)
+        ));
+        output.push_str(&format!("  {} -->|records| memory\n", node_id));
+        output.push_str(&format!(
+            "  %% audit_id[{}]: {}\n",
+            index + 1,
+            escape_mermaid_label(&entry.audit_id)
+        ));
+        if let Some(actor) = &entry.actor {
+            output.push_str(&format!(
+                "  %% actor[{}]: {}\n",
+                index + 1,
+                escape_mermaid_label(actor)
+            ));
+        }
+        if let Some(details) = &entry.details {
+            output.push_str(&format!(
+                "  %% details[{}]: {}\n",
+                index + 1,
+                escape_mermaid_label(details)
+            ));
+        }
+    }
+
+    for index in 0..report.entries.len().saturating_sub(1) {
+        output.push_str(&format!(
+            "  history{} -->|older| history{}\n",
+            index + 1,
+            index + 2
+        ));
+    }
+
+    if report.truncated {
+        output.push_str(
+            "  %% limited output: audit history was truncated; rerun with a higher --limit for more entries\n",
+        );
+    }
+
+    output
+}
+
 /// Render a memory history report as TOON.
 #[must_use]
 pub fn render_memory_history_toon(report: &MemoryHistoryReport) -> String {
@@ -8185,6 +8258,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: pack_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::models::QUERY_SCHEMA_V1,
+            version: "1",
+            description: "Structured query-file request document accepted by ee context and ee search",
+            category: "context",
+            definition: query_request_schema_definition,
+        },
+        SchemaEntry {
             id: "ee.search.v1",
             version: "1",
             description: "Search response envelope and result payload",
@@ -8316,6 +8396,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Canonical no-LLM reflection request artifact",
             category: "reflect",
             definition: reflection_request_schema_definition,
+        },
+        SchemaEntry {
+            id: crate::curate::REFLECTION_CHALLENGE_BINDING_SCHEMA,
+            version: "1",
+            description: "Non-secret HMAC challenge binding payload for reflection requests",
+            category: "reflect",
+            definition: reflection_challenge_binding_schema_definition,
         },
         SchemaEntry {
             id: crate::curate::REFLECTION_RESULT_SCHEMA,
@@ -9129,6 +9216,10 @@ fn pack_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.pack.v2.json").to_string()
 }
 
+fn query_request_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.query.v1.json").to_string()
+}
+
 fn search_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.search.v1.json").to_string()
 }
@@ -9203,6 +9294,10 @@ fn reflection_source_package_schema_definition() -> String {
 
 fn reflection_request_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.reflect.request.v1.json").to_string()
+}
+
+fn reflection_challenge_binding_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.challenge_binding.v1.json").to_string()
 }
 
 fn reflection_result_schema_definition() -> String {

@@ -2057,11 +2057,18 @@ fn pack_replay_record_summary(row: &SqlRow) -> Value {
 }
 
 fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<&str>) -> Value {
-    let Some(raw_ledger) = raw_ledger else {
+    let parsed = crate::db::parse_pack_ledger_fields(
+        "support_bundle_pack_replay_summary",
+        raw_ledger,
+        expected_hash,
+    );
+    let storage = crate::db::pack_ledger_storage_summary(raw_ledger);
+    let Some(ledger) = parsed.ledger.as_ref() else {
         return json!({
-            "status": "missing",
+            "status": parsed.status.as_str(),
             "hashVerified": false,
             "schema": null,
+            "storage": storage,
             "selectedItemCount": 0,
             "omittedItemCount": 0,
             "freshnessStates": {},
@@ -2073,44 +2080,24 @@ fn summarize_pack_replay_ledger(raw_ledger: Option<&str>, expected_hash: Option<
         });
     };
 
-    let Ok(parsed) = serde_json::from_str::<Value>(raw_ledger) else {
-        return json!({
-            "status": "malformed",
-            "hashVerified": false,
-            "schema": null,
-            "selectedItemCount": 0,
-            "omittedItemCount": 0,
-            "freshnessStates": {},
-            "redactionClasses": [],
-            "degradationCodes": [],
-            "derivedAssets": {},
-            "database": {},
-            "candidateCounts": {},
-        });
-    };
-
-    let actual_hash = parsed.get("ledgerHash").and_then(Value::as_str);
+    let actual_hash = ledger.get("ledgerHash").and_then(Value::as_str);
     let hash_verified = expected_hash.is_some_and(|hash| Some(hash) == actual_hash);
-    let status = if expected_hash.is_some() && !hash_verified {
-        "hash_mismatch"
-    } else {
-        "available"
-    };
-    let selected_items = support_ledger_core_array(&parsed, "selectedItems");
-    let omitted_items = support_ledger_core_array(&parsed, "omittedItems");
+    let selected_items = support_ledger_core_array(ledger, "selectedItems");
+    let omitted_items = support_ledger_core_array(ledger, "omittedItems");
 
     json!({
-        "status": status,
+        "status": parsed.status.as_str(),
         "hashVerified": hash_verified,
-        "schema": support_ledger_core_value(&parsed, "schema").cloned().unwrap_or(Value::Null),
+        "schema": support_ledger_core_value(ledger, "schema").cloned().unwrap_or(Value::Null),
+        "storage": storage,
         "selectedItemCount": selected_items.map_or(0, Vec::len),
         "omittedItemCount": omitted_items.map_or(0, Vec::len),
         "freshnessStates": pack_ledger_freshness_counts(selected_items),
         "redactionClasses": pack_ledger_redaction_classes(selected_items),
-        "degradationCodes": pack_ledger_degradation_codes(&parsed),
-        "derivedAssets": support_ledger_core_value(&parsed, "derivedAssets").cloned().unwrap_or_else(|| json!({})),
-        "database": support_ledger_core_value(&parsed, "database").cloned().unwrap_or_else(|| json!({})),
-        "candidateCounts": support_ledger_core_value(&parsed, "candidateCounts").cloned().unwrap_or_else(|| json!({})),
+        "degradationCodes": pack_ledger_degradation_codes(ledger),
+        "derivedAssets": support_ledger_core_value(ledger, "derivedAssets").cloned().unwrap_or_else(|| json!({})),
+        "database": support_ledger_core_value(ledger, "database").cloned().unwrap_or_else(|| json!({})),
+        "candidateCounts": support_ledger_core_value(ledger, "candidateCounts").cloned().unwrap_or_else(|| json!({})),
     })
 }
 

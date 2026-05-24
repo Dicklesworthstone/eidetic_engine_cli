@@ -19,6 +19,10 @@
 //! * Happy path on a remembered memory -> data.command=`memory
 //!   history`, data.memory_exists=true, data.entries contains at
 //!   least one audit-trail entry with audit_id + timestamp + action
+//! * `--format mermaid` -> deterministic flowchart with memory id,
+//!   audit provenance comments, and no stderr
+//! * `--json --format mermaid` and `--robot --format mermaid` ->
+//!   canonical JSON envelope, not diagram or human fallback text
 
 #![cfg(unix)]
 
@@ -130,6 +134,53 @@ fn run_history(workspace_arg: &str, memory_id: &str) -> Result<(Output, Value), 
     let parsed: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("memory history stdout must be JSON: {error}"))?;
     Ok((output, parsed))
+}
+
+fn run_history_mermaid(workspace_arg: &str, memory_id: &str) -> Result<Output, String> {
+    run_ee(&[
+        "--workspace",
+        workspace_arg,
+        "--format",
+        "mermaid",
+        "memory",
+        "history",
+        memory_id,
+    ])
+}
+
+fn run_history_mermaid_machine_mode(
+    workspace_arg: &str,
+    memory_id: &str,
+    mode_flag: &str,
+) -> Result<(Output, Value), String> {
+    let output = run_ee(&[
+        "--workspace",
+        workspace_arg,
+        mode_flag,
+        "--format",
+        "mermaid",
+        "memory",
+        "history",
+        memory_id,
+    ])?;
+    let parsed: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        let first_line = first_stdout_line(&output);
+        format!(
+            "ee memory history {mode_flag} --format mermaid expected canonical JSON override, \
+             but stdout was not JSON: {error}; first output line: {first_line:?}"
+        )
+    })?;
+    Ok((output, parsed))
+}
+
+fn first_stdout_line(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect()
 }
 
 fn assert_error_with_repair(
@@ -371,5 +422,142 @@ fn memory_history_happy_path_returns_audit_entries() -> TestResult {
         first["action"].is_string(),
         format!("entries[0].action must be a string; got {first}"),
     )?;
+    Ok(())
+}
+
+#[test]
+fn memory_history_format_mermaid_renders_deterministic_audit_diagram() -> TestResult {
+    let workspace = unique_workspace("history-mermaid")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let memory_id = remember(
+        &workspace_arg,
+        "Pin-test memory-history mermaid target with \"quotes\".",
+    )?;
+
+    let first = run_history_mermaid(&workspace_arg, &memory_id)?;
+    let second = run_history_mermaid(&workspace_arg, &memory_id)?;
+    ensure(
+        first.status.success() && second.status.success(),
+        format!(
+            "ee memory history --format mermaid must exit zero; first stderr: {}; second stderr: {}",
+            String::from_utf8_lossy(&first.stderr),
+            String::from_utf8_lossy(&second.stderr)
+        ),
+    )?;
+    ensure(
+        first.stderr.is_empty() && second.stderr.is_empty(),
+        format!(
+            "memory history Mermaid must not write stderr; first={}, second={}",
+            String::from_utf8_lossy(&first.stderr),
+            String::from_utf8_lossy(&second.stderr)
+        ),
+    )?;
+    let first_stdout = String::from_utf8_lossy(&first.stdout).into_owned();
+    let second_stdout = String::from_utf8_lossy(&second.stdout).into_owned();
+    ensure(
+        first_stdout == second_stdout,
+        format!(
+            "memory history Mermaid output must be byte-deterministic; first={first_stdout:?} second={second_stdout:?}"
+        ),
+    )?;
+    ensure(
+        first_stdout.starts_with("flowchart TD\n"),
+        format!("Mermaid history output must start with flowchart TD; got {first_stdout:.200?}"),
+    )?;
+    ensure(
+        first_stdout.contains("command: memory history"),
+        format!(
+            "Mermaid history output must preserve command provenance; got {first_stdout:.500?}"
+        ),
+    )?;
+    ensure(
+        first_stdout.contains(&memory_id),
+        format!(
+            "Mermaid history output must reference memory id {memory_id}; got {first_stdout:.500?}"
+        ),
+    )?;
+    ensure(
+        first_stdout.contains("audit_id[1]"),
+        format!("Mermaid history output must preserve audit id comments; got {first_stdout:.500?}"),
+    )?;
+    ensure(
+        first_stdout.contains("-->|records| memory"),
+        format!(
+            "Mermaid history output must connect audit rows to memory; got {first_stdout:.500?}"
+        ),
+    )?;
+    ensure(
+        first_stdout.ends_with('\n'),
+        format!("Mermaid history output must end with a newline; got {first_stdout:.50?}"),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn memory_history_machine_modes_override_format_mermaid() -> TestResult {
+    let workspace = unique_workspace("history-mermaid-machine")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    init_workspace(&workspace_arg)?;
+    let memory_id = remember(
+        &workspace_arg,
+        "Pin-test memory-history JSON override for Mermaid requests.",
+    )?;
+
+    for mode_flag in ["--json", "--robot"] {
+        let (output, parsed) =
+            run_history_mermaid_machine_mode(&workspace_arg, &memory_id, mode_flag)?;
+        let first_line = first_stdout_line(&output);
+        ensure(
+            output.status.success(),
+            format!(
+                "command=`ee memory history {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; status failed; \
+                 first output line={first_line:?}; stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        ensure(
+            output.stderr.is_empty(),
+            format!(
+                "command=`ee memory history {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; stderr must be empty; \
+                 first output line={first_line:?}; stderr={}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        )?;
+        ensure(
+            parsed["schema"].as_str() == Some("ee.response.v2"),
+            format!(
+                "command=`ee memory history {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; schema drifted; \
+                 first output line={first_line:?}; got {parsed}"
+            ),
+        )?;
+        ensure(
+            parsed["data"]["command"].as_str() == Some("memory history"),
+            format!(
+                "command=`ee memory history {mode_flag} --format mermaid`; \
+                 expected capability=canonical JSON override; data.command drifted; \
+                 first output line={first_line:?}; got {}",
+                parsed["data"]
+            ),
+        )?;
+        ensure(
+            !first_line.starts_with("flowchart") && !first_line.starts_with("Memory history"),
+            format!(
+                "command=`ee memory history {mode_flag} --format mermaid`; \
+                 expected JSON override, not Mermaid or human fallback; \
+                 first output line={first_line:?}"
+            ),
+        )?;
+    }
+
     Ok(())
 }

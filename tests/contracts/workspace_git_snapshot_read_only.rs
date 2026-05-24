@@ -15,6 +15,12 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
+use ee::core::git_ahead::{
+    GIT_AHEAD_LOG_FAILED_CODE, GIT_AHEAD_LOG_FORMAT, GIT_AHEAD_LOG_TIMEOUT_CODE,
+    GIT_AHEAD_NO_UPSTREAM_CODE, GIT_AHEAD_SNAPSHOT_SCHEMA_V1, GIT_AHEAD_STATE_LOG_FAILED,
+    GIT_AHEAD_STATE_LOG_TIMEOUT, GIT_AHEAD_STATE_MIXED_AUTHOR, GIT_AHEAD_STATE_NO_UPSTREAM,
+    GitAheadLogState, summarize_git_ahead, summarize_git_ahead_with_log_state,
+};
 use ee::core::swarm_brief::{
     SwarmBriefCommandError, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions,
     WorkspaceGitStatusEntry, collect_workspace_git_operation_state, collect_workspace_git_snapshot,
@@ -210,6 +216,93 @@ fn entry_by_path<'a>(
         .iter()
         .find(|entry| entry.path == path)
         .ok_or_else(|| format!("missing git snapshot entry for {path}: {entries:#?}"))
+}
+
+#[test]
+fn workspace_git_ahead_snapshot_json_contract_covers_mixed_owner_ahead() -> TestResult {
+    let snapshot = summarize_git_ahead(
+        concat!(
+            "# branch.head main\n",
+            "# branch.upstream origin/main\n",
+            "# branch.ab +2 -0\n",
+        ),
+        Some(concat!(
+            "bbbbbbbbbbbbbbbb\x1fAlice\x1ffeat: first owner (bd-2gc7r.1)\n",
+            "aaaaaaaaaaaaaaaa\x1fBob\x1ftest: second owner (bd-other.2)\n",
+        )),
+    );
+    let value = serde_json::to_value(&snapshot)
+        .map_err(|error| format!("serialize ahead snapshot: {error}"))?;
+    let pretty = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("pretty serialize ahead snapshot: {error}"))?;
+
+    assert_eq!(value["schema"], GIT_AHEAD_SNAPSHOT_SCHEMA_V1);
+    assert_eq!(GIT_AHEAD_LOG_FORMAT, "%H%x1f%an%x1f%s");
+    assert_eq!(value["state"], GIT_AHEAD_STATE_MIXED_AUTHOR);
+    assert_eq!(value["headRef"], "main");
+    assert_eq!(value["upstreamRef"], "origin/main");
+    assert_eq!(value["aheadCount"], 2);
+    assert_eq!(value["behindCount"], 0);
+    assert_eq!(value["mixedAuthorAhead"], true);
+    assert_eq!(value["mixedBeadAhead"], true);
+    assert_eq!(value["peerOwnedAheadRisk"], true);
+    assert_eq!(
+        value["commits"]
+            .as_array()
+            .ok_or_else(|| "commits must be an array".to_string())?
+            .len(),
+        2
+    );
+    assert_eq!(value["commits"][0]["shortHash"], "bbbbbbbbbbbb");
+    assert_eq!(value["commits"][0]["beadRefs"][0], "bd-2gc7r.1");
+    assert!(value["commits"][0].get("authorEmail").is_none());
+    assert!(value.get("ahead_count").is_none());
+    assert_eq!(
+        format!("{pretty}\n"),
+        include_str!("../fixtures/golden/git_ahead/mixed_owner_ahead.json.golden")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_ahead_snapshot_json_contract_covers_degraded_states() -> TestResult {
+    let no_upstream = summarize_git_ahead(
+        concat!("# branch.head main\n", "# branch.ab +0 -0\n",),
+        Some(""),
+    );
+    let no_upstream = serde_json::to_value(&no_upstream)
+        .map_err(|error| format!("serialize no-upstream ahead snapshot: {error}"))?;
+
+    assert_eq!(no_upstream["schema"], GIT_AHEAD_SNAPSHOT_SCHEMA_V1);
+    assert_eq!(no_upstream["state"], GIT_AHEAD_STATE_NO_UPSTREAM);
+    assert_eq!(
+        no_upstream["degraded"][0]["code"],
+        GIT_AHEAD_NO_UPSTREAM_CODE
+    );
+
+    let status = concat!(
+        "# branch.head main\n",
+        "# branch.upstream origin/main\n",
+        "# branch.ab +1 -0\n",
+    );
+    let timeout = summarize_git_ahead_with_log_state(status, GitAheadLogState::TimedOut);
+    let timeout = serde_json::to_value(&timeout)
+        .map_err(|error| format!("serialize timeout ahead snapshot: {error}"))?;
+
+    assert_eq!(timeout["state"], GIT_AHEAD_STATE_LOG_TIMEOUT);
+    assert_eq!(timeout["degraded"][0]["code"], GIT_AHEAD_LOG_TIMEOUT_CODE);
+    assert_eq!(timeout["peerOwnedAheadRisk"], true);
+
+    let failure = summarize_git_ahead_with_log_state(status, GitAheadLogState::Failed);
+    let failure = serde_json::to_value(&failure)
+        .map_err(|error| format!("serialize failure ahead snapshot: {error}"))?;
+
+    assert_eq!(failure["state"], GIT_AHEAD_STATE_LOG_FAILED);
+    assert_eq!(failure["degraded"][0]["code"], GIT_AHEAD_LOG_FAILED_CODE);
+    assert_eq!(failure["peerOwnedAheadRisk"], true);
+
+    Ok(())
 }
 
 #[test]
