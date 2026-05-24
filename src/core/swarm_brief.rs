@@ -8097,6 +8097,12 @@ mod tests {
                 "# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -0\n",
                 Some("aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n"),
             ),
+            summarize_git_ahead(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -0\n",
+                Some(
+                    "bbbbbbbbbbbbbbbb\x1fCodex\x1fchore(beads): file review findings from R1 cod_4 pass\n",
+                ),
+            ),
         ] {
             let mut report = report_with_ready_sources();
             report.git_ahead = Some(snapshot);

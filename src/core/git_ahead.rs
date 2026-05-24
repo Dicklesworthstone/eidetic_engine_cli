@@ -174,8 +174,9 @@ pub fn summarize_git_ahead_with_log_state(
     let mixed_author_ahead = authors.len() > 1;
     let mixed_bead_ahead = bead_refs.len() > 1
         || (ahead_count > 1 && !bead_refs.is_empty() && has_commit_without_bead);
+    let ambiguous_bead_attribution = ahead_count > 1 && has_commit_without_bead;
     let ambiguous_ahead = ahead_count > 0
-        && (has_commit_without_bead
+        && (ambiguous_bead_attribution
             || commits.len() != ahead_count
             || branch.upstream_ref.is_none()
             || branch.detached);
@@ -395,6 +396,25 @@ mod tests {
         assert!(!snapshot.ambiguous_ahead);
         assert!(!snapshot.peer_owned_ahead_risk);
         assert_eq!(snapshot.commits[0].short_hash, "730f16a6abcd");
+    }
+
+    #[test]
+    fn single_owner_ahead_without_bead_ref_stays_non_risky() {
+        let snapshot = summarize_git_ahead(
+            &clean_status(1),
+            Some(
+                "730f16a6abcdef\x1fCodex\x1fchore(beads): file review findings from R1 cod_4 pass\n",
+            ),
+        );
+
+        assert_eq!(snapshot.state, GIT_AHEAD_STATE_SINGLE_OWNER);
+        assert_eq!(snapshot.ahead_count, 1);
+        assert_eq!(snapshot.authors, vec!["Codex"]);
+        assert!(snapshot.bead_refs.is_empty());
+        assert!(!snapshot.mixed_author_ahead);
+        assert!(!snapshot.mixed_bead_ahead);
+        assert!(!snapshot.ambiguous_ahead);
+        assert!(!snapshot.peer_owned_ahead_risk);
     }
 
     #[test]
