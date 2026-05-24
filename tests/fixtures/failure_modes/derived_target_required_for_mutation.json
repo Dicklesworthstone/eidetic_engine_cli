@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_target_required_for_mutation",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A mutating curation candidate lacks the explicit target memory needed for safe apply.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate show <candidate-id> --workspace . --json"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_target_required_for_mutation",
+    "severity": "medium",
+    "message_contains": [
+      "target",
+      "required"
+    ],
+    "repair_contains": "ee curate show",
+    "repair_string": "Run `ee curate show <candidate-id> --workspace . --json` to inspect the candidate target.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

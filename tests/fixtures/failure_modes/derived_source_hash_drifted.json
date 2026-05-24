@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_hash_drifted",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A source memory or evidence span changed after a create-derived candidate captured its content hash.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate propose-derived --workspace . --json",
+      "# mutate or revise a cited source before validation"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_hash_drifted",
+    "severity": "medium",
+    "message_contains": [
+      "hash drifted",
+      "source"
+    ],
+    "repair_contains": "ee curate propose-derived",
+    "repair_string": "Run `ee curate propose-derived --workspace . --json` against the current source hashes.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

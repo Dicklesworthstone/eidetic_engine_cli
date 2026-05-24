@@ -110,6 +110,21 @@ in the same commit, keeping the catalog complete by construction.
 | `curation_ttl_policy_missing` | curate disposition | medium | bd-17c65.7.4 (G4) |
 | `curation_harmful_candidate_escalated` | curate disposition, status | high | bd-17c65.7.4 (G4) |
 | `curation_ttl_blocked` | status, curate disposition | medium | bd-17c65.7.4 (G4) |
+| `derived_sources_invalid` | curate validate, curate apply, reflect propose | medium | bd-1vnvl |
+| `derived_source_hash_drifted` | curate validate, curate apply | medium | bd-1vnvl |
+| `derived_source_workspace_mismatch` | curate validate, curate apply, reflect propose | medium | bd-1vnvl |
+| `derived_evidence_already_linked` | curate validate, curate apply | medium | bd-1vnvl |
+| `derived_target_required_for_mutation` | curate validate, curate apply | medium | bd-1vnvl |
+| `derived_target_forbidden_for_create` | curate validate, curate apply | medium | bd-1vnvl |
+| `derived_invalid_memory_spec` | curate validate, curate apply | medium | bd-1vnvl |
+| `reflect_request_expired` | reflect request-ledger diagnostics, reflect result ingest | medium | bd-1vnvl |
+| `reflect_challenge_invalid` | reflect propose, reflect result ingest | high | bd-1vnvl |
+| `reflect_request_consumed` | reflect request-ledger diagnostics, reflect result ingest | medium | bd-1vnvl |
+| `reflect_source_drifted` | reflect propose, reflect request-ledger diagnostics, reflect result ingest | medium | bd-1vnvl |
+| `reflect_unknown_cited_source` | reflect result ingest | medium | bd-1vnvl |
+| `reflect_result_schema_invalid` | reflect result ingest | medium | bd-1vnvl |
+| `reflect_raw_cot_rejected` | reflect result ingest | high | bd-1vnvl |
+| `reflect_key_unavailable` | reflect propose, reflect request-ledger diagnostics | high | bd-1vnvl |
 | `level_transition_tombstoned_rejected` | workflow close, curate apply, curate tombstone | medium | bd-17c65.7.8 (G9) |
 | `level_transition_requires_evidence` | curate apply, workflow close | medium | bd-17c65.7.8 (G9) |
 | `level_transition_concurrent_conflict` | workflow close, job run | medium | bd-17c65.7.8 (G9) |

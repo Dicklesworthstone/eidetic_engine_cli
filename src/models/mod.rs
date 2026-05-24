@@ -357,6 +357,37 @@ pub const DOCTOR_RUN_DIFF_SCHEMA_V1: &str = "ee.doctor.run_diff.v1";
 /// Schema for failure mode fixtures used in tests and evaluations.
 pub const FAILURE_MODE_FIXTURE_SCHEMA_V1: &str = "ee.failure_mode_fixture.v1";
 
+/// External derivation source package is missing, malformed, or not canonical.
+pub const DERIVED_SOURCES_INVALID_CODE: &str = "derived_sources_invalid";
+/// External derivation source content changed after proposal.
+pub const DERIVED_SOURCE_HASH_DRIFTED_CODE: &str = "derived_source_hash_drifted";
+/// External derivation source belongs to a different workspace.
+pub const DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE: &str = "derived_source_workspace_mismatch";
+/// External derivation evidence span is already attached to another memory.
+pub const DERIVED_EVIDENCE_ALREADY_LINKED_CODE: &str = "derived_evidence_already_linked";
+/// Mutating derived apply needs an explicit target when the candidate type mutates one.
+pub const DERIVED_TARGET_REQUIRED_FOR_MUTATION_CODE: &str = "derived_target_required_for_mutation";
+/// Create-derived candidates must not target an existing memory.
+pub const DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE: &str = "derived_target_forbidden_for_create";
+/// External derivation memory spec is missing or malformed.
+pub const DERIVED_INVALID_MEMORY_SPEC_CODE: &str = "derived_invalid_memory_spec";
+/// Reflection request expired before result ingestion.
+pub const REFLECT_REQUEST_EXPIRED_CODE: &str = "reflect_request_expired";
+/// Reflection challenge binding is invalid or cannot verify.
+pub const REFLECT_CHALLENGE_INVALID_CODE: &str = "reflect_challenge_invalid";
+/// Reflection request has already been consumed by another result.
+pub const REFLECT_REQUEST_CONSUMED_CODE: &str = "reflect_request_consumed";
+/// Reflection source package drifted after request creation.
+pub const REFLECT_SOURCE_DRIFTED_CODE: &str = "reflect_source_drifted";
+/// Reflection result cites a source absent from the request package.
+pub const REFLECT_UNKNOWN_CITED_SOURCE_CODE: &str = "reflect_unknown_cited_source";
+/// Reflection result JSON does not satisfy the expected schema.
+pub const REFLECT_RESULT_SCHEMA_INVALID_CODE: &str = "reflect_result_schema_invalid";
+/// Reflection result attempted to return raw chain-of-thought.
+pub const REFLECT_RAW_COT_REJECTED_CODE: &str = "reflect_raw_cot_rejected";
+/// Reflection HMAC key material is unavailable.
+pub const REFLECT_KEY_UNAVAILABLE_CODE: &str = "reflect_key_unavailable";
+
 /// Schema for pack DNA context output.
 pub const PACK_DNA_SCHEMA_V1: &str = "ee.context.pack_dna.v1";
 
@@ -815,6 +846,14 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee doctor --gc-plan")
         || command_lower.starts_with("ee migrate status")
         || command_lower.starts_with("ee memory list")
+        || command_lower.starts_with("ee memory show")
+        || command_lower.starts_with("ee status")
+        || command_lower.starts_with("ee why")
+        || command_lower.starts_with("ee schema show")
+        || command_lower.starts_with("ee curate candidates")
+        || command_lower.starts_with("ee curate show")
+        || command_lower.starts_with("ee curate validate")
+        || command_lower.starts_with("ee reflect request-ledger diagnostics")
         || command_lower.starts_with("ee preflight check")
         || command_lower.starts_with("git status")
         || command_lower.starts_with("git diff")
@@ -857,6 +896,9 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee init")
         || command_lower.starts_with("ee db migrate")
         || command_lower.starts_with("ee doctor --fix")
+        || command_lower.starts_with("ee curate propose-derived")
+        || command_lower.starts_with("ee curate apply")
+        || command_lower.starts_with("ee reflect propose")
     {
         RepairActionSafety {
             risk_class: RepairActionRiskClass::MutatingLocalRepair,
@@ -1195,6 +1237,349 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
     }
 }
 
+fn recovery_command(
+    priority: u8,
+    command: impl Into<String>,
+    rationale: impl Into<String>,
+) -> RecoveryAction {
+    RecoveryAction {
+        priority,
+        kind: RecoveryKind::Command,
+        rationale: rationale.into(),
+        env_name: None,
+        value_hint: None,
+        config_path: None,
+        config_key: None,
+        flag_name: None,
+        command: Some(command.into()),
+        results_in: None,
+        example: None,
+    }
+}
+
+fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAction> {
+    match code {
+        DERIVED_SOURCES_INVALID_CODE
+        | "derived_source_refs_missing"
+        | "derived_source_refs_invalid_json"
+        | "derived_source_refs_not_array"
+        | "derived_source_ref_invalid"
+        | "derived_source_kind_invalid" => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Regenerate the derivation source package with canonical source refs.",
+            ),
+            recovery_command(
+                2,
+                "ee curate show <candidate-id> --workspace . --json",
+                "Inspect the stored candidate package before applying it.",
+            ),
+        ],
+        DERIVED_SOURCE_HASH_DRIFTED_CODE | "derived_source_hash_mismatch" => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Re-propose against current source hashes; do not bypass the drift guard.",
+            ),
+            recovery_command(
+                2,
+                "ee why <source-id> --workspace . --json",
+                "Inspect the changed source before accepting a new derived memory.",
+            ),
+        ],
+        DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE => vec![
+            RecoveryAction::flag(
+                1,
+                "--workspace",
+                "<path owning the cited source>",
+                "Run derivation in the workspace that owns every cited source.",
+            ),
+            recovery_command(
+                2,
+                "ee memory list --workspace . --json",
+                "List source IDs in the active workspace before re-proposing.",
+            ),
+        ],
+        DERIVED_EVIDENCE_ALREADY_LINKED_CODE | "derived_source_evidence_already_linked" => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Choose an unlinked evidence span and create a fresh derived candidate.",
+            ),
+            recovery_command(
+                2,
+                "ee curate candidates --workspace . --json",
+                "Inspect existing candidates that may have already consumed the evidence.",
+            ),
+        ],
+        DERIVED_TARGET_REQUIRED_FOR_MUTATION_CODE | "target_mutation_target_required" => vec![
+            recovery_command(
+                1,
+                "ee curate show <candidate-id> --workspace . --json",
+                "Inspect the candidate type and target memory before mutation.",
+            ),
+            recovery_command(
+                2,
+                "ee curate propose-derived --workspace . --json",
+                "Use create-derived when the intended operation is to create a new memory.",
+            ),
+        ],
+        DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE | "create_derived_target_forbidden" => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Create-derived candidates must be re-proposed without targetMemoryId.",
+            ),
+            recovery_command(
+                2,
+                "ee curate validate <candidate-id> --workspace . --dry-run --json",
+                "Validate the replacement candidate before applying it.",
+            ),
+        ],
+        DERIVED_INVALID_MEMORY_SPEC_CODE
+        | "derived_metadata_missing"
+        | "derived_metadata_invalid_json"
+        | "derived_metadata_invalid"
+        | "derived_metadata_memory_spec_missing"
+        | "derived_memory_level_invalid"
+        | "derived_memory_kind_invalid"
+        | "derived_memory_trust_class_invalid" => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Regenerate the candidate with a valid memorySpec level, kind, trust, and validity window.",
+            ),
+            recovery_command(
+                2,
+                "ee schema show ee.curate.show.v1 --json",
+                "Inspect the expected derived candidate shape before retrying.",
+            ),
+        ],
+        REFLECT_REQUEST_EXPIRED_CODE | "reflection_request_expired" => vec![
+            recovery_command(
+                1,
+                "ee reflect propose --workspace . --json",
+                "Create a fresh reflection request; expired requests remain inspectable but cannot ingest results.",
+            ),
+            recovery_command(
+                2,
+                "ee reflect request-ledger diagnostics --workspace . --json",
+                "Inspect the expired request posture by hash without mutating it.",
+            ),
+        ],
+        REFLECT_CHALLENGE_INVALID_CODE
+        | "missing_reflection_request_challenge"
+        | "missing_reflection_request_expiry"
+        | "empty_reflection_challenge_key_id"
+        | "invalid_reflection_challenge_binding"
+        | "reflection_challenge_json_serialization_failed"
+        | "reflection_challenge_key_mismatch"
+        | "reflection_challenge_algorithm_mismatch"
+        | "reflection_challenge_hmac_mismatch"
+        | "reflection_result_challenge_echo_mismatch"
+        | "reflection_result_challenge_verification_failed" => vec![
+            recovery_command(
+                1,
+                "ee reflect propose --workspace . --json",
+                "Regenerate the request and challenge binding with the current HMAC key.",
+            ),
+            recovery_command(
+                2,
+                "ee status --workspace . --json",
+                "Check reflection key and workspace posture before retrying.",
+            ),
+        ],
+        REFLECT_REQUEST_CONSUMED_CODE | "reflection_result_replay_mismatch" => vec![
+            recovery_command(
+                1,
+                "ee curate candidates --workspace . --json",
+                "Find the candidate that already consumed this reflection request.",
+            ),
+            recovery_command(
+                2,
+                "ee reflect request-ledger diagnostics --workspace . --status consumed --json",
+                "Inspect consumed request metadata without replaying ingestion.",
+            ),
+        ],
+        REFLECT_SOURCE_DRIFTED_CODE | "reflection_request_ledger_mismatch" => vec![
+            recovery_command(
+                1,
+                "ee reflect propose --workspace . --json",
+                "Rebuild the reflection request from current source hashes.",
+            ),
+            recovery_command(
+                2,
+                "ee why <source-id> --workspace . --json",
+                "Inspect the changed source before trusting a new reflection result.",
+            ),
+        ],
+        REFLECT_UNKNOWN_CITED_SOURCE_CODE => vec![
+            recovery_command(
+                1,
+                "ee reflect request-ledger diagnostics --workspace . --json",
+                "Compare cited sources to the retained request package before ingesting a result.",
+            ),
+            recovery_command(
+                2,
+                "ee reflect propose --workspace . --json",
+                "Create a new request if the producer needs a different source set.",
+            ),
+        ],
+        REFLECT_RESULT_SCHEMA_INVALID_CODE
+        | "invalid_reflection_result_artifact"
+        | "reflection_result_json_serialization_failed" => vec![
+            recovery_command(
+                1,
+                "ee reflect propose --workspace . --json",
+                "Send the producer a fresh request carrying the current response schema.",
+            ),
+            recovery_command(
+                2,
+                "ee schema show ee.reflect.result.v1 --json",
+                "Inspect the result schema before retrying ingest.",
+            ),
+        ],
+        REFLECT_RAW_COT_REJECTED_CODE => vec![
+            recovery_command(
+                1,
+                "ee reflect propose --workspace . --json",
+                "Ask for concise conclusions and cited evidence only; raw chain-of-thought is never accepted.",
+            ),
+            recovery_command(
+                2,
+                "ee curate candidates --workspace . --json",
+                "Use accepted non-CoT candidate content if one already exists.",
+            ),
+        ],
+        REFLECT_KEY_UNAVAILABLE_CODE | "missing_reflection_challenge_key_material" => vec![
+            recovery_command(
+                1,
+                "ee status --workspace . --json",
+                "Inspect reflection key-store posture before creating a new request.",
+            ),
+            RecoveryAction::env(
+                2,
+                "EE_REFLECTION_HMAC_KEY",
+                "<path to readable HMAC key material>",
+                "Point reflection request signing at a readable key source.",
+            ),
+            recovery_command(
+                3,
+                "ee reflect propose --workspace . --json",
+                "Retry request creation after the key source is available.",
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn derivation_reflection_recovery_actions_for_message(
+    error: &DomainError,
+    lower_message: &str,
+) -> Vec<RecoveryAction> {
+    let code = match error {
+        DomainError::UsageCodeWithDetails { code, .. }
+        | DomainError::UnsatisfiedDegradedModeCode { code, .. } => Some(*code),
+        _ => None,
+    };
+    if let Some(code) = code {
+        let actions = derivation_reflection_recovery_actions_for_code(code);
+        if !actions.is_empty() {
+            return actions;
+        }
+    }
+
+    let inferred_code = if lower_message.contains("reflection request source package")
+        || lower_message.contains("reflection request ledger field `sourcerefsjson` does not match")
+        || lower_message
+            .contains("reflection request ledger field `sourcecontenthashesjson` does not match")
+        || lower_message.contains("reflection result field `requesthash` mismatch")
+        || lower_message.contains("reflection result field `sourcepackagehash` mismatch")
+    {
+        Some(REFLECT_SOURCE_DRIFTED_CODE)
+    } else if lower_message.contains("derivation source refs")
+        || lower_message.contains("derivation source json")
+        || lower_message.contains("source refs array")
+        || lower_message.contains("object source refs")
+        || lower_message.contains("source package")
+    {
+        Some(DERIVED_SOURCES_INVALID_CODE)
+    } else if lower_message.contains("hash drifted") || lower_message.contains("hash-drifted") {
+        Some(DERIVED_SOURCE_HASH_DRIFTED_CODE)
+    } else if lower_message.contains("different workspace")
+        || lower_message.contains("belongs to workspace")
+    {
+        Some(DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE)
+    } else if lower_message.contains("already linked to a memory")
+        || lower_message.contains("attached to another memory")
+    {
+        Some(DERIVED_EVIDENCE_ALREADY_LINKED_CODE)
+    } else if lower_message.contains("no target memory id")
+        || lower_message.contains("target-mutating operation")
+    {
+        Some(DERIVED_TARGET_REQUIRED_FOR_MUTATION_CODE)
+    } else if lower_message.contains("targetmemoryid set to null")
+        || lower_message.contains("must not target an existing memory")
+        || lower_message.contains("create_derived_target_forbidden")
+    {
+        Some(DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE)
+    } else if lower_message.contains("memoryspec")
+        || lower_message.contains("memory spec")
+        || lower_message.contains("proposed trust class")
+        || lower_message.contains("derivation metadata")
+    {
+        Some(DERIVED_INVALID_MEMORY_SPEC_CODE)
+    } else if lower_message.contains("reflect_hmac_key")
+        || lower_message.contains("reflection hmac")
+        || lower_message.contains("hmac key")
+        || lower_message.contains("reflection challenge hmac key material is not configured")
+    {
+        Some(REFLECT_KEY_UNAVAILABLE_CODE)
+    } else if (lower_message.contains("reflect propose")
+        && (lower_message.contains("source memory")
+            || lower_message.contains("source evidence span")
+            || lower_message.contains("source ids")))
+        || (lower_message.contains("cited source id")
+            && lower_message.contains("not a packaged source"))
+    {
+        Some(REFLECT_UNKNOWN_CITED_SOURCE_CODE)
+    } else if lower_message.contains("reflection request") && lower_message.contains("expired") {
+        Some(REFLECT_REQUEST_EXPIRED_CODE)
+    } else if lower_message.contains("reflection request") && lower_message.contains("consumed") {
+        Some(REFLECT_REQUEST_CONSUMED_CODE)
+    } else if (lower_message.contains("challenge") && lower_message.contains("invalid"))
+        || lower_message.contains("reflection result challenge")
+        || lower_message.contains("challenge does not echo")
+        || lower_message.contains("request challenge")
+        || lower_message.contains("request expiry")
+        || lower_message.contains("request artifact")
+        || lower_message.contains("hmac did not match")
+        || lower_message.contains("key id mismatch")
+        || lower_message.contains("algorithm mismatch")
+    {
+        Some(REFLECT_CHALLENGE_INVALID_CODE)
+    } else if (lower_message.contains("reflection result") && lower_message.contains("schema"))
+        || lower_message.contains("expected ee.reflect.result.v1")
+        || lower_message.contains("descriptor does not match the compiled reflection result schema")
+        || lower_message.contains("failed to serialize reflection result material")
+    {
+        Some(REFLECT_RESULT_SCHEMA_INVALID_CODE)
+    } else if lower_message.contains("chain-of-thought")
+        || lower_message.contains("raw cot")
+        || lower_message.contains("chain of thought")
+        || lower_message.contains("private reasoning marker")
+    {
+        Some(REFLECT_RAW_COT_REJECTED_CODE)
+    } else {
+        None
+    };
+
+    inferred_code
+        .map(derivation_reflection_recovery_actions_for_code)
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DomainErrorSituation {
     Usage,
@@ -1316,6 +1701,11 @@ impl DomainError {
     #[must_use]
     pub fn recovery_actions(&self) -> Vec<RecoveryAction> {
         let message = self.message().to_lowercase();
+        let derivation_reflection_actions =
+            derivation_reflection_recovery_actions_for_message(self, &message);
+        if !derivation_reflection_actions.is_empty() {
+            return derivation_reflection_actions;
+        }
         match self {
             Self::UsageCodeWithDetails {
                 code: "curate_reason_too_large",
@@ -2150,5 +2540,162 @@ mod tests {
         assert!(!actions.is_empty());
         assert_eq!(actions[0].kind, super::RecoveryKind::Broaden);
         assert!(actions[0].rationale.to_lowercase().contains("redact"));
+    }
+
+    #[test]
+    fn domain_error_recovery_for_derivation_codes_has_commands() {
+        let cases = [
+            (
+                super::DERIVED_SOURCE_HASH_DRIFTED_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                "derived_source_hash_mismatch",
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::DERIVED_EVIDENCE_ALREADY_LINKED_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                "create_derived_target_forbidden",
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::DERIVED_INVALID_MEMORY_SPEC_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                "derived_metadata_memory_spec_missing",
+                "ee curate propose-derived --workspace . --json",
+            ),
+        ];
+        for (code, expected_command) in cases {
+            let error = super::DomainError::UsageCodeWithDetails {
+                code,
+                message: format!("derivation fixture for {code}"),
+                repair: Some(expected_command.to_owned()),
+                details_json: "{}".to_owned(),
+            };
+            let actions = error.recovery_actions();
+            assert!(
+                !actions.is_empty(),
+                "{code} should produce recovery actions"
+            );
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| action.command.as_deref() == Some(expected_command)),
+                "{code} should include {expected_command}, got {actions:?}"
+            );
+            let safety = actions[0].safety();
+            assert!(
+                matches!(
+                    safety.risk_class,
+                    super::RepairActionRiskClass::MutatingLocalRepair
+                        | super::RepairActionRiskClass::ReadOnlyProbe
+                ),
+                "{code} should have classified safety metadata, got {safety:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_error_recovery_for_reflection_codes_has_commands() {
+        let cases = [
+            (
+                super::REFLECT_REQUEST_EXPIRED_CODE,
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                "reflection_request_expired",
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                super::REFLECT_REQUEST_CONSUMED_CODE,
+                "ee curate candidates --workspace . --json",
+            ),
+            (
+                super::REFLECT_SOURCE_DRIFTED_CODE,
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                super::REFLECT_RESULT_SCHEMA_INVALID_CODE,
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                "invalid_reflection_result_artifact",
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                super::REFLECT_RAW_COT_REJECTED_CODE,
+                "ee reflect propose --workspace . --json",
+            ),
+            (
+                super::REFLECT_KEY_UNAVAILABLE_CODE,
+                "ee status --workspace . --json",
+            ),
+        ];
+        for (code, expected_command) in cases {
+            let error = super::DomainError::UsageCodeWithDetails {
+                code,
+                message: format!("reflection fixture for {code}"),
+                repair: Some(expected_command.to_owned()),
+                details_json: "{}".to_owned(),
+            };
+            let actions = error.recovery_actions();
+            assert!(
+                !actions.is_empty(),
+                "{code} should produce recovery actions"
+            );
+            assert!(
+                actions
+                    .iter()
+                    .any(|action| action.command.as_deref() == Some(expected_command)),
+                "{code} should include {expected_command}, got {actions:?}"
+            );
+            assert!(
+                actions.iter().all(|action| !action.rationale.is_empty()),
+                "{code} recovery actions should carry reasons"
+            );
+        }
+    }
+
+    #[test]
+    fn derivation_reflection_message_inference_adds_recovery() {
+        let derived = super::DomainError::Usage {
+            message: "Memory source mem_1 hash drifted from blake3:a to blake3:b.".to_owned(),
+            repair: Some("Re-propose the candidate against the current source content.".to_owned()),
+        };
+        let derived_actions = derived.recovery_actions();
+        assert!(
+            derived_actions
+                .iter()
+                .any(|action| action.command.as_deref()
+                    == Some("ee curate propose-derived --workspace . --json")),
+            "hash drift should point at a fresh derived proposal"
+        );
+
+        let reflect = super::DomainError::Configuration {
+            message: "reflect_hmac_key_missing: reflection HMAC key unavailable".to_owned(),
+            repair: Some("Configure reflection HMAC key material.".to_owned()),
+        };
+        let reflect_actions = reflect.recovery_actions();
+        assert!(
+            reflect_actions
+                .iter()
+                .any(|action| action.command.as_deref() == Some("ee status --workspace . --json")),
+            "reflection key failures should point at status"
+        );
+        assert!(
+            reflect_actions
+                .iter()
+                .any(|action| action.env_name.as_deref() == Some("EE_REFLECTION_HMAC_KEY")),
+            "reflection key failures should expose env recovery"
+        );
     }
 }

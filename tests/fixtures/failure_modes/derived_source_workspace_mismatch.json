@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_workspace_mismatch",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply",
+    "reflect propose"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A derived or reflection source belongs to a different workspace than the candidate being validated.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate show <candidate-id> --workspace . --json"
+    ],
+    "invocation": "ee curate validate <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_workspace_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "belongs to workspace",
+      "not"
+    ],
+    "repair_contains": "--workspace",
+    "repair_string": "Run with `--workspace <path owning the cited source>` or re-propose from sources in the active workspace."
+  }
+}

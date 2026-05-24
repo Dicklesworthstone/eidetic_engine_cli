@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_evidence_already_linked",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived candidate cites an evidence span that another memory already consumed.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate candidates --workspace . --json"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_evidence_already_linked",
+    "severity": "medium",
+    "message_contains": [
+      "already linked",
+      "evidence"
+    ],
+    "repair_contains": "ee curate propose-derived",
+    "repair_string": "Run `ee curate propose-derived --workspace . --json` with an unlinked evidence span.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

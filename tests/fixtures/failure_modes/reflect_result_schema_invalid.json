@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_result_schema_invalid",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect result ingest"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection result payload does not satisfy ee.reflect.result.v1.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# submit malformed result JSON"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_result_schema_invalid",
+    "severity": "medium",
+    "message_contains": [
+      "result",
+      "schema"
+    ],
+    "repair_contains": "ee reflect propose",
+    "repair_string": "Run `ee reflect propose --workspace . --json` to send the producer the current response schema.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

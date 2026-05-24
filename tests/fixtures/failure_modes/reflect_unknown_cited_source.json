@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_unknown_cited_source",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect result ingest"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection result cites a source that was not present in the request package.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# submit a result citing an unknown source id"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_unknown_cited_source",
+    "severity": "medium",
+    "message_contains": [
+      "unknown",
+      "source"
+    ],
+    "repair_contains": "ee reflect request-ledger diagnostics",
+    "repair_string": "Run `ee reflect request-ledger diagnostics --workspace . --json` to compare cited sources to the retained request.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

@@ -235,6 +235,25 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
+#### External derivation and reflection (15)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `derived_evidence_already_linked` | medium | bd-1vnvl |
+| `derived_invalid_memory_spec` | medium | bd-1vnvl |
+| `derived_source_hash_drifted` | medium | bd-1vnvl |
+| `derived_source_workspace_mismatch` | medium | bd-1vnvl |
+| `derived_sources_invalid` | medium | bd-1vnvl |
+| `derived_target_forbidden_for_create` | medium | bd-1vnvl |
+| `derived_target_required_for_mutation` | medium | bd-1vnvl |
+| `reflect_challenge_invalid` | high | bd-1vnvl |
+| `reflect_key_unavailable` | high | bd-1vnvl |
+| `reflect_raw_cot_rejected` | high | bd-1vnvl |
+| `reflect_request_consumed` | medium | bd-1vnvl |
+| `reflect_request_expired` | medium | bd-1vnvl |
+| `reflect_result_schema_invalid` | medium | bd-1vnvl |
+| `reflect_source_drifted` | medium | bd-1vnvl |
+| `reflect_unknown_cited_source` | medium | bd-1vnvl |
+
 #### Search and pack quality (52)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|

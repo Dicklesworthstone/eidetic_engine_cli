@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_raw_cot_rejected",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect result ingest"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection result attempts to persist raw chain-of-thought instead of concise conclusions and citations.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# submit a result containing raw chain-of-thought"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_raw_cot_rejected",
+    "severity": "high",
+    "message_contains": [
+      "chain-of-thought",
+      "rejected"
+    ],
+    "repair_contains": "ee reflect propose",
+    "repair_string": "Run `ee reflect propose --workspace . --json` and request concise conclusions with cited evidence only.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_request_consumed",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect request-ledger diagnostics",
+    "reflect result ingest"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection request was already consumed by a prior accepted result.",
+    "setup_commands": [
+      "ee reflect request-ledger diagnostics --workspace . --status consumed --json"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --status consumed --json"
+  },
+  "expected_emission": {
+    "code": "reflect_request_consumed",
+    "severity": "medium",
+    "message_contains": [
+      "consumed",
+      "candidate"
+    ],
+    "repair_contains": "ee curate candidates",
+    "repair_string": "Run `ee curate candidates --workspace . --json` to inspect the candidate that consumed the request.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

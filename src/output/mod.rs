@@ -18861,6 +18861,75 @@ mod tests {
     }
 
     #[test]
+    fn error_schema_derivation_failure_has_structured_recovery() -> TestResult {
+        let error = DomainError::UsageCodeWithDetails {
+            code: crate::models::DERIVED_SOURCE_HASH_DRIFTED_CODE,
+            message: "Memory source mem_1 hash drifted from blake3:old to blake3:new.".to_owned(),
+            repair: Some("Re-propose the candidate against the current source content.".to_owned()),
+            details_json: serde_json::json!({
+                "failureModeCode": crate::models::DERIVED_SOURCE_HASH_DRIFTED_CODE,
+            })
+            .to_string(),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+        let recovery = parsed["error"]["details"]["recovery"]
+            .as_array()
+            .ok_or_else(|| "derivation error should include details.recovery[]".to_owned())?;
+
+        ensure_equal(
+            &recovery[0]["priority"].as_u64(),
+            &Some(1),
+            "derivation recovery priority",
+        )?;
+        ensure_equal(
+            &recovery[0]["kind"].as_str(),
+            &Some("command"),
+            "derivation recovery kind",
+        )?;
+        ensure_equal(
+            &recovery[0]["command"].as_str(),
+            &Some("ee curate propose-derived --workspace . --json"),
+            "derivation recovery command",
+        )?;
+        ensure_contains(
+            recovery[0]["rationale"].as_str().unwrap_or_default(),
+            "current source hashes",
+            "derivation recovery rationale",
+        )
+    }
+
+    #[test]
+    fn error_schema_reflection_failure_has_structured_recovery() -> TestResult {
+        let error = DomainError::Configuration {
+            message: "reflect_hmac_key_missing: reflection HMAC key unavailable".to_owned(),
+            repair: Some("Configure reflection HMAC key material.".to_owned()),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+        let recovery = parsed["error"]["details"]["recovery"]
+            .as_array()
+            .ok_or_else(|| "reflection error should include details.recovery[]".to_owned())?;
+
+        ensure_equal(
+            &recovery[0]["command"].as_str(),
+            &Some("ee status --workspace . --json"),
+            "reflection recovery command",
+        )?;
+        ensure!(
+            recovery
+                .iter()
+                .any(|action| action["envName"].as_str() == Some("EE_REFLECTION_HMAC_KEY")),
+            "reflection key recovery should include env action",
+        )?;
+        ensure_equal(
+            &recovery[0]["requiresHumanApproval"].as_bool(),
+            &Some(false),
+            "reflection read-only recovery does not require approval",
+        )
+    }
+
+    #[test]
     fn error_schema_migration_required_has_stable_structure() -> TestResult {
         let error = DomainError::MigrationRequired {
             message: "Database schema version 3 requires migration to version 5.".to_string(),

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_request_expired",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect request-ledger diagnostics",
+    "reflect result ingest"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection result references a request whose TTL has expired.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# wait past request TTL or replay an expired ledger fixture"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_request_expired",
+    "severity": "medium",
+    "message_contains": [
+      "expired",
+      "reflection request"
+    ],
+    "repair_contains": "ee reflect propose",
+    "repair_string": "Run `ee reflect propose --workspace . --json` to create a fresh request.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

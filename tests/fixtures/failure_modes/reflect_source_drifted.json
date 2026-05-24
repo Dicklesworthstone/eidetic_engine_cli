@@ -1,0 +1,34 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_source_drifted",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect propose",
+    "reflect request-ledger diagnostics",
+    "reflect result ingest"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection result or ledger row no longer matches the source hashes captured in the request package.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# mutate a cited source before result ingest"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_source_drifted",
+    "severity": "medium",
+    "message_contains": [
+      "source",
+      "drift"
+    ],
+    "repair_contains": "ee reflect propose",
+    "repair_string": "Run `ee reflect propose --workspace . --json` against the current source hashes.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

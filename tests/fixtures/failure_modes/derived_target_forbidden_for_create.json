@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_target_forbidden_for_create",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived-memory candidate tries to target an existing memory.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate show <candidate-id> --workspace . --json"
+    ],
+    "invocation": "ee curate validate <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_target_forbidden_for_create",
+    "severity": "medium",
+    "message_contains": [
+      "must not target",
+      "existing memory"
+    ],
+    "repair_contains": "ee curate propose-derived",
+    "repair_string": "Run `ee curate propose-derived --workspace . --json` without targetMemoryId.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_key_unavailable",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect propose",
+    "reflect request-ledger diagnostics"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "Reflection request signing cannot load readable HMAC key material.",
+    "setup_commands": [
+      "unset EE_REFLECTION_HMAC_KEY",
+      "ee reflect propose --workspace . --json"
+    ],
+    "invocation": "ee reflect propose --workspace . --kind gaps --source-memory <memory-id> --json"
+  },
+  "expected_emission": {
+    "code": "reflect_key_unavailable",
+    "severity": "high",
+    "message_contains": [
+      "HMAC key",
+      "unavailable"
+    ],
+    "repair_contains": "ee status",
+    "repair_string": "Run `ee status --workspace . --json` to inspect reflection key-store posture.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

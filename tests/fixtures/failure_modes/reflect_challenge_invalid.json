@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "reflect_challenge_invalid",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "reflect propose",
+    "reflect result ingest"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A reflection challenge binding cannot be verified against the retained request material.",
+    "setup_commands": [
+      "ee reflect propose --workspace . --json",
+      "# tamper with challenge binding in a fixture"
+    ],
+    "invocation": "ee reflect request-ledger diagnostics --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "reflect_challenge_invalid",
+    "severity": "high",
+    "message_contains": [
+      "challenge",
+      "invalid"
+    ],
+    "repair_contains": "ee reflect propose",
+    "repair_string": "Run `ee reflect propose --workspace . --json` to regenerate request and challenge material.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_invalid_memory_spec",
+  "introduced_by": {
+    "bead": "bd-1vnvl",
+    "epic_letter": "UX"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived candidate carries a missing or invalid memorySpec payload.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate show <candidate-id> --workspace . --json"
+    ],
+    "invocation": "ee curate validate <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_invalid_memory_spec",
+    "severity": "medium",
+    "message_contains": [
+      "memorySpec",
+      "invalid"
+    ],
+    "repair_contains": "ee curate propose-derived",
+    "repair_string": "Run `ee curate propose-derived --workspace . --json` with a valid memorySpec.",
+    "repair_command_regex": "Run `(?<cmd>[^`]+)`"
+  }
+}
