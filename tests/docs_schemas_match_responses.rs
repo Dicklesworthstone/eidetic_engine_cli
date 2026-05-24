@@ -17,7 +17,11 @@ use ee::core::completion_audit::{
     build_completion_audit_report_for_workspace, extract_completion_checklist,
 };
 use ee::core::curate::{
-    CURATE_CANDIDATES_SCHEMA_V1, CurateCandidatesFilter, CurateCandidatesReport,
+    CURATE_CANDIDATES_SCHEMA_V1, CURATE_SHOW_SCHEMA_V1, CurateCandidateAudit,
+    CurateCandidateEvidenceSummary, CurateCandidateSource, CurateCandidateSummary,
+    CurateCandidateValidation, CurateCandidatesFilter, CurateCandidatesReport,
+    CurateShowPlannedApplication, CurateShowPlannedDerivedLink,
+    CurateShowPlannedEvidenceAttachment, CurateShowReport, CurateValidationIssue,
     REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
     ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
     ReflectionRequestLedgerDiagnosticsReport,
@@ -37,7 +41,8 @@ use ee::curate::{
 use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
 use ee::models::{
-    DomainError, IMPORT_CASS_SCHEMA_V1, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2,
+    DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V1,
+    RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
     error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
@@ -62,6 +67,7 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.import.cass.v1", "ee.import.cass.v1.json"),
     ("ee.export.v1", "ee.export.v1.json"),
     ("ee.curate.candidates.v1", "ee.curate.candidates.v1.json"),
+    (CURATE_SHOW_SCHEMA_V1, "ee.curate.show.v1.json"),
     (
         ee::curate::REFLECTION_SOURCE_PACKAGE_SCHEMA,
         "ee.reflect.source_package.v1.json",
@@ -1078,6 +1084,183 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
     ensure_json_str(&document, "/requests/4/posture", "invalidLifecycle")?;
     ensure_json_str(&document, "/requests/5/posture", "invalidMaterial")?;
     ensure_json_str(&document, "/expiredPending/0/posture", "expiredPending")?;
+    Ok(())
+}
+
+#[test]
+fn curate_show_report_matches_schema() -> TestResult {
+    // bd-3080b: prove `ee curate show`'s published `ee.curate.show.v1` data
+    // schema matches the rendered Rust report. Covers the bd-18z8x slice's
+    // plannedApplication preview plus the durableMutation=false invariant
+    // and the workspace-qualified nextCommands array.
+    let candidate_id = "curate_show00000000000000bd0001".to_string();
+    let source_memory_id = "mem_show000000000000000000bd0001".to_string();
+    let evidence_span_id = "ev_show00000000000000000000bd0001".to_string();
+    let created_memory_id = "mem_show000000000000000000bd0002".to_string();
+    let hash = |digit: char| format!("blake3:{}", digit.to_string().repeat(64));
+
+    let candidate = CurateCandidateSummary {
+        candidate_id: candidate_id.clone(),
+        id: candidate_id.clone(),
+        kind: "create_derived_memory".to_string(),
+        candidate_type: "create_derived_memory".to_string(),
+        target_memory_id: None,
+        proposed_content: Some("Derived insight from packaged source memory.".to_string()),
+        proposed_level: Some("semantic".to_string()),
+        proposed_kind: Some("insight".to_string()),
+        proposed_tags: vec!["reflection".to_string()],
+        proposed_confidence: Some(0.61_f32),
+        proposed_trust_class: Some("agent_assertion".to_string()),
+        trust_class: Some("agent_assertion".to_string()),
+        confidence: 0.61_f32,
+        status: "approved".to_string(),
+        review_state: "approved".to_string(),
+        reason: "Source memory supports the derived insight.".to_string(),
+        source: CurateCandidateSource {
+            source_type: "agent_inference".to_string(),
+            source_id: Some("reflect_result_show000000000000".to_string()),
+        },
+        proposal_source: "agent_inference".to_string(),
+        producer: ProducerMetadata::curation_candidate(
+            "agent_inference",
+            Some("reflect_result_show000000000000"),
+            None,
+            Some("2026-05-24T00:00:00Z"),
+        ),
+        evidence: Vec::new(),
+        evidence_summary: CurateCandidateEvidenceSummary {
+            member_memory_ids: vec![source_memory_id.clone()],
+            support_count: 1,
+            contradiction_count: 0,
+            cluster_coherence: None,
+        },
+        derivation_source_summary: None,
+        peer_evidence: None,
+        member_memory_ids: vec![source_memory_id.clone()],
+        tombstoned_member_count: 0,
+        priority: "normal".to_string(),
+        close_reason: None,
+        auto_rejected_reason: None,
+        audit: CurateCandidateAudit {
+            proposed_by: "MistySalmon".to_string(),
+            proposed_at: "2026-05-24T00:00:00Z".to_string(),
+        },
+        validation: CurateCandidateValidation {
+            status: "passed".to_string(),
+            warnings: Vec::new(),
+            next_action: format!("ee curate apply {candidate_id}"),
+        },
+        scope: "workspace".to_string(),
+        scope_key: "ws_curate_show_schema".to_string(),
+        created_at: "2026-05-24T00:00:00Z".to_string(),
+        reviewed_at: Some("2026-05-24T00:00:30Z".to_string()),
+        reviewed_by: Some("MistySalmon".to_string()),
+        applied_at: None,
+        ttl_expires_at: None,
+        snoozed_until: None,
+        merged_into_candidate_id: None,
+        state_entered_at: Some("2026-05-24T00:00:30Z".to_string()),
+        last_action_at: Some("2026-05-24T00:00:30Z".to_string()),
+        ttl_policy_id: None,
+        requires_validate: false,
+        requires_apply: true,
+        next_action: format!("ee curate apply {candidate_id}"),
+    };
+
+    let planned_application = CurateShowPlannedApplication {
+        status: "ready".to_string(),
+        decision: "create_derived_memory".to_string(),
+        candidate_type: "create_derived_memory".to_string(),
+        target_memory_id: None,
+        created_memory_id: Some(created_memory_id.clone()),
+        created_memory: None,
+        planned_derived_from_links: vec![CurateShowPlannedDerivedLink {
+            link_id: "mlink_show000000000000000000bd01".to_string(),
+            dst_memory_id: source_memory_id.clone(),
+            relation: "derived_from".to_string(),
+            source_content_hash: hash('1'),
+        }],
+        planned_evidence_attachments: vec![CurateShowPlannedEvidenceAttachment {
+            evidence_span_id: evidence_span_id.clone(),
+            content_hash: hash('2'),
+        }],
+        planned_search_index_job_id: Some("six_show000000000000000000bd0001".to_string()),
+        audit_schema_preview: Some("ee.audit.derived_memory_created.v1".to_string()),
+        errors: Vec::new(),
+        warnings: vec![CurateValidationIssue {
+            code: "proposed_content_redacted".to_string(),
+            message: "Derived memory content contained secret-like values and was redacted."
+                .to_string(),
+            repair: "Review source package and keep only durable, non-secret evidence.".to_string(),
+        }],
+    };
+
+    let workspace_path = "/tmp/curate-show-schema".to_string();
+    let next_commands = vec![
+        format!("ee curate apply {candidate_id} --workspace {workspace_path} --json"),
+        format!("ee curate reject {candidate_id} --workspace {workspace_path} --json"),
+    ];
+
+    let report = CurateShowReport {
+        schema: CURATE_SHOW_SCHEMA_V1,
+        command: "curate show",
+        version: "0.0.0-test",
+        workspace_id: "ws_curate_show_schema".to_string(),
+        workspace_path: workspace_path.clone(),
+        database_path: format!("{workspace_path}/.ee/ee.db"),
+        candidate_id: candidate_id.clone(),
+        candidate,
+        planned_application: Some(planned_application),
+        durable_mutation: false,
+        next_action: format!("ee curate apply {candidate_id}"),
+        next_commands,
+    };
+
+    let document: Value = serde_json::from_str(&report.data_json())
+        .map_err(|error| format!("curate show report data_json must parse: {error}"))?;
+    let schema = schema_doc(CURATE_SHOW_SCHEMA_V1)?;
+
+    validate_json_schema(&document, &schema, &schema, "$")?;
+    ensure_json_str(&document, "/schema", CURATE_SHOW_SCHEMA_V1)?;
+    ensure_json_str(&document, "/command", "curate show")?;
+    ensure_json_bool(&document, "/durableMutation", false)?;
+    ensure_json_str(&document, "/candidate/type", "create_derived_memory")?;
+    ensure_json_str(
+        &document,
+        "/plannedApplication/decision",
+        "create_derived_memory",
+    )?;
+    ensure_json_str(
+        &document,
+        "/plannedApplication/auditSchemaPreview",
+        "ee.audit.derived_memory_created.v1",
+    )?;
+    let next_commands_array = document
+        .pointer("/nextCommands")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "nextCommands must be an array".to_string())?;
+    if next_commands_array.is_empty() {
+        return Err(
+            "nextCommands must include at least one workspace-qualified command".to_string(),
+        );
+    }
+    if !next_commands_array.iter().all(|cmd| {
+        cmd.as_str()
+            .is_some_and(|s| s.contains("--workspace ") && s.contains("--json"))
+    }) {
+        return Err(format!(
+            "nextCommands entries must all be workspace+json-qualified: {next_commands_array:?}"
+        ));
+    }
+    let links_array = document
+        .pointer("/plannedApplication/plannedDerivedFromLinks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "plannedDerivedFromLinks must be an array".to_string())?;
+    if links_array.is_empty() {
+        return Err(
+            "plannedDerivedFromLinks must surface at least one link in this fixture".to_string(),
+        );
+    }
     Ok(())
 }
 

@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.show.v1.json",
+  "title": "ee.curate.show.v1",
+  "description": "Read-only inspect/preview surface for a single curation candidate (bd-18z8x). The command never mutates the database; `durableMutation` is always false. For `create_derived_memory` candidates the report additionally carries a `plannedApplication` preview describing exactly what `ee curate apply` would create, attach, and audit.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "candidateId",
+    "candidate",
+    "durableMutation",
+    "nextAction",
+    "nextCommands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.curate.show.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "curate show"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspacePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databasePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidateId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidate": {
+      "type": "object",
+      "description": "Canonical CurateCandidateSummary for the resolved candidate. Fields mirror the entries in ee.curate.candidates.v1 candidates[].",
+      "additionalProperties": {
+        "$ref": "#/$defs/jsonValue"
+      }
+    },
+    "plannedApplication": {
+      "type": "object",
+      "description": "Preview of the apply transaction. Present only for create_derived_memory candidates; absent for target-mutating candidate kinds whose preview surfaces through `ee curate apply --dry-run`.",
+      "required": [
+        "status",
+        "decision",
+        "candidateType",
+        "plannedDerivedFromLinks",
+        "plannedEvidenceAttachments",
+        "errors",
+        "warnings"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Mirrors ApplyDecision.application.status: `ready`, `blocked`, or `already_applied`."
+        },
+        "decision": {
+          "type": "string",
+          "description": "Mirrors ApplyDecision.application.decision: `create_derived_memory`, `idempotent_replay`, `unchanged`, etc."
+        },
+        "candidateType": {
+          "type": "string"
+        },
+        "targetMemoryId": {
+          "type": ["string", "null"]
+        },
+        "createdMemoryId": {
+          "type": ["string", "null"]
+        },
+        "createdMemory": {
+          "type": ["object", "null"],
+          "additionalProperties": {
+            "$ref": "#/$defs/jsonValue"
+          }
+        },
+        "plannedDerivedFromLinks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "linkId",
+              "dstMemoryId",
+              "relation",
+              "sourceContentHash"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "linkId": {
+                "type": "string"
+              },
+              "dstMemoryId": {
+                "type": "string"
+              },
+              "relation": {
+                "type": "string"
+              },
+              "sourceContentHash": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "plannedEvidenceAttachments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["evidenceSpanId", "contentHash"],
+            "additionalProperties": false,
+            "properties": {
+              "evidenceSpanId": {
+                "type": "string"
+              },
+              "contentHash": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "plannedSearchIndexJobId": {
+          "type": "string"
+        },
+        "auditSchemaPreview": {
+          "type": "string",
+          "description": "Schema id the apply transaction would persist on the memory.create audit row, e.g. `ee.audit.derived_memory_created.v1`."
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/jsonValue"
+            }
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/jsonValue"
+            }
+          }
+        }
+      }
+    },
+    "durableMutation": {
+      "type": "boolean",
+      "const": false,
+      "description": "Always false: `ee curate show` never writes to the database."
+    },
+    "nextAction": {
+      "type": "string"
+    },
+    "nextCommands": {
+      "type": "array",
+      "description": "Workspace-qualified copyable next-step commands (validate, apply, reject, why) for this candidate's current lifecycle state.",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    }
+  }
+}

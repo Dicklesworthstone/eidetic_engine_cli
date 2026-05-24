@@ -7480,9 +7480,9 @@ pub fn render_curate_apply_toon(report: &CurateApplyReport) -> String {
 /// Render a curation show/preview report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_show_json(report: &CurateShowReport) -> String {
-    let data_raw = serde_json::to_string(report)
-        .unwrap_or_else(|_| "{\"schema\":\"ee.curate.show.v1\"}".to_owned());
-    ResponseEnvelope::success().data_raw(&data_raw).finish()
+    ResponseEnvelope::success()
+        .data_raw(&report.data_json())
+        .finish()
 }
 
 /// Render a curation show/preview report as human-readable text.
