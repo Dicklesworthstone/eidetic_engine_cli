@@ -29,6 +29,7 @@ const INSIGHTS_SECTIONS: &[&str] = &[
     "hubs",
     "kCore",
     "kTruss",
+    "knowledgeGaps",
     "knowledgeSkyline",
     "loadBearingMemories",
     "proximityHotspots",
@@ -639,6 +640,83 @@ fn insights_load_bearing_schema_documents_bipartite_items() -> TestResult {
         return Err(
             "loadBearingMemories example summary must name rule-to-source provenance".to_owned(),
         );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> TestResult {
+    let schema_path = repo_root()
+        .join("docs")
+        .join("schemas")
+        .join("ee.insights.v1.json");
+    let schema = read_json(&schema_path)?;
+    let item = schema
+        .pointer("/$defs/knowledgeGapItem")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "ee.insights.v1 missing $defs.knowledgeGapItem".to_owned())?;
+    let required = item
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "$defs.knowledgeGapItem.required must be an array".to_owned())?;
+    for field in [
+        "rank",
+        "gapId",
+        "category",
+        "priority",
+        "confidence",
+        "sourceMemoryIds",
+        "metricEvidence",
+        "explanation",
+        "recommendation",
+    ] {
+        if !required.iter().any(|value| value.as_str() == Some(field)) {
+            return Err(format!("knowledgeGapItem.required missing {field}"));
+        }
+    }
+
+    ensure_eq(
+        schema
+            .pointer("/$defs/knowledgeGapItem/properties/metricEvidence/properties/schema/const")
+            .and_then(Value::as_str),
+        Some("ee.graph.knowledge_gap.v1"),
+        "ee.insights.v1 knowledgeGapItem",
+        "metricEvidence.schema.const",
+    )?;
+    ensure_eq(
+        schema
+            .pointer("/$defs/knowledgeGapRecommendation/properties/kind/const")
+            .and_then(Value::as_str),
+        Some("reflect_propose"),
+        "ee.insights.v1 knowledgeGapRecommendation",
+        "kind.const",
+    )?;
+
+    let section_schema = serde_json::to_string(
+        schema
+            .pointer("/$defs/section")
+            .ok_or_else(|| "ee.insights.v1 missing $defs.section".to_owned())?,
+    )
+    .map_err(|error| format!("serialize section schema: {error}"))?;
+    if !section_schema.contains("\"#/$defs/knowledgeGapItem\"") {
+        return Err("knowledgeGaps section items must reference $defs.knowledgeGapItem".to_owned());
+    }
+
+    let example_sections = schema
+        .pointer("/examples/0/sections")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.insights.v1 example sections must be an array".to_owned())?;
+    let knowledge_gaps_section = example_sections
+        .iter()
+        .find(|section| section.get("name").and_then(Value::as_str) == Some("knowledgeGaps"))
+        .ok_or_else(|| "ee.insights.v1 example missing knowledgeGaps section".to_owned())?;
+    if !knowledge_gaps_section
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|summary| summary.contains("Graph-derived gaps"))
+    {
+        return Err("knowledgeGaps example summary must name graph-derived gaps".to_owned());
     }
 
     Ok(())

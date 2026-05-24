@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -46,6 +47,9 @@ const INSIGHTS_SECTION_UNAVAILABLE_MESSAGE: &str =
 const INSIGHTS_SECTION_UNAVAILABLE_REPAIR: &str =
     "Use sections with non-empty evidence, or implement the unavailable section builder.";
 const BRIDGE_INSIGHT_SCHEMA_V1: &str = "ee.graph.bridge_insight.v1";
+const KNOWLEDGE_GAP_SCHEMA_V1: &str = "ee.graph.knowledge_gap.v1";
+const KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS: u32 = 2;
+const KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX: f32 = 0.50;
 
 type SectionBuilder = fn() -> InsightsSection;
 type SectionRegistryEntry = (&'static str, &'static str, SectionBuilder);
@@ -55,8 +59,8 @@ pub struct InsightsArgs {
     /// Emit only one insight section by name. Names are case-insensitive and
     /// accept both lowercase and canonical-camelCase form. Available:
     /// authorities, bridges, causalBottlenecks, comprehensiveRules,
-    /// contradictionClusters, hubs, kCore, kTruss, knowledgeSkyline,
-    /// loadBearingMemories, proximityHotspots, revisionFrontiers,
+    /// contradictionClusters, hubs, kCore, kTruss, knowledgeGaps,
+    /// knowledgeSkyline, loadBearingMemories, proximityHotspots, revisionFrontiers,
     /// topMemories.
     #[arg(long, value_name = "NAME")]
     pub section: Option<String>,
@@ -173,6 +177,16 @@ struct BridgeInsightInput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct KnowledgeGapInput {
+    category: &'static str,
+    source_memory_ids: Vec<String>,
+    metric_evidence: JsonValue,
+    explanation: String,
+    confidence: f64,
+    priority: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct HitsInsightInput {
     memory_id: String,
     score: f64,
@@ -231,6 +245,7 @@ fn section_registry() -> Vec<SectionRegistryEntry> {
         ("hubs", "hubs", hubs_section),
         ("kcore", "kCore", k_core_section),
         ("ktruss", "kTruss", k_truss_section),
+        ("knowledgegaps", "knowledgeGaps", knowledge_gaps_section),
         (
             "knowledgeskyline",
             "knowledgeSkyline",
@@ -430,6 +445,10 @@ fn build_registry_section(
             let skyline = load_knowledge_skyline(workspace)?;
             Ok(knowledge_skyline_section_from_report(skyline.as_ref()))
         }
+        "knowledgeGaps" => {
+            let gaps = load_knowledge_gap_inputs(workspace)?;
+            Ok(knowledge_gaps_section_from_inputs(&gaps))
+        }
         "loadBearingMemories" => {
             let items = load_bearing_memory_items(workspace)?;
             Ok(load_bearing_memories_section_from_items(&items))
@@ -613,6 +632,15 @@ fn load_contradiction_clusters(
         return Ok(Vec::new());
     };
     contradiction_clusters_from_links(&data.links)
+}
+
+fn load_knowledge_gap_inputs(
+    workspace: Option<&Path>,
+) -> Result<Vec<KnowledgeGapInput>, DomainError> {
+    let Some(data) = load_workspace_insights_graph_data(workspace)? else {
+        return Ok(Vec::new());
+    };
+    knowledge_gap_inputs_from_graph_data(&data)
 }
 
 fn load_knowledge_skyline(
@@ -959,6 +987,233 @@ fn contradiction_clusters_from_links(
     }
     let graph = proximity_graph_from_links(&contradiction_links)?;
     Ok(crate::graph::health::detect_contradiction_clusters(&graph))
+}
+
+fn knowledge_gap_inputs_from_graph_data(
+    data: &WorkspaceInsightsGraphData,
+) -> Result<Vec<KnowledgeGapInput>, DomainError> {
+    if data.memories.is_empty() && data.links.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let memories_by_id = data
+        .memories
+        .iter()
+        .map(|memory| (memory.id.as_str(), memory))
+        .collect::<BTreeMap<_, _>>();
+    let incident_evidence = incident_evidence_span_counts(&data.links);
+    let mut gaps = Vec::new();
+
+    for bridge in bridge_inputs_from_links(&data.links)? {
+        let evidence_span_count = incident_evidence
+            .get(&bridge.memory_id)
+            .copied()
+            .unwrap_or_default();
+        if bridge.cluster_disconnection_magnitude == 0
+            || evidence_span_count > KNOWLEDGE_GAP_THIN_EVIDENCE_MAX_SPANS
+        {
+            continue;
+        }
+        gaps.push(KnowledgeGapInput {
+            category: "thin_evidence_bridge",
+            source_memory_ids: vec![bridge.memory_id.clone()],
+            metric_evidence: serde_json::json!({
+                "schema": KNOWLEDGE_GAP_SCHEMA_V1,
+                "signal": "articulation_bridge",
+                "algorithm": "tarjan_articulation_points",
+                "clusterDisconnectionMagnitude": bridge.cluster_disconnection_magnitude,
+                "bridgeEdgeCount": bridge.bridge_edge_count,
+                "evidenceSpanCount": evidence_span_count,
+            }),
+            explanation: format!(
+                "Memory `{}` disconnects graph neighborhoods but has only {} evidence span(s).",
+                bridge.memory_id, evidence_span_count
+            ),
+            confidence: 0.82,
+            priority: 90 + bridge.cluster_disconnection_magnitude as u64,
+        });
+    }
+
+    for cluster in contradiction_clusters_from_links(&data.links)? {
+        let source_memory_ids =
+            sorted_unique_memory_ids(cluster.exemplar_memory_ids.iter().map(String::as_str));
+        if source_memory_ids.is_empty()
+            || contradiction_cluster_has_resolution(&source_memory_ids, &data.links)
+        {
+            continue;
+        }
+        gaps.push(KnowledgeGapInput {
+            category: "unresolved_contradiction_cluster",
+            source_memory_ids,
+            metric_evidence: serde_json::json!({
+                "schema": KNOWLEDGE_GAP_SCHEMA_V1,
+                "signal": "contradiction_cluster",
+                "algorithm": "louvain_communities",
+                "louvainId": cluster.louvain_id,
+                "size": cluster.size,
+                "internalContradictions": cluster.internal_contradictions,
+                "density": cluster.density,
+            }),
+            explanation: format!(
+                "Contradiction cluster {} has no resolving or superseding edge.",
+                cluster.louvain_id
+            ),
+            confidence: 0.76,
+            priority: 80 + cluster.internal_contradictions as u64,
+        });
+    }
+
+    for memory in data
+        .memories
+        .iter()
+        .filter(|memory| memory_is_harmful_outcome(memory))
+    {
+        let source_memory_ids =
+            harmful_neighborhood_source_ids(memory, &data.links, &memories_by_id);
+        let has_rule = source_memory_ids
+            .iter()
+            .filter_map(|memory_id| memories_by_id.get(memory_id.as_str()))
+            .any(|memory| memory_is_procedural_rule(memory));
+        if has_rule {
+            continue;
+        }
+        gaps.push(KnowledgeGapInput {
+            category: "harmful_neighborhood_without_rule",
+            metric_evidence: serde_json::json!({
+                "schema": KNOWLEDGE_GAP_SCHEMA_V1,
+                "signal": "harmful_outcome_neighborhood",
+                "algorithm": "one_hop_rule_presence",
+                "harmfulMemoryId": memory.id,
+                "neighborCount": source_memory_ids.len().saturating_sub(1),
+                "proceduralRuleCount": 0,
+            }),
+            explanation: format!(
+                "Harmful outcome `{}` has no adjacent procedural rule memory.",
+                memory.id
+            ),
+            confidence: 0.70,
+            priority: 70,
+            source_memory_ids,
+        });
+    }
+
+    for link in data.links.iter().filter(|link| {
+        crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+            && matches!(link.relation.as_str(), "supports" | "derived_from")
+            && link.confidence.is_finite()
+            && link.confidence <= KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX
+    }) {
+        let source_memory_ids =
+            sorted_unique_memory_ids([link.src_memory_id.as_str(), link.dst_memory_id.as_str()]);
+        gaps.push(KnowledgeGapInput {
+            category: "underdetermined_causal_chain",
+            source_memory_ids,
+            metric_evidence: serde_json::json!({
+                "schema": KNOWLEDGE_GAP_SCHEMA_V1,
+                "signal": "low_confidence_causal_link",
+                "algorithm": "link_confidence_threshold",
+                "relation": link.relation,
+                "linkConfidence": link.confidence,
+                "threshold": KNOWLEDGE_GAP_LOW_CONFIDENCE_MAX,
+            }),
+            explanation: format!(
+                "{} link `{}` -> `{}` has confidence {:.3}.",
+                link.relation, link.src_memory_id, link.dst_memory_id, link.confidence
+            ),
+            confidence: 0.66,
+            priority: 60,
+        });
+    }
+
+    sort_and_dedup_knowledge_gaps(&mut gaps);
+    Ok(gaps)
+}
+
+fn incident_evidence_span_counts(links: &[StoredMemoryLink]) -> BTreeMap<String, u32> {
+    let mut counts = BTreeMap::<String, u32>::new();
+    for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
+        for memory_id in [&link.src_memory_id, &link.dst_memory_id] {
+            let count = counts.entry(memory_id.clone()).or_default();
+            *count = count.saturating_add(link.evidence_count);
+        }
+    }
+    counts
+}
+
+fn contradiction_cluster_has_resolution(
+    source_memory_ids: &[String],
+    links: &[StoredMemoryLink],
+) -> bool {
+    let cluster_ids = source_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    links.iter().any(|link| {
+        crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+            && matches!(link.relation.as_str(), "resolves" | "supersedes")
+            && cluster_ids.contains(&link.src_memory_id)
+            && cluster_ids.contains(&link.dst_memory_id)
+    })
+}
+
+fn harmful_neighborhood_source_ids(
+    memory: &StoredMemory,
+    links: &[StoredMemoryLink],
+    memories_by_id: &BTreeMap<&str, &StoredMemory>,
+) -> Vec<String> {
+    let mut source_ids = BTreeSet::from([memory.id.clone()]);
+    for link in links {
+        if !crate::graph::memory_link_mesh_metadata_visible(link.metadata_json.as_deref()) {
+            continue;
+        }
+        if link.src_memory_id == memory.id
+            && memories_by_id.contains_key(link.dst_memory_id.as_str())
+        {
+            source_ids.insert(link.dst_memory_id.clone());
+        }
+        if link.dst_memory_id == memory.id
+            && memories_by_id.contains_key(link.src_memory_id.as_str())
+        {
+            source_ids.insert(link.src_memory_id.clone());
+        }
+    }
+    source_ids.into_iter().collect()
+}
+
+fn memory_is_procedural_rule(memory: &StoredMemory) -> bool {
+    memory.level.eq_ignore_ascii_case("procedural")
+        || memory.kind.to_ascii_lowercase().contains("rule")
+}
+
+fn memory_is_harmful_outcome(memory: &StoredMemory) -> bool {
+    let kind = memory.kind.to_ascii_lowercase();
+    let content = memory.content.to_ascii_lowercase();
+    kind.contains("failure")
+        || kind.contains("harm")
+        || content.contains("harmful")
+        || content.contains("unsafe")
+}
+
+fn sorted_unique_memory_ids<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    ids.into_iter()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn sort_and_dedup_knowledge_gaps(gaps: &mut Vec<KnowledgeGapInput>) {
+    gaps.retain(|gap| !gap.source_memory_ids.is_empty());
+    gaps.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.category.cmp(right.category))
+            .then_with(|| left.source_memory_ids.cmp(&right.source_memory_ids))
+    });
+    let mut seen = BTreeSet::<(String, Vec<String>)>::new();
+    gaps.retain(|gap| seen.insert((gap.category.to_owned(), gap.source_memory_ids.clone())));
 }
 
 fn pagerank_scores_for_skyline(
@@ -1537,6 +1792,67 @@ fn k_truss_section() -> InsightsSection {
     )
 }
 
+fn knowledge_gaps_section() -> InsightsSection {
+    knowledge_gaps_section_from_inputs(&[])
+}
+
+fn knowledge_gaps_section_from_inputs(inputs: &[KnowledgeGapInput]) -> InsightsSection {
+    let mut inputs = inputs.to_vec();
+    sort_and_dedup_knowledge_gaps(&mut inputs);
+    let items = inputs
+        .into_iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let source_memory_ids = input.source_memory_ids;
+            let gap_id = knowledge_gap_id(input.category, &source_memory_ids);
+            let recommendation = serde_json::json!({
+                "kind": "reflect_propose",
+                "command": knowledge_gap_reflect_command(&source_memory_ids),
+                "sourceMemoryIds": source_memory_ids.clone(),
+            });
+            serde_json::json!({
+                "rank": index + 1,
+                "gapId": gap_id,
+                "category": input.category,
+                "priority": input.priority,
+                "confidence": input.confidence,
+                "sourceMemoryIds": source_memory_ids,
+                "metricEvidence": input.metric_evidence,
+                "explanation": input.explanation,
+                "recommendation": recommendation,
+            })
+        })
+        .collect();
+
+    InsightsSection {
+        name: "knowledgeGaps",
+        title: "Knowledge Gaps",
+        summary: "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.",
+        why_it_matters: "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories.",
+        items,
+        next_commands: vec!["ee insights --section knowledgeGaps --workspace . --json"],
+    }
+}
+
+fn knowledge_gap_id(category: &str, source_memory_ids: &[String]) -> String {
+    let mut seed = category.to_owned();
+    for id in source_memory_ids {
+        seed.push(':');
+        seed.push_str(id);
+    }
+    let digest = blake3::hash(seed.as_bytes()).to_hex();
+    format!("kg_{}", &digest[..16])
+}
+
+fn knowledge_gap_reflect_command(source_memory_ids: &[String]) -> String {
+    let mut command = "ee --workspace . --json reflect propose --kind gaps --dry-run".to_owned();
+    for memory_id in source_memory_ids {
+        command.push_str(" --source-memory ");
+        command.push_str(memory_id);
+    }
+    command
+}
+
 fn knowledge_skyline_section() -> InsightsSection {
     knowledge_skyline_section_from_report(None)
 }
@@ -1684,6 +2000,7 @@ mod tests {
         MemoryLinkRelation, MemoryLinkSource,
     };
     use chrono::TimeZone;
+    use clap::Parser as _;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1998,6 +2315,7 @@ mod tests {
                 "hubs",
                 "kCore",
                 "kTruss",
+                "knowledgeGaps",
                 "knowledgeSkyline",
                 "loadBearingMemories",
                 "proximityHotspots",
@@ -2522,6 +2840,320 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_gaps_use_graph_fixtures_and_reflection_recommendations() -> TestResult {
+        let data = WorkspaceInsightsGraphData {
+            memories: vec![
+                stored_memory(
+                    "mem_bridge_a",
+                    "semantic",
+                    "fact",
+                    "Bridge endpoint A.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_bridge_b",
+                    "semantic",
+                    "fact",
+                    "Bridge articulation B.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_bridge_c",
+                    "semantic",
+                    "fact",
+                    "Bridge endpoint C.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_contradiction_a",
+                    "semantic",
+                    "fact",
+                    "Contradiction exemplar A.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_contradiction_b",
+                    "semantic",
+                    "fact",
+                    "Contradiction exemplar B.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_contradiction_c",
+                    "semantic",
+                    "fact",
+                    "Contradiction exemplar C.",
+                    0.9,
+                ),
+                stored_memory(
+                    "mem_harmful_outcome",
+                    "episodic",
+                    "failure",
+                    "Harmful deployment outcome without a durable rule.",
+                    0.8,
+                ),
+                stored_memory(
+                    "mem_harm_neighbor",
+                    "semantic",
+                    "fact",
+                    "Nearby evidence for the harmful incident.",
+                    0.8,
+                ),
+                stored_memory(
+                    "mem_causal_source",
+                    "semantic",
+                    "fact",
+                    "Low-confidence causal source.",
+                    0.6,
+                ),
+                stored_memory(
+                    "mem_causal_target",
+                    "semantic",
+                    "fact",
+                    "Low-confidence causal target.",
+                    0.6,
+                ),
+            ],
+            links: vec![
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_bridge_1",
+                    "mem_bridge_a",
+                    "mem_bridge_b",
+                    "supports",
+                    1,
+                    1.0,
+                ),
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_bridge_2",
+                    "mem_bridge_b",
+                    "mem_bridge_c",
+                    "supports",
+                    1,
+                    1.0,
+                ),
+                stored_memory_link_with_relation(
+                    "link_contra_1",
+                    "mem_contradiction_a",
+                    "mem_contradiction_b",
+                    "contradicts",
+                    None,
+                ),
+                stored_memory_link_with_relation(
+                    "link_contra_2",
+                    "mem_contradiction_b",
+                    "mem_contradiction_c",
+                    "contradicts",
+                    None,
+                ),
+                stored_memory_link_with_relation(
+                    "link_contra_3",
+                    "mem_contradiction_a",
+                    "mem_contradiction_c",
+                    "contradicts",
+                    None,
+                ),
+                stored_memory_link_with_relation(
+                    "link_harm_neighbor",
+                    "mem_harmful_outcome",
+                    "mem_harm_neighbor",
+                    "supports",
+                    None,
+                ),
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_causal_low_confidence",
+                    "mem_causal_source",
+                    "mem_causal_target",
+                    "supports",
+                    4,
+                    0.25,
+                ),
+            ],
+        };
+
+        let gaps = knowledge_gap_inputs_from_graph_data(&data)
+            .map_err(|error| format!("knowledge gap input build failed: {error}"))?;
+        let section = knowledge_gaps_section_from_inputs(&gaps);
+        let categories = section
+            .items
+            .iter()
+            .map(|item| {
+                item["category"]
+                    .as_str()
+                    .ok_or_else(|| "knowledge gap item missing category".to_owned())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(section.name, "knowledgeGaps");
+        assert_eq!(
+            categories,
+            vec![
+                "thin_evidence_bridge",
+                "unresolved_contradiction_cluster",
+                "harmful_neighborhood_without_rule",
+                "underdetermined_causal_chain",
+            ]
+        );
+
+        for item in &section.items {
+            assert!(item["rank"].as_u64().unwrap_or_default() > 0);
+            assert_eq!(
+                item["metricEvidence"]["schema"].as_str(),
+                Some(KNOWLEDGE_GAP_SCHEMA_V1)
+            );
+            assert_eq!(
+                item["recommendation"]["kind"].as_str(),
+                Some("reflect_propose")
+            );
+            let source_ids = item["sourceMemoryIds"]
+                .as_array()
+                .ok_or_else(|| "sourceMemoryIds must be an array".to_owned())?
+                .iter()
+                .map(|id| {
+                    id.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "sourceMemoryIds entries must be strings".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            assert!(!source_ids.is_empty());
+            assert_eq!(
+                item["recommendation"]["sourceMemoryIds"],
+                item["sourceMemoryIds"]
+            );
+
+            let command = item["recommendation"]["command"]
+                .as_str()
+                .ok_or_else(|| "recommendation command must be a string".to_owned())?;
+            for source_id in &source_ids {
+                assert!(
+                    command.contains(&format!("--source-memory {source_id}")),
+                    "recommendation command should cite {source_id}: {command}"
+                );
+            }
+            assert_reflect_propose_command(command, &source_ids)?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn knowledge_gaps_do_not_emit_fake_items_for_empty_or_healthy_graphs() -> TestResult {
+        let empty = WorkspaceInsightsGraphData {
+            memories: Vec::new(),
+            links: Vec::new(),
+        };
+        let empty_gaps = knowledge_gap_inputs_from_graph_data(&empty)
+            .map_err(|error| format!("empty knowledge gap build failed: {error}"))?;
+        assert!(
+            knowledge_gaps_section_from_inputs(&empty_gaps)
+                .items
+                .is_empty()
+        );
+
+        let healthy = WorkspaceInsightsGraphData {
+            memories: vec![
+                stored_memory("mem_healthy_a", "semantic", "fact", "Healthy A.", 0.9),
+                stored_memory("mem_healthy_b", "semantic", "fact", "Healthy B.", 0.9),
+                stored_memory("mem_healthy_c", "semantic", "fact", "Healthy C.", 0.9),
+                stored_memory(
+                    "mem_healthy_rule",
+                    "procedural",
+                    "rule",
+                    "Durable rule with adjacent evidence.",
+                    0.9,
+                ),
+            ],
+            links: vec![
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_healthy_1",
+                    "mem_healthy_a",
+                    "mem_healthy_b",
+                    "supports",
+                    3,
+                    1.0,
+                ),
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_healthy_2",
+                    "mem_healthy_b",
+                    "mem_healthy_c",
+                    "supports",
+                    3,
+                    1.0,
+                ),
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_healthy_3",
+                    "mem_healthy_a",
+                    "mem_healthy_c",
+                    "supports",
+                    3,
+                    1.0,
+                ),
+                stored_memory_link_with_evidence_and_confidence(
+                    "link_healthy_4",
+                    "mem_healthy_b",
+                    "mem_healthy_rule",
+                    "supports",
+                    3,
+                    1.0,
+                ),
+            ],
+        };
+        let healthy_gaps = knowledge_gap_inputs_from_graph_data(&healthy)
+            .map_err(|error| format!("healthy knowledge gap build failed: {error}"))?;
+        assert!(
+            knowledge_gaps_section_from_inputs(&healthy_gaps)
+                .items
+                .is_empty()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn knowledge_gaps_are_deterministic_across_fixture_order() -> TestResult {
+        let memories = vec![
+            stored_memory("mem_order_a", "semantic", "fact", "Order A.", 0.9),
+            stored_memory("mem_order_b", "semantic", "fact", "Order B.", 0.9),
+            stored_memory("mem_order_c", "semantic", "fact", "Order C.", 0.9),
+        ];
+        let links = vec![
+            stored_memory_link_with_relation(
+                "link_order_1",
+                "mem_order_a",
+                "mem_order_b",
+                "supports",
+                None,
+            ),
+            stored_memory_link_with_relation(
+                "link_order_2",
+                "mem_order_b",
+                "mem_order_c",
+                "supports",
+                None,
+            ),
+        ];
+        let forward = WorkspaceInsightsGraphData {
+            memories: memories.clone(),
+            links: links.clone(),
+        };
+        let reverse = WorkspaceInsightsGraphData {
+            memories: memories.into_iter().rev().collect(),
+            links: links.into_iter().rev().collect(),
+        };
+
+        let forward_section = knowledge_gaps_section_from_inputs(
+            &knowledge_gap_inputs_from_graph_data(&forward)
+                .map_err(|error| format!("forward knowledge gap build failed: {error}"))?,
+        );
+        let reverse_section = knowledge_gaps_section_from_inputs(
+            &knowledge_gap_inputs_from_graph_data(&reverse)
+                .map_err(|error| format!("reverse knowledge gap build failed: {error}"))?,
+        );
+
+        assert_eq!(forward_section.items, reverse_section.items);
+        Ok(())
+    }
+
+    #[test]
     fn knowledge_skyline_section_serializes_existing_skyline_report() -> TestResult {
         let mut graph = Graph::new(CompatibilityMode::Strict);
         graph
@@ -2923,21 +3555,97 @@ mod tests {
         relation: &str,
         metadata_json: Option<String>,
     ) -> StoredMemoryLink {
+        stored_memory_link_with_evidence_and_confidence(id, source, target, relation, 1, 1.0)
+            .with_metadata(metadata_json)
+    }
+
+    trait StoredMemoryLinkTestExt {
+        fn with_metadata(self, metadata_json: Option<String>) -> Self;
+    }
+
+    impl StoredMemoryLinkTestExt for StoredMemoryLink {
+        fn with_metadata(mut self, metadata_json: Option<String>) -> Self {
+            self.metadata_json = metadata_json;
+            self
+        }
+    }
+
+    fn stored_memory_link_with_evidence_and_confidence(
+        id: &str,
+        source: &str,
+        target: &str,
+        relation: &str,
+        evidence_count: u32,
+        confidence: f32,
+    ) -> StoredMemoryLink {
         StoredMemoryLink {
             id: id.to_owned(),
             src_memory_id: source.to_owned(),
             dst_memory_id: target.to_owned(),
             relation: relation.to_owned(),
             weight: 1.0,
-            confidence: 1.0,
+            confidence,
             directed: false,
-            evidence_count: 1,
+            evidence_count,
             last_reinforced_at: None,
             source: "agent".to_owned(),
             created_at: "2026-05-16T00:00:00Z".to_owned(),
             created_by: Some("insights-mesh-test".to_owned()),
-            metadata_json,
+            metadata_json: None,
         }
+    }
+
+    fn stored_memory(
+        id: &str,
+        level: &str,
+        kind: &str,
+        content: &str,
+        confidence: f32,
+    ) -> StoredMemory {
+        StoredMemory {
+            id: id.to_owned(),
+            workspace_id: "wsp_insights_test".to_owned(),
+            level: level.to_owned(),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            workflow_id: None,
+            confidence,
+            utility: 0.5,
+            importance: 0.5,
+            provenance_uri: None,
+            trust_class: "agent_validated".to_owned(),
+            trust_subclass: None,
+            provenance_chain_hash: None,
+            provenance_chain_hash_version: "v1".to_owned(),
+            provenance_verification_status: "unverified".to_owned(),
+            provenance_verified_at: None,
+            provenance_verification_note: None,
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            updated_at: "2026-05-16T00:00:00Z".to_owned(),
+            tombstoned_at: None,
+            valid_from: Some("2026-05-16T00:00:00Z".to_owned()),
+            valid_to: None,
+        }
+    }
+
+    fn assert_reflect_propose_command(command: &str, source_ids: &[String]) -> TestResult {
+        let cli = crate::cli::Cli::try_parse_from(command.split_whitespace())
+            .map_err(|error| format!("recommendation command should parse: {error}"))?;
+        let Some(crate::cli::Command::Reflect(crate::cli::ReflectCommand::Propose(args))) =
+            cli.command
+        else {
+            return Err(format!(
+                "recommendation command should parse as reflect propose: {command}"
+            ));
+        };
+        assert_eq!(cli.workspace.as_deref(), Some(std::path::Path::new(".")));
+        assert!(cli.json);
+        assert_eq!(args.kind, "gaps");
+        assert_eq!(args.source_memory.as_slice(), source_ids);
+        assert!(args.source.is_empty());
+        assert!(args.source_evidence_span.is_empty());
+        assert!(args.dry_run);
+        Ok(())
     }
 
     fn skyline_memory(memory_id: &str, trust_class: &str, day: u32) -> KnowledgeSkylineMemory {

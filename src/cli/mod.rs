@@ -93,6 +93,7 @@ use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
+use crate::curate::ReflectionSourcePackageLimits;
 // `crate::core::doctor_runtime::CapabilitiesReport` is referenced via its
 // fully-qualified path at the single call site below to avoid colliding with
 // `crate::core::capabilities::CapabilitiesReport` (line 48), which has
@@ -6054,9 +6055,56 @@ pub struct RecorderEventsListArgs {
 /// Subcommands for `ee reflect`.
 #[derive(Clone, Debug, PartialEq, Subcommand)]
 pub enum ReflectCommand {
+    /// Create an external reflection request artifact and ledger row.
+    Propose(ReflectProposeArgs),
+
     /// Inspect the durable reflection request replay ledger.
     #[command(name = "request-ledger", subcommand)]
     RequestLedger(ReflectRequestLedgerCommand),
+}
+
+/// Arguments for `ee reflect propose`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ReflectProposeArgs {
+    /// Reflection task kind, for example summary, gaps, strengths, or plan.
+    #[arg(long = "kind", value_name = "KIND")]
+    pub kind: String,
+
+    /// Source id resolved as either a memory or evidence span.
+    #[arg(long = "source", value_name = "ID")]
+    pub source: Vec<String>,
+
+    /// Existing memory source id.
+    #[arg(long = "source-memory", value_name = "MEMORY_ID")]
+    pub source_memory: Vec<String>,
+
+    /// Existing CASS evidence span source id.
+    #[arg(long = "source-evidence-span", value_name = "SPAN_ID")]
+    pub source_evidence_span: Vec<String>,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// RFC 3339 creation time. Defaults to now.
+    #[arg(long = "created-at", value_name = "RFC3339")]
+    pub created_at: Option<String>,
+
+    /// Maximum source count to package.
+    #[arg(long = "max-sources", value_name = "N")]
+    pub max_sources: Option<usize>,
+
+    /// Maximum combined excerpt bytes to package.
+    #[arg(long = "max-total-excerpt-bytes", value_name = "BYTES")]
+    pub max_total_excerpt_bytes: Option<usize>,
+
+    /// Maximum excerpt bytes per source.
+    #[arg(long = "max-excerpt-bytes-per-source", value_name = "BYTES")]
+    pub max_excerpt_bytes_per_source: Option<usize>,
+
+    /// Build the request artifact without writing the ledger row.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Subcommands for `ee reflect request-ledger`.
@@ -10601,6 +10649,9 @@ where
         }
         Some(Command::Rationale(RationaleCommand::List(ref args))) => {
             handle_rationale_list(&cli, args, stdout, stderr)
+        }
+        Some(Command::Reflect(ReflectCommand::Propose(ref args))) => {
+            handle_reflect_propose(&cli, args, stdout, stderr)
         }
         Some(Command::Reflect(ReflectCommand::RequestLedger(
             ReflectRequestLedgerCommand::Diagnostics(ref args),
@@ -37261,6 +37312,94 @@ where
     }
 }
 
+fn handle_reflect_propose<W, E>(
+    cli: &Cli,
+    args: &ReflectProposeArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let default_limits = ReflectionSourcePackageLimits::default();
+    let limits = ReflectionSourcePackageLimits {
+        max_sources: args.max_sources.unwrap_or(default_limits.max_sources),
+        max_total_excerpt_bytes: args
+            .max_total_excerpt_bytes
+            .unwrap_or(default_limits.max_total_excerpt_bytes),
+        max_excerpt_bytes_per_source: args
+            .max_excerpt_bytes_per_source
+            .unwrap_or(default_limits.max_excerpt_bytes_per_source),
+    };
+    let options = ReflectionProposeOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        reflection_kind: args.kind.as_str(),
+        source_ids: &args.source,
+        source_memory_ids: &args.source_memory,
+        source_evidence_span_ids: &args.source_evidence_span,
+        created_at: args.created_at.as_deref(),
+        limits,
+        dry_run: args.dry_run,
+        hmac_key_config: None,
+        lifecycle_config: None,
+    };
+
+    match propose_reflection_request(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mode = if report.dry_run {
+                    "DRY RUN"
+                } else if report.durable_mutation {
+                    "PROPOSED"
+                } else {
+                    "ALREADY PROPOSED"
+                };
+                let mut human = format!("{mode}: {}\n\n", report.request_id);
+                human.push_str(&format!("  reflectionKind: {}\n", report.reflection_kind));
+                human.push_str(&format!("  requestHash: {}\n", report.request_hash));
+                human.push_str(&format!("  expiresAt: {}\n", report.expires_at));
+                human.push_str(&format!("  hmacKeyId: {}\n", report.hmac_key_id));
+                human.push_str(&format!("  sources: {} ref(s)\n", report.source_refs.len()));
+                for source in &report.source_refs {
+                    human.push_str(&format!("    - {}/{}\n", source.kind, source.id));
+                }
+                human.push_str(&format!("  persisted: {}\n", report.persisted));
+                human.push_str("\nNext:\n");
+                for next in &report.next_commands {
+                    human.push_str(&format!("  {next}\n"));
+                }
+                write_stdout(stdout, &human)
+            }
+            output::Renderer::Toon => {
+                let toon = format!(
+                    "REFLECT_PROPOSE|request_id={}|request_hash={}|sources={}|persisted={}|dry_run={}",
+                    report.request_id,
+                    report.request_hash,
+                    report.source_refs.len(),
+                    report.persisted,
+                    report.dry_run,
+                );
+                write_stdout(stdout, &(toon + "\n"))
+            }
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let envelope = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report,
+                });
+                write_stdout(stdout, &(envelope.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_reflect_request_ledger_diagnostics<W, E>(
     cli: &Cli,
     args: &ReflectRequestLedgerDiagnosticsArgs,
@@ -44598,7 +44737,7 @@ const PROCEDURE_SUBCOMMANDS: &[&str] = &[
     "propose", "show", "list", "export", "promote", "verify", "drift",
 ];
 const RECORDER_SUBCOMMANDS: &[&str] = &["start", "event", "finish", "tail", "import"];
-const REFLECT_SUBCOMMANDS: &[&str] = &["request-ledger"];
+const REFLECT_SUBCOMMANDS: &[&str] = &["propose", "request-ledger"];
 const REFLECT_REQUEST_LEDGER_SUBCOMMANDS: &[&str] = &["diagnostics"];
 const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
@@ -45029,6 +45168,7 @@ impl NormalizedInvocation {
                     RationaleCommand::List(_) => "rationale list".to_string(),
                 },
                 Command::Reflect(reflect) => match reflect {
+                    ReflectCommand::Propose(_) => "reflect propose".to_string(),
                     ReflectCommand::RequestLedger(request_ledger) => match request_ledger {
                         ReflectRequestLedgerCommand::Diagnostics(_) => {
                             "reflect request-ledger diagnostics".to_string()
@@ -45834,15 +45974,15 @@ mod tests {
         GraphCommand, GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LearnCommand,
         LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
         MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
-        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, RuleCommand,
-        ShadowMode, SituationCommand, StatusArgs, SupportCommand, SwarmBriefArgs, SwarmCommand,
-        TaskFrameCommand, TaskFrameSubgoalCommand, VerifyCommand, WorkflowCommand,
-        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        hook_git_readiness_response_json, mesh, parse_completion_audit_evidence_input,
-        parse_context_profile, parse_lab_counterfactual_swap,
-        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
-        parse_verification_evidence_record_input, plan_cache_diag_degraded,
-        plan_cache_diag_response_json, run, write_index_rebuild_error,
+        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        ReflectRequestLedgerCommand, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
+        SupportCommand, SwarmBriefArgs, SwarmCommand, TaskFrameCommand, TaskFrameSubgoalCommand,
+        VerifyCommand, WorkflowCommand, WorkspaceCommand, WorkspaceHygieneArgs,
+        WorkspaceHygieneMode, db_inspect_redact_source_uri, hook_git_readiness_response_json, mesh,
+        parse_completion_audit_evidence_input, parse_context_profile,
+        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
+        parse_search_source_mode_arg, parse_verification_evidence_record_input,
+        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -57035,6 +57175,75 @@ mod tests {
                 ensure_equal(&args.status, &None, "status absent before defaulting")
             }
             _ => Err("expected Curate Candidates command".to_string()),
+        }
+    }
+
+    #[test]
+    fn reflect_propose_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "reflect",
+            "propose",
+            "--kind",
+            "gaps",
+            "--source",
+            "mem_generic",
+            "--source-memory",
+            "mem_a",
+            "--source-evidence-span",
+            "ev_b",
+            "--created-at",
+            "2026-05-24T00:00:00Z",
+            "--max-sources",
+            "4",
+            "--max-total-excerpt-bytes",
+            "4096",
+            "--max-excerpt-bytes-per-source",
+            "512",
+            "--database",
+            "/tmp/ee.db",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse reflect propose: {:?}", error.kind()))?;
+
+        match parsed.command {
+            Some(Command::Reflect(ReflectCommand::Propose(ref args))) => {
+                ensure_equal(&args.kind, &"gaps".to_string(), "kind")?;
+                ensure_equal(&args.source, &vec!["mem_generic".to_string()], "source")?;
+                ensure_equal(
+                    &args.source_memory,
+                    &vec!["mem_a".to_string()],
+                    "source memory",
+                )?;
+                ensure_equal(
+                    &args.source_evidence_span,
+                    &vec!["ev_b".to_string()],
+                    "source evidence span",
+                )?;
+                ensure_equal(
+                    &args.created_at,
+                    &Some("2026-05-24T00:00:00Z".to_string()),
+                    "created at",
+                )?;
+                ensure_equal(&args.max_sources, &Some(4), "max sources")?;
+                ensure_equal(
+                    &args.max_total_excerpt_bytes,
+                    &Some(4096),
+                    "max total excerpt bytes",
+                )?;
+                ensure_equal(
+                    &args.max_excerpt_bytes_per_source,
+                    &Some(512),
+                    "max excerpt bytes per source",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("/tmp/ee.db")),
+                    "database",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected Reflect propose command, got {other:?}")),
         }
     }
 
