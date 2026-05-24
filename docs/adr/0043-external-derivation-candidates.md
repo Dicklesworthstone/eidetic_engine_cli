@@ -430,10 +430,30 @@ schema, and the contract test for the extended candidate envelope passes.
 
 ## Verification hooks
 
-- **Schema contract test** (`tests/contracts/curation_candidates_schema_v2.rs`):
-  rebuilt table has the new CHECK constraints; the IN list contains
-  `create_derived_memory`; `target_memory_id` is null exactly for
-  `create_derived_memory`; new JSON columns present and guarded by `json_valid`.
+> bd-2xxao (2026-05-24): the original draft of this section named two
+> Rust files (`tests/contracts/curation_candidates_schema_v2.rs`,
+> `tests/e2e_derived_memory_candidate.rs`) and three JSON fixture
+> files (`derived_sources_invalid.json`,
+> `derived_target_required_for_mutation.json`,
+> `derived_target_forbidden_for_create.json`) that were never landed.
+> The bullets below are updated to point at the test files that exist
+> today; uncovered behavior is moved to **Verification gaps** at the
+> end of this section with a tracking bead so reviewers can audit
+> what is asserted vs. what is documented but not yet pinned. The
+> external-derivation operator/contract implementation beads
+> (bd-2dc25, bd-8k9gh, bd-kxm0c) remain the home for the
+> implementation work itself.
+
+- **Schema contract test** (`tests/curation_candidates_v062_unit.rs`):
+  V062 migration applies without error to a fresh DB; the
+  `curation_candidates_v060` retention row is preserved as migration
+  evidence; the public `insert_curation_candidate` API still accepts
+  pre-existing target-mutating candidates after V062. Negative
+  CHECK-constraint enforcement (NULL target + non-empty derivation
+  JSON for `create_derived_memory`, etc.) is exercised through the
+  bd-2dc25 model-layer slice that extends
+  `CreateCurationCandidateInput` to carry the new fields — see that
+  bead's tests rather than a free-standing schema_v2 file.
 - **Response contract test**: `ee.curate.candidates.v1`,
   `ee.curate.validate.v1`, `ee.curate.apply.v1`, and `ee.review.session.v1`
   all serialize `targetMemoryId: null` for `create_derived_memory` bootstrap
@@ -446,15 +466,22 @@ schema, and the contract test for the extended candidate envelope passes.
   preserves existing curation candidates across all pre-existing candidate
   types, keeps review/TTL fields intact, and rewrites the CHECK list without
   losing `paraphrase_dedup_proposal`.
-- **E2E test** (`tests/e2e_derived_memory_candidate.rs`): `ee review session
-  <id> --propose` against a fixture CASS corpus → bootstrap candidate persists
-  → `ee curate validate <id>` approves it without loading a target memory →
-  `ee curate apply <id>` creates a new memory, attaches the source evidence spans
-  to that memory, writes a `memory.create` audit row with
-  `details.schema = "ee.audit.derived_memory_created.v1"`, and enqueues a
-  search-index job. The derived content/source-ref package hash is
-  deterministic; generated memory ids and timestamps are normalized in the
-  assertion.
+- **E2E test** (`tests/e2e_curate_propose_derived.rs`): exercises the
+  `ee curate propose-derived` CLI surface end-to-end through the
+  propose → validate → apply chain. `--dry-run` builds a canonical
+  `create_derived_memory` candidate package without mutating the DB
+  (`targetMemoryId: null`, `source_refs` sorted by `(kind, id)`,
+  `nextCommands` point at the ordinary curate validate/apply path).
+  Non-dry-run inserts a pending candidate visible via `ee curate
+  candidates --status pending`; repeating the same proposal is
+  idempotent (same candidate id, no duplicate row). The copyable
+  `ee curate validate <id>` command from `nextCommands` succeeds
+  without loading a target memory; the copyable `ee curate apply
+  <id>` command succeeds and `data.application.createdMemoryId` is
+  set on the apply response. Audit-row schema + evidence-span
+  attachment + search-index enqueue are described in this ADR's
+  Apply path section; the dedicated audit-schema assertion is a
+  verification gap tracked below.
 - **Memory-source unit test**: a `create_derived_memory` candidate with memory
   source refs creates N `DerivedFrom` links and no evidence-span attachment.
 - **List/sort unit tests**: duplicate grouping, TTL/structural decay adjustment,
@@ -467,22 +494,62 @@ schema, and the contract test for the extended candidate envelope passes.
 - **Provenance URI contract test**: derived-memory creation never writes an
   unregistered provenance URI scheme; candidate provenance remains available
   through audit details and source refs.
+- **Validator coverage** (`tests/e2e_curate_candidates_validators.rs`):
+  pins the `ee curate candidates` Usage-validation paths against the
+  real binary (`--all` vs. `--status` mutual exclusion, unknown
+  `--type` listing the full candidate-type vocabulary including
+  `create_derived_memory`, unknown `--status`, invalid
+  `--target-memory`, missing DB Storage repair, happy path on empty
+  workspace). The behavior-specific bullets listed below
+  (failure-mode JSON fixtures, per-validator rejection paths with
+  stable degraded codes, atomicity under simulated apply failure)
+  describe contracts this ADR adopts but does not yet pin in a
+  dedicated test — see **Verification gaps**.
+
+### Verification gaps
+
+The following obligations are documented contracts but do not yet
+have a discoverable test file. They are tracked by bd-17pa6
+(reality-check follow-up from bd-2xxao) so a reviewer can audit
+gap-closure progress instead of trusting the prose above.
+
 - **Failure-mode fixtures** under `tests/fixtures/failure_modes/`:
-  - `derived_sources_invalid.json` — source ref missing / duplicate / missing
-    `contentHash` / cross-workspace / tombstoned memory / evidence span already
-    linked elsewhere / content-hash mismatch.
-  - `derived_target_required_for_mutation.json` — null target on a
-    non-`create_derived_memory` candidate.
-  - `derived_target_forbidden_for_create.json` — non-null target on a
-    `create_derived_memory` candidate.
-- **Validator unit tests**: empty source list, duplicate source refs, missing
-  `contentHash`, source from another workspace, tombstoned memory source,
-  evidence span already linked elsewhere, malformed `derivation_source_refs_json`,
-  missing `memorySpec`, and non-null target on `create_derived_memory` each
-  rejected with stable degraded codes.
-- **Atomicity test**: simulated failure during apply (search-index enqueue
-  forced to error) leaves the candidate in its pre-apply state and leaves no
-  orphan memory, link, evidence-attachment, audit, or search-index rows.
+  `derived_sources_invalid.json`,
+  `derived_target_required_for_mutation.json`, and
+  `derived_target_forbidden_for_create.json` — none exist on disk.
+- **Memory-source DerivedFrom link unit test**: no test currently
+  asserts that a `create_derived_memory` candidate with memory source
+  refs creates N `DerivedFrom` links (`MemoryLinkRelation::DerivedFrom`)
+  and skips evidence-span attachment for those sources.
+- **Audit-row schema assertion**: no test currently asserts the
+  apply path writes a `memory.create` audit row whose `details.schema`
+  equals `ee.audit.derived_memory_created.v1`. The schema string is
+  referenced from `src/core/curate.rs` but not from any test file.
+- **List/sort unit tests**: duplicate grouping, TTL/structural decay
+  adjustment, and `--target` filtering for `target_memory_id = NULL`
+  candidates lack a dedicated test.
+- **Candidate-type contract test**: `CandidateType::all`, `as_str`,
+  `FromStr`, `requires_content`, the parse-error expected-list message,
+  and the DB CHECK all include `create_derived_memory` exactly once
+  and keep `paraphrase_dedup_proposal` — no test currently pins this.
+- **Provenance URI contract test**: derived-memory creation never
+  writes an unregistered provenance URI scheme — no test currently
+  pins this.
+- **Per-validator rejection unit tests**: empty source list,
+  duplicate source refs, missing `contentHash`, cross-workspace
+  source, tombstoned memory source, evidence span already linked
+  elsewhere, malformed `derivation_source_refs_json`, missing
+  `memorySpec`, and non-null target on `create_derived_memory` each
+  rejected with stable degraded codes — only the broad propose-derived
+  E2E + Usage validators are pinned today.
+- **Atomicity test**: simulated failure during apply (search-index
+  enqueue forced to error) leaves the candidate in its pre-apply
+  state and leaves no orphan memory, link, evidence-attachment,
+  audit, or search-index rows — no test currently pins this.
+
+bd-17pa6 is the dedicated gap-closure tracker; closing it should
+land focused tests for each item above and remove them from this
+gaps list.
 
 ## Open questions deferred
 
