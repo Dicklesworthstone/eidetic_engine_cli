@@ -12039,7 +12039,8 @@ mod tests {
         candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
         list_reflection_request_ledger_diagnostics, parse_reflection_diagnostics_time,
         persist_prepared_reflection_request_ledger, persist_reflection_result_ingest_decision,
-        propose_reflection_request, reflection_hmac_key_diagnostic_from_config,
+        propose_reflection_request, reflection_diagnostic_blake3_hash_is_canonical,
+        reflection_diagnostic_request_id_is_canonical, reflection_hmac_key_diagnostic_from_config,
         reflection_request_ledger_diagnostic_from_stored,
         reflection_request_ledger_input_from_material, reflection_request_ledger_lifecycle_invalid,
         reflection_request_ledger_material_from_stored, reflection_request_ledger_material_invalid,
@@ -12048,7 +12049,7 @@ mod tests {
         reflection_result_candidate_input_from_material,
         reflection_result_replay_gate_from_db_status, review_curation_candidate,
         review_session_proposals, run_curation_disposition, run_review_workspace,
-        stable_workspace_id, validate_curation_candidate,
+        show_curation_candidate, stable_workspace_id, validate_curation_candidate,
     };
     use crate::curate::{
         CandidateSource, PreparedReflectionRequest, REFLECTION_CHALLENGE_BINDING_SCHEMA,
