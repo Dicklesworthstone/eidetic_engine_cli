@@ -14,6 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
+use crate::config::env_registry::{EnvVar, is_set, read_os};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 
 pub const ARTIFACT_RETENTION_DIAGNOSTICS_SCHEMA_V1: &str = "ee.artifact_retention.diagnostics.v1";
@@ -480,9 +481,9 @@ pub fn gather_artifact_retention_report(
 ) -> ArtifactRetentionReport {
     let workspace = normalize_path(&options.workspace);
     let specs = artifact_retention_specs(&workspace);
-    let j1_log_configured = env::var_os("EE_TEST_LOG_PATH").is_some();
-    let retention_manifest_configured = env::var_os("EPIC_RETENTION_MANIFEST").is_some()
-        || env::var_os("EE_E2E_RETENTION_MANIFEST").is_some();
+    let j1_log_configured = is_set(EnvVar::TestLogPath);
+    let retention_manifest_configured =
+        env::var_os("EPIC_RETENTION_MANIFEST").is_some() || is_set(EnvVar::E2eRetentionManifest);
 
     let mut roots = Vec::with_capacity(specs.len());
     let mut actions = Vec::with_capacity(specs.len());
@@ -982,7 +983,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
         },
     ];
 
-    if let Some(path) = env::var_os("EE_TEST_LOG_PATH").map(PathBuf::from) {
+    if let Some(path) = read_os(EnvVar::TestLogPath).map(PathBuf::from) {
         specs.push(ArtifactRetentionRootSpec {
             label: "j1_current_log",
             category: "j1_jsonl_log",
@@ -997,7 +998,7 @@ fn artifact_retention_specs(workspace: &Path) -> Vec<ArtifactRetentionRootSpec> 
     }
 
     if let Some(path) = env::var_os("EPIC_RETENTION_MANIFEST")
-        .or_else(|| env::var_os("EE_E2E_RETENTION_MANIFEST"))
+        .or_else(|| read_os(EnvVar::E2eRetentionManifest))
         .map(PathBuf::from)
     {
         specs.push(ArtifactRetentionRootSpec {

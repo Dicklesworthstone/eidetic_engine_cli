@@ -287,6 +287,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         category: EnvVar::DisableRememberSearchNeighbors.category(),
     },
     EnvVarEntry {
+        name: EnvVar::E2eRetentionManifest.name(),
+        description: EnvVar::E2eRetentionManifest.description(),
+        default: EnvVar::E2eRetentionManifest.default_value(),
+        category: EnvVar::E2eRetentionManifest.category(),
+    },
+    EnvVarEntry {
         name: EnvVar::EmbedDedupCosineFloor.name(),
         description: EnvVar::EmbedDedupCosineFloor.description(),
         default: EnvVar::EmbedDedupCosineFloor.default_value(),
@@ -399,6 +405,12 @@ pub const ENV_VARS: &[EnvVarEntry] = &[
         description: EnvVar::L2PackCacheDisable.description(),
         default: EnvVar::L2PackCacheDisable.default_value(),
         category: EnvVar::L2PackCacheDisable.category(),
+    },
+    EnvVarEntry {
+        name: EnvVar::LegacySelectionCertificate.name(),
+        description: EnvVar::LegacySelectionCertificate.description(),
+        default: EnvVar::LegacySelectionCertificate.default_value(),
+        category: EnvVar::LegacySelectionCertificate.category(),
     },
     EnvVarEntry {
         name: EnvVar::LexicalIndexHugepages.name(),

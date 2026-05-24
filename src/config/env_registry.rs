@@ -38,6 +38,8 @@ pub enum EnvVar {
     DisableToon,
     /// `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS`
     DisableRememberSearchNeighbors,
+    /// `EE_E2E_RETENTION_MANIFEST`
+    E2eRetentionManifest,
     /// `EE_EMBED_DEDUP_COSINE_FLOOR`
     EmbedDedupCosineFloor,
     /// `EE_EMBED_DEDUP_ENABLED`
@@ -84,6 +86,8 @@ pub enum EnvVar {
     L2PackCacheDir,
     /// `EE_L2_PACK_CACHE_DISABLE`
     L2PackCacheDisable,
+    /// `EE_LEGACY_SELECTION_CERTIFICATE`
+    LegacySelectionCertificate,
     /// `EE_LEXICAL_INDEX_HUGEPAGES`
     LexicalIndexHugepages,
     /// `EE_LEXICAL_INDEX_PIN_RAM`
@@ -221,6 +225,7 @@ impl EnvVar {
             Self::DiagForceCapabilityGap,
             Self::DisableToon,
             Self::DisableRememberSearchNeighbors,
+            Self::E2eRetentionManifest,
             Self::EmbedDedupCosineFloor,
             Self::EmbedDedupEnabled,
             Self::EmbedDedupHammingK,
@@ -244,6 +249,7 @@ impl EnvVar {
             Self::L2PackCacheBytes,
             Self::L2PackCacheDir,
             Self::L2PackCacheDisable,
+            Self::LegacySelectionCertificate,
             Self::LexicalIndexHugepages,
             Self::LexicalIndexPinRam,
             Self::LogFormat,
@@ -323,6 +329,7 @@ impl EnvVar {
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
             Self::DisableToon => "EE_DISABLE_TOON",
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
+            Self::E2eRetentionManifest => "EE_E2E_RETENTION_MANIFEST",
             Self::EmbedDedupCosineFloor => "EE_EMBED_DEDUP_COSINE_FLOOR",
             Self::EmbedDedupEnabled => "EE_EMBED_DEDUP_ENABLED",
             Self::EmbedDedupHammingK => "EE_EMBED_DEDUP_HAMMING_K",
@@ -348,6 +355,7 @@ impl EnvVar {
             Self::L2PackCacheBytes => "EE_L2_PACK_CACHE_BYTES",
             Self::L2PackCacheDir => "EE_L2_PACK_CACHE_DIR",
             Self::L2PackCacheDisable => "EE_L2_PACK_CACHE_DISABLE",
+            Self::LegacySelectionCertificate => "EE_LEGACY_SELECTION_CERTIFICATE",
             Self::LexicalIndexHugepages => "EE_LEXICAL_INDEX_HUGEPAGES",
             Self::LexicalIndexPinRam => "EE_LEXICAL_INDEX_PIN_RAM",
             Self::LogFormat => "EE_LOG_FORMAT",
@@ -446,6 +454,9 @@ impl EnvVar {
             Self::DisableRememberSearchNeighbors => {
                 "Disable Frankensearch neighbors during remember-time proposal."
             }
+            Self::E2eRetentionManifest => {
+                "Override the retained-artifact manifest path used by diagnostics."
+            }
             Self::EmbedDedupCosineFloor => {
                 "Set the cosine-similarity floor for insert-time embedding dedup confirmation."
             }
@@ -497,6 +508,9 @@ impl EnvVar {
             Self::L2PackCacheBytes => "Override the L2 pack cache byte cap per workspace.",
             Self::L2PackCacheDir => "Override the L2 pack cache root directory.",
             Self::L2PackCacheDisable => "Disable L2 pack cache lookup and writes.",
+            Self::LegacySelectionCertificate => {
+                "Include the legacy selectionCertificate field in context JSON."
+            }
             Self::LexicalIndexHugepages => {
                 "Request transparent hugepage hints for opt-in lexical index RAM-tier pinning."
             }
@@ -705,6 +719,7 @@ impl EnvVar {
             | Self::RememberCurationSyncBudgetMs => "curation",
             Self::DatabasePath
             | Self::DemoEvidenceRoot
+            | Self::E2eRetentionManifest
             | Self::FlightRecorderDir
             | Self::IndexDir
             | Self::L2PackCacheDir
@@ -720,6 +735,7 @@ impl EnvVar {
             | Self::Format
             | Self::HookMode
             | Self::Json
+            | Self::LegacySelectionCertificate
             | Self::NoColor
             | Self::OutputFormat => "output",
             Self::FlightRecorder

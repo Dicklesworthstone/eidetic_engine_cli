@@ -4,7 +4,8 @@
 //! slice. It freezes the violations that the eventual proc-macro/trybuild layer
 //! must reject at compile time.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Finding {
@@ -28,6 +29,76 @@ fn determinism_lint_fixture_files_are_present() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/determinism_lint");
     assert!(root.join("known_violations.rs").is_file());
     assert!(root.join("known_violations.expected").is_file());
+}
+
+#[test]
+fn raw_ee_env_reads_are_forbidden_outside_env_registry() -> Result<(), String> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let allowed_path = manifest_dir.join("src/config/env_registry.rs");
+    let mut rust_files = Vec::new();
+    collect_rust_files(&manifest_dir.join("src"), &mut rust_files)?;
+    rust_files.sort();
+
+    let mut violations = Vec::new();
+    for path in rust_files {
+        if path == allowed_path {
+            continue;
+        }
+        let source = fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+        for (index, line) in source.lines().enumerate() {
+            if line_has_raw_ee_env_read(line) {
+                let rel = path.strip_prefix(manifest_dir).unwrap_or(path.as_path());
+                violations.push(format!(
+                    "{}:{}: raw EE_* env read outside src/config/env_registry.rs",
+                    rel.display(),
+                    index + 1
+                ));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "raw literal EE_* environment reads must go through EnvVar/read/is_set:\n{}",
+            violations.join("\n")
+        ))
+    }
+}
+
+fn collect_rust_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir)
+        .map_err(|error| format!("failed to read dir {}: {error}", dir.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("failed to read dir entry in {}: {error}", dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+        if file_type.is_dir() {
+            collect_rust_files(&path, files)?;
+        } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn line_has_raw_ee_env_read(line: &str) -> bool {
+    let Some(code) = line.split("//").next() else {
+        return false;
+    };
+    [
+        "std::env::var(\"EE_",
+        "std::env::var_os(\"EE_",
+        "env::var(\"EE_",
+        "env::var_os(\"EE_",
+    ]
+    .iter()
+    .any(|needle| code.contains(needle))
 }
 
 fn scan_fixture(source: &str) -> Vec<Finding> {
