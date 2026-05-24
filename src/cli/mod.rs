@@ -22194,14 +22194,56 @@ fn incident_recovery_actions(fixture: &serde_json::Value) -> serde_json::Value {
                     "summary": action.get("summary").cloned().unwrap_or(serde_json::Value::Null),
                     "command": action.get("command").cloned().unwrap_or(serde_json::Value::Null),
                     "manualStep": action.get("manualStep").cloned().unwrap_or(serde_json::Value::Null),
-                    "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
+                    "evidence": incident_evidence_array(action.get("evidence")),
                     "destructive": action.get("destructive").cloned().unwrap_or(serde_json::Value::Bool(false)),
-                    "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([])),
-                    "repairSafety": action.get("repairSafety").cloned().unwrap_or_else(|| incident_default_repair_safety(action))
+                    "preconditions": incident_string_array_or_empty(action.get("preconditions")),
+                    "repairSafety": incident_repair_safety(action)
                 })
             })
             .collect(),
     )
+}
+
+fn incident_string_array(value: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(|item| serde_json::Value::String(item.to_owned()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn incident_string_array_or_empty(value: Option<&serde_json::Value>) -> serde_json::Value {
+    serde_json::Value::Array(incident_string_array(value))
+}
+
+fn incident_evidence_array(value: Option<&serde_json::Value>) -> serde_json::Value {
+    let evidence = incident_string_array(value);
+    if evidence.is_empty() {
+        serde_json::json!(["incident_fixture_recovery_action"])
+    } else {
+        serde_json::Value::Array(evidence)
+    }
+}
+
+fn incident_repair_safety(action: &serde_json::Value) -> serde_json::Value {
+    if let Some(object) = action
+        .get("repairSafety")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut object = object.clone();
+        let evidence = incident_string_array_or_empty(object.get("evidence"));
+        let preconditions = incident_string_array_or_empty(object.get("preconditions"));
+        object.insert("evidence".to_owned(), evidence);
+        object.insert("preconditions".to_owned(), preconditions);
+        return serde_json::Value::Object(object);
+    }
+
+    incident_default_repair_safety(action)
 }
 
 fn incident_default_repair_safety(action: &serde_json::Value) -> serde_json::Value {
@@ -22216,8 +22258,8 @@ fn incident_default_repair_safety(action: &serde_json::Value) -> serde_json::Val
         "ruleId": "repair_safety:unavailable_or_manual_only",
         "source": "repair_action_safety",
         "reasonCode": "incident_repair_safety_missing",
-        "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
-        "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([]))
+        "evidence": incident_string_array_or_empty(action.get("evidence")),
+        "preconditions": incident_string_array_or_empty(action.get("preconditions"))
     })
 }
 
@@ -47195,6 +47237,19 @@ mod tests {
         ensure_equal(&action["destructive"], &serde_json::json!(false), context)
     }
 
+    fn ensure_json_string_array(value: &serde_json::Value, context: &str) -> TestResult {
+        let items = value
+            .as_array()
+            .ok_or_else(|| format!("{context}: expected array, got {value}"))?;
+        for (index, item) in items.iter().enumerate() {
+            ensure(
+                item.as_str().is_some(),
+                format!("{context}[{index}]: expected string, got {item}"),
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn parser_accepts_diag_incident_fixture() -> TestResult {
         let parsed = Cli::try_parse_from([
@@ -47345,6 +47400,71 @@ mod tests {
                     "evidence": ["legacy_fixture_missing_repair_safety"],
                     "destructive": false,
                     "preconditions": ["fixture reviewed"]
+                },
+                {
+                    "priority": 2,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because repairSafety was explicitly null.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": ["legacy_fixture_null_repair_safety"],
+                    "destructive": false,
+                    "preconditions": ["fixture reviewed"],
+                    "repairSafety": null
+                },
+                {
+                    "priority": 3,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because evidence and preconditions were null.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": null,
+                    "destructive": false,
+                    "preconditions": null
+                },
+                {
+                    "priority": 4,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because evidence and preconditions were scalar.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": "not-array",
+                    "destructive": false,
+                    "preconditions": "not-array"
+                },
+                {
+                    "priority": 5,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because evidence and preconditions had non-string entries.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": [42, true],
+                    "destructive": false,
+                    "preconditions": [false, "fixture reviewed"]
+                },
+                {
+                    "priority": 6,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because repairSafety arrays had malformed entries.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": ["explicit_repair_safety"],
+                    "destructive": false,
+                    "preconditions": [],
+                    "repairSafety": {
+                        "riskClass": "unavailable_or_manual_only",
+                        "preflightCommand": null,
+                        "requiresHumanApproval": false,
+                        "mutatesExternalState": false,
+                        "mutatesTrackerState": false,
+                        "privacyClass": "synthetic_incident_fixture",
+                        "nextAction": "manual_only",
+                        "ruleId": "repair_safety:unavailable_or_manual_only",
+                        "source": "repair_action_safety",
+                        "reasonCode": "incident_repair_safety_supplied",
+                        "evidence": null,
+                        "preconditions": [42, "safety reviewed"]
+                    }
                 }
             ],
             "redactionExpectations": {},
@@ -47374,19 +47494,10 @@ mod tests {
         )?;
         let value: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
-        let action = value["data"]["recoveryActions"]
+        let actions = value["data"]["recoveryActions"]
             .as_array()
-            .and_then(|actions| actions.first())
-            .ok_or_else(|| "rendered incident recovery action missing".to_string())?;
-        ensure(
-            action["repairSafety"].is_object(),
-            "repairSafety fallback must render as an object",
-        )?;
-        ensure_equal(
-            &action["repairSafety"]["riskClass"],
-            &serde_json::json!("unavailable_or_manual_only"),
-            "repairSafety fallback risk class",
-        )?;
+            .ok_or_else(|| "rendered incident recovery actions missing".to_string())?;
+        ensure_equal(&actions.len(), &6_usize, "rendered recovery action count")?;
 
         let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("docs")
@@ -47400,11 +47511,54 @@ mod tests {
         let recovery_action_schema = schema
             .pointer("/$defs/recoveryAction")
             .ok_or_else(|| "swarm incident schema missing recoveryAction definition".to_string())?;
-        super::validate_json_schema_subset(
-            action,
-            recovery_action_schema,
-            &schema,
-            "recoveryActions[0]",
+        for (index, action) in actions.iter().enumerate() {
+            ensure(
+                action["repairSafety"].is_object(),
+                format!("recoveryActions[{index}].repairSafety must render as an object"),
+            )?;
+            ensure_json_string_array(
+                &action["evidence"],
+                &format!("recoveryActions[{index}].evidence"),
+            )?;
+            ensure(
+                action["evidence"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty()),
+                format!("recoveryActions[{index}].evidence must not be empty"),
+            )?;
+            ensure_json_string_array(
+                &action["preconditions"],
+                &format!("recoveryActions[{index}].preconditions"),
+            )?;
+            ensure_json_string_array(
+                &action["repairSafety"]["evidence"],
+                &format!("recoveryActions[{index}].repairSafety.evidence"),
+            )?;
+            ensure_json_string_array(
+                &action["repairSafety"]["preconditions"],
+                &format!("recoveryActions[{index}].repairSafety.preconditions"),
+            )?;
+            super::validate_json_schema_subset(
+                action,
+                recovery_action_schema,
+                &schema,
+                &format!("recoveryActions[{index}]"),
+            )?;
+        }
+        ensure_equal(
+            &actions[1]["repairSafety"]["riskClass"],
+            &serde_json::json!("unavailable_or_manual_only"),
+            "explicit null repairSafety falls back",
+        )?;
+        ensure_equal(
+            &actions[4]["evidence"],
+            &serde_json::json!(["incident_fixture_recovery_action"]),
+            "non-string evidence gets schema-valid fallback evidence",
+        )?;
+        ensure_equal(
+            &actions[5]["repairSafety"]["preconditions"],
+            &serde_json::json!(["safety reviewed"]),
+            "explicit repairSafety preconditions are string-filtered",
         )
     }
 
