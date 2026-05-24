@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2329 # Scenario and assertion helpers are invoked dynamically.
 # EE-TST-005 Advanced Subsystem End-to-End Test Script
 #
 # Validates advanced EE subsystems against the real binary in an isolated
@@ -122,7 +123,7 @@ cleanup() {
     if [[ -n "${TEST_WORKSPACE}" && -d "${TEST_WORKSPACE}" ]]; then
         log_info "Preserved test workspace: ${TEST_WORKSPACE}"
     fi
-    exit ${exit_code}
+    exit "${exit_code}"
 }
 
 setup_workspace() {
@@ -215,7 +216,6 @@ run_ee() {
     LAST_EXIT_CODE="${exit_code}"
     LAST_STDOUT_FILE="${stdout_file}"
     LAST_STDERR_FILE="${stderr_file}"
-    LAST_ELAPSED="${elapsed}"
 }
 
 # Assert exit code
@@ -277,6 +277,21 @@ assert_stdout_clean() {
         return 1
     fi
     return 0
+}
+
+record_degraded_or_usage_failure() {
+    local context="${1:?context required}"
+
+    case "${LAST_EXIT_CODE}" in
+        1|2)
+            log_fail "${context}: shipped command exited with usage/config error ${LAST_EXIT_CODE}; stderr=${LAST_STDERR_FILE}"
+            return 1
+            ;;
+        *)
+            log_skip "${context} (degraded or unavailable, exit ${LAST_EXIT_CODE})"
+            return 0
+            ;;
+    esac
 }
 
 # Assert JSON field exists
@@ -402,7 +417,7 @@ scenario_preflight() {
     local skipped=0
 
     # Test: preflight run --json (dry-run)
-    run_ee preflight run_dryrun preflight run --task "test task" --dry-run --json
+    run_ee preflight run_dryrun preflight run "test task" --dry-run --json
     if [[ "${LAST_EXIT_CODE}" -eq 0 ]]; then
         if assert_stdout_json "preflight run format" && \
            assert_stdout_clean "preflight run stdout clean"; then
@@ -411,14 +426,14 @@ scenario_preflight() {
         else
             ((failed++))
         fi
-    else
-        # May not be fully implemented yet
+    elif record_degraded_or_usage_failure "preflight run --dry-run --json"; then
         ((skipped++))
-        log_skip "preflight run --dry-run --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: preflight show --json
-    run_ee preflight show preflight show --json
+    run_ee preflight show preflight show preflight_test --json
     if [[ "${LAST_EXIT_CODE}" -eq 0 ]]; then
         if assert_stdout_json "preflight show format"; then
             ((passed++))
@@ -426,9 +441,13 @@ scenario_preflight() {
         else
             ((failed++))
         fi
-    else
+    elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
+        ((passed++))
+        log_pass "preflight show --json (not found, expected)"
+    elif record_degraded_or_usage_failure "preflight show --json"; then
         ((skipped++))
-        log_skip "preflight show --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
@@ -455,9 +474,10 @@ scenario_procedure() {
         else
             ((failed++))
         fi
-    else
+    elif record_degraded_or_usage_failure "procedure list --json"; then
         ((skipped++))
-        log_skip "procedure list --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: procedure show --json (with placeholder ID)
@@ -473,13 +493,19 @@ scenario_procedure() {
         # NotFound is acceptable for placeholder ID
         ((passed++))
         log_pass "procedure show --json (not found, expected)"
-    else
+    elif record_degraded_or_usage_failure "procedure show --json"; then
         ((skipped++))
-        log_skip "procedure show --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: procedure propose --dry-run --json
-    run_ee procedure propose_dryrun procedure propose --run-id run_test --dry-run --json
+    run_ee procedure propose_dryrun procedure propose \
+        --title "Test procedure proposal" \
+        --summary "Dry-run proposal from the advanced E2E harness." \
+        --source-run run_test \
+        --dry-run \
+        --json
     if [[ "${LAST_EXIT_CODE}" -eq 0 ]]; then
         if assert_stdout_json "procedure propose format"; then
             ((passed++))
@@ -487,9 +513,10 @@ scenario_procedure() {
         else
             ((failed++))
         fi
-    else
+    elif record_degraded_or_usage_failure "procedure propose --dry-run --json"; then
         ((skipped++))
-        log_skip "procedure propose --dry-run --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
@@ -516,9 +543,10 @@ scenario_economy() {
         else
             ((failed++))
         fi
-    else
+    elif record_degraded_or_usage_failure "economy report --json"; then
         ((skipped++))
-        log_skip "economy report --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: economy score --json
@@ -534,9 +562,10 @@ scenario_economy() {
         # NotFound is acceptable for placeholder ID
         ((passed++))
         log_pass "economy score --json (not found, expected)"
-    else
+    elif record_degraded_or_usage_failure "economy score --json"; then
         ((skipped++))
-        log_skip "economy score --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
@@ -563,9 +592,10 @@ scenario_learning() {
         else
             ((failed++))
         fi
-    else
+    elif record_degraded_or_usage_failure "learn agenda --json"; then
         ((skipped++))
-        log_skip "learn agenda --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: learn uncertainty --json
@@ -577,9 +607,10 @@ scenario_learning() {
         else
             ((failed++))
         fi
-    else
+    elif record_degraded_or_usage_failure "learn uncertainty --json"; then
         ((skipped++))
-        log_skip "learn uncertainty --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
@@ -609,9 +640,10 @@ scenario_causal() {
     elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
         ((passed++))
         log_pass "causal trace --json (not found, expected)"
-    else
+    elif record_degraded_or_usage_failure "causal trace --json"; then
         ((skipped++))
-        log_skip "causal trace --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     # Test: causal estimate --json
@@ -626,9 +658,10 @@ scenario_causal() {
     elif [[ "${LAST_EXIT_CODE}" -eq 10 ]]; then
         ((passed++))
         log_pass "causal estimate --json (not found, expected)"
-    else
+    elif record_degraded_or_usage_failure "causal estimate --json"; then
         ((skipped++))
-        log_skip "causal estimate --json (not yet implemented or degraded)"
+    else
+        ((failed++))
     fi
 
     TESTS_RUN=$((TESTS_RUN + passed + failed))
