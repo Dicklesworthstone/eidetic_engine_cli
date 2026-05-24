@@ -13008,6 +13008,184 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn reflection_request_ledger_export_hygiene_report_pins_safety_invariants() -> TestResult {
+        let report = super::reflection_request_ledger_export_hygiene_report();
+
+        assert_eq!(report.posture, "metadata_only");
+        assert!(report.ordinary_export_safe);
+        assert!(report.bulk_export_safe);
+        assert!(!report.includes_raw_source_excerpts);
+        assert!(!report.includes_hmac_key_material);
+        assert!(!report.includes_prompt_injection_text);
+        assert_eq!(
+            report.redaction_policy,
+            "reflection_request_ledger_bulk_export_metadata_only_v1"
+        );
+
+        let exported: BTreeSet<_> = report.exported_fields.iter().copied().collect();
+        for field in [
+            "requestId",
+            "requestHash",
+            "reflectionKind",
+            "sourcePackageHash",
+            "sourceRefCount",
+            "sourceContentHashCount",
+            "promptTemplateHash",
+            "responseSchemaHash",
+            "createdAt",
+            "expiresAt",
+            "challengeKeyId",
+            "challengeHash",
+            "status",
+            "posture",
+            "consumedCandidateId",
+            "consumedAt",
+            "consumedResultHash",
+            "retention",
+            "hmacKey.status",
+            "hmacKey.keyPathConfigured",
+        ] {
+            assert!(
+                exported.contains(field),
+                "missing exported audit field {field}"
+            );
+        }
+
+        let denied: BTreeSet<_> = report.denied_fields.iter().copied().collect();
+        for field in [
+            "sourcePackage.sources[].excerpt",
+            "sourcePackage.sources[].provenanceUri",
+            "sourceRefsJson",
+            "sourceContentHashesJson.raw",
+            "challenge.hmac",
+            "hmacKeyMaterial",
+            "hmacKeyPath",
+            "promptInjectionSourceText",
+            "result.body",
+            "rawDebugArtifact",
+        ] {
+            assert!(denied.contains(field), "missing denied field {field}");
+            assert!(
+                !exported.contains(field),
+                "secret-bearing denied field must not be exported: {field}"
+            );
+        }
+
+        let surfaces: BTreeSet<_> = report.ordinary_export_surfaces.iter().copied().collect();
+        for surface in [
+            "reflect_request_ledger_diagnostics",
+            "support_bundle",
+            "backup",
+            "handoff",
+            "e2e_event_log",
+        ] {
+            assert!(
+                surfaces.contains(surface),
+                "ordinary export surface missing from hygiene audit: {surface}"
+            );
+        }
+
+        let placeholders: BTreeSet<_> = report.redaction_placeholders.iter().copied().collect();
+        for sentinel in [
+            super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL,
+            "[REDACTED:reflection-source-secret]",
+            "[REDACTED:secret]",
+        ] {
+            assert!(
+                placeholders.contains(sentinel),
+                "missing redaction sentinel {sentinel}"
+            );
+        }
+        for placeholder in &report.redaction_placeholders {
+            assert!(placeholder.starts_with("[REDACTED:"));
+            assert!(placeholder.ends_with(']'));
+            assert!(!placeholder.contains("blake3:"));
+            assert!(!placeholder.contains("reflect_req_"));
+        }
+
+        let report_json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        for sensitive_value in [
+            "fixture-challenge-token",
+            "reflection diagnostics secret key material",
+            "redaction-fixture-value",
+            "reflect_req_real_request_id",
+        ] {
+            assert!(
+                !report_json.contains(sensitive_value),
+                "export hygiene report leaked sensitive value {sensitive_value}"
+            );
+        }
+
+        let value = serde_json::to_value(&report).map_err(|error| error.to_string())?;
+        for field in [
+            "posture",
+            "ordinaryExportSafe",
+            "bulkExportSafe",
+            "includesRawSourceExcerpts",
+            "includesHmacKeyMaterial",
+            "includesPromptInjectionText",
+            "redactionPolicy",
+            "ordinaryExportSurfaces",
+            "exportedFields",
+            "deniedFields",
+            "redactionPlaceholders",
+        ] {
+            assert!(
+                value.get(field).is_some(),
+                "serialized hygiene report is missing audit field {field}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_export_hygiene_redaction_sentinels_match_live_paths() -> TestResult
+    {
+        let report = super::reflection_request_ledger_export_hygiene_report();
+        let redaction_fixture_value = "redaction-fixture-value";
+        let redacted = super::reflection_diagnostic_redacted_text_or_trimmed(&format!(
+            "API_KEY={redaction_fixture_value}"
+        ));
+
+        assert!(!redacted.contains(redaction_fixture_value));
+        assert!(redacted.contains("[REDACTED:"));
+        assert!(
+            report
+                .redaction_placeholders
+                .iter()
+                .any(|placeholder| placeholder.starts_with("[REDACTED:"))
+        );
+
+        let invalid_request_id = super::reflection_diagnostic_request_id_or_sentinel(
+            "reflect_req_real_request_id with whitespace",
+        );
+        assert_eq!(
+            invalid_request_id,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL
+        );
+        assert!(
+            report
+                .redaction_placeholders
+                .contains(&super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL)
+        );
+
+        let invalid_hash = super::reflection_diagnostic_hash_or_sentinel(
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        assert_eq!(
+            invalid_hash,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL
+        );
+        assert!(
+            report
+                .redaction_placeholders
+                .contains(&super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL)
+        );
+        Ok(())
+    }
+
     // ---- bd-2ld00: reflection request-ledger retention coverage ----
 
     #[test]
