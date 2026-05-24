@@ -1,13 +1,15 @@
 # Source Run Evidence
 
-`ee.source_run_evidence.v1` is the planned source-run watchdog contract for
-`bd-12v87.1`. It records one bounded external source execution: Beads/BV
+`ee.source_run_evidence.v1` is the source-run watchdog contract for
+`bd-12v87.1` and `bd-12v87.2`. It records one bounded external source execution: Beads/BV
 reads, Agent Mail health, CASS probes, RCH verifier calls, and future swarm
 collectors.
 
-The schema is intentionally unshipped until the shared runner exists. It
-defines the stable evidence shape that higher-level swarm surfaces should
-consume once `bd-12v87.2` and its integration beads land.
+The shared Rust runner lives in `src/core/source_run.rs`. It enforces an
+explicit timeout budget, captures bounded stdout/stderr tails, records spawn
+failures as evidence, and terminates only the child process group it created.
+Higher-level integration beads consume the stable evidence shape rather than
+re-implementing subprocess watchdog logic.
 
 ## Contract
 

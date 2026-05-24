@@ -90,6 +90,7 @@ pub mod rule;
 pub mod search;
 pub mod singleflight;
 pub mod situation;
+pub mod source_run;
 pub mod sprt;
 pub mod status;
 pub mod streams;

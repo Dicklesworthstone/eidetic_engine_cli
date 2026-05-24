@@ -13,10 +13,10 @@ The shipped fallback ledger schema is
 idempotent ledger storage, redacted support-bundle summaries, and `ee why`
 inclusion.
 
-The planned source-run watchdog schema is `ee.source_run_evidence.v1`.
+The shipped source-run watchdog schema is `ee.source_run_evidence.v1`.
 `bd-12v87.1` defines the shared timeout, redaction, degraded, recovery, and
-provenance contract that later watchdog runner and integration beads will emit.
-It is marked unshipped until those runtime surfaces exist.
+provenance contract; `bd-12v87.2` adds the shared Rust runner that emits it for
+bounded external source commands.
 
 The verification broker view schema is `ee.verification.broker_view.v1`.
 `ee verify broker lookup --json` emits it as the derived broker block over
