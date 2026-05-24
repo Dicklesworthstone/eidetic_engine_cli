@@ -582,6 +582,7 @@ mod tests {
 
     use ee::db::DbConnection;
     use serde::Deserialize;
+    use serde_json::{Map as JsonMap, Value as JsonValue};
     use sqlmodel_core::{Row, Value};
     use sqlmodel_frankensqlite::FrankenConnection;
 
@@ -625,6 +626,23 @@ mod tests {
         line: usize,
         schema_id: String,
         phrase: String,
+        source_excerpt: String,
+    }
+
+    #[derive(Debug)]
+    struct MarkdownJsonExample {
+        path: String,
+        line: usize,
+        fence_language: String,
+        body: String,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct JsonExampleValidationIssue {
+        path: String,
+        line: usize,
+        schema_id: String,
+        message: String,
         source_excerpt: String,
     }
 
@@ -694,15 +712,27 @@ mod tests {
             .iter()
             .filter(|entry| entry.status == "current")
         {
+            if let Some(schema_file) = &entry.schema_file {
+                insert_existing_current_facing_path(schema_file, &mut paths)?;
+            }
             for pattern in &entry.current_facing_contexts {
                 if let Some(prefix) = pattern.strip_suffix("/**") {
                     collect_markdown_paths(&repo_path(prefix), &mut paths)?;
-                } else if repo_path(pattern).is_file() {
-                    paths.insert(pattern.clone());
+                } else {
+                    insert_existing_current_facing_path(pattern, &mut paths)?;
                 }
             }
         }
         Ok(paths)
+    }
+
+    fn insert_existing_current_facing_path(path: &str, paths: &mut BTreeSet<String>) -> TestResult {
+        if repo_path(path).is_file() {
+            paths.insert(path.to_owned());
+            Ok(())
+        } else {
+            Err(format!("current-facing contract path is missing: {path}"))
+        }
     }
 
     fn collect_markdown_paths(root: &Path, paths: &mut BTreeSet<String>) -> Result<(), String> {
@@ -725,6 +755,654 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    fn current_json_example_paths(
+        inventory: &ContractInventory,
+    ) -> Result<BTreeSet<String>, String> {
+        let mut paths = current_facing_doc_paths(inventory)?
+            .into_iter()
+            .filter(|path| path.ends_with(".md"))
+            .collect::<BTreeSet<_>>();
+        insert_existing_current_facing_path("docs/migration-guide.md", &mut paths)?;
+        Ok(paths)
+    }
+
+    fn extract_markdown_json_examples(path: &str, text: &str) -> Vec<MarkdownJsonExample> {
+        let mut examples = Vec::new();
+        let mut active_fence: Option<(String, usize, Vec<String>)> = None;
+
+        for (line_index, line) in text.lines().enumerate() {
+            let line_number = line_index + 1;
+            let trimmed = line.trim_start();
+
+            if let Some((language, start_line, body_lines)) = active_fence.as_mut() {
+                if trimmed.starts_with("```") {
+                    examples.push(MarkdownJsonExample {
+                        path: path.to_owned(),
+                        line: *start_line,
+                        fence_language: language.clone(),
+                        body: body_lines.join("\n"),
+                    });
+                    active_fence = None;
+                } else {
+                    body_lines.push(line.to_owned());
+                }
+                continue;
+            }
+
+            if let Some(info_string) = trimmed.strip_prefix("```") {
+                let language = info_string
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                if language == "json" || language == "jsonc" {
+                    active_fence = Some((language, line_number + 1, Vec::new()));
+                }
+            }
+        }
+
+        examples
+    }
+
+    fn json_example_source_excerpt(source: &str) -> String {
+        source
+            .split_whitespace()
+            .take(32)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn json_example_issue(
+        path: &str,
+        line: usize,
+        schema_id: &str,
+        message: impl Into<String>,
+        source: &str,
+    ) -> JsonExampleValidationIssue {
+        JsonExampleValidationIssue {
+            path: path.to_owned(),
+            line,
+            schema_id: schema_id.to_owned(),
+            message: message.into(),
+            source_excerpt: json_example_source_excerpt(source),
+        }
+    }
+
+    fn contract_schema_id(value: &JsonValue) -> Option<&str> {
+        value
+            .as_object()
+            .and_then(|object| object.get("schema"))
+            .and_then(JsonValue::as_str)
+    }
+
+    fn json_example_validation_issues_for_text(
+        path: &str,
+        text: &str,
+        inventory: &ContractInventory,
+    ) -> Vec<JsonExampleValidationIssue> {
+        let mut issues = Vec::new();
+
+        for example in extract_markdown_json_examples(path, text) {
+            if !example.body.contains("\"schema\"") {
+                continue;
+            }
+            if example.fence_language == "jsonc" {
+                continue;
+            }
+
+            let value = match serde_json::from_str::<JsonValue>(&example.body) {
+                Ok(value) => value,
+                Err(error) => {
+                    issues.push(json_example_issue(
+                        &example.path,
+                        example.line,
+                        "<unparseable>",
+                        format!("contract JSON example is not parseable JSON: {error}"),
+                        &example.body,
+                    ));
+                    continue;
+                }
+            };
+
+            issues.extend(json_example_validation_issues_for_value(
+                &example.path,
+                example.line,
+                &example.body,
+                &value,
+                inventory,
+            ));
+        }
+
+        issues
+    }
+
+    fn json_example_validation_issues_for_value(
+        path: &str,
+        line: usize,
+        source: &str,
+        value: &JsonValue,
+        inventory: &ContractInventory,
+    ) -> Vec<JsonExampleValidationIssue> {
+        let Some(schema_id) = contract_schema_id(value) else {
+            return Vec::new();
+        };
+
+        if !schema_id.starts_with("ee.response.") && !schema_id.starts_with("ee.error.") {
+            return Vec::new();
+        }
+
+        let mut issues = Vec::new();
+        let entry = match inventory_entry(inventory, schema_id) {
+            Ok(entry) => entry,
+            Err(error) => {
+                issues.push(json_example_issue(path, line, schema_id, error, source));
+                return issues;
+            }
+        };
+
+        if entry.status == "legacy" {
+            if !path_is_allowed_historical(path, entry) {
+                issues.push(json_example_issue(
+                    path,
+                    line,
+                    schema_id,
+                    format!(
+                        "{schema_id} is a legacy envelope outside an allowed historical context"
+                    ),
+                    source,
+                ));
+            }
+            return issues;
+        }
+
+        if entry.status != "current" {
+            issues.push(json_example_issue(
+                path,
+                line,
+                schema_id,
+                format!(
+                    "{schema_id} has unsupported contract status {}",
+                    entry.status
+                ),
+                source,
+            ));
+            return issues;
+        }
+
+        for message in validate_current_envelope_example(schema_id, value) {
+            issues.push(json_example_issue(path, line, schema_id, message, source));
+        }
+
+        issues
+    }
+
+    fn current_json_example_issues(
+        inventory: &ContractInventory,
+    ) -> Result<Vec<JsonExampleValidationIssue>, String> {
+        let mut issues = Vec::new();
+
+        for path in current_json_example_paths(inventory)? {
+            let text = fs::read_to_string(repo_path(&path))
+                .map_err(|error| format!("read current-facing doc {path}: {error}"))?;
+            issues.extend(json_example_validation_issues_for_text(
+                &path, &text, inventory,
+            ));
+        }
+
+        issues.extend(schema_file_json_example_issues(inventory)?);
+        issues.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.schema_id.cmp(&right.schema_id))
+                .then(left.message.cmp(&right.message))
+        });
+        Ok(issues)
+    }
+
+    fn schema_file_json_example_issues(
+        inventory: &ContractInventory,
+    ) -> Result<Vec<JsonExampleValidationIssue>, String> {
+        let mut issues = Vec::new();
+
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "current")
+        {
+            let Some(schema_file) = entry.schema_file.as_deref() else {
+                continue;
+            };
+            let text = fs::read_to_string(repo_path(schema_file))
+                .map_err(|error| format!("read schema file {schema_file}: {error}"))?;
+            let schema_json = serde_json::from_str::<JsonValue>(&text)
+                .map_err(|error| format!("parse schema file {schema_file}: {error}"))?;
+            let Some(examples) = schema_json.get("examples") else {
+                continue;
+            };
+            let Some(example_values) = examples.as_array() else {
+                issues.push(json_example_issue(
+                    schema_file,
+                    1,
+                    &entry.schema_id,
+                    "schema examples must be an array",
+                    &text,
+                ));
+                continue;
+            };
+
+            for example in example_values {
+                let source =
+                    serde_json::to_string(example).unwrap_or_else(|_| "<example>".to_owned());
+                issues.extend(json_example_validation_issues_for_value(
+                    schema_file,
+                    1,
+                    &source,
+                    example,
+                    inventory,
+                ));
+            }
+        }
+
+        Ok(issues)
+    }
+
+    fn validate_current_envelope_example(schema_id: &str, value: &JsonValue) -> Vec<String> {
+        match schema_id {
+            "ee.response.v2" => validate_response_v2_example(value),
+            "ee.error.v2" => validate_error_v2_example(value),
+            _ => Vec::new(),
+        }
+    }
+
+    fn validate_response_v2_example(value: &JsonValue) -> Vec<String> {
+        let mut issues = Vec::new();
+        let Some(object) = value.as_object() else {
+            issues.push("ee.response.v2 example must be a JSON object".to_owned());
+            return issues;
+        };
+
+        validate_allowed_keys(
+            object,
+            &["schema", "success", "fields", "data", "degraded"],
+            "response envelope",
+            &mut issues,
+        );
+        validate_string_const(
+            object,
+            "schema",
+            "ee.response.v2",
+            "response envelope",
+            &mut issues,
+        );
+        match object.get("success").and_then(JsonValue::as_bool) {
+            Some(true) => {}
+            Some(false) => issues.push("response envelope success must be true".to_owned()),
+            None => issues.push("response envelope success must be a boolean".to_owned()),
+        }
+        validate_required_object(object, "data", "response envelope", &mut issues);
+        validate_optional_string(object, "fields", "response envelope", &mut issues);
+        if let Some(degraded) = object.get("degraded") {
+            issues.extend(validate_degradation_array(
+                degraded,
+                "response envelope degraded",
+                &["info", "low", "warning", "medium", "high", "critical"],
+            ));
+        }
+
+        issues
+    }
+
+    fn validate_error_v2_example(value: &JsonValue) -> Vec<String> {
+        let mut issues = Vec::new();
+        let Some(object) = value.as_object() else {
+            issues.push("ee.error.v2 example must be a JSON object".to_owned());
+            return issues;
+        };
+
+        validate_allowed_keys(
+            object,
+            &["schema", "error", "degraded"],
+            "error envelope",
+            &mut issues,
+        );
+        validate_string_const(
+            object,
+            "schema",
+            "ee.error.v2",
+            "error envelope",
+            &mut issues,
+        );
+        if let Some(degraded) = object.get("degraded") {
+            issues.extend(validate_degradation_array(
+                degraded,
+                "error envelope degraded",
+                &["low", "medium", "high"],
+            ));
+        }
+
+        let Some(error) = object.get("error").and_then(JsonValue::as_object) else {
+            issues.push("error envelope error must be an object".to_owned());
+            return issues;
+        };
+
+        validate_allowed_keys(
+            error,
+            &[
+                "code",
+                "message",
+                "severity",
+                "repair",
+                "repairKind",
+                "details",
+                "nonRecoverable",
+            ],
+            "error object",
+            &mut issues,
+        );
+        validate_required_string(error, "code", "error object", &mut issues);
+        validate_required_string(error, "message", "error object", &mut issues);
+        validate_required_string(error, "severity", "error object", &mut issues);
+        if let Some(severity) = error.get("severity").and_then(JsonValue::as_str) {
+            validate_enum(
+                severity,
+                &["low", "medium", "high"],
+                "error object severity",
+                &mut issues,
+            );
+        }
+        validate_optional_string(error, "repair", "error object", &mut issues);
+        if let Some(repair_kind) = error.get("repairKind").and_then(JsonValue::as_str) {
+            validate_enum(
+                repair_kind,
+                &["actionable", "template", "placeholder", "unknown", "empty"],
+                "error object repairKind",
+                &mut issues,
+            );
+        }
+        if let Some(non_recoverable) = error.get("nonRecoverable")
+            && !non_recoverable.is_boolean()
+        {
+            issues.push("error object nonRecoverable must be a boolean".to_owned());
+        }
+
+        let Some(details) = error.get("details").and_then(JsonValue::as_object) else {
+            issues.push("error object details must be an object".to_owned());
+            return issues;
+        };
+
+        if error
+            .get("repair")
+            .and_then(JsonValue::as_str)
+            .is_some_and(|repair| !repair.trim().is_empty())
+        {
+            match details.get("recovery") {
+                Some(recovery) => issues.extend(validate_recovery_array(recovery)),
+                None => issues.push(
+                    "error.details.recovery must be a non-empty array when repair is present"
+                        .to_owned(),
+                ),
+            }
+        } else if let Some(recovery) = details.get("recovery") {
+            issues.extend(validate_recovery_array(recovery));
+        }
+
+        issues
+    }
+
+    fn validate_allowed_keys(
+        object: &JsonMap<String, JsonValue>,
+        allowed: &[&str],
+        context: &str,
+        issues: &mut Vec<String>,
+    ) {
+        for key in object.keys() {
+            if !allowed.contains(&key.as_str()) {
+                issues.push(format!("{context} has unsupported field {key}"));
+            }
+        }
+    }
+
+    fn validate_string_const(
+        object: &JsonMap<String, JsonValue>,
+        field: &str,
+        expected: &str,
+        context: &str,
+        issues: &mut Vec<String>,
+    ) {
+        match object.get(field).and_then(JsonValue::as_str) {
+            Some(actual) if actual == expected => {}
+            Some(actual) => issues.push(format!(
+                "{context} {field} must be {expected}, got {actual}"
+            )),
+            None => issues.push(format!("{context} {field} must be a string")),
+        }
+    }
+
+    fn validate_required_string(
+        object: &JsonMap<String, JsonValue>,
+        field: &str,
+        context: &str,
+        issues: &mut Vec<String>,
+    ) {
+        match object.get(field).and_then(JsonValue::as_str) {
+            Some(value) if !value.trim().is_empty() => {}
+            Some(_) => issues.push(format!("{context} {field} must not be empty")),
+            None => issues.push(format!("{context} {field} must be a string")),
+        }
+    }
+
+    fn validate_optional_string(
+        object: &JsonMap<String, JsonValue>,
+        field: &str,
+        context: &str,
+        issues: &mut Vec<String>,
+    ) {
+        if let Some(value) = object.get(field)
+            && !value.is_string()
+        {
+            issues.push(format!("{context} {field} must be a string"));
+        }
+    }
+
+    fn validate_required_object(
+        object: &JsonMap<String, JsonValue>,
+        field: &str,
+        context: &str,
+        issues: &mut Vec<String>,
+    ) {
+        if !object.get(field).is_some_and(JsonValue::is_object) {
+            issues.push(format!("{context} {field} must be an object"));
+        }
+    }
+
+    fn validate_enum(value: &str, allowed: &[&str], context: &str, issues: &mut Vec<String>) {
+        if !allowed.contains(&value) {
+            issues.push(format!(
+                "{context} must be one of {}, got {value}",
+                allowed.join(", ")
+            ));
+        }
+    }
+
+    fn validate_degradation_array(
+        value: &JsonValue,
+        context: &str,
+        severity_values: &[&str],
+    ) -> Vec<String> {
+        let mut issues = Vec::new();
+        let Some(items) = value.as_array() else {
+            issues.push(format!("{context} must be an array"));
+            return issues;
+        };
+
+        for (index, item) in items.iter().enumerate() {
+            let item_context = format!("{context}[{index}]");
+            let Some(object) = item.as_object() else {
+                issues.push(format!("{item_context} must be an object"));
+                continue;
+            };
+
+            validate_allowed_keys(
+                object,
+                &[
+                    "code",
+                    "severity",
+                    "message",
+                    "repair",
+                    "repairKind",
+                    "sources",
+                    "details",
+                ],
+                &item_context,
+                &mut issues,
+            );
+            validate_required_string(object, "code", &item_context, &mut issues);
+            validate_required_string(object, "severity", &item_context, &mut issues);
+            if let Some(severity) = object.get("severity").and_then(JsonValue::as_str) {
+                validate_enum(
+                    severity,
+                    severity_values,
+                    &format!("{item_context} severity"),
+                    &mut issues,
+                );
+            }
+            validate_required_string(object, "message", &item_context, &mut issues);
+            validate_optional_string(object, "repair", &item_context, &mut issues);
+            if let Some(repair_kind) = object.get("repairKind").and_then(JsonValue::as_str) {
+                validate_enum(
+                    repair_kind,
+                    &["actionable", "template", "placeholder", "unknown", "empty"],
+                    &format!("{item_context} repairKind"),
+                    &mut issues,
+                );
+            }
+            if let Some(sources) = object.get("sources")
+                && !sources
+                    .as_array()
+                    .is_some_and(|items| items.iter().all(JsonValue::is_string))
+            {
+                issues.push(format!(
+                    "{item_context} sources must be an array of strings"
+                ));
+            }
+            if let Some(details) = object.get("details")
+                && !details.is_object()
+            {
+                issues.push(format!("{item_context} details must be an object"));
+            }
+        }
+
+        issues
+    }
+
+    fn validate_recovery_array(value: &JsonValue) -> Vec<String> {
+        let mut issues = Vec::new();
+        let Some(items) = value.as_array() else {
+            issues.push("error.details.recovery must be an array".to_owned());
+            return issues;
+        };
+        if items.is_empty() {
+            issues.push(
+                "error.details.recovery must be a non-empty array when repair is present"
+                    .to_owned(),
+            );
+        }
+
+        for (index, item) in items.iter().enumerate() {
+            let context = format!("error.details.recovery[{index}]");
+            let Some(object) = item.as_object() else {
+                issues.push(format!("{context} must be an object"));
+                continue;
+            };
+
+            validate_allowed_keys(
+                object,
+                &[
+                    "priority",
+                    "kind",
+                    "rationale",
+                    "envName",
+                    "valueHint",
+                    "configPath",
+                    "configKey",
+                    "flagName",
+                    "command",
+                    "resultsIn",
+                    "example",
+                ],
+                &context,
+                &mut issues,
+            );
+
+            match object.get("priority").and_then(JsonValue::as_u64) {
+                Some(priority) if priority <= 255 => {}
+                Some(priority) => {
+                    issues.push(format!("{context} priority must be <= 255, got {priority}"))
+                }
+                None => issues.push(format!("{context} priority must be an integer")),
+            }
+            validate_required_string(object, "kind", &context, &mut issues);
+            if let Some(kind) = object.get("kind").and_then(JsonValue::as_str) {
+                validate_enum(
+                    kind,
+                    &[
+                        "env",
+                        "config",
+                        "flag",
+                        "install",
+                        "rebuild",
+                        "permission",
+                        "migration",
+                        "broaden",
+                        "narrow",
+                        "seed",
+                        "none",
+                    ],
+                    &format!("{context} kind"),
+                    &mut issues,
+                );
+            }
+            validate_required_string(object, "rationale", &context, &mut issues);
+            for optional_field in [
+                "envName",
+                "valueHint",
+                "configPath",
+                "configKey",
+                "flagName",
+                "command",
+                "resultsIn",
+                "example",
+            ] {
+                validate_optional_string(object, optional_field, &context, &mut issues);
+            }
+        }
+
+        issues
+    }
+
+    fn json_example_validation_event(issue: &JsonExampleValidationIssue) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "phase": "contract_drift_json_examples",
+            "path": &issue.path,
+            "line": issue.line,
+            "schema_id": &issue.schema_id,
+            "policy_decision": "violation",
+            "message": &issue.message,
+            "source_excerpt": &issue.source_excerpt,
+        })
+    }
+
+    fn json_example_validation_events(issues: &[JsonExampleValidationIssue]) -> String {
+        issues
+            .iter()
+            .map(json_example_validation_event)
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn legacy_schema_claim_violations_for_text(
@@ -2212,6 +2890,14 @@ mod tests {
             &"default".to_owned(),
             "current violation phrase",
         )?;
+        let current_violation_event = legacy_schema_claim_event(&current_violation[0]);
+        ensure_equal(
+            &current_violation_event
+                .get("schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.test_event.v1"),
+            "current violation event schema",
+        )?;
 
         let migration_allowed = legacy_schema_claim_violations_for_text(
             "docs/migration_v0_1_to_v0_2.md",
@@ -2254,6 +2940,131 @@ mod tests {
     }
 
     #[test]
+    fn json_example_policy_classifies_current_historical_and_partial_examples() -> TestResult {
+        let inventory = contract_inventory()?;
+
+        let legacy_current = json_example_validation_issues_for_text(
+            "README.md",
+            r#"```json
+{"schema":"ee.response.v1","success":true,"data":{}}
+```"#,
+            &inventory,
+        );
+        ensure_equal(&legacy_current.len(), &1, "legacy current example count")?;
+        ensure_equal(
+            &legacy_current[0].schema_id,
+            &"ee.response.v1".to_owned(),
+            "legacy current schema id",
+        )?;
+
+        let legacy_historical = json_example_validation_issues_for_text(
+            "docs/migration-guide.md",
+            r#"```json
+{"schema":"ee.response.v0","ok":true,"result":{}}
+```"#,
+            &inventory,
+        );
+        ensure(
+            legacy_historical.is_empty(),
+            format!(
+                "migration guide historical examples should be allowed but got:\n{}",
+                json_example_validation_events(&legacy_historical)
+            ),
+        )?;
+
+        let partial_jsonc = json_example_validation_issues_for_text(
+            "AGENTS.md",
+            r#"```jsonc
+{ "schema": "ee.response.v2", "success": true, "data": { ... } }
+```"#,
+            &inventory,
+        );
+        ensure(
+            partial_jsonc.is_empty(),
+            format!(
+                "jsonc sketches should be ignored by strict JSON validation but got:\n{}",
+                json_example_validation_events(&partial_jsonc)
+            ),
+        )?;
+
+        let invalid_success = json_example_validation_issues_for_text(
+            "README.md",
+            r#"```json
+{"schema":"ee.response.v2","data":{}}
+```"#,
+            &inventory,
+        );
+        ensure_equal(&invalid_success.len(), &1, "invalid success issue count")?;
+        ensure(
+            invalid_success[0].message.contains("success"),
+            format!("invalid success should mention success: {invalid_success:?}"),
+        )?;
+
+        let valid_error = json_example_validation_issues_for_text(
+            "docs/migration-guide.md",
+            r#"```json
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "search_index_unavailable",
+    "message": "Search index is stale or unavailable.",
+    "severity": "medium",
+    "repair": "ee index rebuild --workspace .",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived index.",
+          "command": "ee index rebuild --workspace ."
+        }
+      ]
+    }
+  }
+}
+```"#,
+            &inventory,
+        );
+        ensure(
+            valid_error.is_empty(),
+            format!(
+                "valid error example should pass but got:\n{}",
+                json_example_validation_events(&valid_error)
+            ),
+        )?;
+
+        let invalid_error = json_example_validation_issues_for_text(
+            "docs/migration-guide.md",
+            r#"```json
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "search_index_unavailable",
+    "message": "Search index is stale or unavailable.",
+    "severity": "medium",
+    "repair": "ee index rebuild --workspace .",
+    "details": {"databaseGeneration": 12}
+  }
+}
+```"#,
+            &inventory,
+        );
+        ensure_equal(&invalid_error.len(), &1, "invalid error issue count")?;
+        ensure(
+            invalid_error[0].message.contains("recovery"),
+            format!("invalid error should mention recovery: {invalid_error:?}"),
+        )?;
+        let invalid_error_event = json_example_validation_event(&invalid_error[0]);
+        ensure_equal(
+            &invalid_error_event
+                .get("schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.test_event.v1"),
+            "invalid error event schema",
+        )
+    }
+
+    #[test]
     fn current_facing_docs_do_not_claim_legacy_success_envelopes() -> TestResult {
         let inventory = contract_inventory()?;
         let violations = legacy_schema_claim_violations(&inventory)?;
@@ -2264,5 +3075,961 @@ mod tests {
                 legacy_schema_claim_events(&violations)
             ),
         )
+    }
+
+    #[test]
+    fn current_facing_docs_json_examples_match_current_envelope_contracts() -> TestResult {
+        let inventory = contract_inventory()?;
+        let issues = current_json_example_issues(&inventory)?;
+        ensure(
+            issues.is_empty(),
+            format!(
+                "current-facing JSON examples violate envelope contracts:\n{}",
+                json_example_validation_events(&issues)
+            ),
+        )
+    }
+
+    // ========================================================================
+    // bd-31nul.7 — Public schema registry and source-string parity scanner.
+    //
+    // Cross-checks the contract inventory against Rust source string literals
+    // and comments, JSON schema-file `schema.const` values, and the exported
+    // `public_schemas()` registry. Findings are emitted as ee.test_event.v1
+    // rows with path, line, observed schema id, inventory status, source
+    // kind, and policy decision so downstream gates (bd-31nul.5) can route
+    // them. Tests are fixture-driven so the scanner can ship without waiting
+    // on bead-owned cleanup of live source-string drift (e.g. bd-13631).
+    // ========================================================================
+
+    #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
+    enum RustSourceKind {
+        LineComment,
+        DocComment,
+        BlockComment,
+        StringLiteral,
+        RawStringLiteral,
+        Code,
+    }
+
+    impl RustSourceKind {
+        fn as_str(self) -> &'static str {
+            match self {
+                Self::LineComment => "line_comment",
+                Self::DocComment => "doc_comment",
+                Self::BlockComment => "block_comment",
+                Self::StringLiteral => "string_literal",
+                Self::RawStringLiteral => "raw_string_literal",
+                Self::Code => "code",
+            }
+        }
+
+        fn is_comment(self) -> bool {
+            matches!(
+                self,
+                Self::LineComment | Self::DocComment | Self::BlockComment
+            )
+        }
+
+        fn is_emitted_string(self) -> bool {
+            matches!(self, Self::StringLiteral | Self::RawStringLiteral)
+        }
+    }
+
+    const KIND_CODE: u8 = 0;
+    const KIND_LINE_COMMENT: u8 = 1;
+    const KIND_DOC_COMMENT: u8 = 2;
+    const KIND_BLOCK_COMMENT: u8 = 3;
+    const KIND_STRING_LITERAL: u8 = 4;
+    const KIND_RAW_STRING_LITERAL: u8 = 5;
+
+    fn kind_from_byte(byte: u8) -> RustSourceKind {
+        match byte {
+            KIND_LINE_COMMENT => RustSourceKind::LineComment,
+            KIND_DOC_COMMENT => RustSourceKind::DocComment,
+            KIND_BLOCK_COMMENT => RustSourceKind::BlockComment,
+            KIND_STRING_LITERAL => RustSourceKind::StringLiteral,
+            KIND_RAW_STRING_LITERAL => RustSourceKind::RawStringLiteral,
+            _ => RustSourceKind::Code,
+        }
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+    struct SourceStringOccurrence {
+        path: String,
+        line: usize,
+        schema_id: String,
+        source_kind: RustSourceKind,
+        inventory_status: String,
+        policy_decision: String,
+        snippet: String,
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq, Hash)]
+    struct SchemaConstOccurrence {
+        path: String,
+        line: usize,
+        observed_const: String,
+        inventory_status: String,
+        policy_decision: String,
+        reason: String,
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct PublicSchemaRegistryDiff {
+        missing: Vec<String>,
+        extras: Vec<String>,
+        mismatched: Vec<RegistryMismatch>,
+    }
+
+    #[derive(Debug, Clone, Eq, PartialEq)]
+    struct RegistryMismatch {
+        schema_id: String,
+        inventory_status: String,
+        registry_description: String,
+    }
+
+    impl PublicSchemaRegistryDiff {
+        fn is_clean(&self) -> bool {
+            self.missing.is_empty() && self.extras.is_empty() && self.mismatched.is_empty()
+        }
+
+        fn precise_message(&self) -> String {
+            let mut parts = Vec::new();
+            if !self.missing.is_empty() {
+                parts.push(format!(
+                    "missing from src/output/mod.rs::public_schemas: {}",
+                    self.missing.join(", ")
+                ));
+            }
+            if !self.extras.is_empty() {
+                parts.push(format!(
+                    "extra envelope schemas in public_schemas not declared by contract inventory: {}",
+                    self.extras.join(", ")
+                ));
+            }
+            if !self.mismatched.is_empty() {
+                let pretty = self
+                    .mismatched
+                    .iter()
+                    .map(|m| {
+                        format!(
+                            "{} (inventory={}, registry_description={:?})",
+                            m.schema_id, m.inventory_status, m.registry_description
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                parts.push(format!("status mismatch: {pretty}"));
+            }
+            parts.join(" | ")
+        }
+    }
+
+    /// Tokenize Rust source byte-by-byte and emit a per-byte kind annotation.
+    /// Handles line comments (// and ///, //!), block comments (/* */ with
+    /// nesting), plain string literals with escapes, and raw string literals
+    /// (`r"..."` / `r#"..."#` / `r##"..."##`). Char literals are not separately
+    /// annotated because the target schema identifiers cannot fit inside one.
+    fn annotate_rust_source_kinds(text: &str) -> Vec<u8> {
+        let bytes = text.as_bytes();
+        let n = bytes.len();
+        let mut kinds = vec![KIND_CODE; n];
+        let mut i = 0;
+
+        while i < n {
+            let b = bytes[i];
+
+            if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+                let is_doc = i + 2 < n && (bytes[i + 2] == b'/' || bytes[i + 2] == b'!');
+                let kind = if is_doc {
+                    KIND_DOC_COMMENT
+                } else {
+                    KIND_LINE_COMMENT
+                };
+                let start = i;
+                while i < n && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                for k in &mut kinds[start..i] {
+                    *k = kind;
+                }
+                continue;
+            }
+
+            if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                let is_doc = i + 2 < n && (bytes[i + 2] == b'*' || bytes[i + 2] == b'!');
+                let kind = if is_doc {
+                    KIND_DOC_COMMENT
+                } else {
+                    KIND_BLOCK_COMMENT
+                };
+                let start = i;
+                let mut depth: usize = 1;
+                i += 2;
+                while i < n && depth > 0 {
+                    if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                let end = i.min(n);
+                for k in &mut kinds[start..end] {
+                    *k = kind;
+                }
+                continue;
+            }
+
+            if b == b'r' {
+                let prev_ok =
+                    i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+                if prev_ok {
+                    let mut j = i + 1;
+                    let mut hashes = 0usize;
+                    while j < n && bytes[j] == b'#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if j < n && bytes[j] == b'"' {
+                        let start = i;
+                        let body_start = j + 1;
+                        let mut k = body_start;
+                        while k < n {
+                            if bytes[k] == b'"' {
+                                let mut h = 0usize;
+                                while k + 1 + h < n && bytes[k + 1 + h] == b'#' {
+                                    h += 1;
+                                }
+                                if h >= hashes {
+                                    k = k + 1 + hashes;
+                                    break;
+                                }
+                            }
+                            k += 1;
+                        }
+                        let end = k.min(n);
+                        for kk in &mut kinds[start..end] {
+                            *kk = KIND_RAW_STRING_LITERAL;
+                        }
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+
+            if b == b'"' {
+                let start = i;
+                i += 1;
+                while i < n {
+                    if bytes[i] == b'\\' && i + 1 < n {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                let end = i.min(n);
+                for k in &mut kinds[start..end] {
+                    *k = KIND_STRING_LITERAL;
+                }
+                continue;
+            }
+
+            i += 1;
+        }
+
+        kinds
+    }
+
+    fn source_snippet(text: &str, match_start: usize, match_len: usize) -> String {
+        let window_start = previous_char_boundary(text, match_start.saturating_sub(40));
+        let window_end = next_char_boundary(text, match_start + match_len + 40);
+        text[window_start..window_end]
+            .replace('\n', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn classify_source_occurrence(
+        path: &str,
+        kind: RustSourceKind,
+        entry: &ContractInventoryEntry,
+    ) -> String {
+        if path_is_allowed_historical(path, entry) {
+            "allowed_historical_context".to_owned()
+        } else if kind.is_comment() {
+            "comment_requires_repair".to_owned()
+        } else if kind.is_emitted_string() {
+            "violation_current_surface".to_owned()
+        } else {
+            "unclassified_source_kind".to_owned()
+        }
+    }
+
+    fn scan_rust_source_for_legacy_schema_ids(
+        path: &str,
+        text: &str,
+        inventory: &ContractInventory,
+    ) -> Vec<SourceStringOccurrence> {
+        let kinds = annotate_rust_source_kinds(text);
+        let mut out = Vec::new();
+
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "legacy")
+        {
+            let id = entry.schema_id.as_str();
+            let mut search_from = 0;
+            while let Some(rel) = text[search_from..].find(id) {
+                let abs = search_from + rel;
+                search_from = abs + id.len();
+
+                // Guard against substring matches like ee.response.v10 — the
+                // next byte after the version digits must not be ASCII digit.
+                let after = abs + id.len();
+                if after < text.len() && text.as_bytes()[after].is_ascii_digit() {
+                    continue;
+                }
+
+                let kind = kinds
+                    .get(abs)
+                    .copied()
+                    .map(kind_from_byte)
+                    .unwrap_or(RustSourceKind::Code);
+
+                if matches!(kind, RustSourceKind::Code) {
+                    // Identifier-like occurrences in code position are not
+                    // valid Rust for a dotted schema id; skip to avoid noise.
+                    continue;
+                }
+
+                let line = text[..abs].bytes().filter(|byte| *byte == b'\n').count() + 1;
+                let decision = classify_source_occurrence(path, kind, entry);
+                let snippet = source_snippet(text, abs, id.len());
+
+                out.push(SourceStringOccurrence {
+                    path: path.to_owned(),
+                    line,
+                    schema_id: id.to_owned(),
+                    source_kind: kind,
+                    inventory_status: entry.status.clone(),
+                    policy_decision: decision,
+                    snippet,
+                });
+            }
+        }
+
+        out.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.schema_id.cmp(&right.schema_id))
+                .then(left.source_kind.cmp(&right.source_kind))
+        });
+        out
+    }
+
+    fn source_string_occurrence_event(occurrence: &SourceStringOccurrence) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "phase": "contract_drift_source_string_parity",
+            "path": &occurrence.path,
+            "line": occurrence.line,
+            "schema_id": &occurrence.schema_id,
+            "source_kind": occurrence.source_kind.as_str(),
+            "inventory_status": &occurrence.inventory_status,
+            "policy_decision": &occurrence.policy_decision,
+            "snippet": &occurrence.snippet,
+        })
+    }
+
+    fn source_string_occurrence_events(occurrences: &[SourceStringOccurrence]) -> String {
+        occurrences
+            .iter()
+            .map(source_string_occurrence_event)
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn schema_id_looks_like_envelope(value: &str) -> bool {
+        value.starts_with("ee.response.v")
+            || value.starts_with("ee.error.v")
+            || value.starts_with("ee.pack.v")
+    }
+
+    fn schema_const_line_hint(text: &str, observed: &str) -> usize {
+        text.lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(observed))
+            .map(|(index, _)| index + 1)
+            .unwrap_or(1)
+    }
+
+    fn visit_envelope_consts(value: &JsonValue, out: &mut Vec<String>) {
+        match value {
+            JsonValue::Object(object) => {
+                if let Some(schema_value) = object.get("schema")
+                    && let Some(inner) = schema_value.as_object()
+                    && let Some(constant) = inner.get("const").and_then(JsonValue::as_str)
+                    && schema_id_looks_like_envelope(constant)
+                {
+                    out.push(constant.to_owned());
+                }
+                for child in object.values() {
+                    visit_envelope_consts(child, out);
+                }
+            }
+            JsonValue::Array(array) => {
+                for child in array {
+                    visit_envelope_consts(child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn scan_schema_json_for_envelope_consts(
+        path: &str,
+        text: &str,
+        inventory: &ContractInventory,
+    ) -> Vec<SchemaConstOccurrence> {
+        let Ok(value) = serde_json::from_str::<JsonValue>(text) else {
+            return Vec::new();
+        };
+        let mut observed = Vec::new();
+        visit_envelope_consts(&value, &mut observed);
+
+        let mut out = Vec::new();
+        for constant in observed {
+            let entry = inventory_entry(inventory, &constant);
+            let (status, decision, reason) = match entry {
+                Ok(entry) => classify_schema_const(path, &constant, entry, inventory),
+                Err(_) => (
+                    "unknown".to_owned(),
+                    "violation_unclassified_schema_id".to_owned(),
+                    format!("{constant} has no contract inventory entry"),
+                ),
+            };
+            out.push(SchemaConstOccurrence {
+                path: path.to_owned(),
+                line: schema_const_line_hint(text, &constant),
+                observed_const: constant,
+                inventory_status: status,
+                policy_decision: decision,
+                reason,
+            });
+        }
+
+        out.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.line.cmp(&right.line))
+                .then(left.observed_const.cmp(&right.observed_const))
+        });
+        out
+    }
+
+    fn classify_schema_const(
+        path: &str,
+        observed: &str,
+        entry: &ContractInventoryEntry,
+        inventory: &ContractInventory,
+    ) -> (String, String, String) {
+        match entry.status.as_str() {
+            "current" => (
+                entry.status.clone(),
+                "current_envelope_const".to_owned(),
+                format!("{observed} is the current envelope const for {path}"),
+            ),
+            "legacy" => {
+                if entry.schema_file.as_deref() == Some(path) {
+                    (
+                        entry.status.clone(),
+                        "allowed_legacy_schema_file".to_owned(),
+                        format!(
+                            "{path} is the inventory-declared schemaFile for legacy {observed}"
+                        ),
+                    )
+                } else if path_is_allowed_historical(path, entry) {
+                    (
+                        entry.status.clone(),
+                        "allowed_historical_context".to_owned(),
+                        format!(
+                            "{path} matches an allowedHistoricalContexts pattern for {observed}"
+                        ),
+                    )
+                } else if path.starts_with("docs/schemas/") {
+                    let host_entry = inventory.contracts.iter().find(|candidate| {
+                        candidate.schema_file.as_deref() == Some(path)
+                            && candidate.status == "current"
+                    });
+                    if host_entry.is_some() {
+                        (
+                            entry.status.clone(),
+                            "violation_legacy_const_in_current_schema_file".to_owned(),
+                            format!(
+                                "{path} is a current schemaFile yet declares legacy const {observed}"
+                            ),
+                        )
+                    } else {
+                        (
+                            entry.status.clone(),
+                            "violation_legacy_const_outside_owner_schema_file".to_owned(),
+                            format!(
+                                "legacy {observed} declared in {path}, which is neither the legacy schemaFile nor an allowed historical context"
+                            ),
+                        )
+                    }
+                } else {
+                    (
+                        entry.status.clone(),
+                        "violation_legacy_const_outside_allowed_context".to_owned(),
+                        format!("legacy {observed} declared outside an allowed context: {path}"),
+                    )
+                }
+            }
+            other => (
+                other.to_owned(),
+                "violation_unsupported_status".to_owned(),
+                format!("{observed} has unsupported inventory status {other}"),
+            ),
+        }
+    }
+
+    fn schema_const_occurrence_event(occurrence: &SchemaConstOccurrence) -> serde_json::Value {
+        serde_json::json!({
+            "schema": "ee.test_event.v1",
+            "phase": "contract_drift_schema_const_parity",
+            "path": &occurrence.path,
+            "line": occurrence.line,
+            "schema_id": &occurrence.observed_const,
+            "source_kind": "schema_const",
+            "inventory_status": &occurrence.inventory_status,
+            "policy_decision": &occurrence.policy_decision,
+            "reason": &occurrence.reason,
+        })
+    }
+
+    fn schema_const_occurrence_events(occurrences: &[SchemaConstOccurrence]) -> String {
+        occurrences
+            .iter()
+            .map(schema_const_occurrence_event)
+            .map(|event| event.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn public_schema_registry_diff(inventory: &ContractInventory) -> PublicSchemaRegistryDiff {
+        let registry: BTreeMap<&str, &ee::output::SchemaEntry> = ee::output::public_schemas()
+            .iter()
+            .map(|entry| (entry.id, entry))
+            .collect();
+
+        let envelope_categories = ["envelope"];
+
+        let mut missing = Vec::new();
+        for entry in inventory
+            .contracts
+            .iter()
+            .filter(|entry| entry.status == "current")
+        {
+            if !registry.contains_key(entry.schema_id.as_str()) {
+                missing.push(entry.schema_id.clone());
+            }
+        }
+
+        let inventory_ids: BTreeSet<&str> = inventory
+            .contracts
+            .iter()
+            .map(|entry| entry.schema_id.as_str())
+            .collect();
+
+        let mut extras = Vec::new();
+        for (id, schema) in &registry {
+            if envelope_categories.contains(&schema.category) && !inventory_ids.contains(id) {
+                extras.push((*id).to_owned());
+            }
+        }
+
+        let mut mismatched = Vec::new();
+        for entry in inventory.contracts.iter() {
+            let Some(registered) = registry.get(entry.schema_id.as_str()) else {
+                continue;
+            };
+            let description_lower = registered.description.to_ascii_lowercase();
+            let registry_signals_legacy = description_lower.contains("legacy")
+                || description_lower.contains("deprecated")
+                || description_lower.contains("retained");
+            let inventory_legacy = entry.status == "legacy";
+            if inventory_legacy != registry_signals_legacy
+                && envelope_categories.contains(&registered.category)
+            {
+                mismatched.push(RegistryMismatch {
+                    schema_id: entry.schema_id.clone(),
+                    inventory_status: entry.status.clone(),
+                    registry_description: registered.description.to_owned(),
+                });
+            }
+        }
+
+        missing.sort();
+        extras.sort();
+        mismatched.sort_by(|a, b| a.schema_id.cmp(&b.schema_id));
+
+        PublicSchemaRegistryDiff {
+            missing,
+            extras,
+            mismatched,
+        }
+    }
+
+    #[test]
+    fn source_string_parity_classifies_string_literal_in_current_mcp_surface() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture =
+            "pub const PREPARE: &str = \"Read the returned `ee.response.v1` envelope.\";\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids("src/mcp.rs", fixture, &inventory);
+        ensure_equal(&occurrences.len(), &1, "string-literal occurrence count")?;
+        let occurrence = &occurrences[0];
+        ensure_equal(
+            &occurrence.source_kind,
+            &RustSourceKind::StringLiteral,
+            "source kind",
+        )?;
+        ensure_equal(
+            &occurrence.policy_decision,
+            &"violation_current_surface".to_owned(),
+            "policy decision",
+        )?;
+        let event = source_string_occurrence_event(occurrence);
+        ensure_equal(
+            &event.get("schema").and_then(serde_json::Value::as_str),
+            &Some("ee.test_event.v1"),
+            "event schema",
+        )?;
+        ensure_equal(
+            &event.get("source_kind").and_then(serde_json::Value::as_str),
+            &Some("string_literal"),
+            "event source kind",
+        )
+    }
+
+    #[test]
+    fn source_string_parity_classifies_doc_comment_distinct_from_emitted_string() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = "//! - Same response contracts (ee.response.v1)\n\
+                       pub const PREPARE: &str = \"Read the returned `ee.response.v1` envelope.\";\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids("src/mcp.rs", fixture, &inventory);
+        ensure_equal(&occurrences.len(), &2, "occurrence count")?;
+        let comment = occurrences
+            .iter()
+            .find(|occurrence| occurrence.source_kind.is_comment())
+            .ok_or("missing comment occurrence")?;
+        let literal = occurrences
+            .iter()
+            .find(|occurrence| occurrence.source_kind.is_emitted_string())
+            .ok_or("missing string-literal occurrence")?;
+        ensure_equal(
+            &comment.source_kind,
+            &RustSourceKind::DocComment,
+            "comment kind",
+        )?;
+        ensure_equal(
+            &comment.policy_decision,
+            &"comment_requires_repair".to_owned(),
+            "comment decision",
+        )?;
+        ensure_equal(
+            &literal.source_kind,
+            &RustSourceKind::StringLiteral,
+            "literal kind",
+        )?;
+        ensure_equal(
+            &literal.policy_decision,
+            &"violation_current_surface".to_owned(),
+            "literal decision",
+        )
+    }
+
+    #[test]
+    fn source_string_parity_classifies_block_and_raw_string_kinds() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = "/* legacy mention: ee.response.v1 in block comment */\n\
+                       let body = r#\"{\"schema\":\"ee.response.v1\"}\"#;\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids("src/mcp.rs", fixture, &inventory);
+        ensure_equal(&occurrences.len(), &2, "occurrence count")?;
+        ensure(
+            occurrences
+                .iter()
+                .any(|occurrence| occurrence.source_kind == RustSourceKind::BlockComment),
+            format!(
+                "expected a BlockComment kind but got:\n{}",
+                source_string_occurrence_events(&occurrences)
+            ),
+        )?;
+        ensure(
+            occurrences
+                .iter()
+                .any(|occurrence| occurrence.source_kind == RustSourceKind::RawStringLiteral),
+            format!(
+                "expected a RawStringLiteral kind but got:\n{}",
+                source_string_occurrence_events(&occurrences)
+            ),
+        )?;
+        let raw = occurrences
+            .iter()
+            .find(|occurrence| occurrence.source_kind == RustSourceKind::RawStringLiteral)
+            .ok_or("missing raw string occurrence")?;
+        ensure_equal(
+            &raw.policy_decision,
+            &"violation_current_surface".to_owned(),
+            "raw string decision in current surface",
+        )
+    }
+
+    #[test]
+    fn source_string_parity_allows_legacy_ids_in_owner_const_definition() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = "pub const RESPONSE_SCHEMA_V1: &str = \"ee.response.v1\";\n\
+             //! Owner module describing the legacy ee.response.v1 envelope for backward compat.\n";
+        let occurrences =
+            scan_rust_source_for_legacy_schema_ids("src/models/mod.rs", fixture, &inventory);
+        ensure(
+            !occurrences.is_empty(),
+            "expected at least one occurrence in owner module",
+        )?;
+        for occurrence in &occurrences {
+            ensure_equal(
+                &occurrence.policy_decision,
+                &"allowed_historical_context".to_owned(),
+                "owner-context decision",
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn source_string_parity_allows_legacy_ids_in_tests_historical_context() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = "let body = \"{\\\"schema\\\":\\\"ee.response.v1\\\"}\";\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids(
+            "tests/contracts/some_fixture.rs",
+            fixture,
+            &inventory,
+        );
+        ensure_equal(&occurrences.len(), &1, "fixture occurrence count")?;
+        ensure_equal(
+            &occurrences[0].policy_decision,
+            &"allowed_historical_context".to_owned(),
+            "tests-historical decision",
+        )
+    }
+
+    #[test]
+    fn source_string_parity_does_not_match_within_longer_version_suffix() -> TestResult {
+        let inventory = contract_inventory()?;
+        // ee.response.v10 is a hypothetical future schema id; the scanner
+        // must not treat it as ee.response.v1 with a trailing digit.
+        let fixture = "let s = \"ee.response.v10\";\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids("src/mcp.rs", fixture, &inventory);
+        ensure(
+            occurrences.is_empty(),
+            format!(
+                "ee.response.v10 must not match ee.response.v1 but got:\n{}",
+                source_string_occurrence_events(&occurrences)
+            ),
+        )
+    }
+
+    #[test]
+    fn schema_file_const_validator_allows_legacy_const_in_owner_schema_file() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = r#"{
+            "properties": {
+                "schema": {"type": "string", "const": "ee.response.v1"}
+            }
+        }"#;
+        let occurrences = scan_schema_json_for_envelope_consts(
+            "docs/schemas/ee.response.v1.json",
+            fixture,
+            &inventory,
+        );
+        ensure_equal(&occurrences.len(), &1, "occurrence count")?;
+        ensure_equal(
+            &occurrences[0].policy_decision,
+            &"allowed_legacy_schema_file".to_owned(),
+            "owner schemaFile decision",
+        )
+    }
+
+    #[test]
+    fn schema_file_const_validator_flags_legacy_const_in_unrelated_schema_file() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = r#"{
+            "properties": {
+                "schema": {"type": "string", "const": "ee.response.v1"}
+            }
+        }"#;
+        let occurrences = scan_schema_json_for_envelope_consts(
+            "docs/schemas/ee.status.v1.json",
+            fixture,
+            &inventory,
+        );
+        ensure_equal(&occurrences.len(), &1, "occurrence count")?;
+        ensure(
+            occurrences[0]
+                .policy_decision
+                .starts_with("violation_legacy_const"),
+            format!(
+                "unrelated schema file must violate but got:\n{}",
+                schema_const_occurrence_events(&occurrences)
+            ),
+        )?;
+        let event = schema_const_occurrence_event(&occurrences[0]);
+        ensure_equal(
+            &event.get("source_kind").and_then(serde_json::Value::as_str),
+            &Some("schema_const"),
+            "event source kind",
+        )
+    }
+
+    #[test]
+    fn schema_file_const_validator_flags_mismatched_filename_and_const() -> TestResult {
+        let inventory = contract_inventory()?;
+        // docs/schemas/ee.error.v1.json should hold "ee.error.v1" by the
+        // inventory; if it instead declares "ee.error.v2" the scanner must
+        // flag the mismatch as a current envelope const placed in a legacy
+        // schemaFile, not silently pass.
+        let fixture = r#"{
+            "properties": {
+                "schema": {"type": "string", "const": "ee.error.v2"}
+            }
+        }"#;
+        let occurrences = scan_schema_json_for_envelope_consts(
+            "docs/schemas/ee.error.v1.json",
+            fixture,
+            &inventory,
+        );
+        ensure_equal(&occurrences.len(), &1, "occurrence count")?;
+        ensure(
+            occurrences[0].observed_const == "ee.error.v2"
+                && occurrences[0].policy_decision == "current_envelope_const",
+            format!(
+                "ee.error.v2 const should classify as current envelope const but got:\n{}",
+                schema_const_occurrence_events(&occurrences)
+            ),
+        )?;
+        // The classifier intentionally does not infer filename vs const
+        // mismatch on its own — that responsibility belongs to the per-file
+        // inventory entry. Confirm the scanner still surfaces the constant
+        // so an inventory-driven gate (bd-31nul.5) can flag the placeholder.
+        ensure(
+            occurrences[0].reason.contains("ee.error.v2"),
+            format!(
+                "scanner reason must include observed constant: {:?}",
+                occurrences[0].reason
+            ),
+        )
+    }
+
+    #[test]
+    fn schema_file_const_validator_passes_current_schema_files() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = r#"{
+            "properties": {
+                "schema": {"type": "string", "const": "ee.error.v2"}
+            }
+        }"#;
+        let occurrences = scan_schema_json_for_envelope_consts(
+            "docs/schemas/ee.error.v2.json",
+            fixture,
+            &inventory,
+        );
+        ensure_equal(&occurrences.len(), &1, "occurrence count")?;
+        ensure_equal(
+            &occurrences[0].policy_decision,
+            &"current_envelope_const".to_owned(),
+            "current schemaFile decision",
+        )
+    }
+
+    #[test]
+    fn public_schema_registry_diff_pinpoints_missing_extras_and_mismatched() -> TestResult {
+        let inventory = contract_inventory()?;
+        let diff = public_schema_registry_diff(&inventory);
+        ensure(
+            diff.is_clean(),
+            format!(
+                "public_schemas registry drift detected: {}",
+                diff.precise_message()
+            ),
+        )
+    }
+
+    #[test]
+    fn public_schema_registry_diff_message_is_actionable_on_missing_extras() -> TestResult {
+        // Construct a synthetic diff to prove the precise message contract
+        // — the assertion in the gating test reuses the same format string.
+        let diff = PublicSchemaRegistryDiff {
+            missing: vec!["ee.example.v3".to_owned()],
+            extras: vec!["ee.example.legacy.v1".to_owned()],
+            mismatched: vec![RegistryMismatch {
+                schema_id: "ee.response.v9".to_owned(),
+                inventory_status: "legacy".to_owned(),
+                registry_description: "Success response envelope for all ee commands".to_owned(),
+            }],
+        };
+        let message = diff.precise_message();
+        ensure(
+            message.contains("missing from src/output/mod.rs::public_schemas: ee.example.v3"),
+            format!("missing fragment absent: {message}"),
+        )?;
+        ensure(
+            message.contains(
+                "extra envelope schemas in public_schemas not declared by contract inventory: ee.example.legacy.v1",
+            ),
+            format!("extras fragment absent: {message}"),
+        )?;
+        ensure(
+            message.contains("status mismatch: ee.response.v9 (inventory=legacy"),
+            format!("mismatch fragment absent: {message}"),
+        )
+    }
+
+    #[test]
+    fn source_string_parity_event_has_required_fields() -> TestResult {
+        let inventory = contract_inventory()?;
+        let fixture = "let s = \"ee.response.v1\";\n";
+        let occurrences = scan_rust_source_for_legacy_schema_ids("src/mcp.rs", fixture, &inventory);
+        ensure_equal(&occurrences.len(), &1, "occurrence count")?;
+        let event = source_string_occurrence_event(&occurrences[0]);
+        for field in [
+            "schema",
+            "phase",
+            "path",
+            "line",
+            "schema_id",
+            "source_kind",
+            "inventory_status",
+            "policy_decision",
+            "snippet",
+        ] {
+            ensure(
+                event.get(field).is_some(),
+                format!("event missing required field: {field}"),
+            )?;
+        }
+        Ok(())
     }
 }

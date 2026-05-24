@@ -87,6 +87,10 @@
         {
           "pathPattern": "tests/**",
           "reason": "Fixtures and regression tests may preserve old schema IDs while asserting migration behavior."
+        },
+        {
+          "pathPattern": "src/models/mod.rs",
+          "reason": "Canonical legacy constant definition lives in the owner module."
         }
       ],
       "forbiddenCurrentClaims": [
@@ -116,8 +120,16 @@
           "reason": "Migration guide may mention pre-v1 compatibility history."
         },
         {
+          "pathPattern": "docs/migration-guide.md",
+          "reason": "Current migration guidance may include a historical v0 before/after example while steering users to v2."
+        },
+        {
           "pathPattern": "tests/**",
           "reason": "Schema-version compatibility tests may include v0 identifiers."
+        },
+        {
+          "pathPattern": "src/models/mod.rs",
+          "reason": "Canonical legacy constant definition lives in the owner module."
         }
       ],
       "forbiddenCurrentClaims": [
@@ -129,6 +141,52 @@
         "required",
         "response envelope",
         "success envelope"
+      ]
+    },
+    {
+      "schemaId": "ee.error.v1",
+      "status": "legacy",
+      "surface": "response_error_envelope",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.error.v1.json",
+      "canonicalDocs": [
+        "docs/migration_v0_1_to_v0_2.md"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [
+        {
+          "pathPattern": "docs/migration_v0_1_to_v0_2.md",
+          "reason": "Explicit v0.1 to v0.2 before/after migration examples for the error envelope."
+        },
+        {
+          "pathPattern": "docs/migration-guide.md",
+          "reason": "Current migration guidance may include a historical v1 before/after example while steering users to v2."
+        },
+        {
+          "pathPattern": "docs/archive/**",
+          "reason": "Archived historical design material is not current-facing contract guidance."
+        },
+        {
+          "pathPattern": "tests/**",
+          "reason": "Fixtures and regression tests may preserve old schema IDs while asserting migration behavior."
+        },
+        {
+          "pathPattern": "src/output/mod.rs",
+          "reason": "Legacy error envelope is intentionally registered by public_schemas() for v0/v1 consumers."
+        },
+        {
+          "pathPattern": "src/models/mod.rs",
+          "reason": "Legacy error constant may live alongside response envelope constants."
+        }
+      ],
+      "forbiddenCurrentClaims": [
+        "agent-facing",
+        "always emits",
+        "canonical",
+        "current",
+        "default",
+        "required",
+        "error envelope"
       ]
     }
   ]
