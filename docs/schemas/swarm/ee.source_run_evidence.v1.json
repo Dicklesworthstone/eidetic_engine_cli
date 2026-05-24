@@ -133,7 +133,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["priority", "kind", "command", "message"],
+        "required": ["priority", "kind", "command", "message", "repairSafety"],
         "additionalProperties": false,
         "properties": {
           "priority": {"type": "integer", "minimum": 1},
@@ -142,7 +142,61 @@
             "enum": ["retry", "retry_with_longer_timeout", "use_static_fallback", "repair_substrate_after_approval", "manual_coordination", "fail_closed", "skip_source"]
           },
           "command": {"type": ["string", "null"]},
-          "message": {"type": "string"}
+          "message": {"type": "string"},
+          "repairSafety": {
+            "type": "object",
+            "description": "Repair-action safety metadata for command-like source-run recovery steps. Agents use this block instead of executing the display command directly.",
+            "required": [
+              "riskClass",
+              "preflightCommand",
+              "requiresHumanApproval",
+              "mutatesExternalState",
+              "mutatesTrackerState",
+              "privacyClass",
+              "nextAction",
+              "ruleId",
+              "source",
+              "reasonCode",
+              "evidence",
+              "preconditions"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "riskClass": {
+                "type": "string",
+                "enum": [
+                  "read_only_probe",
+                  "idempotent_refresh",
+                  "mutating_local_repair",
+                  "mutating_external_coordination_repair",
+                  "approval_required_repair",
+                  "destructive_or_irreversible_repair",
+                  "unavailable_or_manual_only"
+                ]
+              },
+              "preflightCommand": {"type": ["string", "null"]},
+              "requiresHumanApproval": {"type": "boolean"},
+              "mutatesExternalState": {"type": "boolean"},
+              "mutatesTrackerState": {"type": "boolean"},
+              "privacyClass": {"type": "string"},
+              "nextAction": {
+                "type": "string",
+                "enum": [
+                  "run_directly",
+                  "run_preflight_first",
+                  "coordinate_first",
+                  "ask_human",
+                  "manual_only",
+                  "policy_denied"
+                ]
+              },
+              "ruleId": {"type": "string"},
+              "source": {"type": "string", "enum": ["repair_action_safety"]},
+              "reasonCode": {"type": "string"},
+              "evidence": {"type": "array", "items": {"type": "string"}},
+              "preconditions": {"type": "array", "items": {"type": "string"}}
+            }
+          }
         }
       }
     },
@@ -214,13 +268,41 @@
           "priority": 1,
           "kind": "manual_coordination",
           "command": null,
-          "message": "Use Beads status and direct git state until Agent Mail is repaired."
+          "message": "Use Beads status and direct git state until Agent Mail is repaired.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "repair_action_safety",
+            "reasonCode": "manual_coordination_fallback",
+            "evidence": ["source_run_recovery_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         },
         {
           "priority": 2,
           "kind": "repair_substrate_after_approval",
           "command": "am doctor repair --yes",
-          "message": "Repair Agent Mail only after the human approves the mutating repair command."
+          "message": "Repair Agent Mail only after the human approves the mutating repair command.",
+          "repairSafety": {
+            "riskClass": "mutating_external_coordination_repair",
+            "preflightCommand": "ee preflight check --cmd 'am doctor repair --yes' --workspace . --json",
+            "requiresHumanApproval": true,
+            "mutatesExternalState": true,
+            "mutatesTrackerState": false,
+            "privacyClass": "coordination_database_metadata",
+            "nextAction": "ask_human",
+            "ruleId": "repair_safety:mutating_external_coordination_repair",
+            "source": "repair_action_safety",
+            "reasonCode": "agent_mail_storage_repair_after_approval",
+            "evidence": ["agent_mail_repair_command", "human_approval_required"],
+            "preconditions": ["human_approved_exact_command"]
+          }
         }
       ],
       "artifacts": [

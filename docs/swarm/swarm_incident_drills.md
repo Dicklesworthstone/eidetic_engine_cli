@@ -21,8 +21,9 @@ Required invariants:
 - `substrates` always covers Agent Mail, Beads, RCH, disk, and hot-path
   posture, even when a substrate is `not_applicable`.
 - `expectedDegraded` lists every degraded code the replay surface must emit.
-- `expectedRecoveryActions` are ordered, evidence-linked, and non-destructive
-  by default.
+- `expectedRecoveryActions` are ordered, evidence-linked, non-destructive by
+  default, and include `repairSafety` metadata so agents can branch without
+  parsing display command text.
 - `assertions.noLiveServices`, `assertions.noLocalCargo`,
   `assertions.noDeletion`, and `assertions.noMutation` must be true for every
   committed fixture.

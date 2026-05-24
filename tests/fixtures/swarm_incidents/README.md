@@ -22,6 +22,6 @@ Fixture invariants:
   deletion is required to replay these scenarios.
 - `assertions.noLiveServices`, `assertions.noLocalCargo`,
   `assertions.noDeletion`, and `assertions.noMutation` must stay true.
-- Recovery actions are ordered, evidence-linked recommendations. They are not
-  autonomous repairs.
+- Recovery actions are ordered, evidence-linked recommendations with
+  `repairSafety` metadata. They are not autonomous repairs.
 - Real home paths and secrets are not allowed in committed fixtures.

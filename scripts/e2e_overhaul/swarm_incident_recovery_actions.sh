@@ -58,8 +58,26 @@ fixture_errors() {
       ($actions | to_entries[] as $entry
         | ($entry.key) as $i
         | ($entry.value) as $action
-        | (["priority","kind","summary","command","manualStep","evidence","destructive","preconditions"] - ($action | keys_unsorted))[]? as $missing
+        | (["priority","kind","summary","command","manualStep","evidence","destructive","preconditions","repairSafety"] - ($action | keys_unsorted))[]? as $missing
         | pointer($i; ".\($missing)") + ": missing required recovery-action field"),
+      ($actions | to_entries[] as $entry
+        | ($entry.key) as $i
+        | ($entry.value) as $action
+        | if (($action.repairSafety // null) | type) != "object" then
+            pointer($i; ".repairSafety") + ": repairSafety must be an object"
+          else empty end),
+      ($actions | to_entries[] as $entry
+        | ($entry.key) as $i
+        | ($entry.value.repairSafety // {}) as $safety
+        | if ((($safety.riskClass // "") | type) != "string" or (($safety.riskClass // "") | length) == 0) then
+            pointer($i; ".repairSafety.riskClass") + ": repairSafety riskClass is required"
+          else empty end),
+      ($actions | to_entries[] as $entry
+        | ($entry.key) as $i
+        | ($entry.value.repairSafety // {}) as $safety
+        | if ((($safety.nextAction // "") | type) != "string" or (($safety.nextAction // "") | length) == 0) then
+            pointer($i; ".repairSafety.nextAction") + ": repairSafety nextAction is required"
+          else empty end),
       ($actions | to_entries[] as $entry
         | ($entry.key) as $i
         | ($entry.value) as $action

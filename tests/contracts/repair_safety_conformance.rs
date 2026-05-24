@@ -325,6 +325,93 @@ fn walk_fallback_actions(value: &Value, path: &str, errors: &mut Vec<String>) {
     }
 }
 
+fn walk_source_run_recovery_actions(value: &Value, path: &str, errors: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            let is_source_run_evidence = map.get("schema").and_then(Value::as_str)
+                == Some("ee.source_run_evidence.v1")
+                || map.get("const").and_then(Value::as_str) == Some("ee.source_run_evidence.v1");
+            if is_source_run_evidence
+                && let Some(actions) = map.get("recovery").and_then(Value::as_array)
+            {
+                for (index, action) in actions.iter().enumerate() {
+                    let ctx = format!("{path}/recovery[{index}]");
+                    let command = action.get("command").and_then(Value::as_str);
+                    let manual_step = action
+                        .get("manualStep")
+                        .and_then(Value::as_str)
+                        .or_else(|| action.get("message").and_then(Value::as_str));
+                    if command.is_some() || manual_step.is_some() {
+                        match action.get("repairSafety") {
+                            Some(safety) => {
+                                if let Err(error) =
+                                    validate_repair_safety(safety, command, manual_step, &ctx)
+                                {
+                                    errors.push(error);
+                                }
+                            }
+                            None => errors.push(format!(
+                                "{ctx}: source-run recovery names command/message without repairSafety"
+                            )),
+                        }
+                    }
+                }
+            }
+            for (key, child) in map {
+                walk_source_run_recovery_actions(child, &format!("{path}/{key}"), errors);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                walk_source_run_recovery_actions(child, &format!("{path}[{index}]"), errors);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_swarm_incident_recovery_actions(value: &Value, path: &str, errors: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            let is_swarm_incident = map.get("schema").and_then(Value::as_str)
+                == Some("ee.swarm_incident.v1")
+                || map.get("const").and_then(Value::as_str) == Some("ee.swarm_incident.v1");
+            if is_swarm_incident
+                && let Some(actions) = map.get("expectedRecoveryActions").and_then(Value::as_array)
+            {
+                for (index, action) in actions.iter().enumerate() {
+                    let ctx = format!("{path}/expectedRecoveryActions[{index}]");
+                    let command = action.get("command").and_then(Value::as_str);
+                    let manual_step = action.get("manualStep").and_then(Value::as_str);
+                    if command.is_some() || manual_step.is_some() {
+                        match action.get("repairSafety") {
+                            Some(safety) => {
+                                if let Err(error) =
+                                    validate_repair_safety(safety, command, manual_step, &ctx)
+                                {
+                                    errors.push(error);
+                                }
+                            }
+                            None => errors.push(format!(
+                                "{ctx}: swarm incident recovery action names command/manualStep without repairSafety"
+                            )),
+                        }
+                    }
+                }
+            }
+            for (key, child) in map {
+                walk_swarm_incident_recovery_actions(child, &format!("{path}/{key}"), errors);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                walk_swarm_incident_recovery_actions(child, &format!("{path}[{index}]"), errors);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_repair_safety_risk_classes(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -442,11 +529,76 @@ fn high_risk_failure_mode_repairs_have_safety_metadata() -> TestResult {
 }
 
 #[test]
+fn source_run_recovery_actions_have_repair_safety_metadata() -> TestResult {
+    let mut errors = Vec::new();
+    let schema_path = repo_root().join("docs/schemas/swarm/ee.source_run_evidence.v1.json");
+    let schema = read_json(&schema_path)?;
+    walk_source_run_recovery_actions(&schema, &schema_path.display().to_string(), &mut errors);
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} source-run recovery repair-safety conformance error(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}
+
+#[test]
+fn swarm_incident_recovery_actions_have_repair_safety_metadata() -> TestResult {
+    let mut errors = Vec::new();
+    let schema_path = repo_root().join("docs/schemas/swarm/ee.swarm_incident.v1.json");
+    let schema = read_json(&schema_path)?;
+    let required = schema
+        .pointer("/$defs/recoveryAction/required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "{}: missing /$defs/recoveryAction/required",
+                schema_path.display()
+            )
+        })?;
+    ensure(
+        required
+            .iter()
+            .any(|field| field.as_str() == Some("repairSafety")),
+        format!(
+            "{}: swarm incident recovery actions must require repairSafety",
+            schema_path.display()
+        ),
+    )?;
+    walk_swarm_incident_recovery_actions(&schema, &schema_path.display().to_string(), &mut errors);
+    for path in tracked_paths("tests/fixtures/swarm_incidents/*.json")? {
+        let value = read_json(&path)?;
+        walk_swarm_incident_recovery_actions(&value, &path.display().to_string(), &mut errors);
+    }
+    let all_examples_path = repo_root().join("tests/fixtures/swarm_schemas/all_examples.json");
+    walk_swarm_incident_recovery_actions(
+        &read_json(&all_examples_path)?,
+        &all_examples_path.display().to_string(),
+        &mut errors,
+    );
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} swarm incident recovery repair-safety conformance error(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
+}
+
+#[test]
 fn repair_safety_matrix_covers_agent_decisions() -> TestResult {
     let mut risk_classes = BTreeSet::new();
     for pattern in [
         "tests/fixtures/failure_modes/*.json",
         "tests/fixtures/swarm_work_packet/*.json",
+        "tests/fixtures/swarm_incidents/*.json",
     ] {
         for path in tracked_paths(pattern)? {
             collect_repair_safety_risk_classes(&read_json(&path)?, &mut risk_classes);
@@ -454,6 +606,10 @@ fn repair_safety_matrix_covers_agent_decisions() -> TestResult {
     }
     collect_repair_safety_risk_classes(
         &read_json(&repo_root().join("docs/schemas/swarm/ee.swarm.work_packet.v1.json"))?,
+        &mut risk_classes,
+    );
+    collect_repair_safety_risk_classes(
+        &read_json(&repo_root().join("docs/schemas/swarm/ee.source_run_evidence.v1.json"))?,
         &mut risk_classes,
     );
 

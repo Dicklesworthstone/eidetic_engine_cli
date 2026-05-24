@@ -95,7 +95,7 @@
     },
     "recoveryAction": {
       "type": "object",
-      "required": ["priority", "kind", "summary", "command", "manualStep", "evidence", "destructive", "preconditions"],
+      "required": ["priority", "kind", "summary", "command", "manualStep", "evidence", "destructive", "preconditions", "repairSafety"],
       "additionalProperties": false,
       "properties": {
         "priority": {"type": "integer", "minimum": 1},
@@ -105,6 +105,61 @@
         "manualStep": {"type": ["string", "null"]},
         "evidence": {"type": "array", "minItems": 1, "items": {"type": "string"}},
         "destructive": {"type": "boolean"},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "repairSafety": {"$ref": "#/$defs/repairSafety"}
+      }
+    },
+    "repairSafety": {
+      "type": "object",
+      "description": "Repair-action safety metadata for swarm incident recovery actions. Agents use this block instead of executing display command text directly.",
+      "required": [
+        "riskClass",
+        "preflightCommand",
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+        "privacyClass",
+        "nextAction",
+        "ruleId",
+        "source",
+        "reasonCode",
+        "evidence",
+        "preconditions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "riskClass": {
+          "type": "string",
+          "enum": [
+            "read_only_probe",
+            "idempotent_refresh",
+            "mutating_local_repair",
+            "mutating_external_coordination_repair",
+            "approval_required_repair",
+            "destructive_or_irreversible_repair",
+            "unavailable_or_manual_only"
+          ]
+        },
+        "preflightCommand": {"type": ["string", "null"]},
+        "requiresHumanApproval": {"type": "boolean"},
+        "mutatesExternalState": {"type": "boolean"},
+        "mutatesTrackerState": {"type": "boolean"},
+        "privacyClass": {"type": "string"},
+        "nextAction": {
+          "type": "string",
+          "enum": [
+            "run_directly",
+            "run_preflight_first",
+            "coordinate_first",
+            "ask_human",
+            "manual_only",
+            "policy_denied"
+          ]
+        },
+        "ruleId": {"type": "string"},
+        "source": {"type": "string", "enum": ["repair_action_safety"]},
+        "reasonCode": {"type": "string"},
+        "evidence": {"type": "array", "items": {"type": "string"}},
         "preconditions": {"type": "array", "items": {"type": "string"}}
       }
     }
@@ -127,8 +182,8 @@
         {"code": "rch_remote_required_fallback_prevented", "severity": "medium", "surface": "diag incident", "reason": "Local Cargo fallback is explicitly forbidden for this repository."}
       ],
       "expectedRecoveryActions": [
-        {"priority": 1, "kind": "observe", "summary": "Capture RCH status and exact topology error before changing code.", "command": "rch status --workers --jobs --json", "manualStep": null, "evidence": ["RCH-E327"], "destructive": false, "preconditions": []},
-        {"priority": 2, "kind": "repair", "summary": "Install or build a patched native macOS RCH client; do not run local Cargo as fallback.", "command": null, "manualStep": "Coordinate on bd-18i4h and verify the patched RCH client before retrying ee Cargo gates.", "evidence": ["bd-18i4h"], "destructive": false, "preconditions": ["RCH source patch is reviewed", "native client install is approved"]}
+        {"priority": 1, "kind": "observe", "summary": "Capture RCH status and exact topology error before changing code.", "command": "rch status --workers --jobs --json", "manualStep": null, "evidence": ["RCH-E327"], "destructive": false, "preconditions": [], "repairSafety": {"riskClass": "read_only_probe", "preflightCommand": null, "requiresHumanApproval": false, "mutatesExternalState": false, "mutatesTrackerState": false, "privacyClass": "synthetic_incident_fixture", "nextAction": "run_directly", "ruleId": "repair_safety:read_only_probe", "source": "repair_action_safety", "reasonCode": "incident_rch_status_observe", "evidence": ["RCH-E327"], "preconditions": []}},
+        {"priority": 2, "kind": "repair", "summary": "Install or build a patched native macOS RCH client; do not run local Cargo as fallback.", "command": null, "manualStep": "Coordinate on bd-18i4h and verify the patched RCH client before retrying ee Cargo gates.", "evidence": ["bd-18i4h"], "destructive": false, "preconditions": ["RCH source patch is reviewed", "native client install is approved"], "repairSafety": {"riskClass": "unavailable_or_manual_only", "preflightCommand": null, "requiresHumanApproval": false, "mutatesExternalState": false, "mutatesTrackerState": false, "privacyClass": "manual_coordination", "nextAction": "manual_only", "ruleId": "repair_safety:unavailable_or_manual_only", "source": "repair_action_safety", "reasonCode": "incident_rch_repair_manual_only", "evidence": ["bd-18i4h"], "preconditions": ["RCH source patch is reviewed", "native client install is approved"]}}
       ],
       "redactionExpectations": {"pathPolicy": "redact_home", "secretPolicy": "no_secrets", "allowedHostLabels": ["css", "csd", "trj"]},
       "assertions": {"deterministic": true, "noLiveServices": true, "noLocalCargo": true, "noDeletion": true, "noMutation": true},
