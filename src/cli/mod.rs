@@ -292,20 +292,23 @@ mod share;
 
 const MIGRATION_REPAIR_COMMAND: &str = "ee migrate run --workspace . --json";
 
-/// Top-level `before_help` prelude rendered by clap above the standard
-/// USAGE / OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without
-/// this, `ee --help` prints 40+ subcommands alphabetically and an agent
-/// has no signal for the most-used path. The prelude points at the
-/// 5-command core path, then groups the rest into stable categories so
-/// the alphabetical detail list below stays useful as a reference.
+/// Top-level long help prelude rendered by clap above the standard USAGE /
+/// OPTIONS / COMMANDS sections. Bead bd-17c65.6.3 (F3): without this,
+/// `ee --help` prints 40+ subcommands alphabetically and an agent has no
+/// signal for the most-used path. The prelude points at the AGENTS.md
+/// 5-command core path, then groups the rest into stable categories so the
+/// alphabetical detail list below stays useful as a reference.
 const HELP_PRELUDE: &str = concat!(
     "Most-used commands (start here):\n",
     "  init          Initialize an ee workspace\n",
-    "  note          Capture a memory with agent-friendly level/kind inference\n",
-    "  pack          Assemble a task-specific context pack\n",
-    "  why           Explain why a memory was stored or selected\n",
+    "  remember      Capture an explicit memory\n",
     "  search        Fine-grained memory retrieval\n",
-    "  remember      Explicit memory capture without inference\n",
+    "  context       Assemble a task-specific context pack\n",
+    "  why           Explain why a memory was stored or selected\n",
+    "\n",
+    "Agent shortcuts:\n",
+    "  note          Capture a memory with agent-friendly level/kind inference\n",
+    "  pack          Build or replay context packs with explicit pack controls\n",
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
@@ -325,12 +328,17 @@ const HELP_PRELUDE: &str = concat!(
     "  ee <subcommand> --help     per-command help\n",
 );
 
+const HELP_LONG_ABOUT: &str = concat!(
+    "Durable, local-first, explainable memory for coding agents.\n\n",
+    HELP_PRELUDE
+);
+
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
     name = "ee",
     version,
     about = "Durable, local-first, explainable memory for coding agents.",
-    before_help = HELP_PRELUDE,
+    long_about = HELP_LONG_ABOUT,
     disable_colored_help = true,
     color = clap::ColorChoice::Never,
     disable_help_subcommand = true
@@ -51935,26 +51943,40 @@ mod tests {
         let (exit, stdout, stderr) = invoke(&["ee", "--help"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
+        ensure_contains(&stdout, "Most-used commands (start here)", "help prelude")?;
+        for command in ["init", "remember", "search", "context", "why"] {
+            ensure_contains(
+                &stdout,
+                &format!("  {command} "),
+                &format!("help promotes {command}"),
+            )?;
+        }
         ensure_contains(&stdout, "status", "help status subcommand")?;
         ensure_contains(&stdout, "insights", "help insights subcommand")?;
-        ensure_contains(&stdout, "  note ", "help promotes note")?;
-        ensure_contains(&stdout, "  pack ", "help promotes pack")?;
-        ensure_contains(&stdout, "  why ", "help promotes why")?;
-        let note_pos = stdout
-            .find("  note ")
-            .ok_or_else(|| "help note position missing".to_string())?;
-        let pack_pos = stdout
-            .find("  pack ")
-            .ok_or_else(|| "help pack position missing".to_string())?;
+        ensure_contains(&stdout, "  note ", "help lists note shortcut")?;
+        ensure_contains(&stdout, "  pack ", "help lists pack shortcut")?;
+        let init_pos = stdout
+            .find("  init ")
+            .ok_or_else(|| "help init position missing".to_string())?;
+        let remember_pos = stdout
+            .find("  remember ")
+            .ok_or_else(|| "help remember position missing".to_string())?;
+        let context_pos = stdout
+            .find("  context ")
+            .ok_or_else(|| "help context position missing".to_string())?;
         let why_pos = stdout
             .find("  why ")
             .ok_or_else(|| "help why position missing".to_string())?;
         let search_pos = stdout
             .find("  search ")
             .ok_or_else(|| "help search position missing".to_string())?;
-        ensure(note_pos < search_pos, "help lists note before search")?;
-        ensure(pack_pos < search_pos, "help lists pack before search")?;
-        ensure(why_pos < search_pos, "help lists why before search")?;
+        ensure(init_pos < search_pos, "help lists init before search")?;
+        ensure(
+            remember_pos < search_pos,
+            "help lists remember before search",
+        )?;
+        ensure(search_pos < context_pos, "help lists search before context")?;
+        ensure(context_pos < why_pos, "help lists context before why")?;
         ensure(stderr.is_empty(), "help stderr must be empty")
     }
 
