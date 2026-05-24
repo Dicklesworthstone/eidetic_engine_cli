@@ -1778,6 +1778,12 @@ fn run_context_pack_with_performance_inner(
             redaction_level: options.redaction_level,
             include_coverage_fill: options.output_options.include_coverage_fill,
             output_redaction_enabled,
+            // bd-1prrl.7.3: arena mode is plumbed through the
+            // `PackAssemblyOptions` surface. Context orchestration
+            // selects `Disabled` for now — the parity-gated swap to
+            // `RequestScoped` lands with bd-1prrl.7.4 once the
+            // golden harness proves byte-identical output.
+            arena_mode: crate::pack::ArenaMode::Disabled,
         },
         determinism,
     )

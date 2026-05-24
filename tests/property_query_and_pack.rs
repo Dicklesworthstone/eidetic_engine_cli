@@ -10,8 +10,8 @@ use chrono::{DateTime, Duration, Utc};
 use ee::models::{MemoryId, ProvenanceUri, RedactionLevel, UnitScore};
 use ee::obs::strip_volatile_fields;
 use ee::pack::{
-    ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft,
-    PackProvenance, PackSection, TokenBudget, assemble_draft,
+    ArenaMode, ContextPackProfile, PackAssemblyOptions, PackCandidate, PackCandidateInput,
+    PackDraft, PackProvenance, PackSection, TokenBudget, assemble_draft,
     assemble_draft_with_profile_and_options_seeded,
 };
 use ee::runtime::determinism::Deterministic;
@@ -339,6 +339,7 @@ fn pack_options() -> impl Strategy<Value = PackAssemblyOptions> {
                     include_coverage_fill,
                     output_redaction_enabled,
                     redaction_level: redaction_level_for(redaction_level_raw),
+                    arena_mode: ArenaMode::Disabled,
                 }
             },
         )
@@ -617,6 +618,7 @@ fn replay_pack_case_input_bytes(input: &serde_json::Value) -> Result<Vec<u8>, St
         include_coverage_fill: input.config.include_coverage_fill,
         output_redaction_enabled: input.config.output_redaction_enabled,
         redaction_level: parse_regression_redaction_level(&input.config.redaction_level)?,
+        arena_mode: ArenaMode::Disabled,
     };
     let specs = input
         .candidate_specs
@@ -1295,6 +1297,7 @@ fn determinism_regression_fixture_captures_structured_pack_input() -> Result<(),
         include_coverage_fill: false,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
 
     let fixture = regression_fixture_for_pack_case_mismatch(
@@ -1349,6 +1352,7 @@ fn determinism_regression_fixture_replays_structured_pack_input() -> Result<(), 
         include_coverage_fill: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
     let input = regression_input_for_pack_case(
         "structured replay".to_string(),
@@ -1384,6 +1388,7 @@ fn determinism_regression_fixture_persists_pack_case_mismatches_only() -> Result
         include_coverage_fill: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
     let input = regression_input_for_pack_case(
         "persisted mismatch".to_string(),
@@ -1443,6 +1448,7 @@ fn determinism_regression_fixture_verifies_replayed_expected_hash() -> Result<()
         include_coverage_fill: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
     let input = regression_input_for_pack_case(
         "structured replay".to_string(),
@@ -1487,6 +1493,7 @@ fn determinism_regression_fixture_replay_rejects_diff_window_drift() -> Result<(
             include_coverage_fill: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
+            arena_mode: ArenaMode::Disabled,
         },
         42,
         &specs,
@@ -1535,6 +1542,7 @@ fn determinism_regression_fixture_verifies_loaded_replay_hashes() -> Result<(), 
             include_coverage_fill: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Strict,
+            arena_mode: ArenaMode::Disabled,
         },
         42,
         &specs,
@@ -2322,6 +2330,7 @@ fn determinism_preflight_event_replays_loaded_fixtures_and_flags_stale() -> Resu
         include_coverage_fill: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
 
     let fresh_input = regression_input_for_pack_case(
@@ -2386,6 +2395,7 @@ fn determinism_preflight_event_rejects_replay_hash_drift_before_sampling() -> Re
         include_coverage_fill: true,
         output_redaction_enabled: true,
         redaction_level: RedactionLevel::Strict,
+        arena_mode: ArenaMode::Disabled,
     };
     let input = regression_input_for_pack_case(
         "drifted preflight replay".to_string(),

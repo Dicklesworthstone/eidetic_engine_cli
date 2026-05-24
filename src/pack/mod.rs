@@ -147,11 +147,92 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+/// bd-1prrl.7.3: Arena allocation policy for pack assembly scratch.
+///
+/// The enum names the lifetime contract so tracing fields, perf
+/// fixtures, and future workspace-reuse work can identify which
+/// allocation strategy produced a given pack. Today both modes
+/// allocate scratch fresh per-request (request-scoped by Rust
+/// ownership); the variant exists so bd-1prrl.7.4 / 7.5 can prove
+/// byte-identical output and measure allocation cost with the mode
+/// selection plumbed end-to-end.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ArenaMode {
+    /// No arena indirection; standard `Vec` allocation per call.
+    /// This is the public default and the baseline for parity tests.
+    #[default]
+    Disabled,
+    /// Arena scratch is allocated and dropped within one pack
+    /// assembly call. No reference into scratch outlives the call.
+    /// Workspace reuse is deferred to a later child bead.
+    RequestScoped,
+}
+
+impl ArenaMode {
+    /// Stable wire-name for tracing fields and perf artifacts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::RequestScoped => "request_scoped",
+        }
+    }
+}
+
+/// bd-1prrl.7.3: Stable identifier for the arena allocation+reset
+/// policy version. Bump only when reset, poisoning, or lifetime
+/// behavior changes — pack content is independent of this value.
+pub const ARENA_POLICY_VERSION: &str = "1";
+
+/// bd-1prrl.7.3: RAII lifetime guard for one arena scope (one pack
+/// assembly request). Owning the guard on the assembly stack frame
+/// ties scratch lifetime to the function call; on drop, an audit
+/// trace records the scope close so reset-count and reuse-generation
+/// counters in bd-1prrl.7.5 perf fixtures have a single emission
+/// point. Does not own scratch buffers itself — Rust ownership of
+/// `PackDraftScratch` / `MmrAssemblyScratch` is the actual guarantee.
+struct ArenaScope {
+    mode: ArenaMode,
+}
+
+impl ArenaScope {
+    fn new(mode: ArenaMode) -> Self {
+        tracing::trace!(
+            target: "ee::pack::arena",
+            arena_mode = mode.as_str(),
+            arena_policy_version = ARENA_POLICY_VERSION,
+            event = "scope_open",
+            "arena scope opened for pack assembly"
+        );
+        Self { mode }
+    }
+}
+
+impl Drop for ArenaScope {
+    fn drop(&mut self) {
+        tracing::trace!(
+            target: "ee::pack::arena",
+            arena_mode = self.mode.as_str(),
+            arena_policy_version = ARENA_POLICY_VERSION,
+            event = "scope_close",
+            arena_reset_count = 1u32,
+            "arena scope closed; scratch dropped within request"
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackAssemblyOptions {
     pub include_coverage_fill: bool,
     pub output_redaction_enabled: bool,
     pub redaction_level: RedactionLevel,
+    /// bd-1prrl.7.3: Arena allocation strategy for scratch buffers.
+    /// Defaults to [`ArenaMode::Disabled`] so existing public output
+    /// is unchanged. Does not participate in `compute_pack_hash`
+    /// inputs, omission order, or selection audit content — those
+    /// invariants are preserved across arena modes by contract
+    /// (`docs/pack-arena-assembly.md`).
+    pub arena_mode: ArenaMode,
 }
 
 impl Default for PackAssemblyOptions {
@@ -160,6 +241,7 @@ impl Default for PackAssemblyOptions {
             include_coverage_fill: true,
             output_redaction_enabled: true,
             redaction_level: RedactionLevel::Minimal,
+            arena_mode: ArenaMode::Disabled,
         }
     }
 }
@@ -4743,6 +4825,14 @@ pub fn assemble_draft_with_profile_and_options_seeded(
     options: PackAssemblyOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<PackDraft, PackValidationError> {
+    // bd-1prrl.7.3: open the arena scope before assembly so the
+    // RAII guard's drop runs before the returned `PackDraft` is
+    // observed by callers. Scratch buffers are owned by
+    // assemble_mmr_draft / assemble_facility_location_draft and are
+    // dropped before this function returns regardless of mode, so
+    // both modes are request-scoped today and produce identical
+    // output (verified by the parity tests below).
+    let _arena_scope = ArenaScope::new(options.arena_mode);
     match profile {
         ContextPackProfile::Submodular => {
             tracing::info!(
@@ -4750,6 +4840,8 @@ pub fn assemble_draft_with_profile_and_options_seeded(
                 algorithm_id = "deterministic_greedy_facility_location_gain_per_token",
                 objective = "facility_location",
                 profile = profile.as_str(),
+                arena_mode = options.arena_mode.as_str(),
+                arena_policy_version = ARENA_POLICY_VERSION,
                 "starting pack assembly"
             );
             assemble_facility_location_draft(profile, query, budget, candidates, options)
@@ -4764,6 +4856,8 @@ pub fn assemble_draft_with_profile_and_options_seeded(
                 algorithm_id = "mmr_with_coverage_fill_v1",
                 objective = "mmr_redundancy",
                 profile = profile.as_str(),
+                arena_mode = options.arena_mode.as_str(),
+                arena_policy_version = ARENA_POLICY_VERSION,
                 "starting pack assembly"
             );
             assemble_mmr_draft(profile, query, budget, candidates, options, determinism)
@@ -7298,6 +7392,194 @@ mod tests {
             &candidate_count,
             "facility candidate count",
         )
+    }
+
+    #[test]
+    fn arena_mode_default_is_disabled() -> TestResult {
+        ensure_equal(
+            &super::PackAssemblyOptions::default().arena_mode,
+            &super::ArenaMode::Disabled,
+            "PackAssemblyOptions::default() must keep arena disabled \
+             so existing public output is unchanged",
+        )?;
+        ensure_equal(
+            &super::ArenaMode::default(),
+            &super::ArenaMode::Disabled,
+            "ArenaMode::default() must be Disabled",
+        )
+    }
+
+    #[test]
+    fn arena_mode_as_str_uses_stable_wire_names() -> TestResult {
+        ensure_equal(
+            &super::ArenaMode::Disabled.as_str(),
+            &"disabled",
+            "Disabled wire-name must remain stable for tracing/perf consumers",
+        )?;
+        ensure_equal(
+            &super::ArenaMode::RequestScoped.as_str(),
+            &"request_scoped",
+            "RequestScoped wire-name must remain stable for tracing/perf consumers",
+        )
+    }
+
+    // bd-1prrl.7.3 parity goldens: arena mode is an internal allocation
+    // strategy and must never change public pack output. The contract in
+    // docs/pack-arena-assembly.md enumerates the parity surfaces; these
+    // tests freeze the byte-identical contract on MMR, facility-location,
+    // and empty paths so bd-1prrl.7.4's broader golden harness can layer
+    // on top without re-establishing the basic invariant.
+
+    fn assert_packs_equal_across_arena_mode(
+        a: &PackDraft,
+        b: &PackDraft,
+        label: &str,
+    ) -> TestResult {
+        ensure_equal(
+            &a.items,
+            &b.items,
+            &format!("{label}: items must match across arena modes"),
+        )?;
+        ensure_equal(
+            &a.omitted,
+            &b.omitted,
+            &format!("{label}: omissions must match across arena modes"),
+        )?;
+        ensure_equal(
+            &a.used_tokens,
+            &b.used_tokens,
+            &format!("{label}: used_tokens must match across arena modes"),
+        )?;
+        ensure_equal(
+            &a.budget,
+            &b.budget,
+            &format!("{label}: budget must match across arena modes"),
+        )?;
+        ensure_equal(
+            &a.selection_audit.selected_items,
+            &b.selection_audit.selected_items,
+            &format!("{label}: selection audit items must match"),
+        )?;
+        ensure_equal(
+            &a.selection_audit.steps,
+            &b.selection_audit.steps,
+            &format!("{label}: selection audit steps must match"),
+        )?;
+        ensure_equal(
+            &a.selection_audit.candidate_count,
+            &b.selection_audit.candidate_count,
+            &format!("{label}: selection audit candidate_count must match"),
+        )?;
+        ensure_equal(
+            &a.selection_audit.algorithm_id,
+            &b.selection_audit.algorithm_id,
+            &format!("{label}: algorithm_id must match"),
+        )
+    }
+
+    #[test]
+    fn arena_mode_parity_mmr_balanced() -> TestResult {
+        let candidates = facility_benchmark_candidates(48)?;
+        let budget =
+            TokenBudget::new(4_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0xee_a7_e3_3a);
+        let disabled = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::Disabled,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("disabled draft rejected: {error:?}"))?;
+        let request_scoped = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates,
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::RequestScoped,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("request_scoped draft rejected: {error:?}"))?;
+        assert_packs_equal_across_arena_mode(&disabled, &request_scoped, "mmr_balanced")
+    }
+
+    #[test]
+    fn arena_mode_parity_facility_location_submodular() -> TestResult {
+        let candidates = facility_benchmark_candidates(48)?;
+        let budget =
+            TokenBudget::new(4_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0xfa_c1_77_07);
+        let disabled = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Submodular,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::Disabled,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("disabled draft rejected: {error:?}"))?;
+        let request_scoped = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Submodular,
+            "ship arena parity",
+            budget,
+            candidates,
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::RequestScoped,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("request_scoped draft rejected: {error:?}"))?;
+        assert_packs_equal_across_arena_mode(
+            &disabled,
+            &request_scoped,
+            "facility_location_submodular",
+        )
+    }
+
+    #[test]
+    fn arena_mode_parity_empty_candidate_pool() -> TestResult {
+        let budget = TokenBudget::new(1_000).map_err(|error| format!("budget: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0);
+        let disabled = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "empty arena parity",
+            budget,
+            Vec::<PackCandidate>::new(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::Disabled,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("disabled draft rejected: {error:?}"))?;
+        let request_scoped = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "empty arena parity",
+            budget,
+            Vec::<PackCandidate>::new(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::RequestScoped,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("request_scoped draft rejected: {error:?}"))?;
+        ensure(
+            disabled.items.is_empty() && request_scoped.items.is_empty(),
+            "empty candidate pool must produce empty items in both arena modes",
+        )?;
+        assert_packs_equal_across_arena_mode(&disabled, &request_scoped, "empty_pool_balanced")
     }
 
     fn draft_from_candidates(candidates: Vec<PackCandidate>) -> Result<PackDraft, String> {
