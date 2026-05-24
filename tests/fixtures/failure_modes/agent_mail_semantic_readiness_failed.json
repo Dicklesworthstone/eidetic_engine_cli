@@ -25,6 +25,30 @@
       "semantic readiness",
       "reservation and inbox reads are not authoritative"
     ],
-    "repair_contains": "semantic readiness"
+    "repair_contains": "semantic readiness",
+    "repair_string": "Repair Agent Mail storage and re-run the work-packet collector after semantic readiness passes.",
+    "repair_safety": [
+      {
+        "appliesTo": "Repair Agent Mail storage and re-run the work-packet collector after semantic readiness passes.",
+        "command": null,
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "no_command",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "manual_only_repair",
+        "evidence": [
+          "recovery_kind_none"
+        ],
+        "preconditions": [
+          "operator_decision_required"
+        ],
+        "manualStep": "Repair Agent Mail storage outside this command path before trusting reservation and inbox reads."
+      }
+    ]
   }
 }

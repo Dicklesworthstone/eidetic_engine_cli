@@ -26,6 +26,29 @@
     ],
     "repair_contains": "br sync --import-only",
     "repair_string": "br sync --import-only",
-    "repair_command_regex": "(?<cmd>br sync --import-only)"
+    "repair_command_regex": "(?<cmd>br sync --import-only)",
+    "repair_safety": [
+      {
+        "appliesTo": "br sync --import-only",
+        "command": "br sync --import-only",
+        "riskClass": "mutating_external_coordination_repair",
+        "preflightCommand": "ee preflight check --cmd 'br sync --import-only' --workspace . --json",
+        "requiresHumanApproval": false,
+        "mutatesExternalState": true,
+        "mutatesTrackerState": true,
+        "privacyClass": "tracker_metadata_only",
+        "nextAction": "coordinate_first",
+        "ruleId": "repair_safety:mutating_external_coordination_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "external_coordination_repair_command",
+        "evidence": [
+          "beads_mutation_command"
+        ],
+        "preconditions": [
+          "bead_id_must_be_explicit"
+        ],
+        "manualStep": "Announce tracker mutation through the bead thread."
+      }
+    ]
   }
 }

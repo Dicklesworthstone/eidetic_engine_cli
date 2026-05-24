@@ -28,6 +28,26 @@
       "Provide a redacted Agent Mail snapshot.",
       "Run `am doctor check` and retry the hygiene report."
     ],
-    "repair_command_regex": "Run `(?<cmd>am doctor check)`"
+    "repair_command_regex": "Run `(?<cmd>am doctor check)`",
+    "repair_safety": [
+      {
+        "appliesTo": "Run `am doctor check` and retry the hygiene report.",
+        "command": "am doctor check",
+        "riskClass": "read_only_probe",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:read_only_probe",
+        "source": "repair_action_safety",
+        "reasonCode": "read_only_probe_command",
+        "evidence": [
+          "read_only_probe_command"
+        ],
+        "preconditions": []
+      }
+    ]
   }
 }

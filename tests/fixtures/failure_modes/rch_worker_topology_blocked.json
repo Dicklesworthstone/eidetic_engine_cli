@@ -27,6 +27,29 @@
       "root metadata redacted"
     ],
     "repair_contains": "worker path mapping",
-    "repair_string": "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped."
+    "repair_string": "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
+    "repair_safety": [
+      {
+        "appliesTo": "Inspect RCH worker path mapping; remote workers are visible but this workspace cannot be mapped.",
+        "command": null,
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "no_command",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "manual_only_repair",
+        "evidence": [
+          "recovery_kind_none"
+        ],
+        "preconditions": [
+          "operator_decision_required"
+        ],
+        "manualStep": "Do not guess a worker-topology repair command; inspect mapping policy and coordinate with the RCH owner."
+      }
+    ]
   }
 }

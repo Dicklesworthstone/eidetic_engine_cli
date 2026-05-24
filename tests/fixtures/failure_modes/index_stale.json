@@ -28,6 +28,28 @@
     ],
     "repair_contains": "ee index rebuild",
     "repair_string": "ee index rebuild --workspace .",
-    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
+    "repair_safety": [
+      {
+        "appliesTo": "ee index rebuild --workspace .",
+        "command": "ee index rebuild --workspace .",
+        "riskClass": "idempotent_refresh",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:idempotent_refresh",
+        "source": "repair_action_safety",
+        "reasonCode": "idempotent_refresh_command",
+        "evidence": [
+          "derived_asset_refresh_command"
+        ],
+        "preconditions": [
+          "workspace_must_be_explicit"
+        ]
+      }
+    ]
   }
 }

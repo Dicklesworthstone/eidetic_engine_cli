@@ -26,6 +26,29 @@
       "unavailable"
     ],
     "repair_contains": "Restore the destructive pattern catalog",
-    "repair_string": "Restore the destructive pattern catalog, then rerun ee preflight check --cmd <command> --json."
+    "repair_string": "Restore the destructive pattern catalog, then rerun ee preflight check --cmd <command> --json.",
+    "repair_safety": [
+      {
+        "appliesTo": "Restore the destructive pattern catalog, then rerun ee preflight check --cmd <command> --json.",
+        "command": null,
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "no_command",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "manual_only_repair",
+        "evidence": [
+          "recovery_kind_none"
+        ],
+        "preconditions": [
+          "operator_decision_required"
+        ],
+        "manualStep": "Restore the pattern catalog before classifying the exact command; do not run placeholder repair text."
+      }
+    ]
   }
 }

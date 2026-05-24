@@ -27,6 +27,26 @@
     ],
     "repair_contains": "ee doctor",
     "repair_string": "ee doctor --json",
-    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
+    "repair_safety": [
+      {
+        "appliesTo": "ee doctor --json",
+        "command": "ee doctor --json",
+        "riskClass": "read_only_probe",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "run_directly",
+        "ruleId": "repair_safety:read_only_probe",
+        "source": "repair_action_safety",
+        "reasonCode": "read_only_probe_command",
+        "evidence": [
+          "read_only_probe_command"
+        ],
+        "preconditions": []
+      }
+    ]
   }
 }

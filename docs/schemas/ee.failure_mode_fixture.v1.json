@@ -120,6 +120,107 @@
         "repair_command_regex": {
           "type": "string"
         },
+        "repair_safety": {
+          "type": "array",
+          "description": "Structured safety metadata for agent-facing repair hints that name a command or require a manual/operator-only path. Each entry mirrors ee.preflight.guard.v1 repairCommandAssessment fields plus an optional appliesTo pointer to the pinned repair text.",
+          "items": {
+            "type": "object",
+            "required": [
+              "command",
+              "riskClass",
+              "preflightCommand",
+              "requiresHumanApproval",
+              "mutatesExternalState",
+              "mutatesTrackerState",
+              "privacyClass",
+              "nextAction",
+              "ruleId",
+              "source",
+              "reasonCode",
+              "evidence",
+              "preconditions"
+            ],
+            "additionalProperties": true,
+            "properties": {
+              "appliesTo": {
+                "type": "string",
+                "description": "Pinned repair_string or repair_strings element this safety assessment classifies."
+              },
+              "command": {
+                "type": ["string", "null"],
+                "description": "Concrete command extracted from the repair hint, or null for manual-only repairs."
+              },
+              "riskClass": {
+                "type": "string",
+                "enum": [
+                  "read_only_probe",
+                  "idempotent_refresh",
+                  "mutating_local_repair",
+                  "mutating_external_coordination_repair",
+                  "approval_required_repair",
+                  "destructive_or_irreversible_repair",
+                  "unavailable_or_manual_only"
+                ]
+              },
+              "preflightCommand": {
+                "type": ["string", "null"]
+              },
+              "requiresHumanApproval": {
+                "type": "boolean"
+              },
+              "mutatesExternalState": {
+                "type": "boolean"
+              },
+              "mutatesTrackerState": {
+                "type": "boolean"
+              },
+              "privacyClass": {
+                "type": "string",
+                "minLength": 1
+              },
+              "nextAction": {
+                "type": "string",
+                "enum": [
+                  "run_directly",
+                  "run_preflight_first",
+                  "coordinate_first",
+                  "ask_human",
+                  "manual_only",
+                  "policy_denied"
+                ]
+              },
+              "ruleId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "string",
+                "minLength": 1
+              },
+              "reasonCode": {
+                "type": "string",
+                "minLength": 1
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "preconditions": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "manualStep": {
+                "type": "string"
+              }
+            }
+          }
+        },
         "details_contains": {
           "type": "array",
           "items": {

@@ -29,6 +29,30 @@
       "Regenerate the redacted Agent Mail snapshot.",
       "Check the configured Agent Mail snapshot path.",
       "Run `am doctor repair` or provide a current redacted Agent Mail snapshot."
+    ],
+    "repair_command_regex": "Run `(?<cmd>am doctor repair)`",
+    "repair_safety": [
+      {
+        "appliesTo": "Run `am doctor repair` or provide a current redacted Agent Mail snapshot.",
+        "command": "am doctor repair",
+        "riskClass": "mutating_external_coordination_repair",
+        "preflightCommand": "ee preflight check --cmd 'am doctor repair' --workspace . --json",
+        "requiresHumanApproval": true,
+        "mutatesExternalState": true,
+        "mutatesTrackerState": false,
+        "privacyClass": "bounded_command_no_raw_state",
+        "nextAction": "ask_human",
+        "ruleId": "repair_safety:mutating_external_coordination_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "external_coordination_repair_command",
+        "evidence": [
+          "external_coordination_repair_command"
+        ],
+        "preconditions": [
+          "shared_state_coordination_required"
+        ],
+        "manualStep": "Coordinate before mutating shared coordination or worker state."
+      }
     ]
   }
 }

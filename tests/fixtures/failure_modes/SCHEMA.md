@@ -122,7 +122,32 @@ lists alphabetically and so the contract test can cross-check
     // (e.g. "Check the configured Agent Mail snapshot path."). Allows
     // an agent to mechanically extract the next action without parsing
     // arbitrary prose. Owned by J6.1.
-    "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
+    "repair_command_regex": "(?P<cmd>ee [a-z][a-z0-9 -]*(?: --[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
+
+    // Optional. Structured repair-safety metadata for command-shaped
+    // or manual-only repair hints. Required for high-risk agent-facing
+    // hints such as Agent Mail repair, Beads mutation, RCH topology
+    // repair, preflight-catalog loss, and other hints where an agent
+    // must not decide from prose alone.
+    "repair_safety": [
+      {
+        "appliesTo": "Lower --relevance-floor to inspect rejected matches.",
+        "command": null,
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": true,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "no_command",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "manual_only_repair",
+        "evidence": ["recovery_kind_none"],
+        "preconditions": ["operator_decision_required"],
+        "manualStep": "No agent-runnable repair command is available."
+      }
+    ]
   }
 }
 ```
@@ -140,6 +165,14 @@ runnable command. The schema fields are:
 - `repair_command_regex` — extraction regex with named capture `cmd`.
   Optional; only present when the repair text is itself a runnable
   command.
+- `repair_safety` — array of structured safety assessments for
+  command-shaped or manual-only repair hints. Each entry uses the same
+  vocabulary as `ee.preflight.guard.v1` `repairCommandAssessment`:
+  `riskClass`, `preflightCommand`, `requiresHumanApproval`,
+  `mutatesExternalState`, `mutatesTrackerState`, `privacyClass`,
+  `nextAction`, `ruleId`, `source`, `reasonCode`, `evidence`, and
+  `preconditions`. `command` is null for manual-only repairs, and
+  `appliesTo` points at the pinned repair string being classified.
 
 When either pinning field is present, the J6.1 contract test
 (`tests/contracts/failure_mode_repair_string.rs`) asserts:
@@ -152,6 +185,9 @@ When either pinning field is present, the J6.1 contract test
    group is non-empty.
 4. If `repair_contains` is set alongside, the pinned string(s) must
    each contain the `repair_contains` substring (consistency).
+5. High-risk repair hints must include `repair_safety`, and the safety
+   entry must expose booleans/next-action metadata so agents can branch
+   without parsing prose.
 
 The fixture-author workflow is:
 
