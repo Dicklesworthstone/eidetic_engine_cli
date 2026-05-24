@@ -3806,6 +3806,37 @@ ee context 'explain pack dna' --workspace . --explain --json
 
 ---
 
+## `graph_pack_dna_timeout`
+
+**Severity:** low
+
+**Surfaces:** context
+
+**Introduced by:** bd-1prrl.8.4 (epic G)
+
+**Trigger.** Pack DNA graph explanation exceeds its bounded computation budget while the context pack itself is otherwise usable.
+
+**Setup.**
+
+```bash
+ee init --workspace .
+ee remember 'Graph-rich Pack DNA timeout fixture.' --workspace . --level semantic --kind fact --json
+```
+
+**Invocation.**
+
+```bash
+ee context 'explain graph-heavy pack dna' --workspace . --explain --json
+```
+
+**Expected emission.** Message contains: `Pack DNA graph explanation timed out ... ordinary context pack items remain usable`
+
+**Repair hint.** `--no-pack-dna`
+
+**Fixture.** [`tests/fixtures/failure_modes/graph_pack_dna_timeout.json`](../tests/fixtures/failure_modes/graph_pack_dna_timeout.json)
+
+---
+
 ## `graph_ppr_empty_seed_set`
 
 **Severity:** low

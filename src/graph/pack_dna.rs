@@ -10,7 +10,7 @@ use crate::core::degraded_aggregation::{
 use crate::graph::algorithms::{DEFAULT_FOREGROUND_BUDGET, current_or_testing_cx, run_with_budget};
 use crate::graph::health::detect_louvain_communities;
 use crate::graph::{GraphError, GraphResult, MemoryGraphProjection};
-use crate::models::degradation::GRAPH_PACK_DNA_NO_DOMINATOR_CODE;
+use crate::models::degradation::{GRAPH_PACK_DNA_NO_DOMINATOR_CODE, GRAPH_PACK_DNA_TIMEOUT_CODE};
 use crate::models::{MemoryId, TrustClass};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
 
@@ -347,6 +347,17 @@ fn pack_dna_degradations(dominator: Option<&PackDnaDominator>) -> Vec<PackDnaDeg
             .to_owned(),
         repair: "Seed a trusted source memory with `trust_class=human_explicit`.".to_owned(),
     }]
+}
+
+pub fn pack_dna_timeout_degradation(timeout_ms: u64) -> PackDnaDegradation {
+    PackDnaDegradation {
+        code: GRAPH_PACK_DNA_TIMEOUT_CODE.to_owned(),
+        severity: "low".to_owned(),
+        message: format!(
+            "Pack DNA graph explanation timed out after {timeout_ms}ms; ordinary context pack items remain usable."
+        ),
+        repair: "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA.".to_owned(),
+    }
 }
 
 fn undirected_from_directed(directed: &DiGraph) -> GraphResult<Graph> {
@@ -854,5 +865,28 @@ mod tests {
             Some(&serde_json::json!(["pack_dna"]))
         );
         Ok(())
+    }
+
+    #[test]
+    fn pack_dna_timeout_degradation_is_specific_and_non_fatal() {
+        let degraded = pack_dna_timeout_degradation(125);
+
+        assert_eq!(degraded.code, GRAPH_PACK_DNA_TIMEOUT_CODE);
+        assert_eq!(degraded.severity, "low");
+        assert!(
+            degraded
+                .message
+                .contains("Pack DNA graph explanation timed out")
+        );
+        assert!(
+            degraded
+                .message
+                .contains("ordinary context pack items remain usable")
+        );
+        assert!(degraded.repair.contains("--no-pack-dna"));
+        assert!(
+            !degraded.repair.contains("centrality-refresh"),
+            "Pack DNA timeout repair should not recommend a broad graph rebuild"
+        );
     }
 }

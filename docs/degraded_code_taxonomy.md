@@ -597,12 +597,13 @@ memory bodies in `sources[]`.
 | `graph_snapshot_topology_unavailable` | low | bd-17c65.5.3 (E3) |
 | `graph_snapshot_unusable` | high | bd-17c65.5.3 (E3) |
 
-#### Graph accretion sentinels (10 — response_time variants of graph_unavailable)
+#### Graph accretion sentinels (11 — response_time variants of graph_unavailable)
 | Code | Severity | Bead |
 |------|----------|------|
 | `graph_ppr_snapshot_stale` | medium | bd-bife.6 |
 | `graph_ppr_empty_seed_set` | low | bd-bife.6 |
 | `graph_pack_dna_no_dominator` | low | bd-bife.6 |
+| `graph_pack_dna_timeout` | low | bd-1prrl.8.4 |
 | `graph_causal_no_evidence` | low | bd-bife.6 |
 | `graph_health_no_contradictions` | info | bd-bife.6 |
 | `graph_curate_disconnected_graph` | warning | bd-bife.6 |

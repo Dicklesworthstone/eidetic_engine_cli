@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_pack_dna_timeout",
+  "introduced_by": {
+    "bead": "bd-1prrl.8.4",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "context"
+  ],
+  "severity": "low",
+  "repair_present": true,
+  "trigger": {
+    "description": "Pack DNA graph explanation exceeds its bounded computation budget while the context pack itself is otherwise usable.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'Graph-rich Pack DNA timeout fixture.' --workspace . --level semantic --kind fact --json"
+    ],
+    "invocation": "ee context 'explain graph-heavy pack dna' --workspace . --explain --json"
+  },
+  "expected_emission": {
+    "code": "graph_pack_dna_timeout",
+    "severity": "low",
+    "message_contains": [
+      "Pack DNA graph explanation timed out",
+      "ordinary context pack items remain usable"
+    ],
+    "repair_contains": "--no-pack-dna",
+    "repair_string": "Retry the context request with `--no-pack-dna`; ordinary pack items remain usable without Pack DNA."
+  }
+}

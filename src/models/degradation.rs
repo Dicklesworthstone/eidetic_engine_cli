@@ -339,6 +339,8 @@ pub const GRAPH_PPR_SNAPSHOT_STALE_CODE: &str = "graph_ppr_snapshot_stale";
 pub const GRAPH_PPR_EMPTY_SEED_SET_CODE: &str = "graph_ppr_empty_seed_set";
 /// Response degraded code for Pack DNA without a trust-anchor dominator.
 pub const GRAPH_PACK_DNA_NO_DOMINATOR_CODE: &str = "graph_pack_dna_no_dominator";
+/// Response degraded code for Pack DNA graph explanation timeout.
+pub const GRAPH_PACK_DNA_TIMEOUT_CODE: &str = "graph_pack_dna_timeout";
 /// Response degraded code for causal explanation requests without evidence.
 pub const GRAPH_CAUSAL_NO_EVIDENCE_CODE: &str = "graph_causal_no_evidence";
 /// Response degraded code for structural health with no contradiction edges.
