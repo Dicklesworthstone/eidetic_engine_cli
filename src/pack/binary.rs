@@ -583,4 +583,89 @@ mod tests {
             );
         }
     }
+
+    // bd-1r6hw: pin the inter-entry contiguity of the items blob — adjacent
+    // item-table entries' (offset, len) pairs must chain with zero padding and
+    // zero overlap, and the first entry must start exactly at end-of-table.
+    // A future writer that introduces alignment padding between items, or
+    // re-orders the blob, would still satisfy each entry's per-entry bounds
+    // check in PackBinaryView::parse but trips this byte-level pin.
+    #[test]
+    fn item_table_entry_offsets_pack_contiguously_no_gaps_or_overlap() {
+        let items = fixture_items();
+        let item_slices: Vec<&[u8]> = items.iter().copied().collect();
+        let frame = serialize_pack_binary(fixture_json(), &item_slices, 0);
+
+        let table_len = items.len() * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+        let expected_first_offset = (PACK_BINARY_HEADER_LEN + table_len) as u64;
+
+        let mut entries: Vec<(u64, u32)> = Vec::with_capacity(items.len());
+        for index in 0..items.len() {
+            let entry_start = PACK_BINARY_HEADER_LEN + index * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+            let offset = u64::from_le_bytes(
+                frame[entry_start..entry_start + 8]
+                    .try_into()
+                    .expect("entry offset bytes"),
+            );
+            let len = u32::from_le_bytes(
+                frame[entry_start + 8..entry_start + 12]
+                    .try_into()
+                    .expect("entry len bytes"),
+            );
+            entries.push((offset, len));
+        }
+
+        assert_eq!(
+            entries[0].0, expected_first_offset,
+            "first item offset must equal end of item-table"
+        );
+        for window in entries.windows(2) {
+            let (prev_offset, prev_len) = window[0];
+            let (next_offset, _) = window[1];
+            assert_eq!(
+                next_offset,
+                prev_offset + prev_len as u64,
+                "adjacent item offsets must be contiguous (no gap, no overlap)"
+            );
+        }
+    }
+
+    // bd-1r6hw: pin the items-blob → canonical_json boundary as bit-exact.
+    // The last item's end byte must be the first byte of canonical_json (as
+    // declared by the trailer's canonical_json_offset). Any drift here means
+    // either trailing padding after the last item or an underrun into the
+    // canonical_json region — both must be a test failure.
+    #[test]
+    fn item_table_to_canonical_json_blob_boundary_is_exact() {
+        let items = fixture_items();
+        let item_slices: Vec<&[u8]> = items.iter().copied().collect();
+        let frame = serialize_pack_binary(fixture_json(), &item_slices, 0);
+
+        let last_index = items.len() - 1;
+        let last_entry_start =
+            PACK_BINARY_HEADER_LEN + last_index * PACK_BINARY_ITEM_TABLE_ENTRY_LEN;
+        let last_offset = u64::from_le_bytes(
+            frame[last_entry_start..last_entry_start + 8]
+                .try_into()
+                .expect("last offset bytes"),
+        );
+        let last_len = u32::from_le_bytes(
+            frame[last_entry_start + 8..last_entry_start + 12]
+                .try_into()
+                .expect("last len bytes"),
+        );
+        let items_blob_end = last_offset + last_len as u64;
+
+        let trailer_start = frame.len() - PACK_BINARY_TRAILER_LEN;
+        let canonical_json_offset = u64::from_le_bytes(
+            frame[trailer_start..trailer_start + 8]
+                .try_into()
+                .expect("canonical_json_offset bytes"),
+        );
+
+        assert_eq!(
+            items_blob_end, canonical_json_offset,
+            "items blob must end exactly where canonical_json begins"
+        );
+    }
 }
