@@ -69,6 +69,14 @@ fn fixtures_dir() -> PathBuf {
         .join("failure_modes")
 }
 
+fn swarm_work_packet_fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("swarm_work_packet")
+        .join(name)
+}
+
 fn list_fixture_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut paths: Vec<PathBuf> = fs::read_dir(dir)
         .map_err(|error| format!("failed to read {}: {error}", dir.display()))?
@@ -78,6 +86,11 @@ fn list_fixture_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         .collect();
     paths.sort();
     Ok(paths)
+}
+
+fn read_json(path: &Path) -> Result<Value, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
@@ -132,6 +145,131 @@ fn required_string_array(value: &Value, field: &str, ctx: &str) -> TestResult {
             format!("{ctx}: repair_safety entry `{field}[{idx}]` must be a non-empty string"),
         )?;
     }
+    Ok(())
+}
+
+fn pointer_string_or_null(value: &Value, pointer: &str, ctx: &str) -> TestResult {
+    ensure(
+        value
+            .pointer(pointer)
+            .is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| !s.is_empty())),
+        format!("{ctx}: `{pointer}` must be a non-empty string or null"),
+    )
+}
+
+fn pointer_object_or_null(value: &Value, pointer: &str, ctx: &str) -> TestResult {
+    ensure(
+        value
+            .pointer(pointer)
+            .is_some_and(|v| v.is_null() || v.is_object()),
+        format!("{ctx}: `{pointer}` must be object or null"),
+    )
+}
+
+fn string_array_at_pointer(value: &Value, pointer: &str, ctx: &str) -> TestResult {
+    let items = value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{ctx}: missing array `{pointer}`"))?;
+    for (idx, item) in items.iter().enumerate() {
+        ensure(
+            item.as_str().is_some_and(|s| !s.is_empty()),
+            format!("{ctx}: `{pointer}[{idx}]` must be a non-empty string"),
+        )?;
+    }
+    Ok(())
+}
+
+fn manual_text_looks_command_shaped(text: &str) -> bool {
+    let text = text.trim_start().to_ascii_lowercase();
+    ["am ", "br ", "bv ", "ee ", "git ", "rch ", "cargo "]
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+fn validate_work_packet_fallback_safety(action: &Value, ctx: &str) -> TestResult {
+    let _kind = non_empty_string(action, "kind", ctx)?;
+    let _summary = non_empty_string(action, "summary", ctx)?;
+    pointer_string_or_null(action, "/command", ctx)?;
+    pointer_object_or_null(action, "/commandAction", ctx)?;
+    pointer_string_or_null(action, "/manualStep", ctx)?;
+    let command = action.pointer("/command").and_then(Value::as_str);
+    let command_action = action.pointer("/commandAction");
+    let manual_step = action.pointer("/manualStep").and_then(Value::as_str);
+    let safety = action
+        .pointer("/repairSafety")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{ctx}: fallback action missing repairSafety object"))?;
+    let safety = Value::Object(safety.clone());
+    let risk_class = non_empty_string(&safety, "riskClass", ctx)?;
+    ensure(
+        RISK_CLASSES.contains(&risk_class),
+        format!("{ctx}: repairSafety riskClass `{risk_class}` is not recognized"),
+    )?;
+    let next_action = non_empty_string(&safety, "nextAction", ctx)?;
+    ensure(
+        NEXT_ACTIONS.contains(&next_action),
+        format!("{ctx}: repairSafety nextAction `{next_action}` is not recognized"),
+    )?;
+    required_nullable_string(&safety, "preflightCommand", ctx)?;
+    let requires_human_approval = required_bool(&safety, "requiresHumanApproval", ctx)?;
+    let mutates_external_state = required_bool(&safety, "mutatesExternalState", ctx)?;
+    let mutates_tracker_state = required_bool(&safety, "mutatesTrackerState", ctx)?;
+    let _privacy_class = non_empty_string(&safety, "privacyClass", ctx)?;
+    let rule_id = non_empty_string(&safety, "ruleId", ctx)?;
+    let source = non_empty_string(&safety, "source", ctx)?;
+    let _reason_code = non_empty_string(&safety, "reasonCode", ctx)?;
+    string_array_at_pointer(&safety, "/evidence", ctx)?;
+    string_array_at_pointer(&safety, "/preconditions", ctx)?;
+    ensure(
+        rule_id.starts_with("repair_safety:"),
+        format!("{ctx}: repairSafety ruleId `{rule_id}` must use repair_safety: prefix"),
+    )?;
+    ensure(
+        source == "repair_action_safety" || source == "work_packet_manual_fallback",
+        format!("{ctx}: repairSafety source `{source}` is not recognized"),
+    )?;
+
+    if command.is_some() {
+        ensure(
+            command_action.is_some_and(Value::is_object),
+            format!("{ctx}: command-shaped fallback action must include commandAction"),
+        )?;
+        ensure(
+            source == "repair_action_safety",
+            format!("{ctx}: command-shaped fallback action must use repair_action_safety source"),
+        )?;
+    } else {
+        ensure(
+            !command_action.is_some_and(Value::is_object),
+            format!("{ctx}: commandAction must be null when command is null"),
+        )?;
+    }
+
+    if let Some(manual_step) = manual_step {
+        ensure(
+            !manual_text_looks_command_shaped(manual_step),
+            format!("{ctx}: manualStep must not be a command-shaped repair hint"),
+        )?;
+    }
+
+    if risk_class == "unavailable_or_manual_only" {
+        ensure(
+            command.is_none() && next_action == "manual_only",
+            format!("{ctx}: manual-only fallback must not expose a command"),
+        )?;
+        ensure(
+            source == "work_packet_manual_fallback",
+            format!("{ctx}: manual-only fallback must use work_packet_manual_fallback source"),
+        )?;
+    }
+    if risk_class == "read_only_probe" {
+        ensure(
+            !requires_human_approval && !mutates_external_state && !mutates_tracker_state,
+            format!("{ctx}: read-only fallback must be non-mutating"),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -651,4 +789,49 @@ fn failure_mode_fixtures_show_some_pinned_coverage() -> TestResult {
              adding new pinned fixtures."
         ),
     )
+}
+
+#[test]
+fn work_packet_fallback_actions_have_repair_safety_metadata() -> TestResult {
+    let fixtures = [
+        "agent_mail_degraded_read_only.json",
+        "agent_mail_semantic_readiness_failed.json",
+        "beads_command_timeout_no_output.json",
+        "crowded_checkout.json",
+        "degraded_mail_rch_topology.json",
+        "healthy_small.json",
+    ];
+    let mut errors = Vec::new();
+    for fixture_name in fixtures {
+        let path = swarm_work_packet_fixture_path(fixture_name);
+        let value = match read_json(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        let Some(actions) = value
+            .pointer("/coordination/agentMail/fallbackActions")
+            .and_then(Value::as_array)
+        else {
+            continue;
+        };
+        for (index, action) in actions.iter().enumerate() {
+            let ctx = format!("{} fallbackActions[{index}]", path.display());
+            if let Err(error) = validate_work_packet_fallback_safety(action, &ctx) {
+                errors.push(error);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} work-packet fallback conformance error(s):\n  - {}",
+            errors.len(),
+            errors.join("\n  - "),
+        ))
+    }
 }

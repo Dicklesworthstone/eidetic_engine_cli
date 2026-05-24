@@ -67,32 +67,117 @@
         {
           "kind": "beads_comment",
           "summary": "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
-          "command": "br comments add bd-docs.1 --message 'agent_mail semantic_readiness=fail (malformed_sqlite); coordinating via beads until repair'",
-          "manualStep": null
+          "command": null,
+          "commandAction": null,
+          "manualStep": "Add a Beads comment before claiming work so peers can see the coordination fallback.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "manual_beads_coordination_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command", "shared_state_coordination_required"]
+          }
         },
         {
           "kind": "manual_coordination",
-          "summary": "Coordinate file-level reservations out of band with peer agents because reservation reads are unavailable.",
+          "summary": "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
           "command": null,
-          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths."
+          "commandAction": null,
+          "manualStep": "Confirm lane ownership in the active coordination channel before touching shared paths.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "manual_coordination_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command", "shared_state_coordination_required"]
+          }
         },
         {
           "kind": "retry_later",
-          "summary": "Retry Agent Mail health and semantic readiness after the storage layer is repaired.",
+          "summary": "Retry Agent Mail health after the storage layer or index is repaired.",
           "command": null,
-          "manualStep": "Re-run am doctor repair and the work-packet collector once semantic_readiness.status returns to pass."
+          "commandAction": null,
+          "manualStep": "Re-run the work-packet collector after Agent Mail reads recover.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "retry_later_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         },
         {
           "kind": "support_bundle",
           "summary": "Capture a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
           "command": "am support-bundle --workspace . --redact paths,offsets",
-          "manualStep": null
+          "commandAction": {
+            "commandId": "agent_mail_support_bundle",
+            "displayCommand": "am support-bundle --workspace . --redact paths,offsets",
+            "argv": ["am", "support-bundle", "--workspace", ".", "--redact", "paths,offsets"],
+            "shellRequired": false,
+            "copySafety": "safe_structured_argv",
+            "mutatesState": true,
+            "requiredSubstrate": "agent_mail",
+            "when": "after_semantic_readiness_failure",
+            "rationale": "Capture bounded Agent Mail diagnostics without shell evaluation."
+          },
+          "manualStep": null,
+          "repairSafety": {
+            "riskClass": "read_only_probe",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "bounded_command_no_raw_state",
+            "nextAction": "run_directly",
+            "ruleId": "repair_safety:read_only_probe",
+            "source": "repair_action_safety",
+            "reasonCode": "read_only_probe_command",
+            "evidence": ["read_only_probe_command"],
+            "preconditions": []
+          }
         },
         {
           "kind": "switch_to_static_work",
           "summary": "Prefer static or docs-first work while coordination authority is unavailable.",
           "command": null,
-          "manualStep": "Avoid claiming peer-touched lanes until semantic readiness recovers."
+          "commandAction": null,
+          "manualStep": "Avoid claiming peer-touched lanes until Agent Mail reads recover.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "static_work_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         }
       ],
       "semanticReadiness": {

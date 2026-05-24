@@ -56,22 +56,67 @@
       "inboxAuthoritative": false,
       "fallbackActions": [
         {
-          "kind": "beads_comment",
-          "summary": "Record Agent Mail degraded posture and coordinate in Beads until the index recovers.",
-          "command": "br comments add bd-docs.1 --message 'agent_mail degraded_read_only; coordinating via beads'",
-          "manualStep": null
+          "kind": "manual_coordination",
+          "summary": "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
+          "command": null,
+          "commandAction": null,
+          "manualStep": "Confirm lane ownership in the active coordination channel before touching shared paths.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "manual_coordination_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command", "shared_state_coordination_required"]
+          }
         },
         {
           "kind": "retry_later",
-          "summary": "Retry Agent Mail health check after the archive/SQLite parity drift heals.",
+          "summary": "Retry Agent Mail health after the storage layer or index is repaired.",
           "command": null,
-          "manualStep": "Re-run am doctor and the work-packet collector after archive_ahead clears."
+          "commandAction": null,
+          "manualStep": "Re-run the work-packet collector after Agent Mail reads recover.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "retry_later_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         },
         {
           "kind": "switch_to_static_work",
-          "summary": "Prefer static or docs-first work while inbox and reservation evidence is non-authoritative.",
+          "summary": "Prefer static or docs-first work while coordination authority is unavailable.",
           "command": null,
-          "manualStep": "Avoid claiming peer-touched lanes until reservation_authoritative becomes true."
+          "commandAction": null,
+          "manualStep": "Avoid claiming peer-touched lanes until Agent Mail reads recover.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "static_work_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         }
       ]
     },
