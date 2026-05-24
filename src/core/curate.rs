@@ -12047,9 +12047,10 @@ mod tests {
         reflection_request_ledger_posture, reflection_request_ledger_recovery,
         reflection_request_ledger_source_digest_mismatch, reflection_result_candidate_id,
         reflection_result_candidate_input_from_material,
-        reflection_result_replay_gate_from_db_status, review_curation_candidate,
-        review_session_proposals, run_curation_disposition, run_review_workspace,
-        show_curation_candidate, stable_workspace_id, validate_curation_candidate,
+        reflection_result_replay_gate_from_db_status, reflection_retention_cutoff,
+        review_curation_candidate, review_session_proposals, run_curation_disposition,
+        run_review_workspace, show_curation_candidate, stable_workspace_id,
+        validate_curation_candidate,
     };
     use crate::curate::{
         CandidateSource, PreparedReflectionRequest, REFLECTION_CHALLENGE_BINDING_SCHEMA,
@@ -13004,6 +13005,157 @@ mod tests {
         assert!(!key_json.contains(raw_secret));
         assert!(!key_json.contains("reflect-secret.key"));
         assert!(key_json.contains("[REDACTED:"));
+        Ok(())
+    }
+
+    // ---- bd-2ld00: reflection request-ledger retention coverage ----
+
+    #[test]
+    fn reflection_retention_cutoff_subtracts_days_at_second_precision() -> TestResult {
+        // bd-2ld00: happy-path cutoff math — retention_days days before `now`
+        // rendered to RFC 3339 seconds.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T12:34:56Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let cutoff = reflection_retention_cutoff(&now, 7, "consumed request retention")
+            .map_err(|error| error.message())?;
+        assert_eq!(cutoff, "2026-05-17T12:34:56Z");
+
+        let cutoff_30 = reflection_retention_cutoff(&now, 30, "consumed request retention")
+            .map_err(|error| error.message())?;
+        assert_eq!(cutoff_30, "2026-04-24T12:34:56Z");
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_retention_cutoff_zero_days_returns_now_at_second_precision() -> TestResult {
+        // bd-2ld00: zero-day retention means cutoff == now (everything older
+        // than 0 days is eligible, i.e. anything <= now). Test pins the
+        // seconds-precision RFC 3339 serialization the schema relies on.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T12:34:56.789Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let cutoff = reflection_retention_cutoff(&now, 0, "consumed request retention")
+            .map_err(|error| error.message())?;
+        // Sub-second precision must be dropped because the DB stores RFC 3339
+        // seconds and the dry-run JSON contract pins that shape.
+        assert_eq!(cutoff, "2026-05-24T12:34:56Z");
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_retention_cutoff_rejects_seconds_overflow() -> TestResult {
+        // bd-2ld00: u64::MAX days * 86_400 overflows u64 — the first guard
+        // (checked_mul) must fire with a Configuration error, not panic.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let error = reflection_retention_cutoff(&now, u64::MAX, "consumed request retention")
+            .expect_err("u64::MAX retention days must fail closed before the chrono subtraction");
+        assert_eq!(error.code(), "configuration");
+        assert!(
+            error.message().contains("exceeds supported duration range"),
+            "overflow message must name the duration range: {}",
+            error.message()
+        );
+        assert!(error.repair().is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_retention_cutoff_rejects_underflow_below_epoch() -> TestResult {
+        // bd-2ld00: a retention window large enough to push the cutoff before
+        // the chrono representable range must fail closed via
+        // `checked_sub_signed` rather than panicking. ~292 billion years of
+        // seconds will exceed i64 once multiplied by 86_400.
+        let now = chrono::DateTime::parse_from_rfc3339("2026-05-24T00:00:00Z")
+            .map_err(|error| error.to_string())?
+            .with_timezone(&chrono::Utc);
+        let huge_days = (i64::MAX / 86_400) as u64 + 1;
+        let error = reflection_retention_cutoff(&now, huge_days, "expired request retention")
+            .expect_err("a retention window past chrono::Duration::MAX must fail closed");
+        assert_eq!(error.code(), "configuration");
+        assert!(
+            error.message().contains("expired request retention"),
+            "underflow error must name the retention label: {}",
+            error.message()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_diagnostics_retention_block_pins_dry_run_safety_invariants() -> TestResult {
+        // bd-2ld00: end-to-end check that the retention block of
+        // ee.reflect.request_ledger.diagnostics.v1 always reports
+        // dry_run = true, durable_mutation = false, and the documented
+        // schema-migration safety posture. These invariants are what callers
+        // (support bundle, backup, handoff) rely on to know the diagnostic is
+        // never a mutation.
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-retention-invariants".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = list_reflection_request_ledger_diagnostics(
+            &ReflectionRequestLedgerDiagnosticsOptions {
+                workspace_path,
+                database_path: Some(&database_path),
+                status: None,
+                now_rfc3339: Some("2026-05-24T12:00:00Z"),
+                limit: 10,
+                include_expired_pending: true,
+                hmac_key_config: None,
+            },
+        )
+        .map_err(|error| error.message())?;
+
+        assert!(!report.durable_mutation);
+        let retention = &report.retention;
+        assert!(retention.dry_run, "retention dry_run must be true");
+        assert!(
+            !retention.durable_mutation,
+            "retention durable_mutation must be false"
+        );
+        assert!(
+            retention
+                .schema_migration_safety
+                .requires_dry_run_before_mutation,
+            "schemaMigrationSafety.requires_dry_run_before_mutation must be true"
+        );
+        assert!(
+            !retention
+                .schema_migration_safety
+                .physical_deletion_allowed_by_default,
+            "schemaMigrationSafety.physical_deletion_allowed_by_default must be false"
+        );
+        assert!(
+            retention
+                .compacted_sensitive_fields
+                .iter()
+                .any(|field| { *field == "challenge.hmac" || *field == "hmacKeyMaterial" }),
+            "compactedSensitiveFields must include challenge.hmac and hmacKeyMaterial: {:?}",
+            retention.compacted_sensitive_fields
+        );
+        // No rows in the workspace ⇒ all eligibility counts are zero, proving
+        // the dry-run never fabricates work to do.
+        assert_eq!(retention.eligible_for_compaction_count, 0);
+        assert_eq!(retention.consumed_eligible_count, 0);
+        assert_eq!(retention.expired_pending_eligible_count, 0);
+        assert_eq!(retention.expired_status_eligible_count, 0);
+        assert_eq!(retention.rejected_eligible_count, 0);
         Ok(())
     }
 

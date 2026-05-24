@@ -32849,6 +32849,183 @@ mod tests {
     }
 
     #[test]
+    fn reflection_request_ledger_retention_counts_returns_zero_for_empty_workspace() -> TestResult {
+        // bd-2ld00: with no ledger rows the dry-run reports zero in every
+        // status bucket; the helper must not fabricate work.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+
+        let counts = connection.reflection_request_ledger_retention_counts(
+            "wsp_01234567890123456789012345",
+            "2026-04-24T00:00:00Z",
+            "2026-05-17T00:00:00Z",
+        )?;
+        ensure_equal(
+            &counts,
+            &super::ReflectionRequestLedgerRetentionCounts::default(),
+            "empty workspace must produce all-zero retention counts",
+        )?;
+        ensure_equal(&counts.total_eligible_count(), &0_usize, "total eligible")?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_retention_counts_splits_by_status_and_cutoff() -> TestResult {
+        // bd-2ld00: pin the four status branches of
+        // reflection_request_ledger_retention_counts (consumed / pending /
+        // expired / rejected) against an in-window vs out-of-window cutoff,
+        // and prove rows whose timestamps fall on the safe side of the
+        // cutoff are NOT counted.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+
+        // Two consumed rows: one eligible (old consumed_at), one not.
+        let mut consumed_old = reflection_request_ledger_input();
+        consumed_old.request_hash = reflection_hash('1');
+        consumed_old.created_at = "2026-03-31T00:00:00Z".to_owned();
+        consumed_old.expires_at = "2026-04-01T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_consumed_old", &consumed_old)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger \
+             SET status = 'consumed', consumed_at = '2026-04-02T00:00:00Z', \
+                 consumed_result_hash = 'blake3:1111111111111111111111111111111111111111111111111111111111111111' \
+             WHERE request_id = 'reflect_req_ret_consumed_old'",
+        )?;
+
+        let mut consumed_fresh = reflection_request_ledger_input();
+        consumed_fresh.request_hash = reflection_hash('2');
+        consumed_fresh.created_at = "2026-05-23T00:00:00Z".to_owned();
+        consumed_fresh.expires_at = "2026-05-24T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_consumed_fresh", &consumed_fresh)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger \
+             SET status = 'consumed', consumed_at = '2026-05-23T12:00:00Z', \
+                 consumed_result_hash = 'blake3:2222222222222222222222222222222222222222222222222222222222222222' \
+             WHERE request_id = 'reflect_req_ret_consumed_fresh'",
+        )?;
+
+        // One pending row with expires_at in the past — eligible for the
+        // expired_pending bucket.
+        let mut pending_expired = reflection_request_ledger_input();
+        pending_expired.request_hash = reflection_hash('3');
+        pending_expired.created_at = "2026-05-01T00:00:00Z".to_owned();
+        pending_expired.expires_at = "2026-05-10T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_pending_old", &pending_expired)?;
+
+        // One pending row with expires_at in the future — NOT eligible.
+        let mut pending_fresh = reflection_request_ledger_input();
+        pending_fresh.request_hash = reflection_hash('4');
+        pending_fresh.created_at = "2026-05-24T00:00:00Z".to_owned();
+        pending_fresh.expires_at = "2026-06-30T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_pending_fresh", &pending_fresh)?;
+
+        // One explicit `expired` status row past the expired cutoff.
+        let mut expired_status = reflection_request_ledger_input();
+        expired_status.request_hash = reflection_hash('5');
+        expired_status.created_at = "2026-04-30T00:00:00Z".to_owned();
+        expired_status.expires_at = "2026-05-01T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_expired_status", &expired_status)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET status = 'expired' \
+             WHERE request_id = 'reflect_req_ret_expired_status'",
+        )?;
+
+        // One rejected row with old created_at — eligible.
+        let mut rejected_old = reflection_request_ledger_input();
+        rejected_old.request_hash = reflection_hash('6');
+        rejected_old.created_at = "2026-04-01T00:00:00Z".to_owned();
+        rejected_old.expires_at = "2026-04-02T00:00:00Z".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_rejected_old", &rejected_old)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET status = 'rejected' \
+             WHERE request_id = 'reflect_req_ret_rejected_old'",
+        )?;
+
+        // Cutoffs: consumed_cutoff = 2026-04-24 (so consumed_old eligible,
+        // consumed_fresh not). expired_cutoff = 2026-05-17 (so pending_expired
+        // and expired_status eligible — both have expires_at before the
+        // cutoff — and rejected_old eligible via its created_at).
+        let counts = connection.reflection_request_ledger_retention_counts(
+            workspace_id,
+            "2026-04-24T00:00:00Z",
+            "2026-05-17T00:00:00Z",
+        )?;
+        ensure_equal(
+            &counts.consumed_eligible_count,
+            &1_usize,
+            "consumed_eligible_count must count only the row whose consumed_at <= cutoff",
+        )?;
+        ensure_equal(
+            &counts.expired_pending_eligible_count,
+            &1_usize,
+            "expired_pending_eligible_count must count only the pending row whose expires_at <= expired_cutoff",
+        )?;
+        ensure_equal(
+            &counts.expired_status_eligible_count,
+            &1_usize,
+            "expired_status_eligible_count must count only the explicit-expired row past the cutoff",
+        )?;
+        ensure_equal(
+            &counts.rejected_eligible_count,
+            &1_usize,
+            "rejected_eligible_count must count only the rejected row whose created_at <= expired_cutoff",
+        )?;
+        ensure_equal(&counts.total_eligible_count(), &4_usize, "total eligible")?;
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_retention_counts_skips_malformed_timestamps() -> TestResult {
+        // bd-2ld00: rows with malformed RFC 3339 timestamps must be skipped
+        // silently (never counted as eligible) so a single corrupt row cannot
+        // mark itself for compaction.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        let workspace_id = "wsp_01234567890123456789012345";
+
+        let mut consumed_bad = reflection_request_ledger_input();
+        consumed_bad.request_hash = reflection_hash('1');
+        connection
+            .insert_reflection_request_ledger("reflect_req_ret_bad_consumed", &consumed_bad)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger \
+             SET status = 'consumed', consumed_at = 'not-a-time', \
+                 consumed_result_hash = 'blake3:1111111111111111111111111111111111111111111111111111111111111111' \
+             WHERE request_id = 'reflect_req_ret_bad_consumed'",
+        )?;
+
+        let mut pending_bad = reflection_request_ledger_input();
+        pending_bad.request_hash = reflection_hash('2');
+        connection.insert_reflection_request_ledger("reflect_req_ret_bad_pending", &pending_bad)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET expires_at = 'not-a-time' \
+             WHERE request_id = 'reflect_req_ret_bad_pending'",
+        )?;
+
+        let counts = connection.reflection_request_ledger_retention_counts(
+            workspace_id,
+            "2030-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        )?;
+        ensure_equal(
+            &counts,
+            &super::ReflectionRequestLedgerRetentionCounts::default(),
+            "malformed timestamps must yield zero eligibility across every bucket",
+        )?;
+        Ok(())
+    }
+
+    #[test]
     fn reflection_request_ledger_rejects_bad_replay_inputs() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
