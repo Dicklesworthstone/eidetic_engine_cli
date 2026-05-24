@@ -18,6 +18,9 @@ use ee::core::completion_audit::{
 };
 use ee::core::curate::{
     CURATE_CANDIDATES_SCHEMA_V1, CurateCandidatesFilter, CurateCandidatesReport,
+    REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
+    ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
+    ReflectionRequestLedgerDiagnosticsReport,
 };
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
@@ -74,6 +77,10 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     (
         ee::curate::REFLECTION_RESULT_SCHEMA,
         "ee.reflect.result.v1.json",
+    ),
+    (
+        REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+        "ee.reflect.request_ledger.diagnostics.v1.json",
     ),
     ("ee.graph.export.v1", "ee.graph.export.v1.json"),
     (
@@ -828,6 +835,250 @@ fn reflection_result_schema_documents_external_result_contract() -> TestResult {
         "selfReportedConfidence": 0.72
     });
     validate_json_schema(&document, &schema, &schema, "$")
+}
+
+#[test]
+fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
+    let hash = |digit: char| format!("blake3:{}", digit.to_string().repeat(64));
+    let request = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000001".to_owned(),
+        request_hash: hash('1'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('2'),
+        source_ref_count: 2,
+        source_content_hash_count: 2,
+        prompt_template_hash: hash('3'),
+        response_schema_hash: hash('4'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('5'),
+        status: "consumed".to_owned(),
+        posture: "consumed",
+        consumed_candidate_id: Some("curate_diag0000001".to_owned()),
+        consumed_at: Some("2026-05-24T00:10:00Z".to_owned()),
+        consumed_result_hash: Some(hash('6')),
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "inspect_existing_candidate",
+            message: "The request has already been consumed; inspect the existing candidate.",
+            command:
+                "ee curate validate curate_diag0000001 --workspace /tmp/schema --dry-run --json"
+                    .to_owned(),
+        }],
+    };
+    let expired = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000002".to_owned(),
+        request_hash: hash('7'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('8'),
+        source_ref_count: 1,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('9'),
+        response_schema_hash: hash('a'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T00:05:00Z".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('b'),
+        status: "pending".to_owned(),
+        posture: "expiredPending",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The request is expired; create a fresh reflection request.",
+            command: "ee reflect propose --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let rotated_key = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000003".to_owned(),
+        request_hash: hash('c'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('d'),
+        source_ref_count: 1,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('e'),
+        response_schema_hash: hash('f'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        challenge_key_id: "reflect_key_old".to_owned(),
+        challenge_hash: hash('0'),
+        status: "pending".to_owned(),
+        posture: "rotatedKey",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The request was minted by a different HMAC key id; restore that key or create a fresh request.",
+            command: "ee reflect propose --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let source_digest_mismatch = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000004".to_owned(),
+        request_hash: hash('0'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('1'),
+        source_ref_count: 2,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('2'),
+        response_schema_hash: hash('3'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('4'),
+        status: "pending".to_owned(),
+        posture: "sourceDigestMismatch",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The stored source references and source content hashes disagree; create a fresh request.",
+            command: "ee reflect propose --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let unavailable_status = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000005".to_owned(),
+        request_hash: hash('5'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('6'),
+        source_ref_count: 1,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('7'),
+        response_schema_hash: hash('8'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('9'),
+        status: "unknown_state".to_owned(),
+        posture: "unavailableStatus",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "repair_or_recreate_request",
+            message: "The ledger row cannot accept a result in its current state.",
+            command: "ee doctor --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let invalid_lifecycle = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000006".to_owned(),
+        request_hash: hash('a'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('b'),
+        source_ref_count: 1,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('c'),
+        response_schema_hash: hash('d'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "not-a-time".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('e'),
+        status: "pending".to_owned(),
+        posture: "invalidLifecycle",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "repair_or_recreate_request",
+            message: "The ledger row cannot accept a result in its current state.",
+            command: "ee doctor --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let invalid_material = ReflectionRequestLedgerDiagnostic {
+        request_id: "reflect_req_diag0000007".to_owned(),
+        request_hash: hash('b'),
+        reflection_kind: "gaps".to_owned(),
+        source_package_hash: hash('c'),
+        source_ref_count: 1,
+        source_content_hash_count: 1,
+        prompt_template_hash: hash('d'),
+        response_schema_hash: hash('e'),
+        created_at: "2026-05-24T00:00:00Z".to_owned(),
+        expires_at: "2026-05-24T01:00:00Z".to_owned(),
+        challenge_key_id: "reflect_key_schema".to_owned(),
+        challenge_hash: hash('f'),
+        status: "pending".to_owned(),
+        posture: "invalidMaterial",
+        consumed_candidate_id: None,
+        consumed_at: None,
+        consumed_result_hash: None,
+        recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "repair_or_recreate_request",
+            message: "The ledger row cannot accept a result in its current state.",
+            command: "ee doctor --workspace /tmp/schema --json".to_owned(),
+        }],
+    };
+    let report = ReflectionRequestLedgerDiagnosticsReport {
+        schema: REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+        command: "reflect request-ledger diagnostics",
+        version: "0.0.0-test",
+        workspace_id: "ws_schema".to_owned(),
+        workspace_path: "/tmp/schema".to_owned(),
+        database_path: "/tmp/schema/.ee/ee.db".to_owned(),
+        status_filter: None,
+        now: "2026-05-24T00:30:00Z".to_owned(),
+        limit: 10,
+        returned_count: 6,
+        expired_pending_count: 1,
+        durable_mutation: false,
+        hmac_key: ReflectionHmacKeyDiagnostic {
+            active_key_id: None,
+            key_path_configured: false,
+            status: "missing_reflection_hmac_key_path",
+            error_code: Some("missing_reflection_hmac_key_path"),
+            recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+                priority: 1,
+                kind: "configure_reflection_hmac_key",
+                message: "Set EE_REFLECTION_HMAC_KEY_PATH to a readable local key file, then re-run ee reflect propose.",
+                command: "ee reflect propose --workspace /tmp/schema --json".to_owned(),
+            }],
+        },
+        requests: vec![
+            request,
+            rotated_key,
+            source_digest_mismatch,
+            unavailable_status,
+            invalid_lifecycle,
+            invalid_material,
+        ],
+        expired_pending: vec![expired],
+        next_action: "follow the per-request recovery action for each ledger posture".to_owned(),
+    };
+    let document: Value = serde_json::from_str(&report.data_json())
+        .map_err(|error| format!("diagnostics report data_json must parse: {error}"))?;
+    let schema = schema_doc(REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1)?;
+
+    validate_json_schema(&document, &schema, &schema, "$")?;
+    ensure_json_str(
+        &document,
+        "/schema",
+        REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+    )?;
+    ensure_json_bool(&document, "/durableMutation", false)?;
+    ensure_json_str(
+        &document,
+        "/hmacKey/status",
+        "missing_reflection_hmac_key_path",
+    )?;
+    ensure_json_str(&document, "/requests/0/posture", "consumed")?;
+    ensure_json_str(&document, "/requests/1/posture", "rotatedKey")?;
+    ensure_json_str(&document, "/requests/2/posture", "sourceDigestMismatch")?;
+    ensure_json_str(&document, "/requests/3/status", "unknown_state")?;
+    ensure_json_str(&document, "/requests/3/posture", "unavailableStatus")?;
+    ensure_json_str(&document, "/requests/4/expiresAt", "not-a-time")?;
+    ensure_json_str(&document, "/requests/4/posture", "invalidLifecycle")?;
+    ensure_json_str(&document, "/requests/5/posture", "invalidMaterial")?;
+    ensure_json_str(&document, "/expiredPending/0/posture", "expiredPending")?;
+    Ok(())
 }
 
 #[test]

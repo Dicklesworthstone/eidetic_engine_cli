@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::OsString;
@@ -5454,9 +5455,9 @@ CREATE INDEX idx_curation_candidates_v062_ttl_policy
 /// auditable and idempotent without persisting raw HMAC key material.
 ///
 /// Storage shape:
-/// * `request_id` remains pattern-flexible because the reflection artifact
-///   currently uses `reflect_req_*` IDs while the bead's follow-up wiring may
-///   move generation to UUIDv7.
+/// * `request_id` remains pattern-flexible inside the `reflect_req_*`
+///   namespace because the bead's follow-up wiring may move generation to
+///   UUIDv7.
 /// * `request_hash` is unique and canonical BLAKE3, collapsing repeated
 ///   ingestion of the same outbound request.
 /// * source refs and content hashes are JSON-validated and further checked by
@@ -18615,6 +18616,11 @@ impl DbConnection {
         input: &CreateReflectionRequestLedgerInput,
     ) -> Result<ReflectionRequestLedgerIngestOutcome> {
         validate_reflection_request_ledger_insert(request_id, input)?;
+        let request_id = request_id.trim();
+        let workspace_id = input.workspace_id.trim();
+        let request_hash = input.request_hash.trim();
+        let created_at = canonical_reflection_rfc3339(&input.created_at, "created_at")?;
+        let expires_at = canonical_reflection_rfc3339(&input.expires_at, "expires_at")?;
 
         let changes_before = self.changes_total()?;
         self.execute_for(
@@ -18626,19 +18632,19 @@ impl DbConnection {
                  status, consumed_candidate_id, consumed_at\
              ) VALUES (\
                  ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'pending', NULL, NULL\
-             )",
+            )",
             &[
-                Value::Text(request_id.trim().to_owned()),
-                Value::Text(input.request_hash.trim().to_owned()),
-                Value::Text(input.workspace_id.trim().to_owned()),
+                Value::Text(request_id.to_owned()),
+                Value::Text(request_hash.to_owned()),
+                Value::Text(workspace_id.to_owned()),
                 Value::Text(input.reflection_kind.trim().to_owned()),
                 Value::Text(input.source_package_hash.trim().to_owned()),
                 Value::Text(input.source_refs_json.clone()),
                 Value::Text(input.source_content_hashes_json.clone()),
                 Value::Text(input.prompt_template_hash.trim().to_owned()),
                 Value::Text(input.response_schema_hash.trim().to_owned()),
-                Value::Text(input.created_at.trim().to_owned()),
-                Value::Text(input.expires_at.trim().to_owned()),
+                Value::Text(created_at),
+                Value::Text(expires_at),
                 Value::Text(input.challenge_key_id.trim().to_owned()),
                 Value::Text(input.challenge_hash.trim().to_owned()),
             ],
@@ -18648,10 +18654,8 @@ impl DbConnection {
             return Ok(ReflectionRequestLedgerIngestOutcome::Inserted);
         }
 
-        if let Some(existing) =
-            self.get_reflection_request_ledger(&input.workspace_id, request_id)?
-        {
-            if existing.request_hash == input.request_hash {
+        if let Some(existing) = self.get_reflection_request_ledger(workspace_id, request_id)? {
+            if existing.request_hash == request_hash {
                 return Ok(ReflectionRequestLedgerIngestOutcome::Duplicate);
             }
             return Err(malformed_reflection_request_ledger_input(
@@ -18659,7 +18663,7 @@ impl DbConnection {
             ));
         }
         if self
-            .get_reflection_request_ledger_by_hash(&input.workspace_id, &input.request_hash)?
+            .get_reflection_request_ledger_by_hash(workspace_id, request_hash)?
             .is_some()
         {
             return Ok(ReflectionRequestLedgerIngestOutcome::Duplicate);
@@ -18734,17 +18738,18 @@ impl DbConnection {
              response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
              status, consumed_candidate_id, consumed_at, consumed_result_hash \
              FROM reflection_request_ledger \
-             WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2) \
-             ORDER BY expires_at ASC, created_at ASC, request_id ASC LIMIT ?3",
+             WHERE workspace_id = ?1 AND (?2 IS NULL OR status = ?2)",
             &[
                 Value::Text(workspace_id.trim().to_owned()),
                 status.map_or(Value::Null, Value::Text),
-                Value::BigInt(i64::from(limit)),
             ],
         )?;
-        rows.iter()
+        let mut diagnostics = rows
+            .iter()
             .map(stored_reflection_request_ledger_from_row)
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        sort_reflection_request_ledger_diagnostics(&mut diagnostics);
+        Ok(diagnostics.into_iter().take(limit as usize).collect())
     }
 
     /// List pending reflection request ledger rows that are expired at `now`.
@@ -18755,7 +18760,7 @@ impl DbConnection {
         limit: u32,
     ) -> Result<Vec<StoredReflectionRequestLedger>> {
         validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
-        parse_reflection_rfc3339(now, "now")?;
+        let now = parse_reflection_rfc3339(now, "now")?;
         let limit = validate_reflection_request_ledger_diagnostic_limit(limit)?;
 
         let rows = self.query_for(
@@ -18765,17 +18770,36 @@ impl DbConnection {
              response_schema_hash, created_at, expires_at, challenge_key_id, challenge_hash, \
              status, consumed_candidate_id, consumed_at, consumed_result_hash \
              FROM reflection_request_ledger \
-             WHERE workspace_id = ?1 AND status = 'pending' AND expires_at <= ?2 \
-             ORDER BY expires_at ASC, created_at ASC, request_id ASC LIMIT ?3",
-            &[
-                Value::Text(workspace_id.trim().to_owned()),
-                Value::Text(now.trim().to_owned()),
-                Value::BigInt(i64::from(limit)),
-            ],
+             WHERE workspace_id = ?1 AND status = 'pending'",
+            &[Value::Text(workspace_id.trim().to_owned())],
         )?;
-        rows.iter()
-            .map(stored_reflection_request_ledger_from_row)
-            .collect()
+        let mut expired = Vec::new();
+        for row in &rows {
+            let stored = stored_reflection_request_ledger_from_row(row)?;
+            let Ok(expires_at) = parse_reflection_rfc3339(&stored.expires_at, "expires_at") else {
+                continue;
+            };
+            if expires_at <= now {
+                expired.push((expires_at, stored));
+            }
+        }
+        expired.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| {
+                    compare_reflection_rfc3339_for_diagnostics(
+                        &left.1.created_at,
+                        &right.1.created_at,
+                        "created_at",
+                    )
+                })
+                .then_with(|| left.1.request_id.cmp(&right.1.request_id))
+        });
+        Ok(expired
+            .into_iter()
+            .take(limit as usize)
+            .map(|(_, stored)| stored)
+            .collect())
     }
 
     /// Mark a pending reflection request as consumed by a derived curation
@@ -18790,21 +18814,31 @@ impl DbConnection {
         consumed_at: &str,
     ) -> Result<bool> {
         validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
-        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_request_id(request_id)?;
         validate_reflection_candidate_id(candidate_id)?;
         validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
-        parse_reflection_rfc3339(consumed_at, "consumed_at")?;
+        let consumed_at = canonical_reflection_rfc3339(consumed_at, "consumed_at")?;
+        if !matches!(
+            self.reflection_request_replay_status(
+                workspace_id,
+                request_id,
+                result_hash,
+                consumed_at.as_str(),
+            )?,
+            ReflectionRequestReplayStatus::Pending
+        ) {
+            return Ok(false);
+        }
 
         let affected = self.execute_for(
             DbOperation::Execute,
             "UPDATE reflection_request_ledger \
              SET status = 'consumed', consumed_candidate_id = ?1, consumed_result_hash = ?2, consumed_at = ?3 \
-             WHERE workspace_id = ?4 AND request_id = ?5 AND status = 'pending' \
-             AND expires_at > ?3",
+             WHERE workspace_id = ?4 AND request_id = ?5 AND status = 'pending'",
             &[
                 Value::Text(candidate_id.to_owned()),
                 Value::Text(result_hash.trim().to_owned()),
-                Value::Text(consumed_at.trim().to_owned()),
+                Value::Text(consumed_at),
                 Value::Text(workspace_id.trim().to_owned()),
                 Value::Text(request_id.trim().to_owned()),
             ],
@@ -18822,16 +18856,38 @@ impl DbConnection {
         now: &str,
     ) -> Result<ReflectionRequestReplayStatus> {
         validate_reflection_required_text(workspace_id, "workspace_id", 128)?;
-        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_request_id(request_id)?;
         validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
         let now = parse_reflection_rfc3339(now, "now")?;
 
         let Some(stored) = self.get_reflection_request_ledger(workspace_id, request_id)? else {
             return Ok(ReflectionRequestReplayStatus::Missing);
         };
+        if matches!(
+            stored.status.as_str(),
+            "pending" | "consumed" | "expired" | "rejected"
+        ) && reflection_request_lifecycle_invalid(&stored)
+        {
+            return Ok(ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            });
+        }
+        if matches!(
+            stored.status.as_str(),
+            "pending" | "consumed" | "expired" | "rejected"
+        ) && reflection_request_material_invalid(&stored)
+        {
+            return Ok(ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_material".to_owned(),
+            });
+        }
         match stored.status.as_str() {
             "pending" => {
-                let expires = parse_reflection_rfc3339(&stored.expires_at, "expires_at")?;
+                let Ok(expires) = parse_reflection_rfc3339(&stored.expires_at, "expires_at") else {
+                    return Ok(ReflectionRequestReplayStatus::UnavailableStatus {
+                        status: "invalid_lifecycle".to_owned(),
+                    });
+                };
                 if expires <= now {
                     Ok(ReflectionRequestReplayStatus::Expired {
                         expires_at: stored.expires_at,
@@ -18841,6 +18897,11 @@ impl DbConnection {
                 }
             }
             "consumed" => {
+                if reflection_request_consumed_lifecycle_invalid(&stored) {
+                    return Ok(ReflectionRequestReplayStatus::UnavailableStatus {
+                        status: "invalid_lifecycle".to_owned(),
+                    });
+                }
                 if stored.consumed_result_hash.as_deref() == Some(result_hash.trim()) {
                     if let Some(candidate_id) = stored.consumed_candidate_id {
                         return Ok(ReflectionRequestReplayStatus::AcceptedReplay { candidate_id });
@@ -18870,7 +18931,7 @@ impl DbConnection {
         result_hash: &str,
         consumed_at: &str,
     ) -> Result<ReflectionRequestCandidateConsumptionOutcome> {
-        validate_reflection_required_text(request_id, "request_id", 128)?;
+        validate_reflection_request_id(request_id)?;
         validate_reflection_candidate_id(candidate_id)?;
         validate_reflection_blake3_hash(result_hash, "consumed_result_hash")?;
         parse_reflection_rfc3339(consumed_at, "consumed_at")?;
@@ -18929,7 +18990,7 @@ fn validate_reflection_request_ledger_insert(
     request_id: &str,
     input: &CreateReflectionRequestLedgerInput,
 ) -> Result<()> {
-    validate_reflection_required_text(request_id, "request_id", 128)?;
+    validate_reflection_request_id(request_id)?;
     validate_reflection_required_text(&input.workspace_id, "workspace_id", 128)?;
     validate_reflection_required_text(&input.reflection_kind, "reflection_kind", 128)?;
     validate_reflection_required_text(&input.challenge_key_id, "challenge_key_id", 256)?;
@@ -18973,6 +19034,25 @@ fn validate_reflection_required_text(
         return Err(malformed_reflection_request_ledger_input(&format!(
             "{field} must be at most {max_len} bytes"
         )));
+    }
+    Ok(())
+}
+
+fn validate_reflection_request_id(value: &str) -> Result<()> {
+    validate_reflection_required_text(value, "request_id", 128)?;
+    let suffix = value.trim().strip_prefix("reflect_req_").ok_or_else(|| {
+        malformed_reflection_request_ledger_input(
+            "request_id must start with the reflect_req_ namespace",
+        )
+    })?;
+    if suffix.is_empty()
+        || !suffix.bytes().all(
+            |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'-'),
+        )
+    {
+        return Err(malformed_reflection_request_ledger_input(
+            "request_id must contain only schema-safe characters after reflect_req_",
+        ));
     }
     Ok(())
 }
@@ -19157,6 +19237,106 @@ fn parse_reflection_rfc3339(
     DateTime::parse_from_rfc3339(value.trim()).map_err(|error| {
         malformed_reflection_request_ledger_input(&format!("{field} must be RFC3339: {error}"))
     })
+}
+
+fn canonical_reflection_rfc3339(value: &str, field: &'static str) -> Result<String> {
+    parse_reflection_rfc3339(value, field).map(|timestamp| {
+        timestamp
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Secs, true)
+    })
+}
+
+fn reflection_request_lifecycle_invalid(stored: &StoredReflectionRequestLedger) -> bool {
+    let Ok(created_at) = parse_reflection_rfc3339(&stored.created_at, "created_at") else {
+        return true;
+    };
+    let Ok(expires_at) = parse_reflection_rfc3339(&stored.expires_at, "expires_at") else {
+        return true;
+    };
+    expires_at <= created_at
+}
+
+fn reflection_request_material_invalid(stored: &StoredReflectionRequestLedger) -> bool {
+    validate_reflection_request_id(&stored.request_id).is_err()
+        || validate_reflection_required_text(&stored.workspace_id, "workspace_id", 128).is_err()
+        || validate_reflection_required_text(&stored.reflection_kind, "reflection_kind", 128)
+            .is_err()
+        || validate_reflection_required_text(&stored.challenge_key_id, "challenge_key_id", 256)
+            .is_err()
+        || validate_reflection_blake3_hash(&stored.request_hash, "request_hash").is_err()
+        || validate_reflection_blake3_hash(&stored.source_package_hash, "source_package_hash")
+            .is_err()
+        || validate_reflection_blake3_hash(&stored.prompt_template_hash, "prompt_template_hash")
+            .is_err()
+        || validate_reflection_blake3_hash(&stored.response_schema_hash, "response_schema_hash")
+            .is_err()
+        || validate_reflection_blake3_hash(&stored.challenge_hash, "challenge_hash").is_err()
+        || validate_reflection_json_bounds(&stored.source_refs_json, "source_refs_json", 32768)
+            .and_then(|_| validate_reflection_source_refs_json(&stored.source_refs_json))
+            .is_err()
+        || validate_reflection_json_bounds(
+            &stored.source_content_hashes_json,
+            "source_content_hashes_json",
+            16384,
+        )
+        .and_then(|_| {
+            validate_reflection_source_content_hashes_json(&stored.source_content_hashes_json)
+        })
+        .is_err()
+}
+
+fn reflection_request_consumed_lifecycle_invalid(stored: &StoredReflectionRequestLedger) -> bool {
+    let Some(candidate_id) = stored.consumed_candidate_id.as_deref() else {
+        return true;
+    };
+    if validate_reflection_candidate_id(candidate_id).is_err() {
+        return true;
+    }
+    let Some(result_hash) = stored.consumed_result_hash.as_deref() else {
+        return true;
+    };
+    if validate_reflection_blake3_hash(result_hash, "consumed_result_hash").is_err() {
+        return true;
+    }
+    let Some(consumed_at) = stored.consumed_at.as_deref() else {
+        return true;
+    };
+    parse_reflection_rfc3339(consumed_at, "consumed_at").is_err()
+}
+
+fn sort_reflection_request_ledger_diagnostics(rows: &mut [StoredReflectionRequestLedger]) {
+    rows.sort_by(|left, right| {
+        compare_reflection_rfc3339_for_diagnostics(
+            &left.expires_at,
+            &right.expires_at,
+            "expires_at",
+        )
+        .then_with(|| {
+            compare_reflection_rfc3339_for_diagnostics(
+                &left.created_at,
+                &right.created_at,
+                "created_at",
+            )
+        })
+        .then_with(|| left.request_id.cmp(&right.request_id))
+    });
+}
+
+fn compare_reflection_rfc3339_for_diagnostics(
+    left: &str,
+    right: &str,
+    field: &'static str,
+) -> Ordering {
+    match (
+        parse_reflection_rfc3339(left, field).ok(),
+        parse_reflection_rfc3339(right, field).ok(),
+    ) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
 }
 
 fn malformed_reflection_request_ledger_input(message: &str) -> DbError {
@@ -31826,7 +32006,9 @@ mod tests {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
         setup_workspace(&connection)?;
-        let input = reflection_request_ledger_input();
+        let mut input = reflection_request_ledger_input();
+        input.created_at = "2026-05-24T00:00:00+00:00".to_owned();
+        input.expires_at = "2026-05-24T01:00:00+00:00".to_owned();
 
         let inserted =
             connection.insert_reflection_request_ledger("reflect_req_0123456789abcdef", &input)?;
@@ -31848,6 +32030,16 @@ mod tests {
             "request hash round-trips",
         )?;
         ensure_equal(&stored.status, &"pending".to_owned(), "row starts pending")?;
+        ensure_equal(
+            &stored.created_at,
+            &"2026-05-24T00:00:00Z".to_owned(),
+            "created_at is canonicalized for stable ledger comparisons",
+        )?;
+        ensure_equal(
+            &stored.expires_at,
+            &"2026-05-24T01:00:00Z".to_owned(),
+            "expires_at is canonicalized for stable ledger comparisons",
+        )?;
         ensure(
             stored.consumed_candidate_id.is_none(),
             "new request is not consumed",
@@ -31869,12 +32061,32 @@ mod tests {
             "same request id and hash dedup",
         )?;
 
+        let mut whitespace_duplicate = input.clone();
+        whitespace_duplicate.workspace_id = format!(" {} ", whitespace_duplicate.workspace_id);
+        whitespace_duplicate.request_hash = format!(" {} ", whitespace_duplicate.request_hash);
+        let duplicate_with_trimmed_inputs = connection.insert_reflection_request_ledger(
+            " reflect_req_0123456789abcdef ",
+            &whitespace_duplicate,
+        )?;
+        ensure_equal(
+            &(duplicate_with_trimmed_inputs as i64),
+            &(ReflectionRequestLedgerIngestOutcome::Duplicate as i64),
+            "trim-equivalent request id, workspace id, and request hash dedup",
+        )?;
+
         let same_hash_different_id =
             connection.insert_reflection_request_ledger("reflect_req_fedcba9876543210", &input)?;
         ensure_equal(
             &(same_hash_different_id as i64),
             &(ReflectionRequestLedgerIngestOutcome::Duplicate as i64),
             "same request hash with a different id dedups",
+        )?;
+
+        let malformed_request_id =
+            connection.insert_reflection_request_ledger("bad request id", &input);
+        ensure(
+            malformed_request_id.is_err(),
+            "malformed reflection request ids are rejected before ledger insert",
         )?;
 
         let mut conflicting = input;
@@ -31897,8 +32109,8 @@ mod tests {
         setup_workspace(&connection)?;
 
         let mut early = reflection_request_ledger_input();
-        early.created_at = "2026-05-24T00:00:00Z".to_owned();
-        early.expires_at = "2026-05-24T00:30:00Z".to_owned();
+        early.created_at = "2026-05-24T00:00:00+00:00".to_owned();
+        early.expires_at = "2026-05-24T00:30:00+00:00".to_owned();
         connection.insert_reflection_request_ledger("reflect_req_diag000000001", &early)?;
 
         let mut later = reflection_request_ledger_input();
@@ -31906,6 +32118,25 @@ mod tests {
         later.created_at = "2026-05-24T00:05:00Z".to_owned();
         later.expires_at = "2026-05-24T00:45:00Z".to_owned();
         connection.insert_reflection_request_ledger("reflect_req_diag000000002", &later)?;
+
+        let mut legacy_offset = reflection_request_ledger_input();
+        legacy_offset.request_hash = reflection_hash('a');
+        legacy_offset.created_at = "2026-05-24T00:03:00Z".to_owned();
+        legacy_offset.expires_at = "2026-05-24T00:40:00Z".to_owned();
+        connection.insert_reflection_request_ledger("reflect_req_diag_offset", &legacy_offset)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET expires_at = '2026-05-23T19:40:00-05:00' \
+             WHERE request_id = 'reflect_req_diag_offset'",
+        )?;
+
+        let mut invalid_lifecycle = reflection_request_ledger_input();
+        invalid_lifecycle.request_hash = reflection_hash('9');
+        connection
+            .insert_reflection_request_ledger("reflect_req_diag_invalidlife", &invalid_lifecycle)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET expires_at = 'not-a-time' \
+             WHERE request_id = 'reflect_req_diag_invalidlife'",
+        )?;
 
         let mut consumed = reflection_request_ledger_input();
         consumed.request_hash = reflection_hash('7');
@@ -31937,8 +32168,13 @@ mod tests {
         let pending_ids: Vec<&str> = pending.iter().map(|row| row.request_id.as_str()).collect();
         ensure_equal(
             &pending_ids,
-            &vec!["reflect_req_diag000000001", "reflect_req_diag000000002"],
-            "pending diagnostics rows are expiry ordered and deterministic",
+            &vec![
+                "reflect_req_diag000000001",
+                "reflect_req_diag_offset",
+                "reflect_req_diag000000002",
+                "reflect_req_diag_invalidlife",
+            ],
+            "pending diagnostics rows are parsed-expiry ordered and deterministic",
         )?;
 
         let consumed_rows = connection.list_reflection_request_ledger_for_diagnostics(
@@ -31965,13 +32201,13 @@ mod tests {
         let limited_ids: Vec<&str> = limited.iter().map(|row| row.request_id.as_str()).collect();
         ensure_equal(
             &limited_ids,
-            &vec!["reflect_req_diag000000001", "reflect_req_diag000000002"],
-            "unfiltered diagnostics respect the requested limit",
+            &vec!["reflect_req_diag000000001", "reflect_req_diag_offset"],
+            "unfiltered diagnostics respect the requested limit after parsed ordering",
         )?;
 
         let expired_pending = connection.list_expired_reflection_request_ledger_for_diagnostics(
             "wsp_01234567890123456789012345",
-            "2026-05-24T00:35:00Z",
+            "2026-05-24T00:30:00+00:00",
             10,
         )?;
         let expired_ids: Vec<&str> = expired_pending
@@ -31981,7 +32217,7 @@ mod tests {
         ensure_equal(
             &expired_ids,
             &vec!["reflect_req_diag000000001"],
-            "expired diagnostics derive stale pending rows without reporting consumed rows",
+            "expired diagnostics derive stale pending rows without reporting consumed or malformed-lifecycle rows",
         )?;
         ensure(
             connection
@@ -32079,7 +32315,7 @@ mod tests {
             "reflect_req_0123456789abcdef",
             candidate_id,
             &reflection_hash('8'),
-            "2026-05-24T00:15:00Z",
+            "2026-05-24T00:15:00+00:00",
         )?;
         ensure(consumed, "pending reflection request is consumed once")?;
 
@@ -32102,7 +32338,7 @@ mod tests {
         ensure_equal(
             &stored.consumed_at,
             &Some("2026-05-24T00:15:00Z".to_owned()),
-            "consumption records timestamp",
+            "consumption records canonical timestamp",
         )?;
         ensure_equal(
             &stored.consumed_result_hash,
@@ -32253,6 +32489,57 @@ mod tests {
             "mismatched replay does not insert a candidate",
         )?;
 
+        let malformed_consumed_request_id = "reflect_req_atomic_badcons";
+        let mut malformed_consumed_input = reflection_request_ledger_input();
+        malformed_consumed_input.request_hash = reflection_hash('c');
+        connection.insert_reflection_request_ledger(
+            malformed_consumed_request_id,
+            &malformed_consumed_input,
+        )?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger \
+             SET status = 'consumed', consumed_result_hash = 'blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', \
+                 consumed_at = '2026-05-24T00:18:00Z' \
+             WHERE request_id = 'reflect_req_atomic_badcons'",
+        )?;
+        let malformed_consumed_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            malformed_consumed_request_id,
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "2026-05-24T00:22:00Z",
+        )?;
+        ensure_equal(
+            &malformed_consumed_replay,
+            &ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "consumed rows without a candidate id fail closed as malformed lifecycle",
+        )?;
+        let malformed_consumed_candidate_id = format!("curate_{}", "h".repeat(26));
+        let malformed_consumed = connection.insert_reflection_result_candidate_and_consume_ledger(
+            malformed_consumed_request_id,
+            &malformed_consumed_candidate_id,
+            &candidate,
+            "blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "2026-05-24T00:22:00Z",
+        )?;
+        ensure_equal(
+            &malformed_consumed,
+            &ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "malformed consumed lifecycle rows do not produce idempotent replay",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate(
+                    "wsp_01234567890123456789012345",
+                    &malformed_consumed_candidate_id,
+                )?
+                .is_none(),
+            "malformed consumed rows leave no candidate row behind",
+        )?;
+
         let mut expired_input = reflection_request_ledger_input();
         expired_input.request_hash = reflection_hash('a');
         expired_input.expires_at = "2026-05-24T00:05:00Z".to_owned();
@@ -32278,6 +32565,201 @@ mod tests {
                 .get_curation_candidate("wsp_01234567890123456789012345", &expired_candidate_id)?
                 .is_none(),
             "expired pending requests leave no candidate row behind",
+        )?;
+
+        let mut invalid_lifecycle_input = reflection_request_ledger_input();
+        invalid_lifecycle_input.request_hash = reflection_hash('d');
+        let invalid_lifecycle_request_id = "reflect_req_atomic_badlife";
+        connection.insert_reflection_request_ledger(
+            invalid_lifecycle_request_id,
+            &invalid_lifecycle_input,
+        )?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET expires_at = 'not-a-time' \
+             WHERE request_id = 'reflect_req_atomic_badlife'",
+        )?;
+
+        let invalid_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            invalid_lifecycle_request_id,
+            &reflection_hash('e'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_replay,
+            &ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "malformed pending lifecycle fails closed as structured unavailable status",
+        )?;
+
+        let invalid_lifecycle_candidate_id = format!("curate_{}", "g".repeat(26));
+        let invalid_lifecycle = connection.insert_reflection_result_candidate_and_consume_ledger(
+            invalid_lifecycle_request_id,
+            &invalid_lifecycle_candidate_id,
+            &candidate,
+            &reflection_hash('e'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_lifecycle,
+            &ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "malformed lifecycle rows do not become storage errors during ingest",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate(
+                    "wsp_01234567890123456789012345",
+                    &invalid_lifecycle_candidate_id,
+                )?
+                .is_none(),
+            "malformed lifecycle rows leave no candidate row behind",
+        )?;
+
+        let mut invalid_created_input = reflection_request_ledger_input();
+        invalid_created_input.request_hash = reflection_hash('0');
+        let invalid_created_request_id = "reflect_req_atomic_badcreated";
+        connection
+            .insert_reflection_request_ledger(invalid_created_request_id, &invalid_created_input)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET created_at = 'not-a-time' \
+             WHERE request_id = 'reflect_req_atomic_badcreated'",
+        )?;
+        let invalid_created_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            invalid_created_request_id,
+            &reflection_hash('0'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_created_replay,
+            &ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "pending rows with malformed created_at fail closed during replay",
+        )?;
+        let invalid_created_candidate_id = format!("curate_{}", "i".repeat(26));
+        let invalid_created = connection.insert_reflection_result_candidate_and_consume_ledger(
+            invalid_created_request_id,
+            &invalid_created_candidate_id,
+            &candidate,
+            &reflection_hash('0'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_created,
+            &ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "malformed created_at rows do not create reflection candidates",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate(
+                    "wsp_01234567890123456789012345",
+                    &invalid_created_candidate_id,
+                )?
+                .is_none(),
+            "malformed created_at rows leave no candidate row behind",
+        )?;
+
+        let mut non_increasing_input = reflection_request_ledger_input();
+        non_increasing_input.request_hash = reflection_hash('2');
+        let non_increasing_request_id = "reflect_req_atomic_nongreater";
+        connection
+            .insert_reflection_request_ledger(non_increasing_request_id, &non_increasing_input)?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger SET expires_at = created_at \
+             WHERE request_id = 'reflect_req_atomic_nongreater'",
+        )?;
+        let non_increasing_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            non_increasing_request_id,
+            &reflection_hash('2'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &non_increasing_replay,
+            &ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "pending rows with expires_at <= created_at fail closed during replay",
+        )?;
+        let non_increasing_candidate_id = format!("curate_{}", "j".repeat(26));
+        let non_increasing = connection.insert_reflection_result_candidate_and_consume_ledger(
+            non_increasing_request_id,
+            &non_increasing_candidate_id,
+            &candidate,
+            &reflection_hash('2'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &non_increasing,
+            &ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus {
+                status: "invalid_lifecycle".to_owned(),
+            },
+            "non-increasing request lifecycles do not create reflection candidates",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate(
+                    "wsp_01234567890123456789012345",
+                    &non_increasing_candidate_id,
+                )?
+                .is_none(),
+            "non-increasing lifecycle rows leave no candidate row behind",
+        )?;
+
+        let mut invalid_material_input = reflection_request_ledger_input();
+        invalid_material_input.request_hash = reflection_hash('3');
+        let invalid_material_request_id = "reflect_req_atomic_badmat";
+        connection.insert_reflection_request_ledger(
+            invalid_material_request_id,
+            &invalid_material_input,
+        )?;
+        connection.execute_raw(
+            "UPDATE reflection_request_ledger \
+             SET request_hash = 'blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
+             WHERE request_id = 'reflect_req_atomic_badmat'",
+        )?;
+        let invalid_material_replay = connection.reflection_request_replay_status(
+            "wsp_01234567890123456789012345",
+            invalid_material_request_id,
+            &reflection_hash('3'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_material_replay,
+            &ReflectionRequestReplayStatus::UnavailableStatus {
+                status: "invalid_material".to_owned(),
+            },
+            "pending rows with malformed base hash material fail closed during replay",
+        )?;
+        let invalid_material_candidate_id = format!("curate_{}", "k".repeat(26));
+        let invalid_material = connection.insert_reflection_result_candidate_and_consume_ledger(
+            invalid_material_request_id,
+            &invalid_material_candidate_id,
+            &candidate,
+            &reflection_hash('3'),
+            "2026-05-24T00:10:00Z",
+        )?;
+        ensure_equal(
+            &invalid_material,
+            &ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus {
+                status: "invalid_material".to_owned(),
+            },
+            "malformed request material rows do not create reflection candidates",
+        )?;
+        ensure(
+            connection
+                .get_curation_candidate(
+                    "wsp_01234567890123456789012345",
+                    &invalid_material_candidate_id,
+                )?
+                .is_none(),
+            "malformed request material rows leave no candidate row behind",
         )?;
 
         connection.close()?;

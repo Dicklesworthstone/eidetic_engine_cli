@@ -77,8 +77,9 @@ use crate::core::curate::{
     CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
     CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
     CurateReviewOptions, CurateReviewReport, CurateTombstoneOptions, CurateUntombstoneOptions,
-    CurateValidateOptions, CurateValidateReport, ReviewSessionOptions, ReviewSessionReport,
-    ReviewWorkspaceOptions, apply_curation_candidate, list_curation_candidates,
+    CurateValidateOptions, CurateValidateReport, ReflectionRequestLedgerDiagnosticsOptions,
+    ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
+    list_curation_candidates, list_reflection_request_ledger_diagnostics,
     review_curation_candidate, review_session_proposals, run_curate_retire, run_curate_tombstone,
     run_curate_untombstone, run_curation_disposition, run_review_workspace,
     validate_curation_candidate,
@@ -308,7 +309,7 @@ const HELP_PRELUDE: &str = concat!(
     "\n",
     "  Inspect:        status, doctor, capabilities, insights, memory show, memory history\n",
     "  Memory ops:     link, tag, memory level, memory expire, memory revise, outcome\n",
-    "  Curate:         curate (candidates|validate|apply), playbook, review\n",
+    "  Curate:         curate (candidates|validate|apply), reflect, playbook, review\n",
     "  Graph:          graph (pagerank|hits|communities|centrality|neighborhood|centrality-refresh), proximity\n",
     "  Maintenance:    maintenance, job, index, steward, daemon\n",
     "  Import/Export:  import (cass|jsonl|eidetic-legacy), export, backup, handoff\n",
@@ -828,6 +829,9 @@ pub enum Command {
     /// Attach safe rationale traces to memories, packs, or recorder events.
     #[command(subcommand)]
     Rationale(RationaleCommand),
+    /// Create and inspect external reflection request handshakes.
+    #[command(subcommand)]
+    Reflect(ReflectCommand),
     /// Rehearse EE command sequences in an isolated sandbox.
     #[command(subcommand)]
     Rehearse(RehearseCommand),
@@ -6047,6 +6051,45 @@ pub struct RecorderEventsListArgs {
     pub database: Option<PathBuf>,
 }
 
+/// Subcommands for `ee reflect`.
+#[derive(Clone, Debug, PartialEq, Subcommand)]
+pub enum ReflectCommand {
+    /// Inspect the durable reflection request replay ledger.
+    #[command(name = "request-ledger", subcommand)]
+    RequestLedger(ReflectRequestLedgerCommand),
+}
+
+/// Subcommands for `ee reflect request-ledger`.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum ReflectRequestLedgerCommand {
+    /// List redaction-safe request ledger diagnostics and recovery actions.
+    Diagnostics(ReflectRequestLedgerDiagnosticsArgs),
+}
+
+/// Arguments for `ee reflect request-ledger diagnostics`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ReflectRequestLedgerDiagnosticsArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Filter by durable ledger status: pending, consumed, expired, or rejected.
+    #[arg(long, value_name = "STATUS")]
+    pub status: Option<String>,
+
+    /// RFC 3339 timestamp used to derive expired-pending posture.
+    #[arg(long, value_name = "RFC3339")]
+    pub now: Option<String>,
+
+    /// Maximum ledger rows to return per diagnostic query.
+    #[arg(long, value_name = "N")]
+    pub limit: Option<u32>,
+
+    /// Skip the derived expired-pending diagnostic query.
+    #[arg(long = "no-expired-pending", action = ArgAction::SetTrue)]
+    pub no_expired_pending: bool,
+}
+
 /// Arguments for `ee recorder start`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct RecorderStartArgs {
@@ -10559,6 +10602,9 @@ where
         Some(Command::Rationale(RationaleCommand::List(ref args))) => {
             handle_rationale_list(&cli, args, stdout, stderr)
         }
+        Some(Command::Reflect(ReflectCommand::RequestLedger(
+            ReflectRequestLedgerCommand::Diagnostics(ref args),
+        ))) => handle_reflect_request_ledger_diagnostics(&cli, args, stdout, stderr),
         Some(Command::Rehearse(RehearseCommand::Plan(ref args))) => {
             handle_rehearse_plan(&cli, args, stdout, stderr)
         }
@@ -22074,7 +22120,8 @@ fn incident_recovery_actions(fixture: &serde_json::Value) -> serde_json::Value {
                     "manualStep": action.get("manualStep").cloned().unwrap_or(serde_json::Value::Null),
                     "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
                     "destructive": action.get("destructive").cloned().unwrap_or(serde_json::Value::Bool(false)),
-                    "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([]))
+                    "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([])),
+                    "repairSafety": action.get("repairSafety").cloned().unwrap_or(serde_json::Value::Null)
                 })
             })
             .collect(),
@@ -37214,6 +37261,63 @@ where
     }
 }
 
+fn handle_reflect_request_ledger_diagnostics<W, E>(
+    cli: &Cli,
+    args: &ReflectRequestLedgerDiagnosticsArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let limit = args
+        .limit
+        .unwrap_or_else(default_reflection_request_list_limit);
+    let options = ReflectionRequestLedgerDiagnosticsOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        status: args.status.as_deref(),
+        now_rfc3339: args.now.as_deref(),
+        limit,
+        include_expired_pending: !args.no_expired_pending,
+        hmac_key_config: None,
+    };
+
+    match list_reflection_request_ledger_diagnostics(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_summary())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_summary() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => {
+                let envelope = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "success": true,
+                    "data": report,
+                });
+                write_stdout(stdout, &(envelope.to_string() + "\n"))
+            }
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn default_reflection_request_list_limit() -> u32 {
+    read(EnvVar::ReflectionRequestListLimit)
+        .and_then(|value| value.parse::<u32>().ok())
+        .or_else(|| {
+            EnvVar::ReflectionRequestListLimit
+                .default_value()
+                .and_then(|value| value.parse::<u32>().ok())
+        })
+        .unwrap_or(50)
+}
+
 fn handle_review_workspace<W, E>(
     cli: &Cli,
     args: &ReviewWorkspaceArgs,
@@ -44348,6 +44452,7 @@ const COMMAND_NAMES: &[&str] = &[
     "profile",
     "procedure",
     "recorder",
+    "reflect",
     "remember",
     "rehearse",
     "review",
@@ -44493,6 +44598,8 @@ const PROCEDURE_SUBCOMMANDS: &[&str] = &[
     "propose", "show", "list", "export", "promote", "verify", "drift",
 ];
 const RECORDER_SUBCOMMANDS: &[&str] = &["start", "event", "finish", "tail", "import"];
+const REFLECT_SUBCOMMANDS: &[&str] = &["request-ledger"];
+const REFLECT_REQUEST_LEDGER_SUBCOMMANDS: &[&str] = &["diagnostics"];
 const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
 const RULE_SUBCOMMANDS: &[&str] = &["add", "list", "show", "mark", "protect", "update"];
@@ -44921,6 +45028,13 @@ impl NormalizedInvocation {
                     RationaleCommand::Show(_) => "rationale show".to_string(),
                     RationaleCommand::List(_) => "rationale list".to_string(),
                 },
+                Command::Reflect(reflect) => match reflect {
+                    ReflectCommand::RequestLedger(request_ledger) => match request_ledger {
+                        ReflectRequestLedgerCommand::Diagnostics(_) => {
+                            "reflect request-ledger diagnostics".to_string()
+                        }
+                    },
+                },
                 Command::Remember(_) => "remember".to_string(),
                 Command::Rehearse(rehearse) => match rehearse {
                     RehearseCommand::Plan(_) => "rehearse plan".to_string(),
@@ -45181,6 +45295,8 @@ fn subcommands_for_path(command_path: &str) -> Option<&'static [&'static str]> {
         "profile config" => Some(PROFILE_CONFIG_SUBCOMMANDS),
         "procedure" => Some(PROCEDURE_SUBCOMMANDS),
         "recorder" => Some(RECORDER_SUBCOMMANDS),
+        "reflect" => Some(REFLECT_SUBCOMMANDS),
+        "reflect request-ledger" => Some(REFLECT_REQUEST_LEDGER_SUBCOMMANDS),
         "rehearse" => Some(REHEARSE_SUBCOMMANDS),
         "review" => Some(REVIEW_SUBCOMMANDS),
         "rule" => Some(RULE_SUBCOMMANDS),
@@ -46773,6 +46889,7 @@ mod tests {
             "evidence",
             "destructive",
             "preconditions",
+            "repairSafety",
         ] {
             ensure(
                 action.get(field).is_some(),
@@ -56918,6 +57035,50 @@ mod tests {
                 ensure_equal(&args.status, &None, "status absent before defaulting")
             }
             _ => Err("expected Curate Candidates command".to_string()),
+        }
+    }
+
+    #[test]
+    fn reflect_request_ledger_diagnostics_command_parses() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "reflect",
+            "request-ledger",
+            "diagnostics",
+            "--status",
+            "pending",
+            "--now",
+            "2026-05-24T00:00:00Z",
+            "--limit",
+            "25",
+            "--database",
+            "/tmp/ee.db",
+            "--no-expired-pending",
+        ])
+        .map_err(|error| {
+            format!(
+                "failed to parse reflect request-ledger diagnostics: {:?}",
+                error.kind()
+            )
+        })?;
+
+        match parsed.command {
+            Some(Command::Reflect(ReflectCommand::RequestLedger(
+                ReflectRequestLedgerCommand::Diagnostics(ref args),
+            ))) => {
+                ensure_equal(&args.status, &Some("pending".to_string()), "status")?;
+                ensure_equal(&args.now, &Some("2026-05-24T00:00:00Z".to_string()), "now")?;
+                ensure_equal(&args.limit, &Some(25), "limit")?;
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("/tmp/ee.db")),
+                    "database",
+                )?;
+                ensure_equal(&args.no_expired_pending, &true, "no expired pending")
+            }
+            other => Err(format!(
+                "expected Reflect request-ledger diagnostics command, got {other:?}"
+            )),
         }
     }
 

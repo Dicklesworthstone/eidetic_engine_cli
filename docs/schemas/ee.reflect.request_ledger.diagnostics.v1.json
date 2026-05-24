@@ -1,0 +1,278 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.request_ledger.diagnostics.v1.json",
+  "title": "ee.reflect.request_ledger.diagnostics.v1",
+  "description": "Read-only, redaction-safe diagnostics for durable reflection request ledger rows.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "now",
+    "limit",
+    "returnedCount",
+    "expiredPendingCount",
+    "durableMutation",
+    "hmacKey",
+    "requests",
+    "expiredPending",
+    "nextAction"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.reflect.request_ledger.diagnostics.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "reflect request-ledger diagnostics"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspacePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databasePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "statusFilter": {
+      "type": "string",
+      "enum": ["pending", "consumed", "expired", "rejected"]
+    },
+    "now": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "returnedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expiredPendingCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "durableMutation": {
+      "type": "boolean",
+      "const": false
+    },
+    "hmacKey": {
+      "$ref": "#/$defs/hmacKeyDiagnostic"
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requestLedgerDiagnostic"
+      }
+    },
+    "expiredPending": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requestLedgerDiagnostic"
+      }
+    },
+    "nextAction": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "returnedCount", "expiredPendingCount", "hmacKey", "nextAction"],
+    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "hmacKey", "nextAction"],
+    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "hmacKey", "requests", "expiredPending", "nextAction"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "hmacKeyDiagnostic": {
+      "type": "object",
+      "required": ["keyPathConfigured", "status", "recovery"],
+      "additionalProperties": false,
+      "properties": {
+        "activeKeyId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "keyPathConfigured": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "missing_reflection_hmac_key_id",
+            "missing_reflection_hmac_key_path",
+            "missing_reflection_hmac_key_material",
+            "invalid_reflection_hmac_key_path",
+            "reflection_hmac_key_read_failed"
+          ]
+        },
+        "errorCode": {
+          "type": "string",
+          "enum": [
+            "missing_reflection_hmac_key_id",
+            "missing_reflection_hmac_key_path",
+            "missing_reflection_hmac_key_material",
+            "invalid_reflection_hmac_key_path",
+            "reflection_hmac_key_read_failed"
+          ]
+        },
+        "recovery": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recoveryAction"
+          }
+        }
+      }
+    },
+    "requestLedgerDiagnostic": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "requestHash",
+        "reflectionKind",
+        "sourcePackageHash",
+        "sourceRefCount",
+        "sourceContentHashCount",
+        "promptTemplateHash",
+        "responseSchemaHash",
+        "createdAt",
+        "expiresAt",
+        "challengeKeyId",
+        "challengeHash",
+        "status",
+        "posture",
+        "recovery"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "pattern": "^reflect_req_[A-Za-z0-9_:-]+$"
+        },
+        "requestHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "reflectionKind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourcePackageHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "sourceRefCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sourceContentHashCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "promptTemplateHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "responseSchemaHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "createdAt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expiresAt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "challengeKeyId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "challengeHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
+        "posture": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "rotatedKey",
+            "sourceDigestMismatch",
+            "expiredPending",
+            "consumed",
+            "expired",
+            "rejected",
+            "invalidLifecycle",
+            "invalidMaterial",
+            "unavailableStatus"
+          ]
+        },
+        "consumedCandidateId": {
+          "type": "string",
+          "pattern": "^curate_[A-Za-z0-9_:-]+$"
+        },
+        "consumedAt": {
+          "type": "string",
+          "minLength": 1
+        },
+        "consumedResultHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "recovery": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/recoveryAction"
+          }
+        }
+      }
+    },
+    "recoveryAction": {
+      "type": "object",
+      "required": ["priority", "kind", "message", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ingest_reflection_result",
+            "rerun_reflection_request",
+            "inspect_existing_candidate",
+            "configure_reflection_hmac_key",
+            "repair_or_recreate_request"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}

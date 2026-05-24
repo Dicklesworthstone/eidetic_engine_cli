@@ -1282,6 +1282,10 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("rationale list", "List safe rationale traces"),
             CommandEffect::read_only_db("rationale show", "Show a safe rationale trace"),
+            CommandEffect::read_only_db(
+                "reflect request-ledger diagnostics",
+                "Inspect reflection request ledger diagnostics without exposing secret payloads",
+            ),
             CommandEffect::read_only(
                 "review session",
                 "Analyze session evidence spans for curation candidates",

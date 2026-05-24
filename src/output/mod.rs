@@ -8412,6 +8412,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: reflection_result_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+            version: "1",
+            description: "Read-only reflection request ledger diagnostics report",
+            category: "reflect",
+            definition: reflection_request_ledger_diagnostics_schema_definition,
+        },
+        SchemaEntry {
             id: crate::graph::GRAPH_EXPORT_SCHEMA_V1,
             version: "1",
             description: "Graph export response envelope",
@@ -9302,6 +9309,10 @@ fn reflection_challenge_binding_schema_definition() -> String {
 
 fn reflection_result_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.reflect.result.v1.json").to_string()
+}
+
+fn reflection_request_ledger_diagnostics_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.request_ledger.diagnostics.v1.json").to_string()
 }
 
 fn graph_export_response_schema_definition() -> String {
@@ -11166,6 +11177,16 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
         description: "Attach safe rationale traces to memories, packs, or recorder events",
         available: true,
         subcommands: &[],
+        args: &[],
+    },
+    CommandEntry {
+        name: "reflect",
+        description: "Create and inspect external reflection request handshakes",
+        available: true,
+        subcommands: &[SubcommandEntry {
+            name: "request-ledger diagnostics",
+            description: "Inspect request ledger integrity and replay posture",
+        }],
         args: &[],
     },
     CommandEntry {

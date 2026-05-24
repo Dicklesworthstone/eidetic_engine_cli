@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use fnx_classes::Graph;
 use fnx_runtime::CompatibilityMode;
 use serde::{Serialize, Serializer};
@@ -22,11 +22,12 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
-    DerivationSourceRef, ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
+    DerivationSourceRef, PreparedReflectionRequest, ReflectionHmacKeyConfig,
+    ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
     ReflectionResultIngestDecision, ReflectionResultReplayGate, ReviewQueueState,
     canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
     resolve_derivation_memory_scores, validate_candidate, validate_candidate_trust_evidence,
-    validate_review_queue_transition,
+    validate_reflection_request_matches_ledger_material, validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
@@ -35,9 +36,10 @@ use crate::db::{
     CreateReflectionRequestLedgerInput, CreateSearchIndexJobInput, CurationCandidateReviewUpdate,
     DbConnection, DbError, DbOperation, EvidenceSpanMemoryAttachResult,
     MemoryLevelTransitionAuditInput, MemoryLinkRelation, MemoryLinkSource,
-    ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestReplayStatus,
-    SearchIndexJobType, StoredCurationCandidate, StoredCurationTtlPolicy, StoredEvidenceSpan,
-    StoredMemory, StoredMemoryLink, StoredReflectionRequestLedger, StoredSession, audit_actions,
+    ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestLedgerIngestOutcome,
+    ReflectionRequestReplayStatus, SearchIndexJobType, StoredCurationCandidate,
+    StoredCurationTtlPolicy, StoredEvidenceSpan, StoredMemory, StoredMemoryLink,
+    StoredReflectionRequestLedger, StoredSession, audit_actions,
     default_curation_ttl_policy_id_for_review_state, generate_audit_id,
 };
 use crate::graph::decay::{
@@ -73,6 +75,12 @@ pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
 pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
+/// Stable schema for reflection request ledger diagnostics.
+pub const REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1: &str =
+    "ee.reflect.request_ledger.diagnostics.v1";
+const REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL: &str = "reflect_req_invalid_material";
+const REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL: &str =
+    "blake3:0000000000000000000000000000000000000000000000000000000000000000";
 pub const CURATE_PEER_EVIDENCE_SOURCE_PREFIX: &str = "peer_evidence|";
 const MAX_CANDIDATE_LIST_LIMIT: u32 = 1000;
 const MAX_REVIEW_SESSION_LIMIT: u32 = 100;
@@ -330,6 +338,25 @@ pub struct ReviewWorkspaceOptions<'a> {
     pub propose: bool,
     /// Preview without inserting curation candidates.
     pub dry_run: bool,
+}
+
+/// Options for read-only reflection request ledger diagnostics.
+#[derive(Clone, Debug)]
+pub struct ReflectionRequestLedgerDiagnosticsOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Optional durable ledger status filter.
+    pub status: Option<&'a str>,
+    /// Optional frozen clock for deterministic diagnostics.
+    pub now_rfc3339: Option<&'a str>,
+    /// Maximum ledger rows to return per diagnostic query.
+    pub limit: u32,
+    /// Include derived expired-pending requests as a separate diagnostic set.
+    pub include_expired_pending: bool,
+    /// Optional key config override for deterministic tests; defaults to env registry.
+    pub hmac_key_config: Option<&'a ReflectionHmacKeyConfig>,
 }
 
 /// Result of listing curation candidates.
@@ -702,6 +729,157 @@ pub struct ReviewWorkspaceReport {
     #[serde(serialize_with = "serialize_review_workspace_degradations")]
     pub degraded: Vec<CurateCandidatesDegradation>,
     pub next_action: String,
+}
+
+/// Result of read-only reflection request ledger diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerDiagnosticsReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_filter: Option<String>,
+    pub now: String,
+    pub limit: u32,
+    pub returned_count: usize,
+    pub expired_pending_count: usize,
+    pub durable_mutation: bool,
+    pub hmac_key: ReflectionHmacKeyDiagnostic,
+    pub requests: Vec<ReflectionRequestLedgerDiagnostic>,
+    pub expired_pending: Vec<ReflectionRequestLedgerDiagnostic>,
+    pub next_action: String,
+}
+
+/// Redacted HMAC key posture for reflection request diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionHmacKeyDiagnostic {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_key_id: Option<String>,
+    pub key_path_configured: bool,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<&'static str>,
+    pub recovery: Vec<ReflectionRequestLedgerDiagnosticRecovery>,
+}
+
+/// Redacted reflection request ledger row for diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerDiagnostic {
+    pub request_id: String,
+    pub request_hash: String,
+    pub reflection_kind: String,
+    pub source_package_hash: String,
+    pub source_ref_count: usize,
+    pub source_content_hash_count: usize,
+    pub prompt_template_hash: String,
+    pub response_schema_hash: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub challenge_key_id: String,
+    pub challenge_hash: String,
+    pub status: String,
+    pub posture: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_candidate_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub consumed_result_hash: Option<String>,
+    pub recovery: Vec<ReflectionRequestLedgerDiagnosticRecovery>,
+}
+
+/// Structured, non-secret recovery action for a reflection ledger diagnostic row.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerDiagnosticRecovery {
+    pub priority: u8,
+    pub kind: &'static str,
+    pub message: &'static str,
+    pub command: String,
+}
+
+impl ReflectionRequestLedgerDiagnosticsReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            serialization_failed_report(
+                REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+                self.command,
+                "status",
+            )
+        })
+    }
+
+    /// Human-readable redacted diagnostic summary.
+    #[must_use]
+    pub fn human_summary(&self) -> String {
+        let mut output = format!(
+            "Reflection request ledger diagnostics ({} row(s), {} expired pending)\n\n",
+            self.returned_count, self.expired_pending_count
+        );
+        if let Some(status) = &self.status_filter {
+            output.push_str(&format!("  status filter: {status}\n"));
+        }
+        output.push_str(&format!("  now: {}\n", self.now));
+        output.push_str(&format!("  persisted: {}\n", self.durable_mutation));
+        output.push_str(&format!("  hmac key: {}\n", self.hmac_key.status));
+        if let Some(action) = self.hmac_key.recovery.first() {
+            output.push_str(&format!("    key next: {}\n", action.command));
+        }
+        for request in &self.requests {
+            output.push_str(&format!(
+                "\n  {} [{}] kind={} expires={} sources={} source_hashes={}\n",
+                request.request_id,
+                request.posture,
+                request.reflection_kind,
+                request.expires_at,
+                request.source_ref_count,
+                request.source_content_hash_count
+            ));
+            if let Some(action) = request.recovery.first() {
+                output.push_str(&format!("    next: {}\n", action.command));
+            }
+        }
+        if !self.expired_pending.is_empty() {
+            output.push_str("\nExpired pending requests:\n");
+            for request in &self.expired_pending {
+                output.push_str(&format!(
+                    "  - {} expires={} action={}\n",
+                    request.request_id,
+                    request.expires_at,
+                    request
+                        .recovery
+                        .first()
+                        .map(|action| action.command.as_str())
+                        .unwrap_or("ee reflect propose --json")
+                ));
+            }
+        }
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    /// Compact TOON-like diagnostic summary.
+    #[must_use]
+    pub fn toon_summary(&self) -> String {
+        format!(
+            "REFLECTION_REQUEST_LEDGER_DIAGNOSTICS|returned={}|expired_pending={}|status={}|key_status={}|mutated={}",
+            self.returned_count,
+            self.expired_pending_count,
+            self.status_filter.as_deref().unwrap_or("all"),
+            self.hmac_key.status,
+            self.durable_mutation
+        )
+    }
 }
 
 impl ReviewWorkspaceReport {
@@ -1569,6 +1747,106 @@ struct PreparedCurateRead {
     workspace_id: String,
     workspace_path: PathBuf,
     database_path: PathBuf,
+}
+
+/// List reflection request ledger rows through a redacted diagnostic report.
+pub fn list_reflection_request_ledger_diagnostics(
+    options: &ReflectionRequestLedgerDiagnosticsOptions<'_>,
+) -> Result<ReflectionRequestLedgerDiagnosticsReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let now = parse_reflection_diagnostics_time(options.now_rfc3339)?;
+    let now_rfc3339 = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let status_filter = options
+        .status
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .map(str::to_owned);
+
+    let connection = open_existing_database(&prepared.database_path)?;
+    let rows = connection
+        .list_reflection_request_ledger_for_diagnostics(
+            &prepared.workspace_id,
+            status_filter.as_deref(),
+            options.limit,
+        )
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list reflection request ledger diagnostics: {error}"),
+            repair: Some("ee doctor --json".to_owned()),
+        })?;
+    let expired_rows = if options.include_expired_pending {
+        connection
+            .list_expired_reflection_request_ledger_for_diagnostics(
+                &prepared.workspace_id,
+                &now_rfc3339,
+                options.limit,
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to list expired reflection request ledger diagnostics: {error}"
+                ),
+                repair: Some("ee doctor --json".to_owned()),
+            })?
+    } else {
+        Vec::new()
+    };
+
+    let owned_hmac_key_config;
+    let hmac_key_config = if let Some(config) = options.hmac_key_config {
+        config
+    } else {
+        owned_hmac_key_config = ReflectionHmacKeyConfig::from_env_registry();
+        &owned_hmac_key_config
+    };
+    let hmac_key =
+        reflection_hmac_key_diagnostic_from_config(hmac_key_config, &prepared.workspace_path);
+    let active_hmac_key_id = if hmac_key.status == "ready" {
+        hmac_key.active_key_id.clone()
+    } else {
+        None
+    };
+    let requests = rows
+        .into_iter()
+        .map(|stored| {
+            reflection_request_ledger_diagnostic_from_stored(
+                stored,
+                &now,
+                &prepared.workspace_path,
+                active_hmac_key_id.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expired_pending = expired_rows
+        .into_iter()
+        .map(|stored| {
+            reflection_request_ledger_diagnostic_from_stored(
+                stored,
+                &now,
+                &prepared.workspace_path,
+                active_hmac_key_id.as_deref(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let next_action =
+        reflection_request_ledger_diagnostics_next_action(requests.len(), expired_pending.len());
+
+    Ok(ReflectionRequestLedgerDiagnosticsReport {
+        schema: REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
+        command: "reflect request-ledger diagnostics",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        status_filter,
+        now: now_rfc3339,
+        limit: options.limit,
+        returned_count: requests.len(),
+        expired_pending_count: expired_pending.len(),
+        durable_mutation: false,
+        hmac_key,
+        requests,
+        expired_pending,
+        next_action,
+    })
 }
 
 /// List curation candidates for the selected workspace.
@@ -4548,6 +4826,64 @@ pub fn reflection_request_ledger_input_from_material(
     }
 }
 
+/// Durable result of persisting an outbound reflection request ledger row.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum ReflectionRequestDurableLedgerOutcome {
+    Inserted,
+    Duplicate,
+}
+
+/// Persist the ledger row carried by a prepared outbound reflection request.
+pub fn persist_prepared_reflection_request_ledger(
+    connection: &DbConnection,
+    prepared: &PreparedReflectionRequest,
+) -> Result<ReflectionRequestDurableLedgerOutcome, DomainError> {
+    let artifact_request_id = prepared.artifact.request_id.trim();
+    let ledger_request_id = prepared.ledger_material.request_id.trim();
+    if artifact_request_id != ledger_request_id {
+        return Err(DomainError::Storage {
+            message:
+                "Prepared reflection request artifact request_id does not match ledger material"
+                    .to_owned(),
+            repair: Some(
+                "Re-run ee reflect propose to create a fresh request artifact and ledger row."
+                    .to_owned(),
+            ),
+        });
+    }
+    validate_reflection_request_matches_ledger_material(
+        &prepared.artifact,
+        &prepared.ledger_material,
+    )
+    .map_err(|error| DomainError::Storage {
+        message: format!("Prepared reflection request does not match ledger material: {error}"),
+        repair: Some(
+            "Re-run ee reflect propose to create a fresh request artifact and ledger row."
+                .to_owned(),
+        ),
+    })?;
+
+    let input = reflection_request_ledger_input_from_material(&prepared.ledger_material);
+    let outcome = connection
+        .insert_reflection_request_ledger(artifact_request_id, &input)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to persist reflection request ledger: {error}"),
+            repair: Some(
+                "Re-run ee reflect propose to create a fresh request artifact and ledger row."
+                    .to_owned(),
+            ),
+        })?;
+    Ok(match outcome {
+        ReflectionRequestLedgerIngestOutcome::Inserted => {
+            ReflectionRequestDurableLedgerOutcome::Inserted
+        }
+        ReflectionRequestLedgerIngestOutcome::Duplicate => {
+            ReflectionRequestDurableLedgerOutcome::Duplicate
+        }
+    })
+}
+
 /// Rehydrate pure reflection ledger material from a stored DB ledger row.
 #[must_use]
 pub fn reflection_request_ledger_material_from_stored(
@@ -4733,6 +5069,382 @@ fn reflection_result_durable_outcome_from_db(
         ReflectionRequestCandidateConsumptionOutcome::UnavailableStatus { status } => {
             ReflectionResultDurableIngestOutcome::UnavailableStatus { status }
         }
+    }
+}
+
+fn reflection_request_ledger_diagnostic_from_stored(
+    stored: StoredReflectionRequestLedger,
+    now: &DateTime<Utc>,
+    workspace_path: &Path,
+    active_hmac_key_id: Option<&str>,
+) -> ReflectionRequestLedgerDiagnostic {
+    let source_ref_count = json_array_len(stored.source_refs_json.as_str());
+    let source_content_hash_count = json_array_len(stored.source_content_hashes_json.as_str());
+    let posture = reflection_request_ledger_posture(&stored, now, active_hmac_key_id);
+    let recovery = reflection_request_ledger_recovery(posture, &stored, workspace_path);
+
+    ReflectionRequestLedgerDiagnostic {
+        request_id: reflection_diagnostic_request_id_or_sentinel(&stored.request_id),
+        request_hash: reflection_diagnostic_hash_or_sentinel(&stored.request_hash),
+        reflection_kind: stored.reflection_kind,
+        source_package_hash: reflection_diagnostic_hash_or_sentinel(&stored.source_package_hash),
+        source_ref_count,
+        source_content_hash_count,
+        prompt_template_hash: reflection_diagnostic_hash_or_sentinel(&stored.prompt_template_hash),
+        response_schema_hash: reflection_diagnostic_hash_or_sentinel(&stored.response_schema_hash),
+        created_at: stored.created_at,
+        expires_at: stored.expires_at,
+        challenge_key_id: stored.challenge_key_id,
+        challenge_hash: reflection_diagnostic_hash_or_sentinel(&stored.challenge_hash),
+        status: stored.status,
+        posture,
+        consumed_candidate_id: stored
+            .consumed_candidate_id
+            .filter(|candidate_id| reflection_diagnostic_candidate_id_is_canonical(candidate_id)),
+        consumed_at: stored.consumed_at,
+        consumed_result_hash: stored
+            .consumed_result_hash
+            .filter(|hash| reflection_diagnostic_blake3_hash_is_canonical(hash)),
+        recovery,
+    }
+}
+
+fn reflection_request_ledger_posture(
+    stored: &StoredReflectionRequestLedger,
+    now: &DateTime<Utc>,
+    active_hmac_key_id: Option<&str>,
+) -> &'static str {
+    if matches!(
+        stored.status.as_str(),
+        "pending" | "consumed" | "expired" | "rejected"
+    ) && reflection_request_ledger_lifecycle_invalid(stored)
+    {
+        return "invalidLifecycle";
+    }
+    if matches!(
+        stored.status.as_str(),
+        "pending" | "consumed" | "expired" | "rejected"
+    ) && reflection_request_ledger_material_invalid(stored)
+    {
+        return "invalidMaterial";
+    }
+    match stored.status.as_str() {
+        "pending" => {
+            if reflection_request_ledger_source_digest_mismatch(stored) {
+                return "sourceDigestMismatch";
+            }
+            match DateTime::parse_from_rfc3339(stored.expires_at.as_str()) {
+                Ok(expires_at) if expires_at.timestamp_millis() <= now.timestamp_millis() => {
+                    "expiredPending"
+                }
+                Ok(_)
+                    if active_hmac_key_id
+                        .is_some_and(|key_id| key_id != stored.challenge_key_id) =>
+                {
+                    "rotatedKey"
+                }
+                Ok(_) => "pending",
+                Err(_) => "invalidLifecycle",
+            }
+        }
+        "consumed" if reflection_request_ledger_consumed_lifecycle_invalid(stored) => {
+            "invalidLifecycle"
+        }
+        "consumed" => "consumed",
+        "expired" => "expired",
+        "rejected" => "rejected",
+        _ => "unavailableStatus",
+    }
+}
+
+fn reflection_request_ledger_lifecycle_invalid(stored: &StoredReflectionRequestLedger) -> bool {
+    let Ok(created_at) = DateTime::parse_from_rfc3339(stored.created_at.trim()) else {
+        return true;
+    };
+    let Ok(expires_at) = DateTime::parse_from_rfc3339(stored.expires_at.trim()) else {
+        return true;
+    };
+    expires_at <= created_at
+}
+
+fn reflection_request_ledger_consumed_lifecycle_invalid(
+    stored: &StoredReflectionRequestLedger,
+) -> bool {
+    stored
+        .consumed_candidate_id
+        .as_deref()
+        .is_none_or(|candidate_id| !reflection_diagnostic_candidate_id_is_canonical(candidate_id))
+        || stored
+            .consumed_result_hash
+            .as_deref()
+            .is_none_or(|hash| !reflection_diagnostic_blake3_hash_is_canonical(hash))
+        || stored
+            .consumed_at
+            .as_deref()
+            .is_none_or(|consumed_at| DateTime::parse_from_rfc3339(consumed_at).is_err())
+}
+
+fn reflection_request_ledger_material_invalid(stored: &StoredReflectionRequestLedger) -> bool {
+    !reflection_diagnostic_request_id_is_canonical(&stored.request_id)
+        || stored.workspace_id.trim().is_empty()
+        || stored.reflection_kind.trim().is_empty()
+        || stored.challenge_key_id.trim().is_empty()
+        || !reflection_diagnostic_blake3_hash_is_canonical(&stored.request_hash)
+        || !reflection_diagnostic_blake3_hash_is_canonical(&stored.source_package_hash)
+        || !reflection_diagnostic_blake3_hash_is_canonical(&stored.prompt_template_hash)
+        || !reflection_diagnostic_blake3_hash_is_canonical(&stored.response_schema_hash)
+        || !reflection_diagnostic_blake3_hash_is_canonical(&stored.challenge_hash)
+        || reflection_source_ref_content_hashes(&stored.source_refs_json).is_none()
+        || reflection_source_content_hashes(&stored.source_content_hashes_json).is_none()
+}
+
+fn reflection_diagnostic_request_id_is_canonical(value: &str) -> bool {
+    value
+        .trim()
+        .strip_prefix("reflect_req_")
+        .is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b':' | b'-'))
+        })
+}
+
+fn reflection_diagnostic_request_id_or_sentinel(value: &str) -> String {
+    if reflection_diagnostic_request_id_is_canonical(value) {
+        value.trim().to_owned()
+    } else {
+        REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL.to_owned()
+    }
+}
+
+fn reflection_diagnostic_candidate_id_is_canonical(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("curate_") && value.len() == 33
+}
+
+fn reflection_diagnostic_blake3_hash_is_canonical(value: &str) -> bool {
+    value.trim().strip_prefix("blake3:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+fn reflection_diagnostic_hash_or_sentinel(value: &str) -> String {
+    if reflection_diagnostic_blake3_hash_is_canonical(value) {
+        value.trim().to_owned()
+    } else {
+        REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL.to_owned()
+    }
+}
+
+fn reflection_request_ledger_source_digest_mismatch(
+    stored: &StoredReflectionRequestLedger,
+) -> bool {
+    let Some(source_ref_hashes) =
+        reflection_source_ref_content_hashes(stored.source_refs_json.as_str())
+    else {
+        return true;
+    };
+    let Some(source_content_hashes) =
+        reflection_source_content_hashes(stored.source_content_hashes_json.as_str())
+    else {
+        return true;
+    };
+    source_ref_hashes != source_content_hashes
+}
+
+fn reflection_source_ref_content_hashes(raw: &str) -> Option<BTreeSet<String>> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let values = parsed.as_array()?;
+    if values.is_empty() {
+        return None;
+    }
+    let mut source_keys = BTreeSet::new();
+    let mut hashes = BTreeSet::new();
+    for value in values {
+        let object = value.as_object()?;
+        let kind = object.get("kind")?.as_str()?.trim();
+        if !matches!(kind, "memory" | "evidence_span") {
+            return None;
+        }
+        let id = object.get("id")?.as_str()?.trim();
+        if id.is_empty() {
+            return None;
+        }
+        let content_hash = object.get("contentHash")?.as_str()?.trim();
+        if !reflection_diagnostic_blake3_hash_is_canonical(content_hash) {
+            return None;
+        }
+        if !source_keys.insert((kind.to_owned(), id.to_owned())) {
+            return None;
+        }
+        hashes.insert(content_hash.to_owned());
+    }
+    Some(hashes)
+}
+
+fn reflection_source_content_hashes(raw: &str) -> Option<BTreeSet<String>> {
+    let parsed = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let values = parsed.as_array()?;
+    if values.is_empty() {
+        return None;
+    }
+    let mut canonical = Vec::with_capacity(values.len());
+    let mut hashes = BTreeSet::new();
+    for value in values {
+        let hash = value.as_str()?.trim();
+        if !reflection_diagnostic_blake3_hash_is_canonical(hash) {
+            return None;
+        }
+        if !hashes.insert(hash.to_owned()) {
+            return None;
+        }
+        canonical.push(hash.to_owned());
+    }
+    if canonical != hashes.iter().cloned().collect::<Vec<_>>() {
+        return None;
+    }
+    Some(hashes)
+}
+
+fn reflection_request_ledger_recovery(
+    posture: &'static str,
+    stored: &StoredReflectionRequestLedger,
+    workspace_path: &Path,
+) -> Vec<ReflectionRequestLedgerDiagnosticRecovery> {
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    match posture {
+        "pending" => vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "ingest_reflection_result",
+            message: "Complete the external reflection result and ingest it once.",
+            command: format!("ee reflect ingest <result-path> --workspace {workspace_arg} --json"),
+        }],
+        "expiredPending" | "expired" => vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The request is expired; create a fresh reflection request.",
+            command: format!("ee reflect propose --workspace {workspace_arg} --json"),
+        }],
+        "rotatedKey" => vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The request was minted by a different HMAC key id; restore that key or create a fresh request.",
+            command: format!("ee reflect propose --workspace {workspace_arg} --json"),
+        }],
+        "sourceDigestMismatch" => vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "rerun_reflection_request",
+            message: "The stored source references and source content hashes disagree; create a fresh request.",
+            command: format!("ee reflect propose --workspace {workspace_arg} --json"),
+        }],
+        "consumed" => vec![ReflectionRequestLedgerDiagnosticRecovery {
+            priority: 1,
+            kind: "inspect_existing_candidate",
+            message: "The request has already been consumed; inspect the existing curation candidate.",
+            command: stored.consumed_candidate_id.as_ref().map_or_else(
+                || format!("ee curate candidates --workspace {workspace_arg} --json"),
+                |candidate_id| {
+                    format!(
+                        "ee curate validate {} --workspace {workspace_arg} --dry-run --json",
+                        shell_quote_command_arg(candidate_id)
+                    )
+                },
+            ),
+        }],
+        "invalidLifecycle" | "invalidMaterial" => vec![
+            ReflectionRequestLedgerDiagnosticRecovery {
+                priority: 1,
+                kind: "repair_or_recreate_request",
+                message: "The ledger row cannot accept a result in its current state.",
+                command: format!("ee doctor --workspace {workspace_arg} --json"),
+            },
+            ReflectionRequestLedgerDiagnosticRecovery {
+                priority: 2,
+                kind: "rerun_reflection_request",
+                message: "Create fresh reflection request material before retrying result ingest.",
+                command: format!("ee reflect propose --workspace {workspace_arg} --json"),
+            },
+        ],
+        "rejected" | "unavailableStatus" => {
+            vec![ReflectionRequestLedgerDiagnosticRecovery {
+                priority: 1,
+                kind: "repair_or_recreate_request",
+                message: "The ledger row cannot accept a result in its current state.",
+                command: format!("ee doctor --workspace {workspace_arg} --json"),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn reflection_hmac_key_diagnostic_from_config(
+    config: &ReflectionHmacKeyConfig,
+    workspace_path: &Path,
+) -> ReflectionHmacKeyDiagnostic {
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    let active_key_id = config.key_id().map(str::to_owned);
+    let key_path_configured = config.key_path_configured();
+    match config.load_key_material() {
+        Ok(key) => ReflectionHmacKeyDiagnostic {
+            active_key_id: Some(key.key_id().to_owned()),
+            key_path_configured,
+            status: "ready",
+            error_code: None,
+            recovery: Vec::new(),
+        },
+        Err(error) => ReflectionHmacKeyDiagnostic {
+            active_key_id,
+            key_path_configured,
+            status: error.code(),
+            error_code: Some(error.code()),
+            recovery: vec![ReflectionRequestLedgerDiagnosticRecovery {
+                priority: 1,
+                kind: "configure_reflection_hmac_key",
+                message: error.recovery(),
+                command: format!("ee reflect propose --workspace {workspace_arg} --json"),
+            }],
+        },
+    }
+}
+
+fn json_array_len(raw: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+fn parse_reflection_diagnostics_time(raw: Option<&str>) -> Result<DateTime<Utc>, DomainError> {
+    raw.map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .map(|timestamp| timestamp.with_timezone(&Utc))
+                .map_err(|error| {
+                    curate_usage_error(
+                        format!("invalid reflection diagnostics timestamp `{value}`: {error}"),
+                        "Use an RFC 3339 timestamp for reflection diagnostics.",
+                    )
+                })
+        })
+        .transpose()
+        .map(|timestamp| timestamp.unwrap_or_else(Utc::now))
+}
+
+fn reflection_request_ledger_diagnostics_next_action(
+    returned_count: usize,
+    expired_pending_count: usize,
+) -> String {
+    if expired_pending_count > 0 {
+        "re-run ee reflect propose for expired pending requests".to_owned()
+    } else if returned_count == 0 {
+        "no reflection request ledger rows matched the filters".to_owned()
+    } else {
+        "follow the per-request recovery action for each ledger posture".to_owned()
     }
 }
 
@@ -10187,13 +10899,16 @@ mod tests {
         CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CandidateType,
         CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
         CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
-        REVIEW_WORKSPACE_SCHEMA_V1, ReflectionResultDurableIngestOutcome, ReviewSessionCandidate,
-        ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
-        apply_curation_candidate, build_bootstrap_session_candidates,
-        build_review_session_candidates, candidate_summary_from_stored,
-        evaluate_candidate_for_validation, list_curation_candidates,
-        persist_reflection_result_ingest_decision, reflection_request_ledger_input_from_material,
+        REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
+        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1,
+        ReflectionRequestDurableLedgerOutcome, ReflectionRequestLedgerDiagnosticsOptions,
+        ReflectionResultDurableIngestOutcome, ReviewSessionCandidate, ReviewSessionOptions,
+        ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
+        build_bootstrap_session_candidates, build_review_session_candidates,
+        candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
+        list_reflection_request_ledger_diagnostics, persist_prepared_reflection_request_ledger,
+        persist_reflection_result_ingest_decision, reflection_hmac_key_diagnostic_from_config,
+        reflection_request_ledger_input_from_material,
         reflection_request_ledger_material_from_stored, reflection_result_candidate_id,
         reflection_result_candidate_input_from_material,
         reflection_result_replay_gate_from_db_status, review_curation_candidate,
@@ -10201,8 +10916,16 @@ mod tests {
         stable_workspace_id, validate_curation_candidate,
     };
     use crate::curate::{
-        CandidateSource, ReflectionRequestLedgerMaterial, ReflectionResultCandidateMaterial,
-        ReflectionResultIngestDecision, ReflectionResultReplayGate,
+        CandidateSource, PreparedReflectionRequest, REFLECTION_CHALLENGE_BINDING_SCHEMA,
+        REFLECTION_REQUEST_SCHEMA, REFLECTION_RESULT_SCHEMA, REFLECTION_SOURCE_PACKAGE_SCHEMA,
+        REFLECTION_SOURCE_REDACTION_POLICY_ID, ReflectionHmacKeyConfig,
+        ReflectionPromptTemplateDescriptor, ReflectionRequestArtifact,
+        ReflectionRequestCallerHints, ReflectionRequestChallenge, ReflectionRequestLedgerMaterial,
+        ReflectionRequestLifecycle, ReflectionRequestNextCommand,
+        ReflectionResponseSchemaDescriptor, ReflectionResultCandidateMaterial,
+        ReflectionResultIngestDecision, ReflectionResultReplayGate, ReflectionSourcePackage,
+        ReflectionSourcePackageBudget, ReflectionSourcePackageEntry,
+        ReflectionSourcePackageRedactionSummary,
     };
     use crate::db::{
         CreateCurationCandidateInput, CreateEvidenceSpanInput, CreateFeedbackEventInput,
@@ -10295,6 +11018,137 @@ mod tests {
             .get(name)
             .map(String::as_str)
             .ok_or_else(|| format!("event missing field {name}; fields={:?}", event.fields))
+    }
+
+    fn reflection_request_ledger_material_fixture(
+        workspace_id: &str,
+        request_id: &str,
+    ) -> ReflectionRequestLedgerMaterial {
+        ReflectionRequestLedgerMaterial {
+            request_id: request_id.to_owned(),
+            request_hash: "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            reflection_kind: "summary".to_owned(),
+            source_package_hash:
+                "blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
+            source_refs_json: r#"[{"kind":"memory","id":"mem_a","contentHash":"blake3:1111111111111111111111111111111111111111111111111111111111111111"}]"#
+                .to_owned(),
+            source_content_hashes_json:
+                r#"["blake3:1111111111111111111111111111111111111111111111111111111111111111"]"#
+                    .to_owned(),
+            prompt_template_hash:
+                "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            response_schema_hash:
+                "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+                    .to_owned(),
+            created_at: "2026-05-24T00:00:00Z".to_owned(),
+            expires_at: "2026-05-24T01:00:00Z".to_owned(),
+            challenge_key_id: "reflect-key-v1".to_owned(),
+            challenge_hash: "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                .to_owned(),
+        }
+    }
+
+    fn prepared_reflection_request_fixture(
+        workspace_id: &str,
+        request_id: &str,
+    ) -> PreparedReflectionRequest {
+        let ledger_material = reflection_request_ledger_material_fixture(workspace_id, request_id);
+        let prompt_template = ReflectionPromptTemplateDescriptor {
+            id: "ee.reflect.prompt.summary",
+            version: "test",
+            hash: ledger_material.prompt_template_hash.clone(),
+        };
+        let response_schema = ReflectionResponseSchemaDescriptor {
+            id: REFLECTION_RESULT_SCHEMA,
+            hash: ledger_material.response_schema_hash.clone(),
+        };
+        let lifecycle = ReflectionRequestLifecycle {
+            created_at: ledger_material.created_at.clone(),
+            expires_at: ledger_material.expires_at.clone(),
+            key_rotation_grace_expires_at: "2026-05-24T02:00:00Z".to_owned(),
+            request_ttl_seconds: 3600,
+            hmac_rotation_grace_seconds: 3600,
+        };
+        let source_package = ReflectionSourcePackage {
+            schema: REFLECTION_SOURCE_PACKAGE_SCHEMA,
+            budget: ReflectionSourcePackageBudget {
+                max_sources: 4,
+                max_total_excerpt_bytes: 1024,
+                max_excerpt_bytes_per_source: 512,
+            },
+            total_source_count: 1,
+            packaged_source_count: 1,
+            omitted_source_count: 0,
+            total_excerpt_bytes: 36,
+            request_hash: ledger_material.source_package_hash.clone(),
+            redaction_summary: ReflectionSourcePackageRedactionSummary {
+                policy_id: REFLECTION_SOURCE_REDACTION_POLICY_ID,
+                secret_placeholder: "[REDACTED]",
+                redacted_source_count: 0,
+                prompt_injection_like_source_count: 0,
+                class_counts: Vec::new(),
+                truncation_reason_counts: Vec::new(),
+                omission_reason_counts: Vec::new(),
+            },
+            sources: vec![ReflectionSourcePackageEntry {
+                kind: "memory",
+                id: "mem_a".to_owned(),
+                memory_level: Some("procedural".to_owned()),
+                memory_kind: Some("rule".to_owned()),
+                evidence_span_kind: None,
+                content_hash:
+                    "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+                        .to_owned(),
+                excerpt: "Keep reflection requests replay-safe.".to_owned(),
+                excerpt_hash:
+                    "blake3:2222222222222222222222222222222222222222222222222222222222222222"
+                        .to_owned(),
+                excerpt_bytes: 36,
+                redaction_classes: Vec::new(),
+                truncation_reason: None,
+                provenance_uri: None,
+            }],
+            omitted_sources: Vec::new(),
+        };
+
+        PreparedReflectionRequest {
+            artifact: ReflectionRequestArtifact {
+                schema: REFLECTION_REQUEST_SCHEMA,
+                request_id: request_id.to_owned(),
+                request_hash: ledger_material.request_hash.clone(),
+                created_at: Some(lifecycle.created_at.clone()),
+                expires_at: Some(lifecycle.expires_at.clone()),
+                workspace_id: workspace_id.to_owned(),
+                reflection_kind: ledger_material.reflection_kind.clone(),
+                source_package_hash: ledger_material.source_package_hash.clone(),
+                prompt_template,
+                response_schema,
+                challenge: Some(ReflectionRequestChallenge {
+                    key_id: ledger_material.challenge_key_id.clone(),
+                    algorithm: "hmac-sha256".to_owned(),
+                    hmac: "fixture-challenge-token".to_owned(),
+                }),
+                caller_hints: Some(ReflectionRequestCallerHints {
+                    result_schema: REFLECTION_RESULT_SCHEMA,
+                    challenge_binding_schema: REFLECTION_CHALLENGE_BINDING_SCHEMA,
+                    replay_policy: "one_result_per_request",
+                    privacy: vec!["store ledger hash only"],
+                }),
+                next_commands: vec![ReflectionRequestNextCommand {
+                    kind: "ingest",
+                    command: "ee reflect ingest path/to/result.json --json".to_owned(),
+                    when: "after an external producer writes a result artifact",
+                    safety: "idempotent replay",
+                }],
+                source_package,
+            },
+            ledger_material,
+            lifecycle,
+        }
     }
 
     #[test]
@@ -10415,6 +11269,611 @@ mod tests {
             reflection_result_replay_gate_from_db_status(ReflectionRequestReplayStatus::Missing),
             ReflectionResultReplayGate::Missing
         );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_persists_prepared_request_ledger_once() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let request_id = "reflect_req_coreledger0001";
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-core-ledger-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let prepared = prepared_reflection_request_fixture(&workspace_id, request_id);
+        let inserted = persist_prepared_reflection_request_ledger(&connection, &prepared)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(inserted, ReflectionRequestDurableLedgerOutcome::Inserted);
+
+        let stored = connection
+            .get_reflection_request_ledger(&workspace_id, request_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "expected persisted reflection request ledger row".to_owned())?;
+        assert_eq!(stored.status, "pending");
+        assert_eq!(stored.request_hash, prepared.ledger_material.request_hash);
+        assert_eq!(
+            stored.source_refs_json,
+            prepared.ledger_material.source_refs_json
+        );
+        assert_eq!(
+            stored.challenge_hash,
+            prepared.ledger_material.challenge_hash
+        );
+        assert_ne!(
+            stored.challenge_hash,
+            prepared
+                .artifact
+                .challenge
+                .as_ref()
+                .ok_or_else(|| "expected fixture challenge".to_owned())?
+                .hmac
+        );
+
+        let duplicate = persist_prepared_reflection_request_ledger(&connection, &prepared)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(duplicate, ReflectionRequestDurableLedgerOutcome::Duplicate);
+
+        let mut mismatched = prepared.clone();
+        mismatched.artifact.request_id = "reflect_req_coreledger0002".to_owned();
+        let error = match persist_prepared_reflection_request_ledger(&connection, &mismatched) {
+            Ok(outcome) => return Err(format!("mismatched request ids persisted as {outcome:?}")),
+            Err(error) => error,
+        };
+        let DomainError::Storage { message, repair } = error else {
+            return Err(format!("unexpected mismatch error: {error:?}"));
+        };
+        assert!(message.contains("request_id does not match ledger material"));
+        assert_eq!(
+            repair.as_deref(),
+            Some("Re-run ee reflect propose to create a fresh request artifact and ledger row.")
+        );
+        assert!(
+            connection
+                .get_reflection_request_ledger(&workspace_id, "reflect_req_coreledger0002")
+                .map_err(|error| error.to_string())?
+                .is_none()
+        );
+
+        let mut drifted = prepared.clone();
+        drifted.ledger_material.request_hash =
+            "blake3:9999999999999999999999999999999999999999999999999999999999999999".to_owned();
+        let error = match persist_prepared_reflection_request_ledger(&connection, &drifted) {
+            Ok(outcome) => return Err(format!("drifted request hash persisted as {outcome:?}")),
+            Err(error) => error,
+        };
+        let DomainError::Storage { message, repair } = error else {
+            return Err(format!("unexpected drift error: {error:?}"));
+        };
+        assert!(message.contains("does not match ledger material"));
+        assert!(message.contains("requestHash"));
+        assert_eq!(
+            repair.as_deref(),
+            Some("Re-run ee reflect propose to create a fresh request artifact and ledger row.")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_lists_request_ledger_diagnostics_without_secret_payloads() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("reflection-core-diagnostics-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let current =
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0001");
+        persist_prepared_reflection_request_ledger(&connection, &current)
+            .map_err(|error| error.to_string())?;
+
+        let mut expired =
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0002");
+        expired.ledger_material.request_hash =
+            "blake3:9999999999999999999999999999999999999999999999999999999999999999".to_owned();
+        expired.ledger_material.created_at = "2026-05-24T00:00:00Z".to_owned();
+        expired.ledger_material.expires_at = "2026-05-24T00:30:00Z".to_owned();
+        expired.artifact.request_hash = expired.ledger_material.request_hash.clone();
+        expired.artifact.created_at = Some(expired.ledger_material.created_at.clone());
+        expired.artifact.expires_at = Some(expired.ledger_material.expires_at.clone());
+        expired.artifact.source_package.request_hash =
+            expired.ledger_material.source_package_hash.clone();
+        expired.lifecycle.created_at = expired.ledger_material.created_at.clone();
+        expired.lifecycle.expires_at = expired.ledger_material.expires_at.clone();
+        persist_prepared_reflection_request_ledger(&connection, &expired)
+            .map_err(|error| error.to_string())?;
+
+        let mut rotated =
+            prepared_reflection_request_fixture(&workspace_id, "reflect_req_corediag0003");
+        rotated.ledger_material.request_hash =
+            "blake3:8888888888888888888888888888888888888888888888888888888888888888".to_owned();
+        rotated.ledger_material.challenge_key_id = "reflect-key-v0".to_owned();
+        rotated.artifact.request_hash = rotated.ledger_material.request_hash.clone();
+        rotated.artifact.source_package.request_hash =
+            rotated.ledger_material.source_package_hash.clone();
+        if let Some(challenge) = rotated.artifact.challenge.as_mut() {
+            challenge.key_id = rotated.ledger_material.challenge_key_id.clone();
+        }
+        persist_prepared_reflection_request_ledger(&connection, &rotated)
+            .map_err(|error| error.to_string())?;
+
+        let mut digest_mismatch =
+            reflection_request_ledger_input_from_material(&current.ledger_material);
+        digest_mismatch.request_hash =
+            "blake3:7777777777777777777777777777777777777777777777777777777777777777".to_owned();
+        digest_mismatch.source_content_hashes_json = serde_json::json!([
+            "blake3:3333333333333333333333333333333333333333333333333333333333333333"
+        ])
+        .to_string();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0004", &digest_mismatch)
+            .map_err(|error| error.to_string())?;
+
+        let mut invalid_lifecycle =
+            reflection_request_ledger_input_from_material(&current.ledger_material);
+        invalid_lifecycle.request_hash =
+            "blake3:6666666666666666666666666666666666666666666666666666666666666666".to_owned();
+        connection
+            .insert_reflection_request_ledger("reflect_req_corediag0005", &invalid_lifecycle)
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_raw(
+                "UPDATE reflection_request_ledger SET expires_at = 'not-a-time' \
+                 WHERE request_id = 'reflect_req_corediag0005'",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let key_path = workspace_path.join("reflection-diagnostics.key");
+        std::fs::write(&key_path, b"reflection diagnostics secret key material")
+            .map_err(|error| error.to_string())?;
+        let key_config =
+            ReflectionHmacKeyConfig::new(Some("reflect-key-v1".to_owned()), Some(key_path));
+
+        let report = list_reflection_request_ledger_diagnostics(
+            &ReflectionRequestLedgerDiagnosticsOptions {
+                workspace_path,
+                database_path: Some(database_path.as_path()),
+                status: Some("pending"),
+                now_rfc3339: Some("2026-05-24T00:30:00Z"),
+                limit: 10,
+                include_expired_pending: true,
+                hmac_key_config: Some(&key_config),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            report.schema,
+            REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1
+        );
+        assert_eq!(report.status_filter.as_deref(), Some("pending"));
+        assert_eq!(report.returned_count, 5);
+        assert_eq!(report.expired_pending_count, 1);
+        assert!(!report.durable_mutation);
+        assert_eq!(report.hmac_key.status, "ready");
+        assert_eq!(
+            report.hmac_key.active_key_id.as_deref(),
+            Some("reflect-key-v1")
+        );
+        assert!(report.hmac_key.key_path_configured);
+        assert!(report.hmac_key.recovery.is_empty());
+
+        let current_row = report
+            .requests
+            .iter()
+            .find(|row| row.request_id == "reflect_req_corediag0001")
+            .ok_or_else(|| "expected current diagnostic row".to_owned())?;
+        assert_eq!(current_row.posture, "pending");
+        assert_eq!(current_row.source_ref_count, 1);
+        assert_eq!(current_row.source_content_hash_count, 1);
+        assert_eq!(
+            current_row.recovery.first().map(|action| action.kind),
+            Some("ingest_reflection_result")
+        );
+
+        let expired_row = report
+            .expired_pending
+            .first()
+            .ok_or_else(|| "expected expired pending diagnostic row".to_owned())?;
+        assert_eq!(expired_row.request_id, "reflect_req_corediag0002");
+        assert_eq!(expired_row.posture, "expiredPending");
+        assert_eq!(
+            expired_row.recovery.first().map(|action| action.kind),
+            Some("rerun_reflection_request")
+        );
+
+        let rotated_row = report
+            .requests
+            .iter()
+            .find(|row| row.request_id == "reflect_req_corediag0003")
+            .ok_or_else(|| "expected rotated key diagnostic row".to_owned())?;
+        assert_eq!(rotated_row.posture, "rotatedKey");
+        assert_eq!(
+            rotated_row.recovery.first().map(|action| action.kind),
+            Some("rerun_reflection_request")
+        );
+
+        let digest_mismatch_row = report
+            .requests
+            .iter()
+            .find(|row| row.request_id == "reflect_req_corediag0004")
+            .ok_or_else(|| "expected source digest mismatch diagnostic row".to_owned())?;
+        assert_eq!(digest_mismatch_row.posture, "sourceDigestMismatch");
+        assert_eq!(
+            digest_mismatch_row
+                .recovery
+                .first()
+                .map(|action| action.kind),
+            Some("rerun_reflection_request")
+        );
+
+        let invalid_lifecycle_row = report
+            .requests
+            .iter()
+            .find(|row| row.request_id == "reflect_req_corediag0005")
+            .ok_or_else(|| "expected invalid lifecycle diagnostic row".to_owned())?;
+        assert_eq!(invalid_lifecycle_row.posture, "invalidLifecycle");
+        assert_eq!(
+            invalid_lifecycle_row
+                .recovery
+                .first()
+                .map(|action| action.kind),
+            Some("repair_or_recreate_request")
+        );
+
+        let report_json = serde_json::to_string(&report).map_err(|error| error.to_string())?;
+        assert!(!report_json.contains("fixture-challenge-token"));
+        assert!(!report_json.contains("Keep reflection requests replay-safe."));
+        assert!(!report_json.contains("reflection diagnostics secret key material"));
+        assert!(!report_json.contains("reflection-diagnostics.key"));
+        assert!(!report_json.contains("mem_a"));
+        assert!(
+            !report_json
+                .contains(&"3333333333333333333333333333333333333333333333333333333333333333")
+        );
+        assert!(report_json.contains("challengeHash"));
+        let missing_key = reflection_hmac_key_diagnostic_from_config(
+            &ReflectionHmacKeyConfig::new(None, None),
+            workspace_path,
+        );
+        assert_eq!(missing_key.status, "missing_reflection_hmac_key_id");
+        assert_eq!(
+            missing_key.recovery.first().map(|action| action.kind),
+            Some("configure_reflection_hmac_key")
+        );
+        let data_json = report.data_json();
+        let human = report.human_summary();
+        let toon = report.toon_summary();
+        for rendered in [&data_json, &human, &toon] {
+            assert!(!rendered.contains("fixture-challenge-token"));
+            assert!(!rendered.contains("Keep reflection requests replay-safe."));
+            assert!(!rendered.contains("reflection diagnostics secret key material"));
+            assert!(!rendered.contains("reflection-diagnostics.key"));
+            assert!(!rendered.contains("mem_a"));
+            assert!(
+                !rendered
+                    .contains(&"3333333333333333333333333333333333333333333333333333333333333333")
+            );
+        }
+        assert!(human.contains("expired pending"));
+        assert!(human.contains("hmac key: ready"));
+        assert!(toon.contains("expired_pending=1"));
+        assert!(toon.contains("key_status=ready"));
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_detects_source_digest_mismatch_without_secret_hash_leakage() -> TestResult {
+        let material = reflection_request_ledger_material_fixture(
+            "wsp_reflection_core",
+            "reflect_req_digest_match",
+        );
+        let mut stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        let digest_a = "blake3:1111111111111111111111111111111111111111111111111111111111111111";
+        let digest_b = "blake3:2222222222222222222222222222222222222222222222222222222222222222";
+        stored.source_refs_json = serde_json::json!([
+            {"kind": "memory", "id": "mem_digest_a", "contentHash": digest_a},
+            {"kind": "evidence_span", "id": "ev_digest_b", "contentHash": digest_b}
+        ])
+        .to_string();
+        stored.source_content_hashes_json = serde_json::json!([digest_a, digest_b]).to_string();
+        assert!(!reflection_request_ledger_source_digest_mismatch(&stored));
+
+        stored.source_content_hashes_json = serde_json::json!([
+            digest_a,
+            "blake3:3333333333333333333333333333333333333333333333333333333333333333"
+        ])
+        .to_string();
+        assert!(reflection_request_ledger_source_digest_mismatch(&stored));
+        let posture = reflection_request_ledger_posture(
+            &stored,
+            &parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+                .map_err(|error| error.to_string())?,
+            Some("reflect-key-v1"),
+        );
+        assert_eq!(posture, "sourceDigestMismatch");
+
+        let recovery = reflection_request_ledger_recovery(posture, &stored, Path::new("."));
+        let recovery_json = serde_json::to_string(&recovery).map_err(|error| error.to_string())?;
+        assert!(recovery_json.contains("fresh request"));
+        assert!(
+            !recovery_json
+                .contains("3333333333333333333333333333333333333333333333333333333333333333")
+        );
+        assert!(!recovery_json.contains("mem_digest_a"));
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_detects_malformed_request_lifecycle() -> TestResult {
+        let material = reflection_request_ledger_material_fixture(
+            "wsp_reflection_core",
+            "reflect_req_bad_lifecycle",
+        );
+        let mut stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        let now = parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+            .map_err(|error| error.to_string())?;
+        assert!(!reflection_request_ledger_lifecycle_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "pending"
+        );
+
+        stored.created_at = "not-a-time".to_owned();
+        assert!(reflection_request_ledger_lifecycle_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidLifecycle"
+        );
+
+        stored.created_at = material.created_at.clone();
+        stored.expires_at = material.created_at.clone();
+        assert!(reflection_request_ledger_lifecycle_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidLifecycle"
+        );
+        let recovery = reflection_request_ledger_recovery(
+            "invalidLifecycle",
+            &stored,
+            Path::new("/tmp/reflection-workspace"),
+        );
+        assert_eq!(
+            recovery.first().map(|action| action.kind),
+            Some("repair_or_recreate_request")
+        );
+        let recovery_json = serde_json::to_string(&recovery).map_err(|error| error.to_string())?;
+        assert!(recovery_json.contains("reflect propose"));
+        assert!(!recovery_json.contains(&material.request_hash));
+        assert!(!recovery_json.contains(&material.challenge_hash));
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_detects_malformed_request_material() -> TestResult {
+        let material =
+            reflection_request_ledger_material_fixture("wsp_reflection_core", "reflect_req_badmat");
+        let mut stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        let now = parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+            .map_err(|error| error.to_string())?;
+        assert!(!reflection_request_ledger_material_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "pending"
+        );
+
+        let bad_request_id = "bad request id";
+        stored.request_id = bad_request_id.to_owned();
+        assert!(reflection_request_ledger_material_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidMaterial"
+        );
+        let bad_id_diagnostic = reflection_request_ledger_diagnostic_from_stored(
+            stored.clone(),
+            &now,
+            Path::new("/tmp/reflection-workspace"),
+            Some("reflect-key-v1"),
+        );
+        assert_eq!(
+            bad_id_diagnostic.request_id,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL
+        );
+        let bad_id_json =
+            serde_json::to_string(&bad_id_diagnostic).map_err(|error| error.to_string())?;
+        assert!(bad_id_json.contains("reflect propose"));
+        assert!(!bad_id_json.contains(bad_request_id));
+        stored.request_id = material.request_id.clone();
+
+        let uppercase_hash =
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        stored.request_hash = uppercase_hash.to_owned();
+        assert!(reflection_request_ledger_material_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidMaterial"
+        );
+        let diagnostic = reflection_request_ledger_diagnostic_from_stored(
+            stored.clone(),
+            &now,
+            Path::new("/tmp/reflection-workspace"),
+            Some("reflect-key-v1"),
+        );
+        assert_eq!(diagnostic.posture, "invalidMaterial");
+        assert_eq!(
+            diagnostic.request_hash,
+            super::REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL
+        );
+        assert_eq!(
+            diagnostic.recovery.first().map(|action| action.kind),
+            Some("repair_or_recreate_request")
+        );
+        let diagnostic_json =
+            serde_json::to_string(&diagnostic).map_err(|error| error.to_string())?;
+        assert!(!diagnostic_json.contains(uppercase_hash));
+
+        stored.request_hash = material.request_hash.clone();
+        stored.source_refs_json = serde_json::json!([
+            {"kind": "memory", "id": "mem_badmat", "contentHash": uppercase_hash}
+        ])
+        .to_string();
+        stored.source_content_hashes_json = serde_json::json!([uppercase_hash]).to_string();
+        assert!(reflection_request_ledger_material_invalid(&stored));
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidMaterial"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_core_detects_malformed_consumed_lifecycle() -> TestResult {
+        let material = reflection_request_ledger_material_fixture(
+            "wsp_reflection_core",
+            "reflect_req_consumed_bad_life",
+        );
+        let mut stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: material.reflection_kind.clone(),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: material.challenge_key_id.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "consumed".to_owned(),
+            consumed_candidate_id: Some("curate_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned()),
+            consumed_at: Some("2026-05-24T00:20:00Z".to_owned()),
+            consumed_result_hash: Some(
+                "blake3:3333333333333333333333333333333333333333333333333333333333333333"
+                    .to_owned(),
+            ),
+        };
+        let now = parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "consumed"
+        );
+
+        stored.consumed_candidate_id = None;
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidLifecycle"
+        );
+        stored.consumed_candidate_id = Some("curate_bad".to_owned());
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidLifecycle"
+        );
+        stored.consumed_candidate_id = Some("curate_aaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned());
+        let uppercase_hash =
+            "blake3:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        stored.consumed_result_hash = Some(uppercase_hash.to_owned());
+        assert_eq!(
+            reflection_request_ledger_posture(&stored, &now, Some("reflect-key-v1")),
+            "invalidLifecycle"
+        );
+        let recovery = reflection_request_ledger_recovery(
+            "invalidLifecycle",
+            &stored,
+            Path::new("/tmp/reflection-workspace"),
+        );
+        assert_eq!(
+            recovery.first().map(|action| action.kind),
+            Some("repair_or_recreate_request")
+        );
+        let recovery_json = serde_json::to_string(&recovery).map_err(|error| error.to_string())?;
+        assert!(
+            !recovery_json
+                .contains("3333333333333333333333333333333333333333333333333333333333333333")
+        );
+        assert!(!recovery_json.contains(uppercase_hash));
+        assert!(!recovery_json.contains("curate_aaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(!recovery_json.contains("curate_bad"));
         Ok(())
     }
 

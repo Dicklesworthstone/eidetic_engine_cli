@@ -2054,6 +2054,21 @@ impl ReflectionResultIngestError {
                 env_name: None,
                 value_hint: None,
             }],
+            Self::UnavailableLedgerStatus { status }
+                if matches!(status.as_str(), "invalid_material" | "invalid_lifecycle") =>
+            {
+                vec![
+                    reflection_command_recovery_action(
+                        1,
+                        "ee reflect request-ledger diagnostics --workspace . --json",
+                        "Inspect redacted reflection request ledger diagnostics before retrying ingest.",
+                    ),
+                    reflection_propose_recovery_action(
+                        2,
+                        "Re-run ee reflect propose to create fresh request material and a usable ledger row.",
+                    ),
+                ]
+            }
             Self::UnavailableLedgerStatus { .. } => vec![ReflectionValidationRecoveryAction {
                 priority: 1,
                 kind: "none",
@@ -2174,11 +2189,23 @@ fn reflection_propose_recovery_action(
     priority: u8,
     rationale: &'static str,
 ) -> ReflectionValidationRecoveryAction {
+    reflection_command_recovery_action(
+        priority,
+        "ee reflect propose --workspace . --json",
+        rationale,
+    )
+}
+
+fn reflection_command_recovery_action(
+    priority: u8,
+    command: &'static str,
+    rationale: &'static str,
+) -> ReflectionValidationRecoveryAction {
     ReflectionValidationRecoveryAction {
         priority,
         kind: "command",
         rationale,
-        command: Some("ee reflect propose --workspace . --json"),
+        command: Some(command),
         env_name: None,
         value_hint: None,
     }
@@ -11079,6 +11106,31 @@ Then update src/policy/mod.rs on main."
                 .contains("local ledger")
         );
 
+        let unavailable_material_error = reflection_result_ingest_decision(
+            &request,
+            &result,
+            &ledger_material,
+            ReflectionResultReplayGate::UnavailableStatus {
+                status: "invalid_material".to_owned(),
+            },
+            &key,
+            "2026-05-24T00:30:00Z",
+        )
+        .expect_err("malformed ledger material must fail closed");
+        assert_eq!(
+            unavailable_material_error.code(),
+            "reflection_request_ledger_unavailable"
+        );
+        let unavailable_material_recovery =
+            serde_json::to_string(&unavailable_material_error.recovery_actions())
+                .map_err(|error| error.to_string())?;
+        assert!(unavailable_material_recovery.contains("request-ledger diagnostics"));
+        assert!(unavailable_material_recovery.contains("reflect propose"));
+        assert!(!unavailable_material_recovery.contains(result_hash.as_str()));
+        assert!(
+            !unavailable_material_recovery.contains("super secret reflection result key material")
+        );
+
         let mismatch_error = reflection_result_ingest_decision(
             &request,
             &result,
@@ -11096,6 +11148,32 @@ Then update src/policy/mod.rs on main."
         assert!(mismatch_recovery.contains("byte-identical result replay"));
         assert!(!mismatch_recovery.contains(result_hash.as_str()));
         assert!(!mismatch_recovery.contains("super secret reflection result key material"));
+
+        let mut wrong_schema = result.clone();
+        wrong_schema.schema = "ee.reflect.result.v0".to_owned();
+        let schema_error = reflection_result_ingest_decision(
+            &request,
+            &wrong_schema,
+            &ledger_material,
+            ReflectionResultReplayGate::Pending,
+            &key,
+            "2026-05-24T00:30:00Z",
+        )
+        .expect_err("schema mismatch must fail before candidate creation");
+        assert!(matches!(
+            schema_error,
+            ReflectionResultIngestError::Result(
+                ReflectionResultValidationError::InvalidResultField {
+                    field: "schema",
+                    ..
+                }
+            )
+        ));
+        let schema_recovery = serde_json::to_string(&schema_error.recovery_actions())
+            .map_err(|error| error.to_string())?;
+        assert!(schema_recovery.contains(REFLECTION_RESULT_SCHEMA));
+        assert!(!schema_recovery.contains("ee.reflect.result.v0"));
+        assert!(!schema_recovery.contains("super secret reflection result key material"));
 
         let mut drifted_ledger = ledger_material;
         drifted_ledger.source_content_hashes_json =
@@ -11117,6 +11195,11 @@ Then update src/policy/mod.rs on main."
                 }
             )
         ));
+        let drift_recovery = serde_json::to_string(&drift_error.recovery_actions())
+            .map_err(|error| error.to_string())?;
+        assert!(drift_recovery.contains("source content hashes"));
+        assert!(!drift_recovery.contains(&"f".repeat(64)));
+        assert!(!drift_recovery.contains("super secret reflection result key material"));
         Ok(())
     }
 
@@ -11358,8 +11441,10 @@ Then update src/policy/mod.rs on main."
         let response_schema_hash = format!("blake3:{}", "c".repeat(64));
         let source_hash_a = format!("blake3:{}", "d".repeat(64));
         let source_hash_b = format!("blake3:{}", "e".repeat(64));
+        let source_hash_c = format!("blake3:{}", "f".repeat(64));
         let source_hashes = [source_hash_a.as_str(), source_hash_b.as_str()];
         let reversed_source_hashes = [source_hash_b.as_str(), source_hash_a.as_str()];
+        let changed_source_hashes = [source_hash_a.as_str(), source_hash_c.as_str()];
         let binding = ReflectionChallengeBinding {
             request_id: "reflect_req_0123456789abcdef",
             request_hash: request_hash.as_str(),
@@ -11415,6 +11500,98 @@ Then update src/policy/mod.rs on main."
         let changed_kind_challenge = build_reflection_request_challenge(changed_kind, secret)
             .map_err(|error| error.to_string())?;
         assert_ne!(challenge.hmac, changed_kind_challenge.hmac);
+
+        let changed_request_id = ReflectionChallengeBinding {
+            request_id: "reflect_req_fedcba9876543210",
+            ..binding
+        };
+        let changed_request_id_challenge =
+            build_reflection_request_challenge(changed_request_id, secret)
+                .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_request_id_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_request_id, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_request_hash_value = format!("blake3:{}", "1".repeat(64));
+        let changed_request_hash = ReflectionChallengeBinding {
+            request_hash: changed_request_hash_value.as_str(),
+            ..binding
+        };
+        let changed_request_hash_challenge =
+            build_reflection_request_challenge(changed_request_hash, secret)
+                .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_request_hash_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_request_hash, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_workspace = ReflectionChallengeBinding {
+            workspace_id: "workspace-challenge-other",
+            ..binding
+        };
+        let changed_workspace_challenge =
+            build_reflection_request_challenge(changed_workspace, secret)
+                .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_workspace_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_workspace, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_source_package_hash_value = format!("blake3:{}", "2".repeat(64));
+        let changed_source_package_hash = ReflectionChallengeBinding {
+            source_package_hash: changed_source_package_hash_value.as_str(),
+            ..binding
+        };
+        let changed_source_package_hash_challenge =
+            build_reflection_request_challenge(changed_source_package_hash, secret)
+                .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_source_package_hash_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_source_package_hash, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_sources = ReflectionChallengeBinding {
+            source_content_hashes: &changed_source_hashes,
+            ..binding
+        };
+        let changed_sources_challenge = build_reflection_request_challenge(changed_sources, secret)
+            .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_sources_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_sources, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_response_schema_hash_value = format!("blake3:{}", "3".repeat(64));
+        let changed_response_schema_hash = ReflectionChallengeBinding {
+            response_schema_hash: changed_response_schema_hash_value.as_str(),
+            ..binding
+        };
+        let changed_response_schema_hash_challenge =
+            build_reflection_request_challenge(changed_response_schema_hash, secret)
+                .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_response_schema_hash_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_response_schema_hash, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeHmacMismatch)
+        ));
+
+        let changed_key_id = ReflectionChallengeBinding {
+            key_id: "reflect_key_2",
+            ..binding
+        };
+        let changed_key_id_challenge = build_reflection_request_challenge(changed_key_id, secret)
+            .map_err(|error| error.to_string())?;
+        assert_ne!(challenge.hmac, changed_key_id_challenge.hmac);
+        assert!(matches!(
+            verify_reflection_request_challenge(changed_key_id, secret, &challenge),
+            Err(ReflectionChallengeError::ChallengeKeyMismatch { .. })
+        ));
         Ok(())
     }
 
