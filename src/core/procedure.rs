@@ -2002,15 +2002,16 @@ fn inspect_named_verification_source(
             Vec::new(),
         );
     }
+    let lookup_source_id = verification_lookup_source_id(source_kind, source_id);
 
     let file_result = match source_kind {
-        VerificationSourceKind::ReproPack => inspect_repro_pack_source(options, source_id),
+        VerificationSourceKind::ReproPack => inspect_repro_pack_source(options, lookup_source_id),
         VerificationSourceKind::EvalFixture
         | VerificationSourceKind::ClaimEvidence
         | VerificationSourceKind::RecorderRun => inspect_filesystem_verification_source(
             &options.workspace,
             source_kind.as_str(),
-            source_id,
+            lookup_source_id,
         ),
     };
     if let Some(result) = file_result {
@@ -2060,6 +2061,18 @@ fn inspect_named_verification_source(
                     Vec::new(),
                 )
             }),
+    }
+}
+
+fn verification_lookup_source_id<'a>(
+    source_kind: &VerificationSourceKind,
+    source_id: &'a str,
+) -> &'a str {
+    match source_kind {
+        VerificationSourceKind::EvalFixture | VerificationSourceKind::ReproPack => {
+            source_id.strip_prefix("evidence://").unwrap_or(source_id)
+        }
+        VerificationSourceKind::ClaimEvidence | VerificationSourceKind::RecorderRun => source_id,
     }
 }
 
@@ -2463,11 +2476,13 @@ fn eval_fixture_source_result(value: &Value, source_id: &str) -> VerificationSou
             step_results.push(StepVerificationResult {
                 step_id: format!("eval_fixture_{fixture_id}_{sequence:03}"),
                 sequence,
-                result: "passed".to_owned(),
+                result: "skipped".to_owned(),
                 expected: Some(format!(
-                    "declared expected exit {expected_exit_code} and stdout schema {stdout_schema}"
+                    "executed command evidence for expected exit {expected_exit_code} and stdout schema {stdout_schema}"
                 )),
-                actual: Some("eval fixture command declaration parsed".to_owned()),
+                actual: Some(
+                    "eval fixture command declaration parsed without runner evidence".to_owned(),
+                ),
             });
         }
     } else {
@@ -2481,12 +2496,19 @@ fn eval_fixture_source_result(value: &Value, source_id: &str) -> VerificationSou
     if !implemented {
         failed = true;
     }
-    let result = if failed { "failed" } else { "passed" };
+    let result = if failed { "failed" } else { "skipped" };
+    let message = if failed {
+        format!("inspected eval fixture {fixture_id}")
+    } else {
+        format!(
+            "eval fixture {fixture_id} declares commands but does not include executed runner evidence"
+        )
+    };
     verification_source_result(
         source_id,
         "eval_fixture",
         result,
-        Some(format!("inspected eval fixture {fixture_id}")),
+        Some(message),
         step_results,
     )
 }
@@ -4319,6 +4341,55 @@ mod tests {
     }
 
     #[test]
+    fn promote_dry_run_blocks_declaration_only_eval_fixture_evidence() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("fixture_decl_only.json"),
+            r#"{"schema":"ee.eval_fixture.v1","fixture_id":"fixture_decl_only","coverage_state":"implemented","command_sequence":[{"step":1,"expected_exit_code":0,"stdout_schema":"ee.response.v2"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.clone(),
+            title: "Run release verification".to_owned(),
+            summary: Some(
+                "1. Run the declared eval fixture\n2. Inspect runner evidence".to_owned(),
+            ),
+            evidence_ids: vec!["fixture_decl_only".to_owned()],
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let promotion = promote_procedure(&ProcedurePromoteOptions {
+            workspace,
+            procedure_id: proposal.procedure_id,
+            to_maturity: Some("validated".to_owned()),
+            dry_run: true,
+            actor: Some("cod_2".to_owned()),
+            reason: Some("declaration-only evidence should not promote".to_owned()),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(promotion.status, "blocked");
+        assert_eq!(promotion.verification.overall_result, "skipped");
+        assert_eq!(promotion.verification.pass_count, 0);
+        assert_eq!(promotion.verification.skip_count, 1);
+        assert!(
+            promotion
+                .planned_effects
+                .iter()
+                .all(|effect| !effect.would_write),
+            "declaration-only eval fixture evidence must not enable promotion writes"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn verify_without_explicit_results_does_not_pass() -> TestResult {
         let options = ProcedureVerifyOptions {
             procedure_id: "proc_test".to_owned(),
@@ -4385,12 +4456,110 @@ mod tests {
         };
 
         let report = verify_procedure(&options).map_err(|error| error.message())?;
-        assert_eq!(report.overall_result, "passed");
-        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.overall_result, "skipped");
+        assert_eq!(report.status, "pending");
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.skip_count, 1);
         assert_eq!(report.fail_count, 0);
         assert_eq!(report.sources_checked[0].source_id, "fx.release_failure.v1");
-        assert_eq!(report.sources_checked[0].result, "passed");
+        assert_eq!(report.sources_checked[0].result, "skipped");
         assert!(!report.sources_checked[0].step_results.is_empty());
+        assert!(
+            report.sources_checked[0]
+                .step_results
+                .iter()
+                .all(|step| step.result == "skipped"),
+            "declaration-only eval fixture steps must not pass"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_eval_fixture_declarations_without_runner_evidence_are_pending() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("fixture_decl_only.json"),
+            r#"{"schema":"ee.eval_fixture.v1","fixture_id":"fixture_decl_only","coverage_state":"implemented","command_sequence":[{"step":1,"expected_exit_code":0,"stdout_schema":"ee.response.v2"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_decl_only".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "pending");
+        assert_eq!(report.overall_result, "skipped");
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.skip_count, 1);
+        assert_eq!(report.sources_checked[0].result, "skipped");
+        assert_eq!(report.sources_checked[0].step_results[0].result, "skipped");
+        assert!(
+            report.sources_checked[0].message.as_deref().is_some_and(
+                |message| message.contains("does not include executed runner evidence")
+            ),
+            "expected declaration-only repair message, got {:?}",
+            report.sources_checked[0].message
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_eval_fixture_runner_reports_are_explicit_execution_evidence() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let fixture_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("eval_fixture");
+        fs::create_dir_all(&fixture_dir).map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("fixture_runner_pass.json"),
+            r#"{"schema":"ee.eval.report.v1","fixture_id":"fixture_runner_pass","status":"passed","step_results":[{"step_id":"run_001","sequence":1,"result":"passed","expected":"runner completed fixture command","actual":"exit_code=0 artifact_hash=blake3:fixturepass"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        fs::write(
+            fixture_dir.join("fixture_runner_fail.json"),
+            r#"{"schema":"ee.eval.report.v1","fixture_id":"fixture_runner_fail","status":"failed","step_results":[{"step_id":"run_001","sequence":1,"result":"failed","expected":"runner completed fixture command","actual":"exit_code=1 artifact_hash=blake3:fixturefail"}]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let passed = verify_procedure(&ProcedureVerifyOptions {
+            workspace: workspace.clone(),
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_runner_pass".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(passed.status, "passed");
+        assert_eq!(passed.overall_result, "passed");
+        assert_eq!(passed.pass_count, 1);
+        assert_eq!(passed.sources_checked[0].step_results[0].result, "passed");
+
+        let failed = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("eval_fixture".to_owned()),
+            source_ids: vec!["fixture_runner_fail".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.overall_result, "failed");
+        assert_eq!(failed.fail_count, 1);
+        assert_eq!(failed.sources_checked[0].step_results[0].result, "failed");
         Ok(())
     }
 
