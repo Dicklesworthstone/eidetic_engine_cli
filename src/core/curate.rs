@@ -10659,6 +10659,7 @@ fn persist_create_derived_candidate_application_inner(
         });
     }
 
+    maybe_inject_create_derived_apply_failure(stored, "after_source_revalidation")?;
     maybe_inject_create_derived_apply_failure(stored, "before_insert_memory")?;
     connection
         .insert_memory(&derived_create.memory_id, &derived_create.memory)
@@ -17026,6 +17027,7 @@ mod tests {
         // status stays "approved" and the audit ledger has no MEMORY_CREATE row,
         // which is the production invariant this phase exists to prove.
         for (index, phase) in [
+            "after_source_revalidation",
             "after_memory_insert",
             "after_derived_links",
             "after_evidence_attachment",
@@ -17536,7 +17538,8 @@ mod tests {
             _ => None,
         };
         let Some((expected_prefix, expected_repair)) = expected else {
-            // Non-call phases (synthetic-storage-only, e.g. `after_memory_insert`,
+            // Non-call phases (synthetic-storage-only, e.g.
+            // `after_source_revalidation`, `after_memory_insert`, and
             // `before_candidate_applied`) do not flow through a `.map_err`
             // closure, so canonical-mapping enforcement does not apply.
             return Ok(());
