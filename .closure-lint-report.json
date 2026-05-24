@@ -1,10 +1,46 @@
 {
   "violations": [
     {
+      "bead": "bd-1prrl.2",
+      "label": "implements-surface",
+      "surface": "agent_context_profile",
+      "reason": "missing tests/golden/agent_context_profile.snap"
+    },
+    {
+      "bead": "bd-1prrl.2",
+      "label": "implements-surface",
+      "surface": "agent_context_profile",
+      "reason": "referenced test path missing: tests/agent_profile_unit.rs"
+    },
+    {
+      "bead": "bd-2dc25",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
+      "bead": "bd-2g2ze",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
       "bead": "bd-2mey5",
       "label": "implements-surface",
       "surface": "plan_cache",
       "reason": "missing tests/golden/plan_cache.snap"
+    },
+    {
+      "bead": "bd-2qvyw",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
+      "bead": "bd-2t583",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
     },
     {
       "bead": "bd-2xdom.2",
@@ -17,6 +53,12 @@
       "label": "implements-surface",
       "surface": "memory-show",
       "reason": "missing tests/golden/memory-show.snap"
+    },
+    {
+      "bead": "bd-362p8",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
     },
     {
       "bead": "bd-36bbk.1.12",
@@ -166,12 +208,6 @@
       "bead": "bd-36bbk.1.3",
       "label": "implements-surface",
       "surface": "tailscale_auto_enrollment_flow",
-      "reason": "referenced test path missing: tests/fixtures/failure_modes/auto_enrollment_*.json"
-    },
-    {
-      "bead": "bd-36bbk.1.3",
-      "label": "implements-surface",
-      "surface": "tailscale_auto_enrollment_flow",
       "reason": "referenced test path missing: tests/mesh_auto_enrollment_audit.rs"
     },
     {
@@ -205,6 +241,12 @@
       "reason": "referenced test path missing: tests/mesh_auto_enroll_rollback_audit.rs"
     },
     {
+      "bead": "bd-3rs00",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
       "bead": "bd-3usjw.14",
       "label": "implements-surface",
       "surface": "plan_doc_sweep",
@@ -232,13 +274,25 @@
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
+      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
     },
     {
       "bead": "bd-3usjw.28",
       "label": "implements-surface",
       "surface": "mcp_parity_test_suite",
-      "reason": "tests/mcp_parity_coverage.rs lacks assertion-style coverage"
+      "reason": "referenced test path missing: tests/mcp_parity/*.rs"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "defer-to-v2",
+      "surface": "serve_localhost",
+      "reason": "missing sibling adr:serve_localhost_v2_design ADR and open v2:serve_localhost bead"
+    },
+    {
+      "bead": "bd-3usjw.4",
+      "label": "implements-surface",
+      "surface": "serve_localhost",
+      "reason": "tests/e2e_serve_localhost.rs does not call init_test_tracing"
     },
     {
       "bead": "bd-3usjw.43",
@@ -349,6 +403,12 @@
       "reason": "missing tests/golden/mcp_serve_stdio_subcommand.snap"
     },
     {
+      "bead": "bd-8k9gh",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
       "bead": "bd-fdvt",
       "label": "implements-surface",
       "surface": "context-pack-dna",
@@ -359,8 +419,14 @@
       "label": "implements-surface",
       "surface": "context-ppr",
       "reason": "missing tests/golden/context-ppr.snap"
+    },
+    {
+      "bead": "bd-uxcej",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
     }
   ],
-  "count": 60,
+  "count": 71,
   "status": "fail"
 }
