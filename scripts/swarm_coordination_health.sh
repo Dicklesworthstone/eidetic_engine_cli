@@ -69,9 +69,7 @@ if command -v "$AM_BIN" >/dev/null 2>&1; then
         --json
 else
     agents_status=127
-    agents_output="$AM_BIN not found"
     single_status=127
-    single_output="$AM_BIN not found"
     multi_status=127
     multi_output="$AM_BIN not found"
 fi
@@ -92,6 +90,7 @@ timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 export SCHEMA timestamp HEALTH_URL AM_BIN PROJECT FROM_AGENT SINGLE_TO MULTI_TO
 export mcp_ok agents_ok single_ok multi_ok observed_panic fallback_active
 export mcp_status agents_status single_status multi_status
+export mcp_output
 
 python3 - <<'PY'
 import json
@@ -106,7 +105,104 @@ def env_int(name: str) -> int:
     except ValueError:
         return 0
 
+def bounded_health_level(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower()
+    if normalized in {"green", "yellow", "red"}:
+        return normalized
+    return None
+
+def bounded_semantic_readiness_status(value):
+    if not isinstance(value, str):
+        return None
+    normalized = value.lower()
+    if normalized in {"pass", "fail"}:
+        return normalized
+    return None
+
+def semantic_readiness_reason_class(value):
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.lower()
+    if (
+        normalized == "malformed_sqlite"
+        or ("sqlite" in normalized and "malformed" in normalized)
+        or "database disk image is malformed" in normalized
+    ):
+        return "malformed_sqlite"
+    if (
+        normalized == "archive_corruption"
+        or (
+            "archive" in normalized
+            and (
+                "corrupt" in normalized
+                or "parse" in normalized
+                or "jsonl" in normalized
+            )
+        )
+    ):
+        return "archive_corruption"
+    if (
+        normalized == "index_rebuild_required"
+        or ("index" in normalized and ("missing" in normalized or "stale" in normalized))
+    ):
+        return "index_rebuild_required"
+    if normalized == "permission_denied" or "permission denied" in normalized:
+        return "permission_denied"
+    return "unknown"
+
+def mcp_health_summary():
+    if env_int("mcp_status") != 0:
+        return {}
+    try:
+        value = json.loads(os.environ.get("mcp_output", ""))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(value, dict):
+        return {}
+
+    summary = {}
+    health_level = bounded_health_level(
+        value.get("health_level") or value.get("healthLevel")
+    )
+    if health_level:
+        summary["health_level"] = health_level
+
+    semantic = value.get("semantic_readiness") or value.get("semanticReadiness")
+    if isinstance(semantic, str):
+        semantic_status = semantic
+        semantic_reason = (
+            value.get("semantic_readiness_reason")
+            or value.get("semanticReadinessReason")
+        )
+    elif isinstance(semantic, dict):
+        semantic_status = semantic.get("status")
+        semantic_reason = (
+            semantic.get("reason")
+            or semantic.get("detail")
+            or semantic.get("message")
+            or value.get("semantic_readiness_reason")
+            or value.get("semanticReadinessReason")
+        )
+    else:
+        semantic_status = None
+        semantic_reason = None
+
+    semantic_status = bounded_semantic_readiness_status(semantic_status)
+    if semantic_status:
+        readiness = {"status": semantic_status}
+        if semantic_status == "fail":
+            readiness["reason"] = semantic_readiness_reason_class(semantic_reason)
+        summary["semantic_readiness"] = readiness
+
+    return summary
+
 panic = os.environ.get("observed_panic", "")
+health_summary = mcp_health_summary()
+semantic_readiness_failed = (
+    health_summary.get("semantic_readiness", {}).get("status") == "fail"
+)
 event = {
     "schema": os.environ["SCHEMA"],
     "timestamp": os.environ["timestamp"],
@@ -115,7 +211,7 @@ event = {
     "am_send_single_recipient_ok": env_bool("single_ok"),
     "am_send_multi_recipient_ok": env_bool("multi_ok"),
     "observed_panic": panic or None,
-    "fallback_active": env_bool("fallback_active"),
+    "fallback_active": env_bool("fallback_active") or semantic_readiness_failed,
     "checks": {
         "mcp_http": {
             "url": os.environ["HEALTH_URL"],
@@ -138,5 +234,6 @@ event = {
         },
     },
 }
+event.update(health_summary)
 print(json.dumps(event, sort_keys=True))
 PY

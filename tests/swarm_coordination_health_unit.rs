@@ -123,3 +123,85 @@ exit 2
         "fallback should be active",
     )
 }
+
+#[test]
+fn health_script_preserves_redacted_semantic_readiness_failure() -> TestResult {
+    let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let fake_bin = tempdir.path().join("bin");
+    fs::create_dir_all(&fake_bin).map_err(|error| error.to_string())?;
+    write_executable(
+        &fake_bin.join("curl"),
+        r#"#!/usr/bin/env bash
+printf '%s\n' '{"health_level":"green","semantic_readiness":{"status":"fail","detail":"open sqlite file /Users/jemanuel/.local/share/mcp_agent_mail_rust/storage.sqlite3: database disk image is malformed: failed to parse B-tree page 283"}}'
+"#,
+    )?;
+    write_executable(
+        &fake_bin.join("am"),
+        r#"#!/usr/bin/env bash
+if [ "$1" = "agents" ] && [ "$2" = "list" ]; then
+  printf '{"agents":[]}\n'
+  exit 0
+fi
+if [ "$1" = "mail" ] && [ "$2" = "send" ]; then
+  printf '{"sent":true}\n'
+  exit 0
+fi
+exit 2
+"#,
+    )?;
+
+    let path = format!(
+        "{}:{}",
+        fake_bin.display(),
+        env::var("PATH").unwrap_or_default()
+    );
+    let output = Command::new(script_path())
+        .env("PATH", path)
+        .env("AGENT_MAIL_PROJECT", tempdir.path())
+        .env("AGENT_MAIL_FROM", "AgentA")
+        .env("AGENT_MAIL_SINGLE_TO", "AgentA")
+        .env("AGENT_MAIL_MULTI_TO", "AgentA,AgentB")
+        .output()
+        .map_err(|error| format!("run health script: {error}"))?;
+
+    ensure(
+        output.status.success(),
+        format!(
+            "health script should exit 0, stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("stdout JSON parse failed: {error}; stdout: {stdout}"))?;
+
+    ensure(
+        value["mcp_http_reachable"] == true,
+        "fake curl should report MCP HTTP reachable",
+    )?;
+    ensure(
+        value["health_level"] == "green",
+        "bounded health level should be preserved",
+    )?;
+    ensure(
+        value["semantic_readiness"]["status"] == "fail",
+        "semantic readiness status should be preserved",
+    )?;
+    ensure(
+        value["semantic_readiness"]["reason"] == "malformed_sqlite",
+        "raw malformed SQLite detail should be classified",
+    )?;
+    ensure(
+        value["fallback_active"] == true,
+        "semantic readiness failure should activate fallback posture",
+    )?;
+
+    for forbidden in ["/Users/jemanuel", "storage.sqlite3", "B-tree", "page 283"] {
+        ensure(
+            !stdout.contains(forbidden),
+            format!("health snapshot leaked raw semantic-readiness detail: {forbidden}"),
+        )?;
+    }
+
+    Ok(())
+}
