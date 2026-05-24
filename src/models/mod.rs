@@ -361,16 +361,32 @@ pub const FAILURE_MODE_FIXTURE_SCHEMA_V1: &str = "ee.failure_mode_fixture.v1";
 pub const DERIVED_SOURCES_INVALID_CODE: &str = "derived_sources_invalid";
 /// External derivation source content changed after proposal.
 pub const DERIVED_SOURCE_HASH_DRIFTED_CODE: &str = "derived_source_hash_drifted";
+/// External derivation source content mismatched at apply-time revalidation.
+pub const DERIVED_SOURCE_HASH_MISMATCH_CODE: &str = "derived_source_hash_mismatch";
 /// External derivation source belongs to a different workspace.
 pub const DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE: &str = "derived_source_workspace_mismatch";
+/// External derivation source memory was tombstoned before apply.
+pub const DERIVED_SOURCE_MEMORY_TOMBSTONED_CODE: &str = "derived_source_memory_tombstoned";
+/// External derivation source memory disappeared before apply.
+pub const DERIVED_SOURCE_MEMORY_MISSING_CODE: &str = "derived_source_memory_missing";
 /// External derivation evidence span is already attached to another memory.
 pub const DERIVED_EVIDENCE_ALREADY_LINKED_CODE: &str = "derived_evidence_already_linked";
+/// External derivation evidence span is already attached to another memory.
+pub const DERIVED_SOURCE_EVIDENCE_ALREADY_LINKED_CODE: &str =
+    "derived_source_evidence_already_linked";
+/// External derivation evidence span disappeared before apply.
+pub const DERIVED_SOURCE_EVIDENCE_MISSING_CODE: &str = "derived_source_evidence_missing";
 /// Mutating derived apply needs an explicit target when the candidate type mutates one.
 pub const DERIVED_TARGET_REQUIRED_FOR_MUTATION_CODE: &str = "derived_target_required_for_mutation";
 /// Create-derived candidates must not target an existing memory.
 pub const DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE: &str = "derived_target_forbidden_for_create";
 /// External derivation memory spec is missing or malformed.
 pub const DERIVED_INVALID_MEMORY_SPEC_CODE: &str = "derived_invalid_memory_spec";
+/// Applied create-derived candidate is missing the audit row needed for replay.
+pub const CREATE_DERIVED_REPLAY_MISSING_AUDIT_CODE: &str = "create_derived_replay_missing_audit";
+/// Applied create-derived candidate has multiple matching audit rows for replay.
+pub const CREATE_DERIVED_REPLAY_AMBIGUOUS_AUDIT_CODE: &str =
+    "create_derived_replay_ambiguous_audit";
 /// Reflection request expired before result ingestion.
 pub const REFLECT_REQUEST_EXPIRED_CODE: &str = "reflect_request_expired";
 /// Reflection challenge binding is invalid or cannot verify.
@@ -1276,7 +1292,7 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
                 "Inspect the stored candidate package before applying it.",
             ),
         ],
-        DERIVED_SOURCE_HASH_DRIFTED_CODE | "derived_source_hash_mismatch" => vec![
+        DERIVED_SOURCE_HASH_DRIFTED_CODE | DERIVED_SOURCE_HASH_MISMATCH_CODE => vec![
             recovery_command(
                 1,
                 "ee curate propose-derived --workspace . --json",
@@ -1286,6 +1302,30 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
                 2,
                 "ee why <source-id> --workspace . --json",
                 "Inspect the changed source before accepting a new derived memory.",
+            ),
+        ],
+        DERIVED_SOURCE_MEMORY_TOMBSTONED_CODE => vec![
+            recovery_command(
+                1,
+                "ee curate propose-derived --workspace . --json",
+                "Re-propose from active source memories; tombstoned sources cannot be reused for apply.",
+            ),
+            recovery_command(
+                2,
+                "ee why <source-id> --workspace . --json",
+                "Inspect the tombstoned source and its audit trail before choosing replacement evidence.",
+            ),
+        ],
+        DERIVED_SOURCE_MEMORY_MISSING_CODE | DERIVED_SOURCE_EVIDENCE_MISSING_CODE => vec![
+            recovery_command(
+                1,
+                "ee curate show <candidate-id> --workspace . --json",
+                "Inspect the candidate's source refs and identify which source disappeared.",
+            ),
+            recovery_command(
+                2,
+                "ee curate propose-derived --workspace . --json",
+                "Re-propose against sources that still exist in the selected workspace.",
             ),
         ],
         DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE => vec![
@@ -1301,7 +1341,7 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
                 "List source IDs in the active workspace before re-proposing.",
             ),
         ],
-        DERIVED_EVIDENCE_ALREADY_LINKED_CODE | "derived_source_evidence_already_linked" => vec![
+        DERIVED_EVIDENCE_ALREADY_LINKED_CODE | DERIVED_SOURCE_EVIDENCE_ALREADY_LINKED_CODE => vec![
             recovery_command(
                 1,
                 "ee curate propose-derived --workspace . --json",
@@ -1311,6 +1351,31 @@ fn derivation_reflection_recovery_actions_for_code(code: &str) -> Vec<RecoveryAc
                 2,
                 "ee curate candidates --workspace . --json",
                 "Inspect existing candidates that may have already consumed the evidence.",
+            ),
+        ],
+        CREATE_DERIVED_REPLAY_MISSING_AUDIT_CODE
+        | CREATE_DERIVED_REPLAY_AMBIGUOUS_AUDIT_CODE
+        | "create_derived_replay_audit_unavailable"
+        | "create_derived_replay_audit_missing_memory_id"
+        | "create_derived_replay_audit_invalid_memory_id"
+        | "create_derived_replay_audit_target_mismatch"
+        | "create_derived_replay_memory_unavailable"
+        | "create_derived_replay_memory_missing"
+        | "create_derived_replay_memory_workspace_mismatch" => vec![
+            recovery_command(
+                1,
+                "ee curate show <candidate-id> --workspace . --json",
+                "Inspect the applied candidate before deciding whether replay is safe.",
+            ),
+            recovery_command(
+                2,
+                "ee audit timeline --surface curation --json",
+                "Inspect curation audit rows for missing, duplicate, or mismatched apply records.",
+            ),
+            recovery_command(
+                3,
+                "ee doctor --workspace . --json",
+                "Run read-only diagnostics for inconsistent derived-apply state; do not edit the database directly.",
             ),
         ],
         DERIVED_TARGET_REQUIRED_FOR_MUTATION_CODE | "target_mutation_target_required" => vec![
@@ -1498,6 +1563,37 @@ fn derivation_reflection_recovery_actions_for_message(
         || lower_message.contains("reflection result field `sourcepackagehash` mismatch")
     {
         Some(REFLECT_SOURCE_DRIFTED_CODE)
+    } else if lower_message.contains(CREATE_DERIVED_REPLAY_MISSING_AUDIT_CODE) {
+        Some(CREATE_DERIVED_REPLAY_MISSING_AUDIT_CODE)
+    } else if lower_message.contains(CREATE_DERIVED_REPLAY_AMBIGUOUS_AUDIT_CODE)
+        || lower_message.contains("create_derived_replay_audit_")
+        || lower_message.contains("create_derived_replay_memory_")
+    {
+        Some(CREATE_DERIVED_REPLAY_AMBIGUOUS_AUDIT_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_MEMORY_TOMBSTONED_CODE)
+        || lower_message.contains("was tombstoned before apply")
+    {
+        Some(DERIVED_SOURCE_MEMORY_TOMBSTONED_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_EVIDENCE_ALREADY_LINKED_CODE)
+        || lower_message.contains(DERIVED_EVIDENCE_ALREADY_LINKED_CODE)
+        || lower_message.contains("already linked to a memory")
+        || lower_message.contains("attached to another memory")
+    {
+        Some(DERIVED_SOURCE_EVIDENCE_ALREADY_LINKED_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_MEMORY_MISSING_CODE) {
+        Some(DERIVED_SOURCE_MEMORY_MISSING_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_EVIDENCE_MISSING_CODE) {
+        Some(DERIVED_SOURCE_EVIDENCE_MISSING_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_HASH_MISMATCH_CODE)
+        || lower_message.contains("hash drifted")
+        || lower_message.contains("hash-drifted")
+    {
+        Some(DERIVED_SOURCE_HASH_DRIFTED_CODE)
+    } else if lower_message.contains(DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE)
+        || lower_message.contains("different workspace")
+        || lower_message.contains("belongs to workspace")
+    {
+        Some(DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE)
     } else if lower_message.contains("derivation source refs")
         || lower_message.contains("derivation source json")
         || lower_message.contains("source refs array")
@@ -1505,16 +1601,6 @@ fn derivation_reflection_recovery_actions_for_message(
         || lower_message.contains("source package")
     {
         Some(DERIVED_SOURCES_INVALID_CODE)
-    } else if lower_message.contains("hash drifted") || lower_message.contains("hash-drifted") {
-        Some(DERIVED_SOURCE_HASH_DRIFTED_CODE)
-    } else if lower_message.contains("different workspace")
-        || lower_message.contains("belongs to workspace")
-    {
-        Some(DERIVED_SOURCE_WORKSPACE_MISMATCH_CODE)
-    } else if lower_message.contains("already linked to a memory")
-        || lower_message.contains("attached to another memory")
-    {
-        Some(DERIVED_EVIDENCE_ALREADY_LINKED_CODE)
     } else if lower_message.contains("no target memory id")
         || lower_message.contains("target-mutating operation")
     {
@@ -2554,8 +2640,32 @@ mod tests {
                 "ee curate propose-derived --workspace . --json",
             ),
             (
+                super::DERIVED_SOURCE_MEMORY_TOMBSTONED_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::DERIVED_SOURCE_MEMORY_MISSING_CODE,
+                "ee curate show <candidate-id> --workspace . --json",
+            ),
+            (
+                super::DERIVED_SOURCE_EVIDENCE_MISSING_CODE,
+                "ee curate show <candidate-id> --workspace . --json",
+            ),
+            (
                 super::DERIVED_EVIDENCE_ALREADY_LINKED_CODE,
                 "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::DERIVED_SOURCE_EVIDENCE_ALREADY_LINKED_CODE,
+                "ee curate propose-derived --workspace . --json",
+            ),
+            (
+                super::CREATE_DERIVED_REPLAY_MISSING_AUDIT_CODE,
+                "ee curate show <candidate-id> --workspace . --json",
+            ),
+            (
+                super::CREATE_DERIVED_REPLAY_AMBIGUOUS_AUDIT_CODE,
+                "ee curate show <candidate-id> --workspace . --json",
             ),
             (
                 super::DERIVED_TARGET_FORBIDDEN_FOR_CREATE_CODE,

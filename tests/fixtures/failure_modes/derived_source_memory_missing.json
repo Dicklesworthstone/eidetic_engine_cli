@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_memory_missing",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived candidate cites a source memory that is missing when apply-time source revalidation runs.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate propose-derived --workspace . --json",
+      "# remove the cited source memory from the selected workspace before apply"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_memory_missing",
+    "severity": "medium",
+    "message_contains": [
+      "memory",
+      "missing"
+    ],
+    "repair_contains": "ee curate show"
+  }
+}

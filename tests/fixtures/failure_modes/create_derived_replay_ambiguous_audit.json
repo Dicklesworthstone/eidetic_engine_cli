@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "create_derived_replay_ambiguous_audit",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate apply"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A retry finds an already-applied create-derived candidate with multiple matching apply audit rows, so replay cannot prove which memory is authoritative.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate apply <candidate-id> --workspace . --json",
+      "# inject or race duplicate curation apply audit rows for the same candidate"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "create_derived_replay_ambiguous_audit",
+    "severity": "high",
+    "message_contains": [
+      "ambiguous",
+      "audit"
+    ],
+    "repair_contains": "ee doctor --workspace . --json"
+  }
+}

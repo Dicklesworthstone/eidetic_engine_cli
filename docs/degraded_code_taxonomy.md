@@ -235,12 +235,19 @@ memory bodies in `sources[]`.
 
 ### `response_time` codes — stay in `degraded[]`
 
-#### External derivation and reflection (15)
+#### External derivation and reflection (22)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
+| `create_derived_replay_ambiguous_audit` | high | bd-3vw03 |
+| `create_derived_replay_missing_audit` | high | bd-3vw03 |
 | `derived_evidence_already_linked` | medium | bd-1vnvl |
 | `derived_invalid_memory_spec` | medium | bd-1vnvl |
 | `derived_source_hash_drifted` | medium | bd-1vnvl |
+| `derived_source_hash_mismatch` | medium | bd-3vw03 |
+| `derived_source_evidence_already_linked` | medium | bd-3vw03 |
+| `derived_source_evidence_missing` | medium | bd-3vw03 |
+| `derived_source_memory_missing` | medium | bd-3vw03 |
+| `derived_source_memory_tombstoned` | medium | bd-3vw03 |
 | `derived_source_workspace_mismatch` | medium | bd-1vnvl |
 | `derived_sources_invalid` | medium | bd-1vnvl |
 | `derived_target_forbidden_for_create` | medium | bd-1vnvl |
@@ -253,6 +260,11 @@ memory bodies in `sources[]`.
 | `reflect_result_schema_invalid` | medium | bd-1vnvl |
 | `reflect_source_drifted` | medium | bd-1vnvl |
 | `reflect_unknown_cited_source` | medium | bd-1vnvl |
+
+Same-candidate create-derived replay is intentionally not a degraded/error code:
+when the applied candidate, audit row, and derived memory agree, `curate apply`
+returns the existing applied result. Missing, duplicate, or mismatched replay
+evidence is classified under the `create_derived_replay_*` conflict codes above.
 
 #### Search and pack quality (52)
 | Code | Severity (canonical) | Bead |

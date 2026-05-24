@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "create_derived_replay_missing_audit",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate apply"
+  ],
+  "severity": "high",
+  "repair_present": true,
+  "trigger": {
+    "description": "A retry finds an already-applied create-derived candidate but no curation apply audit row, so replay cannot prove the applied memory.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate apply <candidate-id> --workspace . --json",
+      "# simulate candidate.applied_at without the corresponding apply audit row"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "create_derived_replay_missing_audit",
+    "severity": "high",
+    "message_contains": [
+      "missing",
+      "audit"
+    ],
+    "repair_contains": "ee doctor --workspace . --json"
+  }
+}

@@ -18900,6 +18900,73 @@ mod tests {
     }
 
     #[test]
+    fn error_schema_derived_apply_conflict_storage_failure_has_recovery() -> TestResult {
+        let error = DomainError::Storage {
+            message:
+                "Create-derived curation candidate cand_1 source refs failed apply-time revalidation: \
+                 derived_source_memory_tombstoned: Memory source mem_1 was tombstoned before apply."
+                    .to_owned(),
+            repair: Some(
+                "Re-run `ee curate validate <candidate-id>` and refresh drifted sources."
+                    .to_owned(),
+            ),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+        let recovery = parsed["error"]["details"]["recovery"]
+            .as_array()
+            .ok_or_else(|| "derived apply conflict should include details.recovery[]".to_owned())?;
+
+        ensure_equal(
+            &recovery[0]["command"].as_str(),
+            &Some("ee curate propose-derived --workspace . --json"),
+            "derived apply conflict recovery command",
+        )?;
+        ensure_equal(
+            &recovery[1]["command"].as_str(),
+            &Some("ee why <source-id> --workspace . --json"),
+            "derived apply source inspection command",
+        )?;
+        ensure_contains(
+            recovery[0]["rationale"].as_str().unwrap_or_default(),
+            "active source memories",
+            "derived apply conflict recovery rationale",
+        )
+    }
+
+    #[test]
+    fn error_schema_create_derived_replay_inconsistency_has_recovery() -> TestResult {
+        let error = DomainError::Storage {
+            message:
+                "create_derived_replay_missing_audit: applied candidate cand_1 is missing its \
+                 curation apply audit row."
+                    .to_owned(),
+            repair: Some("Run `ee doctor --workspace . --json` before retrying replay.".to_owned()),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&error_response_json(&error))
+            .map_err(|error| error.to_string())?;
+        let recovery = parsed["error"]["details"]["recovery"]
+            .as_array()
+            .ok_or_else(|| "replay inconsistency should include details.recovery[]".to_owned())?;
+
+        ensure_equal(
+            &recovery[0]["command"].as_str(),
+            &Some("ee curate show <candidate-id> --workspace . --json"),
+            "first replay recovery command",
+        )?;
+        ensure_equal(
+            &recovery[1]["command"].as_str(),
+            &Some("ee audit timeline --surface curation --json"),
+            "second replay recovery command",
+        )?;
+        ensure_equal(
+            &recovery[2]["command"].as_str(),
+            &Some("ee doctor --workspace . --json"),
+            "third replay recovery command",
+        )
+    }
+
+    #[test]
     fn error_schema_reflection_failure_has_structured_recovery() -> TestResult {
         let error = DomainError::Configuration {
             message: "reflect_hmac_key_missing: reflection HMAC key unavailable".to_owned(),

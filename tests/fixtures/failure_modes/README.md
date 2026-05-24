@@ -110,8 +110,15 @@ in the same commit, keeping the catalog complete by construction.
 | `curation_ttl_policy_missing` | curate disposition | medium | bd-17c65.7.4 (G4) |
 | `curation_harmful_candidate_escalated` | curate disposition, status | high | bd-17c65.7.4 (G4) |
 | `curation_ttl_blocked` | status, curate disposition | medium | bd-17c65.7.4 (G4) |
+| `create_derived_replay_ambiguous_audit` | curate apply | high | bd-3vw03 |
+| `create_derived_replay_missing_audit` | curate apply | high | bd-3vw03 |
 | `derived_sources_invalid` | curate validate, curate apply, reflect propose | medium | bd-1vnvl |
 | `derived_source_hash_drifted` | curate validate, curate apply | medium | bd-1vnvl |
+| `derived_source_hash_mismatch` | curate validate, curate apply | medium | bd-3vw03 |
+| `derived_source_evidence_already_linked` | curate validate, curate apply | medium | bd-3vw03 |
+| `derived_source_evidence_missing` | curate validate, curate apply | medium | bd-3vw03 |
+| `derived_source_memory_missing` | curate validate, curate apply | medium | bd-3vw03 |
+| `derived_source_memory_tombstoned` | curate validate, curate apply | medium | bd-3vw03 |
 | `derived_source_workspace_mismatch` | curate validate, curate apply, reflect propose | medium | bd-1vnvl |
 | `derived_evidence_already_linked` | curate validate, curate apply | medium | bd-1vnvl |
 | `derived_target_required_for_mutation` | curate validate, curate apply | medium | bd-1vnvl |

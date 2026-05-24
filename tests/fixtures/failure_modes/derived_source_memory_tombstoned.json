@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_memory_tombstoned",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived candidate cites a source memory that is tombstoned between proposal and apply.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate propose-derived --workspace . --json",
+      "# tombstone the cited source memory before apply"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_memory_tombstoned",
+    "severity": "medium",
+    "message_contains": [
+      "tombstoned",
+      "source"
+    ],
+    "repair_contains": "ee curate propose-derived"
+  }
+}

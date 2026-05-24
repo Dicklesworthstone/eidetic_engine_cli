@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_hash_mismatch",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A source memory or evidence span no longer matches the hash captured by a create-derived candidate during proposal.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate propose-derived --workspace . --json",
+      "# mutate or revise a cited source before apply"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_hash_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "hash",
+      "source"
+    ],
+    "repair_contains": "ee curate propose-derived"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "derived_source_evidence_already_linked",
+  "introduced_by": {
+    "bead": "bd-3vw03",
+    "epic_letter": "CONTRACTS"
+  },
+  "surfaces": [
+    "curate validate",
+    "curate apply"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "A create-derived candidate cites an evidence span that another memory attaches between proposal and apply.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee curate propose-derived --workspace . --json",
+      "# attach the cited evidence span to a different memory before apply"
+    ],
+    "invocation": "ee curate apply <candidate-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "derived_source_evidence_already_linked",
+    "severity": "medium",
+    "message_contains": [
+      "already linked",
+      "evidence"
+    ],
+    "repair_contains": "ee curate propose-derived"
+  }
+}
