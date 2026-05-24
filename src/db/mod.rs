@@ -55,6 +55,7 @@ pub mod audit_actions {
     pub const AGENT_PROFILE_UPDATE: &str = "agent_profile.update";
     pub const FEEDBACK_RECORD: &str = "feedback.record";
     pub const HANDOFF_INSECURE_LOAD: &str = "handoff.insecure_load";
+    pub const HANDOFF_HMAC_VERIFY_FAILURE: &str = "handoff.hmac_verify_failure";
     pub const HANDOFF_HMAC_ROTATE: &str = "handoff.hmac_rotate";
     pub const FEEDBACK_QUARANTINE: &str = "feedback.quarantine";
     pub const FEEDBACK_QUARANTINE_RELEASE: &str = "feedback.quarantine.release";

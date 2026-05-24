@@ -1844,6 +1844,36 @@ fn verify_capsule_integrity(
     Ok(())
 }
 
+fn verify_capsule_integrity_with_audit(
+    capsule: &serde_json::Value,
+    workspace: &Path,
+    capsule_path: &Path,
+    capsule_bytes: &str,
+    capsule_id: &str,
+    machine_salt_path_override: Option<&Path>,
+) -> Result<(), DomainError> {
+    match verify_capsule_integrity(capsule, workspace, machine_salt_path_override) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let audit_id = record_handoff_hmac_verify_failure_audit(
+                workspace,
+                capsule_path,
+                capsule_bytes,
+                capsule_id,
+                &error,
+            )?;
+            tracing::error!(
+                event = "handoff_hmac_verify_failed",
+                capsule_id = %capsule_id,
+                audit_entry_id = %audit_id,
+                error_code = error.code(),
+                "handoff capsule HMAC verification failed"
+            );
+            Err(error)
+        }
+    }
+}
+
 fn handoff_hmac_error(
     code: &'static str,
     message: impl Into<String>,
@@ -1861,17 +1891,18 @@ fn record_handoff_insecure_load_audit(
     capsule_path: &Path,
     capsule_bytes: &str,
     capsule_id: &str,
-) {
+) -> Result<String, DomainError> {
     let database_path = workspace.join(".ee").join("ee.db");
-    let Ok(conn) = DbConnection::open_file(&database_path) else {
-        return;
-    };
+    let conn = open_handoff_audit_connection(workspace, "insecure HMAC bypass")?;
+    let audit_id = generate_audit_id();
     let details = serde_json::json!({
         "schema": "ee.audit.handoff_insecure_load.v1",
+        "severity": "critical",
         "capsulePath": capsule_path.display().to_string(),
         "capsuleSha256": format!("sha256:{}", sha256_hex(capsule_bytes.as_bytes())),
         "capsuleId": capsule_id,
         "reason": "caller passed --insecure-skip-hmac",
+        "secretMaterialLogged": false,
     });
     let input = CreateAuditInput {
         workspace_id: None,
@@ -1881,7 +1912,52 @@ fn record_handoff_insecure_load_audit(
         target_id: Some(capsule_id.to_owned()),
         details: Some(details.to_string()),
     };
-    let _ = conn.insert_audit(&generate_audit_id(), &input);
+    conn.insert_audit(&audit_id, &input).map_err(|error| {
+        handoff_audit_storage_error(
+            "record insecure HMAC bypass audit",
+            &database_path,
+            error.to_string(),
+        )
+    })?;
+    Ok(audit_id)
+}
+
+fn record_handoff_hmac_verify_failure_audit(
+    workspace: &Path,
+    capsule_path: &Path,
+    capsule_bytes: &str,
+    capsule_id: &str,
+    error: &DomainError,
+) -> Result<String, DomainError> {
+    let database_path = workspace.join(".ee").join("ee.db");
+    let conn = open_handoff_audit_connection(workspace, "HMAC verification failure")?;
+    let audit_id = generate_audit_id();
+    let details = serde_json::json!({
+        "schema": "ee.audit.handoff_hmac_verify_failure.v1",
+        "severity": "critical",
+        "capsulePath": capsule_path.display().to_string(),
+        "capsuleSha256": format!("sha256:{}", sha256_hex(capsule_bytes.as_bytes())),
+        "capsuleId": capsule_id,
+        "errorCode": error.code(),
+        "errorMessage": error.message(),
+        "secretMaterialLogged": false,
+    });
+    let input = CreateAuditInput {
+        workspace_id: None,
+        actor: Some("ee handoff verify".to_owned()),
+        action: audit_actions::HANDOFF_HMAC_VERIFY_FAILURE.to_owned(),
+        target_type: Some("handoff_capsule".to_owned()),
+        target_id: Some(capsule_id.to_owned()),
+        details: Some(details.to_string()),
+    };
+    conn.insert_audit(&audit_id, &input).map_err(|error| {
+        handoff_audit_storage_error(
+            "record HMAC verification failure audit",
+            &database_path,
+            error.to_string(),
+        )
+    })?;
+    Ok(audit_id)
 }
 
 fn record_handoff_hmac_rotate_audit(
@@ -1892,12 +1968,13 @@ fn record_handoff_hmac_rotate_audit(
     old_hmac_prefix: Option<&str>,
     new_hmac_prefix: &str,
     body_sha256: &str,
-) -> Option<String> {
+) -> Result<String, DomainError> {
     let database_path = workspace.join(".ee").join("ee.db");
-    let conn = DbConnection::open_file(&database_path).ok()?;
+    let conn = open_handoff_audit_connection(workspace, "HMAC key rotation")?;
     let audit_id = generate_audit_id();
     let details = serde_json::json!({
         "schema": "ee.audit.handoff_hmac_rotate.v1",
+        "severity": "info",
         "capsulePath": capsule_path.display().to_string(),
         "capsuleId": capsule_id,
         "keyMode": key_mode,
@@ -1914,8 +1991,39 @@ fn record_handoff_hmac_rotate_audit(
         target_id: Some(capsule_id.to_owned()),
         details: Some(details.to_string()),
     };
-    conn.insert_audit(&audit_id, &input).ok()?;
-    Some(audit_id)
+    conn.insert_audit(&audit_id, &input).map_err(|error| {
+        handoff_audit_storage_error(
+            "record HMAC key rotation audit",
+            &database_path,
+            error.to_string(),
+        )
+    })?;
+    Ok(audit_id)
+}
+
+fn open_handoff_audit_connection(
+    workspace: &Path,
+    operation: &str,
+) -> Result<DbConnection, DomainError> {
+    let database_path = workspace.join(".ee").join("ee.db");
+    DbConnection::open_file(&database_path)
+        .map_err(|error| handoff_audit_storage_error(operation, &database_path, error.to_string()))
+}
+
+fn handoff_audit_storage_error(
+    operation: &str,
+    database_path: &Path,
+    source: String,
+) -> DomainError {
+    DomainError::Storage {
+        message: format!(
+            "Failed to {operation} in {}: {source}",
+            database_path.display()
+        ),
+        repair: Some(
+            "Run `ee init --workspace .` or verify the workspace audit database is writable before retrying handoff recovery.".to_owned(),
+        ),
+    }
 }
 
 fn focus_memory_ids(focus_state: &crate::models::FocusState) -> Vec<String> {
@@ -3002,9 +3110,15 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
             repair: Some("Verify the capsule file contains valid JSON".to_owned()),
         })?;
 
-    verify_capsule_integrity(
+    verify_capsule_integrity_with_audit(
         &capsule,
         &options.workspace,
+        &options.capsule,
+        &content,
+        capsule
+            .get("capsule_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
         options.machine_salt_path.as_deref(),
     )?;
 
@@ -3086,13 +3200,13 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
         old_hmac_prefix.as_deref(),
         &new_hmac_prefix,
         &body_sha256,
-    );
+    )?;
     tracing::info!(
         event = "handoff_hmac_rotated",
         capsule_id = %capsule_id,
         old_hmac_prefix = old_hmac_prefix.as_deref().unwrap_or(""),
         new_hmac_prefix = %new_hmac_prefix,
-        audit_entry_id = audit_id.as_deref().unwrap_or(""),
+        audit_entry_id = %audit_id,
         "handoff capsule HMAC rotated"
     );
 
@@ -3104,7 +3218,7 @@ pub fn rotate_handoff_key(options: &RotateKeyOptions) -> Result<RotateKeyReport,
     report.canonical_content_hash_before = canonical_before;
     report.canonical_content_hash_after = canonical_after;
     report.body_preserved = body_preserved;
-    report.audit_id = audit_id;
+    report.audit_id = Some(audit_id);
     Ok(report)
 }
 
@@ -3209,12 +3323,12 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
 
     let mut report = ResumeReport::new(capsule_id, path);
     if options.insecure_skip_hmac {
-        record_handoff_insecure_load_audit(
+        let audit_id = record_handoff_insecure_load_audit(
             &options.workspace,
             &report.capsule_path,
             &content,
             &report.capsule_id,
-        );
+        )?;
         report.degradations.push(
             DegradationInfo::new(
                 HANDOFF_HMAC_SKIPPED_CODE,
@@ -3227,12 +3341,16 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
             event = "handoff_hmac_insecure_load",
             capsule_id = %report.capsule_id,
             capsule_sha256 = %format!("sha256:{}", sha256_hex(content.as_bytes())),
+            audit_entry_id = %audit_id,
             "handoff capsule loaded with HMAC verification disabled"
         );
     } else {
-        verify_capsule_integrity(
+        verify_capsule_integrity_with_audit(
             &capsule,
             &options.workspace,
+            &report.capsule_path,
+            &content,
+            &report.capsule_id,
             options.machine_salt_path.as_deref(),
         )?;
     }
@@ -4159,6 +4277,16 @@ mod tests {
             .prefix("ee-handoff-test-")
             .tempdir()
             .map_err(|error| error.to_string())
+    }
+
+    fn init_test_audit_db(workspace: &Path) -> Result<DbConnection, String> {
+        let db_path = workspace.join(".ee").join("ee.db");
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let conn = DbConnection::open_file(&db_path).map_err(|error| error.to_string())?;
+        conn.migrate().map_err(|error| error.to_string())?;
+        Ok(conn)
     }
 
     fn ensure_symlink_error<T: Debug>(result: Result<T, DomainError>, context: &str) -> TestResult {
@@ -5103,8 +5231,74 @@ memories_revised = 3
     }
 
     #[test]
+    fn handoff_hmac_tampered_body_records_critical_audit() -> TestResult {
+        let dir = repo_tempdir()?;
+        let conn = init_test_audit_db(dir.path())?;
+        let output = create_test_capsule(dir.path(), false, None)?;
+        let mut capsule: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        capsule["sections"][0]["content"] =
+            serde_json::Value::String("tampered content must be audited".to_owned());
+        fs::write(
+            &output,
+            serde_json::to_string_pretty(&capsule).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let error = match resume_handoff(&ResumeOptions {
+            path: output,
+            use_latest: false,
+            workspace: dir.path().to_path_buf(),
+            max_sections: None,
+            task_frame_id: None,
+            bound_workspace_id: None,
+            bound_workspace_identity: None,
+            include_prompt_fragment: false,
+            require_fresh: false,
+            insecure_skip_hmac: false,
+            machine_salt_path: None,
+        }) {
+            Ok(_) => panic!("tampered capsule should fail closed"),
+            Err(error) => error,
+        };
+        ensure_equal(&error.code(), &HANDOFF_CAPSULE_TAMPERED_CODE, "error code")?;
+        let envelope = crate::output::error_response_json(&error);
+        ensure(
+            envelope.contains(r#""schema":"ee.error.v2""#),
+            "tamper failure should render ee.error.v2",
+        )?;
+        ensure(
+            envelope.contains(r#""severity":"critical""#),
+            "tamper failure should render critical severity",
+        )?;
+
+        let audits = conn
+            .list_audit_by_action(audit_actions::HANDOFF_HMAC_VERIFY_FAILURE, None)
+            .map_err(|error| error.to_string())?;
+        ensure_equal(&audits.len(), &1_usize, "one verify-failure audit")?;
+        let details = audits[0]
+            .details
+            .as_deref()
+            .ok_or_else(|| "missing audit details".to_owned())?;
+        ensure(
+            details.contains(r#""severity":"critical""#),
+            "audit records critical severity",
+        )?;
+        ensure(
+            details.contains(r#""errorCode":"handoff_capsule_tampered""#),
+            "audit records tamper error code",
+        )?;
+        ensure(
+            details.contains(r#""secretMaterialLogged":false"#),
+            "audit confirms no secret material logged",
+        )
+    }
+
+    #[test]
     fn handoff_hmac_insecure_skip_loads_with_high_degradation() -> TestResult {
         let dir = repo_tempdir()?;
+        let _conn = init_test_audit_db(dir.path())?;
         let output = create_test_capsule(dir.path(), false, None)?;
         let mut capsule: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&output).map_err(|error| error.to_string())?)

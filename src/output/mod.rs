@@ -5,7 +5,7 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
-use crate::config::env_registry::{EnvVar, read};
+use crate::config::env_registry::{EnvVar, is_set, read};
 use crate::core::agent_detect::{AgentInventoryReport, InstalledAgentDetectionReport};
 use crate::core::capabilities::CapabilitiesReport;
 use crate::core::check::CheckReport;
@@ -2062,8 +2062,7 @@ impl Default for ContextJsonRenderOptions {
             include_meta: true,
             include_verbose_meta: false,
             include_non_affecting_degradations: false,
-            include_legacy_selection_certificate: env::var_os("EE_LEGACY_SELECTION_CERTIFICATE")
-                .is_some(),
+            include_legacy_selection_certificate: is_set(EnvVar::LegacySelectionCertificate),
         }
     }
 }
@@ -2076,8 +2075,7 @@ impl From<ContextPackOutputOptions> for ContextJsonRenderOptions {
             include_meta: options.include_meta,
             include_verbose_meta: options.include_verbose_meta,
             include_non_affecting_degradations: options.include_non_affecting_degradations,
-            include_legacy_selection_certificate: env::var_os("EE_LEGACY_SELECTION_CERTIFICATE")
-                .is_some(),
+            include_legacy_selection_certificate: is_set(EnvVar::LegacySelectionCertificate),
         }
     }
 }
@@ -12168,6 +12166,15 @@ pub fn error_response_toon(error: &DomainError) -> String {
 fn domain_error_severity(error: &DomainError) -> &'static str {
     if error.code().starts_with("level_transition_") {
         return "medium";
+    }
+    if matches!(
+        error.code(),
+        "handoff_hmac_missing"
+            | "handoff_capsule_tampered"
+            | "handoff_capsule_machine_mismatch"
+            | "strict_mode_no_salt_file"
+    ) {
+        return "critical";
     }
     if error.code().starts_with("handoff_") || error.code().starts_with("strict_mode_") {
         return "high";
