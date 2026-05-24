@@ -27,8 +27,10 @@ use ee::models::{MemoryId, ProvenanceUri, UnitScore};
 use ee::output::render_context_response_json;
 use ee::pack::{
     ArenaMode, ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
-    PackAssemblyOptions, PackCandidate, PackCandidateInput, PackDraft, PackProvenance, PackSection,
-    TokenBudget, assemble_draft_with_profile_and_options_seeded, render_context_markdown,
+    PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions, PackCandidate,
+    PackCandidateInput, PackDraft, PackProvenance, PackResourceProfile, PackSection, TokenBudget,
+    assemble_draft_with_profile_and_options_seeded,
+    assemble_draft_with_profile_and_options_seeded_in_workspace, render_context_markdown,
 };
 use ee::runtime::determinism::Deterministic;
 use uuid::Uuid;
@@ -298,6 +300,33 @@ fn assemble(
     .map_err(|error| format!("assemble({profile:?}, {arena_mode:?}): {error:?}"))
 }
 
+fn assemble_workspace_reuse(
+    profile: ContextPackProfile,
+    query: &str,
+    budget: TokenBudget,
+    candidates: Vec<PackCandidate>,
+    seed: u64,
+) -> Result<PackDraft, String> {
+    let determinism = Deterministic::from_seed(seed);
+    let mut workspace = PackArenaWorkspace::new(PackArenaWorkspaceKey::new(
+        "file:///tmp/ee-arena-parity-workspace",
+        PackResourceProfile::Standard,
+    ));
+    assemble_draft_with_profile_and_options_seeded_in_workspace(
+        profile,
+        query,
+        budget,
+        candidates,
+        PackAssemblyOptions {
+            arena_mode: ArenaMode::WorkspaceReuse,
+            ..PackAssemblyOptions::default()
+        },
+        &determinism,
+        &mut workspace,
+    )
+    .map_err(|error| format!("assemble({profile:?}, WorkspaceReuse): {error:?}"))
+}
+
 fn build_context_request(
     query: &str,
     profile: ContextPackProfile,
@@ -335,6 +364,8 @@ fn assert_arena_parity_for_profile(
         ArenaMode::RequestScoped,
         seed,
     )?;
+    let workspace_reuse =
+        assemble_workspace_reuse(profile, query, budget, candidates.to_vec(), seed)?;
 
     if disabled != request_scoped {
         let mut diffs = Vec::new();
@@ -376,17 +407,65 @@ fn assert_arena_parity_for_profile(
             diffs.join("; ")
         ));
     }
+    if disabled != workspace_reuse {
+        let mut diffs = Vec::new();
+        if disabled.items != workspace_reuse.items {
+            diffs.push(format!(
+                "items: disabled={} workspace_reuse={}",
+                disabled.items.len(),
+                workspace_reuse.items.len()
+            ));
+        }
+        if disabled.omitted != workspace_reuse.omitted {
+            diffs.push(format!(
+                "omitted: disabled={} workspace_reuse={}",
+                disabled.omitted.len(),
+                workspace_reuse.omitted.len()
+            ));
+        }
+        if disabled.used_tokens != workspace_reuse.used_tokens {
+            diffs.push(format!(
+                "used_tokens: disabled={} workspace_reuse={}",
+                disabled.used_tokens, workspace_reuse.used_tokens
+            ));
+        }
+        if disabled.selection_audit.selected_items != workspace_reuse.selection_audit.selected_items
+        {
+            diffs.push("selection_audit.selected_items differ".to_string());
+        }
+        if disabled.selection_audit.steps != workspace_reuse.selection_audit.steps {
+            diffs.push("selection_audit.steps differ".to_string());
+        }
+        if disabled.selection_audit.algorithm_id != workspace_reuse.selection_audit.algorithm_id {
+            diffs.push(format!(
+                "selection_audit.algorithm_id: disabled={:?} workspace_reuse={:?}",
+                disabled.selection_audit.algorithm_id, workspace_reuse.selection_audit.algorithm_id
+            ));
+        }
+        return Err(format!(
+            "{label}/{profile:?}: PackDraft diverges for workspace_reuse — {}",
+            diffs.join("; ")
+        ));
+    }
 
     // Markdown rendering parity uses an empty degraded list and a
     // standalone request (no DB) so the test stays mock-free.
     let request = build_context_request(query, profile, budget)?;
     let markdown_disabled = render_context_markdown(&request, &disabled, &[]);
     let markdown_request_scoped = render_context_markdown(&request, &request_scoped, &[]);
+    let markdown_workspace_reuse = render_context_markdown(&request, &workspace_reuse, &[]);
     if markdown_disabled != markdown_request_scoped {
         return Err(format!(
             "{label}/{profile:?}: render_context_markdown byte-differs across arena modes ({} vs {} bytes)",
             markdown_disabled.len(),
             markdown_request_scoped.len()
+        ));
+    }
+    if markdown_disabled != markdown_workspace_reuse {
+        return Err(format!(
+            "{label}/{profile:?}: render_context_markdown byte-differs for workspace_reuse ({} vs {} bytes)",
+            markdown_disabled.len(),
+            markdown_workspace_reuse.len()
         ));
     }
 
@@ -400,10 +479,17 @@ fn assert_arena_parity_for_profile(
     // PackDraft+markdown gate catching it.
     let hash_disabled = compute_pack_hash(&request, &disabled, &[]);
     let hash_request_scoped = compute_pack_hash(&request, &request_scoped, &[]);
+    let hash_workspace_reuse = compute_pack_hash(&request, &workspace_reuse, &[]);
     if hash_disabled != hash_request_scoped {
         return Err(format!(
             "{label}/{profile:?}: compute_pack_hash byte-differs across arena modes \
              (disabled={hash_disabled}, request_scoped={hash_request_scoped})"
+        ));
+    }
+    if hash_disabled != hash_workspace_reuse {
+        return Err(format!(
+            "{label}/{profile:?}: compute_pack_hash byte-differs for workspace_reuse \
+             (disabled={hash_disabled}, workspace_reuse={hash_workspace_reuse})"
         ));
     }
 
@@ -419,15 +505,28 @@ fn assert_arena_parity_for_profile(
         )?;
     let mut draft_for_response_request_scoped = request_scoped.clone();
     draft_for_response_request_scoped.hash = Some(hash_request_scoped.clone());
-    let response_request_scoped =
-        ContextResponse::new(request, draft_for_response_request_scoped, Vec::new()).map_err(
-            |error| {
-                format!("{label}/{profile:?}: ContextResponse::new (request_scoped): {error:?}")
-            },
-        )?;
+    let response_request_scoped = ContextResponse::new(
+        request.clone(),
+        draft_for_response_request_scoped,
+        Vec::new(),
+    )
+    .map_err(|error| {
+        format!("{label}/{profile:?}: ContextResponse::new (request_scoped): {error:?}")
+    })?;
+    let mut draft_for_response_workspace_reuse = workspace_reuse.clone();
+    draft_for_response_workspace_reuse.hash = Some(hash_workspace_reuse.clone());
+    let response_workspace_reuse = ContextResponse::new(
+        request.clone(),
+        draft_for_response_workspace_reuse,
+        Vec::new(),
+    )
+    .map_err(|error| {
+        format!("{label}/{profile:?}: ContextResponse::new (workspace_reuse): {error:?}")
+    })?;
 
     let json_disabled = render_context_response_json(&response_disabled);
     let json_request_scoped = render_context_response_json(&response_request_scoped);
+    let json_workspace_reuse = render_context_response_json(&response_workspace_reuse);
     if json_disabled != json_request_scoped {
         let mismatch_index = json_disabled
             .as_bytes()
@@ -440,6 +539,21 @@ fn assert_arena_parity_for_profile(
              (disabled={} bytes, request_scoped={} bytes, first-mismatch-index={})",
             json_disabled.len(),
             json_request_scoped.len(),
+            mismatch_index
+        ));
+    }
+    if json_disabled != json_workspace_reuse {
+        let mismatch_index = json_disabled
+            .as_bytes()
+            .iter()
+            .zip(json_workspace_reuse.as_bytes())
+            .position(|(a, b)| a != b)
+            .unwrap_or(usize::MAX);
+        return Err(format!(
+            "{label}/{profile:?}: render_context_response_json byte-differs for workspace_reuse \
+             (disabled={} bytes, workspace_reuse={} bytes, first-mismatch-index={})",
+            json_disabled.len(),
+            json_workspace_reuse.len(),
             mismatch_index
         ));
     }

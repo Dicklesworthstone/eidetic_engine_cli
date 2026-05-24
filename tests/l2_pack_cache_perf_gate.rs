@@ -48,8 +48,39 @@ fn l2_warm_context_cache_benchmark_is_registered() -> TestResult {
         "run_context_l2_warm_bench",
         "cargo bench --bench \"$bench\" -- ee_context_pack_l2_warm",
         "append_measured_ms \"$key\"",
-        "if [ \"$PROFILE\" != \"ci-smoke\" ]; then",
+        "if [ \"$PROFILE\" != \"ci-smoke\" ] &&",
         "run_context_l2_warm_bench",
+    ] {
+        if !BENCH_SCRIPT.contains(expected) {
+            return Err(format!("scripts/bench.sh missing `{expected}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn arena_workspace_reuse_context_benchmark_is_registered() -> TestResult {
+    for expected in [
+        "ARENA_MODE_BENCH_GROUP: &str = \"ee_context_arena_mode\"",
+        "ARENA_MODE_BENCH_OPERATION: &str = \"ee_context_arena_workspace_reuse\"",
+        "ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1",
+        "PackArenaWorkspace",
+        "PackArenaWorkspaceKey",
+        "bench_context_arena_mode",
+        "ArenaMode::WorkspaceReuse",
+        "criterion_group!",
+    ] {
+        if !CONTEXT_BENCH.contains(expected) {
+            return Err(format!("benches/context.rs missing `{expected}`"));
+        }
+    }
+
+    for expected in [
+        "run_context_arena_mode_bench",
+        "cargo bench --bench \"$bench\" -- ee_context_arena_mode",
+        "append_result \"$key\" \"measured\"",
+        "run_context_arena_mode_bench",
     ] {
         if !BENCH_SCRIPT.contains(expected) {
             return Err(format!("scripts/bench.sh missing `{expected}`"));
@@ -140,6 +171,74 @@ fn l2_warm_context_cache_budget_and_baseline_are_present() -> TestResult {
     for scale in ["warm_hit_json", "4_concurrent_identical_requests"] {
         if operation.pointer(&format!("/scales/{scale}")).is_none() {
             return Err(format!("L2 warm cache baseline missing scale `{scale}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn arena_workspace_reuse_budget_and_baseline_are_present() -> TestResult {
+    let budgets = budgets_manifest()?;
+    let profiles = budgets
+        .get("profiles")
+        .and_then(Item::as_table)
+        .ok_or_else(|| "budgets manifest missing [profiles] table".to_owned())?;
+    for profile in ["nightly", "stress"] {
+        let benches = profiles
+            .get(profile)
+            .and_then(|item| item.get("benches"))
+            .and_then(Item::as_value)
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("profile `{profile}` missing benches array"))?;
+        if !benches
+            .iter()
+            .any(|entry| entry.as_str() == Some("context_arena_mode"))
+        {
+            return Err(format!(
+                "profile `{profile}` must include context_arena_mode in the perf gate"
+            ));
+        }
+    }
+
+    let operations = budgets
+        .get("operations")
+        .and_then(Item::as_table)
+        .ok_or_else(|| "budgets manifest missing [operations] table".to_owned())?;
+    let operation = operations
+        .get("ee_context_arena_workspace_reuse")
+        .ok_or_else(|| "budgets manifest missing ee_context_arena_workspace_reuse".to_owned())?;
+    let p50 = toml_f64(operation, "p50_ms_max")?;
+    let p99 = toml_f64(operation, "p99_ms_max")?;
+    if !(p50 > 0.0 && p99 >= p50) {
+        return Err(format!(
+            "arena workspace reuse budget must be positive and monotonic, got p50={p50}, p99={p99}"
+        ));
+    }
+
+    let baseline: Value = serde_json::from_str(PERF_BASELINE)
+        .map_err(|error| format!("invalid perf_v0_2 baseline JSON: {error}"))?;
+    let operation = baseline
+        .pointer("/operations/ee_context_arena_workspace_reuse")
+        .ok_or_else(|| {
+            "perf baseline missing operations.ee_context_arena_workspace_reuse".to_owned()
+        })?;
+    for field in [
+        "p50_ms",
+        "p99_ms",
+        "tolerance_pct_p50",
+        "tolerance_pct_p99",
+        "unstable",
+    ] {
+        if operation.get(field).is_none() {
+            return Err(format!("arena workspace reuse baseline missing `{field}`"));
+        }
+    }
+    for scale in ["fixture_coverage_fill", "fixture_provenance_heavy"] {
+        if operation.pointer(&format!("/scales/{scale}")).is_none() {
+            return Err(format!(
+                "arena workspace reuse baseline missing scale `{scale}`"
+            ));
         }
     }
 

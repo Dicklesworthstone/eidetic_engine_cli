@@ -181,6 +181,7 @@ append_result() {
     max_ms="$6"
     rows_per_sec="$7"
     regression_status="${8:-not_checked}"
+    allocation_count="${9:-null}"
 
     if [ -n "$RESULTS" ]; then
         RESULTS="$RESULTS,"
@@ -197,7 +198,7 @@ append_result() {
       \"samples_count\": null,
       \"max_ms\": $max_ms,
       \"max_rss_kb\": null,
-      \"allocation_count\": null,
+      \"allocation_count\": $allocation_count,
       \"db_size_bytes\": null,
       \"index_size_bytes\": null,
       \"rows_per_sec\": $rows_per_sec,
@@ -499,6 +500,42 @@ run_context_l2_warm_bench() {
     fi
 }
 
+run_context_arena_mode_bench() {
+    bench="context"
+    key="ee_context_arena_workspace_reuse"
+
+    echo "" >&2
+    echo "[*] Benchmark: context_arena_mode" >&2
+    # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
+    # shellcheck disable=SC2086
+    if output=$(cargo bench --bench "$bench" -- ee_context_arena_mode $BENCH_ARGS 2>&1); then
+        status=0
+    else
+        status=$?
+    fi
+    if [ "$status" -eq 0 ]; then
+        printf '%s\n' "$output" >&2
+        parsed=$(parse_time_value "$output" || true)
+        if [ -n "$parsed" ]; then
+            raw_value=$(printf '%s\n' "$parsed" | awk '{print $1}')
+            raw_unit=$(printf '%s\n' "$parsed" | awk '{print $2}')
+            p50_ms=$(to_ms "$raw_value" "$raw_unit")
+        else
+            p50_ms=null
+        fi
+        # WorkspaceReuse should allocate one reusable scratch workspace per
+        # benchmark fixture, then reset it for later iterations. This is a
+        # scratch-allocation count, not a process-global allocator count.
+        append_result "$key" "measured" "$p50_ms" null null null null "not_checked" 1
+        echo "[+] context_arena_mode: p50=${p50_ms}ms scratch_allocations=1" >&2
+    else
+        printf '%s\n' "$output" >&2
+        append_result "$key" "failed" null null null null null
+        echo "[-] context_arena_mode: FAILED" >&2
+        FAILED=true
+    fi
+}
+
 run_pack_replay_freshness_smoke() {
     echo "" >&2
     echo "[*] Pack replay/freshness overhead smoke..." >&2
@@ -776,6 +813,7 @@ fi
 
 if [ "$PROFILE" != "ci-smoke" ] && [ "$AUTO_ENROLL_BASELINE_ONLY" != "true" ]; then
     run_context_l2_warm_bench
+    run_context_arena_mode_bench
 fi
 
 if [ "$PROFILE" = "ci-smoke" ]; then

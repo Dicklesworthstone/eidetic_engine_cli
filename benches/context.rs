@@ -21,6 +21,7 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
@@ -34,8 +35,14 @@ use ee::core::context::{
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
-use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
-use ee::pack::PackResourceProfile;
+use ee::models::{MemoryId, MemoryScope, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId};
+use ee::pack::{
+    ArenaMode, ContextPackProfile, PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions,
+    PackCandidate, PackCandidateInput, PackProvenance, PackResourceProfile, PackSection,
+    TokenBudget, assemble_draft_with_profile_and_options_seeded,
+    assemble_draft_with_profile_and_options_seeded_in_workspace,
+};
+use ee::runtime::determinism::Deterministic;
 use ee::search::SpeedMode;
 
 /// Performance budget from plan §28 (README "Performance" table).
@@ -50,12 +57,17 @@ const S4_NIGHTLY_SCALE: usize = 10_000;
 const S4_STRESS_SCALE: usize = 100_000;
 const L2_WARM_BENCH_GROUP: &str = "ee_context_pack_l2_warm";
 const L2_WARM_BENCH_OPERATION: &str = "ee_context_pack_l2_warm";
+const ARENA_MODE_BENCH_GROUP: &str = "ee_context_arena_mode";
+const ARENA_MODE_BENCH_OPERATION: &str = "ee_context_arena_workspace_reuse";
 const L2_WARM_BUDGET_P50_MS: f64 = 10.0;
 const L2_WARM_BUDGET_P99_MS: f64 = 50.0;
+const ARENA_MODE_BUDGET_P50_MS: f64 = 95.0;
+const ARENA_MODE_BUDGET_P99_MS: f64 = 240.0;
 const L2_CONCURRENT_IDENTICAL_REQUESTS: usize = 4;
 const L2_EXPECTED_FRESH_ASSEMBLIES: usize = 1;
 const L2_EXPECTED_WARM_HITS: usize =
     L2_CONCURRENT_IDENTICAL_REQUESTS - L2_EXPECTED_FRESH_ASSEMBLIES;
+const ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResourceScale {
@@ -91,6 +103,97 @@ fn stable_workspace_id(path: &Path) -> String {
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&hash.as_bytes()[..16]);
     WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
+fn arena_memory_id(seed: u128) -> MemoryId {
+    MemoryId::from_uuid(uuid::Uuid::from_u128(seed + 1))
+}
+
+fn arena_score(value: f32) -> UnitScore {
+    UnitScore::parse(value).expect("arena benchmark score")
+}
+
+fn arena_provenance(seed: u128, index: usize) -> PackProvenance {
+    let uri = ProvenanceUri::from_str(&format!(
+        "file://arena-bench-{seed}-{index}.md#L{}",
+        (index + 1) * 10
+    ))
+    .expect("arena benchmark provenance uri");
+    PackProvenance::new(uri, format!("arena benchmark provenance {index}"))
+        .expect("arena benchmark provenance")
+}
+
+fn arena_candidate(
+    seed: u128,
+    section: PackSection,
+    content: impl Into<String>,
+    tokens: u32,
+    relevance: f32,
+    utility: f32,
+    provenance_count: usize,
+) -> PackCandidate {
+    let provenance = (0..provenance_count)
+        .map(|index| arena_provenance(seed, index))
+        .collect();
+    PackCandidate::new(PackCandidateInput {
+        memory_id: arena_memory_id(seed),
+        section,
+        content: content.into(),
+        estimated_tokens: tokens,
+        relevance: arena_score(relevance),
+        utility: arena_score(utility),
+        provenance,
+        why: format!("arena benchmark candidate {seed} matches the task"),
+    })
+    .expect("arena benchmark candidate")
+}
+
+fn arena_fixture_coverage_fill() -> Vec<PackCandidate> {
+    let mut candidates = Vec::with_capacity(20);
+    for seed in 0u128..10 {
+        candidates.push(arena_candidate(
+            seed + 200,
+            PackSection::ProceduralRules,
+            format!("Run cargo fmt before release. variant {seed}"),
+            90,
+            0.95,
+            0.9,
+            1,
+        ));
+    }
+    for seed in 0u128..10 {
+        candidates.push(arena_candidate(
+            seed + 220,
+            PackSection::Failures,
+            format!("Past incident: arena mode swap broke parity {seed}"),
+            85,
+            0.55,
+            0.6,
+            1,
+        ));
+    }
+    candidates
+}
+
+fn arena_fixture_provenance_heavy() -> Vec<PackCandidate> {
+    let sections = [
+        PackSection::Evidence,
+        PackSection::Decisions,
+        PackSection::Artifacts,
+    ];
+    (0u128..9)
+        .map(|seed| {
+            arena_candidate(
+                seed + 400,
+                sections[(seed as usize) % sections.len()],
+                format!("Provenance-heavy arena benchmark candidate {seed}."),
+                110,
+                0.7 + ((seed as f32) * 0.02).min(0.25),
+                0.65 + ((seed as f32) * 0.02).min(0.3),
+                3 + ((seed as usize) % 4),
+            )
+        })
+        .collect()
 }
 
 fn ensure_workspace_row(connection: &DbConnection, workspace_path: &Path) {
@@ -498,6 +601,97 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark arena allocation modes on deterministic pack assembly fixtures.
+fn bench_context_arena_mode(c: &mut Criterion) {
+    let mut group = c.benchmark_group(ARENA_MODE_BENCH_GROUP);
+    let fixtures = [
+        (
+            "fixture_coverage_fill",
+            arena_fixture_coverage_fill(),
+            ContextPackProfile::Balanced,
+            1_400_u32,
+        ),
+        (
+            "fixture_provenance_heavy",
+            arena_fixture_provenance_heavy(),
+            ContextPackProfile::Thorough,
+            6_000_u32,
+        ),
+    ];
+
+    for (fixture_label, candidates, profile, max_tokens) in fixtures {
+        let budget = TokenBudget::new(max_tokens).expect("arena benchmark token budget");
+        for mode in [
+            ArenaMode::Disabled,
+            ArenaMode::RequestScoped,
+            ArenaMode::WorkspaceReuse,
+        ] {
+            let label = format!("{fixture_label}/{}", mode.as_str());
+            match mode {
+                ArenaMode::WorkspaceReuse => {
+                    let mut workspace = PackArenaWorkspace::new(PackArenaWorkspaceKey::new(
+                        "file:///tmp/ee-arena-benchmark-workspace",
+                        PackResourceProfile::Standard,
+                    ));
+                    group.bench_function(
+                        BenchmarkId::new(ARENA_MODE_BENCH_OPERATION, label),
+                        |b| {
+                            b.iter(|| {
+                                let determinism = Deterministic::from_seed(0xbd_17_aa_75);
+                                let draft =
+                                    assemble_draft_with_profile_and_options_seeded_in_workspace(
+                                        profile,
+                                        "show evidence for arena policy decisions",
+                                        budget,
+                                        black_box(candidates.clone()),
+                                        PackAssemblyOptions {
+                                            arena_mode: ArenaMode::WorkspaceReuse,
+                                            ..PackAssemblyOptions::default()
+                                        },
+                                        &determinism,
+                                        &mut workspace,
+                                    )
+                                    .expect("workspace reuse arena benchmark assembly");
+                                black_box((
+                                    draft.items.len(),
+                                    draft.omitted.len(),
+                                    workspace.stats().fresh_scratch_allocations,
+                                    workspace.stats().reset_count,
+                                ))
+                            });
+                        },
+                    );
+                }
+                ArenaMode::Disabled | ArenaMode::RequestScoped => {
+                    group.bench_function(
+                        BenchmarkId::new(ARENA_MODE_BENCH_OPERATION, label),
+                        |b| {
+                            b.iter(|| {
+                                let determinism = Deterministic::from_seed(0xbd_17_aa_75);
+                                let draft = assemble_draft_with_profile_and_options_seeded(
+                                    profile,
+                                    "show evidence for arena policy decisions",
+                                    budget,
+                                    black_box(candidates.clone()),
+                                    PackAssemblyOptions {
+                                        arena_mode: mode,
+                                        ..PackAssemblyOptions::default()
+                                    },
+                                    &determinism,
+                                )
+                                .expect("arena benchmark assembly");
+                                black_box((draft.items.len(), draft.omitted.len()))
+                            });
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    group.finish();
+}
+
 /// Benchmark warm L2 JSON retrieval for the context-pack cache gate.
 fn bench_context_l2_warm_cache(c: &mut Criterion) {
     let mut group = c.benchmark_group(L2_WARM_BENCH_GROUP);
@@ -532,6 +726,7 @@ criterion_group!(
     bench_context,
     bench_context_memory_scales,
     bench_context_s4_resource_scales,
+    bench_context_arena_mode,
     bench_context_l2_warm_cache
 );
 criterion_main!(benches);
@@ -542,12 +737,14 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        BUDGET_P50_MS, BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS,
-        L2_EXPECTED_FRESH_ASSEMBLIES, L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP,
-        L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS, L2_WARM_BUDGET_P99_MS,
-        REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
-        S4_STRESS_SCALE, l2_warm_pack_json, s4_resource_scales_for_profile, seed_database,
-        seed_l2_warm_cache,
+        ARENA_MODE_BENCH_GROUP, ARENA_MODE_BENCH_OPERATION, ARENA_MODE_BUDGET_P50_MS,
+        ARENA_MODE_BUDGET_P99_MS, ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, BUDGET_P50_MS,
+        BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS, L2_EXPECTED_FRESH_ASSEMBLIES,
+        L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP, L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS,
+        L2_WARM_BUDGET_P99_MS, REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE,
+        S4_RESOURCE_SCALES, S4_STRESS_SCALE, arena_fixture_coverage_fill,
+        arena_fixture_provenance_heavy, l2_warm_pack_json, s4_resource_scales_for_profile,
+        seed_database, seed_l2_warm_cache,
     };
 
     #[test]
@@ -650,6 +847,23 @@ mod tests {
             }
         };
         assert_eq!(hit.pack_json, l2_warm_pack_json());
+        Ok(())
+    }
+
+    #[test]
+    fn arena_mode_benchmark_contract_matches_workspace_reuse_gate() -> Result<(), String> {
+        assert_eq!(ARENA_MODE_BENCH_GROUP, "ee_context_arena_mode");
+        assert_eq!(
+            ARENA_MODE_BENCH_OPERATION,
+            "ee_context_arena_workspace_reuse"
+        );
+        assert!(
+            ARENA_MODE_BUDGET_P50_MS > 0.0 && ARENA_MODE_BUDGET_P99_MS >= ARENA_MODE_BUDGET_P50_MS,
+            "arena mode benchmark budgets must be positive and monotonic"
+        );
+        assert_eq!(ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, 1);
+        assert_eq!(arena_fixture_coverage_fill().len(), 20);
+        assert_eq!(arena_fixture_provenance_heavy().len(), 9);
         Ok(())
     }
 }

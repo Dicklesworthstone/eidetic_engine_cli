@@ -35,6 +35,7 @@ benches = [
   "search",
   "context",
   "context_l2_warm",
+  "context_arena_mode",
   "context_with_ppr",
   "pack_size",
   "why",
@@ -71,6 +72,7 @@ benches = [
   "search",
   "context",
   "context_l2_warm",
+  "context_arena_mode",
   "context_with_ppr",
   "pack_size",
   "why",
@@ -127,6 +129,11 @@ description = "S4 resource-aware context pack SLO benchmark across 1k, 10k, and 
 p50_ms_max = 10.0
 p99_ms_max = 50.0
 description = "Warm L2 context-pack JSON retrieval for identical context requests; target evidence is one fresh assembly followed by three L2 hits"
+
+[operations.ee_context_arena_workspace_reuse]
+p50_ms_max = 95.0
+p99_ms_max = 240.0
+description = "Compare disabled, request-scoped, and workspace-reuse arena pack assembly over coverage-fill and provenance-heavy fixtures; allocation_count records reusable scratch allocations"
 
 [operations.ee_pack_size]
 p50_ms_max = 95.0

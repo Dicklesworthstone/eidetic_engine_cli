@@ -149,13 +149,11 @@ fn shell_quote(value: &str) -> String {
 
 /// bd-1prrl.7.3: Arena allocation policy for pack assembly scratch.
 ///
-/// The enum names the lifetime contract so tracing fields, perf
-/// fixtures, and future workspace-reuse work can identify which
-/// allocation strategy produced a given pack. Today both modes
-/// allocate scratch fresh per-request (request-scoped by Rust
-/// ownership); the variant exists so bd-1prrl.7.4 / 7.5 can prove
-/// byte-identical output and measure allocation cost with the mode
-/// selection plumbed end-to-end.
+/// The enum names the lifetime contract so tracing fields and perf
+/// fixtures can identify which allocation strategy produced a given
+/// pack. `WorkspaceReuse` is available only through the explicit
+/// [`PackArenaWorkspace`] API; ordinary assembly calls fall back to
+/// disabled allocation when no workspace lifetime is supplied.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ArenaMode {
     /// No arena indirection; standard `Vec` allocation per call.
@@ -164,8 +162,10 @@ pub enum ArenaMode {
     Disabled,
     /// Arena scratch is allocated and dropped within one pack
     /// assembly call. No reference into scratch outlives the call.
-    /// Workspace reuse is deferred to a later child bead.
     RequestScoped,
+    /// Scratch buffers are reset and reused across multiple pack
+    /// assembly calls within one explicit workspace lifetime.
+    WorkspaceReuse,
 }
 
 impl ArenaMode {
@@ -175,6 +175,7 @@ impl ArenaMode {
         match self {
             Self::Disabled => "disabled",
             Self::RequestScoped => "request_scoped",
+            Self::WorkspaceReuse => "workspace_reuse",
         }
     }
 }
@@ -182,7 +183,167 @@ impl ArenaMode {
 /// bd-1prrl.7.3: Stable identifier for the arena allocation+reset
 /// policy version. Bump only when reset, poisoning, or lifetime
 /// behavior changes — pack content is independent of this value.
-pub const ARENA_POLICY_VERSION: &str = "1";
+pub const ARENA_POLICY_VERSION: &str = "2";
+
+pub const DEFAULT_ARENA_WORKSPACE_CAPACITY: usize = 4_096;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackArenaWorkspaceKey {
+    pub workspace: String,
+    pub schema: &'static str,
+    pub resource_profile: PackResourceProfile,
+    pub arena_policy_version: &'static str,
+}
+
+impl PackArenaWorkspaceKey {
+    #[must_use]
+    pub fn new(workspace: impl Into<String>, resource_profile: PackResourceProfile) -> Self {
+        Self {
+            workspace: workspace.into(),
+            schema: "ee.pack.v2",
+            resource_profile,
+            arena_policy_version: ARENA_POLICY_VERSION,
+        }
+    }
+
+    #[must_use]
+    pub fn generation_key(&self) -> String {
+        revision_hash_with_prefix(&[
+            "pack_arena_workspace",
+            &self.workspace,
+            self.schema,
+            self.resource_profile.as_str(),
+            self.arena_policy_version,
+        ])
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackArenaWorkspaceStats {
+    pub fresh_scratch_allocations: u64,
+    pub reset_count: u64,
+    pub fallback_count: u64,
+    pub max_candidate_capacity: usize,
+    pub poisoned: bool,
+    pub poison_reason: Option<&'static str>,
+}
+
+#[derive(Debug)]
+pub struct PackArenaWorkspace {
+    key: PackArenaWorkspaceKey,
+    capacity_cap: usize,
+    mmr_scratch: Option<MmrAssemblyScratch>,
+    facility_scratch: Option<PackDraftScratch>,
+    stats: PackArenaWorkspaceStats,
+}
+
+impl PackArenaWorkspace {
+    #[must_use]
+    pub fn new(key: PackArenaWorkspaceKey) -> Self {
+        Self::with_capacity_cap(key, DEFAULT_ARENA_WORKSPACE_CAPACITY)
+    }
+
+    #[must_use]
+    pub fn with_capacity_cap(key: PackArenaWorkspaceKey, capacity_cap: usize) -> Self {
+        Self {
+            key,
+            capacity_cap,
+            mmr_scratch: None,
+            facility_scratch: None,
+            stats: PackArenaWorkspaceStats::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn generation_key(&self) -> String {
+        self.key.generation_key()
+    }
+
+    #[must_use]
+    pub const fn capacity_cap(&self) -> usize {
+        self.capacity_cap
+    }
+
+    #[must_use]
+    pub fn stats(&self) -> PackArenaWorkspaceStats {
+        let mut stats = self.stats.clone();
+        stats.poisoned = self.stats.poisoned;
+        stats.poison_reason = self.stats.poison_reason;
+        stats
+    }
+
+    #[must_use]
+    pub const fn is_poisoned(&self) -> bool {
+        self.stats.poisoned
+    }
+
+    fn poison(&mut self, reason: &'static str) {
+        self.stats.poisoned = true;
+        self.stats.poison_reason = Some(reason);
+        self.mmr_scratch = None;
+        self.facility_scratch = None;
+    }
+
+    fn can_reuse_candidate_capacity(&mut self, candidate_count: usize) -> bool {
+        if self.stats.poisoned {
+            self.stats.fallback_count = self.stats.fallback_count.saturating_add(1);
+            return false;
+        }
+        if candidate_count > self.capacity_cap {
+            self.poison("candidate_capacity_exceeded");
+            self.stats.fallback_count = self.stats.fallback_count.saturating_add(1);
+            return false;
+        }
+        self.stats.max_candidate_capacity = self.stats.max_candidate_capacity.max(candidate_count);
+        true
+    }
+
+    fn take_mmr_scratch(&mut self, candidate_count: usize) -> Option<MmrAssemblyScratch> {
+        if !self.can_reuse_candidate_capacity(candidate_count) {
+            return None;
+        }
+        match self.mmr_scratch.take() {
+            Some(mut scratch) => {
+                scratch.reset_for_candidate_capacity(candidate_count);
+                self.stats.reset_count = self.stats.reset_count.saturating_add(1);
+                Some(scratch)
+            }
+            None => {
+                self.stats.fresh_scratch_allocations =
+                    self.stats.fresh_scratch_allocations.saturating_add(1);
+                Some(MmrAssemblyScratch::with_candidate_capacity(candidate_count))
+            }
+        }
+    }
+
+    fn put_mmr_scratch(&mut self, mut scratch: MmrAssemblyScratch, candidate_count: usize) {
+        scratch.reset_for_candidate_capacity(candidate_count);
+        self.mmr_scratch = Some(scratch);
+    }
+
+    fn take_facility_scratch(&mut self, candidate_count: usize) -> Option<PackDraftScratch> {
+        if !self.can_reuse_candidate_capacity(candidate_count) {
+            return None;
+        }
+        match self.facility_scratch.take() {
+            Some(mut scratch) => {
+                scratch.reset_for_candidate_capacity(candidate_count);
+                self.stats.reset_count = self.stats.reset_count.saturating_add(1);
+                Some(scratch)
+            }
+            None => {
+                self.stats.fresh_scratch_allocations =
+                    self.stats.fresh_scratch_allocations.saturating_add(1);
+                Some(PackDraftScratch::with_candidate_capacity(candidate_count))
+            }
+        }
+    }
+
+    fn put_facility_scratch(&mut self, mut scratch: PackDraftScratch, candidate_count: usize) {
+        scratch.reset_for_candidate_capacity(candidate_count);
+        self.facility_scratch = Some(scratch);
+    }
+}
 
 /// bd-1prrl.7.3: RAII lifetime guard for one arena scope (one pack
 /// assembly request). Owning the guard on the assembly stack frame
@@ -193,18 +354,23 @@ pub const ARENA_POLICY_VERSION: &str = "1";
 /// `PackDraftScratch` / `MmrAssemblyScratch` is the actual guarantee.
 struct ArenaScope {
     mode: ArenaMode,
+    reuse_generation: Option<String>,
 }
 
 impl ArenaScope {
-    fn new(mode: ArenaMode) -> Self {
+    fn new(mode: ArenaMode, reuse_generation: Option<String>) -> Self {
         tracing::trace!(
             target: "ee::pack::arena",
             arena_mode = mode.as_str(),
             arena_policy_version = ARENA_POLICY_VERSION,
+            arena_reuse_generation = reuse_generation.as_deref(),
             event = "scope_open",
             "arena scope opened for pack assembly"
         );
-        Self { mode }
+        Self {
+            mode,
+            reuse_generation,
+        }
     }
 }
 
@@ -214,6 +380,7 @@ impl Drop for ArenaScope {
             target: "ee::pack::arena",
             arena_mode = self.mode.as_str(),
             arena_policy_version = ARENA_POLICY_VERSION,
+            arena_reuse_generation = self.reuse_generation.as_deref(),
             event = "scope_close",
             arena_reset_count = 1u32,
             "arena scope closed; scratch dropped within request"
@@ -4825,14 +4992,76 @@ pub fn assemble_draft_with_profile_and_options_seeded(
     options: PackAssemblyOptions,
     determinism: &Deterministic<Seed>,
 ) -> Result<PackDraft, PackValidationError> {
+    assemble_draft_with_profile_and_options_seeded_inner(
+        profile,
+        query,
+        budget,
+        candidates,
+        options,
+        determinism,
+        None,
+    )
+}
+
+pub fn assemble_draft_with_profile_and_options_seeded_in_workspace(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
+    determinism: &Deterministic<Seed>,
+    workspace: &mut PackArenaWorkspace,
+) -> Result<PackDraft, PackValidationError> {
+    let query = query.into();
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assemble_draft_with_profile_and_options_seeded_inner(
+            profile,
+            query,
+            budget,
+            candidates,
+            options,
+            determinism,
+            Some(workspace),
+        )
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => {
+            workspace.poison("panic");
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn assemble_draft_with_profile_and_options_seeded_inner(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    mut options: PackAssemblyOptions,
+    determinism: &Deterministic<Seed>,
+    mut workspace: Option<&mut PackArenaWorkspace>,
+) -> Result<PackDraft, PackValidationError> {
     // bd-1prrl.7.3: open the arena scope before assembly so the
     // RAII guard's drop runs before the returned `PackDraft` is
-    // observed by callers. Scratch buffers are owned by
-    // assemble_mmr_draft / assemble_facility_location_draft and are
-    // dropped before this function returns regardless of mode, so
-    // both modes are request-scoped today and produce identical
-    // output (verified by the parity tests below).
-    let _arena_scope = ArenaScope::new(options.arena_mode);
+    // observed by callers. Workspace reuse requires an explicit
+    // PackArenaWorkspace; ordinary calls degrade to disabled allocation
+    // instead of stashing scratch in process-global state.
+    if options.arena_mode == ArenaMode::WorkspaceReuse && workspace.is_none() {
+        tracing::debug!(
+            target: "ee::pack::arena",
+            arena_mode = ArenaMode::WorkspaceReuse.as_str(),
+            arena_policy_version = ARENA_POLICY_VERSION,
+            event = "workspace_reuse_without_workspace",
+            "workspace_reuse requested without PackArenaWorkspace; falling back to disabled"
+        );
+        options.arena_mode = ArenaMode::Disabled;
+    }
+    let reuse_generation = workspace.as_ref().and_then(|arena| {
+        (options.arena_mode == ArenaMode::WorkspaceReuse).then(|| arena.generation_key())
+    });
+    let _arena_scope = ArenaScope::new(options.arena_mode, reuse_generation);
     match profile {
         ContextPackProfile::Submodular => {
             tracing::info!(
@@ -4844,7 +5073,14 @@ pub fn assemble_draft_with_profile_and_options_seeded(
                 arena_policy_version = ARENA_POLICY_VERSION,
                 "starting pack assembly"
             );
-            assemble_facility_location_draft(profile, query, budget, candidates, options)
+            match workspace.as_deref_mut() {
+                Some(arena) if options.arena_mode == ArenaMode::WorkspaceReuse => {
+                    assemble_facility_location_draft_reusing_workspace(
+                        profile, query, budget, candidates, options, arena,
+                    )
+                }
+                _ => assemble_facility_location_draft(profile, query, budget, candidates, options),
+            }
         }
         ContextPackProfile::Compact
         | ContextPackProfile::Balanced
@@ -4860,7 +5096,20 @@ pub fn assemble_draft_with_profile_and_options_seeded(
                 arena_policy_version = ARENA_POLICY_VERSION,
                 "starting pack assembly"
             );
-            assemble_mmr_draft(profile, query, budget, candidates, options, determinism)
+            match workspace.as_deref_mut() {
+                Some(arena) if options.arena_mode == ArenaMode::WorkspaceReuse => {
+                    assemble_mmr_draft_reusing_workspace(
+                        profile,
+                        query,
+                        budget,
+                        candidates,
+                        options,
+                        determinism,
+                        arena,
+                    )
+                }
+                _ => assemble_mmr_draft(profile, query, budget, candidates, options, determinism),
+            }
         }
     }
 }
@@ -4881,7 +5130,6 @@ impl PackDraftScratch {
         }
     }
 
-    #[cfg(test)]
     fn reset_for_candidate_capacity(&mut self, candidate_count: usize) {
         self.items.clear();
         self.omitted.clear();
@@ -4912,7 +5160,6 @@ impl MmrAssemblyScratch {
         }
     }
 
-    #[cfg(test)]
     fn reset_for_candidate_capacity(&mut self, candidate_count: usize) {
         self.draft.reset_for_candidate_capacity(candidate_count);
         self.selected_signatures.clear();
@@ -4925,7 +5172,6 @@ impl MmrAssemblyScratch {
     }
 }
 
-#[cfg(test)]
 fn ensure_vec_capacity<T>(values: &mut Vec<T>, candidate_count: usize) {
     let additional = candidate_count.saturating_sub(values.capacity());
     if additional > 0 {
@@ -5223,6 +5469,294 @@ fn assemble_mmr_draft(
     })
 }
 
+fn assemble_mmr_draft_reusing_workspace(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
+    determinism: &Deterministic<Seed>,
+    arena: &mut PackArenaWorkspace,
+) -> Result<PackDraft, PackValidationError> {
+    let query = query.into();
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    let candidate_count = candidates.len();
+    let Some(mut scratch) = arena.take_mmr_scratch(candidate_count) else {
+        let mut fallback_options = options;
+        fallback_options.arena_mode = ArenaMode::Disabled;
+        return assemble_mmr_draft(
+            profile,
+            query,
+            budget,
+            candidates,
+            fallback_options,
+            determinism,
+        );
+    };
+
+    let mmr_seed = determinism.shared_child("pack.mmr_tiebreak");
+    tracing::debug!(
+        target: "ee::pack::determinism",
+        seed_scope = %mmr_seed.scope(),
+        seed_hash = %mmr_seed.seed_hash_prefix(),
+        "threaded deterministic token through MMR pack assembly"
+    );
+
+    let query = trim_required(query, PackValidationError::EmptyQuery)?;
+    let mut candidates: Vec<MmrCandidate> = candidates
+        .into_iter()
+        .map(|candidate| MmrCandidate::from_candidate(candidate, options.output_redaction_enabled))
+        .collect();
+    candidates.sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
+
+    let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
+
+    let mut used_tokens = 0_u32;
+    let mut section_usage = SectionTokenUsage::default();
+    let mut next_rank = 1_u32;
+    let mut objective_value = 0.0_f32;
+
+    while !candidates.is_empty() {
+        let candidate_index =
+            select_next_candidate_index(&candidates, &scratch.max_selected_similarities);
+        let selected_max_similarity = scratch
+            .max_selected_similarities
+            .swap_remove(candidate_index);
+        let selection = candidates.swap_remove(candidate_index);
+        let marginal_gain =
+            strict_mmr_marginal_gain_from_similarity(&selection, selected_max_similarity);
+        if marginal_gain <= 0.0 {
+            scratch.coverage_fill_candidates.push(selection);
+            continue;
+        }
+
+        let section_used = section_usage.tokens_for(selection.candidate.section);
+
+        if facility_candidate_is_feasible(
+            &selection.candidate,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+        ) {
+            match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                Some(total) => {
+                    let rank = next_rank;
+                    next_rank = next_rank
+                        .checked_add(1)
+                        .ok_or(PackValidationError::CandidateRankOverflow)?;
+                    objective_value += marginal_gain.max(0.0);
+                    scratch.draft.steps.push(PackSelectionStep {
+                        rank,
+                        memory_id: selection.candidate.memory_id,
+                        marginal_gain,
+                        objective_value,
+                        token_cost: selection.candidate.estimated_tokens,
+                        feasible: true,
+                        covered_features: certificate_features(&selection.candidate),
+                    });
+                    used_tokens = total;
+                    let candidate = selection.candidate;
+                    let redactions = selection.redactions;
+                    section_usage.add_candidate(&candidate);
+                    let selected_signature = selection.signature.clone();
+                    scratch.selected_signatures.push(selection.signature);
+                    update_mmr_max_similarities(
+                        &mut scratch.max_selected_similarities,
+                        &candidates,
+                        &selected_signature,
+                    );
+                    scratch
+                        .draft
+                        .items
+                        .push(PackDraftItem::from_selected_candidate(
+                            rank,
+                            candidate,
+                            redactions,
+                            PackSelectionPhase::StrictMmr,
+                        ));
+                }
+                None => {
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                }
+            }
+        } else {
+            scratch.draft.omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::TokenBudgetExceeded,
+                Some(minimal_budget_for_candidate(
+                    profile,
+                    used_tokens,
+                    section_used,
+                    selection.candidate.section,
+                    selection.candidate.estimated_tokens,
+                )),
+            ));
+        }
+    }
+
+    if options.include_coverage_fill {
+        scratch
+            .coverage_fill_candidates
+            .sort_by(|left, right| compare_candidates(&left.candidate, &right.candidate));
+        let coverage_fill_limit = scratch.draft.items.len();
+        let mut coverage_fill_count = 0_usize;
+        let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
+        for selection in coverage_fill_candidates {
+            if selection.candidate.relevance.into_inner() < DEFAULT_COVERAGE_FILL_RELEVANCE_FLOOR {
+                scratch.draft.omitted.push(PackOmission::from_candidate_at(
+                    &selection.candidate,
+                    PackOmissionReason::BelowRelevanceFloor,
+                    PackRejectionStage::CandidateFilter,
+                    None,
+                ));
+                continue;
+            }
+            if coverage_fill_count >= coverage_fill_limit {
+                if coverage_fill_limit == 0 {
+                    let section_used = section_usage.tokens_for(selection.candidate.section);
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_used,
+                            selection.candidate.section,
+                            selection.candidate.estimated_tokens,
+                        )),
+                    ));
+                } else {
+                    scratch.draft.omitted.push(PackOmission::from_candidate(
+                        &selection.candidate,
+                        PackOmissionReason::RedundantCandidate,
+                        None,
+                    ));
+                }
+                continue;
+            }
+
+            let section_used = section_usage.tokens_for(selection.candidate.section);
+            if facility_candidate_is_feasible(
+                &selection.candidate,
+                used_tokens,
+                budget,
+                &quotas,
+                &section_usage,
+            ) {
+                match used_tokens.checked_add(selection.candidate.estimated_tokens) {
+                    Some(total) => {
+                        let rank = next_rank;
+                        next_rank = next_rank
+                            .checked_add(1)
+                            .ok_or(PackValidationError::CandidateRankOverflow)?;
+                        let marginal_gain =
+                            strict_mmr_marginal_gain(&selection, &scratch.selected_signatures);
+                        scratch.draft.steps.push(PackSelectionStep {
+                            rank,
+                            memory_id: selection.candidate.memory_id,
+                            marginal_gain,
+                            objective_value,
+                            token_cost: selection.candidate.estimated_tokens,
+                            feasible: true,
+                            covered_features: certificate_features(&selection.candidate),
+                        });
+                        used_tokens = total;
+                        let candidate = selection.candidate;
+                        let redactions = selection.redactions;
+                        section_usage.add_candidate(&candidate);
+                        scratch.selected_signatures.push(selection.signature);
+                        coverage_fill_count = coverage_fill_count.saturating_add(1);
+                        scratch
+                            .draft
+                            .items
+                            .push(PackDraftItem::from_selected_candidate(
+                                rank,
+                                candidate,
+                                redactions,
+                                PackSelectionPhase::CoverageFill,
+                            ));
+                    }
+                    None => {
+                        scratch.draft.omitted.push(PackOmission::from_candidate(
+                            &selection.candidate,
+                            PackOmissionReason::TokenBudgetExceeded,
+                            Some(minimal_budget_for_candidate(
+                                profile,
+                                used_tokens,
+                                section_used,
+                                selection.candidate.section,
+                                selection.candidate.estimated_tokens,
+                            )),
+                        ));
+                    }
+                }
+            } else {
+                scratch.draft.omitted.push(PackOmission::from_candidate(
+                    &selection.candidate,
+                    PackOmissionReason::TokenBudgetExceeded,
+                    Some(minimal_budget_for_candidate(
+                        profile,
+                        used_tokens,
+                        section_used,
+                        selection.candidate.section,
+                        selection.candidate.estimated_tokens,
+                    )),
+                ));
+            }
+        }
+    } else {
+        let coverage_fill_candidates = std::mem::take(&mut scratch.coverage_fill_candidates);
+        for selection in coverage_fill_candidates {
+            scratch.draft.omitted.push(PackOmission::from_candidate(
+                &selection.candidate,
+                PackOmissionReason::RedundantCandidate,
+                None,
+            ));
+        }
+    }
+
+    let items = scratch.draft.items.clone();
+    let omitted = scratch.draft.omitted.clone();
+    let steps = scratch.draft.steps.clone();
+    let draft = PackDraft {
+        query,
+        budget,
+        used_tokens,
+        selection_audit: PackSelectionAudit {
+            profile,
+            objective: PackSelectionObjective::MmrRedundancy,
+            algorithm_id: "mmr_with_coverage_fill_v1",
+            algorithm_description: "Deterministic MMR ranking with coverage-fill for relevant candidates that still fit the token budget.",
+            candidate_count,
+            selected_count: items.len(),
+            omitted_count: omitted.len(),
+            budget_limit: budget.max_tokens(),
+            budget_used: used_tokens,
+            total_objective_value: objective_value,
+            monotone: false,
+            submodular: false,
+            selected_items: selected_items_from_draft_items(&items),
+            steps,
+        },
+        items,
+        omitted,
+        hash: None,
+    };
+    arena.put_mmr_scratch(scratch, candidate_count);
+    Ok(draft)
+}
+
 fn assemble_facility_location_draft(
     profile: ContextPackProfile,
     query: impl Into<String>,
@@ -5396,6 +5930,177 @@ fn assemble_facility_location_draft(
         omitted,
         hash: None,
     })
+}
+
+fn assemble_facility_location_draft_reusing_workspace(
+    profile: ContextPackProfile,
+    query: impl Into<String>,
+    budget: TokenBudget,
+    candidates: impl IntoIterator<Item = PackCandidate>,
+    options: PackAssemblyOptions,
+    arena: &mut PackArenaWorkspace,
+) -> Result<PackDraft, PackValidationError> {
+    let query = query.into();
+    let candidates = candidates.into_iter().collect::<Vec<_>>();
+    let candidate_count = candidates.len();
+    let Some(mut scratch) = arena.take_facility_scratch(candidate_count) else {
+        let mut fallback_options = options;
+        fallback_options.arena_mode = ArenaMode::Disabled;
+        return assemble_facility_location_draft(
+            profile,
+            query,
+            budget,
+            candidates,
+            fallback_options,
+        );
+    };
+
+    let query = trim_required(query, PackValidationError::EmptyQuery)?;
+    let mut candidates: Vec<PackCandidate> = candidates;
+    candidates.sort_by(compare_candidates);
+    let mut candidates: Vec<FacilityCandidateProfile> = candidates
+        .into_iter()
+        .map(|candidate| {
+            FacilityCandidateProfile::from_candidate(candidate, options.output_redaction_enabled)
+        })
+        .collect();
+    let mut active: Vec<bool> = vec![true; candidates.len()];
+    let mut remaining_count = candidates.len();
+    let mut current_coverages = vec![0.0_f32; candidates.len()];
+    let similarity_cache = FacilitySimilarityCache::new(&candidates);
+    let mut selector =
+        FacilitySelectionQueue::new(&candidates, &current_coverages, &similarity_cache);
+
+    let quotas = SectionQuotas::for_profile(profile, budget.max_tokens());
+
+    let mut used_tokens = 0_u32;
+    let mut section_usage = SectionTokenUsage::default();
+    let mut next_rank = 1_u32;
+    let mut objective_value = 0.0_f32;
+
+    while remaining_count > 0 {
+        let Some((profile_index, marginal_gain)) = selector.select(
+            &candidates,
+            &current_coverages,
+            &similarity_cache,
+            used_tokens,
+            budget,
+            &quotas,
+            &section_usage,
+        ) else {
+            scratch.omitted.extend(active.iter().enumerate().filter_map(
+                |(profile_index, &is_active)| {
+                    if !is_active {
+                        return None;
+                    }
+                    let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                    Some(PackOmission::from_candidate(
+                        candidate,
+                        PackOmissionReason::TokenBudgetExceeded,
+                        Some(minimal_budget_for_candidate(
+                            profile,
+                            used_tokens,
+                            section_usage.tokens_for(candidate.section),
+                            candidate.section,
+                            candidate.estimated_tokens,
+                        )),
+                    ))
+                },
+            ));
+            break;
+        };
+
+        if marginal_gain <= FACILITY_LOCATION_EPSILON {
+            scratch.omitted.extend(active.iter().enumerate().filter_map(
+                |(profile_index, &is_active)| {
+                    if !is_active {
+                        return None;
+                    }
+                    let candidate = candidates.get(profile_index)?.candidate.as_ref()?;
+                    Some(PackOmission::from_candidate(
+                        candidate,
+                        PackOmissionReason::RedundantCandidate,
+                        None,
+                    ))
+                },
+            ));
+            break;
+        }
+
+        if !active.get(profile_index).copied().unwrap_or(false) {
+            continue;
+        }
+        active[profile_index] = false;
+        remaining_count = remaining_count.saturating_sub(1);
+        let Some(profile) = candidates.get_mut(profile_index) else {
+            continue;
+        };
+        let Some(candidate) = profile.candidate.take() else {
+            continue;
+        };
+        let redactions = std::mem::take(&mut profile.redactions);
+        let rank = next_rank;
+        next_rank = next_rank
+            .checked_add(1)
+            .ok_or(PackValidationError::CandidateRankOverflow)?;
+        used_tokens = used_tokens
+            .checked_add(candidate.estimated_tokens)
+            .ok_or(PackValidationError::CandidateRankOverflow)?;
+        section_usage.add_candidate(&candidate);
+        objective_value = update_facility_coverages_cached(
+            &candidates,
+            &mut current_coverages,
+            &similarity_cache,
+            profile_index,
+        );
+        selector.advance_round();
+        let covered_features = certificate_features(&candidate);
+        scratch.steps.push(PackSelectionStep {
+            rank,
+            memory_id: candidate.memory_id,
+            marginal_gain,
+            objective_value,
+            token_cost: candidate.estimated_tokens,
+            feasible: true,
+            covered_features,
+        });
+        scratch.items.push(PackDraftItem::from_selected_candidate(
+            rank,
+            candidate,
+            redactions,
+            PackSelectionPhase::FacilityLocation,
+        ));
+    }
+
+    let items = scratch.items.clone();
+    let omitted = scratch.omitted.clone();
+    let steps = scratch.steps.clone();
+    let draft = PackDraft {
+        query,
+        budget,
+        used_tokens,
+        selection_audit: PackSelectionAudit {
+            profile,
+            objective: PackSelectionObjective::FacilityLocation,
+            algorithm_id: "deterministic_greedy_facility_location_gain_per_token",
+            algorithm_description: "Deterministic budgeted greedy selection over the facility-location objective.",
+            candidate_count,
+            selected_count: items.len(),
+            omitted_count: omitted.len(),
+            budget_limit: budget.max_tokens(),
+            budget_used: used_tokens,
+            total_objective_value: objective_value,
+            monotone: true,
+            submodular: true,
+            selected_items: selected_items_from_draft_items(&items),
+            steps,
+        },
+        items,
+        omitted,
+        hash: None,
+    };
+    arena.put_facility_scratch(scratch, candidate_count);
+    Ok(draft)
 }
 
 fn selected_items_from_draft_items(items: &[PackDraftItem]) -> Vec<PackSelectedItem> {
@@ -6926,20 +7631,22 @@ mod tests {
         ContextPackProfile, ContextRequest, ContextRequestInput, ContextResponse,
         ContextResponseDegradation, ContextResponseSeverity, DEFAULT_CHARS_PER_TOKEN,
         FACILITY_LOCATION_DIVERSITY_KEY_SIMILARITY_FLOOR, PACK_ASSEMBLY_BUDGET_EXCEEDED_CODE,
-        PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1, PackAssemblyOptions,
-        PackAssemblySlo, PackAssemblySloActuals, PackAssemblySloStatus, PackCacheGovernor,
-        PackCacheStatus, PackCandidate, PackCandidateInput, PackDraft, PackDraftItem, PackHotset,
-        PackHotsetEntry, PackHotsetEntryKind, PackItemRedaction, PackOmissionReason,
-        PackProvenance, PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata,
-        PackScoreBreakdown, PackSection, PackSelectedItem, PackSelectionAudit,
-        PackSelectionObjective, PackSelectionPhase, PackTrustSignal, PackValidationError,
-        SectionQuota, SectionQuotas, TokenBudget, TokenEstimationStrategy,
-        WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR, WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR,
-        assemble_draft, assemble_draft_with_cache_governor, assemble_draft_with_profile,
-        assemble_draft_with_profile_and_options_seeded, candidate_similarity, escape_markdown_text,
-        estimate_character_heuristic_tokens, estimate_tokens, estimate_tokens_default,
-        estimate_word_heuristic_tokens, facility_similarity, pack_item_provenance_json,
-        prewarm_pack_hotset, subsystem_name,
+        PACK_ASSEMBLY_SLOW_CODE, PACK_REVISION_TOKEN_SCHEMA_V1, PackArenaWorkspace,
+        PackArenaWorkspaceKey, PackAssemblyOptions, PackAssemblySlo, PackAssemblySloActuals,
+        PackAssemblySloStatus, PackCacheGovernor, PackCacheStatus, PackCandidate,
+        PackCandidateInput, PackDraft, PackDraftItem, PackHotset, PackHotsetEntry,
+        PackHotsetEntryKind, PackItemRedaction, PackOmissionReason, PackProvenance,
+        PackRejectionStage, PackResourceProfile, PackRevisionMeshMetadata, PackScoreBreakdown,
+        PackSection, PackSelectedItem, PackSelectionAudit, PackSelectionObjective,
+        PackSelectionPhase, PackTrustSignal, PackValidationError, SectionQuota, SectionQuotas,
+        TokenBudget, TokenEstimationStrategy, WORD_HEURISTIC_TOKEN_MULTIPLIER_DENOMINATOR,
+        WORD_HEURISTIC_TOKEN_MULTIPLIER_NUMERATOR, assemble_draft,
+        assemble_draft_with_cache_governor, assemble_draft_with_profile,
+        assemble_draft_with_profile_and_options_seeded,
+        assemble_draft_with_profile_and_options_seeded_in_workspace, candidate_similarity,
+        escape_markdown_text, estimate_character_heuristic_tokens, estimate_tokens,
+        estimate_tokens_default, estimate_word_heuristic_tokens, facility_similarity,
+        pack_item_provenance_json, prewarm_pack_hotset, subsystem_name,
     };
     use crate::cache::{CacheBudget, MemoryPressure};
     use crate::config::MeshCommandMode;
@@ -7420,7 +8127,19 @@ mod tests {
             &super::ArenaMode::RequestScoped.as_str(),
             &"request_scoped",
             "RequestScoped wire-name must remain stable for tracing/perf consumers",
+        )?;
+        ensure_equal(
+            &super::ArenaMode::WorkspaceReuse.as_str(),
+            &"workspace_reuse",
+            "WorkspaceReuse wire-name must remain stable for tracing/perf consumers",
         )
+    }
+
+    fn arena_workspace() -> PackArenaWorkspace {
+        PackArenaWorkspace::new(PackArenaWorkspaceKey::new(
+            "file:///tmp/ee-arena-test-workspace",
+            PackResourceProfile::Standard,
+        ))
     }
 
     // bd-1prrl.7.3 parity goldens: arena mode is an internal allocation
@@ -7511,6 +8230,70 @@ mod tests {
     }
 
     #[test]
+    fn arena_mode_workspace_reuse_mmr_balanced_matches_disabled_and_reuses_scratch() -> TestResult {
+        let candidates = facility_benchmark_candidates(48)?;
+        let budget =
+            TokenBudget::new(4_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0xee_a7_e3_3a);
+        let disabled = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::Disabled,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("disabled draft rejected: {error:?}"))?;
+        let mut workspace = arena_workspace();
+        let first = assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        )
+        .map_err(|error| format!("workspace_reuse first draft rejected: {error:?}"))?;
+        let second = assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates,
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        )
+        .map_err(|error| format!("workspace_reuse second draft rejected: {error:?}"))?;
+
+        assert_packs_equal_across_arena_mode(&disabled, &first, "workspace_reuse_mmr_first")?;
+        assert_packs_equal_across_arena_mode(&disabled, &second, "workspace_reuse_mmr_second")?;
+        let stats = workspace.stats();
+        ensure_equal(
+            &stats.fresh_scratch_allocations,
+            &1,
+            "workspace reuse should allocate the MMR scratch once",
+        )?;
+        ensure(
+            stats.reset_count >= 1,
+            "workspace reuse should reset scratch for the second request",
+        )?;
+        ensure(
+            !stats.poisoned,
+            "workspace reuse should remain unpoisoned for normal MMR requests",
+        )
+    }
+
+    #[test]
     fn arena_mode_parity_facility_location_submodular() -> TestResult {
         let candidates = facility_benchmark_candidates(48)?;
         let budget =
@@ -7544,6 +8327,45 @@ mod tests {
             &disabled,
             &request_scoped,
             "facility_location_submodular",
+        )
+    }
+
+    #[test]
+    fn arena_mode_workspace_reuse_facility_location_matches_disabled() -> TestResult {
+        let candidates = facility_benchmark_candidates(48)?;
+        let budget =
+            TokenBudget::new(4_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0xfa_c1_77_07);
+        let disabled = assemble_draft_with_profile_and_options_seeded(
+            ContextPackProfile::Submodular,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::Disabled,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+        )
+        .map_err(|error| format!("disabled draft rejected: {error:?}"))?;
+        let mut workspace = arena_workspace();
+        let workspace_reuse = assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Submodular,
+            "ship arena parity",
+            budget,
+            candidates,
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        )
+        .map_err(|error| format!("workspace_reuse draft rejected: {error:?}"))?;
+        assert_packs_equal_across_arena_mode(
+            &disabled,
+            &workspace_reuse,
+            "workspace_reuse_facility_location_submodular",
         )
     }
 

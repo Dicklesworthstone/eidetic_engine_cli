@@ -112,6 +112,25 @@
         }
       }
     },
+    "ee_context_arena_workspace_reuse": {
+      "p50_ms": 95.0,
+      "p99_ms": 240.0,
+      "tolerance_pct_p50": 20,
+      "tolerance_pct_p99": 50,
+      "unstable": true,
+      "scales": {
+        "fixture_coverage_fill": {
+          "p50_ms": 95.0,
+          "p99_ms": 240.0,
+          "allocation_count": 1
+        },
+        "fixture_provenance_heavy": {
+          "p50_ms": 95.0,
+          "p99_ms": 240.0,
+          "allocation_count": 1
+        }
+      }
+    },
     "ee_why": {
       "p50_ms": 25.0,
       "p99_ms": 100.0,
