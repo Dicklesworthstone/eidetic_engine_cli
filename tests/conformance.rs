@@ -628,10 +628,7 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "--limit".to_owned(),
                 "3".to_owned(),
             ],
-            fixed_gap(
-                "bd-1wfvv",
-                "handler still wraps diagnostics in ee.response.v1",
-            ),
+            Enforcement::Required,
         ),
         success_case(
             "ENV-SWARM-BRIEF",

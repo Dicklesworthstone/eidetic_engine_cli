@@ -14,7 +14,7 @@ expression: expected_conformance_matrix(&base_cases)
 | context missing database | error | ee.error.v2.json | yes | required |
 | curate show | error | ee.error.v2.json | no | required |
 | reflect propose | error | ee.error.v2.json | no | required |
-| reflect request-ledger diagnostics | success | ee.response.v2.json | no | known gap bd-1wfvv |
+| reflect request-ledger diagnostics | success | ee.response.v2.json | no | required |
 | swarm brief | success | ee.response.v2.json | no | required |
 | swarm next-action | success | ee.response.v2.json | no | required |
 | swarm work-packet | success | ee.response.v2.json | no | required |

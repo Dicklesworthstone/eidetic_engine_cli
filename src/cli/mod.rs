@@ -37558,14 +37558,13 @@ where
             output::Renderer::Json
             | output::Renderer::Jsonl
             | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let envelope = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": true,
-                    "data": report,
-                });
-                write_stdout(stdout, &(envelope.to_string() + "\n"))
-            }
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::ResponseEnvelope::success()
+                    .data_raw(&report.data_json())
+                    .finish()
+                    + "\n"),
+            ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
