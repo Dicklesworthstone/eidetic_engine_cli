@@ -21,11 +21,10 @@
 //! actually observes, and capture it as a regression fixture so future
 //! asupersync upgrades cannot silently flip the contract.
 //!
-//! `ee`-side mitigations (a cooperative cancel-flag the algorithm body
-//! polls, or a process-wide concurrent-orphan cap) live downstream of
-//! whichever answer this fixture pins. Both are tracked separately in
-//! the bd-1y395 description; this file is the observability ground
-//! truth they would build on.
+//! `ee`-side mitigation lives in bd-3p05u: `run_with_budget` caps the
+//! number of graph budget workers that may remain in flight after a
+//! timeout. This file stays as the observability ground truth for the
+//! underlying asupersync drop contract the cap is protecting against.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

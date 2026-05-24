@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -40,8 +41,77 @@ pub const DEFAULT_FOREGROUND_BUDGET: Duration = Duration::from_millis(250);
 pub const DEFAULT_BACKGROUND_BUDGET: Duration = Duration::from_millis(2_000);
 pub const DEFAULT_CGSE_MODE: CompatibilityMode = CompatibilityMode::Strict;
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+// `spawn_blocking` cancellation is soft in asupersync: after timeout the
+// closure may continue running. Keep a bounded process-local slot until the
+// blocking closure actually exits so repeated graph timeouts cannot spawn an
+// unbounded orphan tail.
+const MAX_CONCURRENT_GRAPH_BUDGET_WORKERS: usize = 8;
 const UNTRACKED_GRAPH_SNAPSHOT_ID: &str = "untracked";
 const UNTRACKED_GRAPH_PARAMS_HASH: &str = "untracked";
+
+static GRAPH_BUDGET_WORKER_LIMITER: OnceLock<Arc<GraphBudgetWorkerLimiter>> = OnceLock::new();
+
+#[derive(Debug)]
+struct GraphBudgetWorkerLimiter {
+    active: AtomicUsize,
+    cap: usize,
+}
+
+impl GraphBudgetWorkerLimiter {
+    fn new(cap: usize) -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            cap: cap.max(1),
+        }
+    }
+
+    fn try_acquire(limiter: &Arc<Self>) -> Option<GraphBudgetWorkerSlot> {
+        let mut current = limiter.active.load(Ordering::Acquire);
+        loop {
+            if current >= limiter.cap {
+                return None;
+            }
+            match limiter.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(GraphBudgetWorkerSlot {
+                        limiter: Arc::clone(limiter),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+struct GraphBudgetWorkerSlot {
+    limiter: Arc<GraphBudgetWorkerLimiter>,
+}
+
+impl Drop for GraphBudgetWorkerSlot {
+    fn drop(&mut self) {
+        let previous = self.limiter.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "graph budget worker slot underflow");
+    }
+}
+
+fn graph_budget_worker_limiter() -> Arc<GraphBudgetWorkerLimiter> {
+    Arc::clone(GRAPH_BUDGET_WORKER_LIMITER.get_or_init(|| {
+        Arc::new(GraphBudgetWorkerLimiter::new(
+            MAX_CONCURRENT_GRAPH_BUDGET_WORKERS,
+        ))
+    }))
+}
 
 #[must_use]
 pub fn current_or_testing_cx() -> Cx {
@@ -164,11 +234,42 @@ where
     R: Send + 'static,
     F: FnOnce() -> R + Send + 'static,
 {
+    run_with_budget_observed_with_limiter(
+        cx,
+        name,
+        budget,
+        telemetry,
+        graph_budget_worker_limiter(),
+        f,
+    )
+}
+
+fn run_with_budget_observed_with_limiter<R, F>(
+    cx: &Cx,
+    name: &'static str,
+    budget: Duration,
+    telemetry: BudgetTelemetry<'_>,
+    worker_limiter: Arc<GraphBudgetWorkerLimiter>,
+    f: F,
+) -> GraphResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
     let started = Instant::now();
     if let Err(error) = check_cancelled(cx, name) {
         emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
         return Err(error);
     }
+
+    let Some(worker_slot) = GraphBudgetWorkerLimiter::try_acquire(&worker_limiter) else {
+        let error = GraphError::AlgorithmTimeout {
+            algorithm: name.to_owned(),
+            timeout_ms: duration_millis_saturating(budget),
+        };
+        emit_budget_failure_telemetry(name, budget, started, telemetry, &error);
+        return Err(error);
+    };
 
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .thread_name_prefix("ee-graph-budget")
@@ -180,6 +281,7 @@ where
 
     let outcome = runtime.block_on(async {
         let mut worker = std::pin::pin!(asupersync::runtime::spawn_blocking(move || {
+            let _worker_slot = worker_slot;
             std::panic::catch_unwind(AssertUnwindSafe(f))
         }));
         loop {
@@ -1212,7 +1314,7 @@ fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send + 'static>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -1317,6 +1419,24 @@ mod tests {
             .iter()
             .filter(|event| event.target == target)
             .collect()
+    }
+
+    fn test_budget_telemetry() -> BudgetTelemetry<'static> {
+        BudgetTelemetry {
+            snapshot_id: UNTRACKED_GRAPH_SNAPSHOT_ID,
+            params_hash: UNTRACKED_GRAPH_PARAMS_HASH,
+            emit_compute: true,
+            cache_hit: false,
+            sampling_used: false,
+        }
+    }
+
+    struct KillOnDrop(Arc<AtomicBool>);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
     }
 
     #[test]
@@ -1535,6 +1655,117 @@ mod tests {
             Some("5")
         );
         Ok(())
+    }
+
+    #[test]
+    fn run_with_budget_worker_limit_refuses_work_while_timed_out_worker_runs() -> TestResult {
+        let limiter = Arc::new(GraphBudgetWorkerLimiter::new(1));
+        let kill = Arc::new(AtomicBool::new(false));
+        let _kill_guard = KillOnDrop(Arc::clone(&kill));
+        let first_started = Arc::new(AtomicBool::new(false));
+        let first_kill = Arc::clone(&kill);
+        let first_limiter = Arc::clone(&limiter);
+        let first_started_for_worker = Arc::clone(&first_started);
+
+        let first_handle = thread::spawn(move || {
+            let cx = Cx::for_testing();
+            run_with_budget_observed_with_limiter(
+                &cx,
+                "worker_limit_first_timeout",
+                Duration::from_millis(250),
+                test_budget_telemetry(),
+                first_limiter,
+                move || {
+                    first_started_for_worker.store(true, Ordering::Release);
+                    let hard_stop = Instant::now() + Duration::from_secs(2);
+                    while !first_kill.load(Ordering::Acquire) && Instant::now() < hard_stop {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    1_u64
+                },
+            )
+        });
+
+        let start_deadline = Instant::now() + Duration::from_secs(1);
+        while !first_started.load(Ordering::Acquire) && Instant::now() < start_deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            first_started.load(Ordering::Acquire),
+            "first workload should have started and held the limiter slot"
+        );
+
+        let first = first_handle
+            .join()
+            .map_err(|_| "first worker-limit test thread panicked".to_owned())?;
+
+        match first {
+            Err(GraphError::AlgorithmTimeout {
+                algorithm,
+                timeout_ms,
+            }) => {
+                assert_eq!(algorithm, "worker_limit_first_timeout");
+                assert_eq!(timeout_ms, 250);
+            }
+            Err(other) => return Err(format!("expected first timeout, got {other:?}")),
+            Ok(value) => return Err(format!("expected first timeout, got Ok({value})")),
+        }
+
+        assert_eq!(
+            limiter.active_count(),
+            1,
+            "timed-out worker should keep its slot until the blocking closure exits"
+        );
+
+        let cx = Cx::for_testing();
+        let second_started = Arc::new(AtomicBool::new(false));
+        let second_started_for_worker = Arc::clone(&second_started);
+        let second = run_with_budget_observed_with_limiter(
+            &cx,
+            "worker_limit_second_refused",
+            Duration::from_millis(250),
+            test_budget_telemetry(),
+            Arc::clone(&limiter),
+            move || {
+                second_started_for_worker.store(true, Ordering::Release);
+                2_u64
+            },
+        );
+
+        match second {
+            Err(GraphError::AlgorithmTimeout {
+                algorithm,
+                timeout_ms,
+            }) => {
+                assert_eq!(algorithm, "worker_limit_second_refused");
+                assert_eq!(timeout_ms, 250);
+            }
+            Err(other) => return Err(format!("expected cap refusal timeout, got {other:?}")),
+            Ok(value) => return Err(format!("expected cap refusal timeout, got Ok({value})")),
+        }
+        assert!(
+            !second_started.load(Ordering::Acquire),
+            "cap refusal must happen before spawning another blocking closure"
+        );
+        assert_eq!(
+            limiter.active_count(),
+            1,
+            "refused work must not consume an extra limiter slot"
+        );
+
+        kill.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if limiter.active_count() == 0 {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        Err(format!(
+            "timed-out worker did not release its limiter slot after kill; active={}",
+            limiter.active_count()
+        ))
     }
 
     #[test]
