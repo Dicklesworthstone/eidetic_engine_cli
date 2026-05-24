@@ -1300,14 +1300,11 @@ pub fn promote_procedure(
         include_steps: true,
         include_verification: true,
     })?;
-    let verification = verify_procedure(&ProcedureVerifyOptions {
-        workspace: options.workspace.clone(),
-        procedure_id: procedure_id.to_owned(),
-        source_kind: Some("eval_fixture".to_owned()),
-        source_ids: show.procedure.evidence_ids.clone(),
-        dry_run: true,
-        allow_failure: true,
-    })?;
+    let verification = verify_procedure_for_promotion(
+        &options.workspace,
+        procedure_id,
+        &show.procedure.evidence_ids,
+    )?;
 
     let from_status = show.procedure.status.clone();
     let to_status = target_maturity.as_str().to_owned();
@@ -1477,6 +1474,47 @@ pub fn promote_procedure(
         next_actions,
         generated_at,
     })
+}
+
+fn verify_procedure_for_promotion(
+    workspace: &Path,
+    procedure_id: &str,
+    evidence_ids: &[String],
+) -> Result<ProcedureVerifyReport, DomainError> {
+    let options = ProcedureVerifyOptions {
+        workspace: workspace.to_path_buf(),
+        procedure_id: procedure_id.to_owned(),
+        source_kind: Some("mixed".to_owned()),
+        source_ids: Vec::new(),
+        dry_run: true,
+        allow_failure: true,
+    };
+    let source_results = evidence_ids
+        .iter()
+        .map(|source_id| {
+            let source_kind = promotion_evidence_source_kind(workspace, source_id);
+            inspect_named_verification_source(&options, &source_kind, source_id)
+        })
+        .collect::<Vec<_>>();
+    build_verification_report(&options, "mixed".to_owned(), source_results)
+}
+
+fn promotion_evidence_source_kind(workspace: &Path, source_id: &str) -> VerificationSourceKind {
+    let lookup_source_id = source_id
+        .trim()
+        .strip_prefix("evidence://")
+        .unwrap_or_else(|| source_id.trim());
+    if verification_source_candidate_paths(workspace, "repro_pack", lookup_source_id)
+        .iter()
+        .any(|path| {
+            procedure_path_is_file(path).ok() == Some(true)
+                || procedure_path_is_dir(path).ok() == Some(true)
+        })
+    {
+        VerificationSourceKind::ReproPack
+    } else {
+        VerificationSourceKind::EvalFixture
+    }
 }
 
 fn promote_persisted_procedure(
@@ -2628,54 +2666,103 @@ fn inspect_repro_pack_dir(path: &Path, source_id: &str) -> VerificationSourceRes
     if let Err(error) = ensure_no_procedure_path_symlink_components(path, "inspect repro pack") {
         return procedure_source_path_failure(path, "repro_pack", source_id, error);
     }
-    let required = ["env.json", "manifest.json", "repro.lock", "provenance.json"];
-    let mut step_results = Vec::new();
-    let mut failed = false;
-    for (index, file_name) in required.iter().enumerate() {
-        let file_path = path.join(file_name);
-        let result = match procedure_path_is_file(&file_path) {
-            Ok(true) if valid_json_file(&file_path) => "passed",
-            Ok(_) => {
-                failed = true;
+    match crate::core::repro::replay_pack(&crate::core::repro::ReplayOptions {
+        pack_path: path.to_path_buf(),
+        work_dir: path.to_path_buf(),
+        verify_hashes: true,
+        check_env: false,
+        dry_run: false,
+    }) {
+        Ok(report) => {
+            let result = if report.status.is_success() {
+                "passed"
+            } else {
                 "failed"
-            }
-            Err(error) => {
-                failed = true;
-                step_results.push(StepVerificationResult {
-                    step_id: format!("repro_pack_{source_id}_{file_name}"),
-                    sequence: usize_to_u32_saturating(index + 1),
-                    result: "failed".to_owned(),
-                    expected: Some(format!("{file_name} exists and parses as JSON")),
-                    actual: Some(format!("{}: {error}", file_path.display())),
-                });
-                continue;
-            }
-        };
-        step_results.push(StepVerificationResult {
-            step_id: format!("repro_pack_{source_id}_{file_name}"),
-            sequence: usize_to_u32_saturating(index + 1),
-            result: result.to_owned(),
-            expected: Some(format!("{file_name} exists and parses as JSON")),
-            actual: Some(file_path.display().to_string()),
-        });
+            };
+            verification_source_result(
+                source_id,
+                "repro_pack",
+                result,
+                Some(format!(
+                    "replayed repro pack {} with status {}",
+                    path.display(),
+                    report.status.as_str()
+                )),
+                repro_pack_replay_step_results(source_id, &report),
+            )
+        }
+        Err(error) => verification_source_result(
+            source_id,
+            "repro_pack",
+            "failed",
+            Some(format!(
+                "failed to replay repro pack {}: {}. Next: {}",
+                path.display(),
+                error.message(),
+                error
+                    .repair()
+                    .unwrap_or("regenerate the repro pack and rerun replay")
+            )),
+            vec![StepVerificationResult {
+                step_id: format!("repro_pack_{source_id}_replay"),
+                sequence: 1,
+                result: "failed".to_owned(),
+                expected: Some(
+                    "repro pack replays with manifest, lock, provenance, and artifact hashes"
+                        .to_owned(),
+                ),
+                actual: Some(format!("{} ({})", error.message(), error.code())),
+            }],
+        ),
     }
-    verification_source_result(
-        source_id,
-        "repro_pack",
-        if failed { "failed" } else { "passed" },
-        Some(format!("inspected repro pack {}", path.display())),
-        step_results,
-    )
 }
 
-fn valid_json_file(path: &Path) -> bool {
-    let Ok(true) = procedure_path_is_file(path) else {
-        return false;
-    };
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
-        .is_some()
+fn repro_pack_replay_step_results(
+    source_id: &str,
+    report: &crate::core::repro::ReplayReport,
+) -> Vec<StepVerificationResult> {
+    if report.verification_results.is_empty() {
+        return vec![StepVerificationResult {
+            step_id: format!("repro_pack_{source_id}_replay"),
+            sequence: 1,
+            result: if report.status.is_success() {
+                "passed"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+            expected: Some("repro pack replay produces verification records".to_owned()),
+            actual: Some(format!("status={}", report.status.as_str())),
+        }];
+    }
+
+    report
+        .verification_results
+        .iter()
+        .enumerate()
+        .map(|(index, verification)| StepVerificationResult {
+            step_id: format!("repro_pack_{source_id}_{}", verification.path),
+            sequence: usize_to_u32_saturating(index + 1),
+            result: if verification.passed {
+                "passed"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+            expected: Some(format!(
+                "{} hash matches {}",
+                verification.path, verification.expected_hash
+            )),
+            actual: Some(match (&verification.actual_hash, &verification.error) {
+                (Some(actual_hash), None) => format!("actual_hash={actual_hash}"),
+                (Some(actual_hash), Some(error)) => {
+                    format!("actual_hash={actual_hash}; error={error}")
+                }
+                (None, Some(error)) => format!("error={error}"),
+                (None, None) => "no replay detail".to_owned(),
+            }),
+        })
+        .collect()
 }
 
 fn verification_source_candidate_paths(
@@ -3739,6 +3826,53 @@ mod tests {
         }
     }
 
+    fn repro_pack_hash_payload(payload: &str) -> String {
+        format!("blake3:{}", blake3::hash(payload.as_bytes()).to_hex())
+    }
+
+    fn repro_pack_artifact_entry(path: &str, payload: &str) -> serde_json::Value {
+        json!({
+            "path": path,
+            "hash": repro_pack_hash_payload(payload),
+            "size_bytes": u64::try_from(payload.len()).unwrap_or(u64::MAX),
+            "required": true
+        })
+    }
+
+    fn write_procedure_repro_pack(pack_dir: &Path) -> TestResult {
+        fs::create_dir_all(pack_dir).map_err(|error| error.to_string())?;
+        let env_json = r#"{"schema":"ee.repro_pack.env.v1","os":"linux","arch":"x86_64","captured_at":"2026-05-01T00:00:00Z","env_vars":{},"tool_versions":{"ee":"0.1.0"}}"#;
+        let lock_json = r#"{"schema":"ee.repro_pack.lock.v1","lock_version":1,"locked_at":"2026-05-01T00:00:00Z","dependencies":[]}"#;
+        let provenance_json = r#"{"schema":"ee.repro_pack.provenance.v1","sources":[],"events":[],"verifications":[],"updated_at":"2026-05-01T00:00:00Z"}"#;
+        let manifest_json = serde_json::to_string(&json!({
+            "schema": "ee.repro_pack.manifest.v1",
+            "name": "procedure_repro_pack",
+            "version": "1.0.0",
+            "artifacts": [
+                repro_pack_artifact_entry("env.json", env_json),
+                repro_pack_artifact_entry("repro.lock", lock_json),
+                repro_pack_artifact_entry("provenance.json", provenance_json)
+            ],
+            "created_at": "2026-05-01T00:00:00Z"
+        }))
+        .map_err(|error| error.to_string())?;
+
+        fs::write(pack_dir.join("manifest.json"), manifest_json)
+            .map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("env.json"), env_json).map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("repro.lock"), lock_json).map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("provenance.json"), provenance_json)
+            .map_err(|error| error.to_string())
+    }
+
+    fn write_json_presence_only_repro_pack(pack_dir: &Path) -> TestResult {
+        fs::create_dir_all(pack_dir).map_err(|error| error.to_string())?;
+        for file_name in ["env.json", "manifest.json", "repro.lock", "provenance.json"] {
+            fs::write(pack_dir.join(file_name), "{}").map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn procedure_store_workspace() -> Result<PathBuf, String> {
         let mut payload = uuid::Uuid::now_v7().simple().to_string();
         payload.truncate(26);
@@ -4560,6 +4694,220 @@ mod tests {
         assert_eq!(failed.overall_result, "failed");
         assert_eq!(failed.fail_count, 1);
         assert_eq!(failed.sources_checked[0].step_results[0].result, "failed");
+        Ok(())
+    }
+
+    #[test]
+    fn verify_repro_pack_directory_replays_required_artifacts() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join("pack_pass");
+        write_procedure_repro_pack(&pack_dir)?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("repro_pack".to_owned()),
+            source_ids: vec!["pack_pass".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "passed");
+        assert_eq!(report.overall_result, "passed");
+        assert_eq!(report.pass_count, 1);
+        assert_eq!(report.fail_count, 0);
+        assert_eq!(report.sources_checked[0].source_kind, "repro_pack");
+        assert_eq!(report.sources_checked[0].result, "passed");
+        assert!(
+            report.sources_checked[0]
+                .step_results
+                .iter()
+                .any(|step| step.step_id.ends_with("env.json") && step.result == "passed"),
+            "valid repro pack should replay and verify artifact hashes"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_repro_pack_directory_rejects_hash_mismatch() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join("pack_hash_mismatch");
+        write_procedure_repro_pack(&pack_dir)?;
+        fs::write(pack_dir.join("env.json"), "tampered env payload\n")
+            .map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("repro_pack".to_owned()),
+            source_ids: vec!["pack_hash_mismatch".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert!(
+            report.sources_checked[0].step_results.iter().any(|step| {
+                step.step_id.ends_with("env.json")
+                    && step.result == "failed"
+                    && step
+                        .actual
+                        .as_deref()
+                        .is_some_and(|actual| actual.contains("hash mismatch"))
+            }),
+            "hash mismatch must be explicit replay evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_repro_pack_directory_rejects_missing_required_file() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join("pack_missing_file");
+        fs::create_dir_all(&pack_dir).map_err(|error| error.to_string())?;
+        let env_json = r#"{"schema":"ee.repro_pack.env.v1","os":"linux","arch":"x86_64","captured_at":"2026-05-01T00:00:00Z","env_vars":{},"tool_versions":{"ee":"0.1.0"}}"#;
+        let lock_json = r#"{"schema":"ee.repro_pack.lock.v1","lock_version":1,"locked_at":"2026-05-01T00:00:00Z","dependencies":[]}"#;
+        let provenance_json = r#"{"schema":"ee.repro_pack.provenance.v1","sources":[],"events":[],"verifications":[],"updated_at":"2026-05-01T00:00:00Z"}"#;
+        let manifest_json = serde_json::to_string(&json!({
+            "schema": "ee.repro_pack.manifest.v1",
+            "name": "procedure_repro_pack_missing_file",
+            "version": "1.0.0",
+            "artifacts": [
+                repro_pack_artifact_entry("env.json", env_json),
+                repro_pack_artifact_entry("repro.lock", lock_json),
+                repro_pack_artifact_entry("provenance.json", provenance_json)
+            ],
+            "created_at": "2026-05-01T00:00:00Z"
+        }))
+        .map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("manifest.json"), manifest_json)
+            .map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("env.json"), env_json).map_err(|error| error.to_string())?;
+        fs::write(pack_dir.join("repro.lock"), lock_json).map_err(|error| error.to_string())?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("repro_pack".to_owned()),
+            source_ids: vec!["pack_missing_file".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.status, "failed");
+        assert_eq!(report.overall_result, "failed");
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert!(
+            report.sources_checked[0].step_results.iter().any(|step| {
+                step.step_id.ends_with("provenance.json")
+                    && step.result == "failed"
+                    && step
+                        .actual
+                        .as_deref()
+                        .is_some_and(|actual| actual.contains("missing required artifact"))
+            }),
+            "missing required repro artifact must be explicit replay evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verify_repro_pack_json_presence_only_does_not_pass() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join("pack_json_only");
+        write_json_presence_only_repro_pack(&pack_dir)?;
+
+        let report = verify_procedure(&ProcedureVerifyOptions {
+            workspace,
+            procedure_id: "proc_test".to_owned(),
+            source_kind: Some("repro_pack".to_owned()),
+            source_ids: vec!["pack_json_only".to_owned()],
+            dry_run: true,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        assert_ne!(report.status, "passed");
+        assert_ne!(report.overall_result, "passed");
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.fail_count, 1);
+        assert_eq!(report.sources_checked[0].result, "failed");
+        assert!(
+            report.sources_checked[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("failed to replay repro pack")),
+            "JSON-presence-only pack should carry a replay repair hint"
+        );
+        assert_eq!(report.sources_checked[0].step_results[0].result, "failed");
+        Ok(())
+    }
+
+    #[test]
+    fn promote_dry_run_blocks_json_presence_only_repro_pack_evidence() -> TestResult {
+        let workspace = procedure_store_workspace()?;
+        let pack_dir = workspace
+            .join(".ee")
+            .join("procedure-verification")
+            .join("repro_pack")
+            .join("pack_decl_only");
+        write_json_presence_only_repro_pack(&pack_dir)?;
+        let proposal = propose_procedure(&ProcedureProposeOptions {
+            workspace: workspace.clone(),
+            title: "Replay procedure repro pack".to_owned(),
+            summary: Some("1. Replay the repro pack\n2. Inspect replay evidence".to_owned()),
+            evidence_ids: vec!["pack_decl_only".to_owned()],
+            dry_run: false,
+            ..Default::default()
+        })
+        .map_err(|error| error.message())?;
+
+        let promotion = promote_procedure(&ProcedurePromoteOptions {
+            workspace,
+            procedure_id: proposal.procedure_id,
+            to_maturity: Some("validated".to_owned()),
+            dry_run: true,
+            actor: Some("cod_2".to_owned()),
+            reason: Some("JSON-presence-only repro pack should not promote".to_owned()),
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(promotion.status, "blocked");
+        assert_eq!(promotion.verification.overall_result, "failed");
+        assert_eq!(promotion.verification.pass_count, 0);
+        assert_eq!(promotion.verification.fail_count, 1);
+        assert!(
+            promotion
+                .planned_effects
+                .iter()
+                .all(|effect| !effect.would_write),
+            "JSON-presence-only repro pack evidence must not enable promotion writes"
+        );
         Ok(())
     }
 
