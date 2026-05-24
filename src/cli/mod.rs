@@ -37431,18 +37431,19 @@ where
                 );
                 write_stdout(stdout, &(toon + "\n"))
             }
-            output::Renderer::Json
-            | output::Renderer::Jsonl
-            | output::Renderer::Compact
-            | output::Renderer::Hook => {
-                let envelope = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
-                    "success": true,
-                    "data": report,
-                });
-                write_stdout(stdout, &(envelope.to_string() + "\n"))
-            }
-        },
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(
+                stdout,
+                &(output::ResponseEnvelope::success()
+                    .data_raw(&report.data_json())
+                    .finish()
+                    + "\n"),
+            )
+        }
+    },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
 }
@@ -44159,8 +44160,13 @@ fn render_swarm_next_action_json(
             data
         }
     };
+    // bd-iky0b: swarm next-action emits the v2 response envelope to match
+    // swarm brief and swarm work-packet; the payload schema (data.schema =
+    // ee.swarm_next_action.v1) is unchanged. The conformance harness
+    // (tests/conformance.rs) previously marked this surface as a known
+    // gap; that gap is now closed.
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
         "degraded": degraded,

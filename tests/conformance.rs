@@ -663,10 +663,9 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "--command-timeout-ms".to_owned(),
                 "10".to_owned(),
             ],
-            fixed_gap(
-                "bd-iky0b",
-                "renderer still wraps next-action in ee.response.v1",
-            ),
+            // bd-iky0b (closed): swarm next-action now wraps in
+            // ee.response.v2; the previous fixed_gap is removed.
+            Enforcement::Required,
         ),
         success_case(
             "ENV-SWARM-WORK-PACKET",

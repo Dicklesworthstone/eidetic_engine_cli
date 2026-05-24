@@ -221,10 +221,7 @@ expression: case_catalog(&base_cases)
     ],
     "expected": "success",
     "schemaFile": "ee.response.v2.json",
-    "enforcement": {
-      "knownGap": "bd-iky0b",
-      "reason": "renderer still wraps next-action in ee.response.v1"
-    },
+    "enforcement": "required",
     "requireRecovery": false
   },
   {
