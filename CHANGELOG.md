@@ -24,6 +24,110 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-23
+
+Post-`v0.2.0` work focused on swarm coordination contracts, retrieval and
+ranking refinements, deterministic side-paths, and structural support for
+external derivation. No breaking schema bumps: every change layers on the
+v0.2 envelope, pack, and search contracts.
+
+### Added
+
+- `ee.swarm.work_packet.v1.candidateDecision` enum for stable, deterministic
+  per-candidate claim classification (`safe_to_claim`, `already_owned`,
+  `unsafe_due_to_conflict`, `blocked_by_dependency`, `blocked_by_verification`,
+  `stale_but_reclaimable`, `stale_review`, `external_state_required`).
+  Producer sorts candidate arrays, `unsafeReasons`, `staleReasons`, and
+  `sourceRefs` deterministically before `packetId` calculation. Only
+  `safe_to_claim` may support an automatic claim recommendation
+  (bd-2z5ly.7.5).
+- `ee.swarm_slo.scorecard.v1` schema and golden fixtures for replayable,
+  redaction-safe multi-agent ee workflow scorecards consumed from existing
+  `ee.agent_workload_trace.v1` rows. Records workload shape, coordination
+  posture, latency percentiles, stage attribution, replay hashes, and budget
+  verdicts without leaking memory bodies, mail bodies, command output, or
+  full file listings.
+- `ee.curate.propose_derived.v1` schema and the
+  `ee curate propose-derived` CLI surface for agent-driven, deterministic
+  derived-memory candidate proposals against explicit source refs
+  (kind+id+rationale), with dry-run support and audit-aware insert
+  (bd-kxm0c).
+- ADR 0043 (External-derivation candidates) + supporting schemas
+  (`ee.reflect.request.v1`, `ee.reflect.source_package.v1`) + four
+  deterministic e2e harness scripts for the no-LLM derivation lifecycle.
+- ADR 0032 implementation: `TrustClassTransition` with promote/demote/stable
+  direction, 0.90 CI default, audit-row carry-through, and `ee outcome`
+  integration so trust changes are deterministic and explainable.
+- `MemoryTierTransitionAuditBatch` (`ee.memory_tier.transition_audit.v1`) and
+  the `memory_tier_metadata_stale` degraded code; opt-in
+  `[pack] memory_tier_admission` config that biases ranking on hot/warm
+  candidates without filtering cold items.
+- `ee.pack.compression_manifest.v1` schema, `src/cache/pack_compression.rs`
+  zstd dictionary trainer, and `docs/pack-compression.md` operator guide;
+  `zstd = "0.13.3"` direct dependency.
+- `ee.swarm.work_packet.v1` schema, dedicated docs surface
+  (`docs/agent-ux/swarm-work-packet.md`, `docs/swarm/work_packet.md`), and
+  `ee swarm work-packet --json` CLI surface composed from existing
+  swarm-brief and next-action evidence with no side effects.
+- `ee curate propose-derived --dry-run` agent-facing surface for explicit
+  derived-memory candidates from caller-provided source refs.
+- Lexical RAM tier config block (`[search.lexical_ram_tier]`) and merged-
+  config plumbing into `ee config show` / `ee status`. Runtime `mmap` /
+  `mlock` / `madvise` still pending; status reports
+  `lexical_ram_tier_not_implemented` until the runtime slice lands.
+- `ee verify rch ingest` / `ee verify rch blockers` / `ee verify rch runs`
+  read-only durable-proof queries plus the supporting `verify_ledger`
+  fixtures.
+- `ee graph insights --section bridges` and `--section knowledgeSkyline`
+  graph-derived sections plus the `ee.graph.bridge_insight.v1` schema.
+- Pack-assembly arena allocator scratch types (`PackDraftScratch`,
+  `MmrAssemblyScratch`) for deterministic hot-path reuse without changing
+  pack hashes (bd-1i6np).
+- Curate workspace CASS aggregator
+  (`workspace_cass_review_candidates`) so review-candidate planning sees
+  the full corpus, not a single session window.
+- `br doctor --json` adapter and the `OwnedBeadsIntegrityInputs` surface
+  for richer Beads integrity reports (`external_changes_pending_import`,
+  `dirty_issue_count`, `br_reads_authoritative`).
+- Conformance harnesses for handoff / export / backup
+  (`tests/contracts/handoff_export_backup_conformance.rs`), CASS
+  subprocess supervision (`scripts/e2e_overhaul/cass_subprocess_supervision.sh`),
+  the SLO scorecard, and the `cass_unavailable` ee.error.v2 degradation
+  routing (bd-33t39).
+- Real-binary E2E pin tests for `ee graph centrality`,
+  `ee graph centrality-refresh`, `ee graph path`, `ee memory show / history`,
+  `ee memory expire`, `ee curate candidates --filter`, and the MCP
+  `initialize / tools/call / resources/read / prompts/get` error envelopes.
+
+### Changed
+
+- Refactor: `audit_context_pack_assembly_with_connection` short-circuits
+  when the workspace row is absent so unregistered-workspace pack reads no
+  longer leak FK-error diagnostics.
+- Refactor: replace correlated subselect in last-audit-row query with a
+  direct `ORDER BY timestamp DESC, id DESC LIMIT 1` scan.
+- CASS subprocess adapter (`src/cass/process.rs`) gains a documented
+  supervision lifecycle: bounded I/O timeouts, capture vs. streaming
+  classification, deterministic child reap on timeout.
+- CASS import error envelopes carry structured details via the new
+  `DomainError::ImportWithDetails` variant.
+- Curate / Situation / Tripwire / Preflight / Certificate / Memory-revise
+  surfaces moved from text-heuristic stubs to persisted-store reads with
+  honest degraded envelopes — see
+  `docs/mechanical-boundary-command-inventory.md`.
+- v0.2 envelope examples across AGENTS.md, README.md, the migration guides,
+  the perf-forensics cookbook, the workspace-hygiene workflow, and the
+  ux-style-guide aligned to `ee.response.v2` / `ee.error.v2` everywhere.
+
+### Fixed
+
+- `cass_unavailable` ee.error.v2 routing for any `DomainError::Import` /
+  `ImportWithDetails` whose message contains the case-insensitive
+  `"cass binary"` substring (bd-33t39).
+- Workspace-id audit FK errors on unregistered workspace pack assemblies.
+- Cooperative graph refresh starvation: long-running bridges/articulation
+  refreshes no longer block PageRank / HITS slots.
+
 ## [0.2.0] - 2026-05-21
 
 Post-`v0.1.0` work is a large hardening and expansion wave. The main themes are
@@ -471,6 +575,7 @@ Closed workstreams behind this changelog:
   workspace hygiene, QoS, flight recorder, mesh/Tailscale optionality, duplicate
   work detection, host profiles, and crowded-checkout ergonomics.
 
-[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...main
+[Unreleased]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.3.0...main
+[0.3.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Dicklesworthstone/eidetic_engine_cli/tree/v0.1.0
