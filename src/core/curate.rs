@@ -10243,6 +10243,7 @@ fn persist_create_derived_candidate_application_inner(
             repair: Some(format!("ee curate validate {}", stored.id)),
         });
     }
+    maybe_inject_create_derived_apply_failure(stored, "before_audit_write")?;
 
     let audit_id = generate_audit_id();
     connection
@@ -15965,12 +15966,21 @@ mod tests {
 
     #[test]
     fn apply_curation_candidate_rolls_back_create_derived_failures() -> TestResult {
+        // bd-17i26: `before_audit_write` is the post-mark_applied / pre-insert_audit
+        // phase. The whole create-derived apply runs inside
+        // `connection.with_transaction(|| ...)` so a failure here MUST roll back
+        // the `mark_curation_candidate_applied` status flip (otherwise the
+        // candidate would be left in "applied" with no MEMORY_CREATE audit row).
+        // `assert_create_derived_apply_failure_rolls_back` asserts candidate
+        // status stays "approved" and the audit ledger has no MEMORY_CREATE row,
+        // which is the production invariant this phase exists to prove.
         for (index, phase) in [
             "after_memory_insert",
             "after_derived_links",
             "after_evidence_attachment",
             "after_search_job_enqueue",
             "before_candidate_applied",
+            "before_audit_write",
         ]
         .into_iter()
         .enumerate()
