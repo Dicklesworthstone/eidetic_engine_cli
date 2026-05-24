@@ -1,0 +1,30 @@
+{
+  "schema": "ee.git_ahead_snapshot.v1",
+  "state": "single_owner_ahead",
+  "headRef": "main",
+  "upstreamRef": "origin/main",
+  "aheadCount": 1,
+  "behindCount": 0,
+  "commits": [
+    {
+      "hash": "aaaaaaaaaaaaaaaa",
+      "shortHash": "aaaaaaaaaaaa",
+      "author": "Codex",
+      "subject": "fix: parser (bd-2gc7r.1)",
+      "beadRefs": [
+        "bd-2gc7r.1"
+      ]
+    }
+  ],
+  "authors": [
+    "Codex"
+  ],
+  "beadRefs": [
+    "bd-2gc7r.1"
+  ],
+  "mixedAuthorAhead": false,
+  "mixedBeadAhead": false,
+  "ambiguousAhead": false,
+  "peerOwnedAheadRisk": false,
+  "degraded": []
+}

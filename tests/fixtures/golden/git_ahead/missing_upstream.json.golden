@@ -1,0 +1,22 @@
+{
+  "schema": "ee.git_ahead_snapshot.v1",
+  "state": "no_upstream",
+  "headRef": "main",
+  "aheadCount": 0,
+  "behindCount": 0,
+  "commits": [],
+  "authors": [],
+  "beadRefs": [],
+  "mixedAuthorAhead": false,
+  "mixedBeadAhead": false,
+  "ambiguousAhead": false,
+  "peerOwnedAheadRisk": false,
+  "degraded": [
+    {
+      "code": "git_ahead_no_upstream",
+      "severity": "warning",
+      "message": "Git did not report an upstream branch for this checkout.",
+      "repair": "Set or inspect the upstream before evaluating push readiness."
+    }
+  ]
+}

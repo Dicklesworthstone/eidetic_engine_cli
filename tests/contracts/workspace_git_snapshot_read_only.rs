@@ -19,7 +19,8 @@ use ee::core::git_ahead::{
     GIT_AHEAD_LOG_FAILED_CODE, GIT_AHEAD_LOG_FORMAT, GIT_AHEAD_LOG_TIMEOUT_CODE,
     GIT_AHEAD_NO_UPSTREAM_CODE, GIT_AHEAD_SNAPSHOT_SCHEMA_V1, GIT_AHEAD_STATE_LOG_FAILED,
     GIT_AHEAD_STATE_LOG_TIMEOUT, GIT_AHEAD_STATE_MIXED_AUTHOR, GIT_AHEAD_STATE_NO_UPSTREAM,
-    GitAheadLogState, summarize_git_ahead, summarize_git_ahead_with_log_state,
+    GIT_AHEAD_STATE_SINGLE_OWNER, GIT_AHEAD_STATE_ZERO_AHEAD, GitAheadLogState,
+    summarize_git_ahead, summarize_git_ahead_with_log_state,
 };
 use ee::core::swarm_brief::{
     SwarmBriefCommandError, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshotOptions,
@@ -260,6 +261,77 @@ fn workspace_git_ahead_snapshot_json_contract_covers_mixed_owner_ahead() -> Test
     assert_eq!(
         format!("{pretty}\n"),
         include_str!("../fixtures/golden/git_ahead/mixed_owner_ahead.json.golden")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_ahead_snapshot_json_contract_covers_clean_and_single_owner_goldens() -> TestResult
+{
+    let no_ahead = summarize_git_ahead(
+        concat!(
+            "# branch.head main\n",
+            "# branch.upstream origin/main\n",
+            "# branch.ab +0 -0\n",
+        ),
+        Some(""),
+    );
+    let no_ahead_value = serde_json::to_value(&no_ahead)
+        .map_err(|error| format!("serialize no-ahead snapshot: {error}"))?;
+    let no_ahead_pretty = serde_json::to_string_pretty(&no_ahead)
+        .map_err(|error| format!("pretty serialize no-ahead snapshot: {error}"))?;
+
+    assert_eq!(no_ahead_value["schema"], GIT_AHEAD_SNAPSHOT_SCHEMA_V1);
+    assert_eq!(no_ahead_value["state"], GIT_AHEAD_STATE_ZERO_AHEAD);
+    assert_eq!(no_ahead_value["peerOwnedAheadRisk"], false);
+    assert_eq!(
+        format!("{no_ahead_pretty}\n"),
+        include_str!("../fixtures/golden/git_ahead/no_ahead.json.golden")
+    );
+
+    let single_owner = summarize_git_ahead(
+        concat!(
+            "# branch.head main\n",
+            "# branch.upstream origin/main\n",
+            "# branch.ab +1 -0\n",
+        ),
+        Some("aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n"),
+    );
+    let single_owner_value = serde_json::to_value(&single_owner)
+        .map_err(|error| format!("serialize single-owner snapshot: {error}"))?;
+    let single_owner_pretty = serde_json::to_string_pretty(&single_owner)
+        .map_err(|error| format!("pretty serialize single-owner snapshot: {error}"))?;
+
+    assert_eq!(single_owner_value["schema"], GIT_AHEAD_SNAPSHOT_SCHEMA_V1);
+    assert_eq!(single_owner_value["state"], GIT_AHEAD_STATE_SINGLE_OWNER);
+    assert_eq!(single_owner_value["peerOwnedAheadRisk"], false);
+    assert_eq!(
+        format!("{single_owner_pretty}\n"),
+        include_str!("../fixtures/golden/git_ahead/single_owner_ahead.json.golden")
+    );
+
+    Ok(())
+}
+
+#[test]
+fn workspace_git_ahead_snapshot_json_contract_covers_missing_upstream_golden() -> TestResult {
+    let snapshot = summarize_git_ahead(
+        concat!("# branch.head main\n", "# branch.ab +0 -0\n",),
+        Some(""),
+    );
+    let value = serde_json::to_value(&snapshot)
+        .map_err(|error| format!("serialize missing-upstream snapshot: {error}"))?;
+    let pretty = serde_json::to_string_pretty(&snapshot)
+        .map_err(|error| format!("pretty serialize missing-upstream snapshot: {error}"))?;
+
+    assert_eq!(value["schema"], GIT_AHEAD_SNAPSHOT_SCHEMA_V1);
+    assert_eq!(value["state"], GIT_AHEAD_STATE_NO_UPSTREAM);
+    assert_eq!(value["peerOwnedAheadRisk"], false);
+    assert_eq!(value["degraded"][0]["code"], GIT_AHEAD_NO_UPSTREAM_CODE);
+    assert_eq!(
+        format!("{pretty}\n"),
+        include_str!("../fixtures/golden/git_ahead/missing_upstream.json.golden")
     );
 
     Ok(())

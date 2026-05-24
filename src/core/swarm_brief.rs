@@ -17,6 +17,10 @@ use serde_json::{Value, json};
 
 use crate::core::agent_detect::{AgentInventoryStatus, AgentStatusOptions, gather_agent_status};
 use crate::core::budget_delta_recommender::build_host_calibration_posture;
+use crate::core::git_ahead::{
+    GIT_AHEAD_LOG_FORMAT, GitAheadLogState, GitAheadSnapshot, summarize_git_ahead,
+    summarize_git_ahead_with_log_state,
+};
 use crate::core::profile::{HostResourceProbeReport, recommend_operating_profile};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::verify::{
@@ -152,6 +156,8 @@ pub struct SwarmBriefReport {
     pub recent_commits: Vec<SwarmBriefCommit>,
     #[serde(skip_serializing_if = "WorkspaceGitOperationState::is_clean")]
     pub git_operation_state: WorkspaceGitOperationState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_ahead: Option<GitAheadSnapshot>,
     pub beads: SwarmBriefBeadsSummary,
     pub bv: Option<SwarmBriefBvSummary>,
     pub file_reservations: Vec<SwarmBriefFileReservation>,
@@ -189,6 +195,7 @@ impl SwarmBriefReport {
             dirty_files: Vec::new(),
             recent_commits: Vec::new(),
             git_operation_state: WorkspaceGitOperationState::default(),
+            git_ahead: None,
             beads: SwarmBriefBeadsSummary::default(),
             bv: None,
             file_reservations: Vec::new(),
@@ -1076,6 +1083,7 @@ pub enum SwarmBriefContribution {
         dirty_files: Vec<SwarmBriefDirtyFile>,
         recent_commits: Vec<SwarmBriefCommit>,
         operation_state: WorkspaceGitOperationState,
+        git_ahead: Option<GitAheadSnapshot>,
     },
     Beads(SwarmBriefBeadsSummary),
     Bv(SwarmBriefBvSummary),
@@ -1159,11 +1167,15 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for GitSourceAdapter<'_
                 Vec::new()
             }
         };
+        let git_ahead = collect_git_ahead_snapshot(self.runner, options, &mut degraded);
 
         let item_count = dirty_files.len()
             + recent_commits.len()
             + operation_state.operations.len()
-            + operation_state.autostash_markers.len();
+            + operation_state.autostash_markers.len()
+            + git_ahead
+                .as_ref()
+                .map_or(0, |snapshot| 1 + snapshot.commits.len());
         SwarmBriefSourceOutput {
             snapshot: SwarmBriefSourceSnapshot::ready(
                 SwarmBriefSourceKind::Git,
@@ -1175,9 +1187,76 @@ impl<R: SwarmBriefCommandRunner> SwarmBriefSourceAdapter for GitSourceAdapter<'_
                 dirty_files,
                 recent_commits,
                 operation_state,
+                git_ahead,
             },
         }
     }
+}
+
+fn collect_git_ahead_snapshot<R: SwarmBriefCommandRunner>(
+    runner: &R,
+    options: &SwarmBriefCollectOptions,
+    degraded: &mut Vec<SwarmBriefDegradation>,
+) -> Option<GitAheadSnapshot> {
+    let status_args = ["status", "--porcelain=v2", "--branch"];
+    let status = match runner.run(
+        "git",
+        &status_args,
+        &options.workspace,
+        options.command_timeout_ms,
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            degraded.push(error.to_degradation(
+                SwarmBriefSourceKind::Git,
+                GIT_UNAVAILABLE_CODE,
+                "Run `git status --porcelain=v2 --branch` in the workspace.",
+            ));
+            return None;
+        }
+    };
+
+    let status_only = summarize_git_ahead(&status.stdout, Some(""));
+    let snapshot = match (status_only.ahead_count, status_only.upstream_ref.as_deref()) {
+        (0, _) | (_, None) => status_only,
+        (_, Some(upstream)) => {
+            let range = format!("{upstream}..HEAD");
+            let format_arg = format!("--format={GIT_AHEAD_LOG_FORMAT}");
+            let args = ["log".to_string(), range, format_arg];
+            let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            match runner.run(
+                "git",
+                &arg_refs,
+                &options.workspace,
+                options.command_timeout_ms,
+            ) {
+                Ok(output) => summarize_git_ahead(&status.stdout, Some(&output.stdout)),
+                Err(SwarmBriefCommandError::TimedOut { .. }) => {
+                    summarize_git_ahead_with_log_state(&status.stdout, GitAheadLogState::TimedOut)
+                }
+                Err(SwarmBriefCommandError::Failed { .. }) => {
+                    summarize_git_ahead_with_log_state(&status.stdout, GitAheadLogState::Failed)
+                }
+                Err(
+                    SwarmBriefCommandError::Unavailable(_) | SwarmBriefCommandError::InvalidUtf8(_),
+                ) => summarize_git_ahead_with_log_state(
+                    &status.stdout,
+                    GitAheadLogState::Unavailable,
+                ),
+            }
+        }
+    };
+
+    degraded.extend(snapshot.degraded.iter().map(|entry| {
+        SwarmBriefDegradation::warning(
+            SwarmBriefSourceKind::Git,
+            entry.code,
+            entry.message,
+            Some(entry.repair.to_string()),
+        )
+    }));
+
+    Some(snapshot)
 }
 
 pub struct BeadsSourceAdapter<'a, R> {
@@ -2350,10 +2429,12 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
             dirty_files,
             recent_commits,
             operation_state,
+            git_ahead,
         } => {
             report.dirty_files.extend(dirty_files);
             report.recent_commits.extend(recent_commits);
             report.git_operation_state = operation_state;
+            report.git_ahead = git_ahead;
         }
         SwarmBriefContribution::Beads(summary) => {
             report.beads.ready.extend(summary.ready);
@@ -2503,6 +2584,9 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             "gitOperationInProgress": report.git_operation_state.in_progress,
             "gitOperationMarkerCount": report.git_operation_state.operations.len(),
             "gitAutostashMarkerCount": report.git_operation_state.autostash_markers.len(),
+            "gitAheadCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.ahead_count),
+            "gitAheadCommitCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.commits.len()),
+            "gitAheadPeerOwnedRisk": report.git_ahead.as_ref().is_some_and(|snapshot| snapshot.peer_owned_ahead_risk),
             "readyWorkCount": report.beads.ready.len(),
             "blockedWorkCount": report.beads.blocked.len(),
             "inProgressWorkCount": report.beads.in_progress.len(),
@@ -2536,6 +2620,7 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
             }).unwrap_or_default(),
         },
         "memoryDrift": swarm_brief_memory_drift_summary(report),
+        "gitAhead": swarm_brief_git_ahead_summary(report),
         "verificationBroker": swarm_brief_verification_broker_summary_value(report),
         "sourceStatusCounts": source_status_counts,
         "sourceStatuses": swarm_brief_source_status_summaries(report),
@@ -2642,6 +2727,23 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
         .get("unverifiableCount")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let git_ahead = summary.get("gitAhead").unwrap_or(&Value::Null);
+    let git_ahead_status = git_ahead
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let git_ahead_count = git_ahead
+        .get("aheadCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let git_ahead_commits = git_ahead
+        .get("commitCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let git_ahead_peer_risk = git_ahead
+        .get("peerOwnedAheadRisk")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let top_recommendations = summary
         .get("topRecommendations")
         .and_then(Value::as_array)
@@ -2720,6 +2822,11 @@ pub fn render_swarm_brief_summary_for_handoff(summary: &Value) -> String {
     if memory_drift_status != "unknown" && memory_drift_affected > 0 {
         lines.push(format!(
             "Memory drift posture: status={memory_drift_status}, affected={memory_drift_affected}, changed={memory_drift_changed}, missing_source={memory_drift_missing}, unverifiable={memory_drift_unverifiable}."
+        ));
+    }
+    if git_ahead_peer_risk {
+        lines.push(format!(
+            "Push-safety posture: status={git_ahead_status}, ahead={git_ahead_count}, commits={git_ahead_commits}, peer_owned_risk=true; coordinate and inspect git log origin/main..HEAD --oneline --decorate before pushing."
         ));
     }
     if symbol_risk_status != "unknown"
@@ -3336,6 +3443,39 @@ fn swarm_brief_source_provenance_summaries(report: &SwarmBriefReport) -> Vec<Val
         .collect()
 }
 
+fn swarm_brief_git_ahead_summary(report: &SwarmBriefReport) -> Value {
+    let Some(snapshot) = &report.git_ahead else {
+        return json!({
+            "status": "unknown",
+            "available": false,
+            "aheadCount": 0,
+            "commitCount": 0,
+            "peerOwnedAheadRisk": false,
+            "degradedCodes": [],
+            "rawCommitSubjectsIncluded": false,
+        });
+    };
+
+    json!({
+        "schema": snapshot.schema,
+        "status": snapshot.state,
+        "available": true,
+        "headRef": snapshot.head_ref.as_deref(),
+        "upstreamRef": snapshot.upstream_ref.as_deref(),
+        "aheadCount": snapshot.ahead_count,
+        "behindCount": snapshot.behind_count,
+        "commitCount": snapshot.commits.len(),
+        "authorCount": snapshot.authors.len(),
+        "beadRefCount": snapshot.bead_refs.len(),
+        "mixedAuthorAhead": snapshot.mixed_author_ahead,
+        "mixedBeadAhead": snapshot.mixed_bead_ahead,
+        "ambiguousAhead": snapshot.ambiguous_ahead,
+        "peerOwnedAheadRisk": snapshot.peer_owned_ahead_risk,
+        "degradedCodes": snapshot.degraded.iter().map(|entry| entry.code).collect::<Vec<_>>(),
+        "rawCommitSubjectsIncluded": false,
+    })
+}
+
 fn swarm_brief_memory_drift_summary(report: &SwarmBriefReport) -> Value {
     let Some(summary) = &report.memory_drift else {
         return json!({
@@ -3932,6 +4072,7 @@ fn recommend_swarm_brief_actions(report: &SwarmBriefReport) -> Vec<SwarmBriefRec
     recommendations.extend(degraded_capability_recommendations(report));
     recommendations.extend(resource_pressure_recommendations(report));
     recommendations.extend(git_operation_state_recommendations(report));
+    recommendations.extend(git_ahead_recommendations(report));
     recommendations.extend(surface_conflict_recommendations(report));
     recommendations.extend(memory_drift_recommendations(report));
     recommendations.extend(verification_broker_recommendations(report));
@@ -4206,6 +4347,89 @@ fn verification_broker_evidence(summary: &SwarmBriefVerificationBrokerSummary) -
     if let Some(slots_needed) = summary.rch_queue_head_slots_needed {
         evidence.insert(format!("rch_queue_head_slots_needed:{slots_needed}"));
     }
+    evidence.into_iter().collect()
+}
+
+fn git_ahead_recommendations(report: &SwarmBriefReport) -> Vec<SwarmBriefRecommendation> {
+    let Some(snapshot) = &report.git_ahead else {
+        return Vec::new();
+    };
+    if !snapshot.peer_owned_ahead_risk {
+        return Vec::new();
+    }
+
+    let mut reason_codes = BTreeSet::from([
+        "git_ahead_peer_owned_risk".to_string(),
+        format!("git_ahead_state:{}", snapshot.state),
+    ]);
+    if snapshot.mixed_author_ahead {
+        reason_codes.insert("git_ahead_mixed_author".to_string());
+    }
+    if snapshot.mixed_bead_ahead {
+        reason_codes.insert("git_ahead_mixed_bead".to_string());
+    }
+    if snapshot.ambiguous_ahead {
+        reason_codes.insert("git_ahead_ambiguous".to_string());
+    }
+    reason_codes.extend(
+        snapshot
+            .degraded
+            .iter()
+            .map(|entry| format!("git_ahead_degraded:{}", entry.code)),
+    );
+
+    vec![SwarmBriefRecommendation {
+        id: "rec.git.coordinate_mixed_owner_ahead".to_string(),
+        kind: "push_safety".to_string(),
+        confidence: coordination_confidence(report),
+        severity: git_ahead_recommendation_severity(snapshot).to_string(),
+        reason_codes: reason_codes.into_iter().collect(),
+        evidence: git_ahead_recommendation_evidence(snapshot),
+        suggested_commands: vec![
+            "Coordinate with peers before pushing mixed-owner, mixed-bead, or ambiguous ahead commits.".to_string(),
+            "git log origin/main..HEAD --oneline --decorate".to_string(),
+        ],
+        must_not_do: vec![
+            "Do not automatically push when ahead commits may include peer-owned work.".to_string(),
+            "Do not rewrite, rebase, reset, or squash ahead commits to make the warning disappear.".to_string(),
+        ],
+    }]
+}
+
+fn git_ahead_recommendation_severity(snapshot: &GitAheadSnapshot) -> &'static str {
+    if snapshot.mixed_author_ahead || snapshot.mixed_bead_ahead {
+        "high"
+    } else {
+        "medium"
+    }
+}
+
+fn git_ahead_recommendation_evidence(snapshot: &GitAheadSnapshot) -> Vec<String> {
+    let mut evidence = BTreeSet::from([
+        format!("git_ahead_state:{}", snapshot.state),
+        format!("git_ahead_count:{}", snapshot.ahead_count),
+        format!("git_ahead_commit_count:{}", snapshot.commits.len()),
+        format!("git_ahead_author_count:{}", snapshot.authors.len()),
+        format!("git_ahead_bead_ref_count:{}", snapshot.bead_refs.len()),
+    ]);
+    if let Some(upstream) = snapshot.upstream_ref.as_deref() {
+        evidence.insert(format!("git_ahead_upstream:{upstream}"));
+    }
+    if snapshot.mixed_author_ahead {
+        evidence.insert("git_ahead_mixed_author:true".to_string());
+    }
+    if snapshot.mixed_bead_ahead {
+        evidence.insert("git_ahead_mixed_bead:true".to_string());
+    }
+    if snapshot.ambiguous_ahead {
+        evidence.insert("git_ahead_ambiguous:true".to_string());
+    }
+    evidence.extend(
+        snapshot
+            .degraded
+            .iter()
+            .map(|entry| format!("git_ahead_degraded:{}", entry.code)),
+    );
     evidence.into_iter().collect()
 }
 
@@ -7822,6 +8046,74 @@ mod tests {
     }
 
     #[test]
+    fn advisor_recommends_coordination_for_mixed_owner_ahead_commits() {
+        let mut report = report_with_ready_sources();
+        report.git_ahead = Some(summarize_git_ahead(
+            "# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -0\n",
+            Some(concat!(
+                "aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n",
+                "bbbbbbbbbbbbbbbb\x1fPeerAgent\x1ftest: fixture (bd-peer.2)\n",
+            )),
+        ));
+
+        apply_swarm_brief_advice(&mut report);
+
+        let rec = recommendation(&report, "rec.git.coordinate_mixed_owner_ahead");
+        assert_eq!(rec.kind, "push_safety");
+        assert_eq!(rec.severity, "high");
+        assert!(
+            rec.reason_codes
+                .contains(&"git_ahead_mixed_author".to_string())
+        );
+        assert!(
+            rec.suggested_commands
+                .contains(&"git log origin/main..HEAD --oneline --decorate".to_string())
+        );
+        assert!(
+            rec.must_not_do
+                .iter()
+                .any(|item| item.contains("automatically push"))
+        );
+
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/gitAhead/peerOwnedAheadRisk"),
+            Some(&json!(true))
+        );
+        let rendered = render_swarm_brief_summary_for_handoff(&summary);
+        assert!(rendered.contains("Push-safety posture:"));
+        assert!(rendered.contains("coordinate and inspect git log origin/main..HEAD"));
+        assert!(!rendered.contains("fix: parser"));
+    }
+
+    #[test]
+    fn advisor_stays_quiet_for_clean_and_single_owner_ahead() {
+        for snapshot in [
+            summarize_git_ahead(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n",
+                Some(""),
+            ),
+            summarize_git_ahead(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -0\n",
+                Some("aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n"),
+            ),
+        ] {
+            let mut report = report_with_ready_sources();
+            report.git_ahead = Some(snapshot);
+
+            apply_swarm_brief_advice(&mut report);
+
+            assert!(
+                report
+                    .recommendations
+                    .iter()
+                    .all(|recommendation| recommendation.id
+                        != "rec.git.coordinate_mixed_owner_ahead")
+            );
+        }
+    }
+
+    #[test]
     fn advisor_reports_missing_rch_capability() {
         let mut report = report_with_ready_sources();
         report
@@ -8229,6 +8521,107 @@ mod tests {
                     path: "src/z.rs".to_string(),
                     status: "M".to_string(),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn git_source_adapter_collects_ahead_snapshot_without_mutating_git_state() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "git",
+                &["status", "--short", "--branch", "--untracked-files=all"],
+                "## main...origin/main [ahead 2]\n M src/lib.rs\n",
+            )
+            .with_output(
+                "git",
+                &["log", "-n", "8", "--format=%H%x1f%ct%x1f%s"],
+                "cccccccccccccccc\x1f1778352000\x1ffix: recent subject\n",
+            )
+            .with_output(
+                "git",
+                &["status", "--porcelain=v2", "--branch"],
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -0\n",
+            )
+            .with_output(
+                "git",
+                &["log", "origin/main..HEAD", "--format=%H%x1f%an%x1f%s"],
+                concat!(
+                    "aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.1)\n",
+                    "bbbbbbbbbbbbbbbb\x1fPeerAgent\x1ftest: fixture (bd-peer.2)\n",
+                ),
+            );
+
+        let output = GitSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Ready);
+        match output.contribution {
+            SwarmBriefContribution::Git {
+                git_ahead: Some(snapshot),
+                ..
+            } => {
+                assert_eq!(snapshot.ahead_count, 2);
+                assert!(snapshot.peer_owned_ahead_risk);
+                assert!(snapshot.mixed_author_ahead);
+            }
+            other => panic!("expected git contribution with ahead snapshot, got {other:?}"),
+        }
+        assert_eq!(
+            runner.calls(),
+            vec![
+                "git status --short --branch --untracked-files=all".to_string(),
+                "git log -n 8 --format=%H%x1f%ct%x1f%s".to_string(),
+                "git status --porcelain=v2 --branch".to_string(),
+                "git log origin/main..HEAD --format=%H%x1f%an%x1f%s".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_source_adapter_marks_missing_upstream_as_degraded_without_log_probe() {
+        let options = SwarmBriefCollectOptions::for_workspace(".");
+        let runner = FakeRunner::default()
+            .with_output(
+                "git",
+                &["status", "--short", "--branch", "--untracked-files=all"],
+                "## main\n",
+            )
+            .with_output("git", &["log", "-n", "8", "--format=%H%x1f%ct%x1f%s"], "")
+            .with_output(
+                "git",
+                &["status", "--porcelain=v2", "--branch"],
+                "# branch.head main\n# branch.ab +0 -0\n",
+            );
+
+        let output = GitSourceAdapter { runner: &runner }.collect(&options);
+
+        assert_eq!(output.snapshot.status, SwarmBriefSourceStatus::Degraded);
+        assert!(
+            output
+                .snapshot
+                .degraded
+                .iter()
+                .any(|entry| entry.code == "git_ahead_no_upstream")
+        );
+        match output.contribution {
+            SwarmBriefContribution::Git {
+                git_ahead: Some(snapshot),
+                ..
+            } => {
+                assert_eq!(snapshot.state, "no_upstream");
+                assert!(!snapshot.peer_owned_ahead_risk);
+            }
+            other => {
+                panic!("expected git contribution with degraded ahead snapshot, got {other:?}")
+            }
+        }
+        assert_eq!(
+            runner.calls(),
+            vec![
+                "git status --short --branch --untracked-files=all".to_string(),
+                "git log -n 8 --format=%H%x1f%ct%x1f%s".to_string(),
+                "git status --porcelain=v2 --branch".to_string(),
             ]
         );
     }
@@ -8837,7 +9230,8 @@ mod tests {
         // doesn't matter — the cap fires before any parse path.
         let mut oversized = vec![b'x'; AGENT_MAIL_SNAPSHOT_MAX_BYTES + 1];
         oversized[0] = b'{';
-        oversized[oversized.len() - 1] = b'}';
+        let last_byte = oversized.len() - 1;
+        oversized[last_byte] = b'}';
         fs::write(&snapshot_path, &oversized).map_err(|error| error.to_string())?;
 
         let mut options = SwarmBriefCollectOptions::for_workspace(tempdir.path());

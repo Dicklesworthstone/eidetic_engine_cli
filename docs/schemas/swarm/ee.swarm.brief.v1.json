@@ -39,6 +39,7 @@
       "type": "array",
       "items": {"type": "object"}
     },
+    "gitAhead": {"$ref": "#/definitions/gitAheadSnapshot"},
     "beads": {"type": "object"},
     "bv": {
       "oneOf": [
@@ -157,6 +158,69 @@
         "riskFactors": {"$ref": "#/definitions/stringArray"},
         "evidence": {"$ref": "#/definitions/stringArray"},
         "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "gitAheadSnapshot": {
+      "type": "object",
+      "required": [
+        "schema",
+        "state",
+        "aheadCount",
+        "behindCount",
+        "commits",
+        "authors",
+        "beadRefs",
+        "mixedAuthorAhead",
+        "mixedBeadAhead",
+        "ambiguousAhead",
+        "peerOwnedAheadRisk",
+        "degraded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.git_ahead_snapshot.v1"},
+        "state": {"type": "string"},
+        "headRef": {"type": "string"},
+        "upstreamRef": {"type": "string"},
+        "aheadCount": {"type": "integer", "minimum": 0},
+        "behindCount": {"type": "integer", "minimum": 0},
+        "commits": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/gitAheadCommit"}
+        },
+        "authors": {"$ref": "#/definitions/stringArray"},
+        "beadRefs": {"$ref": "#/definitions/stringArray"},
+        "mixedAuthorAhead": {"type": "boolean"},
+        "mixedBeadAhead": {"type": "boolean"},
+        "ambiguousAhead": {"type": "boolean"},
+        "peerOwnedAheadRisk": {"type": "boolean"},
+        "degraded": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/gitAheadDegradation"}
+        }
+      }
+    },
+    "gitAheadCommit": {
+      "type": "object",
+      "required": ["hash", "shortHash", "author", "subject", "beadRefs"],
+      "additionalProperties": false,
+      "properties": {
+        "hash": {"type": "string"},
+        "shortHash": {"type": "string"},
+        "author": {"type": "string"},
+        "subject": {"type": "string"},
+        "beadRefs": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "gitAheadDegradation": {
+      "type": "object",
+      "required": ["code", "severity", "message", "repair"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {"type": "string"},
+        "severity": {"type": "string"},
+        "message": {"type": "string"},
+        "repair": {"type": "string"}
       }
     },
     "verificationBroker": {
