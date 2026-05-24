@@ -843,6 +843,7 @@ pub struct ReflectionRequestLedgerDiagnosticsReport {
     pub expired_pending_count: usize,
     pub durable_mutation: bool,
     pub retention: ReflectionRequestLedgerRetentionReport,
+    pub export_hygiene: ReflectionRequestLedgerExportHygieneReport,
     pub hmac_key: ReflectionHmacKeyDiagnostic,
     pub requests: Vec<ReflectionRequestLedgerDiagnostic>,
     pub expired_pending: Vec<ReflectionRequestLedgerDiagnostic>,
@@ -881,6 +882,23 @@ pub struct ReflectionRequestLedgerMigrationSafety {
     pub physical_deletion_allowed_by_default: bool,
     pub preserved_identity_fields: Vec<&'static str>,
     pub repair_command: String,
+}
+
+/// Redacted bulk-export posture for reflection request ledger diagnostics.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionRequestLedgerExportHygieneReport {
+    pub posture: &'static str,
+    pub ordinary_export_safe: bool,
+    pub bulk_export_safe: bool,
+    pub includes_raw_source_excerpts: bool,
+    pub includes_hmac_key_material: bool,
+    pub includes_prompt_injection_text: bool,
+    pub redaction_policy: &'static str,
+    pub ordinary_export_surfaces: Vec<&'static str>,
+    pub exported_fields: Vec<&'static str>,
+    pub denied_fields: Vec<&'static str>,
+    pub redaction_placeholders: Vec<&'static str>,
 }
 
 /// Redacted HMAC key posture for reflection request diagnostics.
@@ -966,6 +984,12 @@ impl ReflectionRequestLedgerDiagnosticsReport {
             self.retention.expired_status_eligible_count,
             self.retention.rejected_eligible_count
         ));
+        output.push_str(&format!(
+            "  export hygiene: {} rawExcerpts={} hmacMaterial={}\n",
+            self.export_hygiene.posture,
+            self.export_hygiene.includes_raw_source_excerpts,
+            self.export_hygiene.includes_hmac_key_material
+        ));
         output.push_str(&format!("  hmac key: {}\n", self.hmac_key.status));
         if let Some(action) = self.hmac_key.recovery.first() {
             output.push_str(&format!("    key next: {}\n", action.command));
@@ -1009,10 +1033,11 @@ impl ReflectionRequestLedgerDiagnosticsReport {
     #[must_use]
     pub fn toon_summary(&self) -> String {
         format!(
-            "REFLECTION_REQUEST_LEDGER_DIAGNOSTICS|returned={}|expired_pending={}|retention_eligible={}|status={}|key_status={}|mutated={}",
+            "REFLECTION_REQUEST_LEDGER_DIAGNOSTICS|returned={}|expired_pending={}|retention_eligible={}|export_posture={}|status={}|key_status={}|mutated={}",
             self.returned_count,
             self.expired_pending_count,
             self.retention.eligible_for_compaction_count,
+            self.export_hygiene.posture,
             self.status_filter.as_deref().unwrap_or("all"),
             self.hmac_key.status,
             self.durable_mutation
@@ -1944,7 +1969,7 @@ pub fn list_reflection_request_ledger_diagnostics(
     let hmac_key =
         reflection_hmac_key_diagnostic_from_config(hmac_key_config, &prepared.workspace_path);
     let active_hmac_key_id = if hmac_key.status == "ready" {
-        hmac_key.active_key_id.clone()
+        hmac_key_config.key_id()
     } else {
         None
     };
@@ -1955,7 +1980,7 @@ pub fn list_reflection_request_ledger_diagnostics(
                 stored,
                 &now,
                 &prepared.workspace_path,
-                active_hmac_key_id.as_deref(),
+                active_hmac_key_id,
             )
         })
         .collect::<Vec<_>>();
@@ -1966,7 +1991,7 @@ pub fn list_reflection_request_ledger_diagnostics(
                 stored,
                 &now,
                 &prepared.workspace_path,
-                active_hmac_key_id.as_deref(),
+                active_hmac_key_id,
             )
         })
         .collect::<Vec<_>>();
@@ -1987,6 +2012,7 @@ pub fn list_reflection_request_ledger_diagnostics(
         expired_pending_count: expired_pending.len(),
         durable_mutation: false,
         retention,
+        export_hygiene: reflection_request_ledger_export_hygiene_report(),
         hmac_key,
         requests,
         expired_pending,
@@ -2092,6 +2118,65 @@ fn reflection_request_ledger_retention_report(
             repair_command: format!("ee doctor --workspace {workspace_arg} --json"),
         },
     })
+}
+
+fn reflection_request_ledger_export_hygiene_report() -> ReflectionRequestLedgerExportHygieneReport {
+    ReflectionRequestLedgerExportHygieneReport {
+        posture: "metadata_only",
+        ordinary_export_safe: true,
+        bulk_export_safe: true,
+        includes_raw_source_excerpts: false,
+        includes_hmac_key_material: false,
+        includes_prompt_injection_text: false,
+        redaction_policy: "reflection_request_ledger_bulk_export_metadata_only_v1",
+        ordinary_export_surfaces: vec![
+            "reflect_request_ledger_diagnostics",
+            "support_bundle",
+            "backup",
+            "handoff",
+            "e2e_event_log",
+        ],
+        exported_fields: vec![
+            "requestId",
+            "requestHash",
+            "reflectionKind",
+            "sourcePackageHash",
+            "sourceRefCount",
+            "sourceContentHashCount",
+            "promptTemplateHash",
+            "responseSchemaHash",
+            "createdAt",
+            "expiresAt",
+            "challengeKeyId",
+            "challengeHash",
+            "status",
+            "posture",
+            "consumedCandidateId",
+            "consumedAt",
+            "consumedResultHash",
+            "retention",
+            "hmacKey.status",
+            "hmacKey.keyPathConfigured",
+        ],
+        denied_fields: vec![
+            "sourcePackage.sources[].excerpt",
+            "sourcePackage.sources[].provenanceUri",
+            "sourceRefsJson",
+            "sourceContentHashesJson.raw",
+            "challenge.hmac",
+            "hmacKeyMaterial",
+            "hmacKeyPath",
+            "promptInjectionSourceText",
+            "result.body",
+            "rawDebugArtifact",
+        ],
+        redaction_placeholders: vec![
+            REFLECTION_REQUEST_LEDGER_INVALID_REQUEST_ID_SENTINEL,
+            REFLECTION_REQUEST_LEDGER_INVALID_HASH_SENTINEL,
+            "[REDACTED:reflection-source-secret]",
+            "[REDACTED:secret]",
+        ],
+    }
 }
 
 fn reflection_env_u64(var: EnvVar, label: &'static str) -> Result<u64, DomainError> {
@@ -5940,7 +6025,7 @@ fn reflection_request_ledger_diagnostic_from_stored(
     ReflectionRequestLedgerDiagnostic {
         request_id: reflection_diagnostic_request_id_or_sentinel(&stored.request_id),
         request_hash: reflection_diagnostic_hash_or_sentinel(&stored.request_hash),
-        reflection_kind: stored.reflection_kind,
+        reflection_kind: reflection_diagnostic_redacted_text_or_trimmed(&stored.reflection_kind),
         source_package_hash: reflection_diagnostic_hash_or_sentinel(&stored.source_package_hash),
         source_ref_count,
         source_content_hash_count,
@@ -5948,7 +6033,7 @@ fn reflection_request_ledger_diagnostic_from_stored(
         response_schema_hash: reflection_diagnostic_hash_or_sentinel(&stored.response_schema_hash),
         created_at: stored.created_at,
         expires_at: stored.expires_at,
-        challenge_key_id: stored.challenge_key_id,
+        challenge_key_id: reflection_diagnostic_redacted_text_or_trimmed(&stored.challenge_key_id),
         challenge_hash: reflection_diagnostic_hash_or_sentinel(&stored.challenge_hash),
         status: stored.status,
         posture,
@@ -6050,6 +6135,16 @@ fn reflection_request_ledger_material_invalid(stored: &StoredReflectionRequestLe
         || !reflection_diagnostic_blake3_hash_is_canonical(&stored.challenge_hash)
         || reflection_source_ref_content_hashes(&stored.source_refs_json).is_none()
         || reflection_source_content_hashes(&stored.source_content_hashes_json).is_none()
+}
+
+fn reflection_diagnostic_redacted_text_or_trimmed(value: &str) -> String {
+    let trimmed = value.trim();
+    let redaction = crate::policy::redact_secret_like_content(trimmed);
+    if redaction.redacted {
+        redaction.content
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn reflection_diagnostic_request_id_is_canonical(value: &str) -> bool {
@@ -6242,11 +6337,13 @@ fn reflection_hmac_key_diagnostic_from_config(
     workspace_path: &Path,
 ) -> ReflectionHmacKeyDiagnostic {
     let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
-    let active_key_id = config.key_id().map(str::to_owned);
+    let active_key_id = config
+        .key_id()
+        .map(reflection_diagnostic_redacted_text_or_trimmed);
     let key_path_configured = config.key_path_configured();
     match config.load_key_material() {
         Ok(key) => ReflectionHmacKeyDiagnostic {
-            active_key_id: Some(key.key_id().to_owned()),
+            active_key_id: Some(reflection_diagnostic_redacted_text_or_trimmed(key.key_id())),
             key_path_configured,
             status: "ready",
             error_code: None,
@@ -12722,6 +12819,18 @@ mod tests {
                 .schema_migration_safety
                 .physical_deletion_allowed_by_default
         );
+        assert_eq!(report.export_hygiene.posture, "metadata_only");
+        assert!(report.export_hygiene.ordinary_export_safe);
+        assert!(report.export_hygiene.bulk_export_safe);
+        assert!(!report.export_hygiene.includes_raw_source_excerpts);
+        assert!(!report.export_hygiene.includes_hmac_key_material);
+        assert!(!report.export_hygiene.includes_prompt_injection_text);
+        assert!(
+            report
+                .export_hygiene
+                .denied_fields
+                .contains(&"sourcePackage.sources[].excerpt")
+        );
         assert_eq!(report.hmac_key.status, "ready");
         assert_eq!(
             report.hmac_key.active_key_id.as_deref(),
@@ -12830,7 +12939,66 @@ mod tests {
         assert!(human.contains("expired pending"));
         assert!(human.contains("hmac key: ready"));
         assert!(toon.contains("expired_pending=1"));
+        assert!(toon.contains("export_posture=metadata_only"));
         assert!(toon.contains("key_status=ready"));
+        Ok(())
+    }
+
+    #[test]
+    fn reflection_request_ledger_diagnostics_redact_secret_shaped_metadata() -> TestResult {
+        let material = reflection_request_ledger_material_fixture(
+            "wsp_reflection_core",
+            "reflect_req_secret_meta",
+        );
+        let raw_secret = "sk-test1234567890abcdef1234567890abcdef";
+        let secret_key_value = format!("OPENAI_API_KEY={raw_secret}");
+        let stored = StoredReflectionRequestLedger {
+            request_id: material.request_id.clone(),
+            request_hash: material.request_hash.clone(),
+            workspace_id: material.workspace_id.clone(),
+            reflection_kind: format!("gaps {secret_key_value}"),
+            source_package_hash: material.source_package_hash.clone(),
+            source_refs_json: material.source_refs_json.clone(),
+            source_content_hashes_json: material.source_content_hashes_json.clone(),
+            prompt_template_hash: material.prompt_template_hash.clone(),
+            response_schema_hash: material.response_schema_hash.clone(),
+            created_at: material.created_at.clone(),
+            expires_at: material.expires_at.clone(),
+            challenge_key_id: secret_key_value.clone(),
+            challenge_hash: material.challenge_hash.clone(),
+            status: "pending".to_owned(),
+            consumed_candidate_id: None,
+            consumed_at: None,
+            consumed_result_hash: None,
+        };
+        let now = parse_reflection_diagnostics_time(Some("2026-05-24T00:30:00Z"))
+            .map_err(|error| error.to_string())?;
+        let diagnostic = reflection_request_ledger_diagnostic_from_stored(
+            stored,
+            &now,
+            Path::new("/tmp/reflection-workspace"),
+            Some(secret_key_value.as_str()),
+        );
+        let diagnostic_json =
+            serde_json::to_string(&diagnostic).map_err(|error| error.to_string())?;
+        assert!(!diagnostic_json.contains(raw_secret));
+        assert!(diagnostic_json.contains("[REDACTED:"));
+        assert!(!diagnostic.challenge_key_id.contains(raw_secret));
+        assert!(!diagnostic.reflection_kind.contains(raw_secret));
+
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let key_path = tempdir.path().join("reflect-secret.key");
+        std::fs::write(&key_path, b"secret metadata test key")
+            .map_err(|error| error.to_string())?;
+        let key_diagnostic = reflection_hmac_key_diagnostic_from_config(
+            &ReflectionHmacKeyConfig::new(Some(secret_key_value), Some(key_path)),
+            tempdir.path(),
+        );
+        let key_json = serde_json::to_string(&key_diagnostic).map_err(|error| error.to_string())?;
+        assert_eq!(key_diagnostic.status, "ready");
+        assert!(!key_json.contains(raw_secret));
+        assert!(!key_json.contains("reflect-secret.key"));
+        assert!(key_json.contains("[REDACTED:"));
         Ok(())
     }
 

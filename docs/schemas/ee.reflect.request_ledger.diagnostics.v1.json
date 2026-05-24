@@ -17,6 +17,7 @@
     "expiredPendingCount",
     "durableMutation",
     "retention",
+    "exportHygiene",
     "hmacKey",
     "requests",
     "expiredPending",
@@ -75,6 +76,9 @@
     "retention": {
       "$ref": "#/$defs/retentionReport"
     },
+    "exportHygiene": {
+      "$ref": "#/$defs/exportHygieneReport"
+    },
     "hmacKey": {
       "$ref": "#/$defs/hmacKeyDiagnostic"
     },
@@ -96,12 +100,87 @@
     }
   },
   "field_presets": {
-    "minimal": ["schema", "returnedCount", "expiredPendingCount", "retention", "hmacKey", "nextAction"],
-    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "retention", "hmacKey", "nextAction"],
-    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "retention", "hmacKey", "requests", "expiredPending", "nextAction"],
+    "minimal": ["schema", "returnedCount", "expiredPendingCount", "retention", "exportHygiene", "hmacKey", "nextAction"],
+    "summary": ["schema", "command", "returnedCount", "expiredPendingCount", "retention", "exportHygiene", "hmacKey", "nextAction"],
+    "standard": ["schema", "command", "workspacePath", "statusFilter", "now", "retention", "exportHygiene", "hmacKey", "requests", "expiredPending", "nextAction"],
     "full": ["*"]
   },
   "$defs": {
+    "exportHygieneReport": {
+      "type": "object",
+      "required": [
+        "posture",
+        "ordinaryExportSafe",
+        "bulkExportSafe",
+        "includesRawSourceExcerpts",
+        "includesHmacKeyMaterial",
+        "includesPromptInjectionText",
+        "redactionPolicy",
+        "ordinaryExportSurfaces",
+        "exportedFields",
+        "deniedFields",
+        "redactionPlaceholders"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "posture": {
+          "type": "string",
+          "const": "metadata_only"
+        },
+        "ordinaryExportSafe": {
+          "type": "boolean",
+          "const": true
+        },
+        "bulkExportSafe": {
+          "type": "boolean",
+          "const": true
+        },
+        "includesRawSourceExcerpts": {
+          "type": "boolean",
+          "const": false
+        },
+        "includesHmacKeyMaterial": {
+          "type": "boolean",
+          "const": false
+        },
+        "includesPromptInjectionText": {
+          "type": "boolean",
+          "const": false
+        },
+        "redactionPolicy": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ordinaryExportSurfaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "exportedFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "deniedFields": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "redactionPlaceholders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^\\[REDACTED:[^\\]]+\\]$"
+          }
+        }
+      }
+    },
     "retentionReport": {
       "type": "object",
       "required": [

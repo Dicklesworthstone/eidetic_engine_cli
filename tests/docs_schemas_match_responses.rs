@@ -26,8 +26,8 @@ use ee::core::curate::{
     REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
     ReflectionProposeReport, ReflectionRequestDurableLedgerOutcome,
     ReflectionRequestLedgerDiagnostic, ReflectionRequestLedgerDiagnosticRecovery,
-    ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerMigrationSafety,
-    ReflectionRequestLedgerRetentionReport,
+    ReflectionRequestLedgerDiagnosticsReport, ReflectionRequestLedgerExportHygieneReport,
+    ReflectionRequestLedgerMigrationSafety, ReflectionRequestLedgerRetentionReport,
 };
 use ee::core::memory::{
     MemoryDetails, MemoryListFilter, MemoryListReport, MemoryShowReport, MemorySummary,
@@ -1177,6 +1177,43 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
                 repair_command: "ee doctor --workspace /tmp/schema --json".to_owned(),
             },
         },
+        export_hygiene: ReflectionRequestLedgerExportHygieneReport {
+            posture: "metadata_only",
+            ordinary_export_safe: true,
+            bulk_export_safe: true,
+            includes_raw_source_excerpts: false,
+            includes_hmac_key_material: false,
+            includes_prompt_injection_text: false,
+            redaction_policy: "reflection_request_ledger_bulk_export_metadata_only_v1",
+            ordinary_export_surfaces: vec![
+                "reflect_request_ledger_diagnostics",
+                "support_bundle",
+                "backup",
+                "handoff",
+                "e2e_event_log",
+            ],
+            exported_fields: vec![
+                "requestId",
+                "requestHash",
+                "challengeKeyId",
+                "challengeHash",
+                "status",
+                "retention",
+            ],
+            denied_fields: vec![
+                "sourcePackage.sources[].excerpt",
+                "challenge.hmac",
+                "hmacKeyMaterial",
+                "promptInjectionSourceText",
+                "result.body",
+            ],
+            redaction_placeholders: vec![
+                "[REDACTED:invalid-reflection-request-id]",
+                "[REDACTED:invalid-reflection-hash]",
+                "[REDACTED:reflection-source-secret]",
+                "[REDACTED:secret]",
+            ],
+        },
         hmac_key: ReflectionHmacKeyDiagnostic {
             active_key_id: None,
             key_path_configured: false,
@@ -1226,6 +1263,16 @@ fn reflection_request_ledger_diagnostics_report_matches_schema() -> TestResult {
     ensure_json_bool(
         &document,
         "/retention/schemaMigrationSafety/physicalDeletionAllowedByDefault",
+        false,
+    )?;
+    ensure_json_str(&document, "/exportHygiene/posture", "metadata_only")?;
+    ensure_json_bool(&document, "/exportHygiene/ordinaryExportSafe", true)?;
+    ensure_json_bool(&document, "/exportHygiene/bulkExportSafe", true)?;
+    ensure_json_bool(&document, "/exportHygiene/includesRawSourceExcerpts", false)?;
+    ensure_json_bool(&document, "/exportHygiene/includesHmacKeyMaterial", false)?;
+    ensure_json_bool(
+        &document,
+        "/exportHygiene/includesPromptInjectionText",
         false,
     )?;
     ensure_json_str(
