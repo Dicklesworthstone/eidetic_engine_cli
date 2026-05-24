@@ -198,7 +198,7 @@ Boolean predicates on memory metadata fields.
 {
   "trust": {
     "minClass": "human_explicit",
-    "excludeClasses": ["agent_inferred"],
+    "excludeClasses": ["agent_assertion"],
     "requirePosture": "authoritative"
   },
   "redaction": {
@@ -279,10 +279,22 @@ linked neighbors outside the active workspace scope are ignored and reported via
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"thorough"`, `"submodular"` (`"custom"` not implemented) |
+| `output.profile` | enum | `"balanced"` | `"compact"`, `"balanced"`, `"grounding"`, `"orientation"`, `"wide"`, `"thorough"`, `"submodular"` (`"custom"` recognized but not implemented) |
 | `output.format` | enum | `"json"` | Hint for renderer selection |
 | `output.fields` | enum | `"standard"` | `"minimal"`, `"summary"`, `"standard"`, `"full"` (validated; projection controlled by `--fields` CLI flag) |
 | `output.explain` | bool | false | Include scoring/selection explanations (JSON packs include `selectionAudit` and per-item `why` by default; setting `true` emits an informational degradation confirming this) |
+
+### Retrieval Speed
+
+```json
+{
+  "speed": "default"
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `speed` | enum | `"default"` | Retrieval speed/quality budget: `"instant"`, `"default"`, or `"quality"` |
 
 ### Budget and Limits
 
@@ -608,6 +620,6 @@ These fields are recognized and validated but not wired through to pack/search e
 ### Infrastructure
 
 - [x] `--query-file` CLI plumbing (implemented)
-- [ ] Add JSON Schema export to `ee schema export ee.query.v1`
+- [x] Add JSON Schema export to `ee schema export ee.query.v1`
 - [ ] Add golden fixtures for query validation
 - [ ] Add property tests for query parsing

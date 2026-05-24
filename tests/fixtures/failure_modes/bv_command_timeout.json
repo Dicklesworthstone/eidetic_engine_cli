@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "bv_command_timeout",
+  "introduced_by": {
+    "bead": "bd-2z5ly.10",
+    "epic_letter": "S"
+  },
+  "surfaces": [
+    "swarm brief",
+    "swarm work-packet"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "A bounded read-only BV robot-source command exceeds the swarm collection timeout.",
+    "setup_commands": [
+      "# run swarm brief or work-packet while bv --robot-triage is blocked long enough to hit the collector timeout"
+    ],
+    "invocation": "ee swarm work-packet --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "bv_command_timeout",
+    "severity": "warning",
+    "message_contains": [
+      "timed out",
+      "waiting indefinitely"
+    ],
+    "repair_contains": "br --no-auto-import --allow-stale ready --json",
+    "repair_string": "Retry `bv --robot-triage --robot-triage-by-track` with the configured command timeout, or fall back to `br --no-auto-import --allow-stale ready --json`.",
+    "repair_command_regex": "(?<cmd>br --no-auto-import --allow-stale ready --json)"
+  }
+}

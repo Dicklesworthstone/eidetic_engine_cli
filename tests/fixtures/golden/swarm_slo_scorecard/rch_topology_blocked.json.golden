@@ -1,0 +1,93 @@
+{
+  "schema": "ee.swarm_slo.scorecard.v1",
+  "workload": {
+    "profileId": "swarm_slo_rch_topology_blocked",
+    "scenario": "rch_topology_blocked",
+    "agentCount": 64,
+    "traceSchema": "ee.agent_workload_trace.v1",
+    "expectedDegradationPosture": "blocked",
+    "concurrency": {
+      "shape": "resource_limited",
+      "requestedAgents": 64,
+      "activeAgents": 48,
+      "maxParallelAgents": 32
+    },
+    "commandMix": [
+      { "command": "status", "count": 4 },
+      { "command": "context", "count": 48 },
+      { "command": "search", "count": 48 },
+      { "command": "why", "count": 16 },
+      { "command": "verification", "count": 8 }
+    ],
+    "provenance": {
+      "kind": "mixed",
+      "recordedRows": 44,
+      "syntheticRows": 80,
+      "traceHash": "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "sourceHealth": {
+    "agentMail": { "status": "unavailable", "evidence": ["sqlite_malformed"] },
+    "beads": { "status": "degraded", "evidence": ["no_db_fallback"] },
+    "bv": { "status": "ok", "evidence": ["robot_triage"] },
+    "rch": { "status": "blocked", "evidence": ["rch_e327_path_topology"] },
+    "workspace": { "status": "degraded", "evidence": ["peer_dirty_paths"] }
+  },
+  "budgets": {
+    "profile": "swarm_stress",
+    "p50MsTarget": 250,
+    "p95MsTarget": 900,
+    "p99MsTarget": 1800,
+    "errorCountMax": 0,
+    "degradedCountMax": 8,
+    "stageBudgets": [
+      { "stage": "rch", "p95MsTarget": 300 },
+      { "stage": "coordination", "p95MsTarget": 420 },
+      { "stage": "context", "p95MsTarget": 650 }
+    ]
+  },
+  "measurements": {
+    "sampleCount": 124,
+    "commandCount": 124,
+    "errorCount": 1,
+    "degradedCount": 11,
+    "latency": { "p50Ms": 310, "p95Ms": 1500, "p99Ms": 2400, "maxMs": 2600 }
+  },
+  "stageAttribution": [
+    { "stage": "rch", "elapsedMs": 1200, "shareBasisPoints": 4615, "verdict": "blocked" },
+    { "stage": "coordination", "elapsedMs": 620, "shareBasisPoints": 2385, "verdict": "warn" },
+    { "stage": "context", "elapsedMs": 780, "shareBasisPoints": 3000, "verdict": "warn" }
+  ],
+  "verdict": {
+    "status": "blocked",
+    "summary": "RCH topology was blocked, so the scorecard records a fail-closed verification posture instead of using local Cargo fallback.",
+    "failingBudgetCount": 4
+  },
+  "failureReasons": [
+    {
+      "code": "rch_topology_blocked",
+      "severity": "high",
+      "message": "Remote verification topology blocked the verification slice.",
+      "source": "rch"
+    },
+    {
+      "code": "p99_latency_budget_exceeded",
+      "severity": "medium",
+      "message": "Replay p99 latency exceeded the swarm-stress target.",
+      "source": "budget"
+    }
+  ],
+  "determinism": {
+    "replayHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "fixtureHash": "blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "stable": true,
+    "volatileFieldsStripped": ["recordedAt", "durationMs"]
+  },
+  "redaction": {
+    "rawMailBodiesPresent": false,
+    "rawMemoryBodiesPresent": false,
+    "rawCommandOutputPresent": false,
+    "privatePathsPresent": false,
+    "secretScanApplied": true
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.challenge_binding.v1.json",
+  "title": "ee.reflect.challenge_binding.v1",
+  "description": "Canonical non-secret HMAC binding payload for ee.reflect.request.v1 challenges.",
+  "type": "object",
+  "required": [
+    "schema",
+    "algorithm",
+    "requestId",
+    "requestHash",
+    "workspaceId",
+    "reflectionKind",
+    "sourcePackageHash",
+    "sourceContentHashes",
+    "responseSchemaHash",
+    "expiresAt",
+    "keyId"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.reflect.challenge_binding.v1"},
+    "algorithm": {"type": "string", "const": "hmac-sha256"},
+    "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
+    "requestHash": {"$ref": "#/$defs/blake3Hash"},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "reflectionKind": {"type": "string", "minLength": 1},
+    "sourcePackageHash": {"$ref": "#/$defs/blake3Hash"},
+    "sourceContentHashes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/blake3Hash"}
+    },
+    "responseSchemaHash": {"$ref": "#/$defs/blake3Hash"},
+    "expiresAt": {"type": "string", "format": "date-time"},
+    "keyId": {"type": "string", "minLength": 1}
+  },
+  "field_presets": {
+    "minimal": ["schema", "algorithm", "requestId", "requestHash", "keyId"],
+    "standard": ["schema", "algorithm", "requestId", "requestHash", "workspaceId", "reflectionKind", "sourcePackageHash", "sourceContentHashes", "responseSchemaHash", "expiresAt", "keyId"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    }
+  }
+}

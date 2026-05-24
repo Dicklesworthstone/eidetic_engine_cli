@@ -43,6 +43,18 @@ Fixture scenarios:
   `coordinate_before_claim`.
 - `degraded_mail_rch_topology`: Agent Mail is degraded and remote-only Cargo
   proof is blocked, so only static or docs work can proceed until RCH recovers.
+- `agent_mail_degraded_read_only`, `agent_mail_semantic_readiness_failed`, and
+  `agent_mail_database_contention_timeout`: Agent Mail evidence is present but
+  not authoritative enough to infer reservation or inbox safety.
+- `beads_command_timeout_no_output` and `bv_timeout_no_output`: tracker or
+  graph-triage sources timed out or emitted no output; Beads fallback rows are
+  advisory until a bounded retry or manual inspection succeeds.
+
+Shell smoke coverage lives in `scripts/e2e_swarm_work_packet_no_mutation.sh`.
+The harness snapshots `.beads/`, a synthetic Agent Mail store, and the Git
+index around packet generation, logs `ee.test_event.v1` phases, refuses mutating
+`br` subcommands, and shims Cargo/RCH so packet generation cannot accidentally
+become verification.
 
 ## Beads tracker integrity (bd-2z5ly.9)
 

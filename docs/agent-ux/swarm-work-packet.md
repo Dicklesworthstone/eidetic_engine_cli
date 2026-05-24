@@ -34,6 +34,51 @@ After inspecting the packet:
    a human approves it.
 5. If RCH is blocked, record the exact blocker and do not use local Cargo as substitute proof.
 
+## Copy-Pastable Runs
+
+Healthy checkout:
+
+```bash
+ee swarm work-packet --workspace . --include-rch --json
+```
+
+Crowded checkout with degraded coordination sources:
+
+```bash
+ee swarm work-packet --workspace . --include-rch --json > /tmp/ee-work-packet.json
+jq '.data.observedStateClass, .data.recommendedAction.safeToClaim, .data.degraded, .data.sourceProvenance' /tmp/ee-work-packet.json
+```
+
+Inspect those fields before acting. A degraded packet can still be useful for
+recovery guidance, but it is not a claim ticket. If `safeToClaim` is false or
+the candidate decision is anything other than `safe_to_claim`, stop at
+inspection and coordinate through Beads comments, Agent Mail when available, or
+manual handoff.
+
+## No-Mutation Smoke
+
+The read-only guarantee is covered by
+`scripts/e2e_swarm_work_packet_no_mutation.sh`. The default fixture mode does
+not require a built `ee` binary and does not invoke Cargo or RCH:
+
+```bash
+bash scripts/e2e_swarm_work_packet_no_mutation.sh
+```
+
+To drive a prebuilt work-packet command through the same harness, set
+`EE_PACKET_NO_MUTATION_CMD`:
+
+```bash
+EE_PACKET_NO_MUTATION_CMD='ee swarm work-packet --workspace . --include-rch --json' \
+  bash scripts/e2e_swarm_work_packet_no_mutation.sh
+```
+
+The script emits structured events and a summary under its artifact root. The
+log records before/after snapshots for the sandbox `.beads/` directory, the
+Agent Mail stand-in, and the git index. It also installs PATH shims that refuse
+mutating Beads subcommands and fail the run if packet generation attempts Cargo
+or RCH execution.
+
 ## Required Guarantees
 
 - The packet uses the standard `ee.response.v2` success envelope.
@@ -43,8 +88,12 @@ After inspecting the packet:
 - All candidate, source, degraded-code, and command arrays are deterministic.
 - Every included source has a provenance record, even when the source is
   degraded or unavailable.
-- Agent Mail archive/SQLite parity failures are represented as degraded source
+- Agent Mail archive/SQLite parity failures, semantic-readiness contradictions,
+  and timeout/database-contention states are represented as degraded source
   evidence, not as an empty healthy inbox.
+- BV robot-source timeout/no-output states are represented as degraded source
+  evidence and must recommend stale-safe Beads fallback, not bare interactive
+  `bv`.
 - Beads JSONL/DB drift, merge artifacts, and malformed JSONL tails are
   represented in `data.trackerIntegrity`; agents downgrade candidate safety
   when `brReadsAuthoritative` is false and must not auto-claim when
@@ -78,7 +127,7 @@ After inspecting the packet:
 
 ## Fixture Set
 
-The contract is seeded by three redacted examples:
+The contract is seeded by redacted examples:
 
 - `docs/schemas/swarm/ee.swarm.work_packet.v1.json` embeds data-level examples
   for `healthy_small_repo`, `crowded_checkout`, and
@@ -86,6 +135,11 @@ The contract is seeded by three redacted examples:
 - `tests/fixtures/swarm_work_packet/healthy_small.json`
 - `tests/fixtures/swarm_work_packet/crowded_checkout.json`
 - `tests/fixtures/swarm_work_packet/degraded_mail_rch_topology.json`
+- `tests/fixtures/swarm_work_packet/agent_mail_degraded_read_only.json`
+- `tests/fixtures/swarm_work_packet/agent_mail_semantic_readiness_failed.json`
+- `tests/fixtures/swarm_work_packet/agent_mail_database_contention_timeout.json`
+- `tests/fixtures/swarm_work_packet/beads_command_timeout_no_output.json`
+- `tests/fixtures/swarm_work_packet/bv_timeout_no_output.json`
 - `tests/fixtures/swarm_work_packet/integrity/malformed_jsonl_tail.json`
 
 Implementation work should keep these aligned with the emitted command and add

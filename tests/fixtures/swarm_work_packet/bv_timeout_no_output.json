@@ -1,0 +1,211 @@
+{
+  "schema": "ee.swarm.work_packet.v1",
+  "packetId": "swarm_work_packet_bv_timeout_no_output_0001",
+  "workspace": "repo:25e38e130474e7f0292de2a3",
+  "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content_no_raw_process_output",
+  "observedStateClass": "bv_timeout_no_output",
+  "recommendedAction": {
+    "action": "prefer_static_docs_work",
+    "candidateId": "bd-docs.1",
+    "confidence": "low",
+    "safeToClaim": false,
+    "reasons": [
+      "bv_timeout_no_output",
+      "agent_mail_reservation_authority_unknown",
+      "fallback_rows_not_authoritative",
+      "graph_triage_not_authoritative"
+    ],
+    "proofObligations": [
+      "do_not_wait_indefinitely_for_bv",
+      "do_not_run_interactive_bv",
+      "do_not_treat_missing_bv_recommendation_as_no_work",
+      "record_bv_timeout_in_beads"
+    ],
+    "suggestedCommands": [
+      "br --no-auto-import --allow-stale ready --json",
+      "br comments add bd-docs.1 --message 'bv robot source timeout_no_output; coordinating via beads'"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "bd-docs.1",
+      "title": "Document a redaction-safe coordination contract",
+      "source": "beads_ready_stale_fallback",
+      "status": "in_progress",
+      "priority": 2,
+      "assignee": "peer-agent",
+      "decision": "blocked",
+      "collisionRisk": "high",
+      "unsafeReasons": [
+        "fallback_row_already_owned",
+        "graph_triage_unavailable",
+        "agent_mail_reservation_evidence_unavailable"
+      ],
+      "staleReasons": [
+        "bv_timeout_no_output",
+        "beads_ready_source_stale"
+      ],
+      "sourceRefs": ["br://bd-docs.1"]
+    }
+  ],
+  "coordination": {
+    "activeClaimCount": 1,
+    "dirtyPathCount": 3,
+    "fileCollisionCount": 0,
+    "agentMail": {
+      "status": "unavailable",
+      "healthLevel": null,
+      "unreadCount": null,
+      "ackRequiredCount": null,
+      "degradedCodes": ["agent_mail_unavailable"],
+      "recoveryMode": "manual_coordination",
+      "archiveIndexParity": "unknown",
+      "reservationAuthoritative": false,
+      "inboxAuthoritative": false,
+      "fallbackActions": [
+        {
+          "kind": "manual_coordination",
+          "summary": "Coordinate file-level reservations out of band because Agent Mail is unavailable.",
+          "command": null,
+          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths."
+        },
+        {
+          "kind": "retry_later",
+          "summary": "Retry Agent Mail after the storage or transport issue clears.",
+          "command": null,
+          "manualStep": "Do not loop on Agent Mail while Beads fallback can still guide static work."
+        }
+      ],
+      "semanticReadiness": {
+        "status": "unknown",
+        "reason": "unknown"
+      }
+    },
+    "activeClaims": [
+      {
+        "beadId": "bd-docs.1",
+        "assignee": "peer-agent",
+        "status": "in_progress",
+        "updatedAt": null,
+        "sourceRefs": ["br://bd-docs.1"]
+      }
+    ],
+    "fileCollisions": []
+  },
+  "trackerIntegrity": {
+    "health": "external_changes_pending_import",
+    "jsonlPath": ".beads/issues.jsonl",
+    "dbPath": ".beads/beads.db",
+    "jsonlRecordCount": 2826,
+    "dbRecordCount": 2824,
+    "pendingImportCount": 2,
+    "externalChangesPendingImport": true,
+    "dirtyIssueCount": 0,
+    "mergeArtifactPaths": [],
+    "mergeArtifactCount": 0,
+    "jsonlParseError": null,
+    "brReadsAuthoritative": false,
+    "requiresCandidateDowngrade": false,
+    "recoveryHint": "Use stale-safe Beads inspection only; do not run br update or br claim from non-authoritative fallback rows."
+  },
+  "rchProofPosture": {
+    "sourceEnabled": true,
+    "remoteOnlyRequired": true,
+    "posture": "topology_blocked",
+    "healthyWorkerCount": 0,
+    "safeToLaunchCargoVerification": false,
+    "localFallbackPrevented": true,
+    "blockerCodes": ["rch_worker_topology_blocked"],
+    "knownBlockers": [
+      {
+        "code": "rch_worker_topology_blocked",
+        "fingerprint": "sha256:64139c3370a10eca54471aac3d6f6f23e681e9aa6953b10f870f1f4fb7641560",
+        "commandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77",
+        "message": "Path dependency topology policy failed; move dependencies under /data/projects or /dp and retry.",
+        "remediationBead": "bd-17c65.10.17.1.2",
+        "retryAfter": "2026-05-23T08:30:00Z",
+        "remoteRequired": true,
+        "localFallbackRefused": true,
+        "degradedCodes": [
+          "rch_verify_topology_blocked",
+          "rch_verify_local_fallback_refused"
+        ]
+      }
+    ],
+    "retryAfter": "2026-05-23T08:30:00Z"
+  },
+  "verification": {
+    "requiredCommands": [
+      {
+        "commandId": "cargo_test_swarm_contract",
+        "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle work_packet_bv_timeout_no_output_is_contractual",
+        "requiredSubstrate": "rch",
+        "when": "only_after_rch_remote_workers_recover",
+        "lastOutcome": "environment_blocked",
+        "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"
+      }
+    ],
+    "staticChecks": [
+      {
+        "commandId": "json_parse",
+        "commandTemplate": "jq empty tests/fixtures/swarm_work_packet/bv_timeout_no_output.json",
+        "requiredSubstrate": "static_local",
+        "when": "after_fixture_edits",
+        "lastOutcome": "passed",
+        "lastCommandHash": null
+      }
+    ],
+    "closeoutEvidenceRequired": true
+  },
+  "sourceProvenance": [
+    {
+      "source": "bv",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "timeout_no_output",
+      "digest": "blake3:bv-timeout-no-output",
+      "redaction": "status_class_only_no_raw_stdout_no_raw_stderr_no_pid"
+    },
+    {
+      "source": "beads",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "stale_fallback",
+      "digest": "blake3:beads-stale-fallback",
+      "redaction": "ids_statuses_titles"
+    },
+    {
+      "source": "agent-mail",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "unavailable",
+      "digest": "blake3:agent-mail-unavailable",
+      "redaction": "status_class_only_no_bodies_no_inbox_no_paths"
+    }
+  ],
+  "mutationPolicy": {
+    "sideEffectFree": true,
+    "claimsBeads": false,
+    "reservesFiles": false,
+    "sendsAgentMail": false,
+    "runsCargo": false,
+    "stagesGit": false,
+    "deletesFiles": false
+  },
+  "degraded": [
+    {
+      "code": "bv_command_timeout",
+      "source": "bv",
+      "severity": "warning",
+      "message": "BV robot triage did not finish inside the bounded source timeout.",
+      "repair": "Retry BV with a bounded robot command or fall back to stale-safe Beads inspection."
+    },
+    {
+      "code": "bv_no_output",
+      "source": "bv",
+      "severity": "warning",
+      "message": "BV robot triage produced no output, so graph-aware ranking is not authoritative.",
+      "repair": "Use br --no-auto-import --allow-stale ready --json as a read-only fallback and avoid bare interactive bv."
+    }
+  ]
+}

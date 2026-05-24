@@ -54,7 +54,7 @@
       "properties": {
         "keyId": {"type": "string", "minLength": 1},
         "algorithm": {"type": "string", "const": "hmac-sha256"},
-        "hmac": {"type": "string", "pattern": "^base64url:[A-Za-z0-9_-]+$"}
+        "hmac": {"type": "string", "pattern": "^base64url:[A-Za-z0-9_-]{43}$"}
       }
     },
     "producer": {

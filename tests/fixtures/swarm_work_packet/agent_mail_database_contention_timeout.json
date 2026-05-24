@@ -1,0 +1,217 @@
+{
+  "schema": "ee.swarm.work_packet.v1",
+  "packetId": "swarm_work_packet_agent_mail_database_contention_timeout_0001",
+  "workspace": "repo:25e38e130474e7f0292de2a3",
+  "redactionStatus": "counts_ids_statuses_path_patterns_command_templates_no_mail_body_no_file_content_no_raw_stderr",
+  "observedStateClass": "agent_mail_database_contention_timeout",
+  "recommendedAction": {
+    "action": "prefer_static_docs_work",
+    "candidateId": "bd-docs.1",
+    "confidence": "low",
+    "safeToClaim": false,
+    "reasons": [
+      "agent_mail_database_contention_timeout",
+      "agent_mail_reservation_authority_unknown",
+      "inbox_evidence_not_authoritative",
+      "reservation_evidence_not_authoritative"
+    ],
+    "proofObligations": [
+      "do_not_treat_missing_reservation_rows_as_no_conflict",
+      "do_not_treat_missing_inbox_rows_as_no_peer_messages",
+      "record_agent_mail_timeout_in_beads",
+      "retry_agent_mail_only_after_bounded_backoff_or_repair"
+    ],
+    "suggestedCommands": [
+      "br show bd-docs.1 --json",
+      "br comments add bd-docs.1 --message 'agent_mail timeout database_contention; coordinating via beads'"
+    ]
+  },
+  "candidates": [
+    {
+      "id": "bd-docs.1",
+      "title": "Document a redaction-safe coordination contract",
+      "source": "beads_ready",
+      "status": "open",
+      "priority": 2,
+      "assignee": null,
+      "decision": "stale_or_advisory",
+      "collisionRisk": "medium",
+      "unsafeReasons": [
+        "agent_mail_database_contention_timeout",
+        "agent_mail_reservation_evidence_unavailable"
+      ],
+      "staleReasons": [
+        "agent_mail_inbox_evidence_unavailable",
+        "agent_mail_reservation_evidence_unavailable"
+      ],
+      "sourceRefs": ["br://bd-docs.1"]
+    }
+  ],
+  "coordination": {
+    "activeClaimCount": 0,
+    "dirtyPathCount": 2,
+    "fileCollisionCount": 0,
+    "agentMail": {
+      "status": "unavailable",
+      "healthLevel": null,
+      "unreadCount": null,
+      "ackRequiredCount": null,
+      "degradedCodes": [
+        "agent_mail_database_contention_timeout",
+        "agent_mail_unavailable"
+      ],
+      "recoveryMode": "manual_coordination",
+      "archiveIndexParity": "unknown",
+      "reservationAuthoritative": false,
+      "inboxAuthoritative": false,
+      "fallbackActions": [
+        {
+          "kind": "beads_comment",
+          "summary": "Record that Agent Mail timed out under database contention and coordinate in Beads until reads recover.",
+          "command": "br comments add bd-docs.1 --message 'agent_mail timeout database_contention; coordinating via beads until repair'",
+          "manualStep": null
+        },
+        {
+          "kind": "manual_coordination",
+          "summary": "Coordinate file-level reservations out of band because inbox and reservation reads are unavailable.",
+          "command": null,
+          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths."
+        },
+        {
+          "kind": "retry_later",
+          "summary": "Retry Agent Mail health and session bootstrap after bounded backoff or storage repair.",
+          "command": null,
+          "manualStep": "Re-run Agent Mail health after database contention clears; do not loop while work can proceed through Beads."
+        },
+        {
+          "kind": "switch_to_static_work",
+          "summary": "Prefer static, docs, or fixture work while coordination authority is unavailable.",
+          "command": null,
+          "manualStep": "Avoid claiming peer-touched source lanes until Agent Mail registration and inbox reads recover."
+        }
+      ],
+      "semanticReadiness": {
+        "status": "unknown",
+        "reason": "unknown"
+      }
+    },
+    "activeClaims": [],
+    "fileCollisions": []
+  },
+  "trackerIntegrity": {
+    "health": "external_changes_pending_import",
+    "jsonlPath": ".beads/issues.jsonl",
+    "dbPath": ".beads/beads.db",
+    "jsonlRecordCount": 2826,
+    "dbRecordCount": 2824,
+    "pendingImportCount": 2,
+    "externalChangesPendingImport": true,
+    "dirtyIssueCount": 0,
+    "mergeArtifactPaths": [],
+    "mergeArtifactCount": 0,
+    "jsonlParseError": null,
+    "brReadsAuthoritative": false,
+    "requiresCandidateDowngrade": false,
+    "recoveryHint": "Use stale-safe Beads inspection only; do not run br update or br claim from non-authoritative fallback rows."
+  },
+  "rchProofPosture": {
+    "sourceEnabled": true,
+    "remoteOnlyRequired": true,
+    "posture": "topology_blocked",
+    "healthyWorkerCount": 0,
+    "safeToLaunchCargoVerification": false,
+    "localFallbackPrevented": true,
+    "blockerCodes": ["rch_worker_topology_blocked"],
+    "knownBlockers": [
+      {
+        "code": "rch_worker_topology_blocked",
+        "fingerprint": "sha256:64139c3370a10eca54471aac3d6f6f23e681e9aa6953b10f870f1f4fb7641560",
+        "commandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77",
+        "message": "Path dependency topology policy failed; move dependencies under /data/projects or /dp and retry.",
+        "remediationBead": "bd-17c65.10.17.1.2",
+        "retryAfter": "2026-05-23T08:30:00Z",
+        "remoteRequired": true,
+        "localFallbackRefused": true,
+        "degradedCodes": [
+          "rch_verify_topology_blocked",
+          "rch_verify_local_fallback_refused"
+        ]
+      }
+    ],
+    "retryAfter": "2026-05-23T08:30:00Z"
+  },
+  "verification": {
+    "requiredCommands": [
+      {
+        "commandId": "cargo_test_swarm_contract",
+        "commandTemplate": "scripts/rch_verify.sh -- cargo test --test swarm_schema_lifecycle work_packet_agent_mail_database_contention_timeout_is_contractual",
+        "requiredSubstrate": "rch",
+        "when": "only_after_rch_remote_workers_recover",
+        "lastOutcome": "environment_blocked",
+        "lastCommandHash": "c3deeee238db02a03105ca63a08d2ee9f5de898fce342bb4bbc6c3d063f3fc77"
+      }
+    ],
+    "staticChecks": [
+      {
+        "commandId": "json_parse",
+        "commandTemplate": "jq empty tests/fixtures/swarm_work_packet/agent_mail_database_contention_timeout.json",
+        "requiredSubstrate": "static_local",
+        "when": "after_fixture_edits",
+        "lastOutcome": "passed",
+        "lastCommandHash": null
+      }
+    ],
+    "closeoutEvidenceRequired": true
+  },
+  "sourceProvenance": [
+    {
+      "source": "agent-mail",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "timeout_database_contention",
+      "digest": "blake3:agent-mail-database-contention-timeout",
+      "redaction": "status_class_only_no_bodies_no_inbox_no_paths_no_raw_stderr"
+    },
+    {
+      "source": "beads",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "stale_fallback",
+      "digest": "blake3:beads-stale-fallback",
+      "redaction": "ids_statuses_titles"
+    },
+    {
+      "source": "rch",
+      "collector": "swarm brief",
+      "status": "degraded",
+      "freshness": "stale_worker_topology",
+      "digest": "blake3:rch-blocked",
+      "redaction": "counts_worker_labels_no_raw_logs"
+    }
+  ],
+  "mutationPolicy": {
+    "sideEffectFree": true,
+    "claimsBeads": false,
+    "reservesFiles": false,
+    "sendsAgentMail": false,
+    "runsCargo": false,
+    "stagesGit": false,
+    "deletesFiles": false
+  },
+  "degraded": [
+    {
+      "code": "agent_mail_database_contention_timeout",
+      "source": "agent-mail",
+      "severity": "warning",
+      "message": "Agent Mail timed out while checking registration, inbox, or reservation authority under database contention.",
+      "repair": "Coordinate via Beads and retry Agent Mail after bounded backoff or storage repair."
+    },
+    {
+      "code": "agent_mail_unavailable",
+      "source": "agent-mail",
+      "severity": "warning",
+      "message": "Agent Mail cannot currently prove inbox, acknowledgement, or reservation state.",
+      "repair": "Use Beads and local inspection as advisory coordination until Agent Mail reads recover."
+    }
+  ]
+}

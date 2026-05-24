@@ -1,0 +1,79 @@
+{
+  "schema": "ee.swarm_slo.scorecard.v1",
+  "workload": {
+    "profileId": "swarm_slo_healthy_small",
+    "scenario": "healthy_small_checkout",
+    "agentCount": 4,
+    "traceSchema": "ee.agent_workload_trace.v1",
+    "expectedDegradationPosture": "none",
+    "concurrency": {
+      "shape": "bounded_parallel",
+      "requestedAgents": 4,
+      "activeAgents": 4,
+      "maxParallelAgents": 4
+    },
+    "commandMix": [
+      { "command": "status", "count": 1 },
+      { "command": "context", "count": 4 },
+      { "command": "search", "count": 4 },
+      { "command": "why", "count": 2 }
+    ],
+    "provenance": {
+      "kind": "synthetic",
+      "recordedRows": 0,
+      "syntheticRows": 11,
+      "traceHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "sourceHealth": {
+    "agentMail": { "status": "ok", "evidence": ["health_green"] },
+    "beads": { "status": "ok", "evidence": ["ready_json"] },
+    "bv": { "status": "ok", "evidence": ["robot_next"] },
+    "rch": { "status": "ok", "evidence": ["workers_healthy"] },
+    "workspace": { "status": "ok", "evidence": ["clean_paths"] }
+  },
+  "budgets": {
+    "profile": "swarm_heavy",
+    "p50MsTarget": 120,
+    "p95MsTarget": 350,
+    "p99MsTarget": 800,
+    "errorCountMax": 0,
+    "degradedCountMax": 0,
+    "stageBudgets": [
+      { "stage": "coordination", "p95MsTarget": 80 },
+      { "stage": "context", "p95MsTarget": 220 },
+      { "stage": "record", "p95MsTarget": 60 }
+    ]
+  },
+  "measurements": {
+    "sampleCount": 11,
+    "commandCount": 11,
+    "errorCount": 0,
+    "degradedCount": 0,
+    "latency": { "p50Ms": 72, "p95Ms": 180, "p99Ms": 260, "maxMs": 280 }
+  },
+  "stageAttribution": [
+    { "stage": "coordination", "elapsedMs": 48, "shareBasisPoints": 1714, "verdict": "pass" },
+    { "stage": "context", "elapsedMs": 180, "shareBasisPoints": 6429, "verdict": "pass" },
+    { "stage": "record", "elapsedMs": 52, "shareBasisPoints": 1857, "verdict": "pass" }
+  ],
+  "verdict": {
+    "status": "pass",
+    "summary": "Healthy small swarm replay stayed within every latency and degradation budget.",
+    "failingBudgetCount": 0
+  },
+  "failureReasons": [],
+  "determinism": {
+    "replayHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
+    "fixtureHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+    "stable": true,
+    "volatileFieldsStripped": ["recordedAt", "durationMs"]
+  },
+  "redaction": {
+    "rawMailBodiesPresent": false,
+    "rawMemoryBodiesPresent": false,
+    "rawCommandOutputPresent": false,
+    "privatePathsPresent": false,
+    "secretScanApplied": true
+  }
+}

@@ -831,6 +831,66 @@ ee diag build-admission --workspace . --min-free-bytes 18446744073709551615 --js
 
 ---
 
+## `bv_command_timeout`
+
+**Severity:** warning
+
+**Surfaces:** swarm brief, swarm work-packet
+
+**Introduced by:** bd-2z5ly.10 (epic S)
+
+**Trigger.** A bounded read-only BV robot-source command exceeds the swarm collection timeout.
+
+**Setup.**
+
+```bash
+# run swarm brief or work-packet while bv --robot-triage is blocked long enough to hit the collector timeout
+```
+
+**Invocation.**
+
+```bash
+ee swarm work-packet --workspace . --json
+```
+
+**Expected emission.** Message contains: `timed out`, `waiting indefinitely`
+
+**Repair hint.** `br --no-auto-import --allow-stale ready --json`
+
+**Fixture.** [`tests/fixtures/failure_modes/bv_command_timeout.json`](../tests/fixtures/failure_modes/bv_command_timeout.json)
+
+---
+
+## `bv_no_output`
+
+**Severity:** warning
+
+**Surfaces:** swarm brief, swarm work-packet
+
+**Introduced by:** bd-2z5ly.10 (epic S)
+
+**Trigger.** A read-only BV robot-source command exits successfully but writes no stdout for the JSON parser.
+
+**Setup.**
+
+```bash
+# run swarm brief or work-packet with a bv command wrapper that exits 0 and emits empty stdout
+```
+
+**Invocation.**
+
+```bash
+ee swarm work-packet --workspace . --json
+```
+
+**Expected emission.** Message contains: `no output`, `waiting indefinitely`
+
+**Repair hint.** `br --no-auto-import --allow-stale ready --json`
+
+**Fixture.** [`tests/fixtures/failure_modes/bv_no_output.json`](../tests/fixtures/failure_modes/bv_no_output.json)
+
+---
+
 ## `bv_unavailable`
 
 **Severity:** warning

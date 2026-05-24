@@ -672,7 +672,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 | `trust_quarantine_rows_unreadable` | medium | bd-17c65.10.6 (J6) |
 
-#### Coordination / external tools (27)
+#### Coordination / external tools (29)
 | Code | Severity | Bead |
 |------|----------|------|
 | `agent_mail_unavailable` | medium | bd-2nkbn (Agent Mail resilience) |
@@ -683,6 +683,8 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `beads_no_output` | warning | bd-2z5ly.9.3 (S) |
 | `beads_tracker_stale` | warning | bd-1zb7k.13.3 (C3) |
 | `beads_unavailable` | medium | bd-1zb7k.4 (S3) |
+| `bv_command_timeout` | warning | bd-2z5ly.10 (S) |
+| `bv_no_output` | warning | bd-2z5ly.10 (S) |
 | `bv_unavailable` | medium | bd-1zb7k.4 (S3) |
 | `git_unavailable` | warning | bd-1zb7k.4 (S3), bd-1eq3l.11 |
 | `git_not_repository` | medium | bd-1eq3l.11 |

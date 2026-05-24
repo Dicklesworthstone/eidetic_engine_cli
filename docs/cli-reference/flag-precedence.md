@@ -30,6 +30,8 @@ ee context "prepare release" --workspace . --format json
 ee context "prepare release" --workspace . --json
 ee graph export --workspace . --format mermaid
 ee graph export --workspace . --format mermaid --json
+ee memory history mem_release_rule --workspace . --format mermaid
+ee memory history mem_release_rule --workspace . --format mermaid --json
 ```
 
 Precedence:
@@ -41,6 +43,38 @@ Precedence:
   internal business logic.
 - `--fields` changes which JSON fields are emitted; it does not re-run the
   command with different graph or pack semantics.
+
+## Renderer Capability Matrix
+
+The command-level renderer inventory lives in
+`tests/renderer_command_capabilities.toml` and is validated by
+`tests/renderer_command_capabilities.rs`. Update that matrix whenever a command
+adds a renderer branch, appears in docs as format-aware, or intentionally
+rejects/omits a format.
+
+For agents and harness authors:
+
+- JSON is the canonical machine contract. Use `--json` or `--robot` for
+  automation even when a command also supports `--format mermaid`.
+- Mermaid is a pasteable diagram renderer, not a replacement schema. A command
+  marked `diagram` in the matrix must have an explicit renderer branch and
+  stable Mermaid markers.
+- A command marked `unsupported` for Mermaid must not silently rely on generic
+  Markdown or human output as if it were a diagram. These requests fail with an
+  `ee.error.v2` usage envelope naming the command, requested format, capability,
+  and matrix file. Use the JSON command or the documented human renderer
+  instead.
+
+Copy-pastable recovery when a Mermaid request is unsupported:
+
+```bash
+ee <command> --workspace . --json
+rg -n 'name = "<command>"|formats.mermaid' tests/renderer_command_capabilities.toml
+```
+
+If the command should become Mermaid-capable, add the explicit renderer branch,
+change the matrix entry to `diagram`, add deterministic markers, and add a
+contract or real-binary test before documenting the example here.
 
 ## Context And Pack
 

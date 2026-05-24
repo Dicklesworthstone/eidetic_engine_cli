@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.query.v1.json",
+  "title": "ee.query.v1",
+  "description": "Structured query-file request document accepted by ee context and ee search.",
+  "type": "object",
+  "required": ["version", "query"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "string", "const": "ee.query.v1"},
+    "workspace": {"type": "string", "minLength": 1},
+    "query": {
+      "type": "object",
+      "required": ["text"],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "mode": {"type": "string", "enum": ["hybrid", "lexical", "semantic", "exact"], "default": "hybrid"}
+      }
+    },
+    "tags": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "require": {"$ref": "#/$defs/stringArray"},
+        "requireAny": {"$ref": "#/$defs/stringArray"},
+        "exclude": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/filterPredicate"}
+    },
+    "time": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "after": {"$ref": "#/$defs/rfc3339Timestamp"},
+        "before": {"$ref": "#/$defs/rfc3339Timestamp"}
+      }
+    },
+    "asOf": {"$ref": "#/$defs/rfc3339Timestamp"},
+    "temporalValidity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "posture": {"type": "string", "enum": ["strict", "relaxed", "ignore"], "default": "relaxed"},
+        "referenceTime": {"$ref": "#/$defs/rfc3339Timestamp"}
+      }
+    },
+    "trust": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "minClass": {"$ref": "#/$defs/trustClass"},
+        "excludeClasses": {"type": "array", "items": {"$ref": "#/$defs/trustClass"}},
+        "requirePosture": {"type": "string", "enum": ["authoritative", "advisory", "legacy_evidence"]}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "policy": {"type": "string", "enum": ["respect", "bypass"], "default": "respect"},
+        "allowCategories": {"$ref": "#/$defs/stringArray"}
+      }
+    },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "seedMemories": {"$ref": "#/$defs/stringArray"},
+        "traversal": {"type": "string", "enum": ["outbound", "inbound", "bidirectional"], "default": "bidirectional"},
+        "maxHops": {"type": "integer", "minimum": 0, "maximum": 8, "default": 1},
+        "linkTypes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["supports", "contradicts", "derived_from", "supersedes", "related", "co_tag", "co_mention"]
+          }
+        },
+        "includeOrphans": {"type": "boolean", "default": true}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["compact", "balanced", "grounding", "orientation", "wide", "thorough", "submodular", "custom"],
+          "default": "balanced"
+        },
+        "format": {"type": "string", "enum": ["human", "json", "jsonl", "compact", "hook", "markdown", "toon"], "default": "json"},
+        "fields": {"type": "string", "enum": ["minimal", "summary", "standard", "full"], "default": "standard"},
+        "explain": {"type": "boolean", "default": false}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTokens": {"type": "integer", "minimum": 1, "maximum": 4294967295, "default": 8000},
+        "maxResults": {"type": "integer", "minimum": 1, "maximum": 4294967295, "default": 100},
+        "candidatePool": {"type": "integer", "minimum": 1, "maximum": 4294967295, "default": 200}
+      }
+    },
+    "speed": {"type": "string", "enum": ["instant", "default", "quality"], "default": "default"},
+    "pagination": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {"type": "string"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 200}
+      }
+    },
+    "eval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scenarioId": {"type": "string"},
+        "labels": {"$ref": "#/$defs/stringArray"},
+        "expectedMemoryIds": {"$ref": "#/$defs/stringArray"}
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["version", "query.text"],
+    "summary": ["version", "query", "workspace", "budget", "speed"],
+    "standard": ["version", "query", "workspace", "tags", "filters", "time", "asOf", "temporalValidity", "trust", "redaction", "graph", "output", "budget", "speed", "pagination", "eval"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "filterPredicate": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "eq": {"$ref": "#/$defs/jsonValue"},
+        "neq": {"$ref": "#/$defs/jsonValue"},
+        "in": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "notIn": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        "gt": {"type": "number"},
+        "gte": {"type": "number"},
+        "lt": {"type": "number"},
+        "lte": {"type": "number"},
+        "exists": {"type": "boolean"},
+        "startsWith": {"type": "string"},
+        "endsWith": {"type": "string"},
+        "contains": {"type": "string"}
+      }
+    },
+    "jsonValue": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}
+      ]
+    },
+    "rfc3339Timestamp": {"type": "string", "format": "date-time"},
+    "stringArray": {"type": "array", "items": {"type": "string"}},
+    "trustClass": {
+      "type": "string",
+      "enum": ["human_explicit", "agent_validated", "agent_assertion", "cass_evidence", "legacy_import"]
+    }
+  }
+}
