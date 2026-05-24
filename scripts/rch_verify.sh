@@ -40,6 +40,12 @@ Options:
   --json                    Accepted for symmetry; output is always JSON
   -h, --help                Show this help
 
+Environment:
+  RCH_VERIFY_ATTEMPT_TIMEOUT_MS  Live rch exec timeout budget (default: 900000)
+  RCH_VERIFY_PREFLIGHT_TIMEOUT_MS  Local helper probe timeout budget (default: 10000)
+  RCH_VERIFY_TAIL_BYTES          Diagnostic stdout/stderr tail size (default: 4000)
+  RCH_VERIFY_TMPDIR              Retained diagnostic artifact directory (default: /tmp)
+
 Accepted Cargo verifier shapes:
   cargo check ...
   cargo test ...
@@ -74,6 +80,19 @@ fi
 KNOWN_BLOCKER_TTL_SECONDS="${RCH_VERIFY_KNOWN_BLOCKER_TTL_SECONDS:-21600}"
 KNOWN_BLOCKER_MAX_ENTRIES="${RCH_VERIFY_KNOWN_BLOCKER_MAX_ENTRIES:-128}"
 KNOWN_BLOCKER_JSON="null"
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS="${RCH_VERIFY_ATTEMPT_TIMEOUT_MS:-900000}"
+RCH_VERIFY_PREFLIGHT_TIMEOUT_MS="${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS:-10000}"
+RCH_VERIFY_TAIL_BYTES="${RCH_VERIFY_TAIL_BYTES:-4000}"
+RCH_VERIFY_TMPDIR="${RCH_VERIFY_TMPDIR:-/tmp}"
+RCH_ATTEMPT_TIMED_OUT=false
+RCH_STDOUT_BYTES=0
+RCH_STDERR_BYTES=0
+RCH_ARTIFACT_KINDS=()
+RCH_ARTIFACT_PATHS=()
+RCH_ARTIFACT_ATTEMPTS=()
+RCH_ATTEMPT_STDOUT_FILE=""
+RCH_ATTEMPT_STDERR_FILE=""
+RCH_ATTEMPT_META_FILE=""
 RCH_RUNTIME_JSON='{"status":"not_checked","client_path":null,"client_version":null,"client_compat":null,"daemon_version":null,"daemon_compat":null,"daemon_socket_path":null,"message":null}'
 LOCAL_CARGO_PROCESSES_JSON='{"schema":"ee.rch_local_cargo_tripwire.v1","mode":"probe_processes","status":"not_run","count":0,"processes":[],"detectedLocalBuilds":[],"reason":"not requested"}'
 DEFAULT_RCH_BIN="/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch"
@@ -214,6 +233,255 @@ json_array() {
 
 json_quote() {
     python3 -c 'import json, sys; print(json.dumps(sys.argv[1]))' "$1"
+}
+
+positive_integer_or_die() {
+    local name="$1"
+    local value="$2"
+    case "$value" in
+        ''|*[!0-9]*)
+            echo "rch_verify: $name must be a positive integer, got: $value" >&2
+            exit 2
+            ;;
+        0)
+            echo "rch_verify: $name must be greater than zero" >&2
+            exit 2
+            ;;
+    esac
+}
+
+json_file_field() {
+    local path="$1"
+    local field="$2"
+    python3 - "$path" "$field" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+value = payload.get(sys.argv[2])
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+json_text_field() {
+    local payload="$1"
+    local field="$2"
+    JSON_INPUT="$payload" JSON_FIELD="$field" python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["JSON_INPUT"])
+value = payload.get(os.environ["JSON_FIELD"])
+if isinstance(value, bool):
+    print("true" if value else "false")
+elif value is None:
+    print("")
+else:
+    print(value)
+PY
+}
+
+file_bytes() {
+    local path="$1"
+    if [ -z "$path" ] || [ ! -e "$path" ]; then
+        printf '0'
+        return 0
+    fi
+    wc -c <"$path" | tr -d ' '
+}
+
+capture_command_with_timeout() {
+    local timeout_ms="$1"
+    local cwd="$2"
+    shift 2
+    python3 - "$timeout_ms" "$cwd" "$@" <<'PY'
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+timeout_ms = int(sys.argv[1])
+cwd = sys.argv[2]
+argv = sys.argv[3:]
+started = time.monotonic()
+timed_out = False
+status = 0
+output = b""
+
+try:
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+except OSError as error:
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    print(json.dumps({
+        "status": 126,
+        "timed_out": False,
+        "elapsed_ms": elapsed_ms,
+        "output": f"{type(error).__name__}: {error}",
+    }, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(0)
+try:
+    output, _ = process.communicate(timeout=timeout_ms / 1000)
+    status = process.returncode
+except subprocess.TimeoutExpired:
+    timed_out = True
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except Exception:
+        process.terminate()
+    try:
+        output, _ = process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            process.kill()
+        output, _ = process.communicate()
+    status = 124
+
+elapsed_ms = int((time.monotonic() - started) * 1000)
+print(json.dumps({
+    "status": status,
+    "timed_out": timed_out,
+    "elapsed_ms": elapsed_ms,
+    "output": output.decode("utf-8", "replace"),
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+prepare_attempt_artifacts() {
+    local attempt="$1"
+    RCH_ATTEMPT_STDOUT_FILE="$(mktemp "$RCH_VERIFY_TMPDIR/rch-verify-${attempt}-stdout.XXXXXX")" || exit 2
+    RCH_ATTEMPT_STDERR_FILE="$(mktemp "$RCH_VERIFY_TMPDIR/rch-verify-${attempt}-stderr.XXXXXX")" || exit 2
+    RCH_ATTEMPT_META_FILE="$(mktemp "$RCH_VERIFY_TMPDIR/rch-verify-${attempt}-meta.XXXXXX")" || exit 2
+}
+
+record_attempt_artifacts() {
+    local attempt="$1"
+    if [ -n "$RCH_ATTEMPT_STDOUT_FILE" ]; then
+        RCH_ARTIFACT_KINDS+=("stdout")
+        RCH_ARTIFACT_PATHS+=("$RCH_ATTEMPT_STDOUT_FILE")
+        RCH_ARTIFACT_ATTEMPTS+=("$attempt")
+    fi
+    if [ -n "$RCH_ATTEMPT_STDERR_FILE" ]; then
+        RCH_ARTIFACT_KINDS+=("stderr")
+        RCH_ARTIFACT_PATHS+=("$RCH_ATTEMPT_STDERR_FILE")
+        RCH_ARTIFACT_ATTEMPTS+=("$attempt")
+    fi
+}
+
+attempt_artifacts_json() {
+    python3 - "$@" <<'PY'
+import json
+import sys
+
+items = []
+args = sys.argv[1:]
+for index in range(0, len(args), 3):
+    try:
+        kind, path, attempt = args[index:index + 3]
+    except ValueError:
+        continue
+    if path:
+        items.append({"kind": kind, "path": path, "attempt": attempt})
+print(json.dumps(items, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+artifact_tail() {
+    local kind="$1"
+    local index
+    for index in "${!RCH_ARTIFACT_KINDS[@]}"; do
+        if [ "${RCH_ARTIFACT_KINDS[$index]}" = "$kind" ] && [ -r "${RCH_ARTIFACT_PATHS[$index]}" ]; then
+            cat "${RCH_ARTIFACT_PATHS[$index]}"
+        fi
+    done | tail_text
+}
+
+run_process_with_timeout() {
+    local stdout_file="$1"
+    local stderr_file="$2"
+    local meta_file="$3"
+    local cwd="$4"
+    shift 4
+    python3 - "$RCH_VERIFY_ATTEMPT_TIMEOUT_MS" "$stdout_file" "$stderr_file" "$meta_file" "$cwd" "$@" <<'PY'
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+
+timeout_ms = int(sys.argv[1])
+stdout_path = sys.argv[2]
+stderr_path = sys.argv[3]
+meta_path = sys.argv[4]
+cwd = sys.argv[5]
+argv = sys.argv[6:]
+started = time.monotonic()
+timed_out = False
+status = 0
+
+with open(stdout_path, "wb") as stdout_file, open(stderr_path, "wb") as stderr_file:
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        stdout=stdout_file,
+        stderr=stderr_file,
+        start_new_session=True,
+    )
+    try:
+        status = process.wait(timeout=timeout_ms / 1000)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except Exception:
+            process.terminate()
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            # Kill only the process group this wrapper created; never scan for peers.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                process.kill()
+            process.wait()
+        status = 124
+
+elapsed_ms = int((time.monotonic() - started) * 1000)
+meta = {
+    "status": status,
+    "timed_out": timed_out,
+    "elapsed_ms": elapsed_ms,
+    "stdout_bytes": os.path.getsize(stdout_path) if os.path.exists(stdout_path) else 0,
+    "stderr_bytes": os.path.getsize(stderr_path) if os.path.exists(stderr_path) else 0,
+}
+with open(meta_path, "w", encoding="utf-8") as handle:
+    json.dump(meta, handle, sort_keys=True, separators=(",", ":"))
+sys.exit(status)
+PY
 }
 
 json_object_not_run() {
@@ -365,7 +633,7 @@ candidate_ee_bin() {
         return 0
     fi
 
-    local candidate version_output
+    local candidate version_probe version_output version_timed_out
     for candidate in \
         "${CARGO_TARGET_DIR:-}/debug/ee" \
         "${CARGO_TARGET_DIR:-}/release/ee" \
@@ -373,8 +641,10 @@ candidate_ee_bin() {
         "$PROJECT_ROOT/target/release/ee"
     do
         if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-            version_output="$("$candidate" --version 2>/dev/null || true)"
-            if [ -n "${version_output//[[:space:]]/}" ]; then
+            version_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "$candidate" --version)"
+            version_timed_out="$(json_text_field "$version_probe" timed_out)"
+            version_output="$(json_text_field "$version_probe" output)"
+            if [ "$version_timed_out" != "true" ] && [ -n "${version_output//[[:space:]]/}" ]; then
                 printf '%s' "$candidate"
                 return 0
             fi
@@ -428,11 +698,15 @@ PY
         args+=("--artifact-destination" "$destination")
     done
 
-    local output exit_code
-    set +e
-    output="$("${args[@]}" 2>&1)"
-    exit_code=$?
-    set -e
+    local output exit_code admission_probe admission_timed_out
+    admission_probe="$(capture_command_with_timeout "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$PROJECT_ROOT" "${args[@]}")"
+    output="$(json_text_field "$admission_probe" output)"
+    exit_code="$(json_text_field "$admission_probe" status)"
+    admission_timed_out="$(json_text_field "$admission_probe" timed_out)"
+    if [ "$admission_timed_out" = "true" ]; then
+        output="${output}
+[RCH_VERIFY] build-admission preflight timed out after ${RCH_VERIFY_PREFLIGHT_TIMEOUT_MS}ms"
+    fi
 
     BUILD_ADMISSION_OUTPUT="$output" \
     BUILD_ADMISSION_EXIT_CODE="$exit_code" \
@@ -537,7 +811,7 @@ PY
 }
 
 tail_text() {
-    python3 -c 'import sys; text=sys.stdin.read(); print(text[-4000:])'
+    RCH_VERIFY_TAIL_BYTES="$RCH_VERIFY_TAIL_BYTES" python3 -c 'import os, sys; text=sys.stdin.read(); print(text[-int(os.environ["RCH_VERIFY_TAIL_BYTES"]):])'
 }
 
 extract_worker_id() {
@@ -1491,18 +1765,27 @@ run_rch_invocation_once() {
         return "${RCH_VERIFY_FAKE_EXIT_CODE:-0}"
     fi
 
-    cd "$PROJECT_ROOT" && \
-        RCH_WORKERS="${RCH_WORKERS:-}" \
-        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
-        RCH_REQUIRE_REMOTE=1 \
-        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
-        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
-        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
-        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
-        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        "${RCH_INVOCATION[@]}" 2>&1
+    run_process_with_timeout \
+        "$RCH_ATTEMPT_STDOUT_FILE" \
+        "$RCH_ATTEMPT_STDERR_FILE" \
+        "$RCH_ATTEMPT_META_FILE" \
+        "$PROJECT_ROOT" \
+        env \
+        "RCH_WORKERS=${RCH_WORKERS:-}" \
+        "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "RCH_REQUIRE_REMOTE=1" \
+        "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
+        "RCH_TEST_SLOTS=${RCH_TEST_SLOTS:-2}" \
+        "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
+        "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
+        "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
+        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
+        "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
+        "${RCH_INVOCATION[@]}"
+    local status=$?
+    cat "$RCH_ATTEMPT_STDOUT_FILE"
+    cat "$RCH_ATTEMPT_STDERR_FILE"
+    return "$status"
 }
 
 run_rch_invocation_retry() {
@@ -1512,18 +1795,27 @@ run_rch_invocation_retry() {
         return "${RCH_VERIFY_FAKE_RETRY_EXIT_CODE:-0}"
     fi
 
-    cd "$PROJECT_ROOT" && \
-        RCH_WORKERS="$preferred_workers" \
-        RCH_COMPRESSION="${RCH_COMPRESSION:-0}" \
-        RCH_REQUIRE_REMOTE=1 \
-        RCH_QUEUE_WHEN_BUSY="${RCH_QUEUE_WHEN_BUSY:-1}" \
-        RCH_TEST_SLOTS="${RCH_TEST_SLOTS:-2}" \
-        RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_DAEMON_RESPONSE_TIMEOUT_SECS="${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
-        RCH_CANONICAL_PROJECT_ROOT="${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
-        RCH_ALIAS_PROJECT_ROOT="${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
-        RCH_VISIBILITY="${RCH_VISIBILITY:-summary}" \
-        "${RCH_INVOCATION[@]}" 2>&1
+    run_process_with_timeout \
+        "$RCH_ATTEMPT_STDOUT_FILE" \
+        "$RCH_ATTEMPT_STDERR_FILE" \
+        "$RCH_ATTEMPT_META_FILE" \
+        "$PROJECT_ROOT" \
+        env \
+        "RCH_WORKERS=$preferred_workers" \
+        "RCH_COMPRESSION=${RCH_COMPRESSION:-0}" \
+        "RCH_REQUIRE_REMOTE=1" \
+        "RCH_QUEUE_WHEN_BUSY=${RCH_QUEUE_WHEN_BUSY:-1}" \
+        "RCH_TEST_SLOTS=${RCH_TEST_SLOTS:-2}" \
+        "RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS:-900}" \
+        "RCH_DAEMON_RESPONSE_TIMEOUT_SECS=${RCH_DAEMON_RESPONSE_TIMEOUT_SECS:-900}" \
+        "RCH_CANONICAL_PROJECT_ROOT=${RCH_CANONICAL_PROJECT_ROOT:-$(dirname "$PROJECT_ROOT")}" \
+        "RCH_ALIAS_PROJECT_ROOT=${RCH_ALIAS_PROJECT_ROOT:-/data/projects}" \
+        "RCH_VISIBILITY=${RCH_VISIBILITY:-summary}" \
+        "${RCH_INVOCATION[@]}"
+    local status=$?
+    cat "$RCH_ATTEMPT_STDOUT_FILE"
+    cat "$RCH_ATTEMPT_STDERR_FILE"
+    return "$status"
 }
 
 now_iso() {
@@ -1574,8 +1866,17 @@ emit_json() {
         source_state_json='{"verification_attribution":"live_dirty_checkout","git_head":null,"git_tree":null,"dirty_status_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","dirty_summary":{"total":0,"tracked":0,"untracked":0,"beads":0,"scratch":0,"secret_risk":0,"ignored":0,"unknown":0},"dirty_paths_sample":[],"source_state_degraded_codes":[]}'
     fi
     local json_payload
+    local artifacts_json artifact_args=() artifact_index
+    for artifact_index in "${!RCH_ARTIFACT_KINDS[@]}"; do
+        artifact_args+=(
+            "${RCH_ARTIFACT_KINDS[$artifact_index]}"
+            "${RCH_ARTIFACT_PATHS[$artifact_index]}"
+            "${RCH_ARTIFACT_ATTEMPTS[$artifact_index]}"
+        )
+    done
+    artifacts_json="$(attempt_artifacts_json "${artifact_args[@]}")"
     json_payload="$(cat <<EOF
-{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
+{"schema":"ee.rch.verify.v1","success":$success,"generated_at":"$(now_iso)","command":$command_json,"command_text":$command_text_json,"command_kind":"$COMMAND_KIND","remote_env":$remote_env_json,"remote_required":true,"would_offload":$WOULD_OFFLOAD,"worker_id":$WORKER_ID_JSON,"requested_workers":$requested_workers_json,"configured_workers":$configured_workers_json,"daemon_workers":$daemon_workers_json,"remote_project_root":$REMOTE_PROJECT_ROOT_JSON,"remote_target_dir":$REMOTE_TARGET_DIR_JSON,"exit_code":$exit_code_json,"elapsed_ms":$elapsed_ms,"attempt_timeout_ms":$RCH_VERIFY_ATTEMPT_TIMEOUT_MS,"timed_out":$RCH_ATTEMPT_TIMED_OUT,"stdout_bytes":$RCH_STDOUT_BYTES,"stderr_bytes":$RCH_STDERR_BYTES,"stdout_tail":$stdout_json,"stderr_tail":$stderr_json,"artifacts":$artifacts_json,"degraded_codes":$degraded_codes_json,"rch_invocation":$rch_invocation_json,"build_admission":$build_admission_json,"rch_runtime":$rch_runtime_json,"known_blocker":$known_blocker_json,"local_cargo_processes":$local_cargo_processes_json,"source_state":$source_state_json}
 EOF
 )"
     JSON_PAYLOAD="$json_payload" \
@@ -2138,6 +2439,13 @@ if event_log_path:
         fake_path = Path(fake_invocations_path)
         if fake_path.exists():
             fake_invocation_count = len(fake_path.read_text(encoding="utf-8").splitlines())
+
+    def artifact_path(kind):
+        for artifact in proof.get("artifacts") or []:
+            if artifact.get("kind") == kind:
+                return artifact.get("path")
+        return None
+
     event = {
         "schema": "ee.test_event.v1",
         "ts": proof.get("generated_at"),
@@ -2169,8 +2477,8 @@ if event_log_path:
             "fake_rch_invocation_count": fake_invocation_count,
             "source_manifest_hash": proof.get("source_manifest_hash"),
             "known_blocker": proof.get("known_blocker"),
-            "stdout_artifact_path": None,
-            "stderr_artifact_path": None,
+            "stdout_artifact_path": artifact_path("stdout"),
+            "stderr_artifact_path": artifact_path("stderr"),
             "schema_validation_status": "not_run",
             "deterministic_rerun_hash": proof.get("source_manifest_hash") or proof.get("dirty_status_hash"),
             "first_failure_diagnosis": status,
@@ -2184,6 +2492,10 @@ if event_log_path:
 print(proof_json)
 PY
 }
+
+positive_integer_or_die "RCH_VERIFY_ATTEMPT_TIMEOUT_MS" "$RCH_VERIFY_ATTEMPT_TIMEOUT_MS"
+positive_integer_or_die "RCH_VERIFY_PREFLIGHT_TIMEOUT_MS" "$RCH_VERIFY_PREFLIGHT_TIMEOUT_MS"
+positive_integer_or_die "RCH_VERIFY_TAIL_BYTES" "$RCH_VERIFY_TAIL_BYTES"
 
 COMMAND_KIND="$(classify_command)"
 WOULD_OFFLOAD=false
@@ -2354,6 +2666,11 @@ if [ "${RCH_VERIFY_FAIL_FAST_STALE_WORKER:-1}" = "1" ]; then
 fi
 
 start_ms="$(now_ms)"
+primary_has_artifacts=0
+if [ -z "${RCH_VERIFY_FAKE_OUTPUT:-}" ]; then
+    prepare_attempt_artifacts "primary"
+    primary_has_artifacts=1
+fi
 set +e
 combined_output="$(run_rch_invocation_once)"
 exit_code=$?
@@ -2362,6 +2679,20 @@ end_ms="$(now_ms)"
 elapsed_ms=$((end_ms - start_ms))
 if [ -n "${RCH_VERIFY_FAKE_ELAPSED_MS:-}" ]; then
     elapsed_ms="${RCH_VERIFY_FAKE_ELAPSED_MS}"
+fi
+if [ "$primary_has_artifacts" -eq 1 ]; then
+    if [ -s "$RCH_ATTEMPT_META_FILE" ]; then
+        attempt_timed_out="$(json_file_field "$RCH_ATTEMPT_META_FILE" timed_out)"
+        if [ "$attempt_timed_out" = "true" ]; then
+            RCH_ATTEMPT_TIMED_OUT=true
+        fi
+        RCH_STDOUT_BYTES=$((RCH_STDOUT_BYTES + $(json_file_field "$RCH_ATTEMPT_META_FILE" stdout_bytes)))
+        RCH_STDERR_BYTES=$((RCH_STDERR_BYTES + $(json_file_field "$RCH_ATTEMPT_META_FILE" stderr_bytes)))
+    else
+        RCH_STDOUT_BYTES=$((RCH_STDOUT_BYTES + $(file_bytes "$RCH_ATTEMPT_STDOUT_FILE")))
+        RCH_STDERR_BYTES=$((RCH_STDERR_BYTES + $(file_bytes "$RCH_ATTEMPT_STDERR_FILE")))
+    fi
+    record_attempt_artifacts "primary"
 fi
 
 worker_id="$(printf '%s' "$combined_output" | extract_worker_id)"
@@ -2380,12 +2711,31 @@ if [ "$exit_code" -ne 0 ] \
         retried_after_disk_full=1
         retry_note="[RCH_VERIFY] worker $disk_full_worker hit disk-full transfer failure; retrying once with RCH_WORKERS=$alternate_workers"
         start_retry_ms="$(now_ms)"
+        retry_has_artifacts=0
+        if [ -z "${RCH_VERIFY_FAKE_RETRY_OUTPUT:-}" ]; then
+            prepare_attempt_artifacts "retry"
+            retry_has_artifacts=1
+        fi
         set +e
         retry_output="$(run_rch_invocation_retry "$alternate_workers")"
         retry_exit_code=$?
         set -e
         end_retry_ms="$(now_ms)"
         elapsed_ms=$((elapsed_ms + end_retry_ms - start_retry_ms))
+        if [ "$retry_has_artifacts" -eq 1 ]; then
+            if [ -s "$RCH_ATTEMPT_META_FILE" ]; then
+                attempt_timed_out="$(json_file_field "$RCH_ATTEMPT_META_FILE" timed_out)"
+                if [ "$attempt_timed_out" = "true" ]; then
+                    RCH_ATTEMPT_TIMED_OUT=true
+                fi
+                RCH_STDOUT_BYTES=$((RCH_STDOUT_BYTES + $(json_file_field "$RCH_ATTEMPT_META_FILE" stdout_bytes)))
+                RCH_STDERR_BYTES=$((RCH_STDERR_BYTES + $(json_file_field "$RCH_ATTEMPT_META_FILE" stderr_bytes)))
+            else
+                RCH_STDOUT_BYTES=$((RCH_STDOUT_BYTES + $(file_bytes "$RCH_ATTEMPT_STDOUT_FILE")))
+                RCH_STDERR_BYTES=$((RCH_STDERR_BYTES + $(file_bytes "$RCH_ATTEMPT_STDERR_FILE")))
+            fi
+            record_attempt_artifacts "retry"
+        fi
         combined_output="${combined_output}
 ${retry_note}
 ${retry_output}"
@@ -2416,10 +2766,19 @@ if [ -n "$remote_checkout_missing_paths" ]; then
 [RCH_VERIFY] remote checkout missing tracked files: $remote_checkout_missing_paths"
 fi
 
-stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
+if [ "${#RCH_ARTIFACT_KINDS[@]}" -gt 0 ]; then
+    stdout_tail="$(artifact_tail stdout)"
+    stderr_tail="$(artifact_tail stderr)"
+else
+    stdout_tail="$(printf '%s' "$combined_output" | tail_text)"
+    stderr_tail=""
+fi
 degraded=("${build_admission_degraded[@]}")
 if [ "$exit_code" -ne 0 ]; then
     degraded+=("rch_verify_remote_command_failed")
+fi
+if [ "$RCH_ATTEMPT_TIMED_OUT" = true ]; then
+    degraded+=("rch_verify_capacity_or_timeout")
 fi
 if [ -n "$disk_full_worker" ] || printf '%s' "$combined_output" | is_worker_disk_full_output; then
     degraded+=("rch_verify_worker_disk_full")
@@ -2463,5 +2822,5 @@ elif [ "$WOULD_OFFLOAD" = true ] && [ -z "$worker_id" ]; then
     degraded+=("rch_verify_remote_marker_missing")
 fi
 
-emit_json true "$exit_code" "$elapsed_ms" "$stdout_tail" "" "${degraded[@]}"
+emit_json true "$exit_code" "$elapsed_ms" "$stdout_tail" "$stderr_tail" "${degraded[@]}"
 exit "$exit_code"

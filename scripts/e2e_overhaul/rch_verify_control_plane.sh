@@ -189,6 +189,60 @@ FAKERCH
     chmod +x "$path"
 }
 
+write_fake_rch_hang() {
+    local path="${1:?fake rch path required}"
+    cat > "$path" <<'FAKERCH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  printf 'stdout before hang\n'
+  printf 'stderr before hang\n' >&2
+  sleep 30
+  exit 99
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+FAKERCH
+    chmod +x "$path"
+}
+
+write_fake_rch_worker_filter_ignored() {
+    local path="${1:?fake rch path required}"
+    cat > "$path" <<'FAKERCH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "--version" ]; then
+  printf 'rch 1.0.24\n'
+  exit 0
+fi
+if [ "${1:-}" = "status" ]; then
+  cat <<'JSON'
+{"data":{"daemon":{"version":"1.0.24","socket_path":"/tmp/rch.sock","workers":[],"recent_builds":[]}}}
+JSON
+  exit 0
+fi
+if [ "${1:-}" = "exec" ]; then
+  printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+  printf '[RCH] remote rogue failed (exit 101)\n'
+  exit 101
+fi
+printf 'unexpected fake rch args: %s\n' "$*" >&2
+exit 2
+FAKERCH
+    chmod +x "$path"
+}
+
 assert_known_blocker_recorded_json() {
     local path="${1:?json path required}"
     python3 - "$path" <<'PY'
@@ -262,6 +316,84 @@ print(json.dumps({
 PY
 }
 
+assert_worker_filter_ignored_json() {
+    local path="${1:?json path required}"
+    python3 - "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "rch_environment_failure":
+    raise SystemExit(f"expected rch_environment_failure: {report}")
+if report.get("worker_id") != "rogue":
+    raise SystemExit(f"expected rogue worker marker: {report}")
+codes = set(report.get("degraded_codes") or [])
+worker_codes = set(report.get("worker_state_degraded_codes") or [])
+required = {"rch_verify_remote_command_failed", "rch_verify_worker_filter_ignored"}
+if not required.issubset(codes):
+    raise SystemExit(f"missing worker-filter degraded codes: {report}")
+if "rch_verify_worker_filter_ignored" not in worker_codes:
+    raise SystemExit(f"worker-filter code should be worker-state degraded: {report}")
+if "rogue" not in (report.get("stdout_tail") or ""):
+    raise SystemExit(f"missing rogue worker tail evidence: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": sorted(codes),
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+assert_timeout_json() {
+    local path="${1:?json path required}"
+    local expected_timeout_ms="${2:?timeout ms required}"
+    python3 - "$path" "$expected_timeout_ms" <<'PY'
+import json
+import os
+import sys
+
+path, expected_timeout_ms = sys.argv[1:3]
+expected_timeout_ms = int(expected_timeout_ms)
+with open(path, encoding="utf-8") as handle:
+    report = json.load(handle)
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "capacity_or_timeout":
+    raise SystemExit(f"expected capacity_or_timeout: {report}")
+if report.get("exit_code") != 124:
+    raise SystemExit(f"expected timeout exit 124: {report}")
+if report.get("timed_out") is not True:
+    raise SystemExit(f"expected timed_out=true: {report}")
+if report.get("attempt_timeout_ms") != expected_timeout_ms:
+    raise SystemExit(f"timeout budget drifted: {report}")
+if "rch_verify_capacity_or_timeout" not in (report.get("degraded_codes") or []):
+    raise SystemExit(f"missing capacity timeout degradation: {report}")
+if "stdout before hang" not in (report.get("stdout_tail") or ""):
+    raise SystemExit(f"missing stdout tail evidence: {report}")
+if "stderr before hang" not in (report.get("stderr_tail") or ""):
+    raise SystemExit(f"missing stderr tail evidence: {report}")
+if int(report.get("stdout_bytes") or 0) <= 0:
+    raise SystemExit(f"missing stdout byte accounting: {report}")
+if int(report.get("stderr_bytes") or 0) <= 0:
+    raise SystemExit(f"missing stderr byte accounting: {report}")
+artifacts = report.get("artifacts") or []
+by_kind = {item.get("kind"): item for item in artifacts}
+for kind in ("stdout", "stderr"):
+    artifact = by_kind.get(kind)
+    if not artifact:
+        raise SystemExit(f"missing {kind} artifact: {report}")
+    artifact_path = artifact.get("path")
+    if not artifact_path or not os.path.exists(artifact_path):
+        raise SystemExit(f"{kind} artifact does not exist: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": report.get("degraded_codes") or [],
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
 assert_event_log_json() {
     local path="${1:?event log path required}"
     local expected_status="${2:?expected status required}"
@@ -311,10 +443,11 @@ if not str(fields.get("git_tree") or ""):
     raise SystemExit(f"missing git_tree: {event}")
 if not str(fields.get("dirty_status_hash") or "").startswith("sha256:"):
     raise SystemExit(f"missing dirty_status_hash: {event}")
-if fields.get("stdout_artifact_path", "__missing__") is not None:
-    raise SystemExit(f"stdout_artifact_path should be explicit null: {event}")
-if fields.get("stderr_artifact_path", "__missing__") is not None:
-    raise SystemExit(f"stderr_artifact_path should be explicit null: {event}")
+for artifact_key in ("stdout_artifact_path", "stderr_artifact_path"):
+    artifact_path = fields.get(artifact_key)
+    if artifact_path is not None:
+        if not str(artifact_path).startswith("/tmp/"):
+            raise SystemExit(f"{artifact_key} should be a retained /tmp artifact path: {event}")
 if fields.get("schema_validation_status") != "not_run":
     raise SystemExit(f"unexpected schema validation status: {event}")
 if not str(fields.get("deterministic_rerun_hash") or "").startswith("sha256:"):
@@ -1105,6 +1238,104 @@ emit_event \
     "$(printf '%s' "$known_blocker_second_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "matching known blocker refused before fake RCH and emitted event-log evidence" \
     "known_blocker_refusal"
+
+start="$(started_ms)"
+worker_filter_repo="$WORK_DIR/worker-filter-repo"
+init_fixture_repo "$worker_filter_repo"
+worker_filter_before="$WORK_DIR/worker-filter.before-status"
+git_status_v2 "$worker_filter_repo" > "$worker_filter_before"
+worker_filter_fake_rch="$WORK_DIR/fake-rch-worker-filter"
+worker_filter_invocations="$WORK_DIR/worker-filter-invocations.txt"
+worker_filter_json="$WORK_DIR/worker-filter.json"
+worker_filter_event_log="$WORK_DIR/worker-filter-events.jsonl"
+write_fake_rch_worker_filter_ignored "$worker_filter_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$worker_filter_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:10.500000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-12v87.4 \
+    --skip-build-admission \
+    --project-root "$worker_filter_repo" \
+    --event-log "$worker_filter_event_log" \
+    --rch-bin "$worker_filter_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_worker_filter_e2e > "$worker_filter_json"
+worker_filter_exit=$?
+set -e
+if [ "$worker_filter_exit" -eq 0 ]; then
+    printf 'worker-filter fixture unexpectedly passed\n' >&2
+    exit 1
+fi
+assert_status_unchanged "$worker_filter_repo" "$worker_filter_before" "worker-filter"
+if [ "$(wc -l < "$worker_filter_invocations" | tr -d ' ')" != "1" ]; then
+    printf 'worker-filter fixture should invoke fake RCH once:\n' >&2
+    sed -n '1,120p' "$worker_filter_invocations" >&2
+    exit 1
+fi
+worker_filter_assert="$(assert_worker_filter_ignored_json "$worker_filter_json")"
+assert_event_log_json "$worker_filter_event_log" "rch_environment_failure" "live_dirty_checkout" 1 101 "absent" >/dev/null
+emit_event \
+    "assert" \
+    "worker_filter_ignored_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$worker_filter_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "rogue" \
+    "$(printf '%s' "$worker_filter_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "fake RCH reported a worker outside the configured filter and preserved transcript evidence" \
+    "worker_filter_ignored"
+
+start="$(started_ms)"
+timeout_repo="$WORK_DIR/timeout-repo"
+init_fixture_repo "$timeout_repo"
+timeout_before="$WORK_DIR/timeout.before-status"
+git_status_v2 "$timeout_repo" > "$timeout_before"
+timeout_fake_rch="$WORK_DIR/fake-rch-timeout"
+timeout_invocations="$WORK_DIR/timeout-invocations.txt"
+timeout_json="$WORK_DIR/timeout.json"
+timeout_event_log="$WORK_DIR/timeout-events.jsonl"
+write_fake_rch_hang "$timeout_fake_rch"
+set +e
+FAKE_RCH_INVOCATIONS="$timeout_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:11.000000Z" \
+RCH_VERIFY_ATTEMPT_TIMEOUT_MS=150 \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-12v87.4 \
+    --skip-build-admission \
+    --project-root "$timeout_repo" \
+    --event-log "$timeout_event_log" \
+    --rch-bin "$timeout_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_timeout_e2e > "$timeout_json"
+timeout_exit=$?
+set -e
+if [ "$timeout_exit" -ne 124 ]; then
+    printf 'timeout fixture expected exit 124, got %s\n' "$timeout_exit" >&2
+    sed -n '1,160p' "$timeout_json" >&2
+    exit 1
+fi
+assert_status_unchanged "$timeout_repo" "$timeout_before" "timeout"
+if [ "$(wc -l < "$timeout_invocations" | tr -d ' ')" != "1" ]; then
+    printf 'timeout fixture should invoke fake RCH once:\n' >&2
+    sed -n '1,120p' "$timeout_invocations" >&2
+    exit 1
+fi
+timeout_assert="$(assert_timeout_json "$timeout_json" 150)"
+assert_event_log_json "$timeout_event_log" "capacity_or_timeout" "live_dirty_checkout" 1 124 "absent" >/dev/null
+emit_event \
+    "assert" \
+    "timeout_watchdog_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$timeout_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "" \
+    "$(printf '%s' "$timeout_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "hanging fake RCH was bounded, killed within watchdog budget, and retained tail artifacts" \
+    "timeout_watchdog"
 
 if [ "${RCH_VERIFY_CONTROL_PLANE_LONG_BENCH:-0}" = "1" ]; then
     start="$(started_ms)"
