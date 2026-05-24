@@ -895,6 +895,35 @@ pub fn run_context_pack_seeded(
         .map(|run| run.response)
 }
 
+const PACK_DNA_SERIAL_GRAPH_TASK_COUNT: u64 = 1;
+const PACK_DNA_SERIAL_MERGE_ORDER_KEY: &str = concat!(
+    "serial:normalize_inputs>voronoi_dominator>community_of_mass>",
+    "ego_subgraph>ppr_neighbors>degraded"
+);
+
+fn elapsed_millis_u64(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn trace_pack_dna_explain_orchestration(
+    graph_explain_start: Instant,
+    pack_dna_degraded_code: &str,
+    graph_task_count: u64,
+) {
+    tracing::debug!(
+        target: "ee::context::pack_dna",
+        explain_enabled = true,
+        selection_latency_ms = 0_u64,
+        graph_explain_latency_ms = elapsed_millis_u64(graph_explain_start),
+        overlap_latency_ms = 0_u64,
+        pack_dna_timeout_ms = 0_u64,
+        pack_dna_degraded_code = pack_dna_degraded_code,
+        graph_task_count = graph_task_count,
+        graph_merge_order_key = PACK_DNA_SERIAL_MERGE_ORDER_KEY,
+        "pack DNA explain orchestration completed on serial path"
+    );
+}
+
 pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
     let workspace_path = workspace_path_from_database_path(database_path);
     match workspace_path
@@ -921,6 +950,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         }
     }
 
+    let graph_explain_start = Instant::now();
     let connection = match DbConnection::open_file(database_path) {
         Ok(connection) => connection,
         Err(error) => {
@@ -931,6 +961,11 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 ContextResponseSeverity::Low,
                 format!("Pack DNA was requested but the memory graph could not be opened: {error}"),
                 Some("ee status --json".to_string()),
+            );
+            trace_pack_dna_explain_orchestration(
+                graph_explain_start,
+                "context_graph_snapshot_unavailable",
+                0,
             );
             return;
         }
@@ -949,6 +984,11 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 ContextResponseSeverity::Low,
                 format!("Pack DNA was requested but memory graph projection failed: {error}"),
                 Some("ee graph centrality-refresh --workspace .".to_string()),
+            );
+            trace_pack_dna_explain_orchestration(
+                graph_explain_start,
+                "context_graph_snapshot_unavailable",
+                0,
             );
             return;
         }
@@ -1003,6 +1043,11 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 format!("Pack DNA computation failed: {error}"),
                 Some("ee graph centrality-refresh --workspace .".to_string()),
             );
+            trace_pack_dna_explain_orchestration(
+                graph_explain_start,
+                "context_graph_snapshot_unavailable",
+                PACK_DNA_SERIAL_GRAPH_TASK_COUNT,
+            );
             return;
         }
     };
@@ -1017,6 +1062,21 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         );
     }
 
+    let pack_dna_degraded_codes = pack_dna
+        .degraded
+        .iter()
+        .map(|degradation| degradation.code.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    trace_pack_dna_explain_orchestration(
+        graph_explain_start,
+        if pack_dna_degraded_codes.is_empty() {
+            "none"
+        } else {
+            pack_dna_degraded_codes.as_str()
+        },
+        PACK_DNA_SERIAL_GRAPH_TASK_COUNT,
+    );
     response.data.pack_dna =
         Some(serde_json::to_value(&pack_dna).unwrap_or(serde_json::Value::Null));
 }
