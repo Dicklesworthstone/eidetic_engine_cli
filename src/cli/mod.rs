@@ -22189,11 +22189,28 @@ fn incident_recovery_actions(fixture: &serde_json::Value) -> serde_json::Value {
                     "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
                     "destructive": action.get("destructive").cloned().unwrap_or(serde_json::Value::Bool(false)),
                     "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([])),
-                    "repairSafety": action.get("repairSafety").cloned().unwrap_or(serde_json::Value::Null)
+                    "repairSafety": action.get("repairSafety").cloned().unwrap_or_else(|| incident_default_repair_safety(action))
                 })
             })
             .collect(),
     )
+}
+
+fn incident_default_repair_safety(action: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "riskClass": "unavailable_or_manual_only",
+        "preflightCommand": null,
+        "requiresHumanApproval": false,
+        "mutatesExternalState": false,
+        "mutatesTrackerState": false,
+        "privacyClass": "synthetic_incident_fixture",
+        "nextAction": "manual_only",
+        "ruleId": "repair_safety:unavailable_or_manual_only",
+        "source": "repair_action_safety",
+        "reasonCode": "incident_repair_safety_missing",
+        "evidence": action.get("evidence").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "preconditions": action.get("preconditions").cloned().unwrap_or_else(|| serde_json::json!([]))
+    })
 }
 
 fn handle_diag_graph<W>(cli: &Cli, stdout: &mut W) -> ProcessExitCode
@@ -47219,6 +47236,97 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn diag_incident_defaults_missing_repair_safety_to_schema_valid_object() -> TestResult {
+        let dir = unique_temp_workspace("diag-incident-repair-safety")?;
+        fs::create_dir_all(&dir).map_err(|error| format!("create temp dir: {error}"))?;
+        let fixture_path = Path::new(&dir).join("missing-repair-safety.json");
+        let fixture = serde_json::json!({
+            "schema": "ee.swarm_incident.v1",
+            "scenarioId": "missing_repair_safety",
+            "fixedClock": "2026-05-24T00:00:00Z",
+            "purpose": "Exercise synthetic repairSafety fallback for older operator fixtures.",
+            "substrates": {
+                "agentMail": {"status": "ok", "evidence": [], "degradedCodes": [], "metrics": {}},
+                "beads": {"status": "ok", "evidence": [], "degradedCodes": [], "metrics": {}},
+                "rch": {"status": "ok", "evidence": [], "degradedCodes": [], "metrics": {}},
+                "disk": {"status": "ok", "evidence": [], "degradedCodes": [], "metrics": {}},
+                "hotPath": {"status": "not_applicable", "evidence": [], "degradedCodes": [], "metrics": {}}
+            },
+            "expectedDegraded": [],
+            "expectedRecoveryActions": [
+                {
+                    "priority": 1,
+                    "kind": "manual",
+                    "summary": "Coordinate manually because the source fixture predates repairSafety.",
+                    "command": null,
+                    "manualStep": "Review the incident fixture before running any repair command.",
+                    "evidence": ["legacy_fixture_missing_repair_safety"],
+                    "destructive": false,
+                    "preconditions": ["fixture reviewed"]
+                }
+            ],
+            "redactionExpectations": {},
+            "assertions": {},
+            "artifacts": []
+        });
+        fs::write(&fixture_path, fixture.to_string())
+            .map_err(|error| format!("write fixture: {error}"))?;
+        let fixture_path = fixture_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "diag",
+            "incident",
+            "--fixture",
+            &fixture_path,
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "missing repairSafety exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "missing repairSafety JSON replay should not write stderr",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        let action = value["data"]["recoveryActions"]
+            .as_array()
+            .and_then(|actions| actions.first())
+            .ok_or_else(|| "rendered incident recovery action missing".to_string())?;
+        ensure(
+            action["repairSafety"].is_object(),
+            "repairSafety fallback must render as an object",
+        )?;
+        ensure_equal(
+            &action["repairSafety"]["riskClass"],
+            &serde_json::json!("unavailable_or_manual_only"),
+            "repairSafety fallback risk class",
+        )?;
+
+        let schema_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("docs")
+            .join("schemas")
+            .join("swarm")
+            .join("ee.swarm_incident.v1.json");
+        let schema: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&schema_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let recovery_action_schema = schema
+            .pointer("/$defs/recoveryAction")
+            .ok_or_else(|| "swarm incident schema missing recoveryAction definition".to_string())?;
+        super::validate_json_schema_subset(
+            action,
+            recovery_action_schema,
+            &schema,
+            "recoveryActions[0]",
+        )
     }
 
     #[test]
