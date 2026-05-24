@@ -821,6 +821,7 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("rch status")
         || command_lower.starts_with("rch check")
         || command_lower.starts_with("rch queue")
+        || command_lower.starts_with("am support-bundle")
         || command_lower.starts_with("cargo fmt --check")
         || command_lower.starts_with("cargo metadata")
         || command_lower.starts_with("cargo tree")
@@ -1856,6 +1857,17 @@ mod tests {
         );
         assert!(!read_only.requires_human_approval);
         assert!(!read_only.mutates_external_state);
+
+        let support_bundle = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("am support-bundle --workspace . --redact paths,offsets"),
+        );
+        assert_eq!(
+            support_bundle.risk_class,
+            super::RepairActionRiskClass::ReadOnlyProbe
+        );
+        assert!(!support_bundle.requires_human_approval);
+        assert!(!support_bundle.mutates_external_state);
 
         let agent_mail_repair = super::repair_action_safety(
             super::RecoveryKind::Command,

@@ -156,6 +156,63 @@
         }
       ]
     },
+    "repairSafety": {
+      "type": "object",
+      "description": "Repair-action safety metadata from the shared repair classifier. Agents use this block to decide whether a fallback step can run directly, needs preflight, needs coordination, requires a human, or is manual-only.",
+      "required": [
+        "riskClass",
+        "preflightCommand",
+        "requiresHumanApproval",
+        "mutatesExternalState",
+        "mutatesTrackerState",
+        "privacyClass",
+        "nextAction",
+        "ruleId",
+        "source",
+        "reasonCode",
+        "evidence",
+        "preconditions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "riskClass": {
+          "type": "string",
+          "enum": [
+            "read_only_probe",
+            "idempotent_refresh",
+            "mutating_local_repair",
+            "mutating_external_coordination_repair",
+            "approval_required_repair",
+            "destructive_or_irreversible_repair",
+            "unavailable_or_manual_only"
+          ]
+        },
+        "preflightCommand": {"type": ["string", "null"]},
+        "requiresHumanApproval": {"type": "boolean"},
+        "mutatesExternalState": {"type": "boolean"},
+        "mutatesTrackerState": {"type": "boolean"},
+        "privacyClass": {"type": "string"},
+        "nextAction": {
+          "type": "string",
+          "enum": [
+            "run_directly",
+            "run_preflight_first",
+            "coordinate_first",
+            "ask_human",
+            "manual_only",
+            "policy_denied"
+          ]
+        },
+        "ruleId": {"type": "string"},
+        "source": {
+          "type": "string",
+          "enum": ["repair_action_safety", "work_packet_manual_fallback"]
+        },
+        "reasonCode": {"type": "string"},
+        "evidence": {"$ref": "#/definitions/stringArray"},
+        "preconditions": {"$ref": "#/definitions/stringArray"}
+      }
+    },
     "candidateDecision": {
       "type": "string",
       "description": "bd-2z5ly.7.5: stable work-packet candidate-safety vocabulary. Only safe_to_claim can support an automatic claim recommendation. stale_but_reclaimable may support reopen_stale_work guidance but still requires explicit inspection. All other values are display-only diagnostics that must not emit claim or reopen commands. Candidate arrays, unsafeReasons, staleReasons, and sourceRefs are sorted deterministically by the producer before packetId calculation; adding, removing, or reclassifying a decision requires schema, docs, fixture, and lifecycle-test updates.",
@@ -357,7 +414,7 @@
     "agentMailFallbackAction": {
       "type": "object",
       "description": "bd-2z5ly.8: a single structured Agent Mail fallback step. `command` and `manualStep` are mutually informative: emitters set whichever applies and leave the other `null`. When `command` is present, `commandAction.argv` is the shell-free execution surface. No mail bodies, raw inbox content, or agent identities may appear in `summary`, `command`, `commandAction`, or `manualStep`.",
-      "required": ["kind", "summary", "command", "commandAction", "manualStep"],
+      "required": ["kind", "summary", "command", "commandAction", "manualStep", "repairSafety"],
       "additionalProperties": false,
       "properties": {
         "kind": {
@@ -379,7 +436,8 @@
             {"type": "null"}
           ]
         },
-        "manualStep": {"type": ["string", "null"]}
+        "manualStep": {"type": ["string", "null"]},
+        "repairSafety": {"$ref": "#/definitions/repairSafety"}
       }
     },
     "activeClaim": {

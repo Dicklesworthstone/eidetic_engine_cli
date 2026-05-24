@@ -18,6 +18,7 @@ use crate::core::beads_integrity::{
     BeadsIntegrityHealth, BeadsIntegrityInputs, BeadsIntegrityReport, compose_integrity_report,
     compose_integrity_report_from_br_doctor_json,
 };
+use crate::core::preflight_guard::classify_repair_command_for_preflight;
 use crate::core::swarm_brief::{
     SwarmBriefBead, SwarmBriefCollectOptions, SwarmBriefCommandRunner, SwarmBriefCommit,
     SwarmBriefDegradation, SwarmBriefFileReservation, SwarmBriefReport, SwarmBriefSourceKind,
@@ -716,6 +717,24 @@ pub struct SwarmWorkPacketAgentMailFallbackAction {
     pub command: Option<String>,
     pub command_action: Option<SwarmWorkPacketCommandAction>,
     pub manual_step: Option<&'static str>,
+    pub repair_safety: SwarmWorkPacketRepairSafety,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkPacketRepairSafety {
+    pub risk_class: &'static str,
+    pub preflight_command: Option<String>,
+    pub requires_human_approval: bool,
+    pub mutates_external_state: bool,
+    pub mutates_tracker_state: bool,
+    pub privacy_class: &'static str,
+    pub next_action: &'static str,
+    pub rule_id: &'static str,
+    pub source: &'static str,
+    pub reason_code: &'static str,
+    pub evidence: Vec<&'static str>,
+    pub preconditions: Vec<&'static str>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1707,46 +1726,46 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
     }
 
     let mut actions = vec![
-        SwarmWorkPacketAgentMailFallbackAction {
-            kind: "manual_coordination",
-            summary: "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
-            command: None,
-            command_action: None,
-            manual_step: Some(
+        agent_mail_fallback_action(
+            "manual_coordination",
+            "Coordinate file ownership outside Agent Mail while reservation and inbox reads are unavailable.",
+            None,
+            None,
+            Some(
                 "Confirm lane ownership in the active coordination channel before touching shared paths.",
             ),
-        },
-        SwarmWorkPacketAgentMailFallbackAction {
-            kind: "retry_later",
-            summary: "Retry Agent Mail health after the storage layer or index is repaired.",
-            command: None,
-            command_action: None,
-            manual_step: Some("Re-run the work-packet collector after Agent Mail reads recover."),
-        },
-        SwarmWorkPacketAgentMailFallbackAction {
-            kind: "switch_to_static_work",
-            summary: "Prefer static or docs-first work while coordination authority is unavailable.",
-            command: None,
-            command_action: None,
-            manual_step: Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
-        },
+        ),
+        agent_mail_fallback_action(
+            "retry_later",
+            "Retry Agent Mail health after the storage layer or index is repaired.",
+            None,
+            None,
+            Some("Re-run the work-packet collector after Agent Mail reads recover."),
+        ),
+        agent_mail_fallback_action(
+            "switch_to_static_work",
+            "Prefer static or docs-first work while coordination authority is unavailable.",
+            None,
+            None,
+            Some("Avoid claiming peer-touched lanes until Agent Mail reads recover."),
+        ),
     ];
     if status == "semantic_readiness_failed" {
-        actions.push(SwarmWorkPacketAgentMailFallbackAction {
-            kind: "beads_comment",
-            summary: "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
-            command: None,
-            command_action: None,
-            manual_step: Some(
+        actions.push(agent_mail_fallback_action(
+            "beads_comment",
+            "Record the Agent Mail semantic-readiness failure in Beads and coordinate there until storage repair completes.",
+            None,
+            None,
+            Some(
                 "Add a Beads comment before claiming work so peers can see the coordination fallback.",
             ),
-        });
+        ));
         let support_bundle_command = "am support-bundle --workspace . --redact paths,offsets";
-        actions.push(SwarmWorkPacketAgentMailFallbackAction {
-            kind: "support_bundle",
-            summary: "Capture a redacted support bundle so the storage class can be triaged without raw paths or page offsets.",
-            command: Some(support_bundle_command.to_owned()),
-            command_action: Some(work_packet_command_action(
+        actions.push(agent_mail_fallback_action(
+            "support_bundle",
+            "Capture a redacted support bundle so the storage class can be triaged without raw paths or page offsets.",
+            Some(support_bundle_command.to_owned()),
+            Some(work_packet_command_action(
                 "agent_mail_support_bundle",
                 support_bundle_command,
                 &[
@@ -1762,12 +1781,79 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
                 "after_semantic_readiness_failure",
                 "Capture bounded Agent Mail diagnostics without shell evaluation.",
             )),
-            manual_step: None,
-        });
+            None,
+        ));
     }
     actions.sort();
     actions.dedup();
     actions
+}
+
+fn agent_mail_fallback_action(
+    kind: &'static str,
+    summary: &'static str,
+    command: Option<String>,
+    command_action: Option<SwarmWorkPacketCommandAction>,
+    manual_step: Option<&'static str>,
+) -> SwarmWorkPacketAgentMailFallbackAction {
+    let repair_safety = command.as_deref().map_or_else(
+        || manual_agent_mail_fallback_repair_safety(kind),
+        work_packet_command_repair_safety,
+    );
+    SwarmWorkPacketAgentMailFallbackAction {
+        kind,
+        summary,
+        command,
+        command_action,
+        manual_step,
+        repair_safety,
+    }
+}
+
+fn work_packet_command_repair_safety(command: &str) -> SwarmWorkPacketRepairSafety {
+    let assessment = classify_repair_command_for_preflight(command);
+    SwarmWorkPacketRepairSafety {
+        risk_class: assessment.risk_class,
+        preflight_command: assessment.preflight_command,
+        requires_human_approval: assessment.requires_human_approval,
+        mutates_external_state: assessment.mutates_external_state,
+        mutates_tracker_state: assessment.mutates_tracker_state,
+        privacy_class: assessment.privacy_class,
+        next_action: assessment.next_action.as_str(),
+        rule_id: assessment.rule_id,
+        source: assessment.source,
+        reason_code: assessment.reason_code,
+        evidence: assessment.evidence,
+        preconditions: assessment.preconditions,
+    }
+}
+
+fn manual_agent_mail_fallback_repair_safety(kind: &str) -> SwarmWorkPacketRepairSafety {
+    let reason_code = match kind {
+        "manual_coordination" => "manual_coordination_fallback",
+        "retry_later" => "retry_later_fallback",
+        "switch_to_static_work" => "static_work_fallback",
+        "beads_comment" => "manual_beads_coordination_fallback",
+        _ => "manual_only_fallback",
+    };
+    let mut preconditions = vec!["no_agent_runnable_command"];
+    if kind == "manual_coordination" || kind == "beads_comment" {
+        preconditions.push("shared_state_coordination_required");
+    }
+    SwarmWorkPacketRepairSafety {
+        risk_class: "unavailable_or_manual_only",
+        preflight_command: None,
+        requires_human_approval: false,
+        mutates_external_state: false,
+        mutates_tracker_state: false,
+        privacy_class: "no_command",
+        next_action: "manual_only",
+        rule_id: "repair_safety:unavailable_or_manual_only",
+        source: "work_packet_manual_fallback",
+        reason_code,
+        evidence: vec!["agent_mail_fallback_without_command"],
+        preconditions,
+    }
 }
 
 fn work_packet_rch_proof_posture(
@@ -5273,6 +5359,16 @@ mod tests {
             .iter()
             .map(|action| action.kind)
             .collect::<Vec<_>>();
+        assert!(
+            packet
+                .coordination
+                .agent_mail
+                .fallback_actions
+                .iter()
+                .all(|action| !action.repair_safety.risk_class.is_empty()
+                    && !action.repair_safety.next_action.is_empty()
+                    && !action.repair_safety.evidence.is_empty())
+        );
         assert_eq!(
             fallback_kinds,
             vec![
@@ -5312,6 +5408,21 @@ mod tests {
         assert_eq!(command_action.copy_safety, "safe_structured_argv");
         assert!(!command_action.shell_required);
         assert!(command_action.mutates_state);
+        assert_eq!(support_bundle.repair_safety.risk_class, "read_only_probe");
+        assert_eq!(support_bundle.repair_safety.next_action, "run_directly");
+        assert!(!support_bundle.repair_safety.mutates_external_state);
+        let manual_coordination = packet
+            .coordination
+            .agent_mail
+            .fallback_actions
+            .iter()
+            .find(|action| action.kind == "manual_coordination")
+            .expect("manual coordination fallback emitted");
+        assert_eq!(
+            manual_coordination.repair_safety.risk_class,
+            "unavailable_or_manual_only"
+        );
+        assert_eq!(manual_coordination.repair_safety.next_action, "manual_only");
     }
 
     #[test]
