@@ -6,11 +6,12 @@
 # use `content` (D1) plus `content_truncated` for list views. Also exercises
 # workspace auto-discovery via EE_WORKSPACE + walk-up (D7).
 #
-# Shipped (real assertions):  D1, D6, D7
-# Not yet shipped (todo):     D2, D3, D4, D5
+# Shipped (real assertions): D1, D2, D3, D4, D5, D6, D7
+# Deferred assertions:       none
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 # shellcheck source=scripts/e2e_overhaul/lib/shared.sh
 source "$SCRIPT_DIR/lib/shared.sh"
 require_jq
@@ -148,6 +149,85 @@ else
 fi
 
 # ------------------------------------------------------------
+# D2 (shipped) — JSON pack.text is byte-identical to standalone markdown.
+# ------------------------------------------------------------
+D2_CONTEXT_JSON=$(ee_workspace context "$CONTEXT_QUERY" --max-tokens 1500 --format json 2>/dev/null || true)
+D2_CONTEXT_MARKDOWN=$(ee_workspace context "$CONTEXT_QUERY" --max-tokens 1500 --format markdown 2>/dev/null || true)
+if printf '%s' "$D2_CONTEXT_JSON" | jq . >/dev/null 2>&1; then
+    D2_PACK_TEXT=$(printf '%s' "$D2_CONTEXT_JSON" \
+        | jq -r '.data.pack.text // empty' 2>/dev/null || true)
+    if [ -n "$D2_PACK_TEXT" ] && [ "$D2_PACK_TEXT" = "$D2_CONTEXT_MARKDOWN" ]; then
+        e2e_log_assert_eq "true" "true" "d2_json_pack_text_matches_markdown"
+    else
+        e2e_log_assert_eq "mismatch" "match" "d2_json_pack_text_matches_markdown"
+    fi
+
+    D2_JSON_ITEM_COUNT=$(printf '%s' "$D2_CONTEXT_JSON" \
+        | jq -r '.data.pack.items | length' 2>/dev/null || echo 0)
+    D2_MARKDOWN_ITEM_COUNT=$(printf '%s' "$D2_CONTEXT_MARKDOWN" \
+        | grep -Ec '^### [0-9]+\. ' || true)
+    e2e_log_assert_eq "$D2_MARKDOWN_ITEM_COUNT" "$D2_JSON_ITEM_COUNT" \
+        "d2_markdown_item_count_matches_json"
+else
+    e2e_log_assert_eq "invalid" "parseable" "d2_json_context_parses"
+fi
+
+# ------------------------------------------------------------
+# D3 (shipped) — markdown carries stable pack metadata comments.
+# pack.generatedAt is intentionally omitted because wall-clock text would
+# break D2 byte-equivalence between JSON pack.text and standalone markdown.
+# ------------------------------------------------------------
+D3_PACK_HASH=$(printf '%s' "$D2_CONTEXT_JSON" \
+    | jq -r '.data.pack.hash // empty' 2>/dev/null || true)
+if [ -n "$D3_PACK_HASH" ] && printf '%s' "$D2_CONTEXT_MARKDOWN" \
+    | grep -Fq "<!-- pack.hash: $D3_PACK_HASH -->"; then
+    e2e_log_assert_eq "true" "true" "d3_markdown_contains_pack_hash_comment"
+else
+    e2e_log_assert_eq "missing" "${D3_PACK_HASH:-pack_hash}" \
+        "d3_markdown_contains_pack_hash_comment"
+fi
+
+if printf '%s' "$D2_CONTEXT_MARKDOWN" | grep -Fq "<!-- pack.schema: ee.response.v1 -->"; then
+    e2e_log_assert_eq "true" "true" "d3_markdown_contains_pack_schema_comment"
+else
+    e2e_log_assert_eq "missing" "pack.schema" \
+        "d3_markdown_contains_pack_schema_comment"
+fi
+
+if printf '%s' "$D2_CONTEXT_MARKDOWN" | grep -Fq "<!-- pack.generatedAt:"; then
+    e2e_log_assert_eq "present" "absent" "d3_markdown_omits_volatile_generatedAt"
+else
+    e2e_log_assert_eq "absent" "absent" "d3_markdown_omits_volatile_generatedAt"
+fi
+
+# ------------------------------------------------------------
+# D4 (shipped) — schema-drift contract is registered in the Rust test harness.
+# ------------------------------------------------------------
+if [ -f "$REPO_ROOT/tests/contracts/schema_canonical_fields.rs" ]; then
+    e2e_log_assert_eq "true" "true" "d4_schema_canonical_fields_contract_exists"
+else
+    e2e_log_assert_eq "missing" "present" "d4_schema_canonical_fields_contract_exists"
+fi
+
+if [ -f "$REPO_ROOT/tests/contracts.rs" ]; then
+    D4_REGISTERED_COUNT=$(grep -Ec 'mod schema_canonical_fields;' \
+        "$REPO_ROOT/tests/contracts.rs" 2>/dev/null || true)
+else
+    D4_REGISTERED_COUNT=0
+fi
+e2e_log_assert_num "$D4_REGISTERED_COUNT" -ge 1 \
+    "d4_schema_canonical_fields_contract_registered"
+
+if [ -f "$REPO_ROOT/tests/contracts/schema_canonical_fields.rs" ]; then
+    D4_DRIFT_GUARD_COUNT=$(grep -Ec 'CANONICAL_FIELDS|assert_no_drift|content_preview' \
+        "$REPO_ROOT/tests/contracts/schema_canonical_fields.rs" 2>/dev/null || true)
+else
+    D4_DRIFT_GUARD_COUNT=0
+fi
+e2e_log_assert_num "$D4_DRIFT_GUARD_COUNT" -ge 3 \
+    "d4_schema_canonical_fields_guard_terms_present"
+
+# ------------------------------------------------------------
 # D5 (shipped) — --fields presets and explicit lists use canonical names.
 # ------------------------------------------------------------
 D5_EXPLICIT_JSON=$(ee_workspace status --fields command,version --json || true)
@@ -188,15 +268,3 @@ if printf '%s' "$D5_CONFLICT_JSON" | jq . >/dev/null 2>&1; then
 else
     e2e_log_assert_eq "invalid" "parseable" "d5_conflicting_presets_json_parses"
 fi
-
-# ------------------------------------------------------------
-# D2-D4 (not shipped) — TODOs.
-# ------------------------------------------------------------
-todo_assert "d2_json_markdown_parity" "bd-17c65.4.2" \
-    "Markdown renderer should derive from canonical JSON tree (currently parallel)."
-
-todo_assert "d3_pack_metadata_in_markdown" "bd-17c65.4.3" \
-    "Markdown render lacks pack.hash + pack.schema + pack.generatedAt HTML comments."
-
-todo_assert "d4_schema_drift_audit_in_ci" "bd-17c65.4.4" \
-    "Schema-drift audit test (canonical_content_field) ships in D1 but D4 wants broader coverage."
