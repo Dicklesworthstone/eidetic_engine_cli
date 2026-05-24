@@ -5,7 +5,7 @@
 #   - EE_BINARY            path to the ee binary (default: Cargo target/release/ee)
 #   - REPO_ROOT            absolute repo root
 #   - CORPUS_SEED          path to J2's corpus_2026_05_10_seed.sh
-#   - epic_setup           shared setup: tmp workspace + bounded init + trap
+#   - epic_setup           shared setup: bounded tmp workspace + bounded init + trap
 #   - epic_teardown        called via trap; emits e2e_log_end and retains
 #                          workspaces unless deletion is explicitly allowed
 #   - require_jq           bail out early if jq is missing
@@ -70,6 +70,7 @@ EPIC_NAME=""
 EPIC_SETUP_BASHPID=""
 EPIC_TMP_ROOT=""
 EPIC_RETENTION_MANIFEST=""
+EPIC_WORKSPACE_META=""
 EPIC_INIT_STDOUT=""
 EPIC_INIT_STDERR=""
 EPIC_INIT_META=""
@@ -112,7 +113,7 @@ _epic_write_retention_manifest() {
         "${EE_E2E_KEEP_WORKSPACE:-0}" \
         "${EE_E2E_KEEP_ARTIFACTS:-${EE_E2E_KEEP_WORKSPACE:-0}}" \
         "$cleanup_policy" "${EPIC_SETUP_BASHPID:-}" "${BASHPID:-$$}" \
-        "${EPIC_INIT_STDOUT:-}" "${EPIC_INIT_STDERR:-}" "${EPIC_INIT_META:-}" <<'PY'
+        "${EPIC_WORKSPACE_META:-}" "${EPIC_INIT_STDOUT:-}" "${EPIC_INIT_STDERR:-}" "${EPIC_INIT_META:-}" <<'PY'
 import json
 import os
 import sys
@@ -130,6 +131,7 @@ from datetime import datetime, timezone
     cleanup_policy,
     setup_pid,
     current_pid,
+    workspace_meta,
     init_stdout,
     init_stderr,
     init_meta,
@@ -149,6 +151,7 @@ payload = {
     "retained": cleanup_policy.startswith("retained"),
     "setup_pid": setup_pid or None,
     "current_pid": current_pid or None,
+    "workspace_meta_path": workspace_meta or None,
     "init_stdout_path": init_stdout or None,
     "init_stderr_path": init_stderr or None,
     "init_meta_path": init_meta or None,
@@ -157,6 +160,7 @@ payload = {
         for value in [
             workspace,
             test_log_path or None,
+            workspace_meta or None,
             init_stdout or None,
             init_stderr or None,
             init_meta or None,
@@ -169,6 +173,178 @@ os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(payload, handle, indent=2, sort_keys=True)
     handle.write("\n")
+PY
+}
+
+_epic_create_workspace_with_timeout() {
+    if [ -z "${EPIC_NAME:-}" ] || [ -z "${EPIC_TMP_ROOT:-}" ]; then
+        echo "j3: EPIC_NAME or EPIC_TMP_ROOT is unset before workspace creation" >&2
+        return 2
+    fi
+
+    if [ -z "${EPIC_WORKSPACE_META:-}" ]; then
+        local meta_root
+        meta_root="${EE_E2E_SETUP_META_DIR:-/tmp}"
+        mkdir -p "$meta_root"
+        EPIC_WORKSPACE_META="$meta_root/ee-e2e-${EPIC_NAME}-workspace-create-${EPIC_SETUP_BASHPID:-$$}.json"
+        export EPIC_WORKSPACE_META
+    fi
+
+    python3 - "$EPIC_NAME" "$EPIC_TMP_ROOT" "$EPIC_WORKSPACE_META" \
+        "${EE_E2E_WORKSPACE_CREATE_TIMEOUT_SECONDS:-${EE_E2E_SETUP_TIMEOUT_SECONDS:-15}}" <<'PY'
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+(
+    epic_name,
+    tmp_root,
+    meta_path,
+    raw_timeout,
+) = sys.argv[1:]
+
+try:
+    timeout_seconds = float(raw_timeout)
+    if timeout_seconds <= 0:
+        raise ValueError("timeout must be positive")
+except (TypeError, ValueError):
+    timeout_seconds = 15.0
+
+meta_dir = os.path.dirname(meta_path) or "."
+os.makedirs(meta_dir, exist_ok=True)
+stdout_path = f"{meta_path}.stdout"
+stderr_path = f"{meta_path}.stderr"
+workspace_path = None
+timed_out = False
+kill_escalated = False
+child_still_running = False
+exit_code = 125
+error = None
+termination_error = None
+started_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+started = time.monotonic()
+
+child_code = r"""
+import os
+import sys
+import tempfile
+import time
+
+epic_name, tmp_root = sys.argv[1:]
+if os.environ.get("EE_E2E_WORKSPACE_CREATE_FAKE_HANG") == "1":
+    time.sleep(86400)
+os.makedirs(tmp_root, exist_ok=True)
+path = tempfile.mkdtemp(prefix=f"ee-e2e-{epic_name}.", dir=tmp_root)
+print(path)
+"""
+
+def send_process_group(pid, sig):
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        return None
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+try:
+    with open(stdout_path, "wb") as stdout_handle, open(stderr_path, "wb") as stderr_handle:
+        process = subprocess.Popen(
+            [sys.executable, "-c", child_code, epic_name, tmp_root],
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            start_new_session=True,
+        )
+        try:
+            process.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            termination_error = send_process_group(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                kill_escalated = True
+                termination_error = send_process_group(process.pid, signal.SIGKILL) or termination_error
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    child_still_running = True
+                    try:
+                        process.kill()
+                    except OSError as exc:
+                        termination_error = f"{type(exc).__name__}: {exc}"
+            exit_code = 124
+        else:
+            exit_code = process.returncode
+except FileNotFoundError as exc:
+    exit_code = 127
+    error = f"{type(exc).__name__}: {exc}"
+except PermissionError as exc:
+    exit_code = 126
+    error = f"{type(exc).__name__}: {exc}"
+except OSError as exc:
+    exit_code = 125
+    error = f"{type(exc).__name__}: {exc}"
+
+elapsed_ms = int((time.monotonic() - started) * 1000)
+if isinstance(exit_code, int) and exit_code < 0:
+    exit_code = 128 + abs(exit_code)
+
+if exit_code == 0:
+    try:
+        with open(stdout_path, "r", encoding="utf-8") as handle:
+            first_line = handle.readline().strip()
+        if first_line:
+            workspace_path = first_line
+    except OSError as exc:
+        exit_code = 125
+        error = f"{type(exc).__name__}: {exc}"
+    if not workspace_path:
+        exit_code = 125
+        error = error or "workspace creation produced no workspace path"
+
+def path_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+meta = {
+    "schema": "ee.e2e.workspace_create.v1",
+    "generatedAt": datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+    "startedAt": started_at,
+    "epicName": epic_name,
+    "tmpRoot": tmp_root,
+    "timeoutSeconds": timeout_seconds,
+    "timedOut": timed_out,
+    "killEscalated": kill_escalated,
+    "childStillRunning": child_still_running,
+    "exitCode": exit_code,
+    "elapsedMs": elapsed_ms,
+    "workspacePath": workspace_path,
+    "stdoutPath": stdout_path,
+    "stderrPath": stderr_path,
+    "stdoutBytes": path_size(stdout_path),
+    "stderrBytes": path_size(stderr_path),
+    "fakeHang": os.environ.get("EE_E2E_WORKSPACE_CREATE_FAKE_HANG") == "1",
+    "error": error,
+    "terminationError": termination_error,
+}
+
+with open(meta_path, "w", encoding="utf-8") as handle:
+    json.dump(meta, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+
+if exit_code == 0 and workspace_path:
+    print(workspace_path)
+    raise SystemExit(0)
+if exit_code == 0:
+    raise SystemExit(125)
+raise SystemExit(exit_code)
 PY
 }
 
@@ -328,10 +504,25 @@ epic_setup() {
 
     EPIC_TMP_ROOT="${EE_E2E_TMPDIR:-${TMPDIR:-/tmp}}"
     e2e_log_note "epic_setup_tmp_root tmp_root=$EPIC_TMP_ROOT"
-    mkdir -p "$EPIC_TMP_ROOT"
-    EPIC_WORKSPACE="$(mktemp -d "${EPIC_TMP_ROOT%/}/ee-e2e-${EPIC_NAME}.XXXXXX")"
+    local workspace_meta_root
+    workspace_meta_root="${EE_E2E_SETUP_META_DIR:-/tmp}"
+    mkdir -p "$workspace_meta_root"
+    EPIC_WORKSPACE_META="$workspace_meta_root/ee-e2e-${EPIC_NAME}-workspace-create-${EPIC_SETUP_BASHPID:-$$}.json"
+    EPIC_RETENTION_MANIFEST="${EE_E2E_RETENTION_MANIFEST:-$workspace_meta_root/ee-e2e-${EPIC_NAME}-retention-${EPIC_SETUP_BASHPID:-$$}.json}"
+    export EPIC_WORKSPACE_META
+    export EPIC_RETENTION_MANIFEST
+    e2e_log_note "epic_workspace_meta path=$EPIC_WORKSPACE_META retention_manifest=$EPIC_RETENTION_MANIFEST"
+    if EPIC_WORKSPACE="$(_epic_create_workspace_with_timeout)"; then
+        export EPIC_WORKSPACE
+    else
+        workspace_create_status=$?
+        echo "j3: e2e workspace creation failed for $EPIC_NAME (status=$workspace_create_status)" >&2
+        echo "j3: workspace meta: $EPIC_WORKSPACE_META" >&2
+        e2e_log_note "epic_setup_workspace_create_failed epic=$EPIC_NAME status=$workspace_create_status meta=$EPIC_WORKSPACE_META tmp_root=$EPIC_TMP_ROOT"
+        _epic_write_retention_manifest "retained_after_workspace_create_failure" "workspace_create_failed"
+        exit 3
+    fi
     EPIC_RETENTION_MANIFEST="${EE_E2E_RETENTION_MANIFEST:-$EPIC_WORKSPACE/e2e_retention_manifest.json}"
-    export EPIC_WORKSPACE
     export EPIC_RETENTION_MANIFEST
 
     e2e_log_note "epic_setup workspace=$EPIC_WORKSPACE binary=$EE_BINARY"
