@@ -3,10 +3,10 @@
 #
 # Exercises graph-facing JSON surfaces three times each, strips known volatile
 # fields, canonicalizes with jq -S, and hash-compares the canonical payloads.
-# Missing future surfaces are recorded as structured TODO notes so the harness
-# can land before the full GraphAccretion command surface does.
+# Missing future surfaces can still be recorded as structured TODO notes, but
+# shipped graph agent-UX surfaces must be required checks.
 #
-# Bead: bd-8jvg.1
+# Beads: bd-8jvg.1, bd-2qf2d
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -246,21 +246,24 @@ else
     CAUSAL_FAILURE=""
 fi
 
-# Required future GraphAccretion surfaces named by bd-8jvg.1.
-run_json_surface_3x future "insights_full" "bd-t6wd.1" \
-    "ee insights full JSON surface is not implemented yet." \
+# Shipped graph agent-UX surfaces named by the post-overhaul contract.
+run_json_surface_3x required "insights_full" "bd-t6wd.1" \
+    "ee insights --json should be deterministic." \
     insights --json
-run_json_surface_3x future "insights_section_centrality" "bd-t6wd.1" \
-    "ee insights --section centrality JSON surface is not implemented yet." \
-    insights --section centrality --json
-run_json_surface_3x future "insights_section_contradictions" "bd-t6wd.1" \
-    "ee insights --section contradictions JSON surface is not implemented yet." \
-    insights --section contradictions --json
-run_json_surface_3x future "context_explain" "bd-t6wd.2" \
-    "ee context --explain JSON surface is not implemented yet." \
+run_json_surface_3x required "insights_section_hubs" "bd-t6wd.1" \
+    "ee insights --section hubs JSON surface should be deterministic." \
+    insights --section hubs --json
+run_json_surface_3x required "insights_section_contradiction_clusters" "bd-t6wd.1" \
+    "ee insights --section contradictionClusters JSON surface should be deterministic." \
+    insights --section contradictionClusters --json
+run_json_surface_3x required "insights_section_knowledge_skyline" "bd-t6wd.1" \
+    "ee insights --section knowledgeSkyline JSON surface should be deterministic." \
+    insights --section knowledgeSkyline --json
+run_json_surface_3x required "context_explain" "bd-t6wd.2" \
+    "ee context --explain JSON surface should be deterministic." \
     context "graph determinism harness" --max-tokens 1000 --json --explain
-run_json_surface_3x future "status_skyline" "bd-t6wd.2" \
-    "ee status --skyline JSON surface is not implemented yet." \
+run_json_surface_3x required "status_skyline" "bd-t6wd.2" \
+    "ee status --skyline JSON surface should be deterministic." \
     status --skyline --json
 run_json_surface_3x required "health_robot_insights" "bd-zx2v.4" \
     "ee health --robot-insights JSON surface should be deterministic." \
