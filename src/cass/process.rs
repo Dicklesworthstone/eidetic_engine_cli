@@ -527,7 +527,8 @@ impl CassInvocation {
                         &mut peak_stdout_line_bytes,
                     )
                     .map_err(CassStreamError::Cass)?;
-                    join_stdout_line_reader(&mut stdout_thread).map_err(CassStreamError::Cass)?;
+                    join_finished_stdout_line_reader_after_timeout(&mut stdout_thread)
+                        .map_err(CassStreamError::Cass)?;
                     let mut absent_stdout_thread = None;
                     let mut empty_stdout_bytes = Some(Vec::new());
                     let (_stdout_bytes, stderr_bytes_after_timeout) =
@@ -1072,6 +1073,20 @@ fn collect_finished_stdout_line_reader(
     Ok(())
 }
 
+fn join_finished_stdout_line_reader_after_timeout(
+    handle: &mut Option<thread::JoinHandle<Result<(), CassError>>>,
+) -> Result<(), CassError> {
+    let Some(reader) = handle.as_ref() else {
+        return Ok(());
+    };
+    if reader.is_finished() {
+        return join_stdout_line_reader(handle);
+    }
+    tracing::debug!("cass subprocess stdout line reader did not drain before timeout");
+    *handle = None;
+    Ok(())
+}
+
 fn take_completed_subprocess(
     child_status: &mut Option<ExitStatus>,
     stdout_bytes: &mut Option<Vec<u8>>,
@@ -1172,26 +1187,28 @@ fn drain_pipe_readers_after_timeout(
         );
     }
 
-    // Always join the reader threads to reap them and prevent detached thread leaks.
-    // After kill, the reads should complete quickly with EOF; joining ensures cleanup
-    // even if the grace period expires before the readers finish updating the buffers.
-    if stdout_bytes.is_none() {
-        if let Some(h) = stdout_thread.take() {
-            *stdout_bytes = Some(join_pipe_reader(h)?);
-            tracing::debug!("cass subprocess stdout pipe reader did not drain before timeout");
-        }
-    }
-    if stderr_bytes.is_none() {
-        if let Some(h) = stderr_thread.take() {
-            *stderr_bytes = Some(join_pipe_reader(h)?);
-            tracing::debug!("cass subprocess stderr pipe reader did not drain before timeout");
-        }
-    }
-
     Ok((
-        stdout_bytes.take().unwrap_or_default(),
-        stderr_bytes.take().unwrap_or_default(),
+        finish_pipe_reader_after_timeout("stdout", stdout_thread, stdout_bytes)?,
+        finish_pipe_reader_after_timeout("stderr", stderr_thread, stderr_bytes)?,
     ))
+}
+
+fn finish_pipe_reader_after_timeout(
+    stream_name: &'static str,
+    handle: &mut Option<thread::JoinHandle<Result<Vec<u8>, std::io::Error>>>,
+    bytes: &mut Option<Vec<u8>>,
+) -> Result<Vec<u8>, CassError> {
+    collect_finished_pipe_reader(handle, bytes)?;
+    if let Some(bytes) = bytes.take() {
+        return Ok(bytes);
+    }
+    if handle.take().is_some() {
+        tracing::debug!("cass subprocess {stream_name} pipe reader did not drain before timeout");
+    }
+    if stream_name == "stderr" {
+        return Ok(b"cass subprocess stderr pipe drain timed out; output unavailable".to_vec());
+    }
+    Ok(Vec::new())
 }
 
 #[cfg(unix)]
@@ -1561,6 +1578,52 @@ mod tests {
         assert_eq!(outcome.elapsed(), Duration::from_millis(42));
         assert_eq!(outcome.class(), CassExitClass::Success);
         assert!(!outcome.timed_out());
+    }
+
+    #[test]
+    fn timeout_pipe_drain_does_not_join_unfinished_reader_threads() -> Result<(), String> {
+        let started = Instant::now();
+        let mut stdout_thread = Some(thread::spawn(|| {
+            thread::sleep(TIMEOUT_PIPE_DRAIN_GRACE * 4);
+            Ok(b"late stdout".to_vec())
+        }));
+        let mut stderr_thread = Some(thread::spawn(|| Ok(b"fast stderr".to_vec())));
+        let mut stdout_bytes = None;
+        let mut stderr_bytes = None;
+
+        let (stdout, stderr) = drain_pipe_readers_after_timeout(
+            &mut stdout_thread,
+            &mut stderr_thread,
+            &mut stdout_bytes,
+            &mut stderr_bytes,
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert!(
+            started.elapsed() < TIMEOUT_PIPE_DRAIN_GRACE * 3,
+            "timeout drain must not block on unfinished pipe readers"
+        );
+        assert!(stdout.is_empty());
+        assert_eq!(stderr, b"fast stderr");
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_stdout_line_reader_join_is_bounded() -> Result<(), String> {
+        let started = Instant::now();
+        let mut stdout_thread = Some(thread::spawn(|| {
+            thread::sleep(TIMEOUT_PIPE_DRAIN_GRACE * 4);
+            Ok(())
+        }));
+
+        join_finished_stdout_line_reader_after_timeout(&mut stdout_thread)
+            .map_err(|error| error.to_string())?;
+
+        assert!(
+            started.elapsed() < TIMEOUT_PIPE_DRAIN_GRACE * 3,
+            "timeout path must not block on unfinished stdout line readers"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]
