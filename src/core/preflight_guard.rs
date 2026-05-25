@@ -1393,16 +1393,13 @@ fn git_checkout_segment_is_off_main(segment: &[String]) -> bool {
     let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
         return false;
     };
-    if segment
-        .get(subcommand_index)
-        .is_none_or(|subcommand| subcommand != "checkout")
-    {
-        return false;
+    match segment.get(subcommand_index).map(String::as_str) {
+        Some("checkout") => {
+            git_checkout_target(segment, subcommand_index).is_some_and(|target| target != "main")
+        }
+        Some("switch") => git_switch_segment_is_off_main(segment, subcommand_index),
+        _ => false,
     }
-    let Some(target) = git_checkout_target(segment, subcommand_index) else {
-        return false;
-    };
-    target != "main"
 }
 
 fn git_subcommand_index(segment: &[String], command_index: usize) -> Option<usize> {
@@ -1437,6 +1434,9 @@ fn git_checkout_target(segment: &[String], checkout_index: usize) -> Option<&str
     let mut index = checkout_index + 1;
     while index < segment.len() {
         let word = segment[index].as_str();
+        if word == "-" {
+            return Some(word);
+        }
         if word == "--" {
             return segment.get(index + 1).map(String::as_str);
         }
@@ -1462,6 +1462,55 @@ fn git_checkout_target(segment: &[String], checkout_index: usize) -> Option<&str
 
 fn git_checkout_option_takes_value(word: &str) -> bool {
     matches!(word, "--conflict" | "--pathspec-from-file")
+}
+
+fn git_switch_segment_is_off_main(segment: &[String], switch_index: usize) -> bool {
+    let mut index = switch_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "-" {
+            return true;
+        }
+        if word == "--" {
+            return segment
+                .get(index + 1)
+                .is_some_and(|target| target != "main");
+        }
+        if git_switch_option_creates_or_detaches(word) {
+            return true;
+        }
+        if git_switch_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with("--") && word.contains('=') {
+            index += 1;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return word != "main";
+    }
+    false
+}
+
+fn git_switch_option_creates_or_detaches(word: &str) -> bool {
+    matches!(
+        word,
+        "-c" | "-C" | "-d" | "--create" | "--force-create" | "--detach" | "--orphan"
+    ) || word.starts_with("-c")
+        || word.starts_with("-C")
+        || word.starts_with("-d")
+        || word.starts_with("--create=")
+        || word.starts_with("--detach=")
+        || word.starts_with("--force-create=")
+        || word.starts_with("--orphan=")
+}
+
+fn git_switch_option_takes_value(word: &str) -> bool {
+    matches!(word, "--conflict")
 }
 
 fn matches_git_clean_destructive(command: &str) -> bool {
@@ -3345,7 +3394,11 @@ action = "explode"
     fn builtin_git_checkout_allows_explicit_main_checkout_only() {
         let registry = PreflightGuardRegistry::with_builtins();
 
-        for command in ["git checkout main", "git pull --rebase origin main"] {
+        for command in [
+            "git checkout main",
+            "git switch main",
+            "git pull --rebase origin main",
+        ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 0, "command `{command}` should pass");
             assert!(report.matches.iter().all(|matched| {
@@ -3354,7 +3407,15 @@ action = "explode"
             }));
         }
 
-        for command in ["git checkout -- src/lib.rs", "git checkout -b experiment"] {
+        for command in [
+            "git checkout -- src/lib.rs",
+            "git checkout -",
+            "git checkout -b experiment",
+            "git switch -",
+            "git switch feature/other",
+            "git switch -c experiment",
+            "git -C . switch --detach HEAD~1",
+        ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
             assert!(
