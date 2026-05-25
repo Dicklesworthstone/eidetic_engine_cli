@@ -161,6 +161,60 @@ constant_surface() {
     esac
 }
 
+normalized_command_tokens() {
+    saw_command=false
+    count=0
+    while [ "$#" -gt 0 ] && [ "$count" -lt 3 ]; do
+        token="$1"
+        shift
+        case "$token" in
+            --*=*)
+                continue
+                ;;
+            --*)
+                if [ "$saw_command" = false ]; then
+                    case "$token" in
+                        --workspace|--format|--fields|--cards|--schema-version|--shadow|--policy)
+                            [ "$#" -gt 0 ] && shift
+                            continue
+                            ;;
+                        --json|--no-color|--robot|--schema|--legacy-schema|--help-json|--agent-docs|--meta|--experimental-triad|--help|--version)
+                            continue
+                            ;;
+                        *)
+                            return 0
+                            ;;
+                    esac
+                fi
+                if [ "$#" -gt 0 ]; then
+                    case "$1" in
+                        -*) ;;
+                        *) shift ;;
+                    esac
+                fi
+                continue
+                ;;
+            -*)
+                if [ "$saw_command" = false ]; then
+                    case "$token" in
+                        -j|-h|-V)
+                            continue
+                            ;;
+                        *)
+                            return 0
+                            ;;
+                    esac
+                fi
+                continue
+                ;;
+        esac
+
+        saw_command=true
+        count=$((count + 1))
+        printf "%s\n" "$token"
+    done
+}
+
 normalize_command() {
     raw="$1"
     cleaned=$(
@@ -170,7 +224,6 @@ normalize_command() {
             sed 's/"[^"]*"//g' |
             sed 's/<[^>]*>//g' |
             sed 's/\[[^]]*\]//g' |
-            sed 's/[[:space:]]--.*$//' |
             sed 's/[[:space:]]\+/ /g' |
             sed 's/^ *//' |
             sed 's/ *$//'
@@ -178,18 +231,15 @@ normalize_command() {
     [ -n "$cleaned" ] || return 0
 
     set -- $cleaned
+    command_tokens=$(normalized_command_tokens "$@")
+    [ -n "$command_tokens" ] || return 0
+    set -- $command_tokens
     first="${1:-}"
     second="${2:-}"
     third="${3:-}"
 
     case "$first" in
-        ""|0.1.0|COMMAND|COMMANDS|GLOBAL|OPTIONS|USAGE|ee|--*)
-            # Flag tokens (e.g., `--fields`, `--json`) are global options,
-            # not commands. README examples like `ee --fields full swarm
-            # brief` would otherwise be classified as a documented `--fields`
-            # command and trip the release-tag coverage gate. The
-            # implementation-side scan (CLI extract_command_path) never
-            # emits flag tokens, so they would always show up as "missing".
+        ""|0.1.0|COMMAND|COMMANDS|GLOBAL|OPTIONS|USAGE|ee)
             return 0
             ;;
     esac

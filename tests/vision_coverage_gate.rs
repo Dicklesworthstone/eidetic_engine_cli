@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,6 +20,20 @@ fn unique_report_path(prefix: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(&dir)
         .map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
     Ok(dir.join(format!("{prefix}-{}-{now}.json", std::process::id())))
+}
+
+fn unique_fixture_root(prefix: &str) -> Result<PathBuf, String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("clock moved backwards: {error}"))?
+        .as_nanos();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("vision-coverage-fixtures")
+        .join(format!("{prefix}-{}-{now}", std::process::id()));
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("failed to create {}: {error}", dir.display()))?;
+    Ok(dir)
 }
 
 fn trace_swarm_subcommand_gate(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
@@ -63,13 +77,32 @@ fn run_gate(
     release_tag: bool,
     compare_ref: Option<&str>,
 ) -> Result<std::process::Output, String> {
+    run_gate_in_dir(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        report_path,
+        release_tag,
+        compare_ref,
+    )
+}
+
+fn run_gate_in_dir(
+    current_dir: &Path,
+    report_path: &PathBuf,
+    release_tag: bool,
+    compare_ref: Option<&str>,
+) -> Result<std::process::Output, String> {
     let started = Instant::now();
     trace_swarm_subcommand_gate("input", 0, &[]);
-    ensure_beads_snapshot()?;
+    if current_dir == Path::new(env!("CARGO_MANIFEST_DIR")) {
+        ensure_beads_snapshot()?;
+    }
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("scripts")
+        .join("vision-coverage.sh");
     let mut command = Command::new("sh");
     command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .arg("./scripts/vision-coverage.sh")
+        .current_dir(current_dir)
+        .arg(script_path)
         .arg("--json")
         .arg("--report")
         .arg(report_path);
@@ -88,6 +121,44 @@ fn run_gate(
         &[],
     );
     Ok(output)
+}
+
+fn write_minimal_vision_fixture(root: &Path, readme_command: &str) -> TestResult {
+    fs::create_dir_all(root.join("src").join("cli"))
+        .map_err(|error| format!("failed to create fixture src/cli: {error}"))?;
+    fs::create_dir_all(root.join(".beads"))
+        .map_err(|error| format!("failed to create fixture .beads: {error}"))?;
+    fs::write(
+        root.join("README.md"),
+        format!("# Fixture\n\n## Command Reference\n\n`ee {readme_command}`\n\n## Configuration\n"),
+    )
+    .map_err(|error| format!("failed to write fixture README: {error}"))?;
+    fs::write(
+        root.join("COMPREHENSIVE_PLAN.md"),
+        "\
+## 20. CLI surface
+## 21. Next
+## 29. Walking skeleton
+## 30. Next
+### 20.1 Top-level
+COMMANDS:
+GLOBAL OPTIONS:
+### 20.2 Next
+",
+    )
+    .map_err(|error| format!("failed to write fixture plan: {error}"))?;
+    fs::write(root.join(".beads").join("issues.jsonl"), "")
+        .map_err(|error| format!("failed to write fixture beads: {error}"))?;
+    fs::write(
+        root.join("src").join("cli").join("mod.rs"),
+        r#"
+fn extract_command_path(cli: &Cli) -> String {
+    "swarm brief".to_string()
+}
+    /// Returns a stable identifier suitable
+"#,
+    )
+    .map_err(|error| format!("failed to write fixture cli module: {error}"))
 }
 
 fn read_report(report_path: &PathBuf) -> Result<serde_json::Value, String> {
@@ -248,6 +319,32 @@ fn vision_coverage_canonicalizes_known_command_aliases() -> TestResult {
     string_array_omits(&report, "/missing_surfaces", "swarm")?;
     string_array_contains(&report, "/implemented_surfaces", "completion")?;
     string_array_omits(&report, "/missing_surfaces", "completion")
+}
+
+#[test]
+fn vision_coverage_keeps_command_after_leading_global_options() -> TestResult {
+    let fixture_root = unique_fixture_root("leading-global-options")?;
+    write_minimal_vision_fixture(
+        &fixture_root,
+        "--workspace . --fields full swarm brief --json",
+    )?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+    ensure(
+        output.status.success(),
+        &format!(
+            "fixture gate should pass once the real command is recovered after global flags\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let report = read_report(&report_path)?;
+    string_array_contains(&report, "/documented_surfaces", "swarm brief")?;
+    string_array_contains(&report, "/implemented_surfaces", "swarm brief")?;
+    string_array_omits(&report, "/documented_surfaces", "--workspace")?;
+    string_array_omits(&report, "/documented_surfaces", "--fields")?;
+    string_array_omits(&report, "/missing_surfaces", "swarm brief")
 }
 
 #[test]
