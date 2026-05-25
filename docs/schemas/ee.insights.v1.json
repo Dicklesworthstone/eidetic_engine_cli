@@ -68,7 +68,7 @@
         {"name": "hubs", "title": "Hub Memories", "summary": "HITS hub scores for memories that point to many authoritative facts.", "whyItMatters": "Hub memories are useful navigation anchors for agents assembling a task-specific context pack.", "items": [], "nextCommands": ["ee insights --section hubs --workspace . --json"]},
         {"name": "kCore", "title": "K-Core", "summary": "Core-number membership for densely connected memory regions.", "whyItMatters": "K-core posture shows which memories sit in stable, mutually reinforcing graph neighborhoods.", "items": [], "nextCommands": ["ee insights --section kCore --workspace . --json"]},
         {"name": "kTruss", "title": "K-Truss", "summary": "Triangle-supported structural health findings for support subgraphs.", "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters.", "items": [], "nextCommands": ["ee insights --section kTruss --workspace . --json"]},
-        {"name": "knowledgeGaps", "title": "Knowledge Gaps", "summary": "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.", "whyItMatters": "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories.", "items": [], "nextCommands": ["ee insights --section knowledgeGaps --workspace . --json"]},
+        {"name": "knowledgeGaps", "title": "Knowledge Gaps", "summary": "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.", "whyItMatters": "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories.", "items": [], "nextCommands": ["ee insights --section knowledgeGaps --workspace . --json"], "section": "knowledgeGaps", "recommendations": []},
         {"name": "knowledgeSkyline", "title": "Knowledge Skyline", "summary": "Composite posture across onion layer, community, age, trust, and graph health signals.", "whyItMatters": "The skyline gives agents a portfolio-level view of memory quality before relying on a workspace.", "items": [], "nextCommands": ["ee insights --section knowledgeSkyline --workspace . --json"]},
         {"name": "loadBearingMemories", "title": "Load-Bearing Memories", "summary": "Memories with high influence in rule-to-source provenance projections.", "whyItMatters": "Load-bearing memories should be preserved or reviewed carefully because many rules depend on them.", "items": [], "nextCommands": ["ee insights --section loadBearingMemories --workspace . --json"]},
         {"name": "proximityHotspots", "title": "Proximity Hotspots", "summary": "Memory pairs with small min-cut distance in Gomory-Hu proximity projections.", "whyItMatters": "Proximity hotspots surface tightly coupled facts that should be packed, reviewed, or curated together.", "items": [], "nextCommands": ["ee insights --section proximityHotspots --workspace . --json"]},
@@ -182,7 +182,13 @@
             "required": ["name"]
           },
           "then": {
+            "required": ["section", "recommendations"],
             "properties": {
+              "section": {"const": "knowledgeGaps"},
+              "recommendations": {
+                "type": "array",
+                "items": {"$ref": "#/$defs/knowledgeGapCompactRecommendation"}
+              },
               "items": {
                 "type": "array",
                 "items": {"$ref": "#/$defs/knowledgeGapItem"}
@@ -211,7 +217,12 @@
         "summary": {"type": "string"},
         "whyItMatters": {"type": "string"},
         "items": {"type": "array", "items": {"$ref": "#/$defs/jsonValue"}},
-        "nextCommands": {"type": "array", "items": {"type": "string"}}
+        "nextCommands": {"type": "array", "items": {"type": "string"}},
+        "section": {"type": "string"},
+        "recommendations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/jsonObject"}
+        }
       }
     },
     "authorityItem": {
@@ -388,6 +399,18 @@
           "items": {"type": "string"},
           "minItems": 1
         }
+      }
+    },
+    "knowledgeGapCompactRecommendation": {
+      "type": "object",
+      "required": ["id", "severity", "reason", "suggested_query", "recommendation_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
+        "reason": {"type": "string"},
+        "suggested_query": {"type": "string"},
+        "recommendation_kind": {"type": "string", "const": "reflect_propose"}
       }
     },
     "revisionFrontierItem": {

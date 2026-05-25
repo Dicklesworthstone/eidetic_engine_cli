@@ -692,6 +692,44 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
         "ee.insights.v1 knowledgeGapRecommendation",
         "kind.const",
     )?;
+    let compact = schema
+        .pointer("/$defs/knowledgeGapCompactRecommendation")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "ee.insights.v1 missing $defs.knowledgeGapCompactRecommendation".to_owned()
+        })?;
+    let compact_required = compact
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "$defs.knowledgeGapCompactRecommendation.required must be an array".to_owned()
+        })?;
+    for field in [
+        "id",
+        "severity",
+        "reason",
+        "suggested_query",
+        "recommendation_kind",
+    ] {
+        if !compact_required
+            .iter()
+            .any(|value| value.as_str() == Some(field))
+        {
+            return Err(format!(
+                "knowledgeGapCompactRecommendation.required missing {field}"
+            ));
+        }
+    }
+    ensure_eq(
+        schema
+            .pointer(
+                "/$defs/knowledgeGapCompactRecommendation/properties/recommendation_kind/const",
+            )
+            .and_then(Value::as_str),
+        Some("reflect_propose"),
+        "ee.insights.v1 knowledgeGapCompactRecommendation",
+        "recommendation_kind.const",
+    )?;
 
     let section_schema = serde_json::to_string(
         schema
@@ -701,6 +739,12 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
     .map_err(|error| format!("serialize section schema: {error}"))?;
     if !section_schema.contains("\"#/$defs/knowledgeGapItem\"") {
         return Err("knowledgeGaps section items must reference $defs.knowledgeGapItem".to_owned());
+    }
+    if !section_schema.contains("\"#/$defs/knowledgeGapCompactRecommendation\"") {
+        return Err(
+            "knowledgeGaps section recommendations must reference $defs.knowledgeGapCompactRecommendation"
+                .to_owned(),
+        );
     }
 
     let example_sections = schema
@@ -717,6 +761,21 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
         .is_some_and(|summary| summary.contains("Graph-derived gaps"))
     {
         return Err("knowledgeGaps example summary must name graph-derived gaps".to_owned());
+    }
+    ensure_eq(
+        knowledge_gaps_section
+            .get("section")
+            .and_then(Value::as_str),
+        Some("knowledgeGaps"),
+        "ee.insights.v1 knowledgeGaps example",
+        "section",
+    )?;
+    if !knowledge_gaps_section
+        .get("recommendations")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        return Err("knowledgeGaps example must include empty recommendations".to_owned());
     }
 
     Ok(())

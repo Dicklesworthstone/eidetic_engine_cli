@@ -10,6 +10,7 @@ use fnx_algorithms::{
 use fnx_classes::{AttrMap, Graph};
 use fnx_runtime::{CgseValue, CompatibilityMode};
 use serde::Serialize;
+use serde::ser::SerializeStruct;
 use serde_json::Value as JsonValue;
 
 use crate::config::{
@@ -118,8 +119,7 @@ impl InsightsMode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InsightsSection {
     pub name: &'static str,
     pub title: &'static str,
@@ -127,6 +127,31 @@ pub struct InsightsSection {
     pub why_it_matters: &'static str,
     pub items: Vec<JsonValue>,
     pub next_commands: Vec<&'static str>,
+}
+
+impl Serialize for InsightsSection {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let is_knowledge_gaps = self.name == "knowledgeGaps";
+        let mut state = serializer
+            .serialize_struct("InsightsSection", if is_knowledge_gaps { 8 } else { 6 })?;
+        state.serialize_field("name", self.name)?;
+        state.serialize_field("title", self.title)?;
+        state.serialize_field("summary", self.summary)?;
+        state.serialize_field("whyItMatters", self.why_it_matters)?;
+        state.serialize_field("items", &self.items)?;
+        state.serialize_field("nextCommands", &self.next_commands)?;
+        if is_knowledge_gaps {
+            state.serialize_field("section", self.name)?;
+            state.serialize_field(
+                "recommendations",
+                &knowledge_gap_recommendations_from_items(&self.items),
+            )?;
+        }
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -1853,6 +1878,48 @@ fn knowledge_gap_reflect_command(source_memory_ids: &[String]) -> String {
     command
 }
 
+fn knowledge_gap_recommendations_from_items(items: &[JsonValue]) -> Vec<JsonValue> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("gapId")?.as_str()?;
+            let reason = item.get("explanation")?.as_str()?;
+            let priority = item.get("priority").and_then(JsonValue::as_u64)?;
+            let confidence = item
+                .get("confidence")
+                .and_then(JsonValue::as_f64)
+                .unwrap_or(0.0);
+            let suggested_query = item
+                .get("recommendation")
+                .and_then(|recommendation| recommendation.get("command"))
+                .and_then(JsonValue::as_str)?;
+            let recommendation_kind = item
+                .get("recommendation")
+                .and_then(|recommendation| recommendation.get("kind"))
+                .and_then(JsonValue::as_str)?;
+            Some(serde_json::json!({
+                "id": id,
+                "severity": knowledge_gap_recommendation_severity(priority, confidence),
+                "reason": reason,
+                "suggested_query": suggested_query,
+                "recommendation_kind": recommendation_kind,
+            }))
+        })
+        .collect()
+}
+
+fn knowledge_gap_recommendation_severity(priority: u64, confidence: f64) -> &'static str {
+    if priority >= 90 && confidence >= 0.80 {
+        "high"
+    } else if priority >= 80 {
+        "medium"
+    } else if priority >= 70 {
+        "warning"
+    } else {
+        "low"
+    }
+}
+
 fn knowledge_skyline_section() -> InsightsSection {
     knowledge_skyline_section_from_report(None)
 }
@@ -2973,6 +3040,8 @@ mod tests {
         let gaps = knowledge_gap_inputs_from_graph_data(&data)
             .map_err(|error| format!("knowledge gap input build failed: {error}"))?;
         let section = knowledge_gaps_section_from_inputs(&gaps);
+        let section_json = serde_json::to_value(&section)
+            .map_err(|error| format!("knowledgeGaps section should serialize: {error}"))?;
         let categories = section
             .items
             .iter()
@@ -2993,8 +3062,20 @@ mod tests {
                 "underdetermined_causal_chain",
             ]
         );
+        assert_eq!(section_json["section"].as_str(), Some("knowledgeGaps"));
+        let compact_recommendations = section_json["recommendations"]
+            .as_array()
+            .ok_or_else(|| "knowledgeGaps recommendations must be an array".to_owned())?;
+        assert_eq!(compact_recommendations.len(), section.items.len());
+        assert_eq!(
+            compact_recommendations
+                .iter()
+                .map(|recommendation| recommendation["severity"].as_str().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["high", "medium", "warning", "low"]
+        );
 
-        for item in &section.items {
+        for (item, compact) in section.items.iter().zip(compact_recommendations) {
             assert!(item["rank"].as_u64().unwrap_or_default() > 0);
             assert_eq!(
                 item["metricEvidence"]["schema"].as_str(),
@@ -3003,6 +3084,16 @@ mod tests {
             assert_eq!(
                 item["recommendation"]["kind"].as_str(),
                 Some("reflect_propose")
+            );
+            assert_eq!(compact["id"], item["gapId"]);
+            assert_eq!(compact["reason"], item["explanation"]);
+            assert_eq!(
+                compact["recommendation_kind"].as_str(),
+                Some("reflect_propose")
+            );
+            assert_eq!(
+                compact["suggested_query"],
+                item["recommendation"]["command"]
             );
             let source_ids = item["sourceMemoryIds"]
                 .as_array()

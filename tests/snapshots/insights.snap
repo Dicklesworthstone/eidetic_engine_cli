@@ -12,6 +12,7 @@ expression: value
     "hubs",
     "kCore",
     "kTruss",
+    "knowledgeGaps",
     "knowledgeSkyline",
     "loadBearingMemories",
     "proximityHotspots",
@@ -24,7 +25,23 @@ expression: value
       "code": "graph.workspace_empty",
       "message": "No graph memories are available for insights yet.",
       "repair": "run: ee remember --workspace . \"<memory>\" --json",
-      "severity": "info"
+      "severity": "info",
+      "sources": [
+        "insights"
+      ]
+    },
+    {
+      "code": "insights_section_unavailable",
+      "message": "One or more registered insights sections do not have DB-backed evidence yet.",
+      "repair": "Use sections with non-empty evidence, or implement the unavailable section builder.",
+      "severity": "info",
+      "sources": [
+        "comprehensiveRules",
+        "kCore",
+        "kTruss",
+        "revisionFrontiers",
+        "topMemories"
+      ]
     }
   ],
   "explainCommand": null,
@@ -114,6 +131,18 @@ expression: value
       "summary": "Triangle-supported structural health findings for support subgraphs.",
       "title": "K-Truss",
       "whyItMatters": "K-truss posture helps separate isolated support edges from stronger corroborating clusters."
+    },
+    {
+      "items": [],
+      "name": "knowledgeGaps",
+      "nextCommands": [
+        "ee insights --section knowledgeGaps --workspace . --json"
+      ],
+      "recommendations": [],
+      "section": "knowledgeGaps",
+      "summary": "Graph-derived gaps that need reflection or curation before agents rely on nearby memories.",
+      "title": "Knowledge Gaps",
+      "whyItMatters": "Knowledge gaps turn weak graph evidence into deterministic reflection requests instead of silently trusting incomplete memories."
     },
     {
       "items": [],
