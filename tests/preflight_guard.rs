@@ -120,6 +120,44 @@ fn trauma_guard_memory_match_surfaces_provenance_for_destructive_command() {
 }
 
 #[test]
+fn trauma_guard_memory_match_json_redacts_secret_content() {
+    let matches = match_trauma_guard_memories(
+        "rm -rf /tmp/work",
+        &[stored_memory(
+            "mem_00000000000000000000000003",
+            "risk",
+            "Prior rm -rf incident used API_KEY=sk_test_123 in the recovery shell.",
+            Some("cass-session://incident?api_key=sk_test_123"),
+        )],
+    );
+
+    let serialized =
+        serde_json::to_value(&matches[0]).expect("preflight memory match should serialize to JSON");
+    let rendered = serialized.to_string();
+    assert!(
+        !rendered.contains("sk_test_123"),
+        "matched memory JSON leaked a secret-like value: {rendered}"
+    );
+    assert_eq!(serialized["memoryId"], "mem_00000000000000000000000003");
+    assert!(
+        serialized["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("[REDACTED:api_key]")),
+        "matched memory content should be redacted: {serialized}"
+    );
+    assert!(
+        serialized["provenanceUri"]
+            .as_str()
+            .is_some_and(|content| content.contains("[REDACTED:api_key]")),
+        "matched memory provenance should be redacted: {serialized}"
+    );
+    assert!(
+        serialized.get("memory_id").is_none(),
+        "matched memory JSON should use the schema's camelCase field names"
+    );
+}
+
+#[test]
 fn trauma_guard_memory_match_orders_by_score_then_memory_id() {
     let memories = vec![
         stored_memory(

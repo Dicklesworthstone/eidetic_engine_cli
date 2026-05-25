@@ -248,7 +248,7 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
         bypassed_json["matches"][0]["resolution"],
         "bypassed_with_token"
     );
-    assert_eq!(bypassed_json["matchedMemories"][0]["memory_id"], memory_id);
+    assert_eq!(bypassed_json["matchedMemories"][0]["memoryId"], memory_id);
 
     let audit = ee(&[
         "--workspace",
@@ -280,7 +280,7 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
     assert_eq!(details["token_hash_prefix"], token_hash_prefix);
     assert_eq!(details["command"], "rm -rf /tmp/work");
     assert_eq!(details["matched_memory_ids"][0], memory_id);
-    assert_eq!(details["matched_memories"][0]["memory_id"], memory_id);
+    assert_eq!(details["matched_memories"][0]["memoryId"], memory_id);
 
     Ok(())
 }

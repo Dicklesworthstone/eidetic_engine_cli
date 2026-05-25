@@ -28,6 +28,7 @@
       "pattern": "*rm -rf /*",
       "action": "halt",
       "message": "rm -rf targeting filesystem root is forbidden by AGENTS.md (\"Irreversible Git & Filesystem Actions\").",
+      "recovery": "Stop and obtain explicit human approval for the exact command before proceeding.",
       "source": {
         "kind": "builtin",
         "name": "rm_rf_root"
@@ -37,14 +38,14 @@
   ],
   "matchedMemories": [
     {
-      "memory_id": "mem_00000000000000000000000001",
+      "memoryId": "mem_00000000000000000000000001",
       "kind": "risk",
       "content": "Prior incident: rm -rf /tmp/work recursively removed another agent workspace.",
-      "provenance_uri": "cass-session://incident-rm-rf#L1-L3",
+      "provenanceUri": "cass-session://incident-rm-rf#L1-L3",
       "severity": "high",
-      "severity_source": "inferred_from_memory_kind",
+      "severitySource": "inferred_from_memory_kind",
       "score": 0.5714285714285714,
-      "matched_terms": [
+      "matchedTerms": [
         "-rf",
         "rm",
         "tmp",

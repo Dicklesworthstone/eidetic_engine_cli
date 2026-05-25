@@ -15,7 +15,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Value as JsonValue, json};
 use toml_edit::{DocumentMut, Item};
 
@@ -2428,7 +2429,7 @@ pub struct GuardMatch {
     pub resolution: MatchResolution,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PreflightMemoryMatch {
     pub memory_id: String,
     pub kind: String,
@@ -2438,6 +2439,29 @@ pub struct PreflightMemoryMatch {
     pub severity_source: &'static str,
     pub score: f64,
     pub matched_terms: Vec<String>,
+}
+
+impl Serialize for PreflightMemoryMatch {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let content = crate::policy::redact_secret_like_content(&self.content).content;
+        let provenance_uri = self
+            .provenance_uri
+            .as_ref()
+            .map(|uri| crate::policy::redact_secret_like_content(uri).content);
+        let mut state = serializer.serialize_struct("PreflightMemoryMatch", 8)?;
+        state.serialize_field("memoryId", &self.memory_id)?;
+        state.serialize_field("kind", &self.kind)?;
+        state.serialize_field("content", &content)?;
+        state.serialize_field("provenanceUri", &provenance_uri)?;
+        state.serialize_field("severity", &self.severity)?;
+        state.serialize_field("severitySource", &self.severity_source)?;
+        state.serialize_field("score", &self.score)?;
+        state.serialize_field("matchedTerms", &self.matched_terms)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -2493,6 +2517,7 @@ impl PreflightGuardReport {
             "command": self.command,
             "exitCode": self.exit_code,
             "checkedAt": self.checked_at,
+            "repairCommandAssessment": classify_repair_command_for_preflight(&self.command),
             "matches": self.matches.iter().map(|m| json!({
                 "ruleId": m.rule_id,
                 "pattern": m.pattern,

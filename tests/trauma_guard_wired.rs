@@ -207,12 +207,12 @@ fn destructive_fixture_command_blocks_with_risk_memory_provenance() -> TestResul
     ensure_equal(matched_memories.len(), 1, "matchedMemories length")?;
     let matched = &matched_memories[0];
     ensure_equal(
-        matched.get("memory_id").and_then(Value::as_str),
+        matched.get("memoryId").and_then(Value::as_str),
         Some(memory_id),
         "matched memory id",
     )?;
     ensure_equal(
-        matched.get("provenance_uri").and_then(Value::as_str),
+        matched.get("provenanceUri").and_then(Value::as_str),
         Some(provenance_canonical.as_str()),
         "matched memory provenance",
     )?;

@@ -146,7 +146,7 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
     ensure_equal(matched_memories.len(), 1, "matchedMemories length")?;
     let matched = &matched_memories[0];
     ensure_equal(
-        matched.get("memory_id").and_then(Value::as_str),
+        matched.get("memoryId").and_then(Value::as_str),
         Some(memory_id),
         "matched memory id",
     )?;
@@ -156,13 +156,13 @@ fn destructive_command_surfaces_matching_risk_memory_provenance() -> TestResult 
         "matched memory kind",
     )?;
     ensure_equal(
-        matched.get("provenance_uri").and_then(Value::as_str),
+        matched.get("provenanceUri").and_then(Value::as_str),
         Some(provenance_canonical),
         "matched memory provenance",
     )?;
     ensure(
         matched
-            .get("matched_terms")
+            .get("matchedTerms")
             .and_then(Value::as_array)
             .is_some_and(|terms| !terms.is_empty()),
         format!("matched memory should include matched_terms: {matched}"),

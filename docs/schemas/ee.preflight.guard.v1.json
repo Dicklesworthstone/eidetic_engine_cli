@@ -112,7 +112,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["ruleId", "pattern", "action", "message", "source", "resolution"],
+        "required": ["ruleId", "pattern", "action", "message", "recovery", "source", "resolution"],
         "properties": {
           "ruleId": {
             "type": "string",
@@ -130,6 +130,10 @@
           "message": {
             "type": "string",
             "description": "Human-readable explanation of why the rule fired."
+          },
+          "recovery": {
+            "type": "string",
+            "description": "Bounded next-step guidance for the matched rule."
           },
           "source": {
             "type": "object",
