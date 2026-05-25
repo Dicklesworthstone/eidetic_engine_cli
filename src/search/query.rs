@@ -98,6 +98,20 @@ fn parse_clause(chars: &mut Peekable<Chars<'_>>) -> Option<SearchQueryClause> {
     let quoted = matches!(chars.peek(), Some('"'));
     let value = if quoted {
         chars.next();
+        if !remaining_contains_closing_quote(chars) {
+            let value = parse_bare(chars);
+            if excluded && value.is_empty() {
+                return Some(SearchQueryClause::Term("-".to_string()));
+            }
+            if value.is_empty() {
+                return None;
+            }
+            return if excluded {
+                Some(SearchQueryClause::ExcludedTerm(value))
+            } else {
+                Some(SearchQueryClause::Term(value))
+            };
+        }
         parse_quoted(chars)
     } else {
         parse_bare(chars)
@@ -135,6 +149,25 @@ fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
         chars.next();
     }
     value
+}
+
+fn remaining_contains_closing_quote(chars: &Peekable<Chars<'_>>) -> bool {
+    let mut probe = chars.clone();
+    let mut escaped = false;
+    while let Some(next) = probe.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if next == '\\' {
+            escaped = true;
+            continue;
+        }
+        if next == '"' {
+            return true;
+        }
+    }
+    false
 }
 
 fn parse_quoted(chars: &mut Peekable<Chars<'_>>) -> String {
@@ -303,6 +336,37 @@ mod tests {
             ]
         );
         assert_eq!(query.to_string(), "alpha beta");
+    }
+
+    #[test]
+    fn search_query_parser_treats_unclosed_phrase_as_terms() {
+        let query = parse_search_query(r#""alpha beta -gamma"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::Term("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+                SearchQueryClause::ExcludedTerm("gamma".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "alpha beta -gamma");
+        assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_parser_keeps_exclusion_for_dangling_quoted_term() {
+        let query = parse_search_query(r#"-"alpha beta"#);
+
+        assert_eq!(
+            query.clauses(),
+            &[
+                SearchQueryClause::ExcludedTerm("alpha".to_string()),
+                SearchQueryClause::Term("beta".to_string()),
+            ]
+        );
+        assert_eq!(query.to_string(), "-alpha beta");
+        assert_eq!(parse_search_query(&query.to_string()), query);
     }
 
     #[test]
