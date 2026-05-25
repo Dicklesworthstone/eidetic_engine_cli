@@ -8,7 +8,27 @@ set -euo pipefail
 # complex E2E/boundary migration pipelines.
 #
 # Usage:
-#   ./scripts/verify.sh                # Run all gates
+#   ./scripts/verify.sh                # Run the default profile (all correctness
+#                                       # gates; benches/eval are opt-in)
+#   ./scripts/verify.sh --ci-smoke      # Fast minimal gate set: forbidden deps,
+#                                       # closure linter, drift guards, snapshot
+#                                       # proposal guard, advisories, vision
+#                                       # coverage, unit/contract/golden tests,
+#                                       # Basic E2E. Skips heavy mesh/Tailscale,
+#                                       # overhaul integration, advanced E2E,
+#                                       # boundary migration, doctor safety
+#                                       # harness, benches, and eval. Intended
+#                                       # for swarm CI smoke + agent pre-push
+#                                       # readiness without paying the full
+#                                       # mesh/RCH cost. Documented in
+#                                       # docs/operator-swarm-slo.md (bd-2dgn0.5).
+#   ./scripts/verify.sh --swarm-heavy   # 64-agent / Swarm-X full verification:
+#                                       # default profile PLUS plan-doc-smoke,
+#                                       # fuzz-smoke, eval regression, and
+#                                       # benches. Intended for large-host
+#                                       # opt-in scorecard runs that feed the
+#                                       # bd-2dgn0 swarm SLO evidence trail.
+#                                       # Documented in docs/operator-swarm-slo.md.
 #   ./scripts/verify.sh --plan-doc-smoke # Run plan-sweep verify_cmd smoke checks
 #   ./scripts/verify.sh --fuzz-smoke   # Include 30s cargo-fuzz query parser smoke
 #   ./scripts/verify.sh --include-bench # Include performance benchmarks
@@ -45,6 +65,8 @@ INCLUDE_BENCH=false
 INCLUDE_EVAL=false
 INCLUDE_FUZZ_SMOKE=false
 PLAN_DOC_SMOKE=false
+CI_SMOKE=false
+SWARM_HEAVY=false
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DEFAULT_AGENT_BUILD_ROOT="/Volumes/USBNVME16TB/temp_agent_space"
@@ -56,7 +78,7 @@ VERIFY_BUDGET_FAIL_CODE=6
 for arg in "$@"; do
     case "$arg" in
         --help|-h)
-            sed -n '3,28p' "$0" | sed 's/^# //' | sed 's/^#//'
+            sed -n '3,62p' "$0" | sed 's/^# //' | sed 's/^#//'
             exit 0
             ;;
         --plan-doc-smoke)
@@ -71,6 +93,16 @@ for arg in "$@"; do
         --eval)
             INCLUDE_EVAL=true
             ;;
+        --ci-smoke)
+            CI_SMOKE=true
+            ;;
+        --swarm-heavy)
+            SWARM_HEAVY=true
+            INCLUDE_BENCH=true
+            INCLUDE_EVAL=true
+            INCLUDE_FUZZ_SMOKE=true
+            PLAN_DOC_SMOKE=true
+            ;;
         *)
             echo "Unknown argument: $arg" >&2
             exit 1
@@ -78,7 +110,22 @@ for arg in "$@"; do
     esac
 done
 
+if [ "$CI_SMOKE" = "true" ] && [ "$SWARM_HEAVY" = "true" ]; then
+    echo "error: --ci-smoke and --swarm-heavy are mutually exclusive" >&2
+    echo "       --ci-smoke trims to the fast minimal gate set;" >&2
+    echo "       --swarm-heavy adds the heaviest opt-in gates." >&2
+    echo "       See docs/operator-swarm-slo.md for guidance." >&2
+    exit 1
+fi
+
 echo "=== EE Verification Runner ==="
+if [ "$CI_SMOKE" = "true" ]; then
+    echo "Profile: ci-smoke (fast minimal gate set; see docs/operator-swarm-slo.md)"
+elif [ "$SWARM_HEAVY" = "true" ]; then
+    echo "Profile: swarm-heavy (includes bench, eval, fuzz-smoke, plan-doc-smoke)"
+else
+    echo "Profile: default (correctness gates; benches and eval opt-in)"
+fi
 echo ""
 
 if [ -d "${DEFAULT_AGENT_BUILD_ROOT}" ]; then
@@ -696,7 +743,13 @@ run_stage "Vision Coverage" "with_beads_read_locks sh ./scripts/vision-coverage.
 
 # Gate 4.5: Mechanized proof artifacts. Missing Lean4/TLA+ tools degrade
 # inside the driver instead of blocking the default readiness gate.
-run_stage "Proof Verification (bd-nnfq4)" "./scripts/e2e_overhaul/proof_verify.sh"
+# Skipped under --ci-smoke because the Lean4/TLA+ driver depends on
+# optional external toolchains that smoke runs should not require.
+if [ "$CI_SMOKE" != "true" ]; then
+    run_stage "Proof Verification (bd-nnfq4)" "./scripts/e2e_overhaul/proof_verify.sh"
+else
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Proof Verification (bd-nnfq4) (ci-smoke)\n"
+fi
 
 # Gate 5: Core Cargo Tests (Contracts, Logic, Golden). Benchmarks are
 # deliberately excluded here and run only through the explicit benchmark gate.
@@ -705,59 +758,78 @@ run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bin
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
 
-# Gate 6.1: Agent ergonomics F1-F5 e2e library driver. Missing future scripts
-# are reported as skips until their implementation beads land.
-run_stage "Agent Ergonomics E2E (F1-F5)" "./scripts/e2e_lib/run_agent_ergonomics_e2e.sh"
+# Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
+# pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which
+# gates are dropped and how to recover coverage in a follow-up
+# --swarm-heavy run.
+if [ "$CI_SMOKE" != "true" ]; then
+    # Gate 6.1: Agent ergonomics F1-F5 e2e library driver. Missing future scripts
+    # are reported as skips until their implementation beads land.
+    run_stage "Agent Ergonomics E2E (F1-F5)" "./scripts/e2e_lib/run_agent_ergonomics_e2e.sh"
 
-# Gate 6.5: Overhaul Integration (J4). Gated behind VERIFY_OVERHAUL=1
-# until enough implementation beads ship to make the suite reliably
-# pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
-# exits 0 without running, so this stage stays fast in default CI.
-run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
+    # Gate 6.5: Overhaul Integration (J4). Gated behind VERIFY_OVERHAUL=1
+    # until enough implementation beads ship to make the suite reliably
+    # pass across CI. The driver itself respects VERIFY_OVERHAUL=0 and
+    # exits 0 without running, so this stage stays fast in default CI.
+    run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
-# Gate 6.5.1: Lightweight swarm next-action recommendation-card contract.
-# This keeps SWA6's golden next-action overlap proof in the default gate
-# without requiring the heavier no-mock multi-agent harness.
-run_stage "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "./scripts/e2e_overhaul/swarm_next_action_recommendation_cards.sh"
+    # Gate 6.5.1: Lightweight swarm next-action recommendation-card contract.
+    # This keeps SWA6's golden next-action overlap proof in the default gate
+    # without requiring the heavier no-mock multi-agent harness.
+    run_stage "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "./scripts/e2e_overhaul/swarm_next_action_recommendation_cards.sh"
 
-# Gate 6.6: Graph determinism harness (F4.a). This is separate from the J4
-# epic registry because it tracks the GraphAccretion surfaces while they are
-# landing incrementally.
-run_stage "Graph Determinism E2E (F4.a)" "./scripts/e2e_overhaul/graph_determinism.sh"
+    # Gate 6.6: Graph determinism harness (F4.a). This is separate from the J4
+    # epic registry because it tracks the GraphAccretion surfaces while they are
+    # landing incrementally.
+    run_stage "Graph Determinism E2E (F4.a)" "./scripts/e2e_overhaul/graph_determinism.sh"
 
-# Gate 6.7: Fake Tailscale harness (SRR6.46.10). Later SRR6.46 auto-enrollment
-# e2e scripts import this library, so this self-test runs before those surfaces.
-run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/test_fake_tailscale.sh"
+    # Gate 6.7: Fake Tailscale harness (SRR6.46.10). Later SRR6.46 auto-enrollment
+    # e2e scripts import this library, so this self-test runs before those surfaces.
+    run_stage "Fake Tailscale Harness E2E (SRR6.46.10)" "./scripts/e2e_overhaul/lib/test_fake_tailscale.sh"
 
-# Gate 6.8: Local Tailscale probe status harness (SRR6.46.1). This keeps the
-# no-network status surface covered by the deterministic fake Tailscale CLI.
-run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailscale_local_probe.sh"
+    # Gate 6.8: Local Tailscale probe status harness (SRR6.46.1). This keeps the
+    # no-network status surface covered by the deterministic fake Tailscale CLI.
+    run_stage "Tailscale Local Probe E2E (SRR6.46.1)" "./scripts/e2e_overhaul/tailscale_local_probe.sh"
 
-# Gate 6.9: Tailscale peer autodiscovery harness (SRR6.46.2). Uses fake
-# Tailscale peer metadata; the script itself never invokes cargo.
-run_stage "Tailscale Peer Autodiscovery E2E (SRR6.46.2)" "./scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh"
+    # Gate 6.9: Tailscale peer autodiscovery harness (SRR6.46.2). Uses fake
+    # Tailscale peer metadata; the script itself never invokes cargo.
+    run_stage "Tailscale Peer Autodiscovery E2E (SRR6.46.2)" "./scripts/e2e_overhaul/tailscale_peer_autodiscovery.sh"
 
-# Gate 6.10: Mesh hello protocol contract (SRR6.46.6). Static/no-Cargo gate
-# covering the bounded hello request/response/error schemas and fixtures.
-run_stage "Mesh Hello Handshake E2E (SRR6.46.6)" "./scripts/e2e_overhaul/mesh_hello_handshake.sh"
+    # Gate 6.10: Mesh hello protocol contract (SRR6.46.6). Static/no-Cargo gate
+    # covering the bounded hello request/response/error schemas and fixtures.
+    run_stage "Mesh Hello Handshake E2E (SRR6.46.6)" "./scripts/e2e_overhaul/mesh_hello_handshake.sh"
 
-# Gate 6.11: Mesh hello responder lifecycle contract (SRR6.46.12). Static
-# no-Cargo gate covering daemon/status wiring, degraded fixtures, and audit names.
-run_stage "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)" "./scripts/e2e_overhaul/hello_responder_lifecycle.sh"
+    # Gate 6.11: Mesh hello responder lifecycle contract (SRR6.46.12). Static
+    # no-Cargo gate covering daemon/status wiring, degraded fixtures, and audit names.
+    run_stage "Mesh Hello Responder Lifecycle E2E (SRR6.46.12)" "./scripts/e2e_overhaul/hello_responder_lifecycle.sh"
 
-# Gate 7: Advanced End-to-End
-run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
+    # Gate 7: Advanced End-to-End
+    run_stage "Advanced E2E Scripts" "./scripts/e2e_advanced.sh"
 
-# Gate 8: Boundary Migration
-run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
+    # Gate 8: Boundary Migration
+    run_stage "Boundary Migration Scripts" "./scripts/e2e_boundary_migration.sh"
 
-# Gate 8.5: ee doctor safety harness (bd-21joy)
-# Wraps verify-undo.sh, verify-idempotence.sh, verify-crash-recovery.sh,
-# verify-concurrency.sh, verify-metamorphic.sh against the per-FM
-# fixture suite under tests/doctor_fixtures/ (owned by bd-2oh15).
-# Advisory while fixtures or sub-scripts are missing; set
-# EE_SAFETY_HARNESS_STRICT=1 to fail closed.
-run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
+    # Gate 8.5: ee doctor safety harness (bd-21joy)
+    # Wraps verify-undo.sh, verify-idempotence.sh, verify-crash-recovery.sh,
+    # verify-concurrency.sh, verify-metamorphic.sh against the per-FM
+    # fixture suite under tests/doctor_fixtures/ (owned by bd-2oh15).
+    # Advisory while fixtures or sub-scripts are missing; set
+    # EE_SAFETY_HARNESS_STRICT=1 to fail closed.
+    run_stage "ee doctor Safety Harness (bd-21joy)" "./scripts/run-safety-harness.sh"
+else
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Agent Ergonomics E2E (F1-F5) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Overhaul Integration E2E (J4) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Graph Determinism E2E (F4.a) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Fake Tailscale Harness E2E (SRR6.46.10) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Local Probe E2E (SRR6.46.1) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Tailscale Peer Autodiscovery E2E (SRR6.46.2) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Mesh Hello Handshake E2E (SRR6.46.6) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Mesh Hello Responder Lifecycle E2E (SRR6.46.12) (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Advanced E2E Scripts (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP Boundary Migration Scripts (ci-smoke)\n"
+    STAGE_RESULTS="${STAGE_RESULTS}SKIP ee doctor Safety Harness (bd-21joy) (ci-smoke)\n"
+fi
 
 # Gate 8.8: Pack-quality eval regression sweep. Optional because it validates
 # committed report artifacts and intended eval thresholds after feature slices.
