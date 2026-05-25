@@ -1332,19 +1332,22 @@ fn create_extract_temp_dir() -> Result<tempfile::TempDir, String> {
 }
 
 fn extract_tar_xz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    extract_with_trusted_tar(archive_path, dest_dir, "-xJf")
+    extract_with_trusted_tar(archive_path, dest_dir, "-tJf", "-tvJf", "-xJf")
 }
 
 fn extract_tar_gz(archive_path: &Path, dest_dir: &Path) -> Result<(), String> {
-    extract_with_trusted_tar(archive_path, dest_dir, "-xzf")
+    extract_with_trusted_tar(archive_path, dest_dir, "-tzf", "-tvzf", "-xzf")
 }
 
 fn extract_with_trusted_tar(
     archive_path: &Path,
     dest_dir: &Path,
+    list_flag: &str,
+    verbose_list_flag: &str,
     extract_flag: &str,
 ) -> Result<(), String> {
     let tar_path = resolve_trusted_tar_binary()?;
+    validate_tar_archive_members(&tar_path, archive_path, list_flag, verbose_list_flag)?;
     let mut command = trusted_tar_command(&tar_path)?;
     let status = command
         .arg(extract_flag)
@@ -1365,6 +1368,130 @@ fn extract_with_trusted_tar(
             tar_path.display()
         ))
     }
+}
+
+fn validate_tar_archive_members(
+    tar_path: &Path,
+    archive_path: &Path,
+    list_flag: &str,
+    verbose_list_flag: &str,
+) -> Result<(), String> {
+    let member_listing = run_trusted_tar_capture(tar_path, list_flag, archive_path)?;
+    let verbose_listing = run_trusted_tar_capture(tar_path, verbose_list_flag, archive_path)?;
+    let member_listing = std::str::from_utf8(&member_listing).map_err(|error| {
+        format!(
+            "trusted tar '{}' listed non-UTF-8 member paths in '{}': {error}",
+            tar_path.display(),
+            archive_path.display()
+        )
+    })?;
+    let verbose_listing = std::str::from_utf8(&verbose_listing).map_err(|error| {
+        format!(
+            "trusted tar '{}' listed non-UTF-8 member metadata in '{}': {error}",
+            tar_path.display(),
+            archive_path.display()
+        )
+    })?;
+    validate_tar_archive_member_listing(archive_path, member_listing, verbose_listing)
+}
+
+fn run_trusted_tar_capture(
+    tar_path: &Path,
+    flag: &str,
+    archive_path: &Path,
+) -> Result<Vec<u8>, String> {
+    let mut command = trusted_tar_command(tar_path)?;
+    let output = command
+        .arg(flag)
+        .arg(archive_path)
+        .env_clear()
+        .env("PATH", TRUSTED_INSTALL_TOOL_PATH)
+        .env("LANG", "C")
+        .output()
+        .map_err(|error| {
+            format!(
+                "failed to run trusted tar '{}': {error}",
+                tar_path.display()
+            )
+        })?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(format!(
+            "trusted tar '{}' list failed for '{}' with status {}",
+            tar_path.display(),
+            archive_path.display(),
+            output.status
+        ))
+    }
+}
+
+fn validate_tar_archive_member_listing(
+    archive_path: &Path,
+    member_listing: &str,
+    verbose_listing: &str,
+) -> Result<(), String> {
+    let members = member_listing.lines().collect::<Vec<_>>();
+    let verbose_members = verbose_listing.lines().collect::<Vec<_>>();
+    if members.len() != verbose_members.len() {
+        return Err(format!(
+            "archive '{}' member listing is ambiguous: {} path rows but {} metadata rows",
+            archive_path.display(),
+            members.len(),
+            verbose_members.len()
+        ));
+    }
+
+    for (index, member) in members.iter().enumerate() {
+        let member = member.strip_suffix('\r').unwrap_or(member);
+        if !is_safe_archive_member_path(member) {
+            return Err(format!(
+                "archive '{}' contains unsafe member path '{}' at listing line {}",
+                archive_path.display(),
+                member,
+                index + 1
+            ));
+        }
+        let verbose_member = verbose_members[index]
+            .strip_suffix('\r')
+            .unwrap_or(verbose_members[index]);
+        if !tar_verbose_member_type_is_allowed(verbose_member) {
+            return Err(format!(
+                "archive '{}' contains unsupported member type at listing line {}",
+                archive_path.display(),
+                index + 1
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_safe_archive_member_path(member: &str) -> bool {
+    if member.is_empty() || member.contains('\0') || member.contains('\\') {
+        return false;
+    }
+    let path = Path::new(member);
+    if path.is_absolute() {
+        return false;
+    }
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal = true,
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return false;
+            }
+        }
+    }
+    has_normal
+}
+
+fn tar_verbose_member_type_is_allowed(line: &str) -> bool {
+    matches!(line.as_bytes().first().copied(), Some(b'-' | b'd'))
 }
 
 fn trusted_tar_command(path: &Path) -> Result<std::process::Command, String> {
@@ -1990,6 +2117,60 @@ mod tests {
             supported_archive_format("zip"),
             None,
             "zip apply stays unsupported until a verifier is implemented",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_listing_accepts_regular_files_and_dirs() -> TestResult {
+        validate_tar_archive_member_listing(
+            Path::new("artifact.tar.xz"),
+            "ee/\nee/ee\n",
+            "drwxr-xr-x 0/0 0 Jan 01 00:00 ee/\n-rwxr-xr-x 0/0 10 Jan 01 00:00 ee/ee\n",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_listing_rejects_escape_paths() -> TestResult {
+        let error = validate_tar_archive_member_listing(
+            Path::new("artifact.tar.xz"),
+            "ee\n../escape\n/absolute/escape\n",
+            "-rwxr-xr-x 0/0 10 Jan 01 00:00 ee\n-rw-r--r-- 0/0 1 Jan 01 00:00 ../escape\n-rw-r--r-- 0/0 1 Jan 01 00:00 /absolute/escape\n",
+        )
+        .expect_err("unsafe archive member path should be rejected");
+
+        ensure(
+            error.contains("unsafe member path '../escape'"),
+            "error should identify first unsafe path",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_listing_rejects_symlink_members() -> TestResult {
+        let error = validate_tar_archive_member_listing(
+            Path::new("artifact.tar.xz"),
+            "ee\nlatest-ee\n",
+            "-rwxr-xr-x 0/0 10 Jan 01 00:00 ee\nlrwxr-xr-x 0/0 0 Jan 01 00:00 latest-ee -> /tmp/ee\n",
+        )
+        .expect_err("archive symlink member should be rejected");
+
+        ensure(
+            error.contains("unsupported member type"),
+            "error should identify unsupported member type",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_listing_rejects_ambiguous_metadata() -> TestResult {
+        let error = validate_tar_archive_member_listing(
+            Path::new("artifact.tar.xz"),
+            "ee\nnested/ee\n",
+            "-rwxr-xr-x 0/0 10 Jan 01 00:00 ee\n",
+        )
+        .expect_err("ambiguous archive listing should be rejected");
+
+        ensure(
+            error.contains("member listing is ambiguous"),
+            "error should identify ambiguous listing",
         )
     }
 
