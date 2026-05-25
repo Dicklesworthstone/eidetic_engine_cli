@@ -16,6 +16,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use blake3::Hasher;
 use chrono::Utc;
@@ -116,6 +117,7 @@ const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
 ];
 const SWARM_SCALE_WORKLOADS_MANIFEST: &str =
     include_str!("../../tests/fixtures/swarm_scale/workloads.json");
+static SUPPORT_BUNDLE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Options for creating a support bundle.
 #[derive(Clone, Debug)]
@@ -3043,7 +3045,14 @@ fn planned_files() -> Vec<String> {
 
 fn generate_bundle_id() -> String {
     let now = Utc::now();
-    format!("{}", now.format("%Y%m%d_%H%M%S"))
+    let sequence = SUPPORT_BUNDLE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}_{:09}_p{}_{}",
+        now.format("%Y%m%d_%H%M%S"),
+        now.timestamp_subsec_nanos(),
+        std::process::id(),
+        sequence
+    )
 }
 
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
@@ -3854,7 +3863,18 @@ mod tests {
     fn generate_bundle_id_format() {
         let id = generate_bundle_id();
         assert!(id.contains('_'));
-        assert!(id.len() >= 15);
+        assert!(id.len() >= 28);
+        assert!(id.contains("_p"));
+    }
+
+    #[test]
+    fn generate_bundle_id_is_unique_within_process() {
+        let first = generate_bundle_id();
+        let second = generate_bundle_id();
+        assert_ne!(
+            first, second,
+            "same-process support bundle IDs must not collide inside one timestamp bucket"
+        );
     }
 
     #[test]
