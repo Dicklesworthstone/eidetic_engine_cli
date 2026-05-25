@@ -816,10 +816,11 @@ mod tests {
             ensure(degraded.repair, MIGRATE_REPAIR_COMMAND, code)?;
         }
         ensure(
-            !report
+            report
                 .degraded
                 .iter()
                 .any(|degraded| degraded.repair.contains("ee db migrate")),
+            false,
             "schema degradations must not suggest legacy migration commands",
         )
     }

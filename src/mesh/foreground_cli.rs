@@ -1880,6 +1880,7 @@ pub fn foreground_degradations(
 #[cfg(test)]
 mod tests {
     use super::{
+        AUTO_ENROLLMENT_NODE_KEY_CHANGED_CODE, AUTO_ENROLLMENT_TAILNET_CHANGED_CODE,
         MESH_AUTO_STATUS_SCHEMA_V1, MESH_EXPORT_ARTIFACT_SCHEMA_V1,
         MESH_SYNC_ONCE_NETWORK_DEFERRED_CODE, MESH_SYNC_SUPERVISOR_BACKPRESSURE_CODE,
         MESH_SYNC_SUPERVISOR_BUDGET_EXHAUSTED_CODE, MESH_WORKSPACE_UNINITIALIZED_CODE,
@@ -2320,7 +2321,7 @@ mod tests {
         seed: u64,
     ) -> Result<super::MeshSyncSupervisorReport, String>
     where
-        T: MeshForegroundSyncTransport + 'static,
+        T: MeshForegroundSyncTransport + Send + 'static,
     {
         let mut lab = LabRuntime::new(LabConfig::new(seed));
         let root = lab.state.create_root_region(Budget::INFINITE);

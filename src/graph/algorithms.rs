@@ -2465,7 +2465,7 @@ mod tests {
             });
             for event in events_with_target(&events, CACHE_EVICT_EVENT) {
                 if event.fields.get("reason").map(String::as_str) == Some("ttl_expired") {
-                    all_evicts.push(event);
+                    all_evicts.push(event.clone());
                 }
             }
         }

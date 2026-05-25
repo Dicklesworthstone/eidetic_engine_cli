@@ -1081,11 +1081,12 @@ mod tests {
 
     #[test]
     fn report_serialization_is_byte_stable_across_runs() -> TestResult {
+        let merge_artifacts = [".beads/issues.jsonl.orig".to_owned()];
         let inputs = BeadsIntegrityInputs {
             jsonl_record_count: 100,
             db_record_count: 99,
             auto_import_enabled: false,
-            ..base_inputs(&[".beads/issues.jsonl.orig".to_owned()], None)
+            ..base_inputs(&merge_artifacts, None)
         };
         let first = serde_json::to_string(&compose_integrity_report(inputs.clone()))
             .map_err(|e| format!("serialize first: {e}"))?;

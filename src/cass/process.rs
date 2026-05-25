@@ -1452,11 +1452,16 @@ mod tests {
     use std::path::Path;
     #[cfg(unix)]
     use std::path::PathBuf;
-    use std::time::Duration;
+    use std::thread;
+    use std::time::{Duration, Instant};
     #[cfg(unix)]
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome};
+    use super::{
+        CASS_EXIT_DEGRADED, CASS_EXIT_OK, CassExitClass, CassInvocation, CassOutcome,
+        TIMEOUT_PIPE_DRAIN_GRACE, drain_pipe_readers_after_timeout,
+        join_finished_stdout_line_reader_after_timeout,
+    };
 
     fn invocation() -> CassInvocation {
         CassInvocation::new("cass", ["health", "--json"])

@@ -12096,7 +12096,8 @@ mod tests {
         ReflectionResultDurableIngestOutcome, ReviewSessionCandidate, ReviewSessionOptions,
         ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
         build_bootstrap_session_candidates, build_review_session_candidates,
-        candidate_summary_from_stored, evaluate_candidate_for_validation, list_curation_candidates,
+        candidate_summary_from_stored, evaluate_candidate_for_validation,
+        evaluate_create_derived_candidate_for_validation, list_curation_candidates,
         list_reflection_request_ledger_diagnostics, parse_reflection_diagnostics_time,
         persist_prepared_reflection_request_ledger, persist_reflection_result_ingest_decision,
         propose_reflection_request, reflection_diagnostic_blake3_hash_is_canonical,
@@ -13047,10 +13048,10 @@ mod tests {
         );
         let diagnostic_json =
             serde_json::to_string(&diagnostic).map_err(|error| error.to_string())?;
-        assert!(!diagnostic_json.contains(raw_secret));
+        assert!(!diagnostic_json.contains(raw_secret.as_str()));
         assert!(diagnostic_json.contains("[REDACTED:"));
-        assert!(!diagnostic.challenge_key_id.contains(raw_secret));
-        assert!(!diagnostic.reflection_kind.contains(raw_secret));
+        assert!(!diagnostic.challenge_key_id.contains(raw_secret.as_str()));
+        assert!(!diagnostic.reflection_kind.contains(raw_secret.as_str()));
 
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let key_path = tempdir.path().join("reflect-secret.key");
@@ -13062,7 +13063,7 @@ mod tests {
         );
         let key_json = serde_json::to_string(&key_diagnostic).map_err(|error| error.to_string())?;
         assert_eq!(key_diagnostic.status, "ready");
-        assert!(!key_json.contains(raw_secret));
+        assert!(!key_json.contains(raw_secret.as_str()));
         assert!(!key_json.contains("reflect-secret.key"));
         assert!(key_json.contains("[REDACTED:"));
         Ok(())

@@ -2013,7 +2013,7 @@ mod tests {
         assert!(proposal.candidate_id.starts_with("curate_"));
         assert_eq!(proposal.candidate_id.len(), 33);
         assert_eq!(proposal.input.candidate_type, "rule");
-        assert_eq!(proposal.input.target_memory_id, "mem_42");
+        assert_eq!(proposal.input.target_memory_id.as_deref(), Some("mem_42"));
         assert_eq!(proposal.input.source_type, HARM_PROMOTION_SOURCE_TYPE);
         assert_eq!(
             proposal.input.source_id.as_deref(),

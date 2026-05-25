@@ -564,9 +564,10 @@ mod tests {
 
         let child = token.child("last");
 
+        let expected_last_scope = format!("root::last#{}", u64::MAX - 1);
         ensure_equal(
             &child.scope(),
-            &format!("root::last#{}", u64::MAX - 1),
+            &expected_last_scope.as_str(),
             "last representable child scope before exhaustion",
         )?;
         ensure_equal(
