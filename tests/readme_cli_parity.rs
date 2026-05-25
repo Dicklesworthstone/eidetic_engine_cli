@@ -7,7 +7,7 @@
 //! - README rows for renamed or removed commands
 //! - README rows whose subcommand path drifted from CLI registration
 //!
-//! Source: `CLOSE_THE_GAP_PLAN.md` §41 (vision-coverage gap finds plan-doc
+//! Source: `docs/archive/close_the_gap_2026-05.md` §41 (vision-coverage gap finds plan-doc
 //! ↔ CLI drift but does NOT find README ↔ CLI drift).
 //!
 //! Parsing model:

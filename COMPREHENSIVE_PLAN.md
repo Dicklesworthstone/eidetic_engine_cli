@@ -6,6 +6,26 @@
 
 ---
 
+## Historical Bridges
+
+This plan is the durable vision. When the implementation drifts far enough from
+the vision that a reality-check audit fires, the orchestrator opens a **bridge
+plan** at `CLOSE_THE_GAP_PLAN.md` to schedule the convergence work. When a
+bridge substantially executes, its file is archived to
+`docs/archive/close_the_gap_<YYYY-MM>.md` and the active `CLOSE_THE_GAP_PLAN.md`
+slot is reused for the next bridge (Part N → Part N+1). The cadence and the
+reuse rule live in `AGENTS.md` § *Reality-Check Cadence*.
+
+| Bridge | Window | Archive |
+|---|---|---|
+| Part I + Part II | 2026-05-06 → 2026-05-14 | [`docs/archive/close_the_gap_2026-05.md`](docs/archive/close_the_gap_2026-05.md) |
+
+Closing a bridge does **not** reduce the scope of this comprehensive plan; it
+records what was delivered during the bridge window so future audits can
+distinguish "vision drift" from "expected work-in-progress".
+
+---
+
 ## Table of Contents
 
 0. [Reading guide](#0-reading-guide)

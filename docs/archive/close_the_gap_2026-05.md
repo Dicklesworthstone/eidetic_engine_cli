@@ -1,13 +1,22 @@
-# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI)
+# CLOSE_THE_GAP_PLAN — `ee` (Eidetic Engine CLI) — **ARCHIVED 2026-05 BRIDGE**
 
 > **A comprehensive, no-scope-reduction plan to close every gap between
 > what `README.md` + `COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md` promise
 > and what the implemented code actually delivers.**
 >
-> Status: bridge plan, written 2026-05-06 from a reality-check audit.
-> This document is the working artifact for ambition rounds and Phase 3a
-> bead generation. It does **not** reduce scope from the comprehensive
-> plan; it reasserts the full vision and assigns delivery slots.
+> **Status: ARCHIVED (2026-05 bridge).** Part I (2026-05-06) and Part II
+> (2026-05-14) substantially executed against the bd-3usjw tree; this
+> file is preserved as historical reference, not the active bridge.
+> The canonical vision lives in `COMPREHENSIVE_PLAN.md` (see *Historical
+> Bridges*); the next bridge, when opened, will re-create
+> `CLOSE_THE_GAP_PLAN.md` at the repo root per `AGENTS.md` *Reality-Check
+> Cadence*.
+>
+> Original status (preserved for context): bridge plan, written
+> 2026-05-06 from a reality-check audit. Working artifact for ambition
+> rounds and Phase 3a bead generation. Did **not** reduce scope from the
+> comprehensive plan; reasserted the full vision and assigned delivery
+> slots.
 >
 > Companion to: `COMPREHENSIVE_PLAN_TO_MAKE_EE__OPUS.md` (the vision),
 > `README.md` (the user-facing promise), `AGENTS.md` (the rules).

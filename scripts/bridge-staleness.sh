@@ -29,6 +29,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Active bridge plan lives at CLOSE_THE_GAP_PLAN.md. When archived
+# (e.g. docs/archive/close_the_gap_<YYYY-MM>.md), the active slot is
+# missing — bridge-staleness then degrades signal 1 cleanly and the
+# vision-coverage / Part II signals continue to advise authorship of
+# the next bridge part.
 PLAN_PATH="${ROOT}/CLOSE_THE_GAP_PLAN.md"
 VISION_REPORT="${ROOT}/.vision-coverage-report.json"
 BEADS_JSONL="${ROOT}/.beads/issues.jsonl"

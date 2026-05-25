@@ -1236,9 +1236,17 @@ This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) 
 
 Every 90 days, or whenever `scripts/vision-coverage.sh --json` reports
 `gap_percentage > 5`, run the `reality-check-for-project` skill end-to-end.
-The bridge plan lives at `CLOSE_THE_GAP_PLAN.md` or its archived predecessor;
-update the existing plan from Part N to Part N+1 instead of creating another
-plan file.
+The active bridge plan lives at `CLOSE_THE_GAP_PLAN.md` while a bridge is
+in flight. When a bridge completes its parts and substantially executes, the
+file is archived to `docs/archive/close_the_gap_<YYYY-MM>.md` (e.g. the
+2026-05 bridge archive is `docs/archive/close_the_gap_2026-05.md`). When
+opening the next bridge, update the existing `CLOSE_THE_GAP_PLAN.md` from
+Part N to Part N+1 instead of creating another plan file at the repo root.
+
+Historical bridges (most recent first):
+- Part I + Part II (2026-05-06 / 2026-05-14) — archived at
+  `docs/archive/close_the_gap_2026-05.md`. Closed once the bd-3usjw Part II
+  tree was substantially executed.
 
 The last bridge began on 2026-05-14. The next scheduled bridge target is
 2026-08-13, unless the vision-coverage gap exceeds 5% before then.

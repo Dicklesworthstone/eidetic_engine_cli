@@ -3,7 +3,8 @@
 > Static-reading audit of `origin/main` against `README.md` + `AGENTS.md`
 > "Five Core Jobs", the Walking-Skeleton acceptance gate, and the
 > documented `0.1 → 0.6` milestone path. No source edits; this file is the
-> deliverable. Companion to `CLOSE_THE_GAP_PLAN.md`, focused on the
+> deliverable. Companion to the 2026-05 bridge plan (now archived at
+> `docs/archive/close_the_gap_2026-05.md`), focused on the
 > three questions the orchestrator asked rather than a full plan refresh.
 
 ## TL;DR
