@@ -15239,47 +15239,57 @@ where
 /// content stays in sync with the `DoctorArgs` parser surface; CLI
 /// surface tests pin the schema id + the set of surface entries.
 fn doctor_robot_docs_json() -> String {
+    // bd-34ivx: wrap in the canonical ee.response.v2 envelope. The inner
+    // data block (ee.doctor.robot_docs.v1) is preserved verbatim so
+    // consumers that look it up via `.data.schema` (or `.data.surfaces`,
+    // `.data.related_schemas`) see the same shape as before. Consumers
+    // that previously grepped the top-level `schema` field must now look
+    // one level deeper, which is the v2 envelope contract.
     serde_json::json!({
-        "schema": "ee.doctor.robot_docs.v1",
-        "doctor_version": env!("CARGO_PKG_VERSION"),
-        "doctor_contract_version": "1.0.0",
-        "surfaces": [
-            {
-                "name": "ee doctor",
-                "kind": "subcommand",
-                "purpose": "Run the default doctor health report.",
-                "example": "ee doctor --json"
-            },
-            {
-                "name": "ee doctor --fix-plan",
-                "kind": "flag",
-                "purpose": "Emit a structured fix plan instead of the normal health report.",
-                "example": "ee doctor --fix-plan --json"
-            },
-            {
-                "name": "ee doctor --franken-health",
-                "kind": "flag",
-                "purpose": "Output Franken stack dependency health diagnostics.",
-                "example": "ee doctor --franken-health --json"
-            },
-            {
-                "name": "ee doctor --capabilities",
-                "kind": "flag",
-                "purpose": "Emit the agent-facing ee.doctor.capabilities.v1 JSON contract.",
-                "example": "ee doctor --capabilities"
-            },
-            {
-                "name": "ee doctor --robot-docs",
-                "kind": "flag",
-                "purpose": "Emit the ee.doctor.robot_docs.v1 bundle (this surface index).",
-                "example": "ee doctor --robot-docs"
-            }
-        ],
-        "related_schemas": [
-            "ee.doctor.capabilities.v1",
-            "ee.doctor.run_state.v1",
-            "ee.doctor.action_line.v1"
-        ]
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "schema": "ee.doctor.robot_docs.v1",
+            "doctor_version": env!("CARGO_PKG_VERSION"),
+            "doctor_contract_version": "1.0.0",
+            "surfaces": [
+                {
+                    "name": "ee doctor",
+                    "kind": "subcommand",
+                    "purpose": "Run the default doctor health report.",
+                    "example": "ee doctor --json"
+                },
+                {
+                    "name": "ee doctor --fix-plan",
+                    "kind": "flag",
+                    "purpose": "Emit a structured fix plan instead of the normal health report.",
+                    "example": "ee doctor --fix-plan --json"
+                },
+                {
+                    "name": "ee doctor --franken-health",
+                    "kind": "flag",
+                    "purpose": "Output Franken stack dependency health diagnostics.",
+                    "example": "ee doctor --franken-health --json"
+                },
+                {
+                    "name": "ee doctor --capabilities",
+                    "kind": "flag",
+                    "purpose": "Emit the agent-facing ee.doctor.capabilities.v1 JSON contract.",
+                    "example": "ee doctor --capabilities"
+                },
+                {
+                    "name": "ee doctor --robot-docs",
+                    "kind": "flag",
+                    "purpose": "Emit the ee.doctor.robot_docs.v1 bundle (this surface index).",
+                    "example": "ee doctor --robot-docs"
+                }
+            ],
+            "related_schemas": [
+                "ee.doctor.capabilities.v1",
+                "ee.doctor.run_state.v1",
+                "ee.doctor.action_line.v1"
+            ]
+        }
     })
     .to_string()
 }
@@ -15534,21 +15544,28 @@ fn doctor_robot_triage_json(report: &DoctorReport) -> String {
         .take(5)
         .cloned()
         .collect();
+    // bd-34ivx: wrap in the canonical ee.response.v2 envelope; inner
+    // ee.doctor.robot_triage.v1 data shape (counts/topActionable/entries
+    // /sideEffectFree/configMutation) preserved verbatim.
     serde_json::json!({
-        "schema": "ee.doctor.robot_triage.v1",
-        "doctor_version": env!("CARGO_PKG_VERSION"),
-        "overallHealthy": report.overall_healthy,
-        "posture": report.posture.as_str(),
-        "counts": {
-            "error": errors,
-            "warning": warnings,
-            "ok": oks,
-            "total": entries.len(),
-        },
-        "topActionable": top_actionable,
-        "entries": entries,
-        "sideEffectFree": true,
-        "configMutation": "never",
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": {
+            "schema": "ee.doctor.robot_triage.v1",
+            "doctor_version": env!("CARGO_PKG_VERSION"),
+            "overallHealthy": report.overall_healthy,
+            "posture": report.posture.as_str(),
+            "counts": {
+                "error": errors,
+                "warning": warnings,
+                "ok": oks,
+                "total": entries.len(),
+            },
+            "topActionable": top_actionable,
+            "entries": entries,
+            "sideEffectFree": true,
+            "configMutation": "never",
+        }
     })
     .to_string()
 }
@@ -59009,6 +59026,86 @@ mod tests {
             &stdout,
             "agent-oriented",
             "robot-docs alias surfaces agent-docs content",
+        )
+    }
+
+    #[test]
+    fn doctor_robot_docs_json_wraps_in_ee_response_v2_envelope() -> TestResult {
+        // bd-34ivx: `ee doctor --robot-docs` must ride the canonical
+        // ee.response.v2 envelope; the bare bundle previously emitted
+        // at the top level now lives at `.data` with its inner
+        // ee.doctor.robot_docs.v1 schema id preserved.
+        let raw = super::doctor_robot_docs_json();
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(serde_json::Value::as_str),
+            &Some(crate::models::RESPONSE_SCHEMA_V2),
+            "top-level envelope schema must be ee.response.v2",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/success")
+                .and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "envelope success must be true",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.doctor.robot_docs.v1"),
+            "inner data.schema must be ee.doctor.robot_docs.v1",
+        )?;
+        ensure(
+            value
+                .pointer("/data/surfaces")
+                .is_some_and(serde_json::Value::is_array),
+            "inner data.surfaces must remain an array of surface entries",
+        )
+    }
+
+    #[test]
+    fn doctor_robot_triage_json_wraps_in_ee_response_v2_envelope() -> TestResult {
+        // bd-34ivx: `ee doctor --robot-triage` must ride the canonical
+        // ee.response.v2 envelope; the bare triage report previously
+        // emitted at the top level now lives at `.data` with its inner
+        // ee.doctor.robot_triage.v1 schema id preserved.
+        let report = crate::core::doctor::DoctorReport::gather();
+        let raw = super::doctor_robot_triage_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(serde_json::Value::as_str),
+            &Some(crate::models::RESPONSE_SCHEMA_V2),
+            "top-level envelope schema must be ee.response.v2",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/success")
+                .and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "envelope success must be true",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.doctor.robot_triage.v1"),
+            "inner data.schema must be ee.doctor.robot_triage.v1",
+        )?;
+        ensure(
+            value
+                .pointer("/data/entries")
+                .is_some_and(serde_json::Value::is_array),
+            "inner data.entries must remain an array of triaged checks",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/configMutation")
+                .and_then(serde_json::Value::as_str),
+            &Some("never"),
+            "inner data.configMutation invariant must be preserved",
         )
     }
 

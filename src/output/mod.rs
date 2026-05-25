@@ -6175,7 +6175,13 @@ pub fn render_health_toon(report: &HealthReport) -> String {
     render_toon_from_json(&render_health_json(report))
 }
 
-/// Render the opt-in structural health surface as canonical JSON.
+/// Render the opt-in structural health surface as canonical JSON wrapped
+/// in the `ee.response.v2` envelope (bd-34ivx).
+///
+/// The inner data block is the existing `StructuralHealthReport` shape
+/// (with degradations aggregated). Consumers that previously parsed the
+/// bare report at the top level must now look at `.data`; the report's
+/// own `schema` id remains intact inside `.data.schema`.
 #[must_use]
 pub fn render_structural_health_json(report: &StructuralHealthReport) -> String {
     let mut report = report.clone();
@@ -6188,8 +6194,15 @@ pub fn render_structural_health_json(report: &StructuralHealthReport) -> String 
             repair: (!entry.repair.is_empty()).then_some(entry.repair),
         })
         .collect();
-    serde_json::to_string(&report)
-        .unwrap_or_else(|_| r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned())
+    let Ok(report_value) = serde_json::to_value(&report) else {
+        return r#"{"schema":"ee.error.v2","error":{"code":"serialization_failed","message":"Failed to serialize response","severity":"high","details":{"recovery":[]},"nonRecoverable":false}}"#.to_owned();
+    };
+    serde_json::json!({
+        "schema": RESPONSE_SCHEMA_V2,
+        "success": true,
+        "data": report_value,
+    })
+    .to_string()
 }
 
 /// Render the opt-in structural health surface as human-readable text.
@@ -19684,6 +19697,43 @@ mod tests {
         let toon = render_structural_health_toon(&report);
 
         ensure_toon_matches_json(&json, &toon, "decoded structural health TOON")
+    }
+
+    #[test]
+    fn structural_health_json_wraps_in_ee_response_v2_envelope() -> TestResult {
+        // bd-34ivx: `ee health --robot-insights --json` must ride the
+        // canonical ee.response.v2 envelope; the bare report previously
+        // emitted at the top level now lives at `.data` with its own
+        // inner schema id preserved.
+        let report = sample_structural_health_report();
+        let json = render_structural_health_json(&report);
+        let value: serde_json::Value =
+            serde_json::from_str(&json).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value.pointer("/schema").and_then(serde_json::Value::as_str),
+            &Some(RESPONSE_SCHEMA_V2),
+            "top-level envelope schema must be ee.response.v2",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/success")
+                .and_then(serde_json::Value::as_bool),
+            &Some(true),
+            "envelope success must be true",
+        )?;
+        ensure(
+            value
+                .pointer("/data")
+                .is_some_and(serde_json::Value::is_object),
+            "envelope data must be an object",
+        )?;
+        ensure_equal(
+            &value
+                .pointer("/data/summary/status")
+                .and_then(serde_json::Value::as_str),
+            &Some("degraded"),
+            "inner summary.status must be preserved verbatim from the sample report",
+        )
     }
 
     #[test]
