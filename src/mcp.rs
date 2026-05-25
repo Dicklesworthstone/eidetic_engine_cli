@@ -2145,12 +2145,38 @@ fn is_json_rpc_notification(request: &Value) -> bool {
     request.get("id").is_none()
 }
 
+fn validate_json_rpc_request(request: &Value) -> Result<&str, Value> {
+    if !request.is_object() {
+        return Err(json_rpc_error(
+            None,
+            -32600,
+            "Invalid Request: request must be a JSON object",
+        ));
+    }
+    let id = request.get("id").cloned();
+    match request.get("method") {
+        Some(Value::String(method)) if !method.is_empty() => Ok(method),
+        Some(_) => Err(json_rpc_error(
+            id,
+            -32600,
+            "Invalid Request: method must be a non-empty string",
+        )),
+        None => Err(json_rpc_error(
+            id,
+            -32600,
+            "Invalid Request: method is required",
+        )),
+    }
+}
+
 #[must_use]
 pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-
     trace_mcp_top_level("input", 0, &[]);
-    if is_json_rpc_notification(request) && !method.is_empty() {
+    if let Err(error) = validate_json_rpc_request(request) {
+        trace_mcp_top_level("response", 0, &[]);
+        return Some(error);
+    }
+    if is_json_rpc_notification(request) {
         trace_mcp_top_level("response", 0, &[]);
         return None;
     }
@@ -2163,7 +2189,10 @@ pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
 
 fn handle_request(request: &Value) -> Value {
     let id = request.get("id").cloned();
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let method = match validate_json_rpc_request(request) {
+        Ok(method) => method,
+        Err(error) => return error,
+    };
     let params = request.get("params");
 
     match McpMethod::parse(method) {
@@ -3645,6 +3674,53 @@ mod tests {
 
         assert!(outcome.response.is_none());
         assert!(!outcome.shutdown);
+    }
+
+    #[test]
+    fn non_object_json_rpc_message_returns_invalid_request() -> Result<(), String> {
+        let response = handle_json_rpc_message(&json!([]))
+            .ok_or_else(|| "non-object request must produce an error response".to_string())?;
+        let Some(error) = response.get("error") else {
+            return Err("non-object request response missing error".to_string());
+        };
+
+        assert_eq!(response.get("id"), Some(&Value::Null));
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32600));
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Invalid Request: request must be a JSON object")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_non_string_method_returns_invalid_request() -> Result<(), String> {
+        let cases = [
+            (
+                json!({"jsonrpc": "2.0", "id": "missing-method"}),
+                "Invalid Request: method is required",
+            ),
+            (
+                json!({"jsonrpc": "2.0", "id": "bad-method", "method": []}),
+                "Invalid Request: method must be a non-empty string",
+            ),
+        ];
+
+        for (request, expected_message) in cases {
+            let response = handle_json_rpc_message(&request)
+                .ok_or_else(|| "invalid request must produce an error response".to_string())?;
+            let Some(error) = response.get("error") else {
+                return Err(format!(
+                    "invalid request response missing error for {request}"
+                ));
+            };
+            assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32600));
+            assert_eq!(
+                error.get("message").and_then(Value::as_str),
+                Some(expected_message)
+            );
+        }
+        Ok(())
     }
 
     #[test]
