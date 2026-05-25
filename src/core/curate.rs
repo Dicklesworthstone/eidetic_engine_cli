@@ -5035,6 +5035,16 @@ pub struct ProposeDerivedReport {
     pub next_commands: Vec<String>,
 }
 
+impl ProposeDerivedReport {
+    /// Serialize response data without the outer response envelope.
+    #[must_use]
+    pub fn data_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            serialization_failed_report(CURATE_PROPOSE_DERIVED_SCHEMA_V1, self.command, "status")
+        })
+    }
+}
+
 /// Build a deterministic create-derived-memory candidate package from
 /// caller-supplied source memory/evidence-span ids and a memory spec.
 ///

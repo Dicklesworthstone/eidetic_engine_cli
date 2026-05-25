@@ -328,10 +328,7 @@ const HELP_PRELUDE: &str = concat!(
     "  ee <subcommand> --help     per-command help\n",
 );
 
-const HELP_LONG_ABOUT: &str = concat!(
-    "Durable, local-first, explainable memory for coding agents.\n\n",
-    HELP_PRELUDE
-);
+const HELP_LONG_ABOUT: &str = HELP_PRELUDE;
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 #[command(
