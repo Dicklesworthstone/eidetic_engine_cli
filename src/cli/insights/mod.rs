@@ -3731,7 +3731,7 @@ mod tests {
         };
         assert_eq!(cli.workspace.as_deref(), Some(std::path::Path::new(".")));
         assert!(cli.json);
-        assert_eq!(args.kind, "gaps");
+        assert_eq!(args.kind.as_deref(), Some("gaps"));
         assert_eq!(args.source_memory.as_slice(), source_ids);
         assert!(args.source.is_empty());
         assert!(args.source_evidence_span.is_empty());

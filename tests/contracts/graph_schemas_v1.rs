@@ -4,6 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use ee::db::{
+    CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+    MemoryLinkRelation, MemoryLinkSource,
+};
 use serde_json::Value;
 
 type TestResult = Result<(), String>;
@@ -782,6 +786,231 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
 }
 
 #[test]
+fn insights_knowledge_gaps_cli_freezes_graph_fixture_recommendations() -> TestResult {
+    let fixture = KnowledgeGapsFixture::new("knowledge-gaps-contract")?;
+    fixture.seed_gap_graph()?;
+    let baseline_counts = fixture.storage_counts()?;
+
+    let first = fixture.run_knowledge_gaps()?;
+    let second = fixture.run_knowledge_gaps()?;
+    ensure_eq(
+        first
+            .pointer("/data/selectedSection")
+            .and_then(Value::as_str),
+        Some("knowledgeGaps"),
+        "knowledgeGaps fixture",
+        "selectedSection",
+    )?;
+    ensure_eq(
+        first
+            .pointer("/data/sections/0/section")
+            .and_then(Value::as_str),
+        Some("knowledgeGaps"),
+        "knowledgeGaps fixture",
+        "sections[0].section",
+    )?;
+    if normalize_insights_json_for_determinism(first.clone())
+        != normalize_insights_json_for_determinism(second.clone())
+    {
+        return Err(
+            "knowledgeGaps fixture output is not deterministic across repeated CLI runs".to_owned(),
+        );
+    }
+
+    let section = first
+        .pointer("/data/sections/0")
+        .ok_or_else(|| "knowledgeGaps response missing first section".to_owned())?;
+    let items = section
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "knowledgeGaps items must be an array".to_owned())?;
+    let recommendations = section
+        .get("recommendations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "knowledgeGaps recommendations must be an array".to_owned())?;
+    if items.len() != 4 {
+        return Err(format!(
+            "knowledgeGaps fixture should emit four representative gaps, got {}: {items}",
+            items.len()
+        ));
+    }
+    if recommendations.len() != items.len() {
+        return Err(format!(
+            "knowledgeGaps recommendations should match item count: items={}, recommendations={}",
+            items.len(),
+            recommendations.len()
+        ));
+    }
+
+    let categories = items
+        .iter()
+        .map(|item| {
+            item.get("category")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("knowledge gap missing category: {item}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if categories
+        != vec![
+            "thin_evidence_bridge",
+            "unresolved_contradiction_cluster",
+            "harmful_neighborhood_without_rule",
+            "underdetermined_causal_chain",
+        ]
+    {
+        return Err(format!(
+            "knowledgeGaps categories/order mismatch: {categories:?}"
+        ));
+    }
+
+    let rendered_section =
+        serde_json::to_string(section).map_err(|error| format!("serialize section: {error}"))?;
+    for forbidden in [
+        "placeholder",
+        "todo",
+        "fake",
+        "reflect ingest",
+        "curate apply",
+    ] {
+        if rendered_section.to_ascii_lowercase().contains(forbidden) {
+            return Err(format!(
+                "knowledgeGaps output must not contain forbidden placeholder/action text `{forbidden}`"
+            ));
+        }
+    }
+
+    let hmac_key_path = fixture.write_reflection_key()?;
+    for (item, recommendation) in items.iter().zip(recommendations) {
+        assert_knowledge_gap_item_contract(item)?;
+        assert_knowledge_gap_compact_recommendation_contract(item, recommendation)?;
+        let source_ids = item
+            .get("sourceMemoryIds")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("sourceMemoryIds must be an array: {item}"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("sourceMemoryIds entry must be a string: {value}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let command = item
+            .pointer("/recommendation/command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("knowledge gap recommendation missing command: {item}"))?;
+        let command_sources = reflect_propose_source_memory_args(command)?;
+        if command_sources != source_ids {
+            return Err(format!(
+                "recommendation command source ids must match item source ids exactly: command={command_sources:?}, item={source_ids:?}, command={command}"
+            ));
+        }
+        if !command.contains("--dry-run") || command.contains("reflect ingest") {
+            return Err(format!(
+                "recommendation command must be reflect propose dry-run only: {command}"
+            ));
+        }
+
+        let request = fixture.run_reflect_propose_recommendation(command, &hmac_key_path)?;
+        ensure_eq(
+            request.pointer("/data/schema").and_then(Value::as_str),
+            Some("ee.reflect.propose.v1"),
+            "knowledgeGaps reflect request",
+            "schema",
+        )?;
+        ensure_eq(
+            request
+                .pointer("/data/reflectionKind")
+                .and_then(Value::as_str),
+            Some("gaps"),
+            "knowledgeGaps reflect request",
+            "reflectionKind",
+        )?;
+        ensure_eq(
+            request.pointer("/data/dryRun").and_then(Value::as_bool),
+            Some(true),
+            "knowledgeGaps reflect request",
+            "dryRun",
+        )?;
+        ensure_eq(
+            request
+                .pointer("/data/request/schema")
+                .and_then(Value::as_str),
+            Some("ee.reflect.request.v1"),
+            "knowledgeGaps reflect request artifact",
+            "request.schema",
+        )?;
+        let request_sources = request
+            .pointer("/data/request/sourcePackage/sources")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "reflect request sourcePackage.sources must be an array".to_owned())?
+            .iter()
+            .map(|source| {
+                source
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .ok_or_else(|| format!("reflect request source missing id: {source}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if request_sources != source_ids {
+            return Err(format!(
+                "reflect request sources must match recommendation sources exactly: request={request_sources:?}, item={source_ids:?}"
+            ));
+        }
+    }
+
+    if fixture.storage_counts()? != baseline_counts {
+        return Err("knowledgeGaps insights/reflect-propose dry-run mutated storage".to_owned());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn insights_knowledge_gaps_cli_emits_no_fake_gaps_for_healthy_or_unavailable_graphs() -> TestResult
+{
+    let healthy = KnowledgeGapsFixture::new("knowledge-gaps-healthy")?;
+    healthy.seed_healthy_graph()?;
+    let before = healthy.storage_counts()?;
+    let healthy_json = healthy.run_knowledge_gaps()?;
+    assert_knowledge_gap_section_empty(&healthy_json, "healthy graph")?;
+    if healthy.storage_counts()? != before {
+        return Err("healthy knowledgeGaps probe mutated storage".to_owned());
+    }
+
+    let unavailable = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let workspace = unavailable.path().to_string_lossy().into_owned();
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--json",
+        "insights",
+        "--section",
+        "knowledgeGaps",
+    ])?;
+    let json = stdout_json(&output, "ee insights knowledgeGaps unavailable workspace")?;
+    assert_knowledge_gap_section_empty(&json, "unavailable graph")?;
+    ensure_eq(
+        json.pointer("/data/degradedSignals/0/code")
+            .and_then(Value::as_str),
+        Some("graph.workspace_empty"),
+        "knowledgeGaps unavailable graph",
+        "degradedSignals[0].code",
+    )?;
+    if serde_json::to_string(&json)
+        .map_err(|error| format!("serialize unavailable graph response: {error}"))?
+        .contains("insights_section_unavailable")
+    {
+        return Err(
+            "knowledgeGaps unavailable graph must not use placeholder degradation".to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn why_schema_documents_load_bearing_graph_block() -> TestResult {
     let schema_path = repo_root()
         .join("docs")
@@ -1329,6 +1558,509 @@ fn assert_schema_basics(schema_id: &str, expected_id: &str, schema: &Value) -> T
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct KnowledgeGapsFixture {
+    _tempdir: tempfile::TempDir,
+    workspace: PathBuf,
+    database_path: PathBuf,
+    workspace_id: String,
+}
+
+impl KnowledgeGapsFixture {
+    fn new(label: &str) -> Result<Self, String> {
+        let tempdir = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let workspace = tempdir.path().to_path_buf();
+        let database_dir = workspace.join(".ee");
+        fs::create_dir_all(&database_dir)
+            .map_err(|error| format!("create {}: {error}", database_dir.display()))?;
+        let database_path = database_dir.join("ee.db");
+        let workspace_id = format!("wsp_{}", label.replace('-', "_"));
+        let fixture = Self {
+            _tempdir: tempdir,
+            workspace,
+            database_path,
+            workspace_id,
+        };
+        fixture.initialize_database(label)?;
+        Ok(fixture)
+    }
+
+    fn initialize_database(&self, label: &str) -> Result<(), String> {
+        let connection = self.connection()?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &self.workspace_id,
+                &CreateWorkspaceInput {
+                    path: self.workspace.display().to_string(),
+                    name: Some(label.to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn connection(&self) -> Result<DbConnection, String> {
+        DbConnection::open_file(&self.database_path).map_err(|error| error.to_string())
+    }
+
+    fn seed_gap_graph(&self) -> Result<(), String> {
+        let connection = self.connection()?;
+        for (id, level, kind, content, confidence) in [
+            (
+                "mem_kg_bridge_a",
+                "semantic",
+                "fact",
+                "Bridge endpoint A.",
+                0.9,
+            ),
+            (
+                "mem_kg_bridge_b",
+                "semantic",
+                "fact",
+                "Bridge articulation B.",
+                0.9,
+            ),
+            (
+                "mem_kg_bridge_c",
+                "semantic",
+                "fact",
+                "Bridge endpoint C.",
+                0.9,
+            ),
+            (
+                "mem_kg_contradiction_a",
+                "semantic",
+                "fact",
+                "Contradiction exemplar A.",
+                0.9,
+            ),
+            (
+                "mem_kg_contradiction_b",
+                "semantic",
+                "fact",
+                "Contradiction exemplar B.",
+                0.9,
+            ),
+            (
+                "mem_kg_contradiction_c",
+                "semantic",
+                "fact",
+                "Contradiction exemplar C.",
+                0.9,
+            ),
+            (
+                "mem_kg_harmful_outcome",
+                "episodic",
+                "failure",
+                "Harmful deployment outcome without a durable rule.",
+                0.8,
+            ),
+            (
+                "mem_kg_harm_neighbor",
+                "semantic",
+                "fact",
+                "Nearby evidence for the harmful incident.",
+                0.8,
+            ),
+            (
+                "mem_kg_causal_source",
+                "semantic",
+                "fact",
+                "Low-confidence causal source.",
+                0.6,
+            ),
+            (
+                "mem_kg_causal_target",
+                "semantic",
+                "fact",
+                "Low-confidence causal target.",
+                0.6,
+            ),
+        ] {
+            self.insert_memory(&connection, id, level, kind, content, confidence)?;
+        }
+
+        self.insert_link(
+            &connection,
+            "link_kg_bridge_1",
+            "mem_kg_bridge_a",
+            "mem_kg_bridge_b",
+            MemoryLinkRelation::Supports,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_bridge_2",
+            "mem_kg_bridge_b",
+            "mem_kg_bridge_c",
+            MemoryLinkRelation::Supports,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_contra_1",
+            "mem_kg_contradiction_a",
+            "mem_kg_contradiction_b",
+            MemoryLinkRelation::Contradicts,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_contra_2",
+            "mem_kg_contradiction_b",
+            "mem_kg_contradiction_c",
+            MemoryLinkRelation::Contradicts,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_contra_3",
+            "mem_kg_contradiction_a",
+            "mem_kg_contradiction_c",
+            MemoryLinkRelation::Contradicts,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_harm_neighbor",
+            "mem_kg_harmful_outcome",
+            "mem_kg_harm_neighbor",
+            MemoryLinkRelation::Supports,
+            1,
+            1.0,
+        )?;
+        self.insert_link(
+            &connection,
+            "link_kg_causal_low_confidence",
+            "mem_kg_causal_source",
+            "mem_kg_causal_target",
+            MemoryLinkRelation::Supports,
+            4,
+            0.25,
+        )
+    }
+
+    fn seed_healthy_graph(&self) -> Result<(), String> {
+        let connection = self.connection()?;
+        for (id, level, kind, content, confidence) in [
+            ("mem_kg_healthy_a", "semantic", "fact", "Healthy A.", 0.9),
+            ("mem_kg_healthy_b", "semantic", "fact", "Healthy B.", 0.9),
+            ("mem_kg_healthy_c", "semantic", "fact", "Healthy C.", 0.9),
+            (
+                "mem_kg_healthy_rule",
+                "procedural",
+                "rule",
+                "Durable rule with adjacent evidence.",
+                0.9,
+            ),
+        ] {
+            self.insert_memory(&connection, id, level, kind, content, confidence)?;
+        }
+        for (id, source, target) in [
+            ("link_kg_healthy_1", "mem_kg_healthy_a", "mem_kg_healthy_b"),
+            ("link_kg_healthy_2", "mem_kg_healthy_b", "mem_kg_healthy_c"),
+            ("link_kg_healthy_3", "mem_kg_healthy_a", "mem_kg_healthy_c"),
+            (
+                "link_kg_healthy_4",
+                "mem_kg_healthy_b",
+                "mem_kg_healthy_rule",
+            ),
+        ] {
+            self.insert_link(
+                &connection,
+                id,
+                source,
+                target,
+                MemoryLinkRelation::Supports,
+                3,
+                1.0,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn insert_memory(
+        &self,
+        connection: &DbConnection,
+        id: &str,
+        level: &str,
+        kind: &str,
+        content: &str,
+        confidence: f32,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory(
+                id,
+                &CreateMemoryInput {
+                    workspace_id: self.workspace_id.clone(),
+                    level: level.to_owned(),
+                    kind: kind.to_owned(),
+                    content: content.to_owned(),
+                    workflow_id: None,
+                    confidence,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_validated".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn insert_link(
+        &self,
+        connection: &DbConnection,
+        id: &str,
+        source: &str,
+        target: &str,
+        relation: MemoryLinkRelation,
+        evidence_count: u32,
+        confidence: f32,
+    ) -> Result<(), String> {
+        connection
+            .insert_memory_link(
+                id,
+                &CreateMemoryLinkInput {
+                    src_memory_id: source.to_owned(),
+                    dst_memory_id: target.to_owned(),
+                    relation,
+                    weight: 1.0,
+                    confidence,
+                    directed: false,
+                    evidence_count,
+                    last_reinforced_at: None,
+                    source: MemoryLinkSource::Agent,
+                    created_by: Some("bd-3bsvv-contract".to_owned()),
+                    metadata_json: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn run_knowledge_gaps(&self) -> Result<Value, String> {
+        let workspace = self.workspace.to_string_lossy().into_owned();
+        let output = run_ee(&[
+            "--workspace",
+            &workspace,
+            "--json",
+            "insights",
+            "--section",
+            "knowledgeGaps",
+            "--limit",
+            "10",
+        ])?;
+        stdout_json(&output, "ee insights --section knowledgeGaps")
+    }
+
+    fn write_reflection_key(&self) -> Result<PathBuf, String> {
+        let path = self.workspace.join("reflection_hmac.key");
+        fs::write(&path, "bd-3bsvv-knowledge-gaps-contract-key\n")
+            .map_err(|error| format!("write {}: {error}", path.display()))?;
+        Ok(path)
+    }
+
+    fn run_reflect_propose_recommendation(
+        &self,
+        command: &str,
+        hmac_key_path: &Path,
+    ) -> Result<Value, String> {
+        let args = recommendation_command_args(command)?;
+        let output = Command::new(env!("CARGO_BIN_EXE_ee"))
+            .args(args)
+            .current_dir(&self.workspace)
+            .env_remove("EE_WORKSPACE")
+            .env_remove("EE_WORKSPACE_REGISTRY")
+            .env("EE_REFLECTION_HMAC_KEY_ID", "bd-3bsvv-contract-key")
+            .env("EE_REFLECTION_HMAC_KEY_PATH", hmac_key_path)
+            .output()
+            .map_err(|error| {
+                format!("failed to run recommendation command `{command}`: {error}")
+            })?;
+        stdout_json(&output, "knowledgeGaps reflect propose recommendation")
+    }
+
+    fn storage_counts(&self) -> Result<(usize, usize), String> {
+        let connection = self.connection()?;
+        let memory_count = connection
+            .list_memories(&self.workspace_id, None, true)
+            .map_err(|error| error.to_string())?
+            .len();
+        let link_count = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?
+            .len();
+        Ok((memory_count, link_count))
+    }
+}
+
+fn normalize_insights_json_for_determinism(mut json: Value) -> Value {
+    if let Some(data) = json.get_mut("data").and_then(Value::as_object_mut) {
+        data.insert(
+            "generatedAt".to_owned(),
+            Value::String("<normalized>".to_owned()),
+        );
+        data.insert(
+            "runDurationMs".to_owned(),
+            Value::Number(serde_json::Number::from(0)),
+        );
+    }
+    json
+}
+
+fn assert_knowledge_gap_item_contract(item: &Value) -> TestResult {
+    for field in [
+        "category",
+        "sourceMemoryIds",
+        "metricEvidence",
+        "explanation",
+        "confidence",
+        "priority",
+        "recommendation",
+    ] {
+        if item.get(field).is_none() {
+            return Err(format!("knowledge gap item missing {field}: {item}"));
+        }
+    }
+    let source_ids = item
+        .get("sourceMemoryIds")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("sourceMemoryIds must be an array: {item}"))?;
+    if source_ids.is_empty() {
+        return Err(format!("knowledge gap item must cite sources: {item}"));
+    }
+    ensure_eq(
+        item.pointer("/metricEvidence/schema")
+            .and_then(Value::as_str),
+        Some("ee.graph.knowledge_gap.v1"),
+        "knowledgeGaps item",
+        "metricEvidence.schema",
+    )?;
+    if item
+        .pointer("/metricEvidence/signal")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err(format!("knowledge gap item missing metric signal: {item}"));
+    }
+    ensure_eq(
+        item.pointer("/recommendation/kind").and_then(Value::as_str),
+        Some("reflect_propose"),
+        "knowledgeGaps item",
+        "recommendation.kind",
+    )
+}
+
+fn assert_knowledge_gap_compact_recommendation_contract(
+    item: &Value,
+    recommendation: &Value,
+) -> TestResult {
+    ensure_eq(
+        recommendation.get("id"),
+        item.get("gapId"),
+        "knowledgeGaps compact recommendation",
+        "id",
+    )?;
+    ensure_eq(
+        recommendation.get("reason"),
+        item.get("explanation"),
+        "knowledgeGaps compact recommendation",
+        "reason",
+    )?;
+    ensure_eq(
+        recommendation
+            .get("recommendation_kind")
+            .and_then(Value::as_str),
+        Some("reflect_propose"),
+        "knowledgeGaps compact recommendation",
+        "recommendation_kind",
+    )?;
+    ensure_eq(
+        recommendation.get("suggested_query"),
+        item.pointer("/recommendation/command"),
+        "knowledgeGaps compact recommendation",
+        "suggested_query",
+    )
+}
+
+fn assert_knowledge_gap_section_empty(json: &Value, label: &str) -> TestResult {
+    ensure_eq(
+        json.pointer("/data/selectedSection")
+            .and_then(Value::as_str),
+        Some("knowledgeGaps"),
+        label,
+        "selectedSection",
+    )?;
+    ensure_eq(
+        json.pointer("/data/sections/0/section")
+            .and_then(Value::as_str),
+        Some("knowledgeGaps"),
+        label,
+        "section",
+    )?;
+    let items = json
+        .pointer("/data/sections/0/items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} knowledgeGaps items must be an array"))?;
+    let recommendations = json
+        .pointer("/data/sections/0/recommendations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{label} knowledgeGaps recommendations must be an array"))?;
+    if !items.is_empty() || !recommendations.is_empty() {
+        return Err(format!(
+            "{label} should not emit knowledge gaps or recommendations: items={items:?}, recommendations={recommendations:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn recommendation_command_args(command: &str) -> Result<Vec<String>, String> {
+    let mut parts = command
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if parts.first().map(String::as_str) != Some("ee") {
+        return Err(format!(
+            "recommendation command must start with `ee`: {command}"
+        ));
+    }
+    parts.remove(0);
+    Ok(parts)
+}
+
+fn reflect_propose_source_memory_args(command: &str) -> Result<Vec<String>, String> {
+    let args = recommendation_command_args(command)?;
+    if args.iter().any(|arg| arg == "ingest" || arg == "apply") {
+        return Err(format!(
+            "recommendation command must not ingest/apply reflection output: {command}"
+        ));
+    }
+    let mut sources = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--source-memory" {
+            let source = iter.next().ok_or_else(|| {
+                format!("recommendation command has --source-memory without value: {command}")
+            })?;
+            sources.push(source.clone());
+        }
+    }
+    if sources.is_empty() {
+        return Err(format!(
+            "recommendation command must include at least one --source-memory: {command}"
+        ));
+    }
+    Ok(sources)
 }
 
 #[test]
