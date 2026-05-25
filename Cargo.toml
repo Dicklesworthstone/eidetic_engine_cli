@@ -159,6 +159,10 @@ name = "context"
 harness = false
 
 [[bench]]
+name = "tiered_recall"
+harness = false
+
+[[bench]]
 name = "context_stream"
 harness = false
 

@@ -34,6 +34,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "tiered_recall",
   "context_l2_warm",
   "context_arena_mode",
   "context_with_ppr",
@@ -71,6 +72,7 @@ benches = [
   "remember",
   "search",
   "context",
+  "tiered_recall",
   "context_l2_warm",
   "context_arena_mode",
   "context_with_ppr",
@@ -114,6 +116,11 @@ description = "Hybrid lexical+semantic search over 5k memories"
 p50_ms_max = 95.0
 p99_ms_max = 240.0
 description = "Build 4k-token context pack; S4 resource-scale benchmark covers 1k/10k/100k memory fixtures"
+
+[operations.ee_tiered_recall]
+p50_ms_max = 140.0
+p99_ms_max = 340.0
+description = "Compare disabled and enabled tiered hot/warm/cold recall over the same context fixture; enabled path must preserve required cold evidence"
 
 [operations.ee_context_with_ppr]
 p50_ms_max = 125.0

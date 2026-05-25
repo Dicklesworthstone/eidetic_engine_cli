@@ -101,14 +101,14 @@ case "$PROFILE" in
         RELEASE_BLOCKING=false
         ;;
     nightly)
-        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
+        BENCHMARKS="remember search context tiered_recall pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
         BENCH_ARGS="--warm-up-time 0.5 --measurement-time 2 --sample-size 20"
         PROFILE_CLASS="nightly_ci"
         WORKLOAD_TIER="medium"
         RELEASE_BLOCKING=false
         ;;
     stress)
-        BENCHMARKS="remember search context pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
+        BENCHMARKS="remember search context tiered_recall pack_size why outcome status workspace_init audit_query index_rebuild concurrent_writes import_cass link graph_pagerank graph_ppr graph_louvain graph_ktruss graph_gomory_hu graph_hits graph_full_stack curate_candidates graph_refresh_cooperative"
         BENCH_ARGS=""
         PROFILE_CLASS="local_256gb"
         WORKLOAD_TIER="stress"
