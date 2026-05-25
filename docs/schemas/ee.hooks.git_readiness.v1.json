@@ -13,6 +13,7 @@
     "hookDir",
     "agentName",
     "summary",
+    "aheadRisk",
     "hooks",
     "findings",
     "recommendations"
@@ -37,7 +38,8 @@
         "beadsMetadataMutationRisk",
         "agentNameReady",
         "preflightGuardReachable",
-        "rchHookReachable"
+        "rchHookReachable",
+        "aheadRiskBlocking"
       ],
       "properties": {
         "posture": { "enum": ["ready", "needs_attention", "blocked"] },
@@ -49,7 +51,46 @@
         "beadsMetadataMutationRisk": { "type": "boolean" },
         "agentNameReady": { "type": "boolean" },
         "preflightGuardReachable": { "type": "boolean" },
-        "rchHookReachable": { "type": "boolean" }
+        "rchHookReachable": { "type": "boolean" },
+        "aheadRiskBlocking": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "aheadRisk": {
+      "type": "object",
+      "required": [
+        "schema",
+        "available",
+        "state",
+        "hasUpstream",
+        "upstreamRef",
+        "aheadCount",
+        "commitCount",
+        "mixedOwnerAhead",
+        "mixedBeadAhead",
+        "ambiguousAhead",
+        "peerOwnedAheadRisk",
+        "degradedCodes",
+        "blocking"
+      ],
+      "properties": {
+        "schema": { "const": "ee.hooks.git_readiness.ahead_risk.v1" },
+        "available": { "type": "boolean" },
+        "state": { "type": "string", "minLength": 1 },
+        "hasUpstream": { "type": "boolean" },
+        "upstreamRef": { "type": ["string", "null"] },
+        "aheadCount": { "type": "integer", "minimum": 0 },
+        "commitCount": { "type": "integer", "minimum": 0 },
+        "mixedOwnerAhead": { "type": "boolean" },
+        "mixedBeadAhead": { "type": "boolean" },
+        "ambiguousAhead": { "type": "boolean" },
+        "peerOwnedAheadRisk": { "type": "boolean" },
+        "degradedCodes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "blocking": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -116,6 +157,7 @@
               "git_dir_unreadable",
               "hook_untrusted_or_unreadable",
               "preflight_guard_not_in_git_hooks",
+              "pre_push_ahead_risk",
               "rch_hook_mismatch"
             ]
           },

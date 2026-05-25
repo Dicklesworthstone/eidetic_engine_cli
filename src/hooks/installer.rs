@@ -5,11 +5,16 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::core::git_ahead::{
+    GIT_AHEAD_LOG_FORMAT, GitAheadLogState, GitAheadSnapshot, summarize_git_ahead,
+    summarize_git_ahead_with_log_state,
+};
 use crate::models::DomainError;
 
 /// Schema for hook install report.
@@ -20,6 +25,9 @@ pub const HOOK_STATUS_SCHEMA_V1: &str = "ee.hooks.status.v1";
 
 /// Schema for local Git hook-chain readiness diagnostics.
 pub const GIT_HOOK_READINESS_SCHEMA_V1: &str = "ee.hooks.git_readiness.v1";
+
+/// Schema for the push-safety summary embedded in hook readiness diagnostics.
+pub const GIT_HOOK_AHEAD_RISK_SCHEMA_V1: &str = "ee.hooks.git_readiness.ahead_risk.v1";
 
 const TRAUMA_GUARD_HOOK_HELPER_SURFACE: &str = "trauma_guard_hook_helper";
 
@@ -988,6 +996,70 @@ pub struct GitHookReadinessSummary {
     pub agent_name_ready: bool,
     pub preflight_guard_reachable: bool,
     pub rch_hook_reachable: bool,
+    pub ahead_risk_blocking: bool,
+}
+
+/// Compact push-readiness summary consumed by pre-push hook chains.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHookAheadRiskSummary {
+    pub schema: String,
+    pub available: bool,
+    pub state: String,
+    pub has_upstream: bool,
+    pub upstream_ref: Option<String>,
+    pub ahead_count: usize,
+    pub commit_count: usize,
+    pub mixed_owner_ahead: bool,
+    pub mixed_bead_ahead: bool,
+    pub ambiguous_ahead: bool,
+    pub peer_owned_ahead_risk: bool,
+    pub degraded_codes: Vec<String>,
+    pub blocking: bool,
+}
+
+impl GitHookAheadRiskSummary {
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            schema: GIT_HOOK_AHEAD_RISK_SCHEMA_V1.to_owned(),
+            available: false,
+            state: "unavailable".to_owned(),
+            has_upstream: false,
+            upstream_ref: None,
+            ahead_count: 0,
+            commit_count: 0,
+            mixed_owner_ahead: false,
+            mixed_bead_ahead: false,
+            ambiguous_ahead: false,
+            peer_owned_ahead_risk: false,
+            degraded_codes: vec!["git_ahead_unavailable".to_owned()],
+            blocking: false,
+        }
+    }
+
+    #[must_use]
+    pub fn from_snapshot(snapshot: &GitAheadSnapshot) -> Self {
+        Self {
+            schema: GIT_HOOK_AHEAD_RISK_SCHEMA_V1.to_owned(),
+            available: true,
+            state: snapshot.state.to_owned(),
+            has_upstream: snapshot.upstream_ref.is_some(),
+            upstream_ref: snapshot.upstream_ref.clone(),
+            ahead_count: snapshot.ahead_count,
+            commit_count: snapshot.commits.len(),
+            mixed_owner_ahead: snapshot.mixed_author_ahead,
+            mixed_bead_ahead: snapshot.mixed_bead_ahead,
+            ambiguous_ahead: snapshot.ambiguous_ahead,
+            peer_owned_ahead_risk: snapshot.peer_owned_ahead_risk,
+            degraded_codes: snapshot
+                .degraded
+                .iter()
+                .map(|entry| entry.code.to_owned())
+                .collect(),
+            blocking: snapshot.peer_owned_ahead_risk,
+        }
+    }
 }
 
 /// One inspected Git hook or chained hook target.
@@ -1041,6 +1113,7 @@ pub struct GitHookReadinessReport {
     pub hook_dir: String,
     pub agent_name: Option<String>,
     pub summary: GitHookReadinessSummary,
+    pub ahead_risk: GitHookAheadRiskSummary,
     pub hooks: Vec<GitHookReadinessHook>,
     pub findings: Vec<GitHookReadinessFinding>,
     pub recommendations: Vec<GitHookReadinessRecommendation>,
@@ -1057,6 +1130,18 @@ impl GitHookReadinessReport {
 pub fn check_git_hook_readiness(
     options: &GitHookReadinessOptions,
 ) -> Result<GitHookReadinessReport, DomainError> {
+    let ahead_risk = collect_git_hook_ahead_risk(&options.repository_root);
+    check_git_hook_readiness_with_ahead_risk(options, ahead_risk)
+}
+
+/// Inspect hook readiness using a precomputed ahead-risk summary.
+///
+/// This keeps pre-push policy evaluation testable without shelling out to Git
+/// while preserving `check_git_hook_readiness` as the live read-only collector.
+pub fn check_git_hook_readiness_with_ahead_risk(
+    options: &GitHookReadinessOptions,
+    ahead_risk: GitHookAheadRiskSummary,
+) -> Result<GitHookReadinessReport, DomainError> {
     let (git_dir, hook_dir, mut findings) = resolve_git_hook_dir(&options.repository_root);
     let agent_name = normalize_agent_name(options.agent_name.as_deref());
     let mut hooks = Vec::new();
@@ -1065,9 +1150,13 @@ pub fn check_git_hook_readiness(
         hooks.push(inspect_git_hook(&hook_dir, hook_name));
     }
 
-    findings.extend(git_hook_readiness_findings(&hooks, agent_name.as_deref()));
+    findings.extend(git_hook_readiness_findings(
+        &hooks,
+        agent_name.as_deref(),
+        &ahead_risk,
+    ));
     let recommendations = git_hook_readiness_recommendations(&findings);
-    let summary = git_hook_readiness_summary(&hooks, &findings, agent_name.is_some());
+    let summary = git_hook_readiness_summary(&hooks, &findings, agent_name.is_some(), &ahead_risk);
 
     Ok(GitHookReadinessReport {
         schema: GIT_HOOK_READINESS_SCHEMA_V1.to_owned(),
@@ -1078,6 +1167,7 @@ pub fn check_git_hook_readiness(
         hook_dir: hook_dir.display().to_string(),
         agent_name,
         summary,
+        ahead_risk,
         hooks,
         findings,
         recommendations,
@@ -1089,6 +1179,56 @@ fn normalize_agent_name(agent_name: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn collect_git_hook_ahead_risk(repository_root: &Path) -> GitHookAheadRiskSummary {
+    let status =
+        match run_git_readiness_command(repository_root, &["status", "--porcelain=v2", "--branch"])
+        {
+            Ok(stdout) => stdout,
+            Err(_) => return GitHookAheadRiskSummary::unavailable(),
+        };
+    let status_only = summarize_git_ahead(&status, Some(""));
+    let snapshot = match (status_only.ahead_count, status_only.upstream_ref.as_deref()) {
+        (0, _) | (_, None) => status_only,
+        (_, Some(upstream)) => {
+            let range = format!("{upstream}..HEAD");
+            let format_arg = format!("--format={GIT_AHEAD_LOG_FORMAT}");
+            match run_git_readiness_command(repository_root, &["log", &range, &format_arg]) {
+                Ok(stdout) => summarize_git_ahead(&status, Some(&stdout)),
+                Err(GitReadinessCommandError::Failed) => {
+                    summarize_git_ahead_with_log_state(&status, GitAheadLogState::Failed)
+                }
+                Err(GitReadinessCommandError::Unavailable) => {
+                    summarize_git_ahead_with_log_state(&status, GitAheadLogState::Unavailable)
+                }
+            }
+        }
+    };
+    GitHookAheadRiskSummary::from_snapshot(&snapshot)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitReadinessCommandError {
+    Failed,
+    Unavailable,
+}
+
+fn run_git_readiness_command(
+    repository_root: &Path,
+    args: &[&str],
+) -> Result<String, GitReadinessCommandError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repository_root)
+        .args(args)
+        .output()
+        .map_err(|_| GitReadinessCommandError::Unavailable)?;
+
+    if !output.status.success() {
+        return Err(GitReadinessCommandError::Failed);
+    }
+    String::from_utf8(output.stdout).map_err(|_| GitReadinessCommandError::Unavailable)
 }
 
 fn resolve_git_hook_dir(
@@ -1334,6 +1474,7 @@ fn hook_invokes_local_rust_toolchain(content: &str) -> bool {
 fn git_hook_readiness_findings(
     hooks: &[GitHookReadinessHook],
     agent_name: Option<&str>,
+    ahead_risk: &GitHookAheadRiskSummary,
 ) -> Vec<GitHookReadinessFinding> {
     let mut findings = Vec::new();
     for hook in hooks {
@@ -1386,6 +1527,20 @@ fn git_hook_readiness_findings(
                 repair: "Route Rust verification through scripts/rch_verify.sh or rch exec; do not let shared-checkout Git hooks run local Cargo.".to_owned(),
             });
         }
+    }
+
+    if ahead_risk.blocking {
+        findings.push(GitHookReadinessFinding {
+            code: "pre_push_ahead_risk".to_owned(),
+            severity: "high".to_owned(),
+            hook: Some("pre-push".to_owned()),
+            message: format!(
+                "Ahead-risk summary reports state `{}` with {} ahead commit(s); mixed-owner, mixed-bead, or ambiguous ahead commits must be coordinated before push.",
+                ahead_risk.state, ahead_risk.ahead_count
+            ),
+            repair: "Inspect `git log origin/main..HEAD --oneline --decorate` and coordinate with peers before pushing."
+                .to_owned(),
+        });
     }
 
     if hooks
@@ -1469,11 +1624,22 @@ fn git_hook_readiness_recommendations(
     }
     if findings
         .iter()
+        .any(|finding| finding.code == "pre_push_ahead_risk")
+    {
+        recommendations.push(GitHookReadinessRecommendation {
+            id: "inspect_ahead_risk_before_push".to_owned(),
+            priority: 4,
+            action: "git log origin/main..HEAD --oneline --decorate".to_owned(),
+            rationale: "The pre-push readiness summary found mixed-owner, mixed-bead, or ambiguous ahead commits.".to_owned(),
+        });
+    }
+    if findings
+        .iter()
         .any(|finding| finding.code == "preflight_guard_not_in_git_hooks")
     {
         recommendations.push(GitHookReadinessRecommendation {
             id: "generate_preflight_shell_hook".to_owned(),
-            priority: 4,
+            priority: 5,
             action: "ee hook preflight-shell --shell zsh --json".to_owned(),
             rationale: "The destructive-command guard is most reliable when the shell pre-exec hook is active before commands run.".to_owned(),
         });
@@ -1486,6 +1652,7 @@ fn git_hook_readiness_summary(
     hooks: &[GitHookReadinessHook],
     findings: &[GitHookReadinessFinding],
     agent_name_ready: bool,
+    ahead_risk: &GitHookAheadRiskSummary,
 ) -> GitHookReadinessSummary {
     let blocker_count = findings
         .iter()
@@ -1511,6 +1678,7 @@ fn git_hook_readiness_summary(
         agent_name_ready,
         preflight_guard_reachable: hooks.iter().any(|hook| hook.invokes_preflight_guard),
         rch_hook_reachable: hooks.iter().any(|hook| hook.invokes_rch),
+        ahead_risk_blocking: ahead_risk.blocking,
     }
 }
 
@@ -1830,6 +1998,30 @@ mod tests {
         options: &HookInstallOptions,
     ) -> Result<HookInstallReport, DomainError> {
         install_hooks_with_binary_path(options, std::path::Path::new("/usr/local/bin/ee"))
+    }
+
+    fn configured_git_hook_repo() -> Result<TempDir, String> {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join(".git").join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-commit"),
+            "#!/bin/sh\n/usr/local/bin/ee preflight check --cmd \"$*\" --json\n",
+        )
+        .map_err(|e| e.to_string())?;
+        fs::write(
+            hook_dir.join("pre-push"),
+            r#"#!/usr/bin/env python3
+import os
+AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(temp)
+    }
+
+    fn fake_ahead_risk(status: &str, log: Option<&str>) -> GitHookAheadRiskSummary {
+        GitHookAheadRiskSummary::from_snapshot(&summarize_git_ahead(status, log))
     }
 
     #[test]
@@ -2351,6 +2543,93 @@ AGENT_NAME = os.environ.get("AGENT_NAME", "").strip()
         assert!(report.summary.agent_name_ready);
         assert!(report.summary.preflight_guard_reachable);
         assert!(report.findings.is_empty(), "clean chain should not warn");
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_ahead_risk_summary_allows_safe_pre_push_states() -> TestResult {
+        let safe_states = [
+            fake_ahead_risk("# branch.head main\n# branch.ab +0 -0\n", Some("")),
+            fake_ahead_risk(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n",
+                Some(""),
+            ),
+            fake_ahead_risk(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +1 -0\n",
+                Some("aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.3)\n"),
+            ),
+        ];
+
+        for ahead_risk in safe_states {
+            let temp = configured_git_hook_repo()?;
+            let report = check_git_hook_readiness_with_ahead_risk(
+                &GitHookReadinessOptions {
+                    repository_root: temp.path().to_path_buf(),
+                    agent_name: Some("LilacLake".to_owned()),
+                },
+                ahead_risk,
+            )
+            .map_err(|e| e.message())?;
+
+            assert_eq!(report.summary.posture, "ready");
+            assert!(!report.summary.ahead_risk_blocking);
+            assert!(!report.ahead_risk.blocking);
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .all(|finding| finding.code != "pre_push_ahead_risk"),
+                "safe ahead summaries must not block pre-push readiness"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn git_readiness_blocks_pre_push_for_mixed_owner_ahead_risk() -> TestResult {
+        let temp = configured_git_hook_repo()?;
+        let report = check_git_hook_readiness_with_ahead_risk(
+            &GitHookReadinessOptions {
+                repository_root: temp.path().to_path_buf(),
+                agent_name: Some("LilacLake".to_owned()),
+            },
+            fake_ahead_risk(
+                "# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -0\n",
+                Some(concat!(
+                    "aaaaaaaaaaaaaaaa\x1fCodex\x1ffix: parser (bd-2gc7r.3)\n",
+                    "bbbbbbbbbbbbbbbb\x1fPeerAgent\x1ftest: fixture (bd-peer.2)\n",
+                )),
+            ),
+        )
+        .map_err(|e| e.message())?;
+
+        assert_eq!(report.summary.posture, "blocked");
+        assert!(report.summary.ahead_risk_blocking);
+        assert_eq!(report.ahead_risk.ahead_count, 2);
+        assert_eq!(
+            report.ahead_risk.upstream_ref.as_deref(),
+            Some("origin/main")
+        );
+        assert!(report.ahead_risk.mixed_owner_ahead);
+        assert!(report.ahead_risk.peer_owned_ahead_risk);
+        assert!(report.ahead_risk.blocking);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "pre_push_ahead_risk"
+                    && finding.hook.as_deref() == Some("pre-push")),
+            "mixed-owner ahead summary must block pre-push readiness"
+        );
+        assert!(
+            report
+                .recommendations
+                .iter()
+                .any(|recommendation| recommendation.id == "inspect_ahead_risk_before_push"),
+            "blocked pre-push readiness should explain the inspection command"
+        );
 
         Ok(())
     }
