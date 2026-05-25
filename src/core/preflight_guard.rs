@@ -1889,15 +1889,55 @@ fn matches_kubectl_mass_delete(command: &str) -> bool {
         }
         let args = &segment[command_index + 1..];
         args.iter().any(|arg| arg == "delete")
-            && args.iter().any(|arg| arg == "--all")
+            && args.iter().any(|arg| kubectl_flag_is_truthy(arg, "--all"))
             && args
                 .iter()
-                .any(|arg| arg == "--all-namespaces" || arg == "-A")
+                .any(|arg| arg == "-A" || kubectl_flag_is_truthy(arg, "--all-namespaces"))
     })
 }
 
+/// Whether `arg` is the bool flag `flag` either bare (`--all`) or in an
+/// explicit-truthy `key=value` form (`--all=true`, `--all=1`, `--all=yes`).
+/// Per `kubectl` docs every bool flag accepts both shapes and treats them
+/// identically. The matcher must accept both or `--all=true` silently
+/// bypasses the guard.
+fn kubectl_flag_is_truthy(arg: &str, flag: &str) -> bool {
+    if arg == flag {
+        return true;
+    }
+    if let Some(value) = arg
+        .strip_prefix(flag)
+        .and_then(|rest| rest.strip_prefix('='))
+    {
+        return matches!(
+            value.to_ascii_lowercase().as_str(),
+            "true" | "1" | "yes" | "y" | "on" | "t"
+        );
+    }
+    false
+}
+
 fn matches_drop_table_sql(command: &str) -> bool {
-    command.to_ascii_lowercase().contains("drop table")
+    // Normalize whitespace before matching so trivial bypasses such as
+    // `DROP  TABLE`, `DROP\tTABLE`, or `DROP\nTABLE` (passed verbatim
+    // through `psql -c '...'`) cannot evade the guard. Case is folded
+    // to lowercase. Comment-stripping is left for a future revision —
+    // the common bypass vector is whitespace, not SQL comments.
+    let lowered = command.to_ascii_lowercase();
+    let mut collapsed = String::with_capacity(lowered.len());
+    let mut last_was_space = false;
+    for ch in lowered.chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                collapsed.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            last_was_space = false;
+        }
+    }
+    collapsed.contains("drop table")
 }
 
 fn matches_terraform_destroy(command: &str) -> bool {

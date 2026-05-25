@@ -345,6 +345,82 @@ fn destructive_infrastructure_builtins_match_shell_wrappers_and_paths() {
 }
 
 #[test]
+fn kubectl_mass_delete_blocks_truthy_value_form_bypass() {
+    // Previously, `--all` was matched via raw `arg == "--all"`. kubectl
+    // accepts `--all=true` and `--all=1` for the same intent, which let
+    // the destructive command slip past the guard. Each truthy form must
+    // halt with exit 7 like the bare flag.
+    let registry = PreflightGuardRegistry::with_builtins();
+    for command in [
+        "kubectl delete pods --all=true --all-namespaces=true",
+        "kubectl delete pods --all=1 --all-namespaces=1",
+        "kubectl delete pods --all=yes --all-namespaces=yes",
+        "kubectl delete pods --all=true -A",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "kubectl mass-delete bypass `{command}` should exit 7"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:kubectl_mass_delete"),
+            "command `{command}` did not cite builtin:kubectl_mass_delete: {:?}",
+            report.matches
+        );
+    }
+}
+
+#[test]
+fn kubectl_mass_delete_does_not_match_explicit_false() {
+    // `--all=false` is the opposite intent and must NOT be flagged.
+    let registry = PreflightGuardRegistry::with_builtins();
+    let report = run_preflight_guard(
+        &registry,
+        &opts("kubectl delete pods --all=false --all-namespaces=false my-pod"),
+    );
+    assert!(
+        report
+            .matches
+            .iter()
+            .all(|matched| matched.rule_id != "builtin:kubectl_mass_delete"),
+        "explicit --all=false must not trip the mass-delete guard: {:?}",
+        report.matches
+    );
+}
+
+#[test]
+fn drop_table_sql_blocks_whitespace_variant_bypasses() {
+    // Previously the matcher did a literal `contains("drop table")`
+    // substring search. Inserting extra whitespace inside the CLI
+    // argument (multiple spaces, tabs, newlines) bypassed the guard
+    // even though the resulting SQL was semantically identical.
+    let registry = PreflightGuardRegistry::with_builtins();
+    for command in [
+        "psql -c 'DROP  TABLE memories;'",
+        "psql -c 'DROP\tTABLE memories;'",
+        "psql -c 'DROP\nTABLE memories;'",
+        "psql -c 'drop   table   memories;'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, 7,
+            "drop-table bypass `{command}` should exit 7"
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:drop_table_sql"),
+            "command `{command}` did not cite builtin:drop_table_sql: {:?}",
+            report.matches
+        );
+    }
+}
+
+#[test]
 fn no_match_yields_exit_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
     let report = run_preflight_guard(&registry, &opts("ls -la"));
