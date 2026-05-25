@@ -111,6 +111,9 @@ fn secret_key_match_has_value(content: &str, key: &str, index: usize) -> bool {
         return false;
     };
 
+    if matches!(after_key, '"' | '\'') && before == Some(after_key) {
+        return quoted_secret_key_has_value(content, value_start + after_key.len_utf8());
+    }
     if is_secret_key_connector(after_key) {
         return secret_key_suffix_has_value(content, value_start + after_key.len_utf8());
     }
@@ -119,6 +122,19 @@ fn secret_key_match_has_value(content: &str, key: &str, index: usize) -> bool {
     }
 
     separator_starts_secret_value(content, value_start + after_key.len_utf8(), after_key)
+}
+
+fn quoted_secret_key_has_value(content: &str, mut offset: usize) -> bool {
+    while offset < content.len() {
+        let Some(next) = content[offset..].chars().next() else {
+            return false;
+        };
+        if !next.is_whitespace() {
+            return matches!(next, ':' | '=');
+        }
+        offset += next.len_utf8();
+    }
+    false
 }
 
 fn separator_starts_secret_value(content: &str, mut offset: usize, mut separator: char) -> bool {

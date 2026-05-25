@@ -81,7 +81,7 @@ impl BeadAffinityContext {
 
     #[must_use]
     pub fn is_cold_start(&self) -> bool {
-        self.labels.is_empty() && self.tokens.is_empty()
+        self.bead_id.trim().is_empty() && self.labels.is_empty() && self.tokens.is_empty()
     }
 }
 
@@ -836,6 +836,19 @@ mod tests {
         let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
 
         assert_eq!(score.link_overlap, 0);
+    }
+
+    #[test]
+    fn bead_affinity_bead_id_only_context_can_match_links() {
+        let context = BeadAffinityContext::new("bd-2942u", std::iter::empty::<String>(), "");
+        let candidate = BeadAffinityCandidateSignals::new()
+            .with_tags(["unrelated"])
+            .with_link_refs(["source_uri:bd-2942u-parent"]);
+
+        let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
+
+        assert_eq!(score.link_overlap, 1);
+        assert!(score.applied());
     }
 
     #[test]
