@@ -424,6 +424,32 @@ fn force_push_warns_but_exits_zero() {
 }
 
 #[test]
+fn checkout_guard_blocks_main_pathspec_and_forced_checkout_forms() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for command in [
+        "git checkout main -- src/lib.rs",
+        "git checkout main src/lib.rs",
+        "git checkout -- main",
+        "git checkout -b main",
+        "git checkout --detach main",
+        "git checkout -f main",
+        "git switch --force main",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == "builtin:git_checkout_off_main"),
+            "command `{command}` did not cite git checkout guard: {:?}",
+            report.matches
+        );
+    }
+}
+
+#[test]
 fn rust_verifier_command_substitution_halts_before_tracker_or_mail_command() {
     let registry = PreflightGuardRegistry::with_builtins();
 

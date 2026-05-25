@@ -75,6 +75,36 @@
       ]
     },
     {
+      "id": "git_checkout_main_pathspec_overwrite",
+      "category": "git_checkout_overwrite",
+      "command": "git checkout main -- src/lib.rs",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_checkout_off_main"
+      ]
+    },
+    {
+      "id": "git_checkout_branch_creation_named_main",
+      "category": "git_checkout_overwrite",
+      "command": "git checkout -b main",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_checkout_off_main"
+      ]
+    },
+    {
+      "id": "git_switch_force_main",
+      "category": "git_checkout_overwrite",
+      "command": "git switch --force main",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_checkout_off_main"
+      ]
+    },
+    {
       "id": "git_force_push",
       "category": "force_push",
       "command": "git push --force origin main",

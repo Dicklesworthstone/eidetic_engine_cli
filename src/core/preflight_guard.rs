@@ -1394,9 +1394,7 @@ fn git_checkout_segment_is_off_main(segment: &[String]) -> bool {
         return false;
     };
     match segment.get(subcommand_index).map(String::as_str) {
-        Some("checkout") => {
-            git_checkout_target(segment, subcommand_index).is_some_and(|target| target != "main")
-        }
+        Some("checkout") => git_checkout_segment_is_forbidden(segment, subcommand_index),
         Some("switch") => git_switch_segment_is_off_main(segment, subcommand_index),
         _ => false,
     }
@@ -1430,18 +1428,21 @@ fn git_global_option_takes_value(word: &str) -> bool {
     )
 }
 
-fn git_checkout_target(segment: &[String], checkout_index: usize) -> Option<&str> {
+fn git_checkout_segment_is_forbidden(segment: &[String], checkout_index: usize) -> bool {
     let mut index = checkout_index + 1;
+    let mut target = None;
     while index < segment.len() {
         let word = segment[index].as_str();
         if word == "-" {
-            return Some(word);
+            return true;
         }
         if word == "--" {
-            return segment.get(index + 1).map(String::as_str);
+            return segment.get(index + 1).is_some();
         }
-        if matches!(word, "-b" | "-B" | "--branch" | "--orphan") {
-            return segment.get(index + 1).map(String::as_str);
+        if git_checkout_option_creates_detaches_or_forces(word)
+            || git_checkout_pathspec_option(word)
+        {
+            return true;
         }
         if git_checkout_option_takes_value(word) {
             index += 2;
@@ -1455,13 +1456,38 @@ fn git_checkout_target(segment: &[String], checkout_index: usize) -> Option<&str
             index += 1;
             continue;
         }
-        return Some(word);
+        if target.is_some() {
+            return true;
+        }
+        target = Some(word);
+        index += 1;
     }
-    None
+    target.is_some_and(|target| target != "main")
+}
+
+fn git_checkout_option_creates_detaches_or_forces(word: &str) -> bool {
+    matches!(
+        word,
+        "-b" | "-B" | "-d" | "-f" | "--branch" | "--orphan" | "--detach" | "--force"
+    ) || word.starts_with("-b")
+        || word.starts_with("-B")
+        || word.starts_with("-d")
+        || word.starts_with("--branch=")
+        || word.starts_with("--orphan=")
+        || word.starts_with("--detach=")
+        || word.starts_with("--force=")
+        || (word.starts_with('-')
+            && !word.starts_with("--")
+            && word.chars().skip(1).any(|ch| ch == 'f'))
+}
+
+fn git_checkout_pathspec_option(word: &str) -> bool {
+    matches!(word, "--pathspec-from-file" | "--pathspec-file-nul")
+        || word.starts_with("--pathspec-from-file=")
 }
 
 fn git_checkout_option_takes_value(word: &str) -> bool {
-    matches!(word, "--conflict" | "--pathspec-from-file")
+    matches!(word, "--conflict")
 }
 
 fn git_switch_segment_is_off_main(segment: &[String], switch_index: usize) -> bool {
@@ -1477,6 +1503,9 @@ fn git_switch_segment_is_off_main(segment: &[String], switch_index: usize) -> bo
                 .is_some_and(|target| target != "main");
         }
         if git_switch_option_creates_or_detaches(word) {
+            return true;
+        }
+        if git_switch_option_discards_changes(word) {
             return true;
         }
         if git_switch_option_takes_value(word) {
@@ -1507,6 +1536,15 @@ fn git_switch_option_creates_or_detaches(word: &str) -> bool {
         || word.starts_with("--detach=")
         || word.starts_with("--force-create=")
         || word.starts_with("--orphan=")
+}
+
+fn git_switch_option_discards_changes(word: &str) -> bool {
+    matches!(word, "-f" | "--force" | "--discard-changes")
+        || word.starts_with("--force=")
+        || word.starts_with("--discard-changes=")
+        || (word.starts_with('-')
+            && !word.starts_with("--")
+            && word.chars().skip(1).any(|ch| ch == 'f'))
 }
 
 fn git_switch_option_takes_value(word: &str) -> bool {
@@ -3396,7 +3434,9 @@ action = "explode"
 
         for command in [
             "git checkout main",
+            "git checkout --quiet main",
             "git switch main",
+            "git switch --quiet main",
             "git pull --rebase origin main",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
@@ -3409,12 +3449,23 @@ action = "explode"
 
         for command in [
             "git checkout -- src/lib.rs",
+            "git checkout -- main",
+            "git checkout main -- src/lib.rs",
+            "git checkout main src/lib.rs",
             "git checkout -",
+            "git checkout -b main",
+            "git checkout -B main",
             "git checkout -b experiment",
+            "git checkout --detach main",
+            "git checkout -f main",
+            "git checkout --pathspec-from-file=paths.txt",
             "git switch -",
             "git switch feature/other",
             "git switch -c experiment",
-            "git -C . switch --detach HEAD~1",
+            "git switch -C main",
+            "git switch --force main",
+            "git switch --discard-changes main",
+            "git -C . switch --detach main",
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");
