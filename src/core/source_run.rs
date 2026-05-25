@@ -848,7 +848,7 @@ fn degradation_for_status(
         }],
         SourceRunStatus::TimedOut => vec![SourceRunDegradation {
             code: "source_run_timeout".to_owned(),
-            severity: SourceRunSeverity::Medium,
+            severity,
             message: format!(
                 "{} source command exceeded its timeout budget.",
                 source.source_id
@@ -996,8 +996,11 @@ fn run_system_source_command(request: &SourceRunRequest) -> SourceRunExecution {
             terminate_source_process_group(child_group);
             let killed_own_child = terminate_child_after_error(&mut child);
             let status = child.wait().ok();
-            let (stdout, stderr) =
-                drain_capture_readers_after_timeout(&mut stdout_thread, &mut stderr_thread);
+            let (stdout, stderr) = drain_capture_readers_after_timeout(
+                &mut stdout_thread,
+                &mut stderr_thread,
+                tail_bytes_max,
+            );
             return SourceRunExecution::TimedOut {
                 exit_code: status.as_ref().and_then(std::process::ExitStatus::code),
                 signal: status.as_ref().and_then(exit_signal),
@@ -1053,9 +1056,26 @@ fn join_capture_reader(
     }
 }
 
+fn join_finished_capture_reader(
+    handle: &mut Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
+    tail_bytes_max: usize,
+) -> SourceRunPipeCapture {
+    let Some(reader) = handle.as_ref() else {
+        return SourceRunPipeCapture::empty();
+    };
+    if reader.is_finished() {
+        return join_capture_reader(handle);
+    }
+    SourceRunPipeCapture::from_bytes(
+        b"source command pipe drain timed out; output tail unavailable",
+        tail_bytes_max,
+    )
+}
+
 fn drain_capture_readers_after_timeout(
     stdout_thread: &mut Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
     stderr_thread: &mut Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
+    tail_bytes_max: usize,
 ) -> (SourceRunPipeCapture, SourceRunPipeCapture) {
     let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;
     loop {
@@ -1080,8 +1100,8 @@ fn drain_capture_readers_after_timeout(
         );
     }
     (
-        join_capture_reader(stdout_thread),
-        join_capture_reader(stderr_thread),
+        join_finished_capture_reader(stdout_thread, tail_bytes_max),
+        join_finished_capture_reader(stderr_thread, tail_bytes_max),
     )
 }
 
@@ -1258,6 +1278,32 @@ mod tests {
     }
 
     #[test]
+    fn fail_closed_timeout_uses_high_severity() {
+        let mut request = request();
+        request.policy = SourceRunPolicy::fail_closed(
+            SourceRunRequiredMode::RemoteVerificationRequired,
+            "remote verification evidence is mandatory",
+        );
+        let evidence = run_source_command_with(
+            &request,
+            &FakeExecutor {
+                execution: SourceRunExecution::TimedOut {
+                    exit_code: None,
+                    signal: None,
+                    stdout: SourceRunPipeCapture::empty(),
+                    stderr: SourceRunPipeCapture::empty(),
+                    elapsed: Duration::from_millis(5_001),
+                    killed_own_child: true,
+                },
+            },
+            &FixedClock::new("2026-05-24T05:04:00Z"),
+        );
+
+        assert_eq!(evidence.status, SourceRunStatus::TimedOut);
+        assert_eq!(evidence.degraded[0].severity, SourceRunSeverity::High);
+    }
+
+    #[test]
     fn unsafe_argv_and_env_material_are_not_serialized() {
         let mut request = request();
         request.command = SourceRunCommand::new("agent-mail")
@@ -1331,6 +1377,30 @@ mod tests {
         assert_eq!(left.captured_at, Some("2026-05-24T05:04:00Z".to_owned()));
         assert_eq!(left.timing.started_at, right.timing.started_at);
         assert_eq!(left.provenance_hash, right.provenance_hash);
+    }
+
+    #[test]
+    fn timeout_pipe_drain_does_not_join_unfinished_reader_threads() {
+        let started = Instant::now();
+        let mut stdout_thread = Some(thread::spawn(|| {
+            thread::sleep(TIMEOUT_PIPE_DRAIN_GRACE * 4);
+            Ok(SourceRunPipeCapture::from_bytes(b"late stdout", 64))
+        }));
+        let mut stderr_thread = Some(thread::spawn(|| {
+            Ok(SourceRunPipeCapture::from_bytes(b"fast stderr", 64))
+        }));
+
+        let (stdout, stderr) =
+            drain_capture_readers_after_timeout(&mut stdout_thread, &mut stderr_thread, 64);
+
+        assert!(
+            started.elapsed() < TIMEOUT_PIPE_DRAIN_GRACE * 3,
+            "timeout drain must not block on unfinished pipe readers"
+        );
+        let unavailable = b"source command pipe drain timed out; output tail unavailable";
+        assert_eq!(stdout.total_bytes, unavailable.len());
+        assert_eq!(stdout.tail.as_slice(), unavailable);
+        assert_eq!(stderr.tail.as_slice(), b"fast stderr");
     }
 
     #[test]
