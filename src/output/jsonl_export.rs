@@ -18,15 +18,15 @@ use crate::models::{
 /// `auth` alone was removed: it false-positives on words like `author`,
 /// `authority`, `authentic`, and `authentication`, which would fully redact
 /// any memory body that merely discussed those concepts. The narrower
-/// `oauth`, `auth_token`, `auth-token`, `authorization` entries below cover
-/// the secret-bearing shapes without catching prose.
-const SECRET_PATTERNS: &[&str] = &[
+/// oauth/auth-token/auth.key entries below cover common secret-bearing shapes.
+/// Broad terms like `token` are handled separately with assignment/header
+/// context so ordinary prose such as "token budget" is not fully redacted.
+const SECRET_SUBSTRINGS: &[&str] = &[
     "password",
     "secret",
     "api_key",
     "apikey",
     "api-key",
-    "token",
     "bearer",
     "authorization",
     "oauth",
@@ -51,6 +51,8 @@ const SECRET_PATTERNS: &[&str] = &[
     "-----begin",
     "-----end",
 ];
+
+const SECRET_CONTEXT_KEYS: &[&str] = &["token"];
 
 /// Placeholder for redacted content.
 pub const REDACTED_PLACEHOLDER: &str = "[REDACTED]";
@@ -85,7 +87,98 @@ const SENSITIVE_PATH_PREFIXES: &[&str] = &[
 #[must_use]
 pub fn contains_secret_pattern(content: &str) -> bool {
     let lower = content.to_lowercase();
-    SECRET_PATTERNS.iter().any(|pat| lower.contains(pat))
+    SECRET_SUBSTRINGS.iter().any(|pat| lower.contains(pat))
+        || SECRET_CONTEXT_KEYS
+            .iter()
+            .any(|key| contains_secret_key_with_value(&lower, key))
+}
+
+fn contains_secret_key_with_value(content: &str, key: &str) -> bool {
+    content
+        .match_indices(key)
+        .any(|(index, _)| secret_key_match_has_value(content, key, index))
+}
+
+fn secret_key_match_has_value(content: &str, key: &str, index: usize) -> bool {
+    let before = content[..index].chars().next_back();
+    if before.is_some_and(is_secret_key_char) {
+        return false;
+    }
+
+    let value_start = index + key.len();
+    let mut chars = content[value_start..].chars();
+    let Some(after_key) = chars.next() else {
+        return false;
+    };
+
+    if is_secret_key_connector(after_key) {
+        return secret_key_suffix_has_value(content, value_start + after_key.len_utf8());
+    }
+    if is_secret_key_char(after_key) {
+        return false;
+    }
+
+    separator_starts_secret_value(content, value_start + after_key.len_utf8(), after_key)
+}
+
+fn separator_starts_secret_value(content: &str, mut offset: usize, mut separator: char) -> bool {
+    if separator.is_whitespace() {
+        loop {
+            let Some(next) = content[offset..].chars().next() else {
+                return false;
+            };
+            offset += next.len_utf8();
+            if !next.is_whitespace() {
+                separator = next;
+                break;
+            }
+        }
+    }
+    if matches!(separator, ':' | '=') {
+        return true;
+    }
+    if matches!(separator, '"' | '\'') {
+        return next_non_whitespace(content, offset).is_some_and(|next| matches!(next, ':' | '='));
+    }
+    false
+}
+
+fn next_non_whitespace(content: &str, mut offset: usize) -> Option<char> {
+    while offset < content.len() {
+        let next = content[offset..].chars().next()?;
+        if !next.is_whitespace() {
+            return Some(next);
+        }
+        offset += next.len_utf8();
+    }
+    None
+}
+
+fn secret_key_suffix_has_value(content: &str, mut offset: usize) -> bool {
+    let mut saw_suffix = false;
+    while offset < content.len() {
+        let Some(next) = content[offset..].chars().next() else {
+            break;
+        };
+        if is_secret_key_char(next) || is_secret_key_connector(next) {
+            saw_suffix |= is_secret_key_char(next);
+            offset += next.len_utf8();
+            continue;
+        }
+        if !saw_suffix {
+            return false;
+        }
+        return separator_starts_secret_value(content, offset + next.len_utf8(), next);
+    }
+    false
+}
+
+fn is_secret_key_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+}
+
+fn is_secret_key_connector(ch: char) -> bool {
+    matches!(ch, '_' | '-' | '.')
 }
 
 /// Apply redaction to text content based on redaction level.
@@ -1046,6 +1139,54 @@ mod tests {
         assert!(contains_secret_pattern("OAUTH=abc123"));
         assert!(contains_secret_pattern("auth_token: 9f3c2"));
         assert!(contains_secret_pattern("Authorization: Bearer xyz"));
+    }
+
+    #[test]
+    fn contains_secret_pattern_does_not_match_token_prose() {
+        assert!(!contains_secret_pattern(
+            "Keep the token budget under 4000 for compact context packs."
+        ));
+        assert!(!contains_secret_pattern(
+            "Keep the token-budget window under 4000 for compact context packs."
+        ));
+        assert!(!contains_secret_pattern(
+            "The token.count metric is only a retrieval budget estimate."
+        ));
+        assert!(!contains_secret_pattern(
+            "The tokenizer splits source text into stable token spans."
+        ));
+        assert!(!contains_secret_pattern(
+            r#"The field name "token" appears in docs without a value."#
+        ));
+
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "token", "=abc123"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "token", ": abc123"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "token",
+            "_value=abc123"
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            r#""token"#,
+            r#"":"abc123""#
+        ])));
+        assert!(contains_secret_pattern(&secret_fixture(&[
+            "session",
+            "-token=abc123"
+        ])));
+    }
+
+    #[test]
+    fn redact_content_minimal_preserves_token_budget_prose() -> TestResult {
+        let content = "Pack selection compares token budget against estimated tokens.";
+        ensure(
+            redact_content(content, RedactionLevel::Minimal),
+            content.to_owned(),
+            "minimal redaction preserves token-budget prose",
+        )
     }
 
     #[test]
