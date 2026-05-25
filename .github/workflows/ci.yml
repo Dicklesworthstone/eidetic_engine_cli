@@ -42,7 +42,16 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
-          CARGO_PATH_ROOT="$project_root" perl -0pi -e 's#/data/projects#$ENV{CARGO_PATH_ROOT}#g' Cargo.toml
+          # Cargo.toml uses ../<sibling-repo>/... paths to match the local
+          # Mac/Linux dev checkout layout where ee lives next to the franken
+          # sibling crates. CI clones the siblings into $RUNNER_TEMP and
+          # rewrites the Cargo.toml prefix so cargo metadata resolves them.
+          # Both spellings are accepted so a future revert to the historical
+          # /data/projects/... prefix would still build here.
+          CARGO_PATH_ROOT="$project_root" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -113,7 +122,12 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/frankensqlite.git "$project_root/frankensqlite"
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git "$project_root/sqlmodel_rust"
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
-          CARGO_PATH_ROOT="$project_root" perl -0pi -e 's#/data/projects#$ENV{CARGO_PATH_ROOT}#g' Cargo.toml
+          # See the verify job for the rationale on accepting both
+          # ../<sibling> and /data/projects/<sibling> prefixes here.
+          CARGO_PATH_ROOT="$project_root" perl -0pi -e '
+            s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+            s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
+          ' Cargo.toml
 
       - name: Checkout Franken stack path dependencies
         if: runner.os == 'Windows'
@@ -130,7 +144,12 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
           $cargoPathRoot = $projectRoot -replace "\\", "/"
-          (Get-Content Cargo.toml -Raw).Replace("/data/projects", $cargoPathRoot) | Set-Content Cargo.toml -NoNewline
+          $cargoText = Get-Content Cargo.toml -Raw
+          foreach ($repo in @("asupersync","franken_agent_detection","franken_networkx","frankensearch","frankensqlite","sqlmodel_rust","toon_rust")) {
+            $cargoText = $cargoText.Replace("/data/projects/$repo", "$cargoPathRoot/$repo")
+            $cargoText = $cargoText.Replace("../$repo", "$cargoPathRoot/$repo")
+          }
+          Set-Content Cargo.toml -Value $cargoText -NoNewline
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
@@ -225,7 +244,12 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/sqlmodel_rust.git (Join-Path $projectRoot "sqlmodel_rust")
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git (Join-Path $projectRoot "toon_rust")
           $cargoPathRoot = $projectRoot -replace "\\", "/"
-          (Get-Content Cargo.toml -Raw).Replace("/data/projects", $cargoPathRoot) | Set-Content Cargo.toml -NoNewline
+          $cargoText = Get-Content Cargo.toml -Raw
+          foreach ($repo in @("asupersync","franken_agent_detection","franken_networkx","frankensearch","frankensqlite","sqlmodel_rust","toon_rust")) {
+            $cargoText = $cargoText.Replace("/data/projects/$repo", "$cargoPathRoot/$repo")
+            $cargoText = $cargoText.Replace("../$repo", "$cargoPathRoot/$repo")
+          }
+          Set-Content Cargo.toml -Value $cargoText -NoNewline
 
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@nightly
