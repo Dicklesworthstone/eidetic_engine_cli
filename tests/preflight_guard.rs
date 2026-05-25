@@ -555,7 +555,7 @@ fn local_rustc_guard_allows_rch_wrappers_and_literal_mentions() {
     let registry = PreflightGuardRegistry::with_builtins();
 
     for command in [
-        "rch exec -- rustc src/main.rs",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- rustc src/main.rs",
         "scripts/rch_verify.sh -- rustdoc --test src/lib.rs",
         "br comment bd-123 --message 'RCH command: `rustdoc --test src/lib.rs`'",
         "rg 'rustc src/main.rs' docs src",
@@ -568,6 +568,45 @@ fn local_rustc_guard_allows_rch_wrappers_and_literal_mentions() {
                 .iter()
                 .all(|matched| matched.rule_id != "builtin:local_rust_compiler_verification"),
             "command `{command}` unexpectedly matched local rustc/rustdoc guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
+fn bare_rch_exec_rust_verifier_payload_halts_without_remote_required() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for (command, expected_rule_id) in [
+        (
+            "rch exec -- env TMPDIR=/tmp cargo test --lib foo",
+            "builtin:local_cargo_heavy_verification",
+        ),
+        (
+            "rch --json exec -- cargo check --all-targets",
+            "builtin:local_cargo_heavy_verification",
+        ),
+        (
+            "rch exec -- cargo --target-dir /tmp/ee-rch-target test --lib foo",
+            "builtin:local_cargo_heavy_verification",
+        ),
+        (
+            "rch exec -- rustc src/main.rs",
+            "builtin:local_rust_compiler_verification",
+        ),
+        (
+            "/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- rustdoc --test src/lib.rs",
+            "builtin:local_rust_compiler_verification",
+        ),
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == expected_rule_id),
+            "command `{command}` did not cite {expected_rule_id}: {:?}",
             report.matches,
         );
     }

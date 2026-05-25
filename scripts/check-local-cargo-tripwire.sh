@@ -546,7 +546,13 @@ path_available_bytes() {
         printf 'null'
         return
     fi
-    df -Pk "$path" 2>/dev/null | awk 'NR==2 {printf "%.0f", $4 * 1024}'
+    local available_bytes
+    available_bytes=$(df -Pk "$path" 2>/dev/null | awk 'NR==2 {printf "%.0f", $4 * 1024}')
+    if [ -n "$available_bytes" ]; then
+        printf '%s' "$available_bytes"
+    else
+        printf 'null'
+    fi
 }
 
 disk_context_json() {
@@ -580,9 +586,9 @@ disk_context_json() {
         '{
             workspace_path:$workspace_path,
             workspace_free_bytes:$workspace_free_bytes,
-            cargo_target_dir:($cargo_target_dir | select(length > 0)),
+            cargo_target_dir:(if $cargo_target_dir | length > 0 then $cargo_target_dir else null end),
             cargo_target_free_bytes:$cargo_target_free_bytes,
-            tmpdir:($tmpdir | select(length > 0)),
+            tmpdir:(if $tmpdir | length > 0 then $tmpdir else null end),
             tmpdir_free_bytes:$tmpdir_free_bytes,
             external_drive_mounted:$external_drive_mounted
         }'

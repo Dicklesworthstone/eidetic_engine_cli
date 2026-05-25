@@ -945,11 +945,11 @@ fn local_cargo_heavy_segment_matches(segment: &[String]) -> bool {
     let Some(command_index) = shell_segment_command_index(segment) else {
         return false;
     };
-    let Some(command_name) = segment.get(command_index) else {
+    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
         return false;
-    };
-    if is_rch_wrapper_command(command_name) {
-        return false;
+    }
+    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
+        return local_cargo_heavy_segment_matches(payload);
     }
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_local_cargo_heavy_verification(shell_body);
@@ -961,11 +961,11 @@ fn local_cargo_target_dir_override_segment_matches(segment: &[String]) -> bool {
     let Some(command_index) = shell_segment_command_index(segment) else {
         return false;
     };
-    let Some(command_name) = segment.get(command_index) else {
+    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
         return false;
-    };
-    if is_rch_wrapper_command(command_name) {
-        return false;
+    }
+    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
+        return local_cargo_target_dir_override_segment_matches(payload);
     }
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_local_cargo_target_dir_override(shell_body);
@@ -986,8 +986,11 @@ fn local_rust_compiler_segment_matches(segment: &[String]) -> bool {
     let Some(command_name) = segment.get(command_index) else {
         return false;
     };
-    if is_rch_wrapper_command(command_name) {
+    if trusted_rust_verifier_wrapper_segment(segment, command_index) {
         return false;
+    }
+    if let Some(payload) = untrusted_rch_exec_payload_segment(segment, command_index) {
+        return local_rust_compiler_segment_matches(payload);
     }
     if let Some(shell_body) = shell_c_argument(segment, command_index) {
         return matches_local_rust_compiler_verification(shell_body);
@@ -1127,9 +1130,123 @@ fn is_shell_command(word: &str) -> bool {
     )
 }
 
-fn is_rch_wrapper_command(word: &str) -> bool {
-    let base = command_basename(word);
-    base == "rch" || base == "rch_verify.sh" || word.ends_with("/scripts/rch_verify.sh")
+fn trusted_rust_verifier_wrapper_segment(segment: &[String], command_index: usize) -> bool {
+    trusted_rch_verify_segment(segment, command_index)
+        || remote_required_rch_exec_segment(segment, command_index)
+}
+
+fn trusted_rch_verify_segment(segment: &[String], command_index: usize) -> bool {
+    let Some(command_name) = segment.get(command_index) else {
+        return false;
+    };
+    if is_rch_verify_command(command_name) {
+        return true;
+    }
+    if !is_shell_command(command_name) {
+        return false;
+    }
+    shell_script_argument(segment, command_index).is_some_and(is_rch_verify_command)
+}
+
+fn shell_script_argument(segment: &[String], command_index: usize) -> Option<&str> {
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "-c" || (word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+        {
+            return None;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return Some(word);
+    }
+    None
+}
+
+fn remote_required_rch_exec_segment(segment: &[String], command_index: usize) -> bool {
+    segment
+        .get(command_index)
+        .is_some_and(|word| command_basename(word) == "rch")
+        && rch_exec_subcommand_index(segment, command_index).is_some()
+        && rch_require_remote_is_set_before_command(segment, command_index)
+}
+
+fn untrusted_rch_exec_payload_segment(
+    segment: &[String],
+    command_index: usize,
+) -> Option<&[String]> {
+    if remote_required_rch_exec_segment(segment, command_index) {
+        return None;
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "rch")
+    {
+        return None;
+    }
+    let exec_index = rch_exec_subcommand_index(segment, command_index)?;
+    rch_exec_payload_segment(segment, exec_index)
+}
+
+fn rch_exec_subcommand_index(segment: &[String], command_index: usize) -> Option<usize> {
+    let mut index = command_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            return None;
+        }
+        if rch_global_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return (word == "exec").then_some(index);
+    }
+    None
+}
+
+fn rch_exec_payload_segment(segment: &[String], exec_index: usize) -> Option<&[String]> {
+    let mut index = exec_index + 1;
+    while index < segment.len() {
+        let word = segment[index].as_str();
+        if word == "--" {
+            index += 1;
+            break;
+        }
+        if rch_exec_option_takes_value(word) {
+            index += 2;
+            continue;
+        }
+        if word.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    (index < segment.len()).then_some(&segment[index..])
+}
+
+fn rch_global_option_takes_value(word: &str) -> bool {
+    matches!(word, "--config" | "--profile" | "--socket")
+}
+
+fn rch_exec_option_takes_value(word: &str) -> bool {
+    matches!(word, "--cwd" | "--workdir")
+}
+
+fn rch_require_remote_is_set_before_command(segment: &[String], command_index: usize) -> bool {
+    segment[..command_index]
+        .iter()
+        .any(|word| word == "RCH_REQUIRE_REMOTE=1")
+}
+
+fn is_rch_verify_command(word: &str) -> bool {
+    command_basename(word) == "rch_verify.sh" || word.ends_with("/scripts/rch_verify.sh")
 }
 
 fn command_basename(word: &str) -> &str {
@@ -3498,12 +3615,12 @@ action = "explode"
         let registry = PreflightGuardRegistry::with_builtins();
 
         for command in [
-            "rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-target cargo test --lib foo",
-            "rch exec -- rustc src/main.rs",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- env TMPDIR=/tmp CARGO_TARGET_DIR=/tmp/ee-rch-target cargo test --lib foo",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- rustc src/main.rs",
             "scripts/rch_verify.sh -- rustdoc --test src/lib.rs",
             "scripts/rch_verify.sh --bead-id bd-123 -- cargo check --all-targets",
             "bash scripts/rch_verify.sh --summary -- cargo clippy --all-targets -- -D warnings",
-            "rch exec -- cargo --target-dir /tmp/ee-rch-target test --lib foo",
+            "RCH_REQUIRE_REMOTE=1 rch exec -- cargo --target-dir /tmp/ee-rch-target test --lib foo",
             "cargo metadata --no-deps --format-version 1",
             "cargo fmt --check",
             "rustfmt +nightly --edition 2024 --check src/core/preflight_guard.rs",
@@ -3518,6 +3635,45 @@ action = "explode"
                         && matched.rule_id != "builtin:local_rust_compiler_verification"
                 }),
                 "command `{command}` unexpectedly matched local Rust verification rules: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn local_cargo_guard_blocks_bare_rch_exec_rust_verifier_payloads() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for (command, rule_id) in [
+            (
+                "rch exec -- env TMPDIR=/tmp cargo test --lib foo",
+                "builtin:local_cargo_heavy_verification",
+            ),
+            (
+                "rch --json exec -- cargo check --all-targets",
+                "builtin:local_cargo_heavy_verification",
+            ),
+            (
+                "rch exec -- cargo --target-dir /tmp/ee-rch-target test --lib foo",
+                "builtin:local_cargo_heavy_verification",
+            ),
+            (
+                "rch exec -- rustc src/main.rs",
+                "builtin:local_rust_compiler_verification",
+            ),
+            (
+                "/Users/jemanuel/projects/remote_compilation_helper/target-local/release/rch exec -- rustdoc --test src/lib.rs",
+                "builtin:local_rust_compiler_verification",
+            ),
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == rule_id),
+                "command `{command}` did not cite {rule_id}: {:?}",
                 report.matches,
             );
         }
