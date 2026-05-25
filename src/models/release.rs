@@ -991,7 +991,7 @@ fn release_artifact_path_has_symlink_component(root: &Path, relative: &Path) -> 
 
 fn is_safe_relative_path(path: &str) -> bool {
     let trimmed = path.trim();
-    if trimmed.is_empty() || trimmed.contains('\0') || trimmed.contains('\\') {
+    if trimmed.is_empty() || path.contains('\\') || path.chars().any(|ch| ch.is_control()) {
         return false;
     }
     let candidate = Path::new(trimmed);
@@ -1270,6 +1270,16 @@ mod tests {
         ensure(
             !is_allowed_package_member_path("workspace.sqlite"),
             "sqlite denied",
+        )?;
+        for path in ["bin/ee\tdebug", "bin/ee\rdebug", "bin/ee\u{7f}"] {
+            ensure(
+                !is_allowed_package_member_path(path),
+                &format!("package member path {path:?} should reject control characters"),
+            )?;
+        }
+        ensure(
+            !is_safe_release_artifact_path("ee-x86_64-unknown-linux-gnu\n.tar.xz"),
+            "release artifact path with control character denied",
         )
     }
 

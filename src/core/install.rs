@@ -1478,7 +1478,7 @@ fn validate_tar_archive_member_listing(
 }
 
 fn is_safe_archive_member_path(member: &str) -> bool {
-    if member.is_empty() || member.contains('\0') || member.contains('\\') {
+    if member.is_empty() || member.contains('\\') || member.chars().any(|ch| ch.is_control()) {
         return false;
     }
     let path = Path::new(member);
@@ -2200,6 +2200,20 @@ mod tests {
         ensure(
             error.contains("unsafe member path '../escape'"),
             "error should identify first unsafe path",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_path_rejects_control_characters() -> TestResult {
+        for member in ["ee\tbin", "ee\rbin", "ee\u{7f}", "ee\u{1b}[31m"] {
+            ensure(
+                !is_safe_archive_member_path(member),
+                &format!("archive member path {member:?} should reject control characters"),
+            )?;
+        }
+        ensure(
+            is_safe_archive_member_path("ee/bin"),
+            "ordinary archive member remains allowed",
         )
     }
 
