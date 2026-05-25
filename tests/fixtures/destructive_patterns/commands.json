@@ -35,6 +35,16 @@
       ]
     },
     {
+      "id": "git_hard_reset_with_global_option",
+      "category": "hard_reset",
+      "command": "git -C . reset --hard HEAD~1",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_reset_hard"
+      ]
+    },
+    {
       "id": "git_recursive_clean",
       "category": "recursive_clean",
       "command": "git clean -fd",
@@ -55,9 +65,39 @@
       ]
     },
     {
+      "id": "git_worktree_add_with_global_option",
+      "category": "worktree_add",
+      "command": "git -C . worktree add ../parallel main",
+      "expectedAction": "halt",
+      "expectedExitCode": 7,
+      "expectedRuleIds": [
+        "builtin:git_worktree_add"
+      ]
+    },
+    {
       "id": "git_force_push",
       "category": "force_push",
       "command": "git push --force origin main",
+      "expectedAction": "warn",
+      "expectedExitCode": 0,
+      "expectedRuleIds": [
+        "builtin:git_push_force"
+      ]
+    },
+    {
+      "id": "git_force_push_short_flag",
+      "category": "force_push",
+      "command": "git -C . push -f origin main",
+      "expectedAction": "warn",
+      "expectedExitCode": 0,
+      "expectedRuleIds": [
+        "builtin:git_push_force"
+      ]
+    },
+    {
+      "id": "git_force_push_refspec",
+      "category": "force_push",
+      "command": "git push origin +main:main",
       "expectedAction": "warn",
       "expectedExitCode": 0,
       "expectedRuleIds": [

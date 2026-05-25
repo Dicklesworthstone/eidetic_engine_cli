@@ -10311,7 +10311,7 @@ where
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
                     let json = serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": report.data_json(),
                     });
@@ -33742,7 +33742,7 @@ fn format_search_json_with_mesh_and_recalibration(
         data_object.insert("recalibration".to_owned(), recalibration.data_json());
     }
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     })
@@ -35763,7 +35763,7 @@ fn format_why_json(report: &crate::core::why::WhyReport) -> String {
     });
 
     let mut json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "why",
@@ -47053,7 +47053,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
             "swarm brief response schema",
         )?;
         ensure_equal(

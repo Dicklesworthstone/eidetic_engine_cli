@@ -410,11 +410,17 @@ fn rm_rf_builtin_matches_command_positions_and_wrappers() {
 #[test]
 fn force_push_warns_but_exits_zero() {
     let registry = PreflightGuardRegistry::with_builtins();
-    let report = run_preflight_guard(&registry, &opts("git push --force origin main"));
-    assert_eq!(report.exit_code, 0);
-    assert_eq!(report.matches.len(), 1);
-    assert_eq!(report.matches[0].action, GuardAction::Warn);
-    assert_eq!(report.matches[0].rule_id, "builtin:git_push_force");
+    for command in [
+        "git push --force origin main",
+        "git push origin +main:main",
+        "bash -lc 'git push origin +HEAD:main'",
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(report.exit_code, 0, "command `{command}` should warn only");
+        assert_eq!(report.matches.len(), 1, "command `{command}` match count");
+        assert_eq!(report.matches[0].action, GuardAction::Warn);
+        assert_eq!(report.matches[0].rule_id, "builtin:git_push_force");
+    }
 }
 
 #[test]
@@ -460,6 +466,59 @@ fn rust_verifier_command_substitution_allows_wrappers_and_literal_prose() {
                 .iter()
                 .all(|matched| matched.rule_id != "builtin:rust_verifier_command_substitution"),
             "command `{command}` unexpectedly matched command-substitution guard: {:?}",
+            report.matches,
+        );
+    }
+}
+
+#[test]
+fn git_builtin_guards_recurse_through_command_substitution() {
+    let registry = PreflightGuardRegistry::with_builtins();
+
+    for (command, expected_rule_id, expected_exit_code) in [
+        (
+            "br comment bd-123 --message \"$(git reset --hard HEAD~1)\"",
+            "builtin:git_reset_hard",
+            7,
+        ),
+        ("echo `git clean -fd`", "builtin:git_clean_fd", 7),
+        (
+            "am send --body \"$(git worktree add ../parallel main)\"",
+            "builtin:git_worktree_add",
+            7,
+        ),
+        (
+            "echo \"$(git stash push -m savepoint)\"",
+            "builtin:git_stash",
+            7,
+        ),
+        (
+            "echo \"$(git rebase -i origin/main)\"",
+            "builtin:git_rebase",
+            7,
+        ),
+        (
+            "bash -lc 'echo \"$(git checkout HEAD~1)\"'",
+            "builtin:git_checkout_off_main",
+            7,
+        ),
+        (
+            "echo \"$(git push --force origin main)\"",
+            "builtin:git_push_force",
+            0,
+        ),
+    ] {
+        let report = run_preflight_guard(&registry, &opts(command));
+        assert_eq!(
+            report.exit_code, expected_exit_code,
+            "command `{command}` exit code",
+        );
+        assert!(
+            report
+                .matches
+                .iter()
+                .any(|matched| matched.rule_id == expected_rule_id),
+            "command `{command}` did not cite {expected_rule_id}: {:?}",
             report.matches,
         );
     }

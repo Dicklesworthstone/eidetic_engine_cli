@@ -312,10 +312,7 @@ expression: case_catalog(&base_cases)
     ],
     "expected": "success",
     "schemaFile": "ee.response.v2.json",
-    "enforcement": {
-      "knownGap": "bd-1ctyu",
-      "reason": "diag artifacts still emits ee.response.v1"
-    },
+    "enforcement": "required",
     "requireRecovery": false
   },
   {
@@ -334,10 +331,7 @@ expression: case_catalog(&base_cases)
     ],
     "expected": "success",
     "schemaFile": "ee.response.v2.json",
-    "enforcement": {
-      "knownGap": "bd-1ctyu",
-      "reason": "diag build-admission still emits ee.response.v1"
-    },
+    "enforcement": "required",
     "requireRecovery": false
   }
 ]

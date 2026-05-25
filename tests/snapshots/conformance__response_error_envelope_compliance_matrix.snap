@@ -22,5 +22,5 @@ expression: expected_conformance_matrix(&base_cases)
 | diag plan-cache | success | ee.response.v2.json | no | required |
 | diag dependencies | success | ee.response.v2.json | no | required |
 | diag host-profile | success | ee.response.v2.json | no | required |
-| diag artifacts | success | ee.response.v2.json | no | known gap bd-1ctyu |
-| diag build-admission | success | ee.response.v2.json | no | known gap bd-1ctyu |
+| diag artifacts | success | ee.response.v2.json | no | required |
+| diag build-admission | success | ee.response.v2.json | no | required |

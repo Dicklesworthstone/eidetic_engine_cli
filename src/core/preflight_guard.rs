@@ -414,6 +414,10 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
             "rust_verifier_command_substitution" => {
                 return matches_rust_verifier_command_substitution(command);
             }
+            "git_reset_hard" => return matches_git_reset_hard(command),
+            "git_worktree_add" => return matches_git_worktree_add(command),
+            "git_stash" => return matches_git_subcommand(command, "stash"),
+            "git_rebase" => return matches_git_subcommand(command, "rebase"),
             "git_checkout_off_main" => return matches_git_checkout_off_main(command),
             "git_clean_fd" => return matches_git_clean_destructive(command),
             "script_code_rewrite" => return matches_script_code_rewrite(command),
@@ -423,6 +427,7 @@ fn rule_matches_command(rule: &PreflightGuardRule, command: &str) -> bool {
             "terraform_destroy" => return matches_terraform_destroy(command),
             "raw_block_device_write" => return matches_raw_block_device_write(command),
             "filesystem_create" => return matches_filesystem_create(command),
+            "git_push_force" => return matches_git_push_force(command),
             _ => {}
         }
     }
@@ -1135,7 +1140,121 @@ fn is_variable_command(word: &str) -> bool {
     word.starts_with('$')
 }
 
+fn matches_git_reset_hard(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_git_reset_hard) {
+        return true;
+    }
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| git_reset_segment_is_hard(segment))
+}
+
+fn git_reset_segment_is_hard(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_reset_hard(shell_body);
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "git")
+    {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    if segment
+        .get(subcommand_index)
+        .is_none_or(|subcommand| subcommand != "reset")
+    {
+        return false;
+    }
+    segment
+        .iter()
+        .skip(subcommand_index + 1)
+        .any(|word| git_reset_option_is_hard(word))
+}
+
+fn git_reset_option_is_hard(word: &str) -> bool {
+    word == "--hard" || word.starts_with("--hard=")
+}
+
+fn matches_git_worktree_add(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_git_worktree_add) {
+        return true;
+    }
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| git_worktree_segment_is_add(segment))
+}
+
+fn git_worktree_segment_is_add(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_worktree_add(shell_body);
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "git")
+    {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    if segment
+        .get(subcommand_index)
+        .is_none_or(|subcommand| subcommand != "worktree")
+    {
+        return false;
+    }
+    segment
+        .iter()
+        .skip(subcommand_index + 1)
+        .find(|word| !word.starts_with('-') || word.as_str() == "-")
+        .is_some_and(|subcommand| subcommand == "add")
+}
+
+fn matches_git_subcommand(command: &str, expected_subcommand: &str) -> bool {
+    if command_contains_active_command_substitution(command, |body| {
+        matches_git_subcommand(body, expected_subcommand)
+    }) {
+        return true;
+    }
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| git_segment_has_subcommand(segment, expected_subcommand))
+}
+
+fn git_segment_has_subcommand(segment: &[String], expected_subcommand: &str) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_subcommand(shell_body, expected_subcommand);
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "git")
+    {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    segment
+        .get(subcommand_index)
+        .is_some_and(|subcommand| subcommand == expected_subcommand)
+}
+
 fn matches_git_checkout_off_main(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_git_checkout_off_main) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| git_checkout_segment_is_off_main(segment))
@@ -1229,6 +1348,9 @@ fn git_checkout_option_takes_value(word: &str) -> bool {
 }
 
 fn matches_git_clean_destructive(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_git_clean_destructive) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| git_clean_segment_is_destructive(segment))
@@ -1264,6 +1386,57 @@ fn git_clean_segment_is_destructive(segment: &[String]) -> bool {
 
 fn git_clean_option_has_force(word: &str) -> bool {
     if word == "--force" || word.starts_with("--force=") {
+        return true;
+    }
+    word.starts_with('-') && !word.starts_with("--") && word.chars().skip(1).any(|ch| ch == 'f')
+}
+
+fn matches_git_push_force(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_git_push_force) {
+        return true;
+    }
+    shell_command_segments(command)
+        .iter()
+        .any(|segment| git_push_segment_has_force(segment))
+}
+
+fn git_push_segment_has_force(segment: &[String]) -> bool {
+    let Some(command_index) = shell_segment_command_index(segment) else {
+        return false;
+    };
+    if let Some(shell_body) = shell_c_argument(segment, command_index) {
+        return matches_git_push_force(shell_body);
+    }
+    if segment
+        .get(command_index)
+        .is_none_or(|word| command_basename(word) != "git")
+    {
+        return false;
+    }
+    let Some(subcommand_index) = git_subcommand_index(segment, command_index) else {
+        return false;
+    };
+    if segment
+        .get(subcommand_index)
+        .is_none_or(|subcommand| subcommand != "push")
+    {
+        return false;
+    }
+    segment
+        .iter()
+        .skip(subcommand_index + 1)
+        .any(|word| git_push_option_is_force(word))
+}
+
+fn git_push_option_is_force(word: &str) -> bool {
+    if word.starts_with('+') && word.len() > 1 {
+        return true;
+    }
+    if word == "--force"
+        || word.starts_with("--force=")
+        || word == "--force-with-lease"
+        || word.starts_with("--force-with-lease=")
+    {
         return true;
     }
     word.starts_with('-') && !word.starts_with("--") && word.chars().skip(1).any(|ch| ch == 'f')
@@ -2981,12 +3154,16 @@ action = "explode"
             "rmdir scratch",
             "bash -lc 'rm test_clamp.rs'",
             "git reset --hard HEAD~3",
+            "git -C . reset --hard HEAD~3",
             "git clean -fd",
             "git clean -xdf",
             "git clean -f untracked.rs",
             "git worktree add ../parallel main",
+            "git -C . worktree add ../parallel main",
             "git stash push -m savepoint",
+            "git -C . stash push -m savepoint",
             "git rebase -i origin/main",
+            "git -C . rebase origin/main",
             "git checkout feature/other",
             "git -C . checkout HEAD~1",
             "bash -lc 'git checkout old-branch'",
@@ -3414,11 +3591,17 @@ action = "explode"
     #[test]
     fn builtin_force_push_warns_but_does_not_halt() {
         let registry = PreflightGuardRegistry::with_builtins();
-        let report = run_preflight_guard(&registry, &opts("git push --force origin main"));
-        assert_eq!(report.exit_code, 0);
-        assert_eq!(report.matches.len(), 1);
-        assert_eq!(report.matches[0].action, GuardAction::Warn);
-        assert_eq!(report.matches[0].rule_id, "builtin:git_push_force");
+        for command in [
+            "git push --force origin main",
+            "git -C . push -f origin main",
+            "bash -lc 'git push --force-with-lease origin main'",
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 0, "command `{command}` should warn only");
+            assert_eq!(report.matches.len(), 1, "command `{command}` match count");
+            assert_eq!(report.matches[0].action, GuardAction::Warn);
+            assert_eq!(report.matches[0].rule_id, "builtin:git_push_force");
+        }
     }
 
     #[test]

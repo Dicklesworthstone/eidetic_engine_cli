@@ -738,7 +738,7 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "diag".to_owned(),
                 "artifacts".to_owned(),
             ],
-            fixed_gap("bd-1ctyu", "diag artifacts still emits ee.response.v1"),
+            Enforcement::Required,
         ),
         success_case(
             "ENV-DIAG-BUILD-ADMISSION",
@@ -754,10 +754,7 @@ fn cli_json_envelopes_conform_to_response_v2_and_error_v2() -> TestResult {
                 "--artifact-destination".to_owned(),
                 "target/sync-down".to_owned(),
             ],
-            fixed_gap(
-                "bd-1ctyu",
-                "diag build-admission still emits ee.response.v1",
-            ),
+            Enforcement::Required,
         ),
     ];
 
