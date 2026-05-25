@@ -13,6 +13,13 @@ use crate::models::{
 };
 
 /// Patterns that indicate sensitive content requiring redaction.
+///
+/// Each entry must be specific enough that ordinary prose does not match.
+/// `auth` alone was removed: it false-positives on words like `author`,
+/// `authority`, `authentic`, and `authentication`, which would fully redact
+/// any memory body that merely discussed those concepts. The narrower
+/// `oauth`, `auth_token`, `auth-token`, `authorization` entries below cover
+/// the secret-bearing shapes without catching prose.
 const SECRET_PATTERNS: &[&str] = &[
     "password",
     "secret",
@@ -22,7 +29,13 @@ const SECRET_PATTERNS: &[&str] = &[
     "token",
     "bearer",
     "authorization",
-    "auth",
+    "oauth",
+    "auth_token",
+    "auth-token",
+    "auth.token",
+    "auth_key",
+    "auth-key",
+    "auth.key",
     "credential",
     "private_key",
     "privatekey",
@@ -1011,6 +1024,28 @@ mod tests {
         ])));
         assert!(!contains_secret_pattern("just some normal content"));
         assert!(!contains_secret_pattern("public data here"));
+    }
+
+    #[test]
+    fn contains_secret_pattern_does_not_match_auth_prose() {
+        // Bare `auth` substring used to false-positive on these prose
+        // memories and fully redact them during export. Adding the
+        // narrower oauth/auth_token/auth-token entries keeps real
+        // secret-bearing shapes detectable without obliterating any
+        // memory that merely discusses authentication.
+        assert!(!contains_secret_pattern(
+            "The author wrote about authority figures in the authentic style."
+        ));
+        assert!(!contains_secret_pattern(
+            "Use the authentication middleware to authorize requests."
+        ));
+        assert!(!contains_secret_pattern(
+            "JWT sessions are minted by the auth service."
+        ));
+        // Real secret shapes that still must redact.
+        assert!(contains_secret_pattern("OAUTH=abc123"));
+        assert!(contains_secret_pattern("auth_token: 9f3c2"));
+        assert!(contains_secret_pattern("Authorization: Bearer xyz"));
     }
 
     #[test]
