@@ -35,7 +35,7 @@ use crate::db::{
     generate_audit_id,
 };
 use crate::models::{
-    DomainError, ProducerMetadata, RESPONSE_SCHEMA_V1, VERIFICATION_EVIDENCE_SCHEMA_V1,
+    DomainError, ProducerMetadata, RESPONSE_SCHEMA_V2, VERIFICATION_EVIDENCE_SCHEMA_V1,
     VerificationClosureGuidance, VerificationEvidenceRecord, VerificationGateRequirement,
     VerificationStatus, rch_cargo_closure_requirements, verification_closure_guidance,
     verification_evidence_beads_summary,
@@ -1410,7 +1410,7 @@ pub fn default_rch_cargo_closure_requirements() -> Vec<VerificationGateRequireme
 #[must_use]
 pub fn verification_response_json(data: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     })
