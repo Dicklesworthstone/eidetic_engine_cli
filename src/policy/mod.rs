@@ -7,6 +7,7 @@
 pub mod memory_decay;
 pub mod producer_normalization;
 pub mod security_profile;
+pub mod swarm_slo_attribution;
 pub mod trust_decay;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -21,6 +22,13 @@ pub use producer_normalization::{NormalizedProducerId, ProducerIdKind, normalize
 pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,
+};
+pub use swarm_slo_attribution::{
+    SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
+    SwarmSloAttributionBucket, SwarmSloCoordinationEvent, SwarmSloCoordinationInput,
+    SwarmSloPosture, SwarmSloProducerAttribution, SwarmSloRedactedEvidence,
+    SwarmSloResourceUsageEvent, SwarmSloResourceUsageInput, adapt_swarm_slo_coordination_event,
+    adapt_swarm_slo_resource_usage_event,
 };
 pub use trust_decay::{
     DecayConfig, PEER_FEEDBACK_IGNORED_BY_POLICY_EVENT, PEER_FEEDBACK_RECEIVED_EVENT,
