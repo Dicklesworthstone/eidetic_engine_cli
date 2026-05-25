@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ee.contract_drift_radar.v1",
+  "title": "Contract Drift Radar Report",
+  "description": "Output of scripts/contract-drift-radar.sh (bd-31nul.5). Static, Cargo-free scan of current-facing agent documentation against the canonical contract inventory, JSONC envelope schema ids, and the failure-mode fixture catalog. Per-phase events are emitted as ee.test_event.v1 lines; this schema describes the final report at .contract-drift-radar-report.json.",
+  "type": "object",
+  "required": ["schema", "generatedAt", "verdict", "summary", "schemaInventory", "violations"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "ee.contract_drift_radar.v1" },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC timestamp."
+    },
+    "verdict": {
+      "enum": ["ok", "violations"],
+      "description": "Overall verdict across all phases."
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "docsScanned",
+        "schemasLoaded",
+        "staleEnvelopeRefs",
+        "envelopeExamplesScanned",
+        "schemaIdViolations",
+        "documentedCodes",
+        "fixtureCodes",
+        "documentedMissingFixture"
+      ],
+      "properties": {
+        "docsScanned": { "type": "integer", "minimum": 0 },
+        "schemasLoaded": { "type": "integer", "minimum": 0 },
+        "staleEnvelopeRefs": { "type": "integer", "minimum": 0 },
+        "envelopeExamplesScanned": { "type": "integer", "minimum": 0 },
+        "schemaIdViolations": { "type": "integer", "minimum": 0 },
+        "skippedLegacyExamples": { "type": "integer", "minimum": 0 },
+        "documentedCodes": { "type": "integer", "minimum": 0 },
+        "fixtureCodes": { "type": "integer", "minimum": 0 },
+        "documentedMissingFixture": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "schemaInventory": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^ee\\." },
+      "description": "Canonical schema ids enumerated from docs/schemas/ee.*.json."
+    },
+    "violations": {
+      "type": "object",
+      "required": ["docsScan", "jsonExampleCheck", "taxonomyXcheck"],
+      "additionalProperties": false,
+      "properties": {
+        "docsScan": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "line", "code", "context"],
+            "properties": {
+              "file": { "type": "string" },
+              "line": { "type": "integer", "minimum": 0 },
+              "code": { "const": "stale_envelope_version_reference" },
+              "context": { "type": "string" }
+            }
+          }
+        },
+        "jsonExampleCheck": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["file", "line", "code", "schemaId", "fenceLanguage"],
+            "properties": {
+              "file": { "type": "string" },
+              "line": { "type": "integer", "minimum": 0 },
+              "code": { "const": "json_example_schema_id_unknown" },
+              "schemaId": { "type": "string" },
+              "fenceLanguage": { "enum": ["json", "jsonc"] }
+            }
+          }
+        },
+        "taxonomyXcheck": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "degradedCode"],
+            "properties": {
+              "code": { "const": "documented_code_missing_fixture" },
+              "degradedCode": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

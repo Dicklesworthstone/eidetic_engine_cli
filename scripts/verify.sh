@@ -23,6 +23,7 @@ set -euo pipefail
 #   4. Untracked Work Audit    - advisory Beads FILE SURFACE coverage for dirty paths
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
+#   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
 #   4.7. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
 #   4.8. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
@@ -671,6 +672,16 @@ run_stage "Bridge Staleness Advisory" "with_beads_read_locks ./scripts/bridge-st
 # .plan-drift-report.json with BV-friendly warning hints for active
 # implements-surface beads whose plan_doc_section labels point at evolved text.
 run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh --quiet"
+
+# Gate 3.8: Advisory contract-drift radar (bd-31nul.5). Cargo-free static
+# scan of current-facing agent docs for stale envelope versions, unknown
+# JSONC envelope schema ids, and degraded-code documentation that lacks a
+# matching tests/fixtures/failure_modes/<code>.json fixture. Always exits 0
+# and writes .contract-drift-radar-report.json with schema
+# "ee.contract_drift_radar.v1". The Cargo-backed proof (full JSONC envelope
+# validation against jsonschema files) is the schema_drift contracts test
+# under cargo test -p ee --test contracts and stays an RCH-only surface.
+run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --quiet"
 
 # Gate 4.7: Static cargo-fuzz target registration/docs audit. This is a
 # no-build guard; actual cargo-fuzz sweeps remain explicit RCH-only evidence.

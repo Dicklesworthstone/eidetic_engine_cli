@@ -243,6 +243,7 @@ tests/audit_artifacts/install_pipeline_*.json
 /functions.txt
 /pass1.jsonl
 /.plan-drift-report.json
+/.contract-drift-radar-report.json
 /closure_lint_out.txt
 /db_for_loops.txt
 /findings.jsonl

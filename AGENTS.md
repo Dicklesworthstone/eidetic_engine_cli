@@ -665,6 +665,21 @@ Same DB + indexes + config + query → byte-identical JSON output. Same workspac
 
 The CI gates that enforce each of these are the load-bearing surface for the overhaul. Adding a feature without updating its gate is a regression.
 
+After any of the above changes, run the **contract drift radar** to catch
+stale docs that reference the old surface:
+
+```bash
+scripts/contract-drift-radar.sh           # static gate, no Cargo
+```
+
+It runs as Gate 3.8 of `scripts/verify.sh` and writes
+`.contract-drift-radar-report.json` (schema `ee.contract_drift_radar.v1`). The
+report flags stale envelope-version references in agent-facing docs, JSONC
+example blocks with unknown schema ids, and degraded-code documentation that
+lacks a matching `tests/fixtures/failure_modes/<code>.json` fixture. See
+`docs/contract-drift-radar.md` for interpretation, allow-marker syntax, and
+the RCH command template for the Cargo-backed schema-drift contract test.
+
 ### CLI Output Rules
 
 - JSON data goes to **stdout**.

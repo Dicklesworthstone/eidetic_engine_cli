@@ -31,6 +31,7 @@ For agents pinned to the previous envelope shape, use the documented migration
 surface for that release line. Older `0.1.x` builds accepted `--schema-version
 v0` or `--legacy-schema` to emit `ee.response.v0`:
 
+<!-- legacy-example: pre-0.2 envelope, no live schema file by design -->
 ```json
 {"schema":"ee.response.v0","ok":true,"result":{}}
 ```
