@@ -1411,11 +1411,14 @@ fn support_bundle_redaction_patterns(
 fn support_bundle_redaction_fields(
     report: &crate::core::support_bundle::BundleReport,
 ) -> Vec<String> {
-    if report.redaction_summary.total_redactions == 0 {
-        Vec::new()
-    } else {
-        vec!["diagnostics[*].content".to_owned()]
+    let mut fields = Vec::new();
+    if report.workspace_path.contains("[REDACTED:") {
+        fields.push("workspacePath".to_owned());
     }
+    if !report.dry_run && report.redaction_summary.total_redactions > fields.len() as u32 {
+        fields.push("diagnostics[*].content".to_owned());
+    }
+    fields
 }
 
 fn context_redaction_fields_and_patterns(response: &ContextResponse) -> (Vec<String>, Vec<String>) {
@@ -43681,7 +43684,7 @@ where
                     support_bundle_redaction_patterns(&report),
                 );
                 let response = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data
                 });
@@ -43731,7 +43734,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let response = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json()
                 });

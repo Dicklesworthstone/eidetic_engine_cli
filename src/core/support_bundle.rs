@@ -292,6 +292,8 @@ pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError>
         .workspace
         .canonicalize()
         .unwrap_or_else(|_| options.workspace.clone());
+    let redaction_level = options.effective_redaction_level();
+    let workspace_redaction = redact_support_bundle_path(&workspace_path, redaction_level);
 
     let bundle_id = generate_bundle_id();
     let files_collected = planned_files();
@@ -301,16 +303,16 @@ pub fn plan_bundle(options: &BundleOptions) -> Result<BundleReport, DomainError>
         bundle_id,
         files_collected,
         total_size_bytes: 0,
-        redaction_applied: options.effective_redaction_level().redacts_secrets(),
-        redaction_level: options.effective_redaction_level(),
+        redaction_applied: redaction_level.redacts_secrets(),
+        redaction_level,
         redaction_summary: RedactionSummary {
-            total_redactions: 0,
-            reasons: vec![],
+            total_redactions: if workspace_redaction.redacted { 1 } else { 0 },
+            reasons: workspace_redaction.redacted_reasons.clone(),
         },
         output_path: None,
         manifest_hash: None,
         dry_run: true,
-        workspace_path: workspace_path.display().to_string(),
+        workspace_path: workspace_redaction.content,
     })
 }
 
@@ -339,13 +341,23 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     })?;
     reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
 
-    let diagnostics = collect_diagnostics(&workspace_path, options.audit_limit)?;
     let redaction_level = options.effective_redaction_level();
+    let workspace_redaction = redact_support_bundle_path(&workspace_path, redaction_level);
+    let diagnostics = collect_diagnostics(&workspace_path, options.audit_limit)?;
 
     let mut manifest_entries = Vec::new();
     let mut all_redaction_reasons: Vec<String> = Vec::new();
     let mut total_redactions = 0u32;
     let mut total_size = 0u64;
+
+    if workspace_redaction.redacted {
+        total_redactions += 1;
+        for reason in &workspace_redaction.redacted_reasons {
+            if !all_redaction_reasons.contains(reason) {
+                all_redaction_reasons.push(reason.clone());
+            }
+        }
+    }
 
     let files_to_write = [
         (STATUS_FILE, &diagnostics.status_json),
@@ -447,7 +459,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
         bundle_id: bundle_id.clone(),
         created_at: Utc::now().to_rfc3339(),
-        workspace_path: workspace_path.display().to_string(),
+        workspace_path: workspace_redaction.content.clone(),
         ee_version: env!("CARGO_PKG_VERSION").to_owned(),
         files: manifest_entries,
         total_size_bytes: total_size,
@@ -486,7 +498,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         output_path: Some(bundle_dir),
         manifest_hash: Some(manifest_hash),
         dry_run: false,
-        workspace_path: workspace_path.display().to_string(),
+        workspace_path: workspace_redaction.content,
     })
 }
 
@@ -2522,6 +2534,10 @@ fn redact_support_diagnostic_text(text: &str) -> String {
     redact_support_diagnostic_content(text).content
 }
 
+fn redact_support_bundle_path(path: &Path, level: RedactionLevel) -> SupportDiagnosticRedaction {
+    redact_support_bundle_content(&path.display().to_string(), level)
+}
+
 fn redact_support_bundle_content(text: &str, level: RedactionLevel) -> SupportDiagnosticRedaction {
     match level {
         RedactionLevel::None => SupportDiagnosticRedaction {
@@ -3378,6 +3394,77 @@ mod tests {
         assert!(report.dry_run);
         assert!(report.redaction_applied);
         assert!(!report.files_collected.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn plan_bundle_redacts_workspace_path_under_paranoid() -> TestResult {
+        let options = BundleOptions {
+            workspace: PathBuf::from("/Users/alice/private/support-bundle-workspace"),
+            output_dir: None,
+            dry_run: true,
+            redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw: false,
+            audit_limit: 100,
+        };
+
+        let report = plan_bundle(&options).map_err(|e| e.message())?;
+        assert!(
+            !report.workspace_path.contains("/Users/alice"),
+            "paranoid support-bundle reports must not expose raw workspace paths: {}",
+            report.workspace_path
+        );
+        assert!(
+            report
+                .redaction_summary
+                .reasons
+                .iter()
+                .any(|reason| reason == "path_like_segment"),
+            "workspace-path redaction must be reflected in the redaction summary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_bundle_manifest_redacts_workspace_path_under_paranoid() -> TestResult {
+        let out_dir = unique_test_path("manifest-workspace-redaction-out");
+        fs::create_dir_all(&out_dir)
+            .map_err(|error| format!("failed to create {}: {error}", out_dir.display()))?;
+        let options = BundleOptions {
+            workspace: PathBuf::from("/Users/alice/private/support-bundle-workspace"),
+            output_dir: Some(out_dir),
+            dry_run: false,
+            redacted: true,
+            redaction_level: RedactionLevel::Paranoid,
+            include_raw: false,
+            audit_limit: 100,
+        };
+
+        let report = create_bundle(&options).map_err(|e| e.message())?;
+        assert!(
+            !report.workspace_path.contains("/Users/alice"),
+            "created support-bundle report must not expose raw workspace paths: {}",
+            report.workspace_path
+        );
+
+        let bundle_dir = report
+            .output_path
+            .as_ref()
+            .ok_or_else(|| "created bundle must report output path".to_owned())?;
+        let manifest_text = fs::read_to_string(bundle_dir.join(MANIFEST_FILE))
+            .map_err(|error| format!("failed to read manifest: {error}"))?;
+        assert!(
+            !manifest_text.contains("/Users/alice"),
+            "support bundle manifest must not expose raw workspace paths: {manifest_text}"
+        );
+        let manifest: BundleManifest = serde_json::from_str(&manifest_text)
+            .map_err(|error| format!("manifest must parse: {error}"))?;
+        assert!(
+            manifest.workspace_path.contains("REDACTED"),
+            "manifest workspace path must carry a redaction placeholder: {}",
+            manifest.workspace_path
+        );
         Ok(())
     }
 
