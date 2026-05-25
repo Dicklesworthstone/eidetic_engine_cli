@@ -200,12 +200,18 @@ fn seed_graph_workspace() -> Result<(PathBuf, Vec<String>), String> {
     )
     .map_err(|error| error.to_string())?;
 
+    let memory_contents = [
+        "Memory 0 for graph determinism test and Pack DNA orchestration.",
+        "Memory 1 for graph determinism test and Pack DNA orchestration.",
+        "Memory 2 for graph determinism test and Pack DNA orchestration.",
+        "Memory 3 for graph determinism test and Pack DNA orchestration.",
+        "Memory 4 for graph determinism test and Pack DNA orchestration.",
+        "Auxiliary topology node 5 linked to the graph but not selected by the query.",
+        "Auxiliary topology node 6 linked to the graph but not selected by the query.",
+    ];
     let mut memory_ids = Vec::new();
-    for i in 0..5 {
-        let id = remember(
-            &workspace_arg,
-            &format!("Memory {i} for graph determinism test."),
-        )?;
+    for content in memory_contents {
+        let id = remember(&workspace_arg, content)?;
         memory_ids.push(id);
     }
 
@@ -251,6 +257,26 @@ fn seed_graph_workspace() -> Result<(PathBuf, Vec<String>), String> {
         .insert_memory_link(&link_id, &input)
         .map_err(|e| e.to_string())?;
 
+    for (src_index, dst_index) in [(1_usize, 5_usize), (3, 6)] {
+        let input = CreateMemoryLinkInput {
+            src_memory_id: memory_ids[src_index].clone(),
+            dst_memory_id: memory_ids[dst_index].clone(),
+            relation: MemoryLinkRelation::Supports,
+            weight: 0.6,
+            confidence: 0.8,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: None,
+            source: MemoryLinkSource::Human,
+            created_by: None,
+            metadata_json: None,
+        };
+        let link_id = MemoryLinkId::from_uuid(Uuid::now_v7()).to_string();
+        connection
+            .insert_memory_link(&link_id, &input)
+            .map_err(|e| e.to_string())?;
+    }
+
     Ok((workspace, memory_ids))
 }
 
@@ -270,36 +296,67 @@ fn run_graph_command(workspace: &Path, subcommand: &str) -> Result<String, Strin
 }
 
 fn run_context_pack_dna(workspace: &Path) -> Result<String, String> {
+    let parsed = run_context_json(
+        workspace,
+        &["--json", "context", "--explain", "graph determinism memory"],
+    )?;
+    let pack_dna = parsed
+        .pointer("/data/pack/packDna")
+        .ok_or_else(|| "context --explain missing data.pack.packDna".to_string())?;
+    validate_pack_dna_shape(pack_dna)?;
+    serde_json::to_string(pack_dna).map_err(|error| error.to_string())
+}
+
+fn run_context_json(workspace: &Path, args: &[&str]) -> Result<Value, String> {
     let workspace_arg = workspace
         .to_str()
         .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
-    let output = run_ee(&[
-        "--workspace",
-        workspace_arg,
-        "--json",
-        "context",
-        "--explain",
-        "graph determinism memory",
-    ])?;
+    let mut command_args = vec!["--workspace", workspace_arg];
+    command_args.extend_from_slice(args);
+    let output = run_ee(&command_args)?;
     if !output.status.success() {
         return Err(format!(
-            "context --explain failed: stdout={} stderr={}",
+            "context command failed: stdout={} stderr={}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
     if !output.stderr.is_empty() {
         return Err(format!(
-            "context --explain wrote stderr: {}",
+            "context command wrote stderr: {}",
             String::from_utf8_lossy(&output.stderr)
         ));
     }
 
-    let parsed: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("context --explain stdout must be JSON: {error}"))?;
-    let pack_dna = parsed
-        .pointer("/data/pack/packDna")
-        .ok_or_else(|| "context --explain missing data.pack.packDna".to_string())?;
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("context command stdout must be JSON: {error}"))
+}
+
+fn run_context_stdout(workspace: &Path, args: &[&str]) -> Result<String, String> {
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?;
+    let mut command_args = vec!["--workspace", workspace_arg];
+    command_args.extend_from_slice(args);
+    let output = run_ee(&command_args)?;
+    if !output.status.success() {
+        return Err(format!(
+            "context command failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    if !output.stderr.is_empty() {
+        return Err(format!(
+            "context command wrote stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    String::from_utf8(output.stdout).map_err(|error| format!("context stdout not UTF-8: {error}"))
+}
+
+fn validate_pack_dna_shape(pack_dna: &Value) -> TestResult {
     if pack_dna["schema"] != Value::String("ee.context.pack_dna.v1".to_string()) {
         return Err(format!("unexpected packDna schema: {}", pack_dna["schema"]));
     }
@@ -331,7 +388,7 @@ fn run_context_pack_dna(workspace: &Path) -> Result<String, String> {
     if !pack_dna["degraded"].is_array() {
         return Err("packDna.degraded must be an array".to_string());
     }
-    serde_json::to_string(pack_dna).map_err(|error| error.to_string())
+    Ok(())
 }
 
 struct CausalWhyFixture {
@@ -976,6 +1033,92 @@ fn context_pack_dna_output_is_deterministic() -> TestResult {
         ));
     }
 
+    Ok(())
+}
+
+#[test]
+fn context_pack_dna_pipeline_parity_preserves_pack_fields() -> TestResult {
+    let (workspace, _) = seed_graph_workspace()?;
+    let query = "graph determinism memory";
+    let base_args = ["--json", "context", query, "--max-tokens", "1200"];
+    let suppressed_args = [
+        "--json",
+        "context",
+        "--explain",
+        "--no-pack-dna",
+        query,
+        "--max-tokens",
+        "1200",
+    ];
+    let explain_args = [
+        "--json",
+        "context",
+        "--explain",
+        query,
+        "--max-tokens",
+        "1200",
+    ];
+
+    let base_stdout = run_context_stdout(&workspace, &base_args)?;
+    let suppressed_stdout = run_context_stdout(&workspace, &suppressed_args)?;
+    if base_stdout != suppressed_stdout {
+        return Err(
+            "context --explain --no-pack-dna must stay byte-identical to non-explain context"
+                .to_owned(),
+        );
+    }
+
+    let base = serde_json::from_str::<Value>(&base_stdout).map_err(|error| error.to_string())?;
+    let explain = run_context_json(&workspace, &explain_args)?;
+    for pointer in [
+        "/schema",
+        "/success",
+        "/data/pack/hash",
+        "/data/pack/items",
+        "/data/pack/text",
+        "/data/pack/quality",
+        "/data/pack/selectionAudit",
+    ] {
+        if base.pointer(pointer) != explain.pointer(pointer) {
+            return Err(format!(
+                "Pack DNA explain path changed non-Pack-DNA field {pointer}: base={:?} explain={:?}",
+                base.pointer(pointer),
+                explain.pointer(pointer)
+            ));
+        }
+    }
+
+    let pack_dna = explain
+        .pointer("/data/pack/packDna")
+        .ok_or_else(|| "context --explain missing packDna".to_owned())?;
+    validate_pack_dna_shape(pack_dna)?;
+    if !pack_dna["voronoiDominator"].is_object() {
+        return Err(format!(
+            "graph-rich fixture should exercise a Pack DNA dominator: {pack_dna}"
+        ));
+    }
+    if !pack_dna["communityOfMass"].is_object() {
+        return Err(format!(
+            "graph-rich fixture should exercise community of mass: {pack_dna}"
+        ));
+    }
+    let ego_node_count = pack_dna
+        .pointer("/egoSubgraph/nodeCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if ego_node_count < 3 {
+        return Err(format!(
+            "graph-rich fixture should exercise a non-trivial ego subgraph: {pack_dna}"
+        ));
+    }
+    let ppr_neighbors = pack_dna["pprNeighbors"]
+        .as_array()
+        .ok_or_else(|| "pprNeighbors must be an array".to_owned())?;
+    if ppr_neighbors.is_empty() {
+        return Err(format!(
+            "graph-rich fixture should expose PPR neighbors outside selected query seeds: {pack_dna}"
+        ));
+    }
     Ok(())
 }
 

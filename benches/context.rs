@@ -29,12 +29,15 @@ use ee::cache::pack_l2::{PackL2Cache, PackL2CacheLookup, PackL2CacheOptions};
 use tempfile::TempDir;
 
 use ee::core::context::{
-    ContextPackOptions, ContextPackOutputOptions, run_context_pack,
-    run_context_pack_with_performance,
+    ContextPackOptions, ContextPackOutputOptions, attach_pack_dna_to_context_response,
+    run_context_pack, run_context_pack_with_performance,
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
-use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
+use ee::db::{
+    CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
+    MemoryLinkRelation, MemoryLinkSource,
+};
 use ee::models::{MemoryId, MemoryScope, ProvenanceUri, RedactionLevel, UnitScore, WorkspaceId};
 use ee::pack::{
     ArenaMode, ContextPackProfile, PackArenaWorkspace, PackArenaWorkspaceKey, PackAssemblyOptions,
@@ -59,15 +62,20 @@ const L2_WARM_BENCH_GROUP: &str = "ee_context_pack_l2_warm";
 const L2_WARM_BENCH_OPERATION: &str = "ee_context_pack_l2_warm";
 const ARENA_MODE_BENCH_GROUP: &str = "ee_context_arena_mode";
 const ARENA_MODE_BENCH_OPERATION: &str = "ee_context_arena_workspace_reuse";
+const PACK_DNA_ORCHESTRATION_BENCH_GROUP: &str = "ee_context_pack_dna_orchestration";
+const PACK_DNA_ORCHESTRATION_OPERATION: &str = "ee_context_pack_dna_attach";
 const L2_WARM_BUDGET_P50_MS: f64 = 10.0;
 const L2_WARM_BUDGET_P99_MS: f64 = 50.0;
 const ARENA_MODE_BUDGET_P50_MS: f64 = 95.0;
 const ARENA_MODE_BUDGET_P99_MS: f64 = 240.0;
+const PACK_DNA_ORCHESTRATION_BUDGET_P50_MS: f64 = 125.0;
+const PACK_DNA_ORCHESTRATION_BUDGET_P99_MS: f64 = 300.0;
 const L2_CONCURRENT_IDENTICAL_REQUESTS: usize = 4;
 const L2_EXPECTED_FRESH_ASSEMBLIES: usize = 1;
 const L2_EXPECTED_WARM_HITS: usize =
     L2_CONCURRENT_IDENTICAL_REQUESTS - L2_EXPECTED_FRESH_ASSEMBLIES;
 const ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1;
+const PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResourceScale {
@@ -354,6 +362,142 @@ fn build_resource_scale_index(
         "S4 benchmark index should cover every seeded memory"
     );
     index_dir
+}
+
+fn seed_pack_dna_orchestration_database(temp_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let workspace_path = temp_dir.to_path_buf();
+    let db_path = workspace_path.join(".ee").join("ee.db");
+
+    std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create .ee dir");
+    std::fs::write(
+        workspace_path.join(".ee").join("config.toml"),
+        "[graph.feature.pack_dna]\nenabled = true\n",
+    )
+    .expect("write Pack DNA benchmark config");
+
+    let connection = DbConnection::open_file(&db_path).expect("open db");
+    connection.migrate().expect("migrate db");
+    ensure_workspace_row(&connection, &workspace_path);
+    let workspace_id = stable_workspace_id(&workspace_path);
+
+    for index in 0..18 {
+        let selected = index < 12;
+        let content = if selected {
+            format!(
+                "Pack DNA orchestration benchmark memory {index}: graph release pipeline evidence \
+                 with deterministic context selection and explain parity."
+            )
+        } else {
+            format!(
+                "Auxiliary Pack DNA topology neighbor {index}: linked graph evidence that should \
+                 support PPR neighbors without dominating selected context items."
+            )
+        };
+        let input = CreateMemoryInput {
+            workspace_id: workspace_id.clone(),
+            level: "semantic".to_owned(),
+            kind: "fact".to_owned(),
+            content,
+            workflow_id: None,
+            confidence: 0.85,
+            utility: if selected { 0.85 } else { 0.4 },
+            importance: if selected { 0.8 } else { 0.35 },
+            provenance_uri: None,
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: Some("pack-dna-orchestration-bench".to_owned()),
+            tags: vec![
+                "bench".to_owned(),
+                "pack-dna".to_owned(),
+                if selected { "selected" } else { "topology" }.to_owned(),
+            ],
+            valid_from: None,
+            valid_to: None,
+        };
+        connection
+            .insert_memory(&format!("mem_pack_dna_{index:03}"), &input)
+            .expect("insert Pack DNA benchmark memory");
+    }
+
+    for (link_index, (src, dst)) in [
+        (0_usize, 1_usize),
+        (0, 2),
+        (1, 3),
+        (2, 4),
+        (3, 5),
+        (4, 6),
+        (5, 7),
+        (6, 8),
+        (7, 9),
+        (8, 10),
+        (9, 11),
+        (1, 12),
+        (4, 13),
+        (7, 14),
+        (10, 15),
+        (11, 16),
+        (2, 17),
+        (0, 11),
+        (3, 9),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let input = CreateMemoryLinkInput {
+            src_memory_id: format!("mem_pack_dna_{src:03}"),
+            dst_memory_id: format!("mem_pack_dna_{dst:03}"),
+            relation: MemoryLinkRelation::Supports,
+            weight: 0.75,
+            confidence: 0.9,
+            directed: false,
+            evidence_count: 1,
+            last_reinforced_at: Some("2026-05-25T00:00:00Z".to_owned()),
+            source: MemoryLinkSource::Human,
+            created_by: Some("pack-dna-orchestration-bench".to_owned()),
+            metadata_json: None,
+        };
+        connection
+            .insert_memory_link(&format!("link_pack_dna_{link_index:03}"), &input)
+            .expect("insert Pack DNA benchmark link");
+    }
+    connection.close().expect("close Pack DNA benchmark db");
+
+    let index_dir = build_resource_scale_index(&workspace_path, &db_path, 18);
+    (workspace_path, db_path, index_dir)
+}
+
+fn pack_dna_orchestration_options(
+    workspace_path: &Path,
+    db_path: &Path,
+    index_dir: &Path,
+) -> ContextPackOptions {
+    ContextPackOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(db_path.to_path_buf()),
+        index_dir: Some(index_dir.to_path_buf()),
+        query: "Pack DNA orchestration graph release pipeline".to_string(),
+        speed: SpeedMode::Default,
+        filters: Default::default(),
+        profile: None,
+        max_tokens: Some(1_200),
+        candidate_pool: Some(12),
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        output_options: ContextPackOutputOptions::default(),
+    }
 }
 
 fn performance_timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
@@ -721,13 +865,78 @@ fn bench_context_l2_warm_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark Pack DNA explain attachment separately from baseline context packing.
+fn bench_context_pack_dna_orchestration(c: &mut Criterion) {
+    let mut group = c.benchmark_group(PACK_DNA_ORCHESTRATION_BENCH_GROUP);
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (workspace_path, db_path, index_dir) =
+        seed_pack_dna_orchestration_database(temp_dir.path());
+
+    group.bench_function(
+        BenchmarkId::new(PACK_DNA_ORCHESTRATION_OPERATION, "baseline_no_explain"),
+        |b| {
+            b.iter(|| {
+                let response = run_context_pack(&pack_dna_orchestration_options(
+                    &workspace_path,
+                    &db_path,
+                    &index_dir,
+                ))
+                .expect("baseline context pack");
+                black_box((
+                    response.data.pack.hash,
+                    response.data.pack.items.len(),
+                    response.data.pack_dna.is_none(),
+                ))
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(PACK_DNA_ORCHESTRATION_OPERATION, "explain_attach_pack_dna"),
+        |b| {
+            b.iter(|| {
+                let mut response = run_context_pack(&pack_dna_orchestration_options(
+                    &workspace_path,
+                    &db_path,
+                    &index_dir,
+                ))
+                .expect("context pack before Pack DNA attach");
+                let baseline_hash = response.data.pack.hash.clone();
+                let baseline_item_count = response.data.pack.items.len();
+                attach_pack_dna_to_context_response(&db_path, &mut response);
+                let pack_dna = response
+                    .data
+                    .pack_dna
+                    .as_ref()
+                    .expect("Pack DNA attach should populate JSON");
+                black_box((
+                    baseline_hash,
+                    baseline_item_count,
+                    pack_dna.pointer("/voronoiDominator").is_some(),
+                    pack_dna.pointer("/communityOfMass").is_some(),
+                    pack_dna
+                        .pointer("/egoSubgraph/nodeCount")
+                        .and_then(serde_json::Value::as_u64),
+                    pack_dna
+                        .pointer("/pprNeighbors")
+                        .and_then(serde_json::Value::as_array)
+                        .map(Vec::len),
+                ))
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_context,
     bench_context_memory_scales,
     bench_context_s4_resource_scales,
     bench_context_arena_mode,
-    bench_context_l2_warm_cache
+    bench_context_l2_warm_cache,
+    bench_context_pack_dna_orchestration
 );
 criterion_main!(benches);
 
@@ -741,10 +950,13 @@ mod tests {
         ARENA_MODE_BUDGET_P99_MS, ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, BUDGET_P50_MS,
         BUDGET_P99_MS, L2_CONCURRENT_IDENTICAL_REQUESTS, L2_EXPECTED_FRESH_ASSEMBLIES,
         L2_EXPECTED_WARM_HITS, L2_WARM_BENCH_GROUP, L2_WARM_BENCH_OPERATION, L2_WARM_BUDGET_P50_MS,
-        L2_WARM_BUDGET_P99_MS, REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE,
-        S4_RESOURCE_SCALES, S4_STRESS_SCALE, arena_fixture_coverage_fill,
-        arena_fixture_provenance_heavy, l2_warm_pack_json, s4_resource_scales_for_profile,
-        seed_database, seed_l2_warm_cache,
+        L2_WARM_BUDGET_P99_MS, PACK_DNA_ORCHESTRATION_BENCH_GROUP,
+        PACK_DNA_ORCHESTRATION_BUDGET_P50_MS, PACK_DNA_ORCHESTRATION_BUDGET_P99_MS,
+        PACK_DNA_ORCHESTRATION_OPERATION, PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT,
+        REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
+        S4_STRESS_SCALE, arena_fixture_coverage_fill, arena_fixture_provenance_heavy,
+        l2_warm_pack_json, pack_dna_orchestration_options, s4_resource_scales_for_profile,
+        seed_database, seed_l2_warm_cache, seed_pack_dna_orchestration_database,
     };
 
     #[test]
@@ -864,6 +1076,34 @@ mod tests {
         assert_eq!(ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS, 1);
         assert_eq!(arena_fixture_coverage_fill().len(), 20);
         assert_eq!(arena_fixture_provenance_heavy().len(), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn pack_dna_orchestration_benchmark_contract_matches_pipeline_gate() -> Result<(), String> {
+        assert_eq!(
+            PACK_DNA_ORCHESTRATION_BENCH_GROUP,
+            "ee_context_pack_dna_orchestration"
+        );
+        assert_eq!(
+            PACK_DNA_ORCHESTRATION_OPERATION,
+            "ee_context_pack_dna_attach"
+        );
+        assert!(
+            PACK_DNA_ORCHESTRATION_BUDGET_P50_MS > 0.0
+                && PACK_DNA_ORCHESTRATION_BUDGET_P99_MS >= PACK_DNA_ORCHESTRATION_BUDGET_P50_MS,
+            "Pack DNA orchestration benchmark budgets must be positive and monotonic"
+        );
+        assert_eq!(PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT, 1);
+
+        let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
+        let (workspace_path, db_path, index_dir) =
+            seed_pack_dna_orchestration_database(temp_dir.path());
+        assert!(db_path.exists(), "Pack DNA benchmark database must exist");
+        assert!(index_dir.exists(), "Pack DNA benchmark index must exist");
+        let options = pack_dna_orchestration_options(&workspace_path, &db_path, &index_dir);
+        assert_eq!(options.candidate_pool, Some(12));
+        assert_eq!(options.max_tokens, Some(1_200));
         Ok(())
     }
 }
