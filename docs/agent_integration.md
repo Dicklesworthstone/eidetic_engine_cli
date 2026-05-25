@@ -50,3 +50,21 @@ the RCH proof status and source attribution explicitly:
 Do not translate these states into "verified" or "failed" without the qualifier.
 They are attribution states, and they do not authorize local Cargo fallback,
 stash/reset/checkout/worktree operations, or cleanup of another agent's files.
+
+## Landing producer-derived memories
+
+When an external producer (reflection ingest, `ee review session --propose`,
+vendor pipelines) needs to land a *new* memory derived from existing sources,
+use the `create_derived_memory` candidate flow:
+
+```
+ee curate propose-derived ... → ee curate show <id> → ee curate validate <id>
+                              → ee curate apply <id> → ee why <createdMemoryId>
+```
+
+See [`docs/external-derivation-operator.md`](external-derivation-operator.md)
+for the safe command order, source-ref shapes, trust-class default,
+target-mutating vs create-derived contract differences, and the failure-mode
+catalog. The operator doc is authoritative for agents writing producer
+harnesses; [ADR 0043](adr/0043-external-derivation-candidates.md) covers the
+design context.
