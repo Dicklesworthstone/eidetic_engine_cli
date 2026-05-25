@@ -1798,8 +1798,14 @@ fn copy_derived_artifacts_to_restore(
             repair: Some("verify the backup directory and retry restore".to_owned()),
         })?;
         let observed_hash = hash_bytes(&bytes);
-        let expected_hash = derived.hash.as_deref().unwrap_or("unknown");
-        let validation_status = if derived.hash.as_deref() == Some(observed_hash.as_str()) {
+        let expected_hash = derived.hash.as_deref().ok_or_else(|| DomainError::Import {
+            message: format!(
+                "derived backup asset '{}' is missing a manifest hash during restore",
+                derived.path
+            ),
+            repair: Some("recreate the backup with ee backup create --include-derived".to_owned()),
+        })?;
+        let validation_status = if expected_hash == observed_hash {
             "valid"
         } else {
             "mismatch"
@@ -1814,6 +1820,18 @@ fn copy_derived_artifacts_to_restore(
             status = validation_status,
             "backup restore derived asset validation observed"
         );
+        if expected_hash != observed_hash {
+            return Err(DomainError::Import {
+                message: format!(
+                    "derived backup asset '{}' hash changed during restore: expected {}, observed {}",
+                    derived.path, expected_hash, observed_hash
+                ),
+                repair: Some(
+                    "rerun ee backup verify <backup-path> --json and restore from a trusted backup copy"
+                        .to_owned(),
+                ),
+            });
+        }
         let restore_path = write_new_relative_file(restore_artifact_dir, &derived.path, &bytes)?;
         let lab_episode_path = if derived.kind == "lab_episode"
             && derived.path.starts_with("derived/lab/episode_files/")
@@ -6178,6 +6196,82 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "derived_asset_corrupt"),
             "verify detects derived asset corruption",
+        )
+    }
+
+    #[test]
+    fn copy_derived_artifacts_rejects_restore_time_hash_drift() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let backup_path = tempdir.path().join("backup");
+        let restore_artifact_dir = tempdir.path().join("restore-artifacts");
+        let side_path = tempdir.path().join("restore-side-path");
+        let derived_path = "derived/wal_holds.json";
+        fs::create_dir_all(backup_path.join("derived")).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&restore_artifact_dir).map_err(|error| error.to_string())?;
+        let trusted_bytes = b"{\"schema\":\"trusted\"}\n";
+        fs::write(
+            backup_path.join(derived_path),
+            b"{\"schema\":\"tampered-after-verify\"}\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let inspect = BackupInspectReport {
+            schema: BACKUP_INSPECT_SCHEMA_V1,
+            backup_id: "backup_restore_hash_drift".to_owned(),
+            label: None,
+            created_at: None,
+            ee_version: None,
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            manifest_path: backup_path
+                .join(MANIFEST_FILE)
+                .to_string_lossy()
+                .into_owned(),
+            manifest_hash: "blake3:manifest".to_owned(),
+            workspace_id: None,
+            workspace_path: None,
+            database_path: None,
+            redaction_level: None,
+            export_scope: None,
+            counts: BackupCounts::default(),
+            verification_status: Some("verified".to_owned()),
+            artifacts: Vec::new(),
+            derived: vec![BackupDerivedAssetReport {
+                path: derived_path.to_owned(),
+                kind: "wal_holds".to_owned(),
+                hash: Some(hash_bytes(trusted_bytes)),
+                byte_size: Some(trusted_bytes.len() as u64),
+                captured_at: Some("2026-05-25T00:00:00Z".to_owned()),
+                episode_id_if_lab: None,
+            }],
+            degraded: Vec::new(),
+            issues: Vec::new(),
+        };
+
+        let result = copy_derived_artifacts_to_restore(
+            &backup_path,
+            &restore_artifact_dir,
+            &side_path,
+            &inspect,
+        );
+
+        match result {
+            Err(DomainError::Import { message, repair }) => {
+                ensure(
+                    message.contains("hash changed during restore"),
+                    "restore-time hash drift should be explicit",
+                )?;
+                ensure_equal(
+                    repair.as_deref(),
+                    Some(
+                        "rerun ee backup verify <backup-path> --json and restore from a trusted backup copy",
+                    ),
+                    "restore-time hash drift repair",
+                )?;
+            }
+            other => return Err(format!("expected import error, got {other:?}")),
+        }
+        ensure(
+            !restore_artifact_dir.join(derived_path).exists(),
+            "restore must not copy a derived asset whose hash changed",
         )
     }
 
