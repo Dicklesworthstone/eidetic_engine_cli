@@ -407,11 +407,18 @@ pub fn bead_affinity_score(
             .iter()
             .any(|token| token.len() >= 8 && digest.contains(token))
     });
-    let link_overlap = candidate
-        .link_refs
-        .iter()
-        .filter(|link| link.contains(&context.bead_id))
-        .count();
+    // `String::contains("")` is always true, so an empty bead_id would
+    // inflate `link_overlap` by every candidate link. Guard against that:
+    // a context with no bead identity has no link-overlap signal to give.
+    let link_overlap = if context.bead_id.is_empty() {
+        0
+    } else {
+        candidate
+            .link_refs
+            .iter()
+            .filter(|link| link.contains(&context.bead_id))
+            .count()
+    };
 
     let raw = tag_overlap as f32 * 0.025
         + content_token_overlap as f32 * 0.015
@@ -788,6 +795,27 @@ mod tests {
             bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP).value,
             0.0
         );
+    }
+
+    #[test]
+    fn bead_affinity_empty_bead_id_does_not_credit_every_link() {
+        // Regression: an empty bead_id with non-empty labels/tokens used
+        // to evade `is_cold_start()` and then `link.contains("")` matched
+        // every candidate link, inflating `link_overlap` and pushing the
+        // bias toward the cap. The guard in `bead_affinity_score` now
+        // skips the link-overlap pass when bead_id is empty.
+        let context = BeadAffinityContext::new("", ["retrieval"], "ranking");
+        let candidate = BeadAffinityCandidateSignals::new()
+            .with_tags(["release"])
+            .with_link_refs([
+                "source_uri:bd-aaaaa-parent",
+                "source_uri:bd-bbbbb-child",
+                "source_uri:bd-ccccc",
+            ]);
+
+        let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
+
+        assert_eq!(score.link_overlap, 0);
     }
 
     #[test]
