@@ -64,18 +64,27 @@ const ARENA_MODE_BENCH_GROUP: &str = "ee_context_arena_mode";
 const ARENA_MODE_BENCH_OPERATION: &str = "ee_context_arena_workspace_reuse";
 const PACK_DNA_ORCHESTRATION_BENCH_GROUP: &str = "ee_context_pack_dna_orchestration";
 const PACK_DNA_ORCHESTRATION_OPERATION: &str = "ee_context_pack_dna_attach";
+const TIERED_RECALL_BENCH_GROUP: &str = "ee_context_tiered_recall";
+const TIERED_RECALL_OPERATION: &str = "ee_context_memory_tier_admission";
+const TIERED_RECALL_QUERY: &str = "tiered recall release cold explicit failure evidence";
+const TIERED_RECALL_FILLER_COUNT: usize = 650;
+const TIERED_RECALL_MEMORY_COUNT: usize = TIERED_RECALL_FILLER_COUNT + 1;
+const TIERED_RECALL_CANDIDATE_POOL: u32 = TIERED_RECALL_MEMORY_COUNT as u32;
 const L2_WARM_BUDGET_P50_MS: f64 = 10.0;
 const L2_WARM_BUDGET_P99_MS: f64 = 50.0;
 const ARENA_MODE_BUDGET_P50_MS: f64 = 95.0;
 const ARENA_MODE_BUDGET_P99_MS: f64 = 240.0;
 const PACK_DNA_ORCHESTRATION_BUDGET_P50_MS: f64 = 125.0;
 const PACK_DNA_ORCHESTRATION_BUDGET_P99_MS: f64 = 300.0;
+const TIERED_RECALL_BUDGET_P50_MS: f64 = 140.0;
+const TIERED_RECALL_BUDGET_P99_MS: f64 = 340.0;
 const L2_CONCURRENT_IDENTICAL_REQUESTS: usize = 4;
 const L2_EXPECTED_FRESH_ASSEMBLIES: usize = 1;
 const L2_EXPECTED_WARM_HITS: usize =
     L2_CONCURRENT_IDENTICAL_REQUESTS - L2_EXPECTED_FRESH_ASSEMBLIES;
 const ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1;
 const PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT: u64 = 1;
+const TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ResourceScale {
@@ -500,6 +509,125 @@ fn pack_dna_orchestration_options(
     }
 }
 
+fn write_tiered_recall_config(workspace_path: &Path, enabled: bool) {
+    std::fs::create_dir_all(workspace_path.join(".ee")).expect("create tiered recall .ee dir");
+    std::fs::write(
+        workspace_path.join(".ee").join("config.toml"),
+        format!("[pack]\nmemory_tier_admission = {enabled}\n"),
+    )
+    .expect("write tiered recall benchmark config");
+}
+
+fn seed_tiered_recall_database(temp_dir: &Path, tier_enabled: bool) -> (PathBuf, PathBuf, PathBuf) {
+    let workspace_path = temp_dir.to_path_buf();
+    let db_path = workspace_path.join(".ee").join("ee.db");
+
+    std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create .ee dir");
+    write_tiered_recall_config(&workspace_path, tier_enabled);
+
+    let connection = DbConnection::open_file(&db_path).expect("open db");
+    connection.migrate().expect("migrate db");
+    ensure_workspace_row(&connection, &workspace_path);
+    let workspace_id = stable_workspace_id(&workspace_path);
+
+    for index in 0..TIERED_RECALL_FILLER_COUNT {
+        let input = CreateMemoryInput {
+            workspace_id: workspace_id.clone(),
+            level: "procedural".to_owned(),
+            kind: "rule".to_owned(),
+            content: format!(
+                "Tiered recall benchmark filler {index}: hot warm context for \
+                 tiered recall release cold explicit failure evidence."
+            ),
+            workflow_id: None,
+            confidence: 0.95,
+            utility: 0.95,
+            importance: 0.95,
+            provenance_uri: Some(format!("bench://tiered-recall/filler/{index}")),
+            trust_class: "human_explicit".to_owned(),
+            trust_subclass: Some("tiered-recall-bench".to_owned()),
+            tags: vec![
+                "bench".to_owned(),
+                "tiered-recall".to_owned(),
+                "filler".to_owned(),
+            ],
+            valid_from: None,
+            valid_to: None,
+        };
+        connection
+            .insert_memory(&format!("mem_tiered_recall_filler_{index:03}"), &input)
+            .expect("insert tiered recall filler memory");
+    }
+
+    let cold_input = CreateMemoryInput {
+        workspace_id,
+        level: "procedural".to_owned(),
+        kind: "failure".to_owned(),
+        content: "Tiered recall cold explicit failure evidence sentinel: keep required cold \
+                  failure evidence eligible even when hot and warm tiers are full."
+            .to_owned(),
+        workflow_id: None,
+        confidence: 0.02,
+        utility: 0.02,
+        importance: 0.02,
+        provenance_uri: Some("bench://tiered-recall/cold-required".to_owned()),
+        trust_class: "human_explicit".to_owned(),
+        trust_subclass: Some("tiered-recall-bench".to_owned()),
+        tags: vec![
+            "bench".to_owned(),
+            "tiered-recall".to_owned(),
+            "cold-required".to_owned(),
+        ],
+        valid_from: None,
+        valid_to: None,
+    };
+    connection
+        .insert_memory("mem_tiered_recall_cold_required", &cold_input)
+        .expect("insert tiered recall cold required memory");
+    connection
+        .close()
+        .expect("close tiered recall benchmark db");
+
+    let index_dir =
+        build_resource_scale_index(&workspace_path, &db_path, TIERED_RECALL_MEMORY_COUNT);
+    (workspace_path, db_path, index_dir)
+}
+
+fn tiered_recall_options(
+    workspace_path: &Path,
+    db_path: &Path,
+    index_dir: &Path,
+) -> ContextPackOptions {
+    ContextPackOptions {
+        workspace_path: workspace_path.to_path_buf(),
+        database_path: Some(db_path.to_path_buf()),
+        index_dir: Some(index_dir.to_path_buf()),
+        query: TIERED_RECALL_QUERY.to_owned(),
+        speed: SpeedMode::Default,
+        filters: Default::default(),
+        profile: None,
+        max_tokens: Some(20_000),
+        candidate_pool: Some(TIERED_RECALL_CANDIDATE_POOL),
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        redaction_level: RedactionLevel::Minimal,
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: ee::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        output_options: ContextPackOutputOptions::default(),
+    }
+}
+
 fn performance_timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
     performance
         .pointer("/data/timings")
@@ -513,6 +641,13 @@ fn performance_timing_ms(performance: &serde_json::Value, name: &str) -> f64 {
             })
         })
         .unwrap_or(0.0)
+}
+
+fn performance_u64(performance: &serde_json::Value, pointer: &str) -> u64 {
+    performance
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_default()
 }
 
 fn l2_warm_pack_json() -> serde_json::Value {
@@ -929,6 +1064,76 @@ fn bench_context_pack_dna_orchestration(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark advisory memory-tier admission against an otherwise identical recall fixture.
+fn bench_context_tiered_recall(c: &mut Criterion) {
+    let mut group = c.benchmark_group(TIERED_RECALL_BENCH_GROUP);
+    let disabled_temp_dir = TempDir::new().expect("disabled tiered recall temp dir");
+    let enabled_temp_dir = TempDir::new().expect("enabled tiered recall temp dir");
+    let (disabled_workspace_path, disabled_db_path, disabled_index_dir) =
+        seed_tiered_recall_database(disabled_temp_dir.path(), false);
+    let (enabled_workspace_path, enabled_db_path, enabled_index_dir) =
+        seed_tiered_recall_database(enabled_temp_dir.path(), true);
+
+    group.bench_function(
+        BenchmarkId::new(TIERED_RECALL_OPERATION, "baseline_disabled"),
+        |b| {
+            b.iter(|| {
+                let run = run_context_pack_with_performance(
+                    &tiered_recall_options(
+                        &disabled_workspace_path,
+                        &disabled_db_path,
+                        &disabled_index_dir,
+                    ),
+                    "context",
+                )
+                .expect("disabled tiered recall context pack");
+                black_box((
+                    run.response.data.pack.hash,
+                    performance_u64(&run.performance, "/data/candidates/tierBoostedCandidates"),
+                    performance_u64(&run.performance, "/data/candidates/tierColdCandidates"),
+                    performance_timing_ms(&run.performance, "total"),
+                ))
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(TIERED_RECALL_OPERATION, "enabled_cold_recall"),
+        |b| {
+            b.iter(|| {
+                let run = run_context_pack_with_performance(
+                    &tiered_recall_options(
+                        &enabled_workspace_path,
+                        &enabled_db_path,
+                        &enabled_index_dir,
+                    ),
+                    "context",
+                )
+                .expect("enabled tiered recall context pack");
+                let required_cold_selected = run.response.data.pack.items.iter().any(|item| {
+                    item.memory_id.to_string() == "mem_tiered_recall_cold_required"
+                        && item.why.contains("tierAdmission tier=cold")
+                        && item.why.contains("requiredEvidencePreserved=true")
+                });
+                black_box((
+                    run.response.data.pack.hash,
+                    performance_u64(&run.performance, "/data/candidates/tierBoostedCandidates"),
+                    performance_u64(&run.performance, "/data/candidates/tierColdCandidates"),
+                    performance_u64(
+                        &run.performance,
+                        "/data/candidates/tierRequiredColdCandidates",
+                    ),
+                    performance_timing_ms(&run.performance, "memoryTierAdmission"),
+                    performance_timing_ms(&run.performance, "total"),
+                    required_cold_selected,
+                ))
+            });
+        },
+    );
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_context,
@@ -936,7 +1141,8 @@ criterion_group!(
     bench_context_s4_resource_scales,
     bench_context_arena_mode,
     bench_context_l2_warm_cache,
-    bench_context_pack_dna_orchestration
+    bench_context_pack_dna_orchestration,
+    bench_context_tiered_recall
 );
 criterion_main!(benches);
 
@@ -954,9 +1160,13 @@ mod tests {
         PACK_DNA_ORCHESTRATION_BUDGET_P50_MS, PACK_DNA_ORCHESTRATION_BUDGET_P99_MS,
         PACK_DNA_ORCHESTRATION_OPERATION, PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT,
         REGRESSION_THRESHOLD, S4_NIGHTLY_SCALE, S4_RELEASE_CANDIDATE_SCALE, S4_RESOURCE_SCALES,
-        S4_STRESS_SCALE, arena_fixture_coverage_fill, arena_fixture_provenance_heavy,
-        l2_warm_pack_json, pack_dna_orchestration_options, s4_resource_scales_for_profile,
-        seed_database, seed_l2_warm_cache, seed_pack_dna_orchestration_database,
+        S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP, TIERED_RECALL_BUDGET_P50_MS,
+        TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
+        TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, TIERED_RECALL_MEMORY_COUNT,
+        TIERED_RECALL_OPERATION, TIERED_RECALL_QUERY, arena_fixture_coverage_fill,
+        arena_fixture_provenance_heavy, l2_warm_pack_json, pack_dna_orchestration_options,
+        s4_resource_scales_for_profile, seed_database, seed_l2_warm_cache,
+        seed_pack_dna_orchestration_database,
     };
 
     #[test]
@@ -1105,5 +1315,29 @@ mod tests {
         assert_eq!(options.candidate_pool, Some(12));
         assert_eq!(options.max_tokens, Some(1_200));
         Ok(())
+    }
+
+    #[test]
+    fn tiered_recall_benchmark_contract_matches_e2e_gate() {
+        assert_eq!(TIERED_RECALL_BENCH_GROUP, "ee_context_tiered_recall");
+        assert_eq!(TIERED_RECALL_OPERATION, "ee_context_memory_tier_admission");
+        assert_eq!(
+            TIERED_RECALL_QUERY,
+            "tiered recall release cold explicit failure evidence"
+        );
+        assert_eq!(
+            TIERED_RECALL_CANDIDATE_POOL as usize,
+            TIERED_RECALL_MEMORY_COUNT
+        );
+        assert!(
+            TIERED_RECALL_MEMORY_COUNT > 640,
+            "default_swarm hot+warm budgets are 640, so the fixture must force a cold tier"
+        );
+        assert_eq!(TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, 1);
+        assert!(
+            TIERED_RECALL_BUDGET_P50_MS > 0.0
+                && TIERED_RECALL_BUDGET_P99_MS >= TIERED_RECALL_BUDGET_P50_MS,
+            "tiered recall benchmark budgets must be positive and monotonic"
+        );
     }
 }
