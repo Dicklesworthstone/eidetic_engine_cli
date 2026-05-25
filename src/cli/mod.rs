@@ -6150,6 +6150,13 @@ pub struct ReflectIngestArgs {
     /// Validate the result without writing a curation candidate or consuming the ledger.
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
     pub dry_run: bool,
+
+    /// Reject any result whose reflectionKind is not `gaps` before consulting
+    /// the request ledger. Mirrors the propose-side `--gaps-only` guard so
+    /// agent harnesses can defensively pin the gaps-only handshake regardless
+    /// of what the ledger says.
+    #[arg(long = "gaps-only", action = ArgAction::SetTrue)]
+    pub gaps_only: bool,
 }
 
 /// Subcommands for `ee reflect request-ledger`.
@@ -37744,6 +37751,7 @@ where
         result_json: result_json.as_str(),
         consumed_at: args.consumed_at.as_deref(),
         dry_run: args.dry_run,
+        gaps_only: args.gaps_only,
         hmac_key_config: None,
     };
 
@@ -58019,6 +58027,7 @@ mod tests {
             "--database",
             "/tmp/ee.db",
             "--dry-run",
+            "--gaps-only",
         ])
         .map_err(|error| format!("failed to parse reflect ingest: {:?}", error.kind()))?;
         match ingest.command {
@@ -58039,7 +58048,8 @@ mod tests {
                     &Some(PathBuf::from("/tmp/ee.db")),
                     "database",
                 )?;
-                ensure_equal(&args.dry_run, &true, "dry run")
+                ensure_equal(&args.dry_run, &true, "dry run")?;
+                ensure_equal(&args.gaps_only, &true, "gaps only on ingest (bd-3dw0l)")
             }
             other => Err(format!("expected Reflect ingest command, got {other:?}")),
         }

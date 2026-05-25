@@ -23,15 +23,17 @@ use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_d
 use crate::curate::{
     CandidateInput, CandidateSource, CandidateStatus, CandidateType, CandidateValidationError,
     DerivationMemorySpec, DerivationMetadata, DerivationProducerMetadata, DerivationSourceKind,
-    DerivationSourceRef, PreparedReflectionRequest, ReflectionHmacKeyConfig,
-    ReflectionRequestArtifact, ReflectionRequestLedgerMaterial, ReflectionRequestLifecycleConfig,
-    ReflectionResultCandidateMaterial, ReflectionResultIngestDecision, ReflectionResultReplayGate,
-    ReflectionSourceInput, ReflectionSourceMetadata, ReflectionSourcePackageLimits,
-    ReviewQueueState, build_reflection_request_artifact, build_reflection_source_package,
+    DerivationSourceRef, PreparedReflectionRequest, ReflectionHmacKeyConfig, ReflectionKind,
+    ReflectionPromptProfile, ReflectionRequestArtifact, ReflectionRequestLedgerMaterial,
+    ReflectionRequestLifecycleConfig, ReflectionResultArtifact, ReflectionResultCandidateMaterial,
+    ReflectionResultIngestDecision, ReflectionResultReplayGate, ReflectionSourceInput,
+    ReflectionSourceMetadata, ReflectionSourcePackageLimits, ReviewQueueState,
+    build_reflection_request_artifact_with_profile, build_reflection_source_package,
     canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
-    prepare_reflection_request_with_config, resolve_derivation_memory_scores, validate_candidate,
-    validate_candidate_trust_evidence, validate_reflection_request_matches_ledger_material,
-    validate_review_queue_transition,
+    prepare_reflection_request_with_config, reflection_ledger_source_refs,
+    reflection_result_artifact_hash, reflection_result_ingest_decision_from_ledger,
+    resolve_derivation_memory_scores, validate_candidate, validate_candidate_trust_evidence,
+    validate_reflection_request_matches_ledger_material, validate_review_queue_transition,
 };
 use crate::db::{
     ApplyMemoryCurationInput, ApplyMemoryLevelTransitionInput, CreateAuditInput,
@@ -77,12 +79,16 @@ pub const CURATE_RETIRE_SCHEMA_V1: &str = "ee.curate.retire.v1";
 pub const CURATE_TOMBSTONE_SCHEMA_V1: &str = "ee.curate.tombstone.v1";
 /// Stable schema for curate untombstone reports.
 pub const CURATE_UNTOMBSTONE_SCHEMA_V1: &str = "ee.curate.untombstone.v1";
+/// Stable schema for `ee curate auto-promote` reports (bd-2r8vp).
+pub const CURATE_AUTO_PROMOTE_SCHEMA_V1: &str = "ee.curate.auto_promote.v1";
 /// Stable schema for review workspace reports.
 pub const REVIEW_WORKSPACE_SCHEMA_V1: &str = "ee.review.workspace.v1";
 /// Stable schema for explicit propose-derived candidate reports (bd-kxm0c).
 pub const CURATE_PROPOSE_DERIVED_SCHEMA_V1: &str = "ee.curate.propose_derived.v1";
 /// Stable schema for reflect request proposal reports.
 pub const REFLECTION_PROPOSE_SCHEMA_V1: &str = "ee.reflect.propose.v1";
+/// Stable schema for reflection result ingest reports.
+pub const REFLECTION_INGEST_SCHEMA_V1: &str = "ee.reflect.ingest.v1";
 /// Stable schema for reflection request ledger diagnostics.
 pub const REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1: &str =
     "ee.reflect.request_ledger.diagnostics.v1";
@@ -340,6 +346,42 @@ pub struct CurateUntombstoneOptions<'a> {
     pub dry_run: bool,
     /// Restore reason for audit trail.
     pub reason: Option<&'a str>,
+}
+
+/// Options for `ee curate auto-promote` (bd-2r8vp).
+///
+/// Threshold promotion proposes level transitions for memories that meet
+/// access-count and confidence floors per source level. The command is
+/// dry-run-first; mutations only happen when `apply == true`, and even
+/// then they route through the canonical
+/// `crate::core::memory::update_memory_level` audit path.
+#[derive(Clone, Debug)]
+pub struct CurateAutoPromoteOptions<'a> {
+    /// Workspace root selected by the CLI.
+    pub workspace_path: &'a Path,
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    pub database_path: Option<&'a Path>,
+    /// Actor recorded in audit metadata when applying.
+    pub actor: Option<&'a str>,
+    /// Preview only; never write level transitions.
+    pub dry_run: bool,
+    /// Explicit apply gate. Must be `true` (and `dry_run == false`) to
+    /// route proposals through `update_memory_level`.
+    pub apply: bool,
+    /// Minimum positive-feedback "access count" for an episodic memory to
+    /// be eligible for promotion to semantic.
+    pub min_access_count_episodic: u32,
+    /// Minimum confidence for an episodic memory to be eligible for
+    /// promotion to semantic.
+    pub min_confidence_episodic: f32,
+    /// Minimum positive-feedback "access count" for a semantic memory to
+    /// be eligible for promotion to procedural.
+    pub min_access_count_semantic: u32,
+    /// Minimum confidence for a semantic memory to be eligible for
+    /// promotion to procedural.
+    pub min_confidence_semantic: f32,
+    /// Maximum number of proposals to emit per run.
+    pub max_per_run: u32,
 }
 
 /// Options for reviewing workspace evidence and proposing curation candidates.
@@ -797,6 +839,159 @@ impl CurateUntombstoneReport {
         format!(
             "CURATE_UNTOMBSTONE|id={}|dry_run={}|persisted={}",
             self.memory_id, self.dry_run, self.persisted
+        )
+    }
+}
+
+/// Effective thresholds reported back by `ee curate auto-promote` so
+/// operators can audit why a memory was or was not proposed.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateAutoPromoteThresholds {
+    pub min_access_count_episodic: u32,
+    pub min_confidence_episodic: f32,
+    pub min_access_count_semantic: u32,
+    pub min_confidence_semantic: f32,
+    pub max_per_run: u32,
+}
+
+/// A single threshold-promotion proposal (or rejection) emitted by
+/// `ee curate auto-promote`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateAutoPromoteProposal {
+    pub memory_id: String,
+    pub current_level: String,
+    pub proposed_level: Option<String>,
+    pub access_count: u32,
+    pub harmful_count: u32,
+    pub confidence: f32,
+    /// `"eligible"` when the memory passed every gate; otherwise
+    /// `"disqualified"`.
+    pub eligibility: String,
+    /// Stable string naming the threshold that fired (e.g.
+    /// `min_confidence_semantic`). `None` when disqualified before any
+    /// threshold could fire.
+    pub threshold_fired: Option<String>,
+    /// Deterministic, sorted list of reasons the memory was rejected.
+    /// Empty when `eligibility == "eligible"`.
+    pub disqualifiers: Vec<String>,
+    /// Human-readable explanation of the decision.
+    pub explanation: String,
+    /// `ee` command that would persist the proposed transition.
+    pub apply_command: Option<String>,
+    /// Apply-mode outcome. `"not_applied"` when dry-run, `"applied"` or
+    /// `"apply_failed"` when `apply == true`.
+    pub apply_status: String,
+    /// Audit row ID populated when `apply == true` and the transition
+    /// committed.
+    pub audit_id: Option<String>,
+    /// Stable error code when `apply_status == "apply_failed"`.
+    pub apply_error_code: Option<String>,
+    /// Human-readable error message when `apply_status == "apply_failed"`.
+    pub apply_error_message: Option<String>,
+}
+
+/// Result of `ee curate auto-promote` (bd-2r8vp).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurateAutoPromoteReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub actor: Option<String>,
+    pub dry_run: bool,
+    pub apply: bool,
+    pub durable_mutation: bool,
+    pub thresholds: CurateAutoPromoteThresholds,
+    pub scanned_memory_count: u32,
+    pub eligible_count: u32,
+    pub disqualified_count: u32,
+    pub applied_count: u32,
+    pub apply_failed_count: u32,
+    pub proposals: Vec<CurateAutoPromoteProposal>,
+    pub next_action: String,
+}
+
+impl CurateAutoPromoteReport {
+    #[must_use]
+    pub fn json_output(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| {
+            format!(
+                r#"{{"schema":"{}","command":"curate auto-promote","error":"serialization_failed"}}"#,
+                CURATE_AUTO_PROMOTE_SCHEMA_V1
+            )
+        })
+    }
+
+    #[must_use]
+    pub fn human_output(&self) -> String {
+        let mode = if self.apply && !self.dry_run {
+            "APPLIED"
+        } else {
+            "DRY RUN"
+        };
+        let mut output = format!(
+            "{mode}: ee curate auto-promote — scanned={} eligible={} disqualified={} applied={} apply_failed={}\n\n",
+            self.scanned_memory_count,
+            self.eligible_count,
+            self.disqualified_count,
+            self.applied_count,
+            self.apply_failed_count,
+        );
+        output.push_str("Thresholds:\n");
+        output.push_str(&format!(
+            "  episodic -> semantic: confidence >= {:.2}, access_count >= {}\n",
+            self.thresholds.min_confidence_episodic, self.thresholds.min_access_count_episodic,
+        ));
+        output.push_str(&format!(
+            "  semantic -> procedural: confidence >= {:.2}, access_count >= {}\n",
+            self.thresholds.min_confidence_semantic, self.thresholds.min_access_count_semantic,
+        ));
+        output.push_str(&format!(
+            "  max_per_run: {}\n\n",
+            self.thresholds.max_per_run
+        ));
+        for proposal in &self.proposals {
+            let arrow = proposal
+                .proposed_level
+                .as_deref()
+                .map(|level| format!(" -> {level}"))
+                .unwrap_or_default();
+            output.push_str(&format!(
+                "  [{}] {}: {}{arrow} (confidence={:.2}, access={}, harmful={})\n",
+                proposal.eligibility,
+                proposal.memory_id,
+                proposal.current_level,
+                proposal.confidence,
+                proposal.access_count,
+                proposal.harmful_count,
+            ));
+            if !proposal.disqualifiers.is_empty() {
+                output.push_str(&format!(
+                    "      disqualifiers: {}\n",
+                    proposal.disqualifiers.join(", ")
+                ));
+            }
+        }
+        output.push_str("\nNext:\n  ");
+        output.push_str(&self.next_action);
+        output.push('\n');
+        output
+    }
+
+    #[must_use]
+    pub fn toon_output(&self) -> String {
+        format!(
+            "CURATE_AUTO_PROMOTE|scanned={}|eligible={}|disqualified={}|applied={}|dry_run={}",
+            self.scanned_memory_count,
+            self.eligible_count,
+            self.disqualified_count,
+            self.applied_count,
+            self.dry_run,
         )
     }
 }
@@ -4851,6 +5046,374 @@ pub fn run_curate_untombstone(
     })
 }
 
+/// Signals that count as "positive access" evidence for threshold promotion.
+const AUTO_PROMOTE_POSITIVE_SIGNALS: &[&str] = &["positive", "helpful", "confirmation"];
+/// Signals that disqualify a memory from threshold promotion.
+const AUTO_PROMOTE_HARMFUL_SIGNALS: &[&str] = &[
+    "negative",
+    "contradiction",
+    "harmful",
+    "inaccurate",
+    "outdated",
+    "stale",
+];
+
+/// Identify the source level → target level promotion edge, or `None`
+/// when the level is not promotable by threshold promotion.
+fn threshold_promotion_target(source_level: &str) -> Option<&'static str> {
+    match source_level {
+        "episodic" => Some("semantic"),
+        "semantic" => Some("procedural"),
+        _ => None,
+    }
+}
+
+/// Run `ee curate auto-promote` (bd-2r8vp).
+///
+/// Iterates over promotable memories at `episodic` and `semantic` source
+/// levels, applies threshold + safety gates, and emits one
+/// `CurateAutoPromoteProposal` per scanned memory in deterministic
+/// `(current_level, memory_id)` order. Default behavior is dry-run: no
+/// `memory.level_transition` audit rows are written. Apply mode
+/// (`apply == true && dry_run == false`) routes proposals through the
+/// canonical `crate::core::memory::update_memory_level` audit path; it
+/// never mutates `memories.level` directly.
+pub fn run_curate_auto_promote(
+    options: &CurateAutoPromoteOptions<'_>,
+) -> Result<CurateAutoPromoteReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let actor = options
+        .actor
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let apply_mode = options.apply && !options.dry_run;
+
+    let thresholds = CurateAutoPromoteThresholds {
+        min_access_count_episodic: options.min_access_count_episodic,
+        min_confidence_episodic: options.min_confidence_episodic,
+        min_access_count_semantic: options.min_access_count_semantic,
+        min_confidence_semantic: options.min_confidence_semantic,
+        max_per_run: options.max_per_run,
+    };
+
+    let connection = open_existing_database(&prepared.database_path)?;
+
+    // Build the set of memory IDs that have any pending feedback
+    // quarantine. We load once and group rather than issuing N+1
+    // per-memory queries.
+    let pending_quarantines = connection
+        .list_feedback_quarantine(&prepared.workspace_id, Some("pending"))
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to list feedback quarantines: {error}"),
+            repair: Some("ee doctor".to_owned()),
+        })?;
+    let quarantined_memory_ids: BTreeSet<String> = pending_quarantines
+        .iter()
+        .filter(|row| row.target_type == "memory")
+        .map(|row| row.target_id.clone())
+        .collect();
+
+    let mut all_memories: Vec<StoredMemory> = Vec::new();
+    for level in ["episodic", "semantic"] {
+        let mut rows = connection
+            .list_memories(&prepared.workspace_id, Some(level), true)
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to list memories at level {level}: {error}"),
+                repair: Some("ee memory list --json".to_owned()),
+            })?;
+        all_memories.append(&mut rows);
+    }
+    // Deterministic order: by (current_level, memory_id). list_memories
+    // already returns id-ascending, so a stable sort by level keeps id
+    // order within level.
+    all_memories.sort_by(|left, right| {
+        left.level
+            .cmp(&right.level)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let scanned_memory_count = u32::try_from(all_memories.len()).unwrap_or(u32::MAX);
+    let mut eligible_count: u32 = 0;
+    let mut disqualified_count: u32 = 0;
+    let mut applied_count: u32 = 0;
+    let mut apply_failed_count: u32 = 0;
+    let mut proposals: Vec<CurateAutoPromoteProposal> = Vec::with_capacity(all_memories.len());
+
+    let now = Utc::now();
+    let mut emitted_eligible: u32 = 0;
+
+    for memory in &all_memories {
+        let promotion_target = threshold_promotion_target(memory.level.as_str());
+        let (min_access, min_confidence, threshold_fired_name) = match memory.level.as_str() {
+            "episodic" => (
+                options.min_access_count_episodic,
+                options.min_confidence_episodic,
+                "episodic",
+            ),
+            "semantic" => (
+                options.min_access_count_semantic,
+                options.min_confidence_semantic,
+                "semantic",
+            ),
+            _ => (0, 0.0, "unknown"),
+        };
+
+        let mut disqualifiers: Vec<String> = Vec::new();
+
+        if memory.tombstoned_at.is_some() {
+            disqualifiers.push("tombstoned".to_owned());
+        }
+        if let Some(valid_to) = memory.valid_to.as_deref()
+            && let Ok(parsed) = DateTime::parse_from_rfc3339(valid_to)
+            && parsed.with_timezone(&Utc) <= now
+        {
+            disqualifiers.push("valid_to_expired".to_owned());
+        }
+        if quarantined_memory_ids.contains(&memory.id) {
+            disqualifiers.push("pending_quarantine".to_owned());
+        }
+
+        let feedback_rows = connection
+            .list_feedback_events_for_target("memory", &memory.id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to list feedback events for memory {}: {error}",
+                    memory.id
+                ),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+        let mut access_count: u32 = 0;
+        let mut harmful_count: u32 = 0;
+        for row in &feedback_rows {
+            if AUTO_PROMOTE_POSITIVE_SIGNALS.contains(&row.signal.as_str()) {
+                access_count = access_count.saturating_add(1);
+            } else if AUTO_PROMOTE_HARMFUL_SIGNALS.contains(&row.signal.as_str()) {
+                harmful_count = harmful_count.saturating_add(1);
+            }
+        }
+        if harmful_count > 0 {
+            disqualifiers.push("harmful_feedback".to_owned());
+        }
+
+        let mut threshold_fired: Option<String> = None;
+        if promotion_target.is_none() {
+            disqualifiers.push("not_promotable_level".to_owned());
+        } else {
+            if memory.confidence < min_confidence {
+                let label = format!("min_confidence_{threshold_fired_name}");
+                disqualifiers.push(format!("below_{label}"));
+                if threshold_fired.is_none() {
+                    threshold_fired = Some(label);
+                }
+            }
+            if access_count < min_access {
+                let label = format!("min_access_count_{threshold_fired_name}");
+                disqualifiers.push(format!("below_{label}"));
+                if threshold_fired.is_none() {
+                    threshold_fired = Some(label);
+                }
+            }
+        }
+
+        // Cap the eligible cohort at `max_per_run` so a large workspace
+        // does not produce a runaway proposal list. Memories beyond the
+        // cap are reported as disqualified with `cap_reached` so the
+        // operator can see why they were dropped.
+        let cap_reached = disqualifiers.is_empty()
+            && promotion_target.is_some()
+            && emitted_eligible >= options.max_per_run;
+        if cap_reached {
+            disqualifiers.push("cap_reached".to_owned());
+        }
+
+        let eligible = disqualifiers.is_empty();
+        // Deterministic disqualifier order.
+        disqualifiers.sort();
+        disqualifiers.dedup();
+
+        let (proposed_level, threshold_fired_final, apply_command) = if eligible
+            && let Some(target) = promotion_target
+        {
+            threshold_fired = Some(format!("min_confidence_{threshold_fired_name}"));
+            (
+                Some(target.to_owned()),
+                threshold_fired.clone(),
+                Some(format!(
+                    "ee memory level {} --to {target} --expected {} --reason \"threshold_promotion: confidence={:.3} access_count={}\" --json",
+                    memory.id, memory.level, memory.confidence, access_count
+                )),
+            )
+        } else {
+            (None, threshold_fired, None)
+        };
+
+        let explanation = build_auto_promote_explanation(
+            &memory.id,
+            &memory.level,
+            proposed_level.as_deref(),
+            memory.confidence,
+            access_count,
+            harmful_count,
+            &disqualifiers,
+        );
+
+        let mut proposal = CurateAutoPromoteProposal {
+            memory_id: memory.id.clone(),
+            current_level: memory.level.clone(),
+            proposed_level: proposed_level.clone(),
+            access_count,
+            harmful_count,
+            confidence: memory.confidence,
+            eligibility: if eligible {
+                "eligible".to_owned()
+            } else {
+                "disqualified".to_owned()
+            },
+            threshold_fired: threshold_fired_final,
+            disqualifiers,
+            explanation,
+            apply_command,
+            apply_status: "not_applied".to_owned(),
+            audit_id: None,
+            apply_error_code: None,
+            apply_error_message: None,
+        };
+
+        if eligible {
+            eligible_count = eligible_count.saturating_add(1);
+            emitted_eligible = emitted_eligible.saturating_add(1);
+            if apply_mode {
+                match apply_threshold_promotion(
+                    &prepared,
+                    &memory.id,
+                    &memory.level,
+                    proposed_level
+                        .as_deref()
+                        .expect("eligible proposal always has a target level"),
+                    memory.confidence,
+                    access_count,
+                    actor.as_deref(),
+                ) {
+                    Ok(audit_id) => {
+                        proposal.apply_status = "applied".to_owned();
+                        proposal.audit_id = Some(audit_id);
+                        applied_count = applied_count.saturating_add(1);
+                    }
+                    Err(error) => {
+                        let (code, message) = describe_domain_error(&error);
+                        proposal.apply_status = "apply_failed".to_owned();
+                        proposal.apply_error_code = Some(code);
+                        proposal.apply_error_message = Some(message);
+                        apply_failed_count = apply_failed_count.saturating_add(1);
+                    }
+                }
+            }
+        } else {
+            disqualified_count = disqualified_count.saturating_add(1);
+        }
+
+        proposals.push(proposal);
+    }
+
+    let next_action = if apply_mode {
+        "ee audit list --action memory.level_transition --json".to_owned()
+    } else {
+        "ee curate auto-promote --apply --json".to_owned()
+    };
+
+    Ok(CurateAutoPromoteReport {
+        schema: CURATE_AUTO_PROMOTE_SCHEMA_V1,
+        command: "curate auto-promote",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        actor,
+        dry_run: !apply_mode,
+        apply: options.apply,
+        durable_mutation: apply_mode && applied_count > 0,
+        thresholds,
+        scanned_memory_count,
+        eligible_count,
+        disqualified_count,
+        applied_count,
+        apply_failed_count,
+        proposals,
+        next_action,
+    })
+}
+
+fn build_auto_promote_explanation(
+    memory_id: &str,
+    current_level: &str,
+    proposed_level: Option<&str>,
+    confidence: f32,
+    access_count: u32,
+    harmful_count: u32,
+    disqualifiers: &[String],
+) -> String {
+    if disqualifiers.is_empty() {
+        let target = proposed_level.unwrap_or("(unknown)");
+        format!(
+            "Memory {memory_id} at {current_level} (confidence={confidence:.3}, access_count={access_count}, harmful_count={harmful_count}) meets every threshold gate for promotion to {target}.",
+        )
+    } else {
+        format!(
+            "Memory {memory_id} at {current_level} (confidence={confidence:.3}, access_count={access_count}, harmful_count={harmful_count}) was rejected: {}.",
+            disqualifiers.join(", ")
+        )
+    }
+}
+
+fn describe_domain_error(error: &DomainError) -> (String, String) {
+    match error {
+        DomainError::Usage { message, .. } => ("usage".to_owned(), message.clone()),
+        DomainError::UsageCodeWithDetails { code, message, .. } => {
+            ((*code).to_owned(), message.clone())
+        }
+        DomainError::Storage { message, .. } => ("storage".to_owned(), message.clone()),
+        DomainError::NotFound { resource, id, .. } => {
+            ("not_found".to_owned(), format!("{resource} {id} not found"))
+        }
+        DomainError::MigrationRequired { message, .. } => {
+            ("migration_required".to_owned(), message.clone())
+        }
+        other => ("apply_failed".to_owned(), other.to_string()),
+    }
+}
+
+fn apply_threshold_promotion(
+    prepared: &PreparedCurateRead,
+    memory_id: &str,
+    expected_level: &str,
+    target_level: &str,
+    confidence: f32,
+    access_count: u32,
+    actor: Option<&str>,
+) -> Result<String, DomainError> {
+    let reason =
+        format!("threshold_promotion: confidence={confidence:.3} access_count={access_count}");
+    let options = crate::core::memory::MemoryLevelOptions {
+        workspace_path: &prepared.workspace_path,
+        database_path: &prepared.database_path,
+        memory_id,
+        level: target_level,
+        expected_level: Some(expected_level),
+        reason: Some(reason.as_str()),
+        actor: Some(actor.unwrap_or("ee curate auto-promote")),
+        dry_run: false,
+        include_tombstoned: false,
+    };
+    let report = crate::core::memory::update_memory_level(&options)?;
+    report.audit_id.ok_or_else(|| DomainError::Storage {
+        message: format!(
+            "Memory level transition for {memory_id} succeeded but did not return an audit id."
+        ),
+        repair: Some("ee doctor --json".to_owned()),
+    })
+}
+
 /// Review workspace evidence and propose curation candidates.
 pub fn run_review_workspace(
     options: &ReviewWorkspaceOptions<'_>,
@@ -5360,6 +5923,7 @@ pub struct ReflectionProposeOptions<'a> {
     pub workspace_path: &'a Path,
     pub database_path: Option<&'a Path>,
     pub reflection_kind: &'a str,
+    pub gaps_only: bool,
     pub source_ids: &'a [String],
     pub source_memory_ids: &'a [String],
     pub source_evidence_span_ids: &'a [String],
@@ -5381,6 +5945,7 @@ pub struct ReflectionProposeReport {
     pub workspace_path: String,
     pub database_path: String,
     pub reflection_kind: String,
+    pub gaps_only: bool,
     pub request_id: String,
     pub request_hash: String,
     pub source_package_hash: String,
@@ -5396,6 +5961,60 @@ pub struct ReflectionProposeReport {
     pub next_commands: Vec<String>,
 }
 
+/// Options for `ee reflect ingest`.
+#[derive(Clone, Debug)]
+pub struct ReflectionIngestOptions<'a> {
+    pub workspace_path: &'a Path,
+    pub database_path: Option<&'a Path>,
+    pub result_json: &'a str,
+    pub consumed_at: Option<&'a str>,
+    pub dry_run: bool,
+    /// Reject any result whose `reflection_kind` is not `gaps` BEFORE the
+    /// ledger lookup. Mirrors the propose-side gaps-only profile so callers
+    /// can defensively pin the handshake to the v1 gaps slice without
+    /// trusting the ledger row to match. The general reflection_kind match
+    /// against the ledger still runs inside the validator; this flag only
+    /// changes WHEN and HOW the rejection surfaces (bd-3dw0l).
+    pub gaps_only: bool,
+    pub hmac_key_config: Option<ReflectionHmacKeyConfig>,
+}
+
+/// Validation summary for a reflection result ingest.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionIngestValidationSummary {
+    pub request_ledger: &'static str,
+    pub challenge: &'static str,
+    pub source_lock: &'static str,
+    pub replay_gate: &'static str,
+}
+
+/// Report returned by `ee reflect ingest`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReflectionIngestReport {
+    pub schema: &'static str,
+    pub command: &'static str,
+    pub version: &'static str,
+    pub workspace_id: String,
+    pub workspace_path: String,
+    pub database_path: String,
+    pub reflection_kind: String,
+    pub request_id: String,
+    pub request_hash: String,
+    pub result_hash: String,
+    pub source_refs: Vec<ProposeDerivedSourceRef>,
+    pub candidate_id: Option<String>,
+    pub consumed_at: String,
+    pub dry_run: bool,
+    pub durable_mutation: bool,
+    pub outcome: String,
+    pub durable_ingest_outcome: Option<ReflectionResultDurableIngestOutcome>,
+    pub validation: ReflectionIngestValidationSummary,
+    pub result: ReflectionResultArtifact,
+    pub next_commands: Vec<String>,
+}
+
 /// Create an external reflection request artifact and persist its non-secret
 /// replay ledger row.
 pub fn propose_reflection_request(
@@ -5408,6 +6027,18 @@ pub fn propose_reflection_request(
         return Err(curate_usage_error(
             "reflect propose --kind must not be empty".to_owned(),
             "ee reflect propose --help",
+        ));
+    }
+    let reflection_kind = ReflectionKind::from_str(reflection_kind).map_err(|error| {
+        curate_usage_error(
+            format!("reflect propose --kind is not supported: {error}"),
+            "ee reflect propose --help",
+        )
+    })?;
+    if options.gaps_only && reflection_kind != ReflectionKind::Gaps {
+        return Err(curate_usage_error(
+            "reflect propose --gaps-only requires reflection kind gaps".to_owned(),
+            "ee reflect propose --gaps-only --help",
         ));
     }
     if options.source_ids.is_empty()
@@ -5448,10 +6079,16 @@ pub fn propose_reflection_request(
 
     let source_package = build_reflection_source_package(&source_inputs, options.limits)
         .map_err(reflection_request_package_domain_error)?;
-    let request = build_reflection_request_artifact(
+    let prompt_profile = if options.gaps_only {
+        ReflectionPromptProfile::GapsOnly
+    } else {
+        ReflectionPromptProfile::SourcePackage
+    };
+    let request = build_reflection_request_artifact_with_profile(
         prepared.workspace_id.as_str(),
-        reflection_kind,
+        reflection_kind.as_str(),
         source_package,
+        prompt_profile,
     )
     .map_err(reflection_request_package_domain_error)?;
 
@@ -5507,6 +6144,7 @@ pub fn propose_reflection_request(
         workspace_path: prepared.workspace_path.display().to_string(),
         database_path: prepared.database_path.display().to_string(),
         reflection_kind: prepared_request.ledger_material.reflection_kind.clone(),
+        gaps_only: options.gaps_only,
         request_id: prepared_request.ledger_material.request_id.clone(),
         request_hash: prepared_request.ledger_material.request_hash.clone(),
         source_package_hash: prepared_request.ledger_material.source_package_hash.clone(),
@@ -5743,10 +6381,388 @@ fn reflection_propose_source_refs(
 fn reflection_propose_next_commands(workspace_path: &Path) -> Vec<String> {
     let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
     vec![
+        format!("ee reflect ingest --workspace {workspace_arg} --file result.json --json"),
         format!(
             "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status pending --json"
         ),
         format!("ee curate candidates --status pending --workspace {workspace_arg} --json"),
+    ]
+}
+
+/// Validate and ingest an ee.reflect.result.v1 artifact as a pending
+/// create-derived-memory curation candidate.
+pub fn ingest_reflection_result(
+    options: &ReflectionIngestOptions<'_>,
+) -> Result<ReflectionIngestReport, DomainError> {
+    let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
+    let result: ReflectionResultArtifact =
+        serde_json::from_str(options.result_json).map_err(|error| {
+            curate_usage_error(
+                format!("Invalid reflection result JSON: {error}"),
+                "ee reflect ingest --help",
+            )
+        })?;
+    let request_id = result.request_id.trim();
+    if request_id.is_empty() {
+        return Err(curate_usage_error(
+            "reflect ingest result requestId must not be empty".to_owned(),
+            "ee reflect ingest --help",
+        ));
+    }
+
+    // bd-3dw0l: gaps-only ingest must reject non-gaps results BEFORE
+    // consulting the ledger so the rejection surfaces as a structured
+    // policy error rather than the late reflectionKind mismatch the
+    // ledger-side validator would emit. The reflection_kind/ledger match
+    // continues to run inside validate_reflection_result_artifact for
+    // non-gaps-only ingest calls.
+    if options.gaps_only {
+        let kind = result.reflection_kind.trim();
+        if kind != "gaps" {
+            return Err(DomainError::PolicyDenied {
+                message: format!(
+                    "Gaps-only ingest rejected reflectionKind `{kind}`; --gaps-only accepts only `gaps` results."
+                ),
+                repair: Some(
+                    "Re-run ee reflect ingest without --gaps-only, or produce a gaps reflection result.".to_owned(),
+                ),
+            });
+        }
+    }
+
+    let consumed_at = options
+        .consumed_at
+        .map(str::to_owned)
+        .unwrap_or_else(|| Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true));
+    DateTime::parse_from_rfc3339(consumed_at.as_str()).map_err(|error| {
+        curate_usage_error(
+            format!("reflect ingest --consumed-at must be RFC3339: {error}"),
+            "ee reflect ingest --help",
+        )
+    })?;
+
+    let result_hash =
+        reflection_result_artifact_hash(&result).map_err(reflection_result_validation_error)?;
+    let connection = open_existing_database(&prepared.database_path)?;
+    let stored = connection
+        .get_reflection_request_ledger(&prepared.workspace_id, request_id)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to load reflection request ledger row: {error}"),
+            repair: Some("ee reflect request-ledger diagnostics --json".to_owned()),
+        })?
+        .ok_or_else(|| DomainError::NotFound {
+            resource: "reflection_request_ledger".to_owned(),
+            id: request_id.to_owned(),
+            repair: Some("ee reflect propose --workspace . --json".to_owned()),
+        })?;
+    let material = reflection_request_ledger_material_from_stored(&stored);
+    validate_reflection_current_source_hashes(&connection, &prepared.workspace_id, &material)?;
+
+    let replay_gate = reflection_result_replay_gate_from_db_status(
+        connection
+            .reflection_request_replay_status(
+                &prepared.workspace_id,
+                request_id,
+                result_hash.as_str(),
+                consumed_at.as_str(),
+            )
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to evaluate reflection replay status: {error}"),
+                repair: Some("ee reflect request-ledger diagnostics --json".to_owned()),
+            })?,
+    );
+    let key = if matches!(replay_gate, ReflectionResultReplayGate::Pending) {
+        Some(
+            options
+                .hmac_key_config
+                .clone()
+                .unwrap_or_else(ReflectionHmacKeyConfig::from_env_registry)
+                .load_key_material()
+                .map_err(|error| DomainError::Configuration {
+                    message: format!("{}: {error}", error.code()),
+                    repair: Some(error.recovery().to_owned()),
+                })?,
+        )
+    } else {
+        None
+    };
+    let decision = reflection_result_ingest_decision_from_ledger(
+        &material,
+        &result,
+        replay_gate.clone(),
+        key.as_ref(),
+        consumed_at.as_str(),
+    )
+    .map_err(reflection_result_ingest_error)?;
+    let candidate_id = reflection_ingest_candidate_id_from_decision(
+        &decision,
+        prepared.workspace_id.as_str(),
+        request_id,
+    );
+
+    let durable_ingest_outcome = if options.dry_run {
+        None
+    } else {
+        Some(persist_reflection_result_ingest_decision(
+            &connection,
+            &prepared.workspace_id,
+            request_id,
+            &decision,
+            consumed_at.as_str(),
+        )?)
+    };
+    let durable_mutation = matches!(
+        durable_ingest_outcome,
+        Some(ReflectionResultDurableIngestOutcome::Inserted { .. })
+    );
+    let candidate_id = durable_ingest_outcome
+        .as_ref()
+        .and_then(reflection_ingest_candidate_id_from_durable_outcome)
+        .or(candidate_id);
+    let outcome =
+        reflection_ingest_outcome_label(options.dry_run, &decision, &durable_ingest_outcome);
+    let source_refs = reflection_ledger_source_refs(&material)
+        .map_err(reflection_result_validation_error)?
+        .into_iter()
+        .map(|source_ref| ProposeDerivedSourceRef {
+            kind: source_ref.kind.as_str().to_owned(),
+            id: source_ref.id,
+            content_hash: source_ref.content_hash,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(ReflectionIngestReport {
+        schema: REFLECTION_INGEST_SCHEMA_V1,
+        command: "reflect ingest",
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: prepared.workspace_id,
+        workspace_path: prepared.workspace_path.display().to_string(),
+        database_path: prepared.database_path.display().to_string(),
+        reflection_kind: material.reflection_kind,
+        request_id: material.request_id,
+        request_hash: material.request_hash,
+        result_hash,
+        source_refs,
+        candidate_id,
+        consumed_at,
+        dry_run: options.dry_run,
+        durable_mutation,
+        outcome,
+        durable_ingest_outcome,
+        validation: ReflectionIngestValidationSummary {
+            request_ledger: "matched",
+            challenge: if key.is_some() {
+                "verified"
+            } else {
+                "replayed"
+            },
+            source_lock: "current",
+            replay_gate: reflection_replay_gate_label(&replay_gate),
+        },
+        result,
+        next_commands: reflection_ingest_next_commands(options.workspace_path),
+    })
+}
+
+fn validate_reflection_current_source_hashes(
+    connection: &DbConnection,
+    workspace_id: &str,
+    material: &ReflectionRequestLedgerMaterial,
+) -> Result<(), DomainError> {
+    for source_ref in
+        reflection_ledger_source_refs(material).map_err(reflection_result_validation_error)?
+    {
+        match source_ref.kind {
+            DerivationSourceKind::Memory => {
+                let memory = connection
+                    .get_memory(source_ref.id.as_str())
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to load reflection source memory {}: {error}",
+                            source_ref.id
+                        ),
+                        repair: Some(format!("ee memory show {} --json", source_ref.id)),
+                    })?
+                    .ok_or_else(|| DomainError::NotFound {
+                        resource: "memory".to_owned(),
+                        id: source_ref.id.clone(),
+                        repair: Some("ee reflect propose --workspace . --json".to_owned()),
+                    })?;
+                if memory.workspace_id != workspace_id {
+                    return Err(curate_usage_error(
+                        format!(
+                            "reflection source memory {} belongs to workspace {}, not {}",
+                            memory.id, memory.workspace_id, workspace_id
+                        ),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+                if memory.tombstoned_at.is_some() {
+                    return Err(curate_usage_error(
+                        format!("reflection source memory {} is tombstoned", memory.id),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+                let current_hash = memory_content_hash(memory.content.as_str());
+                if current_hash != source_ref.content_hash {
+                    return Err(curate_usage_error(
+                        format!(
+                            "reflection source memory {} changed since request creation",
+                            memory.id
+                        ),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+            }
+            DerivationSourceKind::EvidenceSpan => {
+                let span = connection
+                    .get_evidence_span(source_ref.id.as_str())
+                    .map_err(|error| DomainError::Storage {
+                        message: format!(
+                            "Failed to load reflection source evidence span {}: {error}",
+                            source_ref.id
+                        ),
+                        repair: Some("ee import cass --workspace . --json".to_owned()),
+                    })?
+                    .ok_or_else(|| DomainError::NotFound {
+                        resource: "evidence_span".to_owned(),
+                        id: source_ref.id.clone(),
+                        repair: Some("ee reflect propose --workspace . --json".to_owned()),
+                    })?;
+                if span.workspace_id != workspace_id {
+                    return Err(curate_usage_error(
+                        format!(
+                            "reflection source evidence span {} belongs to workspace {}, not {}",
+                            span.id, span.workspace_id, workspace_id
+                        ),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+                if span.content_hash != source_ref.content_hash {
+                    return Err(curate_usage_error(
+                        format!(
+                            "reflection source evidence span {} changed since request creation",
+                            span.id
+                        ),
+                        "ee reflect propose --workspace . --json",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reflection_result_validation_error(
+    error: crate::curate::ReflectionResultValidationError,
+) -> DomainError {
+    let recovery = error.recovery_actions();
+    let repair = recovery
+        .iter()
+        .find_map(|action| action.command)
+        .map(str::to_owned);
+    DomainError::UsageCodeWithDetails {
+        code: error.code(),
+        message: format!("Invalid reflection result artifact: {error}"),
+        repair,
+        details_json: serde_json::json!({ "recovery": recovery }).to_string(),
+    }
+}
+
+fn reflection_result_ingest_error(
+    error: crate::curate::ReflectionResultIngestError,
+) -> DomainError {
+    let recovery = error.recovery_actions();
+    let repair = recovery
+        .iter()
+        .find_map(|action| action.command)
+        .map(str::to_owned);
+    DomainError::UsageCodeWithDetails {
+        code: error.code(),
+        message: format!("Reflection result ingest rejected: {error}"),
+        repair,
+        details_json: serde_json::json!({ "recovery": recovery }).to_string(),
+    }
+}
+
+fn reflection_ingest_candidate_id_from_decision(
+    decision: &ReflectionResultIngestDecision,
+    workspace_id: &str,
+    request_id: &str,
+) -> Option<String> {
+    match decision {
+        ReflectionResultIngestDecision::CreateCandidate { result_hash, .. } => Some(
+            reflection_result_candidate_id(workspace_id, request_id, result_hash),
+        ),
+        ReflectionResultIngestDecision::IdempotentReplay { candidate_id, .. } => {
+            Some(candidate_id.clone())
+        }
+    }
+}
+
+fn reflection_ingest_candidate_id_from_durable_outcome(
+    outcome: &ReflectionResultDurableIngestOutcome,
+) -> Option<String> {
+    match outcome {
+        ReflectionResultDurableIngestOutcome::Inserted { candidate_id }
+        | ReflectionResultDurableIngestOutcome::IdempotentReplay { candidate_id } => {
+            Some(candidate_id.clone())
+        }
+        ReflectionResultDurableIngestOutcome::MissingLedger
+        | ReflectionResultDurableIngestOutcome::Expired { .. }
+        | ReflectionResultDurableIngestOutcome::MismatchedReplay { .. }
+        | ReflectionResultDurableIngestOutcome::UnavailableStatus { .. } => None,
+    }
+}
+
+fn reflection_ingest_outcome_label(
+    dry_run: bool,
+    decision: &ReflectionResultIngestDecision,
+    durable_outcome: &Option<ReflectionResultDurableIngestOutcome>,
+) -> String {
+    if dry_run {
+        return match decision {
+            ReflectionResultIngestDecision::CreateCandidate { .. } => "would_insert".to_owned(),
+            ReflectionResultIngestDecision::IdempotentReplay { .. } => {
+                "idempotent_replay".to_owned()
+            }
+        };
+    }
+    match durable_outcome {
+        Some(ReflectionResultDurableIngestOutcome::Inserted { .. }) => "inserted".to_owned(),
+        Some(ReflectionResultDurableIngestOutcome::IdempotentReplay { .. }) => {
+            "idempotent_replay".to_owned()
+        }
+        Some(ReflectionResultDurableIngestOutcome::MissingLedger) => "missing_ledger".to_owned(),
+        Some(ReflectionResultDurableIngestOutcome::Expired { .. }) => "expired".to_owned(),
+        Some(ReflectionResultDurableIngestOutcome::MismatchedReplay { .. }) => {
+            "mismatched_replay".to_owned()
+        }
+        Some(ReflectionResultDurableIngestOutcome::UnavailableStatus { .. }) => {
+            "unavailable_status".to_owned()
+        }
+        None => "not_run".to_owned(),
+    }
+}
+
+fn reflection_replay_gate_label(replay_gate: &ReflectionResultReplayGate) -> &'static str {
+    match replay_gate {
+        ReflectionResultReplayGate::Missing => "missing",
+        ReflectionResultReplayGate::Pending => "pending",
+        ReflectionResultReplayGate::Expired { .. } => "expired",
+        ReflectionResultReplayGate::AcceptedReplay { .. } => "accepted_replay",
+        ReflectionResultReplayGate::MismatchedReplay { .. } => "mismatched_replay",
+        ReflectionResultReplayGate::UnavailableStatus { .. } => "unavailable_status",
+    }
+}
+
+fn reflection_ingest_next_commands(workspace_path: &Path) -> Vec<String> {
+    let workspace_arg = shell_quote_command_arg(&workspace_path.display().to_string());
+    vec![
+        format!("ee curate candidates --status pending --workspace {workspace_arg} --json"),
+        format!(
+            "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status consumed --json"
+        ),
     ]
 }
 
@@ -6278,10 +7294,10 @@ fn reflection_request_ledger_recovery(
     match posture {
         "pending" => vec![ReflectionRequestLedgerDiagnosticRecovery {
             priority: 1,
-            kind: "inspect_pending_reflection_request",
-            message: "Inspect pending reflection requests; result ingestion is not implemented yet.",
+            kind: "ingest_reflection_result",
+            message: "Submit a matching ee.reflect.result.v1 artifact for this pending request.",
             command: format!(
-                "ee reflect request-ledger diagnostics --workspace {workspace_arg} --status pending --json"
+                "ee reflect ingest --workspace {workspace_arg} --file result.json --json"
             ),
         }],
         "expiredPending" | "expired" => vec![ReflectionRequestLedgerDiagnosticRecovery {
@@ -12089,15 +13105,16 @@ mod tests {
         CURATE_UNTOMBSTONE_SCHEMA_V1, CURATE_VALIDATE_SCHEMA_V1, CandidateType,
         CurateCandidatesDegradation, CurateCandidatesFilter, CurateCandidatesOptions,
         CurateCandidatesReport, CurateDispositionOptions, CurateReviewAction, CurateReviewOptions,
-        REFLECTION_PROPOSE_SCHEMA_V1, REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
-        REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY, REVIEW_SESSION_SCHEMA_V1,
-        REVIEW_WORKSPACE_SCHEMA_V1, ReflectionProposeOptions,
-        ReflectionRequestDurableLedgerOutcome, ReflectionRequestLedgerDiagnosticsOptions,
-        ReflectionResultDurableIngestOutcome, ReviewSessionCandidate, ReviewSessionOptions,
-        ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
-        build_bootstrap_session_candidates, build_review_session_candidates,
-        candidate_summary_from_stored, evaluate_candidate_for_validation,
-        evaluate_create_derived_candidate_for_validation, list_curation_candidates,
+        REFLECTION_INGEST_SCHEMA_V1, REFLECTION_PROPOSE_SCHEMA_V1,
+        REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, REVIEW_CANDIDATE_KIND_PROPOSE_NEW_MEMORY,
+        REVIEW_SESSION_SCHEMA_V1, REVIEW_WORKSPACE_SCHEMA_V1, ReflectionIngestOptions,
+        ReflectionProposeOptions, ReflectionRequestDurableLedgerOutcome,
+        ReflectionRequestLedgerDiagnosticsOptions, ReflectionResultDurableIngestOutcome,
+        ReviewSessionCandidate, ReviewSessionOptions, ReviewSessionReport, ReviewWorkspaceOptions,
+        apply_curation_candidate, build_bootstrap_session_candidates,
+        build_review_session_candidates, candidate_summary_from_stored,
+        evaluate_candidate_for_validation, evaluate_create_derived_candidate_for_validation,
+        ingest_reflection_result, list_curation_candidates,
         list_reflection_request_ledger_diagnostics, parse_reflection_diagnostics_time,
         persist_prepared_reflection_request_ledger, persist_reflection_result_ingest_decision,
         propose_reflection_request, reflection_diagnostic_blake3_hash_is_canonical,
@@ -12120,8 +13137,9 @@ mod tests {
         ReflectionPromptTemplateDescriptor, ReflectionRequestArtifact,
         ReflectionRequestCallerHints, ReflectionRequestChallenge, ReflectionRequestLedgerMaterial,
         ReflectionRequestLifecycle, ReflectionRequestLifecycleConfig, ReflectionRequestNextCommand,
-        ReflectionResponseSchemaDescriptor, ReflectionResultCandidateMaterial,
-        ReflectionResultIngestDecision, ReflectionResultReplayGate, ReflectionSourcePackage,
+        ReflectionResponseSchemaDescriptor, ReflectionResultArtifact,
+        ReflectionResultCandidateMaterial, ReflectionResultIngestDecision,
+        ReflectionResultProducer, ReflectionResultReplayGate, ReflectionSourcePackage,
         ReflectionSourcePackageBudget, ReflectionSourcePackageEntry, ReflectionSourcePackageLimits,
         ReflectionSourcePackageRedactionSummary,
     };
@@ -12622,6 +13640,7 @@ mod tests {
             workspace_path,
             database_path: Some(&database_path),
             reflection_kind: "gaps",
+            gaps_only: false,
             source_ids: &source_ids,
             source_memory_ids: &source_memory_ids,
             source_evidence_span_ids: &source_evidence_span_ids,
@@ -12689,7 +13708,135 @@ mod tests {
             duplicate.ledger_outcome,
             Some(ReflectionRequestDurableLedgerOutcome::Duplicate)
         );
+
+        let mut kind_fields = serde_json::Map::new();
+        kind_fields.insert(
+            "knowledgeGaps".to_owned(),
+            serde_json::json!([
+                {
+                    "topic": "reflection ingest handshake tests",
+                    "question": "Which replay edge cases still need direct coverage?"
+                }
+            ]),
+        );
+        let result = ReflectionResultArtifact {
+            schema: REFLECTION_RESULT_SCHEMA.to_owned(),
+            request_id: report.request_id.clone(),
+            request_hash: report.request_hash.clone(),
+            challenge: challenge.clone(),
+            producer: ReflectionResultProducer {
+                kind: "agent_harness".to_owned(),
+                id: "cod_1".to_owned(),
+                version: Some("2026-05-25".to_owned()),
+                extra: BTreeMap::new(),
+            },
+            reflection_kind: "gaps".to_owned(),
+            cited_source_ids: vec![memory_id.clone()],
+            body: "The cited memory leaves an unresolved gap about replay-handshake coverage."
+                .to_owned(),
+            kind_fields,
+            self_reported_confidence: 0.74,
+        };
+        let result_json = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        let ingest_options = ReflectionIngestOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            result_json: result_json.as_str(),
+            consumed_at: Some("2026-05-24T00:30:00Z"),
+            dry_run: false,
+            gaps_only: false,
+            hmac_key_config: Some(ReflectionHmacKeyConfig::new(
+                Some("reflect-key-test".to_owned()),
+                Some(key_path.clone()),
+            )),
+        };
+        let ingest =
+            ingest_reflection_result(&ingest_options).map_err(|error| error.to_string())?;
+        assert_eq!(ingest.schema, REFLECTION_INGEST_SCHEMA_V1);
+        assert_eq!(ingest.command, "reflect ingest");
+        assert_eq!(ingest.request_id, report.request_id);
+        assert_eq!(ingest.reflection_kind, "gaps");
+        assert_eq!(ingest.outcome, "inserted");
+        assert!(ingest.durable_mutation);
+        assert!(
+            ingest
+                .candidate_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("curate_"))
+        );
+        assert!(matches!(
+            ingest.durable_ingest_outcome,
+            Some(ReflectionResultDurableIngestOutcome::Inserted { .. })
+        ));
+
+        let replay =
+            ingest_reflection_result(&ingest_options).map_err(|error| error.to_string())?;
+        assert_eq!(replay.outcome, "idempotent_replay");
+        assert!(!replay.durable_mutation);
+        assert_eq!(replay.candidate_id, ingest.candidate_id);
         Ok(())
+    }
+
+    #[test]
+    fn reflection_ingest_gaps_only_rejects_non_gaps_result_before_ledger_lookup() -> TestResult {
+        // bd-3dw0l: gaps-only ingest is a defensive policy gate. A
+        // non-gaps result must be refused BEFORE the workspace database
+        // is opened or any ledger row is consulted. Confirms the
+        // rejection surfaces as PolicyDenied (exit 7) with a clear
+        // repair hint, so an agent harness can distinguish "wrong
+        // kind, this is policy" from "request not found in ledger".
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        // Note: no `ee init` runs here. The gaps-only guard must fire
+        // before the missing-database storage error.
+        let result_json = serde_json::json!({
+            "schema": "ee.reflect.result.v1",
+            "requestId": "rq_test_non_gaps",
+            "requestHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+            "challenge": {
+                "keyId": "k1",
+                "algorithm": "hmac-sha256",
+                "hmac": "base64url:placeholder"
+            },
+            "producer": {
+                "kind": "external",
+                "id": "fixture"
+            },
+            "reflectionKind": "summary",
+            "citedSourceIds": ["mem_a"],
+            "body": "Test summary result that should be rejected by gaps-only ingest.",
+            "kindFields": { "summary": "anything" },
+            "selfReportedConfidence": 0.7
+        })
+        .to_string();
+        let options = ReflectionIngestOptions {
+            workspace_path,
+            database_path: None,
+            result_json: result_json.as_str(),
+            consumed_at: Some("2026-05-25T00:00:00Z"),
+            dry_run: true,
+            gaps_only: true,
+            hmac_key_config: None,
+        };
+        let outcome = ingest_reflection_result(&options);
+        match outcome {
+            Err(DomainError::PolicyDenied { message, repair }) => {
+                assert!(
+                    message.contains("Gaps-only") && message.contains("summary"),
+                    "policy-denied message must name the kind; got `{message}`"
+                );
+                assert!(
+                    repair
+                        .as_deref()
+                        .is_some_and(|r| r.contains("gaps-only") || r.contains("--gaps-only")),
+                    "repair hint must mention the gaps-only flag; got `{repair:?}`"
+                );
+                Ok(())
+            }
+            other => Err(format!(
+                "expected DomainError::PolicyDenied for non-gaps result under gaps-only ingest; got {other:?}"
+            )),
+        }
     }
 
     #[test]
@@ -20564,5 +21711,416 @@ mod tests {
             bootstrap.is_empty(),
             "bootstrap pass must skip spans with non-empty memory_id (those are linker territory)"
         );
+    }
+
+    /// bd-2r8vp: dry-run threshold promotion proposes eligible memories,
+    /// rejects every disqualifier class, sorts deterministically, and
+    /// writes zero `memory.level_transition` audit rows.
+    #[test]
+    fn auto_promote_proposes_eligible_memories_and_writes_no_audit_rows_in_dry_run() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("auto-promote-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        // mem_eligible: episodic, high confidence + 6 positive feedback
+        // events -> eligible to promote to semantic
+        let mem_eligible = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA001)).to_string();
+        // mem_low_confidence: episodic, confidence below floor
+        let mem_low_confidence = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA002)).to_string();
+        // mem_low_access: episodic, confidence ok but only 2 positive
+        // feedback events
+        let mem_low_access = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA003)).to_string();
+        // mem_harmful: episodic, would be eligible but has a harmful
+        // feedback event -> harmful_feedback disqualifier
+        let mem_harmful = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA004)).to_string();
+        // mem_tombstoned: episodic with tombstone -> tombstoned
+        let mem_tombstoned = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA005)).to_string();
+        // mem_quarantined: episodic with pending quarantine row ->
+        // pending_quarantine
+        let mem_quarantined = MemoryId::from_uuid(uuid::Uuid::from_u128(0xA006)).to_string();
+
+        let insert_memory = |id: &str, level: &str, confidence: f32| {
+            connection
+                .insert_memory(
+                    id,
+                    &CreateMemoryInput {
+                        workspace_id: workspace_id.clone(),
+                        level: level.to_owned(),
+                        kind: "rule".to_owned(),
+                        content: format!("memory body {id}"),
+                        workflow_id: None,
+                        confidence,
+                        utility: 0.5,
+                        importance: 0.5,
+                        provenance_uri: None,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        tags: Vec::new(),
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+
+        insert_memory(&mem_eligible, "episodic", 0.9)?;
+        insert_memory(&mem_low_confidence, "episodic", 0.5)?;
+        insert_memory(&mem_low_access, "episodic", 0.9)?;
+        insert_memory(&mem_harmful, "episodic", 0.9)?;
+        insert_memory(&mem_tombstoned, "episodic", 0.9)?;
+        insert_memory(&mem_quarantined, "episodic", 0.9)?;
+
+        connection
+            .tombstone_memory(&mem_tombstoned)
+            .map_err(|error| error.to_string())?;
+
+        // Positive feedback events.
+        let push_feedback = |seed: u128, target: &str, signal: &str| -> Result<(), String> {
+            connection
+                .insert_feedback_event(
+                    &feedback_id(seed),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: target.to_owned(),
+                        signal: signal.to_owned(),
+                        weight: 1.0,
+                        source_type: "agent_inference".to_owned(),
+                        source_id: Some("auto-promote-test".to_owned()),
+                        reason: Some("synthetic".to_owned()),
+                        evidence_json: None,
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())
+        };
+
+        for offset in 0..6_u128 {
+            push_feedback(0xB001 + offset, &mem_eligible, "helpful")?;
+        }
+        for offset in 0..6_u128 {
+            push_feedback(0xB010 + offset, &mem_low_confidence, "helpful")?;
+        }
+        for offset in 0..2_u128 {
+            push_feedback(0xB020 + offset, &mem_low_access, "helpful")?;
+        }
+        for offset in 0..6_u128 {
+            push_feedback(0xB030 + offset, &mem_harmful, "helpful")?;
+        }
+        // The disqualifier signal.
+        push_feedback(0xB040, &mem_harmful, "harmful")?;
+        // Also seed positive feedback on the quarantined memory so it
+        // would otherwise be eligible.
+        for offset in 0..6_u128 {
+            push_feedback(0xB050 + offset, &mem_quarantined, "helpful")?;
+        }
+
+        // Insert a pending quarantine row targeting mem_quarantined.
+        connection
+            .insert_feedback_quarantine(
+                "fq_0000000000000000000000quar",
+                &crate::db::CreateFeedbackQuarantineInput {
+                    workspace_id: workspace_id.clone(),
+                    source_id: "auto-promote-test".to_owned(),
+                    target_type: "memory".to_owned(),
+                    target_id: mem_quarantined.clone(),
+                    signal: "negative".to_owned(),
+                    weight: 1.0,
+                    source_type: "agent_inference".to_owned(),
+                    proposed_event_id: None,
+                    recorded_at: "2026-05-25T00:00:00Z".to_owned(),
+                    reason: "synthetic quarantine".to_owned(),
+                    event_reason: None,
+                    evidence_json: None,
+                    session_id: None,
+                    raw_event_hash: "blake3:auto-promote-test".to_owned(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        drop(connection);
+
+        let options = super::CurateAutoPromoteOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: Some("cc_1"),
+            dry_run: true,
+            apply: false,
+            min_access_count_episodic: 5,
+            min_confidence_episodic: 0.8,
+            min_access_count_semantic: 10,
+            min_confidence_semantic: 0.9,
+            max_per_run: 10,
+        };
+
+        let report = super::run_curate_auto_promote(&options)
+            .map_err(|error| format!("run_curate_auto_promote failed: {error:?}"))?;
+
+        assert_eq!(report.schema, super::CURATE_AUTO_PROMOTE_SCHEMA_V1);
+        assert!(report.dry_run, "dry_run flag must be reported true");
+        assert!(
+            !report.durable_mutation,
+            "dry-run must not be marked durable"
+        );
+        assert_eq!(report.scanned_memory_count, 6);
+        assert_eq!(report.eligible_count, 1);
+        assert_eq!(report.disqualified_count, 5);
+        assert_eq!(report.applied_count, 0);
+
+        // Proposals must be in (level, id) order.
+        let ordered_ids: Vec<&str> = report
+            .proposals
+            .iter()
+            .map(|p| p.memory_id.as_str())
+            .collect();
+        let mut expected = ordered_ids.clone();
+        expected.sort();
+        assert_eq!(
+            ordered_ids, expected,
+            "auto-promote proposals must be in deterministic id order"
+        );
+
+        let eligible = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_eligible)
+            .ok_or_else(|| "eligible memory missing from proposals".to_owned())?;
+        assert_eq!(eligible.eligibility, "eligible");
+        assert_eq!(eligible.proposed_level.as_deref(), Some("semantic"));
+        assert_eq!(eligible.access_count, 6);
+        assert_eq!(eligible.harmful_count, 0);
+        assert!(eligible.disqualifiers.is_empty());
+        assert_eq!(eligible.apply_status, "not_applied");
+        assert!(eligible.audit_id.is_none());
+        assert!(
+            eligible
+                .apply_command
+                .as_deref()
+                .unwrap_or("")
+                .contains("ee memory level"),
+            "eligible proposal must surface an apply command"
+        );
+
+        let low_confidence = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_low_confidence)
+            .ok_or_else(|| "low-confidence memory missing".to_owned())?;
+        assert_eq!(low_confidence.eligibility, "disqualified");
+        assert!(
+            low_confidence
+                .disqualifiers
+                .iter()
+                .any(|d| d == "below_min_confidence_episodic"),
+            "low-confidence memory must surface below_min_confidence_episodic; got {:?}",
+            low_confidence.disqualifiers
+        );
+
+        let low_access = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_low_access)
+            .ok_or_else(|| "low-access memory missing".to_owned())?;
+        assert!(
+            low_access
+                .disqualifiers
+                .iter()
+                .any(|d| d == "below_min_access_count_episodic"),
+            "low-access memory must surface below_min_access_count_episodic; got {:?}",
+            low_access.disqualifiers
+        );
+
+        let harmful = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_harmful)
+            .ok_or_else(|| "harmful memory missing".to_owned())?;
+        assert!(
+            harmful
+                .disqualifiers
+                .iter()
+                .any(|d| d == "harmful_feedback"),
+            "harmful memory must surface harmful_feedback; got {:?}",
+            harmful.disqualifiers
+        );
+
+        let tombstoned = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_tombstoned)
+            .ok_or_else(|| "tombstoned memory missing".to_owned())?;
+        assert!(
+            tombstoned.disqualifiers.iter().any(|d| d == "tombstoned"),
+            "tombstoned memory must surface tombstoned; got {:?}",
+            tombstoned.disqualifiers
+        );
+
+        let quarantined = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == mem_quarantined)
+            .ok_or_else(|| "quarantined memory missing".to_owned())?;
+        assert!(
+            quarantined
+                .disqualifiers
+                .iter()
+                .any(|d| d == "pending_quarantine"),
+            "quarantined memory must surface pending_quarantine; got {:?}",
+            quarantined.disqualifiers
+        );
+
+        // Crucial dry-run guarantee: no memory.level_transition audit
+        // rows were written.
+        let verify_connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let audit_rows = verify_connection
+            .list_audit_by_action(audit_actions::MEMORY_LEVEL_TRANSITION, None)
+            .map_err(|error| error.to_string())?;
+        assert!(
+            audit_rows.is_empty(),
+            "dry-run auto-promote must not write memory.level_transition audit rows; got {} row(s)",
+            audit_rows.len()
+        );
+
+        // Memory level must be unchanged after dry-run.
+        let still_episodic = verify_connection
+            .get_memory(&mem_eligible)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "eligible memory disappeared".to_owned())?;
+        assert_eq!(
+            still_episodic.level, "episodic",
+            "dry-run must leave memory level untouched"
+        );
+
+        Ok(())
+    }
+
+    /// bd-2r8vp: apply mode routes through the canonical
+    /// memory.level_transition audit path and updates memories.level.
+    #[test]
+    fn auto_promote_apply_mode_writes_canonical_level_transition_audit() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: workspace_path.display().to_string(),
+                    name: Some("auto-promote-apply-test".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0xC001)).to_string();
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "episodic".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "apply mode promotion target".to_owned(),
+                    workflow_id: None,
+                    confidence: 0.95,
+                    utility: 0.5,
+                    importance: 0.5,
+                    provenance_uri: None,
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        for offset in 0..6_u128 {
+            connection
+                .insert_feedback_event(
+                    &feedback_id(0xD001 + offset),
+                    &CreateFeedbackEventInput {
+                        workspace_id: workspace_id.clone(),
+                        target_type: "memory".to_owned(),
+                        target_id: memory_id.clone(),
+                        signal: "helpful".to_owned(),
+                        weight: 1.0,
+                        source_type: "agent_inference".to_owned(),
+                        source_id: Some("auto-promote-apply".to_owned()),
+                        reason: Some("synthetic".to_owned()),
+                        evidence_json: None,
+                        session_id: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        drop(connection);
+
+        let options = super::CurateAutoPromoteOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            actor: Some("cc_1"),
+            dry_run: false,
+            apply: true,
+            min_access_count_episodic: 5,
+            min_confidence_episodic: 0.8,
+            min_access_count_semantic: 10,
+            min_confidence_semantic: 0.9,
+            max_per_run: 10,
+        };
+
+        let report = super::run_curate_auto_promote(&options)
+            .map_err(|error| format!("apply-mode auto-promote failed: {error:?}"))?;
+
+        assert!(!report.dry_run, "apply mode must report dry_run=false");
+        assert!(report.durable_mutation, "apply must mark durable_mutation");
+        assert_eq!(report.applied_count, 1);
+        assert_eq!(report.apply_failed_count, 0);
+
+        let applied = report
+            .proposals
+            .iter()
+            .find(|p| p.memory_id == memory_id)
+            .ok_or_else(|| "promoted memory missing from proposals".to_owned())?;
+        assert_eq!(applied.apply_status, "applied");
+        assert!(applied.audit_id.is_some(), "apply must emit an audit id");
+
+        let verify_connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        let rows = verify_connection
+            .list_audit_by_action(audit_actions::MEMORY_LEVEL_TRANSITION, None)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            rows.len(),
+            1,
+            "apply must write exactly one memory.level_transition audit row"
+        );
+        assert_eq!(rows[0].target_id.as_deref(), Some(memory_id.as_str()));
+
+        let promoted = verify_connection
+            .get_memory(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "promoted memory disappeared".to_owned())?;
+        assert_eq!(promoted.level, "semantic");
+
+        Ok(())
     }
 }
