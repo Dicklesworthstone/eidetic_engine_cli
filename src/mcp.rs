@@ -2318,10 +2318,11 @@ fn handle_stdio_line(line: &str, max_bytes: usize) -> StdioLineOutcome {
             };
         }
     };
-    let shutdown = request
-        .get("method")
-        .and_then(Value::as_str)
-        .is_some_and(|method| method == "shutdown");
+    let shutdown = request.get("id").is_some()
+        && request
+            .get("method")
+            .and_then(Value::as_str)
+            .is_some_and(|method| method == "shutdown");
     StdioLineOutcome {
         response: handle_json_rpc_message(&request),
         shutdown,
@@ -2337,12 +2338,17 @@ fn write_json_rpc_response<W: Write>(
     let output_text = if response_text.len() > max_bytes {
         let id = response.get("id").cloned().filter(|value| !value.is_null());
         let error = mcp_size_limit_exceeded_error(id, "response", response_text.len(), max_bytes);
-        let error_text = error.to_string();
+        let mut error_text = error.to_string();
         if error_text.len() > max_bytes {
-            return Err(format!(
-                "MCP size_limit_exceeded response is {} bytes, above configured cap {max_bytes}",
-                error_text.len()
-            ));
+            let compact_error =
+                mcp_size_limit_exceeded_error(None, "response", response_text.len(), max_bytes);
+            error_text = compact_error.to_string();
+            if error_text.len() > max_bytes {
+                return Err(format!(
+                    "MCP size_limit_exceeded response is {} bytes, above configured cap {max_bytes}",
+                    error_text.len()
+                ));
+            }
         }
         error_text
     } else {
@@ -2514,6 +2520,39 @@ mod tests {
                 .and_then(|data| data.get("direction"))
                 .and_then(Value::as_str),
             Some("response")
+        );
+        assert!(
+            rendered.len() <= 1025,
+            "rendered capped response should stay within cap plus newline"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_response_writer_omits_id_when_error_would_exceed_cap() -> Result<(), String> {
+        let oversized_id = "request-id-".to_owned() + &"x".repeat(950);
+        let response = json_rpc_result(
+            json!(oversized_id),
+            json!({
+                "content": "x".repeat(4096)
+            }),
+        );
+        let mut output = Vec::new();
+        write_json_rpc_response(&mut output, &response, 1024)?;
+
+        let rendered = String::from_utf8(output).map_err(|error| error.to_string())?;
+        let parsed: Value =
+            serde_json::from_str(rendered.trim()).map_err(|error| error.to_string())?;
+        assert!(
+            parsed.get("id").is_some_and(Value::is_null),
+            "oversized fallback should omit an id that would exceed the configured cap: {parsed}"
+        );
+        assert_eq!(
+            parsed
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str),
+            Some(MCP_SIZE_LIMIT_EXCEEDED_CODE)
         );
         assert!(
             rendered.len() <= 1025,
@@ -2929,8 +2968,18 @@ mod tests {
         let Some(result) = response.get("result") else {
             return Err("resources/read response missing result".to_string());
         };
-        assert_eq!(result.get("isError").and_then(Value::as_bool), Some(false));
-        assert_eq!(result.get("exitCode").and_then(Value::as_u64), Some(0));
+        assert!(
+            result.get("isError").is_none(),
+            "resources/read must not use tool-result isError metadata"
+        );
+        assert!(
+            result.get("exitCode").is_none(),
+            "resources/read must not use tool-result exitCode metadata"
+        );
+        assert!(
+            result.get("stderr").is_none(),
+            "resources/read must not expose tool-result stderr metadata"
+        );
 
         let Some(contents) = result.get("contents").and_then(Value::as_array) else {
             return Err("resources/read response missing contents".to_string());
@@ -2979,7 +3028,7 @@ mod tests {
     }
 
     #[test]
-    fn resource_result_redacts_stderr_when_used_as_text() -> Result<(), String> {
+    fn resource_read_failure_returns_redacted_json_rpc_error() -> Result<(), String> {
         let raw_stderr =
             "error: failed to read /Users/alice/private/repo/logs/build.log\nNext: inspect it";
         let response = resource_read_result(
@@ -2989,25 +3038,20 @@ mod tests {
             String::new(),
             raw_stderr.to_owned(),
         );
-        let Some(result) = response.get("result") else {
-            return Err("resource response missing result".to_string());
-        };
-        let Some(stderr) = result.get("stderr").and_then(Value::as_str) else {
-            return Err("resource response missing stderr".to_string());
-        };
-        let Some(text) = result
-            .get("contents")
-            .and_then(Value::as_array)
-            .and_then(|contents| contents.first())
-            .and_then(|content| content.get("text"))
+        assert!(
+            response.get("result").is_none(),
+            "failed resources/read must not be reported as a successful resource body"
+        );
+        let Some(message) = response
+            .get("error")
+            .and_then(|error| error.get("message"))
             .and_then(Value::as_str)
         else {
-            return Err("resource response missing text".to_string());
+            return Err("resource response missing error message".to_string());
         };
 
-        assert_eq!(stderr, text);
-        assert!(!stderr.contains("/Users/alice/private/repo"));
-        assert!(stderr.contains("[REDACTED_PATH]"));
+        assert!(!message.contains("/Users/alice/private/repo"));
+        assert!(message.contains("[REDACTED_PATH]"));
         Ok(())
     }
 
@@ -3590,6 +3634,17 @@ mod tests {
         });
 
         assert_eq!(handle_json_rpc_message(&request), None);
+    }
+
+    #[test]
+    fn shutdown_notification_is_fire_and_forget_without_stopping_stdio_loop() {
+        let outcome = handle_stdio_line(
+            r#"{"jsonrpc":"2.0","method":"shutdown"}"#,
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+        );
+
+        assert!(outcome.response.is_none());
+        assert!(!outcome.shutdown);
     }
 
     #[test]
