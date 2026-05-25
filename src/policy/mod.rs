@@ -5,6 +5,7 @@
 //! diagnostics.
 
 pub mod memory_decay;
+pub mod producer_normalization;
 pub mod security_profile;
 pub mod trust_decay;
 
@@ -16,6 +17,7 @@ pub use memory_decay::{
     MemoryDecayThresholds, evaluate_memory_decay, evaluate_memory_decay_with_settings,
     memory_decay_freshness_score, memory_decay_half_life_days,
 };
+pub use producer_normalization::{NormalizedProducerId, ProducerIdKind, normalize_producer_id};
 pub use security_profile::{
     FilePermissionCheck, FilePermissionReport, ParseSecurityProfileError, SecurityProfile,
     check_workspace_permissions, load_profile_from_env,
