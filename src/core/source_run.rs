@@ -960,42 +960,64 @@ fn run_system_source_command(request: &SourceRunRequest) -> SourceRunExecution {
     let stderr_thread = thread::spawn(move || read_tail_pipe(stderr, tail_bytes_max));
     let mut stdout_thread = Some(stdout_thread);
     let mut stderr_thread = Some(stderr_thread);
+    let mut child_status = None;
 
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = join_capture_reader(&mut stdout_thread);
-                let stderr = join_capture_reader(&mut stderr_thread);
-                return SourceRunExecution::Completed {
-                    exit_code: status.code(),
-                    signal: exit_signal(&status),
-                    stdout,
-                    stderr,
-                    elapsed: started.elapsed(),
-                };
+        if child_status.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    child_status = Some(status);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    #[cfg(unix)]
+                    terminate_source_process_group(child_group);
+                    terminate_child_after_error(&mut child);
+                    let (stdout, mut stderr) = drain_capture_readers_after_timeout(
+                        &mut stdout_thread,
+                        &mut stderr_thread,
+                        tail_bytes_max,
+                    );
+                    append_capture_error(
+                        &mut stderr,
+                        &format!("source command wait failed: {error}"),
+                    );
+                    return SourceRunExecution::Completed {
+                        exit_code: None,
+                        signal: None,
+                        stdout,
+                        stderr,
+                        elapsed: started.elapsed(),
+                    };
+                }
             }
-            Ok(None) => {}
-            Err(error) => {
-                terminate_child_after_error(&mut child);
-                let stdout = join_capture_reader(&mut stdout_thread);
-                let mut stderr = join_capture_reader(&mut stderr_thread);
-                append_capture_error(&mut stderr, &format!("source command wait failed: {error}"));
-                return SourceRunExecution::Completed {
-                    exit_code: None,
-                    signal: None,
-                    stdout,
-                    stderr,
-                    elapsed: started.elapsed(),
-                };
-            }
+        }
+
+        if child_status.is_some() && capture_readers_finished(&stdout_thread, &stderr_thread) {
+            let Some(status) = child_status.take() else {
+                continue;
+            };
+            let stdout = join_capture_reader(&mut stdout_thread);
+            let stderr = join_capture_reader(&mut stderr_thread);
+            return SourceRunExecution::Completed {
+                exit_code: status.code(),
+                signal: exit_signal(&status),
+                stdout,
+                stderr,
+                elapsed: started.elapsed(),
+            };
         }
 
         let elapsed = started.elapsed();
         if elapsed >= request.timeout {
             #[cfg(unix)]
             terminate_source_process_group(child_group);
-            let killed_own_child = terminate_child_after_error(&mut child);
-            let status = child.wait().ok();
+            let killed_own_child = if child_status.is_none() {
+                terminate_child_after_error(&mut child)
+            } else {
+                false
+            };
+            let status = child_status.take().or_else(|| child.wait().ok());
             let (stdout, stderr) = drain_capture_readers_after_timeout(
                 &mut stdout_thread,
                 &mut stderr_thread,
@@ -1018,6 +1040,18 @@ fn run_system_source_command(request: &SourceRunRequest) -> SourceRunExecution {
                 .min(TIMEOUT_POLL_INTERVAL),
         );
     }
+}
+
+fn capture_readers_finished(
+    stdout_thread: &Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
+    stderr_thread: &Option<thread::JoinHandle<io::Result<SourceRunPipeCapture>>>,
+) -> bool {
+    stdout_thread
+        .as_ref()
+        .is_none_or(thread::JoinHandle::is_finished)
+        && stderr_thread
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
 }
 
 fn read_tail_pipe<R: Read>(
@@ -1079,13 +1113,7 @@ fn drain_capture_readers_after_timeout(
 ) -> (SourceRunPipeCapture, SourceRunPipeCapture) {
     let deadline = Instant::now() + TIMEOUT_PIPE_DRAIN_GRACE;
     loop {
-        if stdout_thread
-            .as_ref()
-            .is_none_or(thread::JoinHandle::is_finished)
-            && stderr_thread
-                .as_ref()
-                .is_none_or(thread::JoinHandle::is_finished)
-        {
+        if capture_readers_finished(stdout_thread, stderr_thread) {
             break;
         }
         let now = Instant::now();
@@ -1421,5 +1449,37 @@ mod tests {
         assert_eq!(evidence.status, SourceRunStatus::TimedOut);
         assert!(evidence.exit.killed_own_child);
         assert!(!evidence.exit.killed_peer_processes);
+    }
+
+    #[test]
+    fn system_runner_times_out_when_descendant_keeps_pipe_open() {
+        let request = SourceRunRequest::new(
+            SourceRunSource::new(SourceRunKind::Shell, "shell", "inherited_pipe"),
+            SourceRunCommand::new("sh").with_args(["-c", "(sleep 2) & printf 'ready\\n'; exit 0"]),
+            Duration::from_millis(50),
+        )
+        .with_tail_bytes_max(64);
+        let started = Instant::now();
+
+        let evidence = run_source_command_with(
+            &request,
+            &SystemSourceRunExecutor,
+            &FixedClock::new("2026-05-24T05:04:00Z"),
+        );
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "source runner must not block on inherited pipe handles after parent exit"
+        );
+        assert_eq!(evidence.status, SourceRunStatus::TimedOut);
+        assert_eq!(evidence.exit.exit_code, Some(0));
+        assert!(!evidence.exit.killed_own_child);
+        assert!(
+            evidence
+                .output
+                .stdout_tail
+                .as_deref()
+                .is_some_and(|tail| tail.contains("ready"))
+        );
     }
 }
