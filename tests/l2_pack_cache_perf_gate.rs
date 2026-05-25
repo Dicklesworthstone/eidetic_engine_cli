@@ -6,6 +6,8 @@ type TestResult<T = ()> = Result<T, String>;
 const CONTEXT_BENCH: &str = include_str!("../benches/context.rs");
 const BENCH_SCRIPT: &str = include_str!("../scripts/bench.sh");
 const E2E_SCRIPT: &str = include_str!("../scripts/e2e_overhaul/pack_cache_l2.sh");
+const ZSTD_DICTIONARY_E2E_SCRIPT: &str =
+    include_str!("../scripts/e2e_overhaul/zstd_pack_dictionary.sh");
 const BUDGETS_TOML: &str = include_str!("../benches/budgets.toml");
 const PERF_BASELINE: &str = include_str!("../benches/baselines/perf_v0_2.json");
 
@@ -60,6 +62,27 @@ fn l2_warm_context_cache_benchmark_is_registered() -> TestResult {
 }
 
 #[test]
+fn zstd_pack_dictionary_benchmark_is_registered() -> TestResult {
+    for expected in [
+        "ZSTD_PACK_DICTIONARY_BENCH_GROUP: &str = \"ee_context_zstd_pack_dictionary\"",
+        "ZSTD_PACK_DICTIONARY_OPERATION: &str = \"ee_context_zstd_pack_dictionary_l2\"",
+        "ZSTD_PACK_DICTIONARY_SAMPLE_COUNT: usize = 96",
+        "train_pack_compression_dictionary",
+        "PackL2CompressionDictionary",
+        "seed_zstd_pack_dictionary_cache",
+        "bench_context_zstd_pack_dictionary",
+        "zstd_pack_dictionary_benchmark_contract_matches_e2e_gate",
+        "criterion_group!",
+    ] {
+        if !CONTEXT_BENCH.contains(expected) {
+            return Err(format!("benches/context.rs missing `{expected}`"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn arena_workspace_reuse_context_benchmark_is_registered() -> TestResult {
     for expected in [
         "ARENA_MODE_BENCH_GROUP: &str = \"ee_context_arena_mode\"",
@@ -106,6 +129,37 @@ fn l2_pack_cache_e2e_harness_covers_runtime_contract() -> TestResult {
         if !E2E_SCRIPT.contains(expected) {
             return Err(format!(
                 "scripts/e2e_overhaul/pack_cache_l2.sh missing `{expected}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn zstd_pack_dictionary_e2e_harness_covers_dictionary_contract() -> TestResult {
+    for expected in [
+        "zstd_pack_dictionary",
+        "EE_L2_PACK_CACHE_DIR",
+        "zstd --train",
+        "ee.pack.l2_cache.entry.v2",
+        "dictionaryId",
+        "compressedByteLen",
+        "uncompressedByteLen",
+        "compression_dictionary_missing",
+        "compression_dictionary_corrupt",
+        "l2_pack_cache_corruption",
+        "zstd_pack_dictionary_perf_proof",
+        "pack_hash_unchanged",
+        "ledger_hash_unchanged",
+        "rendered_json_unchanged",
+        "markdown_output_unchanged",
+        "missing_dictionary_fallback_specific",
+        "corrupt_dictionary_fallback_specific",
+    ] {
+        if !ZSTD_DICTIONARY_E2E_SCRIPT.contains(expected) {
+            return Err(format!(
+                "scripts/e2e_overhaul/zstd_pack_dictionary.sh missing `{expected}`"
             ));
         }
     }

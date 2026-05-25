@@ -25,7 +25,15 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use ee::cache::pack_l2::{PackL2Cache, PackL2CacheLookup, PackL2CacheOptions};
+use ee::cache::pack_compression::{
+    PackCompressionDictionaryTrainingOutcome, PackCompressionSample,
+    PackCompressionSampleSourceKind, PackCompressionTrainingOptions,
+    train_pack_compression_dictionary,
+};
+use ee::cache::pack_l2::{
+    PackL2Cache, PackL2CacheLookup, PackL2CacheOptions, PackL2CompressionDictionary,
+    PackL2WriteReport,
+};
 use tempfile::TempDir;
 
 use ee::core::context::{
@@ -64,6 +72,8 @@ const ARENA_MODE_BENCH_GROUP: &str = "ee_context_arena_mode";
 const ARENA_MODE_BENCH_OPERATION: &str = "ee_context_arena_workspace_reuse";
 const PACK_DNA_ORCHESTRATION_BENCH_GROUP: &str = "ee_context_pack_dna_orchestration";
 const PACK_DNA_ORCHESTRATION_OPERATION: &str = "ee_context_pack_dna_attach";
+const ZSTD_PACK_DICTIONARY_BENCH_GROUP: &str = "ee_context_zstd_pack_dictionary";
+const ZSTD_PACK_DICTIONARY_OPERATION: &str = "ee_context_zstd_pack_dictionary_l2";
 const TIERED_RECALL_BENCH_GROUP: &str = "ee_context_tiered_recall";
 const TIERED_RECALL_OPERATION: &str = "ee_context_memory_tier_admission";
 const TIERED_RECALL_QUERY: &str = "tiered recall release cold explicit failure evidence";
@@ -76,6 +86,8 @@ const ARENA_MODE_BUDGET_P50_MS: f64 = 95.0;
 const ARENA_MODE_BUDGET_P99_MS: f64 = 240.0;
 const PACK_DNA_ORCHESTRATION_BUDGET_P50_MS: f64 = 125.0;
 const PACK_DNA_ORCHESTRATION_BUDGET_P99_MS: f64 = 300.0;
+const ZSTD_PACK_DICTIONARY_BUDGET_P50_MS: f64 = 15.0;
+const ZSTD_PACK_DICTIONARY_BUDGET_P99_MS: f64 = 75.0;
 const TIERED_RECALL_BUDGET_P50_MS: f64 = 140.0;
 const TIERED_RECALL_BUDGET_P99_MS: f64 = 340.0;
 const L2_CONCURRENT_IDENTICAL_REQUESTS: usize = 4;
@@ -84,6 +96,7 @@ const L2_EXPECTED_WARM_HITS: usize =
     L2_CONCURRENT_IDENTICAL_REQUESTS - L2_EXPECTED_FRESH_ASSEMBLIES;
 const ARENA_MODE_EXPECTED_WORKSPACE_FRESH_ALLOCATIONS: u64 = 1;
 const PACK_DNA_ORCHESTRATION_SERIAL_TASK_COUNT: u64 = 1;
+const ZSTD_PACK_DICTIONARY_SAMPLE_COUNT: usize = 96;
 const TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN: u64 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -683,6 +696,124 @@ fn seed_l2_warm_cache(cache_root: &Path) -> (PackL2Cache, String) {
     (cache, key)
 }
 
+fn zstd_pack_dictionary_pack_json() -> serde_json::Value {
+    let repeated_terms = (0..96)
+        .map(|index| {
+            format!(
+                "zstd dictionary pack fixture repeated provenance segment {index:03}: release context cache ledger hash pack hash markdown parity"
+            )
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "pack": {
+                "schema": "ee.pack.v2",
+                "hash": "blake3:zstd-pack-dictionary-benchmark-pack",
+                "ledgerHash": "blake3:zstd-pack-dictionary-benchmark-ledger",
+                "markdownHash": "sha256:zstd-pack-dictionary-benchmark-markdown",
+                "text": repeated_terms.join("\n"),
+                "items": repeated_terms
+                    .iter()
+                    .enumerate()
+                    .map(|(index, content)| {
+                        serde_json::json!({
+                            "id": format!("mem_zstd_pack_dictionary_{index:03}"),
+                            "content": content,
+                            "why": "dictionary-compressed L2 cache benchmark fixture",
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            },
+        },
+        "degraded": [],
+    })
+}
+
+fn zstd_pack_dictionary_training_samples() -> Vec<PackCompressionSample> {
+    (0..ZSTD_PACK_DICTIONARY_SAMPLE_COUNT)
+        .map(|index| {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "schema": "ee.pack.v2",
+                "hash": format!("blake3:zstd-pack-dictionary-training-{index:03}"),
+                "ledgerHash": format!("blake3:zstd-pack-dictionary-ledger-{index:03}"),
+                "text": format!(
+                    "zstd dictionary pack fixture repeated provenance segment {index:03}: release context cache ledger hash pack hash markdown parity"
+                ),
+                "items": [
+                    {
+                        "id": format!("mem_zstd_pack_dictionary_{index:03}"),
+                        "why": "dictionary-compressed L2 cache benchmark fixture",
+                    },
+                    {
+                        "id": format!("mem_zstd_pack_dictionary_shared_{index:03}"),
+                        "why": "shared dictionary corpus term cache replay",
+                    },
+                ],
+            }))
+            .expect("zstd dictionary training sample JSON");
+            PackCompressionSample::new(
+                PackCompressionSampleSourceKind::PackRecord,
+                format!("pack-zstd-dictionary-{index:03}"),
+                Some(index as u64),
+                payload,
+            )
+            .with_redaction_level("ids_hashes_counts_paths_no_pack_content_no_query_text")
+        })
+        .collect()
+}
+
+fn zstd_pack_dictionary() -> PackL2CompressionDictionary {
+    let options = PackCompressionTrainingOptions {
+        workspace_id: Some("wsp_zstd_pack_dictionary_benchmark".to_owned()),
+        max_dictionary_bytes: 8 * 1024,
+        max_sample_count: ZSTD_PACK_DICTIONARY_SAMPLE_COUNT,
+        max_sample_bytes: 512 * 1024,
+        ..PackCompressionTrainingOptions::default()
+    };
+    let outcome =
+        train_pack_compression_dictionary(&zstd_pack_dictionary_training_samples(), &options)
+            .expect("train zstd pack dictionary benchmark fixture");
+    let report = match outcome {
+        PackCompressionDictionaryTrainingOutcome::Trained(report) => report,
+        PackCompressionDictionaryTrainingOutcome::NoEligibleSamples(_) => {
+            panic!("zstd pack dictionary benchmark fixture should train a dictionary")
+        }
+    };
+    PackL2CompressionDictionary {
+        id: report
+            .dictionary_id
+            .expect("trained dictionary should have an id"),
+        byte_hash: report
+            .dictionary_byte_hash
+            .expect("trained dictionary should have a byte hash"),
+        bytes: report.dictionary_bytes,
+    }
+}
+
+fn seed_zstd_pack_dictionary_cache(
+    cache_root: &Path,
+    with_dictionary: bool,
+) -> (PackL2Cache, String, Option<String>, PackL2WriteReport) {
+    let cache = PackL2Cache::new(
+        cache_root.to_path_buf(),
+        PackL2CacheOptions::new(8 * 1_048_576, Duration::from_secs(300)),
+    );
+    let key = "blake3:ee-context-zstd-pack-dictionary-benchmark-key".to_owned();
+    let dictionary = with_dictionary.then(zstd_pack_dictionary);
+    let dictionary_id = dictionary.as_ref().map(|dictionary| dictionary.id.clone());
+    let report = cache
+        .put_compressed_with_dictionary_at(
+            &key,
+            &zstd_pack_dictionary_pack_json(),
+            dictionary.as_ref(),
+            1_800_000_000,
+        )
+        .expect("seed zstd dictionary L2 pack cache entry");
+    (cache, key, dictionary_id, report)
+}
+
 fn active_bench_profile() -> String {
     std::env::var("EE_BENCH_PROFILE").unwrap_or_else(|_| "manual".to_owned())
 }
@@ -1000,6 +1131,88 @@ fn bench_context_l2_warm_cache(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark dictionary-compressed L2 pack cache retrieval against a no-dictionary entry.
+fn bench_context_zstd_pack_dictionary(c: &mut Criterion) {
+    let mut group = c.benchmark_group(ZSTD_PACK_DICTIONARY_BENCH_GROUP);
+    let dictionary_temp_dir = TempDir::new().expect("dictionary L2 temp dir");
+    let baseline_temp_dir = TempDir::new().expect("baseline L2 temp dir");
+    let (dictionary_cache, dictionary_key, dictionary_id, dictionary_report) =
+        seed_zstd_pack_dictionary_cache(&dictionary_temp_dir.path().join("pack-l2-dict"), true);
+    let (baseline_cache, baseline_key, _, baseline_report) =
+        seed_zstd_pack_dictionary_cache(&baseline_temp_dir.path().join("pack-l2-plain"), false);
+
+    group.bench_function(
+        BenchmarkId::new(ZSTD_PACK_DICTIONARY_OPERATION, "dictionary_hit_json"),
+        |b| {
+            b.iter(|| {
+                match dictionary_cache
+                    .get(black_box(dictionary_key.as_str()))
+                    .expect("dictionary-compressed L2 cache lookup")
+                {
+                    PackL2CacheLookup::Hit(hit) => {
+                        let compression = hit
+                            .compression
+                            .as_ref()
+                            .expect("dictionary entry should be compressed");
+                        black_box((
+                            hit.pack_json,
+                            compression.dictionary_id.clone(),
+                            compression.compressed_bytes,
+                            compression.uncompressed_bytes,
+                            compression.decompression_latency_ms,
+                            dictionary_id.clone(),
+                            dictionary_report.byte_len,
+                        ))
+                    }
+                    PackL2CacheLookup::Miss(miss) => {
+                        panic!(
+                            "dictionary-compressed L2 cache entry should hit, got miss: {:?}",
+                            miss.reason
+                        );
+                    }
+                }
+            });
+        },
+    );
+
+    group.bench_function(
+        BenchmarkId::new(
+            ZSTD_PACK_DICTIONARY_OPERATION,
+            "baseline_no_dictionary_hit_json",
+        ),
+        |b| {
+            b.iter(|| {
+                match baseline_cache
+                    .get(black_box(baseline_key.as_str()))
+                    .expect("baseline compressed L2 cache lookup")
+                {
+                    PackL2CacheLookup::Hit(hit) => {
+                        let compression = hit
+                            .compression
+                            .as_ref()
+                            .expect("baseline entry should be compressed");
+                        black_box((
+                            hit.pack_json,
+                            compression.dictionary_id.clone(),
+                            compression.compressed_bytes,
+                            compression.uncompressed_bytes,
+                            baseline_report.byte_len,
+                        ))
+                    }
+                    PackL2CacheLookup::Miss(miss) => {
+                        panic!(
+                            "baseline compressed L2 cache entry should hit, got miss: {:?}",
+                            miss.reason
+                        );
+                    }
+                }
+            });
+        },
+    );
+
+    group.finish();
+}
+
 /// Benchmark Pack DNA explain attachment separately from baseline context packing.
 fn bench_context_pack_dna_orchestration(c: &mut Criterion) {
     let mut group = c.benchmark_group(PACK_DNA_ORCHESTRATION_BENCH_GROUP);
@@ -1142,6 +1355,7 @@ criterion_group!(
     bench_context_arena_mode,
     bench_context_l2_warm_cache,
     bench_context_pack_dna_orchestration,
+    bench_context_zstd_pack_dictionary,
     bench_context_tiered_recall
 );
 criterion_main!(benches);
@@ -1163,10 +1377,13 @@ mod tests {
         S4_STRESS_SCALE, TIERED_RECALL_BENCH_GROUP, TIERED_RECALL_BUDGET_P50_MS,
         TIERED_RECALL_BUDGET_P99_MS, TIERED_RECALL_CANDIDATE_POOL,
         TIERED_RECALL_EXPECTED_REQUIRED_COLD_MIN, TIERED_RECALL_MEMORY_COUNT,
-        TIERED_RECALL_OPERATION, TIERED_RECALL_QUERY, arena_fixture_coverage_fill,
-        arena_fixture_provenance_heavy, l2_warm_pack_json, pack_dna_orchestration_options,
-        s4_resource_scales_for_profile, seed_database, seed_l2_warm_cache,
-        seed_pack_dna_orchestration_database,
+        TIERED_RECALL_OPERATION, TIERED_RECALL_QUERY, ZSTD_PACK_DICTIONARY_BENCH_GROUP,
+        ZSTD_PACK_DICTIONARY_BUDGET_P50_MS, ZSTD_PACK_DICTIONARY_BUDGET_P99_MS,
+        ZSTD_PACK_DICTIONARY_OPERATION, ZSTD_PACK_DICTIONARY_SAMPLE_COUNT,
+        arena_fixture_coverage_fill, arena_fixture_provenance_heavy, l2_warm_pack_json,
+        pack_dna_orchestration_options, s4_resource_scales_for_profile, seed_database,
+        seed_l2_warm_cache, seed_pack_dna_orchestration_database, seed_zstd_pack_dictionary_cache,
+        zstd_pack_dictionary_pack_json,
     };
 
     #[test]
@@ -1314,6 +1531,92 @@ mod tests {
         let options = pack_dna_orchestration_options(&workspace_path, &db_path, &index_dir);
         assert_eq!(options.candidate_pool, Some(12));
         assert_eq!(options.max_tokens, Some(1_200));
+        Ok(())
+    }
+
+    #[test]
+    fn zstd_pack_dictionary_benchmark_contract_matches_e2e_gate() -> Result<(), String> {
+        assert_eq!(
+            ZSTD_PACK_DICTIONARY_BENCH_GROUP,
+            "ee_context_zstd_pack_dictionary"
+        );
+        assert_eq!(
+            ZSTD_PACK_DICTIONARY_OPERATION,
+            "ee_context_zstd_pack_dictionary_l2"
+        );
+        assert_eq!(ZSTD_PACK_DICTIONARY_SAMPLE_COUNT, 96);
+        assert!(
+            ZSTD_PACK_DICTIONARY_BUDGET_P50_MS > 0.0
+                && ZSTD_PACK_DICTIONARY_BUDGET_P99_MS >= ZSTD_PACK_DICTIONARY_BUDGET_P50_MS,
+            "zstd dictionary benchmark budgets must be positive and monotonic"
+        );
+
+        let temp_dir = TempDir::new().map_err(|error| error.to_string())?;
+        let (dictionary_cache, dictionary_key, dictionary_id, dictionary_report) =
+            seed_zstd_pack_dictionary_cache(&temp_dir.path().join("pack-l2-dict"), true);
+        let (baseline_cache, baseline_key, _, baseline_report) =
+            seed_zstd_pack_dictionary_cache(&temp_dir.path().join("pack-l2-plain"), false);
+        assert_eq!(
+            dictionary_key, baseline_key,
+            "dictionary and baseline fixtures must share a comparable cache key"
+        );
+        let dictionary_id = dictionary_id.ok_or_else(|| "dictionary id missing".to_owned())?;
+        let dictionary_compression = dictionary_report
+            .compression
+            .as_ref()
+            .ok_or_else(|| "dictionary write report missing compression".to_owned())?;
+        let baseline_compression = baseline_report
+            .compression
+            .as_ref()
+            .ok_or_else(|| "baseline write report missing compression".to_owned())?;
+        assert_eq!(
+            dictionary_compression.dictionary_id.as_deref(),
+            Some(dictionary_id.as_str())
+        );
+        assert!(
+            dictionary_compression.compressed_bytes < dictionary_compression.uncompressed_bytes,
+            "dictionary-compressed payload must improve on uncompressed fixture bytes"
+        );
+        assert!(
+            baseline_compression.compressed_bytes < baseline_compression.uncompressed_bytes,
+            "baseline compressed payload must improve on uncompressed fixture bytes"
+        );
+
+        let hit = match dictionary_cache
+            .get(&dictionary_key)
+            .map_err(|error| error.to_string())?
+        {
+            super::PackL2CacheLookup::Hit(hit) => hit,
+            super::PackL2CacheLookup::Miss(miss) => {
+                return Err(format!(
+                    "dictionary-compressed L2 entry missed: {:?}",
+                    miss.reason
+                ));
+            }
+        };
+        assert_eq!(hit.pack_json, zstd_pack_dictionary_pack_json());
+        let hit_compression = hit
+            .compression
+            .ok_or_else(|| "dictionary hit missing compression metadata".to_owned())?;
+        assert_eq!(
+            hit_compression.dictionary_id.as_deref(),
+            Some(dictionary_id.as_str())
+        );
+        assert_eq!(
+            hit_compression.uncompressed_bytes,
+            dictionary_compression.uncompressed_bytes
+        );
+
+        let baseline_hit = match baseline_cache
+            .get(&baseline_key)
+            .map_err(|error| error.to_string())?
+        {
+            super::PackL2CacheLookup::Hit(hit) => hit,
+            super::PackL2CacheLookup::Miss(miss) => {
+                return Err(format!("baseline L2 entry missed: {:?}", miss.reason));
+            }
+        };
+        assert_eq!(baseline_hit.pack_json, zstd_pack_dictionary_pack_json());
         Ok(())
     }
 
