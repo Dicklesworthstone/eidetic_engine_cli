@@ -837,6 +837,147 @@ mod tests {
             .and_then(JsonValue::as_str)
     }
 
+    fn markdown_example_mentions_envelope_contract(source: &str) -> bool {
+        source.contains("\"schema\"")
+            && (source.contains("\"ee.response.") || source.contains("\"ee.error."))
+    }
+
+    fn strip_jsonc_comments(source: &str) -> String {
+        let mut out = String::with_capacity(source.len());
+        let mut chars = source.chars().peekable();
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut in_line_comment = false;
+        let mut in_block_comment = false;
+
+        while let Some(ch) = chars.next() {
+            if in_line_comment {
+                if ch == '\n' {
+                    in_line_comment = false;
+                    out.push(ch);
+                }
+                continue;
+            }
+            if in_block_comment {
+                if ch == '\n' {
+                    out.push('\n');
+                } else if ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
+                }
+                continue;
+            }
+
+            if in_string {
+                out.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if ch == '"' {
+                in_string = true;
+                out.push(ch);
+            } else if ch == '/' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_line_comment = true;
+            } else if ch == '/' && chars.peek() == Some(&'*') {
+                chars.next();
+                in_block_comment = true;
+            } else {
+                out.push(ch);
+            }
+        }
+
+        out
+    }
+
+    fn remove_json_trailing_commas(source: &str) -> String {
+        let chars = source.chars().collect::<Vec<_>>();
+        let mut out = String::with_capacity(source.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut index = 0;
+
+        while index < chars.len() {
+            let ch = chars[index];
+            if in_string {
+                out.push(ch);
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                index += 1;
+                continue;
+            }
+
+            if ch == '"' {
+                in_string = true;
+                out.push(ch);
+                index += 1;
+                continue;
+            }
+
+            if ch == ',' {
+                let mut lookahead = index + 1;
+                while chars
+                    .get(lookahead)
+                    .is_some_and(|next| next.is_whitespace())
+                {
+                    lookahead += 1;
+                }
+                if matches!(chars.get(lookahead), Some(&'}') | Some(&']')) {
+                    index += 1;
+                    continue;
+                }
+            }
+
+            out.push(ch);
+            index += 1;
+        }
+
+        out
+    }
+
+    fn normalize_jsonc(source: &str) -> String {
+        remove_json_trailing_commas(&strip_jsonc_comments(source))
+    }
+
+    fn parse_markdown_json_example(
+        example: &MarkdownJsonExample,
+    ) -> Result<Vec<JsonValue>, String> {
+        let source = if example.fence_language == "jsonc" {
+            normalize_jsonc(&example.body)
+        } else {
+            example.body.clone()
+        };
+        let mut values = Vec::new();
+        let stream = serde_json::Deserializer::from_str(&source).into_iter::<JsonValue>();
+        for value in stream {
+            values.push(value.map_err(|error| {
+                format!(
+                    "contract {} example is not parseable JSON after JSONC normalization: {error}",
+                    example.fence_language
+                )
+            })?);
+        }
+        if values.is_empty() {
+            return Err(format!(
+                "contract {} example does not contain a JSON value",
+                example.fence_language
+            ));
+        }
+        Ok(values)
+    }
+
     fn json_example_validation_issues_for_text(
         path: &str,
         text: &str,
@@ -845,34 +986,33 @@ mod tests {
         let mut issues = Vec::new();
 
         for example in extract_markdown_json_examples(path, text) {
-            if !example.body.contains("\"schema\"") {
-                continue;
-            }
-            if example.fence_language == "jsonc" {
+            if !markdown_example_mentions_envelope_contract(&example.body) {
                 continue;
             }
 
-            let value = match serde_json::from_str::<JsonValue>(&example.body) {
-                Ok(value) => value,
+            let values = match parse_markdown_json_example(&example) {
+                Ok(values) => values,
                 Err(error) => {
                     issues.push(json_example_issue(
                         &example.path,
                         example.line,
                         "<unparseable>",
-                        format!("contract JSON example is not parseable JSON: {error}"),
+                        error,
                         &example.body,
                     ));
                     continue;
                 }
             };
 
-            issues.extend(json_example_validation_issues_for_value(
-                &example.path,
-                example.line,
-                &example.body,
-                &value,
-                inventory,
-            ));
+            for value in values {
+                issues.extend(json_example_validation_issues_for_value(
+                    &example.path,
+                    example.line,
+                    &example.body,
+                    &value,
+                    inventory,
+                ));
+            }
         }
 
         issues
@@ -1356,6 +1496,7 @@ mod tests {
                         "rebuild",
                         "permission",
                         "migration",
+                        "command",
                         "broaden",
                         "narrow",
                         "seed",
@@ -2972,18 +3113,100 @@ mod tests {
             ),
         )?;
 
-        let partial_jsonc = json_example_validation_issues_for_text(
+        let malformed_jsonc_sketch = json_example_validation_issues_for_text(
             "AGENTS.md",
             r#"```jsonc
 { "schema": "ee.response.v2", "success": true, "data": { ... } }
 ```"#,
             &inventory,
         );
+        ensure_equal(
+            &malformed_jsonc_sketch.len(),
+            &1,
+            "malformed jsonc sketch issue count",
+        )?;
         ensure(
-            partial_jsonc.is_empty(),
+            malformed_jsonc_sketch[0].schema_id == "<unparseable>"
+                && malformed_jsonc_sketch[0].message.contains("parseable JSON"),
             format!(
-                "jsonc sketches should be ignored by strict JSON validation but got:\n{}",
-                json_example_validation_events(&partial_jsonc)
+                "malformed jsonc envelope sketches should not be skipped:\n{}",
+                json_example_validation_events(&malformed_jsonc_sketch)
+            ),
+        )?;
+
+        let valid_jsonc = json_example_validation_issues_for_text(
+            "README.md",
+            r#"```jsonc
+{
+  // JSONC contract examples are normalized before validation.
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {},
+  "degraded": [],
+}
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "search_index_unavailable",
+    "message": "Search index is stale or unavailable.",
+    "severity": "medium",
+    "repair": "ee index rebuild --workspace .",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "rebuild",
+          "rationale": "Rebuild the derived index.",
+          "command": "ee index rebuild --workspace .",
+        },
+      ],
+    },
+  },
+}
+```"#,
+            &inventory,
+        );
+        ensure(
+            valid_jsonc.is_empty(),
+            format!(
+                "valid jsonc envelope examples should pass but got:\n{}",
+                json_example_validation_events(&valid_jsonc)
+            ),
+        )?;
+
+        let drifted_jsonc = json_example_validation_issues_for_text(
+            "README.md",
+            r#"```jsonc
+{
+  // This used to bypass validation because the fence language was jsonc.
+  "schema": "ee.response.v1",
+  "success": true,
+  "data": {},
+}
+{
+  "schema": "ee.response.v2",
+  "data": {},
+}
+```"#,
+            &inventory,
+        );
+        ensure_equal(&drifted_jsonc.len(), &2, "drifted jsonc issue count")?;
+        ensure(
+            drifted_jsonc
+                .iter()
+                .any(|issue| issue.schema_id == "ee.response.v1"),
+            format!(
+                "drifted jsonc should report legacy response schema:\n{}",
+                json_example_validation_events(&drifted_jsonc)
+            ),
+        )?;
+        ensure(
+            drifted_jsonc
+                .iter()
+                .any(|issue| issue.message.contains("success")),
+            format!(
+                "drifted jsonc should report malformed v2 response:\n{}",
+                json_example_validation_events(&drifted_jsonc)
             ),
         )?;
 

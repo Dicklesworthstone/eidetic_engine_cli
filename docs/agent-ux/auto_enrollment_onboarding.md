@@ -111,13 +111,21 @@ Error path uses `ee.error.v2`:
 ```jsonc
 {
   "schema": "ee.error.v2",
-  "success": false,
   "error": {
-    "code": "...",
-    "severity": "info" | "low" | "warning" | "medium" | "high" | "critical",
-    "message": "...",
-    "repair": "...",
-    "details": { "recovery": [ /* structured actions */ ] }
+    "code": "mesh_auto_enroll_blocked",
+    "message": "Auto-enrollment is blocked until the hello responder is running.",
+    "severity": "medium",
+    "repair": "ee daemon --foreground",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "command",
+          "rationale": "Start the local hello responder before retrying auto-enrollment.",
+          "command": "ee daemon --foreground"
+        }
+      ]
+    }
   }
 }
 ```

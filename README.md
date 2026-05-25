@@ -509,8 +509,31 @@ Current top-level groups:
 Machine readers should inspect the JSON contract before trusting a result:
 
 ```jsonc
-{ "schema": "ee.response.v2", "success": true,  "data": { }, "degraded": [ ] }
-{ "schema": "ee.error.v2",    "error": { "code": "...", "message": "...", "severity": "...", "repair": "...", "details": { "recovery": [ ] } } }
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {},
+  "degraded": []
+}
+{
+  "schema": "ee.error.v2",
+  "error": {
+    "code": "migration_required",
+    "message": "Database schema migration is required.",
+    "severity": "high",
+    "repair": "ee migrate run --workspace .",
+    "details": {
+      "recovery": [
+        {
+          "priority": 0,
+          "kind": "migration",
+          "rationale": "Apply pending local schema migrations.",
+          "command": "ee migrate run --workspace ."
+        }
+      ]
+    }
+  }
+}
 ```
 
 | Check | What to read |
