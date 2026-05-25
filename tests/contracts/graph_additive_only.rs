@@ -251,7 +251,10 @@ fn graph_payload_for_baseline(surface: &str, actual: Value) -> Result<Value, Str
     }
 
     if actual.get("schema").and_then(Value::as_str) != Some("ee.response.v2") {
-        return Ok(actual);
+        let schema = actual.get("schema").and_then(Value::as_str);
+        return Err(format!(
+            "health graph baseline response schema must be ee.response.v2, got {schema:?}"
+        ));
     }
 
     if actual.get("success").and_then(Value::as_bool) != Some(true) {
@@ -260,7 +263,6 @@ fn graph_payload_for_baseline(surface: &str, actual: Value) -> Result<Value, Str
 
     let data = actual
         .get("data")
-        .cloned()
         .ok_or_else(|| "health graph baseline response envelope missing data".to_owned())?;
     let inner_schema = data.get("schema").and_then(Value::as_str);
     if inner_schema != Some("ee.health.structural.v1") {
@@ -269,11 +271,11 @@ fn graph_payload_for_baseline(surface: &str, actual: Value) -> Result<Value, Str
         ));
     }
 
-    Ok(data)
+    Ok(actual)
 }
 
 #[test]
-fn graph_payload_for_baseline_unwraps_health_response_v2() -> TestResult {
+fn graph_payload_for_baseline_requires_health_response_v2() -> TestResult {
     let payload = serde_json::json!({
         "schema": "ee.health.structural.v1",
         "summary": {
@@ -291,11 +293,11 @@ fn graph_payload_for_baseline_unwraps_health_response_v2() -> TestResult {
     let normalized = graph_payload_for_baseline("health", response)?;
     assert_eq!(
         normalized.get("schema").and_then(Value::as_str),
-        Some("ee.health.structural.v1")
+        Some("ee.response.v2")
     );
     assert_eq!(
         normalized
-            .get("summary")
+            .pointer("/data/summary")
             .and_then(Value::as_object)
             .map(|summary| summary.len()),
         Some(2)
@@ -317,6 +319,21 @@ fn graph_payload_for_baseline_rejects_health_envelope_schema_drift() {
     let error = graph_payload_for_baseline("health", response)
         .expect_err("health graph payload schema drift must fail clearly");
     assert!(error.contains("ee.health.structural.v1"));
+}
+
+#[test]
+fn graph_payload_for_baseline_rejects_bare_health_payload() {
+    let bare_payload = serde_json::json!({
+        "schema": "ee.health.structural.v1",
+        "summary": {
+            "critical": 0,
+            "warning": 1
+        }
+    });
+
+    let error = graph_payload_for_baseline("health", bare_payload)
+        .expect_err("old bare health structural payload must fail the public-surface baseline");
+    assert!(error.contains("ee.response.v2"));
 }
 
 fn run_ee(args: &[String]) -> Result<Output, String> {

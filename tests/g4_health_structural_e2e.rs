@@ -33,8 +33,14 @@ fn g4_health_structural_script_passes_with_cargo_built_binary() {
     let log = std::fs::read_to_string(&log_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", log_path.display()));
     assert!(
+        log.contains("g4_health_structural_response_schema"),
+        "structured log should include the response envelope schema assertion; log path: {}\nlog:\n{}",
+        log_path.display(),
+        log
+    );
+    assert!(
         log.contains("g4_health_structural_schema"),
-        "structured log should include the schema assertion; log path: {}\nlog:\n{}",
+        "structured log should include the inner structural schema assertion; log path: {}\nlog:\n{}",
         log_path.display(),
         log
     );

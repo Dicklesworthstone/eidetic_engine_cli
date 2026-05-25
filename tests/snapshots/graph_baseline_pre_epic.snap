@@ -56,22 +56,26 @@ expression: graph_baseline_pre_epic
       "name": "health",
       "command": "ee health --robot-insights --workspace <fixture> --json",
       "baseline": {
-        "contradictionClusters": [],
-        "degraded": [],
-        "kTruss": {
-          "maxK": 0,
-          "supportSubgraphMemoryCount": 0,
-          "topMembers": []
+        "data": {
+          "contradictionClusters": [],
+          "degraded": [],
+          "kTruss": {
+            "maxK": 0,
+            "supportSubgraphMemoryCount": 0,
+            "topMembers": []
+          },
+          "schema": "ee.health.structural.v1",
+          "snapshotVersion": 1,
+          "summary": {
+            "contradictionClusterCount": 0,
+            "kTrussMaxK": 0,
+            "recommendedCommand": "ee curate candidates --workspace . --json",
+            "status": "ok",
+            "supportSubgraphMemoryCount": 0
+          }
         },
-        "schema": "ee.health.structural.v1",
-        "snapshotVersion": 1,
-        "summary": {
-          "contradictionClusterCount": 0,
-          "kTrussMaxK": 0,
-          "recommendedCommand": "ee curate candidates --workspace . --json",
-          "status": "ok",
-          "supportSubgraphMemoryCount": 0
-        }
+        "schema": "ee.response.v2",
+        "success": true
       }
     }
   ]
