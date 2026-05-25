@@ -90,14 +90,14 @@ base64 = { version = "0.22.1" }
 blake3 = { version = "1.5" }
 crossbeam-queue = { version = "0.3" }
 determinism = { version = "0.1.0", path = "crates/determinism" }
-franken-agent-detection = { version = "0.1.3", path = "/data/projects/franken_agent_detection", default-features = false }
+franken-agent-detection = { version = "0.1.3", path = "../franken_agent_detection", default-features = false }
 chrono = { version = "0.4.44", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap_complete = { version = "4.6.1" }
-fnx-algorithms = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-algorithms" }
-fnx-classes = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-classes" }
-fnx-runtime = { version = "0.1.0", path = "/data/projects/franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
-frankensearch = { version = "0.3.0", path = "/data/projects/frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
+fnx-algorithms = { version = "0.1.0", path = "../franken_networkx/crates/fnx-algorithms" }
+fnx-classes = { version = "0.1.0", path = "../franken_networkx/crates/fnx-classes" }
+fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtime", default-features = false, features = ["asupersync-integration"] }
+frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
 getrandom = { version = "0.3.4" }
 regex-lite = { version = "0.1" }
 ring = { version = "0.17" }
@@ -107,14 +107,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 serde_yaml = { version = "0.9.34" }
 sha2 = { version = "0.10.9" }
-sqlmodel-core = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-core" }
-sqlmodel-frankensqlite = { version = "0.2.2", path = "/data/projects/sqlmodel_rust/crates/sqlmodel-frankensqlite" }
+sqlmodel-core = { version = "0.2.2", path = "../sqlmodel_rust/crates/sqlmodel-core" }
+sqlmodel-frankensqlite = { version = "0.2.2", path = "../sqlmodel_rust/crates/sqlmodel-frankensqlite" }
 tempfile = { version = "3.27.0" }
 # Real BPE tokenization for context pack budget enforcement
 # (eidetic_engine_cli-aitk). Default features only; the `async-openai`
 # feature would pull tokio/reqwest/hyper which are forbidden here.
 tiktoken-rs = { version = "0.11.0", default-features = false }
-toon = { package = "tru", version = "0.2.2", path = "/data/projects/toon_rust", default-features = false }
+toon = { package = "tru", version = "0.2.2", path = "../toon_rust", default-features = false }
 toml_edit = { version = "0.25.11", default-features = false, features = ["parse", "display"] }
 tracing = { version = "0.1.44" }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
@@ -271,39 +271,39 @@ name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
 [patch.crates-io]
-asupersync = { path = "/data/projects/asupersync" }
-fsqlite = { path = "/data/projects/frankensqlite/crates/fsqlite" }
-fsqlite-core = { path = "/data/projects/frankensqlite/crates/fsqlite-core" }
-fsqlite-error = { path = "/data/projects/frankensqlite/crates/fsqlite-error" }
-fsqlite-types = { path = "/data/projects/frankensqlite/crates/fsqlite-types" }
-fsqlite-func = { path = "/data/projects/frankensqlite/crates/fsqlite-func" }
-fsqlite-ext-fts5 = { path = "/data/projects/frankensqlite/crates/fsqlite-ext-fts5" }
-fsqlite-ext-json = { path = "/data/projects/frankensqlite/crates/fsqlite-ext-json" }
-fsqlite-ast = { path = "/data/projects/frankensqlite/crates/fsqlite-ast" }
-fsqlite-btree = { path = "/data/projects/frankensqlite/crates/fsqlite-btree" }
-fsqlite-pager = { path = "/data/projects/frankensqlite/crates/fsqlite-pager" }
-fsqlite-parser = { path = "/data/projects/frankensqlite/crates/fsqlite-parser" }
-fsqlite-planner = { path = "/data/projects/frankensqlite/crates/fsqlite-planner" }
-fsqlite-vdbe = { path = "/data/projects/frankensqlite/crates/fsqlite-vdbe" }
-fsqlite-vfs = { path = "/data/projects/frankensqlite/crates/fsqlite-vfs" }
-fsqlite-wal = { path = "/data/projects/frankensqlite/crates/fsqlite-wal" }
-fsqlite-mvcc = { path = "/data/projects/frankensqlite/crates/fsqlite-mvcc" }
-fsqlite-observability = { path = "/data/projects/frankensqlite/crates/fsqlite-observability" }
-frankensearch = { path = "/data/projects/frankensearch/frankensearch" }
-frankensearch-core = { path = "/data/projects/frankensearch/crates/frankensearch-core" }
-frankensearch-embed = { path = "/data/projects/frankensearch/crates/frankensearch-embed" }
-frankensearch-index = { path = "/data/projects/frankensearch/crates/frankensearch-index" }
-frankensearch-lexical = { path = "/data/projects/frankensearch/crates/frankensearch-lexical" }
-frankensearch-fusion = { path = "/data/projects/frankensearch/crates/frankensearch-fusion" }
-frankensearch-rerank = { path = "/data/projects/frankensearch/crates/frankensearch-rerank" }
-frankensearch-storage = { path = "/data/projects/frankensearch/crates/frankensearch-storage" }
-frankensearch-durability = { path = "/data/projects/frankensearch/crates/frankensearch-durability" }
-fnx-runtime = { path = "/data/projects/franken_networkx/crates/fnx-runtime" }
-fnx-classes = { path = "/data/projects/franken_networkx/crates/fnx-classes" }
-fnx-algorithms = { path = "/data/projects/franken_networkx/crates/fnx-algorithms" }
-fnx-views = { path = "/data/projects/franken_networkx/crates/fnx-views" }
-fnx-dispatch = { path = "/data/projects/franken_networkx/crates/fnx-dispatch" }
-fnx-convert = { path = "/data/projects/franken_networkx/crates/fnx-convert" }
+asupersync = { path = "../asupersync" }
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
+fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
+fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+fsqlite-func = { path = "../frankensqlite/crates/fsqlite-func" }
+fsqlite-ext-fts5 = { path = "../frankensqlite/crates/fsqlite-ext-fts5" }
+fsqlite-ext-json = { path = "../frankensqlite/crates/fsqlite-ext-json" }
+fsqlite-ast = { path = "../frankensqlite/crates/fsqlite-ast" }
+fsqlite-btree = { path = "../frankensqlite/crates/fsqlite-btree" }
+fsqlite-pager = { path = "../frankensqlite/crates/fsqlite-pager" }
+fsqlite-parser = { path = "../frankensqlite/crates/fsqlite-parser" }
+fsqlite-planner = { path = "../frankensqlite/crates/fsqlite-planner" }
+fsqlite-vdbe = { path = "../frankensqlite/crates/fsqlite-vdbe" }
+fsqlite-vfs = { path = "../frankensqlite/crates/fsqlite-vfs" }
+fsqlite-wal = { path = "../frankensqlite/crates/fsqlite-wal" }
+fsqlite-mvcc = { path = "../frankensqlite/crates/fsqlite-mvcc" }
+fsqlite-observability = { path = "../frankensqlite/crates/fsqlite-observability" }
+frankensearch = { path = "../frankensearch/frankensearch" }
+frankensearch-core = { path = "../frankensearch/crates/frankensearch-core" }
+frankensearch-embed = { path = "../frankensearch/crates/frankensearch-embed" }
+frankensearch-index = { path = "../frankensearch/crates/frankensearch-index" }
+frankensearch-lexical = { path = "../frankensearch/crates/frankensearch-lexical" }
+frankensearch-fusion = { path = "../frankensearch/crates/frankensearch-fusion" }
+frankensearch-rerank = { path = "../frankensearch/crates/frankensearch-rerank" }
+frankensearch-storage = { path = "../frankensearch/crates/frankensearch-storage" }
+frankensearch-durability = { path = "../frankensearch/crates/frankensearch-durability" }
+fnx-runtime = { path = "../franken_networkx/crates/fnx-runtime" }
+fnx-classes = { path = "../franken_networkx/crates/fnx-classes" }
+fnx-algorithms = { path = "../franken_networkx/crates/fnx-algorithms" }
+fnx-views = { path = "../franken_networkx/crates/fnx-views" }
+fnx-dispatch = { path = "../franken_networkx/crates/fnx-dispatch" }
+fnx-convert = { path = "../franken_networkx/crates/fnx-convert" }
 
 # Lint Policy (EE-002)
 # CI runs: cargo clippy --all-targets -- -D warnings
