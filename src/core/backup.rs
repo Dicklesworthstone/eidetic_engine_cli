@@ -1312,17 +1312,27 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         }
 
         let actual_hash = hash_file(&path)?;
-        if let Some(expected_hash) = &artifact.hash
-            && &actual_hash != expected_hash
-        {
-            issues.push(
-                BackupVerificationIssue::error(
-                    "artifact_hash_mismatch",
-                    "backup artifact hash does not match manifest",
-                )
-                .with_path(artifact.path.clone())
-                .with_expected_actual(expected_hash.clone(), actual_hash.clone()),
-            );
+        match &artifact.hash {
+            Some(expected_hash) if &actual_hash != expected_hash => {
+                issues.push(
+                    BackupVerificationIssue::error(
+                        "artifact_hash_mismatch",
+                        "backup artifact hash does not match manifest",
+                    )
+                    .with_path(artifact.path.clone())
+                    .with_expected_actual(expected_hash.clone(), actual_hash.clone()),
+                );
+            }
+            Some(_) => {}
+            None => {
+                issues.push(
+                    BackupVerificationIssue::error(
+                        "artifact_hash_missing",
+                        "backup artifact manifest entry is missing a content hash",
+                    )
+                    .with_path(artifact.path.clone()),
+                );
+            }
         }
 
         checked_artifacts.push(BackupArtifactReport {
@@ -1374,27 +1384,37 @@ pub fn verify_backup(options: &BackupVerifyOptions) -> Result<BackupVerifyReport
         }
 
         let actual_hash = hash_file(&path)?;
-        if let Some(expected_hash) = &derived.hash
-            && &actual_hash != expected_hash
-        {
-            tracing::warn!(
-                target: "ee::backup",
-                event = "backup_derived_corrupt",
-                kind = %derived.kind,
-                path = %derived.path,
-                mismatch = "hash",
-                expected_hash = %expected_hash,
-                observed_hash = %actual_hash,
-                "backup derived asset hash mismatch"
-            );
-            issues.push(
-                BackupVerificationIssue::high(
-                    "derived_asset_corrupt",
-                    "derived backup asset hash does not match manifest",
-                )
-                .with_path(derived.path.clone())
-                .with_expected_actual(expected_hash.clone(), actual_hash.clone()),
-            );
+        match &derived.hash {
+            Some(expected_hash) if &actual_hash != expected_hash => {
+                tracing::warn!(
+                    target: "ee::backup",
+                    event = "backup_derived_corrupt",
+                    kind = %derived.kind,
+                    path = %derived.path,
+                    mismatch = "hash",
+                    expected_hash = %expected_hash,
+                    observed_hash = %actual_hash,
+                    "backup derived asset hash mismatch"
+                );
+                issues.push(
+                    BackupVerificationIssue::high(
+                        "derived_asset_corrupt",
+                        "derived backup asset hash does not match manifest",
+                    )
+                    .with_path(derived.path.clone())
+                    .with_expected_actual(expected_hash.clone(), actual_hash.clone()),
+                );
+            }
+            Some(_) => {}
+            None => {
+                issues.push(
+                    BackupVerificationIssue::high(
+                        "derived_asset_hash_missing",
+                        "derived backup asset manifest entry is missing a content hash",
+                    )
+                    .with_path(derived.path.clone()),
+                );
+            }
         }
 
         if derived.kind == "wal_holds" {
@@ -6196,6 +6216,88 @@ mod tests {
                 .iter()
                 .any(|issue| issue.code == "derived_asset_corrupt"),
             "verify detects derived asset corruption",
+        )
+    }
+
+    #[test]
+    fn verify_backup_fails_required_artifact_without_hash() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let backup_path = tempdir.path().join("backup");
+        fs::create_dir_all(&backup_path).map_err(|error| error.to_string())?;
+        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
+        fs::write(backup_path.join(RECORDS_FILE), records_payload)
+            .map_err(|error| error.to_string())?;
+        let manifest = json!({
+            "schema": BACKUP_MANIFEST_SCHEMA_V1,
+            "backupId": "missing-required-artifact-hash",
+            "artifacts": [{
+                "path": RECORDS_FILE,
+                "kind": "jsonl_export",
+                "sizeBytes": records_payload.len(),
+                "required": true,
+            }],
+        });
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let verified =
+            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+
+        ensure_equal(verified.status.as_str(), "failed", "verify status")?;
+        ensure(
+            verified.issues.iter().any(|issue| {
+                issue.code == "artifact_hash_missing" && issue.path.as_deref() == Some(RECORDS_FILE)
+            }),
+            "verify must fail closed when required artifact hash is absent",
+        )
+    }
+
+    #[test]
+    fn verify_backup_fails_derived_asset_without_hash() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let backup_path = tempdir.path().join("backup");
+        let derived_path = "derived/wal_holds.json";
+        fs::create_dir_all(backup_path.join("derived")).map_err(|error| error.to_string())?;
+        let records_payload = b"{\"schema\":\"ee.export.header.v1\"}\n";
+        let derived_payload = b"{\"present\":false,\"rowCount\":0}\n";
+        fs::write(backup_path.join(RECORDS_FILE), records_payload)
+            .map_err(|error| error.to_string())?;
+        fs::write(backup_path.join(derived_path), derived_payload)
+            .map_err(|error| error.to_string())?;
+        let manifest = json!({
+            "schema": BACKUP_MANIFEST_SCHEMA_V2,
+            "backupId": "missing-derived-hash",
+            "artifacts": [{
+                "path": RECORDS_FILE,
+                "kind": "jsonl_export",
+                "hash": hash_bytes(records_payload),
+                "sizeBytes": records_payload.len(),
+                "required": true,
+            }],
+            "derived": [{
+                "path": derived_path,
+                "kind": "wal_holds",
+                "byte_size": derived_payload.len(),
+                "captured_at": "2026-05-25T00:00:00Z",
+            }],
+        });
+        let manifest_bytes =
+            serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
+        fs::write(backup_path.join(MANIFEST_FILE), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let verified =
+            verify_backup(&BackupVerifyOptions { backup_path }).map_err(|error| error.message())?;
+
+        ensure_equal(verified.status.as_str(), "failed", "verify status")?;
+        ensure(
+            verified.issues.iter().any(|issue| {
+                issue.code == "derived_asset_hash_missing"
+                    && issue.path.as_deref() == Some(derived_path)
+            }),
+            "verify must fail closed when derived asset hash is absent",
         )
     }
 
