@@ -557,19 +557,18 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
                 hash_mismatches.push(entry.path.clone());
                 continue;
             };
-            if regular_file_no_symlink(&file_path) {
-                files_found.push(entry.path.clone());
-                if let Ok(content) = fs::read_to_string(&file_path) {
-                    total_size += content.len() as u64;
-                    if options.verify_hashes {
-                        let actual_hash = compute_hash(&content);
-                        if actual_hash != entry.content_hash {
-                            hash_mismatches.push(entry.path.clone());
-                        }
-                    }
-                }
-            } else if options.verify_hashes {
+            let Ok(content) = read_regular_file_no_symlinks(&file_path) else {
                 hash_mismatches.push(entry.path.clone());
+                continue;
+            };
+
+            files_found.push(entry.path.clone());
+            total_size += content.len() as u64;
+            if options.verify_hashes {
+                let actual_hash = compute_hash(&content);
+                if actual_hash != entry.content_hash {
+                    hash_mismatches.push(entry.path.clone());
+                }
             }
         }
     } else if options.bundle_path.is_dir() {
@@ -4265,6 +4264,61 @@ mod tests {
         assert!(
             !report.files_found.contains(&"../outside.json".to_owned()),
             "parent traversal entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_missing_entry_invalid_without_hashes() -> TestResult {
+        let root = unique_test_path("inspect-missing-entry-no-hash");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+
+        let missing_path = "missing.json".to_owned();
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: missing_path.clone(),
+                size_bytes: 2,
+                content_hash: compute_hash("{}"),
+                redacted: true,
+            }],
+            total_size_bytes: 2,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            !report.valid,
+            "missing manifest entries must invalidate bundles even when hashes are not verified"
+        );
+        assert!(
+            !report.hash_verified,
+            "test setup must exercise structure-only inspection"
+        );
+        assert!(
+            report.hash_mismatches.contains(&missing_path),
+            "missing entry should be reported as an integrity mismatch"
+        );
+        assert!(
+            !report.files_found.contains(&missing_path),
+            "missing entry must not count as collected bundle evidence"
         );
         Ok(())
     }
