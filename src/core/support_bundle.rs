@@ -334,12 +334,7 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
     let bundle_id = generate_bundle_id();
     let bundle_dir = output_dir.join(format!("ee_support_{bundle_id}"));
 
-    reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
-    fs::create_dir_all(&bundle_dir).map_err(|e| DomainError::Storage {
-        message: format!("Failed to create bundle directory: {e}"),
-        repair: Some("Check write permissions on output directory".to_string()),
-    })?;
-    reject_existing_symlink_component(&bundle_dir, "support bundle output")?;
+    create_support_bundle_directory(&output_dir, &bundle_dir)?;
 
     let redaction_level = options.effective_redaction_level();
     let workspace_redaction = redact_support_bundle_path(&workspace_path, redaction_level);
@@ -3035,7 +3030,7 @@ fn generate_bundle_id() -> String {
 
 fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
-    ensure_support_bundle_file_final_path_regular_or_missing(path)?;
+    ensure_support_bundle_file_final_path_absent(path)?;
     let temp_path = support_bundle_temp_path(path)?;
     ensure_support_bundle_file_temp_path_absent(&temp_path)?;
 
@@ -3074,7 +3069,7 @@ fn write_file_with_hash(path: &Path, content: &str) -> Result<u64, DomainError> 
 
 fn publish_support_bundle_temp_file(temp_path: &Path, path: &Path) -> Result<(), DomainError> {
     reject_existing_symlink_component(path, "support bundle file")?;
-    ensure_support_bundle_file_final_path_regular_or_missing(path)?;
+    ensure_support_bundle_file_final_path_absent(path)?;
     reject_existing_symlink_component(temp_path, "support bundle temp file")?;
     ensure_support_bundle_created_temp_path_regular(temp_path)?;
     fs::rename(temp_path, path).map_err(|e| DomainError::Storage {
@@ -3085,6 +3080,47 @@ fn publish_support_bundle_temp_file(temp_path: &Path, path: &Path) -> Result<(),
         ),
         repair: None,
     })
+}
+
+fn create_support_bundle_directory(
+    output_dir: &Path,
+    bundle_dir: &Path,
+) -> Result<(), DomainError> {
+    reject_existing_symlink_component(output_dir, "support bundle output root")?;
+    fs::create_dir_all(output_dir).map_err(|e| DomainError::Storage {
+        message: format!(
+            "Failed to create support bundle output directory {}: {e}",
+            output_dir.display()
+        ),
+        repair: Some("Check write permissions on output directory".to_string()),
+    })?;
+    reject_existing_symlink_component(output_dir, "support bundle output root")?;
+    reject_existing_symlink_component(bundle_dir, "support bundle output")?;
+    fs::create_dir(bundle_dir).map_err(|e| {
+        let (message, repair) = if e.kind() == std::io::ErrorKind::AlreadyExists {
+            (
+                format!(
+                    "Support bundle directory {} already exists; refusing to overwrite it.",
+                    bundle_dir.display()
+                ),
+                "Retry support bundle creation with a fresh output directory.".to_owned(),
+            )
+        } else {
+            (
+                format!(
+                    "Failed to create support bundle directory {}: {e}",
+                    bundle_dir.display()
+                ),
+                "Check write permissions on output directory.".to_owned(),
+            )
+        };
+        DomainError::Storage {
+            message,
+            repair: Some(repair),
+        }
+    })?;
+    reject_existing_symlink_component(bundle_dir, "support bundle output")?;
+    Ok(())
 }
 
 fn support_bundle_temp_path(path: &Path) -> Result<PathBuf, DomainError> {
@@ -3146,11 +3182,18 @@ fn ensure_support_bundle_created_temp_path_regular(path: &Path) -> Result<(), Do
     }
 }
 
-fn ensure_support_bundle_file_final_path_regular_or_missing(
-    path: &Path,
-) -> Result<(), DomainError> {
+fn ensure_support_bundle_file_final_path_absent(path: &Path) -> Result<(), DomainError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(()),
+        Ok(metadata) if metadata.file_type().is_file() => Err(DomainError::Storage {
+            message: format!(
+                "Refusing to create support bundle file {} because it already exists.",
+                path.display()
+            ),
+            repair: Some(
+                "Choose a fresh support bundle output directory or remove the stale file."
+                    .to_owned(),
+            ),
+        }),
         Ok(_) => Err(DomainError::Storage {
             message: format!(
                 "Refusing to create support bundle file {} because the final path is not a regular file.",
@@ -3873,6 +3916,36 @@ mod tests {
     }
 
     #[test]
+    fn write_file_with_hash_rejects_existing_final_without_overwriting() -> TestResult {
+        let root = unique_test_path("write-existing-final");
+        let file_path = root.join("bundle").join("evidence.json");
+        fs::create_dir_all(
+            file_path
+                .parent()
+                .ok_or_else(|| "file path missing parent".to_owned())?,
+        )
+        .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::write(&file_path, "existing bundle content")
+            .map_err(|error| format!("failed to write existing final path: {error}"))?;
+
+        let error = write_file_with_hash(&file_path, "{}")
+            .expect_err("existing final path should reject support bundle publish");
+
+        assert!(
+            error.message().contains("already exists"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&file_path)
+                .map_err(|error| format!("failed to read existing final path: {error}"))?,
+            "existing bundle content",
+            "support bundle writer must leave existing final content untouched"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn write_file_with_hash_rejects_existing_temp_without_truncating() -> TestResult {
         let root = unique_test_path("write-existing-temp");
         let file_path = root.join("bundle").join("evidence.json");
@@ -3903,6 +3976,34 @@ mod tests {
         assert!(
             !file_path.exists(),
             "final support bundle file must not be published when temp exists"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn create_support_bundle_directory_rejects_existing_bundle_dir() -> TestResult {
+        let root = unique_test_path("existing-bundle-dir");
+        let output_dir = root.join("support-out");
+        let bundle_dir = output_dir.join("ee_support_existing");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create stale bundle dir: {error}"))?;
+        let sentinel_path = bundle_dir.join(STATUS_FILE);
+        fs::write(&sentinel_path, "existing status")
+            .map_err(|error| format!("failed to write existing bundle sentinel: {error}"))?;
+
+        let error = create_support_bundle_directory(&output_dir, &bundle_dir)
+            .expect_err("existing bundle directory should be rejected");
+
+        assert!(
+            error.message().contains("already exists"),
+            "unexpected error: {}",
+            error.message()
+        );
+        assert_eq!(
+            fs::read_to_string(&sentinel_path)
+                .map_err(|error| format!("failed to read existing bundle sentinel: {error}"))?,
+            "existing status",
+            "support bundle directory creation must not alter existing bundle contents"
         );
         Ok(())
     }
