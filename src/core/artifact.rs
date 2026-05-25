@@ -24,6 +24,15 @@ const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 1_048_576;
 const DEFAULT_SNIPPET_CHARS: usize = 2_048;
 const REDACTED_SNIPPET: &str = "[REDACTED]";
 
+// Each entry must be specific enough that ordinary prose does not match.
+// Bare `token` was removed: it false-positives on words like `token budget`,
+// `tokenize`, `tokenized`, `tokenizer`, and any documentation that merely
+// discusses tokens, which fully redacted any matching artifact snippet.
+// Real `token=value` / `token: value` shapes are still caught downstream
+// by `output::jsonl_export::contains_secret_pattern`'s context-aware check
+// (see `crate::output::jsonl_export::SECRET_CONTEXT_KEYS`). Mirrors the
+// jsonl_export fix in 7bab915e so the two snippet-redaction gates stay
+// behaviorally aligned for the prose-vs-secret boundary.
 const SECRET_PATTERNS: &[&str] = &[
     "password",
     "secret",
@@ -31,7 +40,6 @@ const SECRET_PATTERNS: &[&str] = &[
     "apikey",
     "api-key",
     "api.key",
-    "token",
     "bearer",
     "authorization",
     "credential",
@@ -1140,9 +1148,18 @@ fn safe_snippet(text: &str, limit: usize) -> Option<String> {
 
 fn contains_secret_pattern(content: &str) -> bool {
     let lowered = content.to_ascii_lowercase();
-    SECRET_PATTERNS
+    if SECRET_PATTERNS
         .iter()
         .any(|pattern| lowered.contains(pattern))
+    {
+        return true;
+    }
+    // Pick up real `token=value` / `token: value` shapes that the bare
+    // SECRET_PATTERNS list intentionally no longer matches. The export
+    // detector already understands the prose-vs-secret boundary for
+    // `token`, so chaining it keeps secret-snippet redaction strict
+    // without re-introducing the `token` prose false positive.
+    crate::output::jsonl_export::contains_secret_pattern(content)
 }
 
 fn media_type_for_path(path: &Path, is_text: bool) -> String {
@@ -1528,6 +1545,39 @@ mod tests {
             !contains_secret_pattern("ordinary artifact snippet with no sensitive marker"),
             "ordinary artifact snippet should not be redacted",
         )
+    }
+
+    #[test]
+    fn artifact_secret_pattern_does_not_match_token_prose() -> TestResult {
+        // Bare `token` substring used to false-positive on every prose
+        // mention of tokens and replace the whole stored snippet with
+        // [REDACTED]. The jsonl_export gate was repaired in 7bab915e;
+        // the artifact snippet gate had drifted. Lock the behavioural
+        // alignment in so future SECRET_PATTERNS edits cannot
+        // re-introduce the prose-redaction regression.
+        for prose in [
+            "Keep the token budget under 4000 for compact context packs.",
+            "The tokenizer splits text into stable token spans.",
+            "Update tokens count when the agent retries.",
+            "Documentation mentions no token value embedded here.",
+        ] {
+            ensure(
+                !contains_secret_pattern(prose),
+                format!("token prose should not redact artifact snippet: {prose}"),
+            )?;
+        }
+        // Real token-shaped secret forms must still redact via the
+        // export-side context-aware detector.
+        for secret in [
+            &secret_fixture(&["token", "=abc123"]),
+            &secret_fixture(&["token", ": abc123"]),
+        ] {
+            ensure(
+                contains_secret_pattern(secret),
+                format!("token=value secret form must still redact: {secret}"),
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
