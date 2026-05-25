@@ -8050,6 +8050,8 @@ pub enum FocusCommand {
     Clear(FocusClearArgs),
     /// Explain current focus state and memory validity.
     Explain(FocusExplainArgs),
+    /// Suggest focus areas from recent CASS spans and graph centrality.
+    Suggest(FocusSuggestArgs),
 }
 
 /// Arguments for `ee focus show`.
@@ -8187,6 +8189,30 @@ pub struct FocusClearArgs {
 /// Arguments for `ee focus explain`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct FocusExplainArgs {}
+
+/// Arguments for `ee focus suggest` (bd-sg5si).
+///
+/// Read-only surface that combines recent CASS spans and graph centrality
+/// signals to recommend focus areas. The current implementation is the
+/// Phase 1 CLI surface plus stable schema; the centrality computation and
+/// CASS-span scoring are tracked by a follow-up `implements-surface:focus_suggest`
+/// bead. When no signals are available the surface emits an empty
+/// `recommendations` array and a documented degraded code so the agent
+/// can distinguish "no work to suggest" from "computation unavailable".
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct FocusSuggestArgs {
+    /// Source recent CASS spans for span_ids and recency signals.
+    #[arg(long = "from-cass", action = ArgAction::SetTrue)]
+    pub from_cass: bool,
+
+    /// Maximum number of recommendations to emit. Default 5.
+    #[arg(long, default_value_t = 5)]
+    pub limit: usize,
+
+    /// Recency window for CASS spans, in hours. Default 24.
+    #[arg(long = "recent-hours", default_value_t = 24)]
+    pub recent_hours: u32,
+}
 
 /// Subcommands for `ee task-frame`.
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
@@ -12931,12 +12957,73 @@ where
             ),
         }),
         FocusCommand::Explain(_) => explain_focus(&FocusExplainOptions { workspace_path }),
+        FocusCommand::Suggest(args) => {
+            // bd-sg5si Phase 1: emit the stable schema with an empty
+            // `recommendations` array and a `degraded` code documenting
+            // that the centrality + CASS-span scoring is owed by the
+            // follow-up `implements-surface:focus_suggest` bead. This is
+            // the AGENTS.md honesty-only pattern — the contract is
+            // pinned so downstream work has a clear target, but the
+            // surface does not pretend to have signals it cannot yet
+            // compute.
+            return write_stdout(stdout, &(render_focus_suggest_envelope(args) + "\n"));
+        }
     };
 
     match result {
         Ok(report) => write_focus_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
     }
+}
+
+/// Build the v1 envelope for `ee focus suggest`. Schema:
+///
+/// ```jsonc
+/// {
+///   "schema": "ee.response.v2",
+///   "success": true,
+///   "data": {
+///     "schema": "ee.focus.suggest.v1",
+///     "recommendations": [
+///       {
+///         "topic": "<short topic label>",
+///         "spanIds": ["<cass-span-id>", ...],
+///         "centralityScore": 0.0,
+///         "rationale": "<why this topic surfaced>",
+///         "suggestedQuery": "<concrete ee context/search query>"
+///       }
+///     ],
+///     "fromCass": false,
+///     "limit": 5,
+///     "recentHours": 24
+///   },
+///   "degraded": [
+///     { "code": "focus_suggest_unimplemented", "severity": "info",
+///       "message": "...", "repair": "..." }
+///   ]
+/// }
+/// ```
+fn render_focus_suggest_envelope(args: &FocusSuggestArgs) -> String {
+    let payload = serde_json::json!({
+        "schema": "ee.response.v2",
+        "success": true,
+        "data": {
+            "schema": "ee.focus.suggest.v1",
+            "recommendations": [],
+            "fromCass": args.from_cass,
+            "limit": args.limit,
+            "recentHours": args.recent_hours,
+        },
+        "degraded": [
+            {
+                "code": "focus_suggest_unimplemented",
+                "severity": "info",
+                "message": "ee focus suggest is in Phase 1: CLI surface and schema are pinned, but recent-CASS scoring and graph centrality are not yet wired. Tracked by follow-up bead implements-surface:focus_suggest.",
+                "repair": "Use `ee context` or `ee search` until focus-suggest centrality lands."
+            }
+        ]
+    });
+    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned())
 }
 
 fn focus_scope(
@@ -45469,6 +45556,7 @@ impl NormalizedInvocation {
                     FocusCommand::Remove(_) => "focus remove".to_string(),
                     FocusCommand::Clear(_) => "focus clear".to_string(),
                     FocusCommand::Explain(_) => "focus explain".to_string(),
+                    FocusCommand::Suggest(_) => "focus suggest".to_string(),
                 },
                 Command::Handoff(handoff) => match handoff {
                     HandoffCommand::CompletionAudit(_) => "handoff completion-audit".to_string(),

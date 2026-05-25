@@ -1172,6 +1172,10 @@ impl EffectManifest {
                 "Explain passive active-memory focus state",
             ),
             CommandEffect::read_only_db("focus show", "Show passive active-memory focus state"),
+            CommandEffect::read_only_db(
+                "focus suggest",
+                "Suggest focus areas from recent CASS spans and graph centrality (bd-sg5si Phase 1: schema scaffold)",
+            ),
             CommandEffect::read_only(
                 "economy prune-plan",
                 "Plan economy pruning without mutation",
