@@ -2288,6 +2288,18 @@ fn handle_request(request: &Value) -> Value {
     }
 }
 
+fn should_stop_stdio_loop_after_response(request: &Value, response: Option<&Value>) -> bool {
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || request.get("id").is_none()
+        || request.get("method").and_then(Value::as_str) != Some("shutdown")
+    {
+        return false;
+    }
+
+    response
+        .is_some_and(|response| response.get("error").is_none() && response.get("result").is_some())
+}
+
 fn read_limited_jsonl_line<R: BufRead>(
     reader: &mut R,
     max_bytes: usize,
@@ -2376,15 +2388,9 @@ fn handle_stdio_line(line: &str, max_bytes: usize) -> StdioLineOutcome {
             };
         }
     };
-    let shutdown = request.get("id").is_some()
-        && request
-            .get("method")
-            .and_then(Value::as_str)
-            .is_some_and(|method| method == "shutdown");
-    StdioLineOutcome {
-        response: handle_json_rpc_message(&request),
-        shutdown,
-    }
+    let response = handle_json_rpc_message(&request);
+    let shutdown = should_stop_stdio_loop_after_response(&request, response.as_ref());
+    StdioLineOutcome { response, shutdown }
 }
 
 fn write_json_rpc_response<W: Write>(
@@ -3703,6 +3709,46 @@ mod tests {
 
         assert!(outcome.response.is_none());
         assert!(!outcome.shutdown);
+    }
+
+    #[test]
+    fn valid_shutdown_request_stops_stdio_loop_after_success_response() -> Result<(), String> {
+        let outcome = handle_stdio_line(
+            r#"{"jsonrpc":"2.0","id":"shutdown-1","method":"shutdown"}"#,
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+        );
+
+        assert!(outcome.shutdown);
+        let response = outcome
+            .response
+            .ok_or_else(|| "shutdown request should produce a response".to_string())?;
+        assert_eq!(response.get("id"), Some(&json!("shutdown-1")));
+        assert!(response.get("result").is_some());
+        assert!(response.get("error").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_shutdown_request_returns_error_without_stopping_stdio_loop() -> Result<(), String> {
+        let outcome = handle_stdio_line(
+            r#"{"jsonrpc":"1.0","id":"bad-shutdown","method":"shutdown"}"#,
+            DEFAULT_MCP_MAX_REQUEST_BYTES,
+        );
+
+        assert!(!outcome.shutdown);
+        let response = outcome
+            .response
+            .ok_or_else(|| "invalid shutdown request should produce an error".to_string())?;
+        let Some(error) = response.get("error") else {
+            return Err("invalid shutdown response missing error".to_string());
+        };
+        assert_eq!(response.get("id"), Some(&json!("bad-shutdown")));
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32600));
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Invalid Request: jsonrpc must be \"2.0\"")
+        );
+        Ok(())
     }
 
     #[test]
