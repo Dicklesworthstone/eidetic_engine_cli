@@ -7447,7 +7447,28 @@ fn parse_optional_metadata_timestamp(
     field: &'static str,
     errors: &mut Vec<CurateValidationIssue>,
 ) -> Option<DateTime<Utc>> {
-    let value = optional_json_string(object, field)?;
+    let Some(raw_value) = object.get(field) else {
+        return None;
+    };
+    if raw_value.is_null() {
+        return None;
+    }
+    let Some(value) = raw_value.as_str().map(str::trim) else {
+        errors.push(validation_issue(
+            "derived_validity_timestamp_invalid",
+            format!("memorySpec.{field} must be an RFC 3339 string or null."),
+            "Use RFC 3339 validity timestamps or null.",
+        ));
+        return None;
+    };
+    if value.is_empty() {
+        errors.push(validation_issue(
+            "derived_validity_timestamp_invalid",
+            format!("memorySpec.{field} must not be empty when present."),
+            "Use RFC 3339 validity timestamps or null.",
+        ));
+        return None;
+    }
     match DateTime::parse_from_rfc3339(value) {
         Ok(timestamp) => Some(timestamp.with_timezone(&Utc)),
         Err(error) => {
@@ -18081,6 +18102,16 @@ mod tests {
         ])
         .to_string();
         let valid_metadata_json = create_derived_valid_metadata_json();
+        let metadata_with_spec = |memory_spec: serde_json::Value| {
+            serde_json::json!({
+                "memorySpec": memory_spec,
+                "producer": {
+                    "producer": "test-reflector",
+                    "producerPayload": {"schema": "ee.reflect.result.v1"}
+                }
+            })
+            .to_string()
+        };
 
         let mut missing_refs = create_derived_stored_candidate(
             "curate_create_derived_missing_refs",
@@ -18173,6 +18204,49 @@ mod tests {
                 serde_json::json!({"producer": {"producer": "test-reflector"}}).to_string(),
             ),
             "derived_metadata_memory_spec_missing",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_numeric_valid_from",
+                "Derived memory with non-string validFrom.",
+                valid_source_refs_json.clone(),
+                metadata_with_spec(serde_json::json!({
+                    "level": "semantic",
+                    "kind": "fact",
+                    "validFrom": 20260501
+                })),
+            ),
+            "derived_validity_timestamp_invalid",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_blank_valid_to",
+                "Derived memory with blank validTo.",
+                valid_source_refs_json.clone(),
+                metadata_with_spec(serde_json::json!({
+                    "level": "semantic",
+                    "kind": "fact",
+                    "validTo": "   "
+                })),
+            ),
+            "derived_validity_timestamp_invalid",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_reversed_validity_window",
+                "Derived memory with reversed validity window.",
+                valid_source_refs_json.clone(),
+                metadata_with_spec(serde_json::json!({
+                    "level": "semantic",
+                    "kind": "fact",
+                    "validFrom": "2026-06-01T00:00:00Z",
+                    "validTo": "2026-05-01T00:00:00Z"
+                })),
+            ),
+            "derived_memory_validity_window_invalid",
         )?;
 
         let mut non_null_target = create_derived_stored_candidate(
