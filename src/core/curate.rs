@@ -15801,6 +15801,25 @@ mod tests {
                 .human_summary()
                 .contains("new memory derived from 2 source(s)")
         );
+
+        let target_filtered = list_curation_candidates(&CurateCandidatesOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_type: None,
+            status: Some("pending"),
+            target_memory_id: Some(target_memory_id.as_str()),
+            limit: 10,
+            offset: 0,
+            sort: "created_at",
+            group_duplicates: true,
+        })
+        .map_err(|error| error.message())?;
+        assert_eq!(target_filtered.candidates.len(), 1);
+        assert_eq!(target_filtered.candidates[0].id, ordinary_id);
+        assert_eq!(
+            target_filtered.candidates[0].target_memory_id.as_deref(),
+            Some(target_memory_id.as_str())
+        );
         Ok(())
     }
 
@@ -15877,6 +15896,51 @@ mod tests {
             derivation_source_refs_json: Some(source_refs_json),
             derivation_metadata_json: Some(metadata_json),
         }
+    }
+
+    fn create_derived_valid_metadata_json() -> String {
+        serde_json::json!({
+            "memorySpec": {
+                "level": "semantic",
+                "kind": "fact",
+                "confidence": 0.61,
+                "utility": 0.50,
+                "importance": 0.40,
+                "provenanceUri": "ee-mem://mem_validator_source",
+                "trustClass": "agent_assertion",
+                "trustSubclass": "reflection",
+                "tags": ["reflection"]
+            },
+            "producer": {
+                "producer": "test-reflector",
+                "producerPayload": {"schema": "ee.reflect.result.v1"}
+            }
+        })
+        .to_string()
+    }
+
+    fn assert_create_derived_validation_code(
+        connection: &DbConnection,
+        stored: StoredCurationCandidate,
+        expected_code: &str,
+    ) -> TestResult {
+        let decision = evaluate_create_derived_candidate_for_validation(
+            connection,
+            &stored,
+            "2026-05-01T00:00:00Z",
+            true,
+        );
+        let codes = decision
+            .validation
+            .errors
+            .iter()
+            .map(|issue| issue.code.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            codes.contains(&expected_code),
+            "expected create-derived validator code {expected_code}, got {codes:?}"
+        );
+        Ok(())
     }
 
     #[test]
@@ -16945,6 +17009,174 @@ mod tests {
     }
 
     #[test]
+    fn apply_curation_candidate_creates_derived_memory_from_memory_sources_only() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let first_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_101_1)).to_string();
+        let second_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x5_101_2)).to_string();
+        let evidence_source_id = evidence_id(0x5_101_3);
+        let seed_candidate_id = curate_id(0x5_101_4);
+        let candidate_id = curate_id(0x5_101_5);
+        let connection = seed_create_derived_candidate_database(
+            &database_path,
+            workspace_path,
+            &workspace_id,
+            &first_memory_id,
+            &evidence_source_id,
+            &seed_candidate_id,
+            None,
+            None,
+            None,
+        )?;
+
+        let first_memory = connection
+            .get_memory(&first_memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "first source memory missing".to_owned())?;
+        let second_content =
+            "Second source memory says memory-only derivations must not attach evidence spans.";
+        connection
+            .insert_memory(
+                &second_memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "semantic".to_owned(),
+                    kind: "fact".to_owned(),
+                    content: second_content.to_owned(),
+                    workflow_id: None,
+                    confidence: 0.68,
+                    utility: 0.55,
+                    importance: 0.45,
+                    provenance_uri: Some("cass-session://memory-only-derived#L3-L4".to_owned()),
+                    trust_class: "agent_assertion".to_owned(),
+                    trust_subclass: None,
+                    tags: vec!["reflection".to_owned()],
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let source_refs_json = serde_json::json!([
+            {
+                "kind": "memory",
+                "id": first_memory_id,
+                "contentHash": super::memory_content_hash(&first_memory.content)
+            },
+            {
+                "kind": "memory",
+                "id": second_memory_id,
+                "contentHash": super::memory_content_hash(second_content)
+            }
+        ])
+        .to_string();
+        let metadata_json = serde_json::json!({
+            "memorySpec": {
+                "level": "semantic",
+                "kind": "fact",
+                "confidence": 0.62,
+                "utility": 0.51,
+                "importance": 0.41,
+                "provenanceUri": format!("ee-mem://{first_memory_id}"),
+                "trustClass": "agent_assertion",
+                "trustSubclass": "reflection",
+                "tags": ["reflection", "memory-only"]
+            },
+            "producer": {
+                "producer": "test-reflector",
+                "producerPayload": {"schema": "ee.reflect.result.v1"}
+            }
+        })
+        .to_string();
+        connection
+            .insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "create_derived_memory".to_owned(),
+                    target_memory_id: None,
+                    proposed_content: Some(
+                        "Derived memory: memory-only source packages create provenance links without evidence attachment."
+                            .to_owned(),
+                    ),
+                    proposed_confidence: Some(0.62),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("reflect_result_memory_only_012345".to_owned()),
+                    reason: "Reflection result cites two memory sources and no evidence spans."
+                        .to_owned(),
+                    confidence: 0.77,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:07Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: Some(source_refs_json),
+                    derivation_metadata_json: Some(metadata_json),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+        let report = apply_curation_candidate(&super::CurateApplyOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+            allow_tombstone_load_bearing: false,
+        })
+        .map_err(|error| error.message())?;
+
+        let created_memory_id = report
+            .application
+            .created_memory_id
+            .as_deref()
+            .ok_or_else(|| "memory-only apply should expose createdMemoryId".to_owned())?;
+        let change_after = |field: &str| {
+            report
+                .application
+                .changes
+                .iter()
+                .find(|change| change.field == field)
+                .and_then(|change| change.after.as_deref())
+        };
+        assert_eq!(change_after("derivedFromMemoryCount"), Some("2"));
+        assert_eq!(change_after("attachedEvidenceSpanCount"), Some("0"));
+
+        let links = connection
+            .list_memory_links_for_memory(created_memory_id, Some(MemoryLinkRelation::DerivedFrom))
+            .map_err(|error| error.to_string())?;
+        let mut linked_sources = links
+            .iter()
+            .map(|link| link.dst_memory_id.clone())
+            .collect::<Vec<_>>();
+        linked_sources.sort();
+        let mut expected_sources = vec![first_memory_id, second_memory_id];
+        expected_sources.sort();
+        assert_eq!(linked_sources, expected_sources);
+        assert!(
+            links
+                .iter()
+                .all(|link| link.src_memory_id == created_memory_id)
+        );
+
+        let evidence = connection
+            .get_evidence_span(&evidence_source_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "unreferenced seed evidence span missing".to_owned())?;
+        assert_eq!(evidence.memory_id, None);
+        Ok(())
+    }
+
+    #[test]
     fn apply_curation_candidate_blocks_create_derived_replay_without_audit() -> TestResult {
         let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
         let workspace_path = tempdir.path();
@@ -17821,6 +18053,304 @@ mod tests {
             .ok_or_else(|| "create-derived candidate missing after validation".to_owned())?;
         assert_eq!(stored.status, "rejected");
         assert!(stored.target_memory_id.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn validate_curation_candidate_rejects_create_derived_malformed_packages_with_stable_codes()
+    -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let database_path = tempdir.path().join("ee.db");
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+
+        let source_hash = format!("blake3:{}", "e".repeat(64));
+        let valid_source_refs_json = serde_json::json!([
+            {"kind": "memory", "id": "mem_validator_source", "contentHash": source_hash}
+        ])
+        .to_string();
+        let valid_metadata_json = create_derived_valid_metadata_json();
+
+        let mut missing_refs = create_derived_stored_candidate(
+            "curate_create_derived_missing_refs",
+            "Derived memory with missing source refs.",
+            valid_source_refs_json.clone(),
+            valid_metadata_json.clone(),
+        );
+        missing_refs.derivation_source_refs_json = None;
+        assert_create_derived_validation_code(
+            &connection,
+            missing_refs,
+            "derived_source_refs_missing",
+        )?;
+
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_bad_json_refs",
+                "Derived memory with malformed source refs.",
+                "not json".to_owned(),
+                valid_metadata_json.clone(),
+            ),
+            "derived_source_refs_invalid_json",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_object_refs",
+                "Derived memory with object source refs.",
+                "{}".to_owned(),
+                valid_metadata_json.clone(),
+            ),
+            "derived_source_refs_not_array",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_empty_refs",
+                "Derived memory with an empty source package.",
+                "[]".to_owned(),
+                valid_metadata_json.clone(),
+            ),
+            "empty_derivation_source_package",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_missing_hash",
+                "Derived memory with a source missing contentHash.",
+                serde_json::json!([{"kind": "memory", "id": "mem_missing_hash"}]).to_string(),
+                valid_metadata_json.clone(),
+            ),
+            "derived_source_ref_invalid",
+        )?;
+
+        let duplicate_refs_json = serde_json::json!([
+            {"kind": "memory", "id": "mem_duplicate", "contentHash": source_hash},
+            {"kind": "memory", "id": "mem_duplicate", "contentHash": source_hash}
+        ])
+        .to_string();
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_duplicate_refs",
+                "Derived memory with duplicate source refs.",
+                duplicate_refs_json,
+                valid_metadata_json.clone(),
+            ),
+            "duplicate_derivation_source",
+        )?;
+
+        let mut missing_metadata = create_derived_stored_candidate(
+            "curate_create_derived_missing_metadata",
+            "Derived memory with missing metadata.",
+            valid_source_refs_json.clone(),
+            valid_metadata_json.clone(),
+        );
+        missing_metadata.derivation_metadata_json = None;
+        assert_create_derived_validation_code(
+            &connection,
+            missing_metadata,
+            "derived_metadata_missing",
+        )?;
+        assert_create_derived_validation_code(
+            &connection,
+            create_derived_stored_candidate(
+                "curate_create_derived_missing_memory_spec",
+                "Derived memory missing memorySpec.",
+                valid_source_refs_json.clone(),
+                serde_json::json!({"producer": {"producer": "test-reflector"}}).to_string(),
+            ),
+            "derived_metadata_memory_spec_missing",
+        )?;
+
+        let mut non_null_target = create_derived_stored_candidate(
+            "curate_create_derived_target_forbidden",
+            "Derived memory with a forbidden target memory id.",
+            valid_source_refs_json,
+            valid_metadata_json,
+        );
+        non_null_target.target_memory_id = Some("mem_existing_target".to_owned());
+        assert_create_derived_validation_code(
+            &connection,
+            non_null_target,
+            "create_derived_target_forbidden",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn validate_curation_candidate_rejects_create_derived_db_source_state_codes() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let database_path = workspace_path.join("ee.db");
+        let workspace_id = test_workspace_id(workspace_path);
+        let other_workspace_id = "wsp_create_derived_other".to_owned();
+        let tombstoned_memory_id =
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7_101_1)).to_string();
+        let cross_workspace_memory_id =
+            MemoryId::from_uuid(uuid::Uuid::from_u128(0x7_101_2)).to_string();
+        let linked_memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(0x7_101_3)).to_string();
+        let linked_evidence_id = evidence_id(0x7_101_4);
+        let session_id = SessionId::from_uuid(uuid::Uuid::from_u128(0x7_101_5)).to_string();
+        let candidate_id = curate_id(0x7_101_6);
+
+        let connection =
+            DbConnection::open_file(&database_path).map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let other_workspace_path = workspace_path.join("other");
+        for (workspace, name, path) in [
+            (
+                &workspace_id,
+                "create-derived-state-main",
+                workspace_path.display().to_string(),
+            ),
+            (
+                &other_workspace_id,
+                "create-derived-state-other",
+                other_workspace_path.display().to_string(),
+            ),
+        ] {
+            connection
+                .insert_workspace(
+                    workspace,
+                    &CreateWorkspaceInput {
+                        path,
+                        name: Some(name.to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let tombstoned_content = "Tombstoned source memory should fail create-derived validation.";
+        let cross_workspace_content =
+            "Cross-workspace source memory should fail create-derived validation.";
+        let linked_memory_content = "Linked evidence owner memory.";
+        for (memory_id, memory_workspace_id, content) in [
+            (&tombstoned_memory_id, &workspace_id, tombstoned_content),
+            (
+                &cross_workspace_memory_id,
+                &other_workspace_id,
+                cross_workspace_content,
+            ),
+            (&linked_memory_id, &workspace_id, linked_memory_content),
+        ] {
+            connection
+                .insert_memory(
+                    memory_id,
+                    &CreateMemoryInput {
+                        workspace_id: (*memory_workspace_id).clone(),
+                        level: "semantic".to_owned(),
+                        kind: "fact".to_owned(),
+                        content: content.to_owned(),
+                        workflow_id: None,
+                        confidence: 0.70,
+                        utility: 0.60,
+                        importance: 0.50,
+                        provenance_uri: None,
+                        trust_class: "agent_assertion".to_owned(),
+                        trust_subclass: None,
+                        tags: vec!["reflection".to_owned()],
+                        valid_from: None,
+                        valid_to: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        let tombstoned = connection
+            .tombstone_memory(&tombstoned_memory_id)
+            .map_err(|error| error.to_string())?;
+        assert!(tombstoned);
+
+        connection
+            .insert_session(
+                &session_id,
+                &session_input(&workspace_id, "create-derived-state-session"),
+            )
+            .map_err(|error| error.to_string())?;
+        let evidence_input = evidence_span_input(
+            &workspace_id,
+            &session_id,
+            Some(linked_memory_id.as_str()),
+            "create-derived-linked-evidence",
+            1,
+            "Already linked evidence should fail create-derived validation.",
+        );
+        let linked_evidence_hash = evidence_input.content_hash.clone();
+        connection
+            .insert_evidence_span(&linked_evidence_id, &evidence_input)
+            .map_err(|error| error.to_string())?;
+
+        let source_refs_json = serde_json::json!([
+            {
+                "kind": "memory",
+                "id": tombstoned_memory_id,
+                "contentHash": super::memory_content_hash(tombstoned_content)
+            },
+            {
+                "kind": "memory",
+                "id": cross_workspace_memory_id,
+                "contentHash": super::memory_content_hash(cross_workspace_content)
+            },
+            {
+                "kind": "evidence_span",
+                "id": linked_evidence_id,
+                "contentHash": linked_evidence_hash
+            }
+        ])
+        .to_string();
+        connection
+            .insert_curation_candidate(
+                &candidate_id,
+                &CreateCurationCandidateInput {
+                    workspace_id: workspace_id.clone(),
+                    candidate_type: "create_derived_memory".to_owned(),
+                    target_memory_id: None,
+                    proposed_content: Some(
+                        "Derived memory with invalid DB-backed source states.".to_owned(),
+                    ),
+                    proposed_confidence: Some(0.61),
+                    proposed_trust_class: Some("agent_assertion".to_owned()),
+                    source_type: "agent_inference".to_owned(),
+                    source_id: Some("reflect_result_state_codes_012345".to_owned()),
+                    reason: "Pin create-derived DB source state validation codes.".to_owned(),
+                    confidence: 0.74,
+                    status: Some("pending".to_owned()),
+                    created_at: Some("2026-05-01T00:00:08Z".to_owned()),
+                    ttl_expires_at: None,
+                    derivation_source_refs_json: Some(source_refs_json),
+                    derivation_metadata_json: Some(create_derived_valid_metadata_json()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        let report = validate_curation_candidate(&super::CurateValidateOptions {
+            workspace_path,
+            database_path: Some(&database_path),
+            candidate_id: &candidate_id,
+            actor: Some("MistySalmon"),
+            dry_run: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert_eq!(report.validation.status, "failed");
+        assert_eq!(report.validation.decision, "rejected");
+        for expected_code in [
+            "derived_source_memory_tombstoned",
+            "derived_source_workspace_mismatch",
+            "derived_source_evidence_already_linked",
+        ] {
+            assert!(
+                report
+                    .validation
+                    .errors
+                    .iter()
+                    .any(|issue| issue.code == expected_code),
+                "expected create-derived validator code {expected_code}, got {:?}",
+                report.validation.errors
+            );
+        }
         Ok(())
     }
 

@@ -480,8 +480,7 @@ schema, and the contract test for the extended candidate envelope passes.
   <id>` command succeeds and `data.application.createdMemoryId` is
   set on the apply response. Audit-row schema + evidence-span
   attachment + search-index enqueue are described in this ADR's
-  Apply path section; the dedicated audit-schema assertion is a
-  verification gap tracked below.
+  Apply path section and pinned by the runtime assertions below.
 - **Memory-source unit test**: a `create_derived_memory` candidate with memory
   source refs creates N `DerivedFrom` links and no evidence-span attachment.
 - **List/sort unit tests**: duplicate grouping, TTL/structural decay adjustment,
@@ -506,13 +505,7 @@ schema, and the contract test for the extended candidate envelope passes.
   describe contracts this ADR adopts but does not yet pin in a
   dedicated test — see **Verification gaps**.
 
-### Verification gaps
-
-The following obligations are documented contracts but do not yet
-have a discoverable test file. bd-17pa6 (the initial reality-check
-follow-up from bd-2xxao) closed the unit/static items below; the
-remaining DB-required items are tracked by bd-8k69m so a reviewer
-can audit gap-closure progress instead of trusting the prose above.
+### Verification coverage
 
 **Closed by bd-17pa6:**
 - ~~**Failure-mode fixtures**~~ — landed alongside bd-1vnvl
@@ -536,37 +529,43 @@ can audit gap-closure progress instead of trusting the prose above.
   guarantee follows because `PackProvenance::new` takes a typed
   `ProvenanceUri`, so the registry boundary is enforced at construction.
 
-**Still open:**
-- **Memory-source DerivedFrom link unit test**: no test currently
-  asserts that a `create_derived_memory` candidate with memory source
-  refs creates N `DerivedFrom` links (`MemoryLinkRelation::DerivedFrom`)
-  and skips evidence-span attachment for those sources. Needs DB
-  setup + curate apply.
-- **Audit-row schema runtime assertion**: no test currently asserts
-  the apply path actually writes a `memory.create` audit row whose
-  `details.schema` equals `ee.audit.derived_memory_created.v1`. The
-  static reference check above lets a future rename trip a focused
-  failure, but does not assert the emission path. Needs DB +
-  curate apply + audit-table query.
-- **List/sort unit tests**: duplicate grouping, TTL/structural decay
-  adjustment, and `--target` filtering for `target_memory_id = NULL`
-  candidates lack a dedicated test. Needs DB + list path.
-- **Per-validator rejection unit tests**: empty source list,
+**Closed by bd-8k69m:**
+- ~~**Memory-source DerivedFrom link unit test**~~ — pinned by
+  `apply_curation_candidate_creates_derived_memory_from_memory_sources_only`
+  in `src/core/curate.rs`. A `create_derived_memory` candidate with
+  two memory source refs creates two
+  `MemoryLinkRelation::DerivedFrom` links and leaves an unrelated
+  evidence span unattached.
+- ~~**Audit-row schema runtime assertion**~~ — pinned by
+  `apply_curation_candidate_creates_derived_memory_with_provenance`
+  in `src/core/curate.rs`. The apply path writes a `memory.create`
+  audit row whose `details.schema` equals
+  `ee.audit.derived_memory_created.v1`, and idempotent replay does
+  not duplicate the audit.
+- ~~**List/sort unit tests**~~ — pinned by
+  `list_curation_candidates_supports_sorting_and_duplicate_grouping`,
+  `list_curation_candidates_surfaces_create_derived_null_target`, and
+  `create_derived_duplicate_group_key_is_canonical` in
+  `src/core/curate.rs`; structural decay and TTL review transitions
+  remain covered by the curation-disposition tests in the same module.
+- ~~**Per-validator rejection unit tests**~~ — pinned by
+  `validate_curation_candidate_rejects_create_derived_malformed_packages_with_stable_codes`,
+  `validate_curation_candidate_rejects_create_derived_db_source_state_codes`,
+  and
+  `validate_curation_candidate_rejects_create_derived_drift_and_bad_provenance`
+  in `src/core/curate.rs`. These cover empty source packages,
   duplicate source refs, missing `contentHash`, cross-workspace
-  source, tombstoned memory source, evidence span already linked
-  elsewhere, malformed `derivation_source_refs_json`, missing
-  `memorySpec`, and non-null target on `create_derived_memory` each
-  rejected with stable degraded codes — only the broad propose-derived
-  E2E + Usage validators are pinned today. Needs DB + validator path.
-- **Atomicity test**: simulated failure during apply (search-index
-  enqueue forced to error) leaves the candidate in its pre-apply
-  state and leaves no orphan memory, link, evidence-attachment,
-  audit, or search-index rows — no test currently pins this. Needs
-  DB + fault-injection harness.
-
-bd-8k69m is the dedicated gap-closure tracker for the remaining
-DB-required items; closing it lands focused tests for each item
-above and removes them from this gaps list.
+  sources, tombstoned memory sources, already-linked evidence spans,
+  malformed `derivation_source_refs_json`, missing `memorySpec`,
+  non-null targets, hash drift, and invalid provenance with stable
+  validator codes.
+- ~~**Atomicity test**~~ — pinned by
+  `apply_curation_candidate_rolls_back_create_derived_failures` and
+  `apply_curation_candidate_rolls_back_create_derived_busy_lock_failures`
+  in `src/core/curate.rs`. Simulated failure across each create-derived
+  apply phase, including search-index enqueue and audit insertion,
+  leaves no orphan memory, link, evidence attachment, audit, or
+  search-index rows.
 
 ## Open questions deferred
 

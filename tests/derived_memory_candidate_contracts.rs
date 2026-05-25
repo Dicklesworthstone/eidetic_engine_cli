@@ -17,10 +17,9 @@
 //    `UnknownScheme` error, so derived-memory creation cannot smuggle
 //    an unregistered scheme through `PackProvenance::new`.
 //
-// The remaining bd-17pa6 numbered items (DerivedFrom-link unit test,
-// list/sort unit tests, per-validator rejection unit tests, atomicity
-// test) require DB setup and stay in the ADR's Verification gaps
-// section until separate focused tests land.
+// bd-8k69m closed the remaining DB-backed ADR 0043 obligations in
+// `src/core/curate.rs`; this file stays focused on the static contract
+// hooks that can fail without standing up a database.
 
 #![forbid(unsafe_code)]
 
