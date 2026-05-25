@@ -33,7 +33,7 @@
     "workspace": { "status": "degraded", "evidence": ["dirty_paths_redacted"] }
   },
   "budgets": {
-    "profile": "swarm_heavy",
+    "profile": "swarm_heavy_64_agent",
     "p50MsTarget": 180,
     "p95MsTarget": 650,
     "p99MsTarget": 1300,
@@ -74,6 +74,60 @@
       "severity": "medium",
       "message": "Replay p95 latency exceeded the swarm-heavy target.",
       "source": "budget"
+    }
+  ],
+  "budgetVerdicts": [
+    {
+      "name": "p50_latency",
+      "category": "latency",
+      "measurement": 240,
+      "target": 180,
+      "unit": "ms",
+      "status": "warn",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "p95_latency",
+      "category": "latency",
+      "measurement": 910,
+      "target": 650,
+      "unit": "ms",
+      "status": "fail",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "p99_latency",
+      "category": "latency",
+      "measurement": 1400,
+      "target": 1300,
+      "unit": "ms",
+      "status": "fail",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "bv_stage",
+      "category": "source",
+      "measurement": 1,
+      "target": 0,
+      "unit": "count",
+      "status": "fail",
+      "reasonCode": "coordination_source_unavailable"
+    }
+  ],
+  "regressionReasons": [
+    {
+      "code": "context_p99_over_budget",
+      "severity": "medium",
+      "message": "Coordination timeout pushed context p99 latency over the swarm-heavy budget.",
+      "repair": "Capture a deterministic BV fallback result or lower the replay concurrency before accepting this scorecard as release-ready.",
+      "evidence": ["robot_next_timeout", "no_output"]
+    },
+    {
+      "code": "coordination_source_unavailable",
+      "severity": "high",
+      "message": "BV produced no robot output, so the next-action source was unavailable.",
+      "repair": "Restore BV robot output or mark the replay as coordination-degraded with an alternate source.",
+      "evidence": ["robot_next_timeout", "no_output"]
     }
   ],
   "determinism": {

@@ -42,9 +42,18 @@ secrets, environment dumps, or private path listings.
 
 The scorecard adds the aggregate layer that a 64-agent swarm needs: agent count,
 concurrency shape, command mix, source postures, synthetic-vs-recorded
-provenance, expected degradation posture, SLO budget profile, p50/p95/p99
+provenance, expected degradation posture, named SLO budget profile, p50/p95/p99
 latency, error/degraded counts, stage attribution, deterministic replay hashes,
-and actionable failure reasons. Fixtures under
+budget verdicts, and actionable regression reasons. The canonical budget
+profiles are `ci_smoke`, `developer_crowded_checkout`, `swarm_heavy_64_agent`,
+and `stress_256gb_host`.
+
+Every scorecard includes `budgetVerdicts[]` rows for the measured budgets that
+decided the verdict. Failing and blocked scorecards also include
+`regressionReasons[]` with stable codes such as `context_p99_over_budget`,
+`coordination_source_unavailable`, and `rch_topology_blocked`, plus a repair
+string that tells an agent which prerequisite to fix before rerunning the
+release gate. Fixtures under
 `tests/fixtures/golden/swarm_slo_scorecard/` pin the healthy small checkout,
 crowded checkout, Agent Mail unavailable, BV timeout/no-output, and RCH topology
 blocked scenarios without requiring live external services.

@@ -14,6 +14,8 @@
     "stageAttribution",
     "verdict",
     "failureReasons",
+    "budgetVerdicts",
+    "regressionReasons",
     "determinism",
     "redaction"
   ],
@@ -50,6 +52,19 @@
         "$ref": "#/$defs/failureReason"
       }
     },
+    "budgetVerdicts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/budgetVerdict"
+      }
+    },
+    "regressionReasons": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/regressionReason"
+      }
+    },
     "determinism": {
       "$ref": "#/$defs/determinism"
     },
@@ -59,7 +74,16 @@
   },
   "field_presets": {
     "minimal": ["schema", "workload", "verdict"],
-    "summary": ["schema", "workload", "measurements", "verdict", "failureReasons"],
+    "summary": [
+      "schema",
+      "workload",
+      "budgets",
+      "measurements",
+      "verdict",
+      "failureReasons",
+      "budgetVerdicts",
+      "regressionReasons"
+    ],
     "standard": [
       "schema",
       "workload",
@@ -68,6 +92,8 @@
       "measurements",
       "verdict",
       "failureReasons",
+      "budgetVerdicts",
+      "regressionReasons",
       "determinism"
     ],
     "full": ["*"]
@@ -108,7 +134,7 @@
         "workspace": { "status": "ok", "evidence": ["clean_paths"] }
       },
       "budgets": {
-        "profile": "swarm_heavy",
+        "profile": "ci_smoke",
         "p50MsTarget": 120,
         "p95MsTarget": 350,
         "p99MsTarget": 800,
@@ -138,6 +164,36 @@
         "failingBudgetCount": 0
       },
       "failureReasons": [],
+      "budgetVerdicts": [
+        {
+          "name": "p50_latency",
+          "category": "latency",
+          "measurement": 72,
+          "target": 120,
+          "unit": "ms",
+          "status": "pass",
+          "reasonCode": null
+        },
+        {
+          "name": "p95_latency",
+          "category": "latency",
+          "measurement": 180,
+          "target": 350,
+          "unit": "ms",
+          "status": "pass",
+          "reasonCode": null
+        },
+        {
+          "name": "p99_latency",
+          "category": "latency",
+          "measurement": 260,
+          "target": 800,
+          "unit": "ms",
+          "status": "pass",
+          "reasonCode": null
+        }
+      ],
+      "regressionReasons": [],
       "determinism": {
         "replayHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
         "fixtureHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
@@ -314,7 +370,12 @@
       "properties": {
         "profile": {
           "type": "string",
-          "enum": ["swarm_light", "swarm_heavy", "swarm_stress"]
+          "enum": [
+            "ci_smoke",
+            "developer_crowded_checkout",
+            "swarm_heavy_64_agent",
+            "stress_256gb_host"
+          ]
         },
         "p50MsTarget": { "type": "integer", "minimum": 0 },
         "p95MsTarget": { "type": "integer", "minimum": 0 },
@@ -428,6 +489,77 @@
         "source": {
           "type": "string",
           "enum": ["budget", "coordination", "runner", "rch", "workspace"]
+        }
+      }
+    },
+    "budgetVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "category", "measurement", "target", "unit", "status", "reasonCode"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "category": {
+          "type": "string",
+          "enum": ["latency", "error", "degradation", "source", "stage"]
+        },
+        "measurement": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unit": {
+          "type": "string",
+          "enum": ["ms", "count"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail", "blocked"]
+        },
+        "reasonCode": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_]*$"
+        }
+      }
+    },
+    "regressionReason": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "message", "repair", "evidence"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "context_p99_over_budget",
+            "coordination_source_unavailable",
+            "rch_topology_blocked",
+            "budget_profile_missing",
+            "replay_nondeterministic",
+            "unsafe_mutation_in_replay"
+          ]
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "message": {
+          "type": "string"
+        },
+        "repair": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_\\-]*$"
+          }
         }
       }
     },

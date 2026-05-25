@@ -34,7 +34,7 @@
     "workspace": { "status": "degraded", "evidence": ["peer_dirty_paths"] }
   },
   "budgets": {
-    "profile": "swarm_heavy",
+    "profile": "developer_crowded_checkout",
     "p50MsTarget": 180,
     "p95MsTarget": 600,
     "p99MsTarget": 1200,
@@ -71,6 +71,45 @@
       "source": "coordination"
     }
   ],
+  "budgetVerdicts": [
+    {
+      "name": "p50_latency",
+      "category": "latency",
+      "measurement": 141,
+      "target": 180,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p95_latency",
+      "category": "latency",
+      "measurement": 540,
+      "target": 600,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p99_latency",
+      "category": "latency",
+      "measurement": 980,
+      "target": 1200,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "coordination_stage",
+      "category": "stage",
+      "measurement": 310,
+      "target": 180,
+      "unit": "ms",
+      "status": "warn",
+      "reasonCode": "coordination_source_unavailable"
+    }
+  ],
+  "regressionReasons": [],
   "determinism": {
     "replayHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
     "fixtureHash": "blake3:6666666666666666666666666666666666666666666666666666666666666666",

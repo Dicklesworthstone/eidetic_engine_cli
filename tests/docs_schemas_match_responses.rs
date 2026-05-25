@@ -510,8 +510,10 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
             "healthy_small_checkout",
             "pass",
             "none",
+            "ci_smoke",
             "/sourceHealth/agentMail/status",
             "ok",
+            None,
             None,
         ),
         (
@@ -519,35 +521,43 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
             "crowded_checkout",
             "warn",
             "recoverable",
+            "developer_crowded_checkout",
             "/sourceHealth/workspace/status",
             "degraded",
             Some("coordination_warn_crowded_checkout"),
+            None,
         ),
         (
             "agent_mail_unavailable",
             "agent_mail_unavailable",
             "warn",
             "recoverable",
+            "swarm_heavy_64_agent",
             "/sourceHealth/agentMail/status",
             "unavailable",
             Some("agent_mail_unavailable"),
+            Some("coordination_source_unavailable"),
         ),
         (
             "bv_timeout_no_output",
             "bv_timeout_no_output",
             "fail",
             "required",
+            "swarm_heavy_64_agent",
             "/sourceHealth/bv/status",
             "timeout",
             Some("bv_timeout_no_output"),
+            Some("context_p99_over_budget"),
         ),
         (
             "rch_topology_blocked",
             "rch_topology_blocked",
             "blocked",
             "blocked",
+            "stress_256gb_host",
             "/sourceHealth/rch/status",
             "blocked",
+            Some("rch_topology_blocked"),
             Some("rch_topology_blocked"),
         ),
     ];
@@ -557,9 +567,11 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
         scenario,
         verdict,
         expected_degradation_posture,
+        budget_profile,
         source_status_pointer,
         source_status,
         primary_failure_code,
+        primary_regression_code,
     ) in cases
     {
         let fixture = read_json(&fixture_path(&format!(
@@ -577,8 +589,31 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
             "/workload/traceSchema",
             "ee.agent_workload_trace.v1",
         )?;
+        ensure_json_str(&fixture, "/budgets/profile", budget_profile)?;
         ensure_json_str(&fixture, "/verdict/status", verdict)?;
         ensure_json_str(&fixture, source_status_pointer, source_status)?;
+        let budget_verdicts = fixture
+            .pointer("/budgetVerdicts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{fixture_name} missing budgetVerdicts array"))?;
+        if budget_verdicts.is_empty() {
+            return Err(format!(
+                "{fixture_name} must include at least one budget verdict"
+            ));
+        }
+        if matches!(verdict, "fail" | "blocked") {
+            let has_hard_budget_verdict = budget_verdicts.iter().any(|budget_verdict| {
+                budget_verdict
+                    .pointer("/status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| matches!(status, "fail" | "blocked"))
+            });
+            if !has_hard_budget_verdict {
+                return Err(format!(
+                    "{fixture_name} must include a failing or blocked budget verdict"
+                ));
+            }
+        }
         if let Some(expected_failure_code) = primary_failure_code {
             let has_failure_code = fixture
                 .pointer("/failureReasons")
@@ -592,6 +627,32 @@ fn swarm_slo_scorecard_golden_fixtures_match_schema() -> TestResult {
             if !has_failure_code {
                 return Err(format!(
                     "{fixture_name} must include primary failure code {expected_failure_code}"
+                ));
+            }
+        }
+        let regression_reasons = fixture
+            .pointer("/regressionReasons")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{fixture_name} missing regressionReasons array"))?;
+        if let Some(expected_regression_code) = primary_regression_code {
+            let has_regression_code = regression_reasons.iter().any(|regression_reason| {
+                regression_reason.pointer("/code").and_then(Value::as_str)
+                    == Some(expected_regression_code)
+            });
+            if !has_regression_code {
+                return Err(format!(
+                    "{fixture_name} must include primary regression code {expected_regression_code}"
+                ));
+            }
+        }
+        for regression_reason in regression_reasons {
+            let repair = regression_reason
+                .pointer("/repair")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("{fixture_name} regression reason missing repair"))?;
+            if repair.trim().is_empty() {
+                return Err(format!(
+                    "{fixture_name} regression repair must not be empty"
                 ));
             }
         }

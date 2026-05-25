@@ -33,7 +33,7 @@
     "workspace": { "status": "ok", "evidence": ["clean_paths"] }
   },
   "budgets": {
-    "profile": "swarm_heavy",
+    "profile": "ci_smoke",
     "p50MsTarget": 120,
     "p95MsTarget": 350,
     "p99MsTarget": 800,
@@ -63,6 +63,45 @@
     "failingBudgetCount": 0
   },
   "failureReasons": [],
+  "budgetVerdicts": [
+    {
+      "name": "p50_latency",
+      "category": "latency",
+      "measurement": 72,
+      "target": 120,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p95_latency",
+      "category": "latency",
+      "measurement": 180,
+      "target": 350,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p99_latency",
+      "category": "latency",
+      "measurement": 260,
+      "target": 800,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "degraded_count",
+      "category": "degradation",
+      "measurement": 0,
+      "target": 0,
+      "unit": "count",
+      "status": "pass",
+      "reasonCode": null
+    }
+  ],
+  "regressionReasons": [],
   "determinism": {
     "replayHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
     "fixtureHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",

@@ -34,7 +34,7 @@
     "workspace": { "status": "degraded", "evidence": ["peer_dirty_paths"] }
   },
   "budgets": {
-    "profile": "swarm_stress",
+    "profile": "stress_256gb_host",
     "p50MsTarget": 250,
     "p95MsTarget": 900,
     "p99MsTarget": 1800,
@@ -75,6 +75,60 @@
       "severity": "medium",
       "message": "Replay p99 latency exceeded the swarm-stress target.",
       "source": "budget"
+    }
+  ],
+  "budgetVerdicts": [
+    {
+      "name": "p50_latency",
+      "category": "latency",
+      "measurement": 310,
+      "target": 250,
+      "unit": "ms",
+      "status": "warn",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "p95_latency",
+      "category": "latency",
+      "measurement": 1500,
+      "target": 900,
+      "unit": "ms",
+      "status": "fail",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "p99_latency",
+      "category": "latency",
+      "measurement": 2400,
+      "target": 1800,
+      "unit": "ms",
+      "status": "fail",
+      "reasonCode": "context_p99_over_budget"
+    },
+    {
+      "name": "rch_stage",
+      "category": "stage",
+      "measurement": 1200,
+      "target": 300,
+      "unit": "ms",
+      "status": "blocked",
+      "reasonCode": "rch_topology_blocked"
+    }
+  ],
+  "regressionReasons": [
+    {
+      "code": "rch_topology_blocked",
+      "severity": "high",
+      "message": "Remote verification was blocked by path topology, and the scorecard must not fall back to local Cargo.",
+      "repair": "Fix the RCH canonical and alias project roots, then rerun the replay and remote verification gate.",
+      "evidence": ["rch_e327_path_topology"]
+    },
+    {
+      "code": "context_p99_over_budget",
+      "severity": "medium",
+      "message": "Blocked RCH verification and coordination delay pushed p99 latency beyond the stress host budget.",
+      "repair": "Resolve the RCH blocker before tuning context budgets so verification latency is attributed correctly.",
+      "evidence": ["rch_e327_path_topology", "peer_dirty_paths"]
     }
   ],
   "determinism": {

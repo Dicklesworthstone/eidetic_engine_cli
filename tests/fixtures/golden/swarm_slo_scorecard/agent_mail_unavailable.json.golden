@@ -33,7 +33,7 @@
     "workspace": { "status": "degraded", "evidence": ["reservations_unavailable"] }
   },
   "budgets": {
-    "profile": "swarm_heavy",
+    "profile": "swarm_heavy_64_agent",
     "p50MsTarget": 180,
     "p95MsTarget": 650,
     "p99MsTarget": 1300,
@@ -68,6 +68,53 @@
       "severity": "warning",
       "message": "Agent Mail posture was unavailable, so source attribution used Beads and local inspection only.",
       "source": "coordination"
+    }
+  ],
+  "budgetVerdicts": [
+    {
+      "name": "p50_latency",
+      "category": "latency",
+      "measurement": 155,
+      "target": 180,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p95_latency",
+      "category": "latency",
+      "measurement": 580,
+      "target": 650,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "p99_latency",
+      "category": "latency",
+      "measurement": 1040,
+      "target": 1300,
+      "unit": "ms",
+      "status": "pass",
+      "reasonCode": null
+    },
+    {
+      "name": "agent_mail_source",
+      "category": "source",
+      "measurement": 1,
+      "target": 0,
+      "unit": "count",
+      "status": "warn",
+      "reasonCode": "coordination_source_unavailable"
+    }
+  ],
+  "regressionReasons": [
+    {
+      "code": "coordination_source_unavailable",
+      "severity": "warning",
+      "message": "Agent Mail was unavailable, so coordination evidence was incomplete even though the replay stayed within latency budgets.",
+      "repair": "Restore Agent Mail health or record the Beads/BV fallback as an explicit degraded source before treating coordination evidence as complete.",
+      "evidence": ["sqlite_malformed", "reservations_unavailable"]
     }
   ],
   "determinism": {
