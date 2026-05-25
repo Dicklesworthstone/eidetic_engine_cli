@@ -33,7 +33,7 @@ readme = "README.md"
 keywords = ["memory", "agents", "cli", "local-first", "search"]
 categories = ["command-line-utilities", "database", "development-tools"]
 default-run = "ee"
-publish = false
+publish = true
 exclude = [
     "tests/fixtures/*",
     "tests/golden/*",
