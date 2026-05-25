@@ -407,18 +407,11 @@ pub fn bead_affinity_score(
             .iter()
             .any(|token| token.len() >= 8 && digest.contains(token))
     });
-    // `String::contains("")` is always true, so an empty bead_id would
-    // inflate `link_overlap` by every candidate link. Guard against that:
-    // a context with no bead identity has no link-overlap signal to give.
-    let link_overlap = if context.bead_id.is_empty() {
-        0
-    } else {
-        candidate
-            .link_refs
-            .iter()
-            .filter(|link| link.contains(&context.bead_id))
-            .count()
-    };
+    let link_overlap = candidate
+        .link_refs
+        .iter()
+        .filter(|link| link_ref_mentions_bead(link, &context.bead_id))
+        .count();
 
     let raw = tag_overlap as f32 * 0.025
         + content_token_overlap as f32 * 0.015
@@ -516,6 +509,34 @@ fn normalize_label_set(values: impl IntoIterator<Item = impl Into<String>>) -> B
 
 fn intersection_count(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
     left.intersection(right).count()
+}
+
+fn link_ref_mentions_bead(link_ref: &str, bead_id: &str) -> bool {
+    let bead_id = bead_id.trim();
+    if bead_id.is_empty() {
+        return false;
+    }
+
+    let mut search_from = 0;
+    while let Some(offset) = link_ref[search_from..].find(bead_id) {
+        let start = search_from + offset;
+        let end = start + bead_id.len();
+        let before_is_boundary = link_ref[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        let after_is_boundary = link_ref[end..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+
+        if before_is_boundary && after_is_boundary {
+            return true;
+        }
+        search_from = end;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -802,8 +823,7 @@ mod tests {
         // Regression: an empty bead_id with non-empty labels/tokens used
         // to evade `is_cold_start()` and then `link.contains("")` matched
         // every candidate link, inflating `link_overlap` and pushing the
-        // bias toward the cap. The guard in `bead_affinity_score` now
-        // skips the link-overlap pass when bead_id is empty.
+        // bias toward the cap. The link matcher now skips empty bead ids.
         let context = BeadAffinityContext::new("", ["retrieval"], "ranking");
         let candidate = BeadAffinityCandidateSignals::new()
             .with_tags(["release"])
@@ -816,6 +836,22 @@ mod tests {
         let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
 
         assert_eq!(score.link_overlap, 0);
+    }
+
+    #[test]
+    fn bead_affinity_link_overlap_matches_bead_id_boundaries() {
+        let context = BeadAffinityContext::new("bd-1", ["retrieval"], "ranking");
+        let candidate = BeadAffinityCandidateSignals::new().with_link_refs([
+            "source_uri:bd-1-parent",
+            "source_uri:bd-10-parent",
+            "source_uri:bd-1a-child",
+            "xdb-1",
+            "bd-1",
+        ]);
+
+        let score = bead_affinity_score(&context, &candidate, DEFAULT_BEAD_AFFINITY_BIAS_CAP);
+
+        assert_eq!(score.link_overlap, 2);
     }
 
     #[test]
