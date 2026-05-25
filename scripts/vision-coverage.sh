@@ -223,6 +223,23 @@ canonical_command_alias() {
     esac
 }
 
+expand_command_inventory() {
+    while IFS= read -r command; do
+        canonical=$(canonical_command_alias "$command")
+        [ -n "$canonical" ] || continue
+
+        prefix=""
+        for part in $canonical; do
+            if [ -n "$prefix" ]; then
+                prefix="$prefix $part"
+            else
+                prefix="$part"
+            fi
+            printf "%s\n" "$prefix"
+        done
+    done
+}
+
 extract_readme_command_reference() {
     read_source "$README_FILE" |
         sed -n '/^## Command Reference/,/^## Configuration/p' |
@@ -308,11 +325,10 @@ documented_commands() {
 
 implemented_commands() {
     read_source "$CLI_MOD" |
-        grep -o '=> "[^"]*"\.to_string()' |
-        sed 's/.*=> "//; s/".*//' |
-        while IFS= read -r command; do
-            canonical_command_alias "$command"
-        done |
+        sed -n '/fn extract_command_path(cli: &Cli) -> String {/,/    \/\/\/ Returns a stable identifier suitable/p' |
+        grep -o '"[a-z][a-z0-9 -]*"\.to_string()' |
+        sed 's/^"//; s/"\.to_string()$//' |
+        expand_command_inventory |
         sort -u
 }
 

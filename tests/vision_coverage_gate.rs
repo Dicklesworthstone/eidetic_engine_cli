@@ -208,6 +208,20 @@ fn vision_coverage_canonicalizes_known_command_aliases() -> TestResult {
     string_array_contains(&report, "/implemented_surfaces", "graph centrality-refresh")?;
     string_array_omits(&report, "/missing_surfaces", "graph refresh")?;
 
+    for surface in [
+        "db",
+        "graph snapshot",
+        "job",
+        "mcp",
+        "mesh",
+        "migrate",
+        "perf",
+        "verify",
+    ] {
+        string_array_contains(&report, "/implemented_surfaces", surface)?;
+        string_array_omits(&report, "/missing_surfaces", surface)?;
+    }
+
     string_array_contains(&report, "/implemented_surfaces", "index vacuum")?;
     string_array_omits(&report, "/missing_surfaces", "index vacuum")?;
     string_array_contains(&report, "/implemented_surfaces", "eval report")?;
