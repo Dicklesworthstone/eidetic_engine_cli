@@ -168,14 +168,21 @@ normalized_command_tokens() {
         token="$1"
         shift
         case "$token" in
-            --*=*)
-                continue
-                ;;
             --*)
                 if [ "$saw_command" = false ]; then
-                    case "$token" in
+                    option_name="$token"
+                    option_has_inline_value=false
+                    case "$option_name" in
+                        --*=*)
+                            option_name="${option_name%%=*}"
+                            option_has_inline_value=true
+                            ;;
+                    esac
+                    case "$option_name" in
                         --workspace|--format|--fields|--cards|--schema-version|--shadow|--policy)
-                            [ "$#" -gt 0 ] && shift
+                            if [ "$option_has_inline_value" = false ]; then
+                                [ "$#" -gt 0 ] && shift
+                            fi
                             continue
                             ;;
                         --json|--no-color|--robot|--schema|--legacy-schema|--help-json|--agent-docs|--meta|--experimental-triad|--help|--version)

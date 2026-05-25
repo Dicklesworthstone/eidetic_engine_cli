@@ -348,6 +348,27 @@ fn vision_coverage_keeps_command_after_leading_global_options() -> TestResult {
 }
 
 #[test]
+fn vision_coverage_rejects_unknown_leading_inline_global_options() -> TestResult {
+    let fixture_root = unique_fixture_root("unknown-inline-global-option")?;
+    write_minimal_vision_fixture(&fixture_root, "--future-flag=on swarm brief --json")?;
+    let report_path = fixture_root.join("report.json");
+    let output = run_gate_in_dir(&fixture_root, &report_path, false, None)?;
+    ensure(
+        output.status.success(),
+        &format!(
+            "fixture gate should pass while ignoring commands behind unknown global flags\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+
+    let report = read_report(&report_path)?;
+    string_array_omits(&report, "/documented_surfaces", "swarm brief")?;
+    string_array_omits(&report, "/documented_surfaces", "--future-flag")?;
+    string_array_omits(&report, "/missing_surfaces", "swarm brief")
+}
+
+#[test]
 fn vision_coverage_blocks_release_tag_when_gap_remains() -> TestResult {
     let report_path = unique_report_path("release-tag")?;
     let output = run_gate(&report_path, true, None)?;

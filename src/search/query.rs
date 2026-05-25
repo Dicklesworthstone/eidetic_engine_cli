@@ -51,11 +51,11 @@ pub enum SearchQueryClause {
 impl fmt::Display for SearchQueryClause {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Term(term) => formatter.write_str(term),
+            Self::Term(term) => write_printable_unquoted(term, formatter),
             Self::Phrase(phrase) => write_quoted(phrase, formatter),
             Self::ExcludedTerm(term) => {
                 formatter.write_str("-")?;
-                formatter.write_str(term)
+                write_printable_unquoted(term, formatter)
             }
             Self::ExcludedPhrase(phrase) => {
                 formatter.write_str("-")?;
@@ -177,14 +177,40 @@ fn push_quoted_printable(
 
 fn write_quoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
     formatter.write_str("\"")?;
+    let mut last_was_normalized_space = false;
     for character in value.chars() {
         match character {
             '"' => formatter.write_str("\\\"")?,
             '\\' => formatter.write_str("\\\\")?,
+            other if other.is_control() => {
+                if !last_was_normalized_space {
+                    formatter.write_str(" ")?;
+                    last_was_normalized_space = true;
+                }
+            }
             other => write!(formatter, "{other}")?,
+        }
+        if !character.is_control() {
+            last_was_normalized_space = false;
         }
     }
     formatter.write_str("\"")
+}
+
+fn write_printable_unquoted(value: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let mut last_was_normalized_space = false;
+    for character in value.chars() {
+        if character.is_control() {
+            if !last_was_normalized_space {
+                formatter.write_str(" ")?;
+                last_was_normalized_space = true;
+            }
+        } else {
+            write!(formatter, "{character}")?;
+            last_was_normalized_space = false;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -360,5 +386,29 @@ mod tests {
             "canonical query form must not emit raw control characters"
         );
         assert_eq!(parse_search_query(&query.to_string()), query);
+    }
+
+    #[test]
+    fn search_query_clause_display_sanitizes_direct_control_char_values() {
+        for clause in [
+            SearchQueryClause::Term("alpha\u{0000}\nbeta".to_string()),
+            SearchQueryClause::Phrase("line\u{0007}\nfeed".to_string()),
+            SearchQueryClause::ExcludedTerm("gamma\u{001f}delta".to_string()),
+            SearchQueryClause::ExcludedPhrase("tab\tfeed".to_string()),
+        ] {
+            assert!(
+                !clause.to_string().chars().any(char::is_control),
+                "direct clause Display must not emit raw controls: {clause:?}"
+            );
+        }
+
+        assert_eq!(
+            SearchQueryClause::Phrase("line\u{0007}\nfeed".to_string()).to_string(),
+            r#""line feed""#
+        );
+        assert_eq!(
+            SearchQueryClause::ExcludedTerm("gamma\u{001f}delta".to_string()).to_string(),
+            "-gamma delta"
+        );
     }
 }
