@@ -617,6 +617,199 @@ fn reflection_kind_round_trips_for_documented_v1_kinds() -> TestResult {
     Ok(())
 }
 
+// ---- Combined kinds: summary_insight_strengths, plan_kinds (bd-379lj) ----
+//
+// Pin the propose+ingest acceptance for the two "combined" reflection kinds
+// the handshake supports: `summary_insight_strengths` (aggregates summary,
+// insights, strengths into one derived memory) and `plan_kinds` (aggregates
+// plan steps). The enum variants, per-kind validators, and candidate-route
+// table all already exist in src/curate/mod.rs; this section pins the
+// externally observable contract so future drift trips a focused failure.
+
+fn build_request_sealed_with_kind(
+    reflection_kind: &str,
+    now_index: u8,
+) -> Result<ee::curate::ReflectionRequestArtifact, String> {
+    let sources = vec![source_a(), source_b()];
+    let package =
+        build_reflection_source_package(&sources, ReflectionSourcePackageLimits::default())
+            .map_err(|e| format!("source package: {e}"))?;
+    let artifact = build_reflection_request_artifact(WORKSPACE_ID, reflection_kind, package)
+        .map_err(|e| format!("artifact: {e}"))?;
+    // Distinct lifecycle windows per call so two sealed artifacts in the same
+    // test never collide on identical `now` strings.
+    let created = format!("2026-05-25T18:{:02}:00Z", now_index);
+    let expires = format!("2026-05-25T18:{:02}:00Z", now_index + 30);
+    attach_reflection_request_challenge(artifact, &created, &expires, KEY_ID, KEY_MATERIAL)
+        .map_err(|e| format!("challenge: {e}"))
+}
+
+fn build_result_with_kind_fields(
+    request: &ee::curate::ReflectionRequestArtifact,
+    kind_fields: serde_json::Map<String, serde_json::Value>,
+    body: &str,
+) -> Result<ee::curate::ReflectionResultArtifact, String> {
+    let challenge = request
+        .challenge
+        .clone()
+        .ok_or_else(|| "sealed artifact must carry a challenge".to_owned())?;
+    let cited_source_ids: Vec<String> = request
+        .source_package
+        .sources
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect();
+    Ok(ee::curate::ReflectionResultArtifact {
+        schema: "ee.reflect.result.v1".to_owned(),
+        request_id: request.request_id.clone(),
+        request_hash: request.request_hash.clone(),
+        challenge,
+        producer: ee::curate::ReflectionResultProducer {
+            kind: "test_producer".to_owned(),
+            id: "fixture".to_owned(),
+            version: Some("1.0".to_owned()),
+            extra: Default::default(),
+        },
+        reflection_kind: request.reflection_kind.clone(),
+        cited_source_ids,
+        body: body.to_owned(),
+        kind_fields,
+        self_reported_confidence: 0.6,
+    })
+}
+
+#[test]
+fn summary_insight_strengths_accepts_valid_kind_fields() -> TestResult {
+    let request =
+        build_request_sealed_with_kind(ReflectionKind::SummaryInsightStrengths.as_str(), 0)?;
+    let mut kind_fields = serde_json::Map::new();
+    kind_fields.insert(
+        "summary".to_owned(),
+        serde_json::Value::String("Compressed view of the source memories.".to_owned()),
+    );
+    let result = build_result_with_kind_fields(
+        &request,
+        kind_fields,
+        "Combined summary-insight-strengths derived from cited sources.",
+    )?;
+    // pick `now` inside the request lifecycle window for this fixture
+    let now = "2026-05-25T18:05:00Z";
+    validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, now).map_err(|e| {
+        format!("expected valid SummaryInsightStrengths result to pass validation, got {e:?}")
+    })?;
+    Ok(())
+}
+
+#[test]
+fn summary_insight_strengths_rejects_empty_kind_fields() -> TestResult {
+    let request =
+        build_request_sealed_with_kind(ReflectionKind::SummaryInsightStrengths.as_str(), 1)?;
+    let result = build_result_with_kind_fields(
+        &request,
+        serde_json::Map::new(),
+        "Body present but no kindFields populated.",
+    )?;
+    // `now` chosen inside the lifecycle window so shape_and_identity must be
+    // the path that rejects this; expiry never gets a chance to mask the
+    // kindFields contract.
+    let now = "2026-05-25T18:06:00Z";
+    match validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, now) {
+        Err(ReflectionResultValidationError::InvalidResultField { field, message }) => {
+            if field != "kindFields" {
+                return Err(format!(
+                    "expected InvalidResultField on `kindFields`, got field={field}, message={message}"
+                ));
+            }
+            if !message.contains("summary")
+                && !message.contains("insights")
+                && !message.contains("strengths")
+            {
+                return Err(format!(
+                    "expected summary_insight_strengths-specific diagnostic, got: {message}"
+                ));
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "expected InvalidResultField for empty summary_insight_strengths kindFields, got {other:?}"
+        )),
+    }
+}
+
+#[test]
+fn plan_kinds_accepts_valid_steps_array() -> TestResult {
+    let request = build_request_sealed_with_kind(ReflectionKind::PlanKinds.as_str(), 2)?;
+    let mut kind_fields = serde_json::Map::new();
+    kind_fields.insert(
+        "steps".to_owned(),
+        serde_json::Value::Array(vec![
+            serde_json::Value::String("Step 1: cite source A".to_owned()),
+            serde_json::Value::String("Step 2: cite source B".to_owned()),
+        ]),
+    );
+    let result = build_result_with_kind_fields(
+        &request,
+        kind_fields,
+        "Plan kinds derived from cited sources.",
+    )?;
+    // now_index=2 → created=2026-05-25T18:02Z, expires=2026-05-25T18:32Z.
+    let now = "2026-05-25T18:10:00Z";
+    validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, now)
+        .map_err(|e| format!("expected valid PlanKinds result to pass validation, got {e:?}"))?;
+    Ok(())
+}
+
+#[test]
+fn plan_kinds_rejects_empty_kind_fields() -> TestResult {
+    let request = build_request_sealed_with_kind(ReflectionKind::PlanKinds.as_str(), 3)?;
+    let result = build_result_with_kind_fields(
+        &request,
+        serde_json::Map::new(),
+        "Body present but no kindFields populated.",
+    )?;
+    // now_index=3 → window is 2026-05-25T18:03Z..18:33Z; pick inside it.
+    let now = "2026-05-25T18:11:00Z";
+    match validate_reflection_result_artifact(&request, &result, KEY_MATERIAL, now) {
+        Err(ReflectionResultValidationError::InvalidResultField { field, message }) => {
+            if field != "kindFields" {
+                return Err(format!(
+                    "expected InvalidResultField on `kindFields`, got field={field}, message={message}"
+                ));
+            }
+            if !message.contains("planKinds") && !message.contains("steps") {
+                return Err(format!(
+                    "expected plan_kinds-specific diagnostic, got: {message}"
+                ));
+            }
+            Ok(())
+        }
+        other => Err(format!(
+            "expected InvalidResultField for empty plan_kinds kindFields, got {other:?}"
+        )),
+    }
+}
+
+#[test]
+fn combined_kinds_yield_byte_identical_request_hash_for_identical_inputs() -> TestResult {
+    // Determinism across runs and across the two combined variants.
+    let a1 = build_request_sealed_with_kind(ReflectionKind::SummaryInsightStrengths.as_str(), 4)?;
+    let a2 = build_request_sealed_with_kind(ReflectionKind::SummaryInsightStrengths.as_str(), 5)?;
+    if a1.request_hash != a2.request_hash {
+        return Err(format!(
+            "SummaryInsightStrengths requestHash drifted under identical inputs: {} vs {}",
+            a1.request_hash, a2.request_hash
+        ));
+    }
+    let p1 = build_request_sealed_with_kind(ReflectionKind::PlanKinds.as_str(), 6)?;
+    if a1.request_hash == p1.request_hash {
+        return Err(
+            "SummaryInsightStrengths and PlanKinds must produce different requestHash for the same sources"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 // ---- Forbidden-dependency guard for the reflection surface ----------
 //
 // AGENTS.md forbids tokio/async-std/smol/rusqlite/petgraph/hyper/axum/

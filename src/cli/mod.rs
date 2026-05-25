@@ -74,16 +74,18 @@ use crate::core::context_delta::{
     ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 use crate::core::curate::{
-    CurateApplyOptions, CurateApplyReport, CurateCandidatesOptions, CurateCandidatesReport,
-    CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions, CurateReviewAction,
-    CurateReviewOptions, CurateReviewReport, CurateShowOptions, CurateShowReport,
-    CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions, CurateValidateReport,
+    CurateApplyOptions, CurateApplyReport, CurateAutoPromoteOptions, CurateAutoPromoteReport,
+    CurateCandidatesOptions, CurateCandidatesReport, CurateDispositionOptions,
+    CurateDispositionReport, CurateRetireOptions, CurateReviewAction, CurateReviewOptions,
+    CurateReviewReport, CurateShowOptions, CurateShowReport, CurateTombstoneOptions,
+    CurateUntombstoneOptions, CurateValidateOptions, CurateValidateReport, ReflectionIngestOptions,
     ReflectionProposeOptions, ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions,
     ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
-    list_curation_candidates, list_reflection_request_ledger_diagnostics,
+    ingest_reflection_result, list_curation_candidates, list_reflection_request_ledger_diagnostics,
     propose_reflection_request, review_curation_candidate, review_session_proposals,
-    run_curate_retire, run_curate_tombstone, run_curate_untombstone, run_curation_disposition,
-    run_review_workspace, show_curation_candidate, validate_curation_candidate,
+    run_curate_auto_promote, run_curate_retire, run_curate_tombstone, run_curate_untombstone,
+    run_curation_disposition, run_review_workspace, show_curation_candidate,
+    validate_curation_candidate,
 };
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::core::disk_pressure::{
@@ -6067,6 +6069,9 @@ pub enum ReflectCommand {
     /// Create an external reflection request artifact and ledger row.
     Propose(ReflectProposeArgs),
 
+    /// Ingest an external reflection result as a pending curation candidate.
+    Ingest(ReflectIngestArgs),
+
     /// Inspect the durable reflection request replay ledger.
     #[command(name = "request-ledger", subcommand)]
     RequestLedger(ReflectRequestLedgerCommand),
@@ -6075,9 +6080,16 @@ pub enum ReflectCommand {
 /// Arguments for `ee reflect propose`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ReflectProposeArgs {
-    /// Reflection task kind, for example summary, gaps, strengths, or plan.
+    /// Reflection task kind. v1 vocabulary: summary, insight, gaps, strengths,
+    /// question, plan, summary_insight_strengths, plan_kinds,
+    /// procedural_extract, contradiction_resolve. Unsupported kinds are
+    /// rejected at ingest with UnsupportedReflectionKind.
     #[arg(long = "kind", value_name = "KIND")]
-    pub kind: String,
+    pub kind: Option<String>,
+
+    /// Emit a gaps-only request that asks only for kindFields.knowledgeGaps.
+    #[arg(long = "gaps-only", action = ArgAction::SetTrue)]
+    pub gaps_only: bool,
 
     /// Source id resolved as either a memory or evidence span.
     #[arg(long = "source", value_name = "ID")]
@@ -6112,6 +6124,30 @@ pub struct ReflectProposeArgs {
     pub max_excerpt_bytes_per_source: Option<usize>,
 
     /// Build the request artifact without writing the ledger row.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `ee reflect ingest`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct ReflectIngestArgs {
+    /// ee.reflect.result.v1 JSON file to ingest.
+    #[arg(long = "file", value_name = "PATH", conflicts_with = "stdin")]
+    pub file: Option<PathBuf>,
+
+    /// Read ee.reflect.result.v1 JSON from stdin.
+    #[arg(long = "stdin", action = ArgAction::SetTrue)]
+    pub stdin: bool,
+
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// RFC 3339 ingest timestamp. Defaults to now.
+    #[arg(long = "consumed-at", value_name = "RFC3339")]
+    pub consumed_at: Option<String>,
+
+    /// Validate the result without writing a curation candidate or consuming the ledger.
     #[arg(long = "dry-run", action = ArgAction::SetTrue)]
     pub dry_run: bool,
 }
@@ -7062,6 +7098,67 @@ pub enum CurateCommand {
     /// derived memory or attaches spans directly. See bd-kxm0c.
     #[command(name = "propose-derived")]
     ProposeDerived(CurateProposeDerivedArgs),
+    /// Propose deterministic threshold-based level promotions for
+    /// memories that meet per-level access-count and confidence floors.
+    /// Default behavior is dry-run/propose: no memory level
+    /// transitions are written unless `--apply` is supplied. Apply mode
+    /// routes through the canonical `memory.level_transition` audit
+    /// path. See bd-2r8vp.
+    #[command(name = "auto-promote")]
+    AutoPromote(CurateAutoPromoteArgs),
+}
+
+/// Arguments for `ee curate auto-promote` (bd-2r8vp).
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct CurateAutoPromoteArgs {
+    /// Optional database path. Defaults to `<workspace>/.ee/ee.db`.
+    #[arg(long, value_name = "PATH")]
+    pub database: Option<PathBuf>,
+
+    /// Actor recorded in audit metadata when `--apply` is set.
+    #[arg(long, value_name = "ACTOR")]
+    pub actor: Option<String>,
+
+    /// Minimum positive-feedback access count for an episodic memory to
+    /// be eligible for promotion to semantic.
+    #[arg(long = "min-access-count-episodic", default_value_t = 5)]
+    pub min_access_count_episodic: u32,
+
+    /// Minimum confidence for an episodic memory to be eligible for
+    /// promotion to semantic.
+    #[arg(long = "min-confidence-episodic", default_value_t = 0.8_f32)]
+    pub min_confidence_episodic: f32,
+
+    /// Minimum positive-feedback access count for a semantic memory to
+    /// be eligible for promotion to procedural.
+    #[arg(long = "min-access-count-semantic", default_value_t = 10)]
+    pub min_access_count_semantic: u32,
+
+    /// Minimum confidence for a semantic memory to be eligible for
+    /// promotion to procedural.
+    #[arg(long = "min-confidence-semantic", default_value_t = 0.9_f32)]
+    pub min_confidence_semantic: f32,
+
+    /// Maximum number of promotions to propose (or apply) per run.
+    #[arg(long = "max-per-run", default_value_t = 10)]
+    pub max_per_run: u32,
+
+    /// Force dry-run regardless of `--apply`. Default behavior is
+    /// already dry-run; this flag is accepted for explicitness in
+    /// agent harnesses.
+    #[arg(long = "dry-run", action = ArgAction::SetTrue)]
+    pub dry_run: bool,
+
+    /// Mark the surface as propose-only. Accepted for parity with the
+    /// `ee curate auto-promote --propose --dry-run` shape documented
+    /// in bd-2r8vp. Has no effect at runtime: dry-run is the default.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub propose: bool,
+
+    /// Explicit apply gate. Without `--apply`, the command is read-only
+    /// and never writes a memory.level_transition audit row.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub apply: bool,
 }
 
 /// Arguments for `ee curate propose-derived` (bd-kxm0c).
@@ -10675,6 +10772,9 @@ where
         Some(Command::Reflect(ReflectCommand::Propose(ref args))) => {
             handle_reflect_propose(&cli, args, stdout, stderr)
         }
+        Some(Command::Reflect(ReflectCommand::Ingest(ref args))) => {
+            handle_reflect_ingest(&cli, args, stdout, stderr)
+        }
         Some(Command::Reflect(ReflectCommand::RequestLedger(
             ReflectRequestLedgerCommand::Diagnostics(ref args),
         ))) => handle_reflect_request_ledger_diagnostics(&cli, args, stdout, stderr),
@@ -10830,6 +10930,9 @@ where
         }
         Some(Command::Curate(CurateCommand::Untombstone(ref args))) => {
             handle_curate_untombstone(&cli, args, stdout, stderr)
+        }
+        Some(Command::Curate(CurateCommand::AutoPromote(ref args))) => {
+            handle_curate_auto_promote(&cli, args, stdout, stderr)
         }
         Some(Command::Curate(CurateCommand::ProposeDerived(ref args))) => {
             handle_curate_propose_derived(&cli, args, stdout, stderr)
@@ -37360,6 +37463,45 @@ where
     }
 }
 
+fn handle_curate_auto_promote<W, E>(
+    cli: &Cli,
+    args: &CurateAutoPromoteArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let options = CurateAutoPromoteOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        actor: args.actor.as_deref(),
+        dry_run: args.dry_run || !args.apply,
+        apply: args.apply,
+        min_access_count_episodic: args.min_access_count_episodic,
+        min_confidence_episodic: args.min_confidence_episodic,
+        min_access_count_semantic: args.min_access_count_semantic,
+        min_confidence_semantic: args.min_confidence_semantic,
+        max_per_run: args.max_per_run,
+    };
+
+    match run_curate_auto_promote(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                write_stdout(stdout, &report.human_output())
+            }
+            output::Renderer::Toon => write_stdout(stdout, &(report.toon_output() + "\n")),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(report.json_output() + "\n")),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
 fn handle_curate_untombstone<W, E>(
     cli: &Cli,
     args: &CurateUntombstoneArgs,
@@ -37502,10 +37644,15 @@ where
             .max_excerpt_bytes_per_source
             .unwrap_or(default_limits.max_excerpt_bytes_per_source),
     };
+    let reflection_kind = match reflect_propose_kind(args) {
+        Ok(kind) => kind,
+        Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    };
     let options = ReflectionProposeOptions {
         workspace_path: &workspace,
         database_path: args.database.as_deref(),
-        reflection_kind: args.kind.as_str(),
+        reflection_kind: reflection_kind.as_str(),
+        gaps_only: args.gaps_only,
         source_ids: &args.source,
         source_memory_ids: &args.source_memory,
         source_evidence_span_ids: &args.source_evidence_span,
@@ -37528,6 +37675,7 @@ where
                 };
                 let mut human = format!("{mode}: {}\n\n", report.request_id);
                 human.push_str(&format!("  reflectionKind: {}\n", report.reflection_kind));
+                human.push_str(&format!("  gapsOnly: {}\n", report.gaps_only));
                 human.push_str(&format!("  requestHash: {}\n", report.request_hash));
                 human.push_str(&format!("  expiresAt: {}\n", report.expires_at));
                 human.push_str(&format!("  hmacKeyId: {}\n", report.hmac_key_id));
@@ -37555,6 +37703,108 @@ where
             ),
         },
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn reflect_propose_kind(args: &ReflectProposeArgs) -> Result<String, DomainError> {
+    match (args.kind.as_deref(), args.gaps_only) {
+        (Some(kind), _) => Ok(kind.to_owned()),
+        (None, true) => Ok("gaps".to_owned()),
+        (None, false) => Err(DomainError::Usage {
+            message: "reflect propose requires --kind or --gaps-only".to_owned(),
+            repair: Some("ee reflect propose --help".to_owned()),
+        }),
+    }
+}
+
+fn handle_reflect_ingest<W, E>(
+    cli: &Cli,
+    args: &ReflectIngestArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let workspace = cli.resolve_workspace();
+    let result_json = match read_reflection_result_input(args) {
+        Ok(input) => input,
+        Err(error) => {
+            let domain_error = DomainError::Usage {
+                message: error,
+                repair: Some("pass --file <reflection-result.json> or --stdin".to_owned()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+    let options = ReflectionIngestOptions {
+        workspace_path: &workspace,
+        database_path: args.database.as_deref(),
+        result_json: result_json.as_str(),
+        consumed_at: args.consumed_at.as_deref(),
+        dry_run: args.dry_run,
+        hmac_key_config: None,
+    };
+
+    match ingest_reflection_result(&options) {
+        Ok(report) => match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                let mode = if report.dry_run {
+                    "DRY RUN"
+                } else if report.durable_mutation {
+                    "INGESTED"
+                } else {
+                    "REPLAY"
+                };
+                let candidate = report.candidate_id.as_deref().unwrap_or("(none)");
+                let mut human = format!("{mode}: {candidate}\n\n");
+                human.push_str(&format!("  requestId: {}\n", report.request_id));
+                human.push_str(&format!("  reflectionKind: {}\n", report.reflection_kind));
+                human.push_str(&format!("  resultHash: {}\n", report.result_hash));
+                human.push_str(&format!("  outcome: {}\n", report.outcome));
+                human.push_str(&format!("  sources: {} ref(s)\n", report.source_refs.len()));
+                human.push_str("\nNext:\n");
+                for next in &report.next_commands {
+                    human.push_str(&format!("  {next}\n"));
+                }
+                write_stdout(stdout, &human)
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_reflect_ingest_toon(&report) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(
+                stdout,
+                &(output::render_reflect_ingest_json(&report) + "\n"),
+            ),
+        },
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn read_reflection_result_input(args: &ReflectIngestArgs) -> Result<String, String> {
+    match (&args.file, args.stdin) {
+        (Some(path), false) => fs::read_to_string(path).map_err(|error| {
+            format!(
+                "Failed to read reflection result input '{}': {error}",
+                path.display()
+            )
+        }),
+        (None, true) => {
+            let mut input = String::new();
+            io::stdin()
+                .read_to_string(&mut input)
+                .map_err(|error| format!("Failed to read reflection result from stdin: {error}"))?;
+            Ok(input)
+        }
+        (None, false) => {
+            Err("reflect ingest requires --file <reflection-result.json> or --stdin".to_owned())
+        }
+        (Some(_), true) => Err("pass only one of --file or --stdin".to_owned()),
     }
 }
 
@@ -44972,7 +45222,7 @@ const PROCEDURE_SUBCOMMANDS: &[&str] = &[
     "propose", "show", "list", "export", "promote", "verify", "drift",
 ];
 const RECORDER_SUBCOMMANDS: &[&str] = &["start", "event", "finish", "tail", "import"];
-const REFLECT_SUBCOMMANDS: &[&str] = &["propose", "request-ledger"];
+const REFLECT_SUBCOMMANDS: &[&str] = &["propose", "ingest", "request-ledger"];
 const REFLECT_REQUEST_LEDGER_SUBCOMMANDS: &[&str] = &["diagnostics"];
 const REHEARSE_SUBCOMMANDS: &[&str] = &["plan", "run", "inspect", "promote-plan"];
 const REVIEW_SUBCOMMANDS: &[&str] = &["session"];
@@ -45159,6 +45409,7 @@ impl NormalizedInvocation {
                     CurateCommand::Tombstone(_) => "curate tombstone".to_string(),
                     CurateCommand::Untombstone(_) => "curate untombstone".to_string(),
                     CurateCommand::ProposeDerived(_) => "curate propose-derived".to_string(),
+                    CurateCommand::AutoPromote(_) => "curate auto-promote".to_string(),
                 },
                 Command::Diag(diag) => match diag {
                     DiagCommand::AdvisoryLock(_) => "diag advisory-lock".to_string(),
@@ -45405,6 +45656,7 @@ impl NormalizedInvocation {
                 },
                 Command::Reflect(reflect) => match reflect {
                     ReflectCommand::Propose(_) => "reflect propose".to_string(),
+                    ReflectCommand::Ingest(_) => "reflect ingest".to_string(),
                     ReflectCommand::RequestLedger(request_ledger) => match request_ledger {
                         ReflectRequestLedgerCommand::Diagnostics(_) => {
                             "reflect request-ledger diagnostics".to_string()
@@ -46214,12 +46466,12 @@ mod tests {
         ReflectRequestLedgerCommand, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
         SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand,
         TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
-        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode,
-        db_inspect_redact_source_uri, hook_git_readiness_response_json, mesh,
-        parse_completion_audit_evidence_input, parse_context_profile,
-        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
-        parse_search_source_mode_arg, parse_verification_evidence_record_input,
-        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
+        WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
+        hook_git_readiness_response_json, mesh, parse_completion_audit_evidence_input,
+        parse_context_profile, parse_lab_counterfactual_swap,
+        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
+        parse_verification_evidence_record_input, plan_cache_diag_degraded,
+        plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -53306,6 +53558,22 @@ mod tests {
                 agent_name_ready: true,
                 preflight_guard_reachable: true,
                 rch_hook_reachable: false,
+                ahead_risk_blocking: false,
+            },
+            ahead_risk: crate::hooks::GitHookAheadRiskSummary {
+                schema: crate::hooks::GIT_HOOK_AHEAD_RISK_SCHEMA_V1.to_owned(),
+                available: true,
+                state: "zero_ahead".to_owned(),
+                has_upstream: true,
+                upstream_ref: Some("origin/main".to_owned()),
+                ahead_count: 0,
+                commit_count: 0,
+                mixed_owner_ahead: false,
+                mixed_bead_ahead: false,
+                ambiguous_ahead: false,
+                peer_owned_ahead_risk: false,
+                degraded_codes: Vec::new(),
+                blocking: false,
             },
             hooks: Vec::new(),
             findings: Vec::new(),
@@ -57675,7 +57943,8 @@ mod tests {
 
         match parsed.command {
             Some(Command::Reflect(ReflectCommand::Propose(ref args))) => {
-                ensure_equal(&args.kind, &"gaps".to_string(), "kind")?;
+                ensure_equal(&args.kind, &Some("gaps".to_string()), "kind")?;
+                ensure_equal(&args.gaps_only, &false, "gaps only")?;
                 ensure_equal(&args.source, &vec!["mem_generic".to_string()], "source")?;
                 ensure_equal(
                     &args.source_memory,
@@ -57711,6 +57980,68 @@ mod tests {
                 ensure_equal(&args.dry_run, &true, "dry run")
             }
             other => Err(format!("expected Reflect propose command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn reflect_gaps_only_and_ingest_commands_parse() -> TestResult {
+        let propose = Cli::try_parse_from([
+            "ee",
+            "reflect",
+            "propose",
+            "--gaps-only",
+            "--source-memory",
+            "mem_a",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse reflect gaps-only: {:?}", error.kind()))?;
+        match propose.command {
+            Some(Command::Reflect(ReflectCommand::Propose(ref args))) => {
+                ensure_equal(&args.kind, &None, "implicit gaps kind")?;
+                ensure_equal(&args.gaps_only, &true, "gaps only")?;
+                ensure_equal(
+                    &args.source_memory,
+                    &vec!["mem_a".to_string()],
+                    "source memory",
+                )?;
+            }
+            other => return Err(format!("expected Reflect propose command, got {other:?}")),
+        }
+
+        let ingest = Cli::try_parse_from([
+            "ee",
+            "reflect",
+            "ingest",
+            "--file",
+            "result.json",
+            "--consumed-at",
+            "2026-05-25T00:00:00Z",
+            "--database",
+            "/tmp/ee.db",
+            "--dry-run",
+        ])
+        .map_err(|error| format!("failed to parse reflect ingest: {:?}", error.kind()))?;
+        match ingest.command {
+            Some(Command::Reflect(ReflectCommand::Ingest(ref args))) => {
+                ensure_equal(
+                    &args.file,
+                    &Some(PathBuf::from("result.json")),
+                    "result file",
+                )?;
+                ensure_equal(&args.stdin, &false, "stdin")?;
+                ensure_equal(
+                    &args.consumed_at,
+                    &Some("2026-05-25T00:00:00Z".to_string()),
+                    "consumed at",
+                )?;
+                ensure_equal(
+                    &args.database,
+                    &Some(PathBuf::from("/tmp/ee.db")),
+                    "database",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry run")
+            }
+            other => Err(format!("expected Reflect ingest command, got {other:?}")),
         }
     }
 
