@@ -29,6 +29,8 @@ const SOURCE_B_BODY: &str = "bd-2ri4f source B says losing candidates must recov
 const EVIDENCE_BODY: &str = "bd-2ri4f shared evidence span consumed by one derived memory only.";
 const DERIVED_A_BODY: &str = "bd-2ri4f derived memory A wins the evidence race.";
 const DERIVED_B_BODY: &str = "bd-2ri4f derived memory B loses the evidence race.";
+const DERIVED_REJECTED_BODY: &str =
+    "bd-17bob rejected derived memory must not create mutation artifacts.";
 
 #[derive(Debug)]
 struct CommandRun {
@@ -125,6 +127,7 @@ fn redacted_args(args: &[String]) -> Vec<String> {
                 EVIDENCE_BODY,
                 DERIVED_A_BODY,
                 DERIVED_B_BODY,
+                DERIVED_REJECTED_BODY,
             ]
             .contains(&arg.as_str())
             {
@@ -532,6 +535,7 @@ fn assert_event_log_has_phases(log_path: &Path, expected: &[&str]) -> TestResult
         EVIDENCE_BODY,
         DERIVED_A_BODY,
         DERIVED_B_BODY,
+        DERIVED_REJECTED_BODY,
     ] {
         ensure(
             !text.contains(raw_body),
@@ -540,6 +544,427 @@ fn assert_event_log_has_phases(log_path: &Path, expected: &[&str]) -> TestResult
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn rejected_derived_candidate_is_terminal_and_leaves_no_mutation_artifacts() -> TestResult {
+    let run_dir = unique_run_dir()?;
+    let workspace = run_dir.join("workspace");
+    let artifact_dir = run_dir.join("artifacts");
+    let fake_bin_dir = run_dir.join("bin");
+    let cass_payload_dir = run_dir.join("cass");
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&artifact_dir).map_err(|error| error.to_string())?;
+    let log_path = run_dir.join("derived_reject_terminal.events.jsonl");
+    let workspace_arg = workspace.display().to_string();
+    let database_arg = workspace.join(".ee").join("ee.db").display().to_string();
+    let (_cass_binary, cass_envs) = write_fake_cass(&fake_bin_dir, &cass_payload_dir, &workspace)?;
+
+    log_note(
+        &log_path,
+        "setup_reject_terminal",
+        BTreeMap::from([
+            ("workspace".to_owned(), json!(workspace_arg)),
+            ("assertionResult".to_owned(), json!("started")),
+        ]),
+    )?;
+
+    let init = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_setup_init",
+        &ee_args(&workspace_arg, &["init"]),
+        &[],
+        command_fields(&[], &[], &[], None, "workspace_initialized"),
+    )?;
+    assert_success(&init, "ee init for reject path", &log_path)?;
+
+    let import = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_setup_import_cass",
+        &ee_args(
+            &workspace_arg,
+            &[
+                "import",
+                "cass",
+                "--database",
+                &database_arg,
+                "--limit",
+                "1",
+            ],
+        ),
+        &cass_envs,
+        command_fields(&[], &[], &[], None, "evidence_imported"),
+    )?;
+    assert_success(&import, "ee import cass for reject path", &log_path)?;
+
+    let evidence_inspect = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_evidence_span_lookup",
+        &ee_args(
+            &workspace_arg,
+            &["db", "inspect", "evidence_spans", "--limit", "10"],
+        ),
+        &[],
+        command_fields(&[], &[], &[], None, "evidence_span_discovered"),
+    )?;
+    assert_success(
+        &evidence_inspect,
+        "db inspect evidence_spans for reject path",
+        &log_path,
+    )?;
+    let evidence_span_id = first_unlinked_evidence_span_id(&evidence_inspect.json, &log_path)?;
+
+    let source = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_setup_source",
+        &ee_args(
+            &workspace_arg,
+            &[
+                "remember",
+                "--level",
+                "semantic",
+                "--kind",
+                "fact",
+                SOURCE_A_BODY,
+            ],
+        ),
+        &[],
+        command_fields(&[], &[], &[&evidence_span_id], None, "source_seeded"),
+    )?;
+    assert_success(&source, "remember reject source", &log_path)?;
+    let source_id = memory_id_from_remember(&source, "reject source", &log_path)?;
+
+    let propose = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_propose",
+        &ee_args(
+            &workspace_arg,
+            &[
+                "curate",
+                "propose-derived",
+                "--level",
+                "semantic",
+                "--kind",
+                "insight",
+                "--content",
+                DERIVED_REJECTED_BODY,
+                "--source-memory",
+                &source_id,
+                "--source-evidence-span",
+                &evidence_span_id,
+                "--producer-kind",
+                "e2e_test",
+            ],
+        ),
+        &[],
+        command_fields(
+            &[],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "reject_candidate_proposed",
+        ),
+    )?;
+    assert_success(&propose, "propose reject candidate", &log_path)?;
+    let candidate_id = candidate_id_from_propose(&propose, "reject candidate", &log_path)?;
+
+    let reject = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_candidate",
+        &ee_args(
+            &workspace_arg,
+            &[
+                "curate",
+                "reject",
+                &candidate_id,
+                "--reason",
+                "bd-17bob terminal reject invariant",
+            ],
+        ),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "candidate_rejected",
+        ),
+    )?;
+    assert_success(&reject, "reject derived candidate", &log_path)?;
+    ensure(
+        reject
+            .json
+            .pointer("/data/toStatus")
+            .and_then(Value::as_str)
+            == Some("rejected"),
+        format!(
+            "reject output must transition candidate to rejected: {}",
+            reject.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        reject
+            .json
+            .pointer("/data/auditId")
+            .and_then(Value::as_str)
+            .is_some(),
+        format!(
+            "reject output must expose the audit row id: {}",
+            reject.json
+        ),
+        &log_path,
+    )?;
+
+    let show = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_show_terminal",
+        &ee_args(&workspace_arg, &["curate", "show", &candidate_id]),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "terminal_status_visible",
+        ),
+    )?;
+    assert_success(&show, "show rejected derived candidate", &log_path)?;
+    ensure(
+        show.json
+            .pointer("/data/candidate/status")
+            .and_then(Value::as_str)
+            == Some("rejected"),
+        format!(
+            "curate show must expose rejected terminal status: {}",
+            show.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        show.json
+            .pointer("/data/plannedApplication/status")
+            .and_then(Value::as_str)
+            == Some("blocked"),
+        format!("curate show must block rejected candidates: {}", show.json),
+        &log_path,
+    )?;
+    ensure(
+        show.json
+            .pointer("/data/plannedApplication/createdMemoryId")
+            .is_none_or(Value::is_null),
+        format!(
+            "rejected candidate preview must not expose createdMemoryId: {}",
+            show.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        show.json
+            .pointer("/data/plannedApplication/plannedDerivedFromLinks")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        format!(
+            "rejected candidate preview must not plan derived links: {}",
+            show.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        show.json
+            .pointer("/data/plannedApplication/plannedEvidenceAttachments")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        format!(
+            "rejected candidate preview must not plan evidence attachments: {}",
+            show.json
+        ),
+        &log_path,
+    )?;
+
+    let apply = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_apply_blocked",
+        &ee_args(&workspace_arg, &["curate", "apply", &candidate_id]),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "terminal_apply_blocked",
+        ),
+    )?;
+    assert_success(&apply, "apply rejected derived candidate", &log_path)?;
+    ensure(
+        apply
+            .json
+            .pointer("/data/application/status")
+            .and_then(Value::as_str)
+            == Some("blocked"),
+        format!(
+            "apply on rejected candidate must be blocked: {}",
+            apply.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        conflict_codes(&apply.json)
+            .iter()
+            .any(|code| code == "candidate_status_terminal"),
+        format!(
+            "blocked apply must explain terminal status; got {}",
+            apply.json
+        ),
+        &log_path,
+    )?;
+    ensure(
+        apply
+            .json
+            .pointer("/data/mutation/persisted")
+            .and_then(Value::as_bool)
+            == Some(false),
+        format!("blocked apply must not persist mutation: {}", apply.json),
+        &log_path,
+    )?;
+    ensure(
+        apply
+            .json
+            .pointer("/data/application/createdMemoryId")
+            .is_none_or(Value::is_null),
+        format!(
+            "blocked apply must not expose a created memory id: {}",
+            apply.json
+        ),
+        &log_path,
+    )?;
+
+    let memories = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_db_memories_invariant",
+        &ee_args(
+            &workspace_arg,
+            &["db", "inspect", "memories", "--limit", "20"],
+        ),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "no_rejected_memory_created",
+        ),
+    )?;
+    assert_success(&memories, "db inspect memories after reject", &log_path)?;
+    ensure(
+        memories
+            .json
+            .pointer("/data/report/rows")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                !rows.iter().any(|row| {
+                    row.pointer("/values/content").and_then(Value::as_str)
+                        == Some(DERIVED_REJECTED_BODY)
+                })
+            }),
+        format!(
+            "rejected derived content must not be persisted as a memory: {}",
+            memories.json
+        ),
+        &log_path,
+    )?;
+
+    let links = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_db_links_invariant",
+        &ee_args(
+            &workspace_arg,
+            &["db", "inspect", "memory_links", "--limit", "20"],
+        ),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "no_derived_links_created",
+        ),
+    )?;
+    assert_success(&links, "db inspect memory_links after reject", &log_path)?;
+    ensure(
+        links
+            .json
+            .pointer("/data/report/rows")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty),
+        format!("reject path must not create memory links: {}", links.json),
+        &log_path,
+    )?;
+
+    let evidence_after = run_ee_logged(
+        &log_path,
+        &artifact_dir,
+        "reject_db_evidence_invariant",
+        &ee_args(
+            &workspace_arg,
+            &["db", "inspect", "evidence_spans", "--limit", "10"],
+        ),
+        &[],
+        command_fields(
+            &[&candidate_id],
+            &[&source_id],
+            &[&evidence_span_id],
+            None,
+            "evidence_left_unattached",
+        ),
+    )?;
+    assert_success(
+        &evidence_after,
+        "db inspect evidence after reject",
+        &log_path,
+    )?;
+    ensure(
+        evidence_after
+            .json
+            .pointer("/data/report/rows")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+                    let values = row.get("values").unwrap_or(&Value::Null);
+                    values.get("id").and_then(Value::as_str) == Some(evidence_span_id.as_str())
+                        && values.get("memory_id").is_none_or(Value::is_null)
+                })
+            }),
+        format!(
+            "reject path must leave evidence span unattached: {}",
+            evidence_after.json
+        ),
+        &log_path,
+    )?;
+
+    assert_event_log_has_phases(
+        &log_path,
+        &[
+            "setup_reject_terminal",
+            "reject_propose",
+            "reject_candidate",
+            "reject_show_terminal",
+            "reject_apply_blocked",
+            "reject_db_memories_invariant",
+            "reject_db_links_invariant",
+            "reject_db_evidence_invariant",
+        ],
+    )
 }
 
 #[test]
