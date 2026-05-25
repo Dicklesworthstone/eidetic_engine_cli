@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use chrono::Utc;
@@ -3746,6 +3746,32 @@ fn collect_lab_episode_file_dir(
     degraded: &mut Vec<BackupDegradation>,
     payloads: &mut Vec<BackupDerivedPayload>,
 ) {
+    match first_existing_symlink_component(episode_dir) {
+        Ok(Some(symlink_path)) => {
+            degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!(
+                    "lab episode directory '{}' was skipped because it traverses symbolic link '{}'",
+                    episode_dir.display(),
+                    symlink_path.display()
+                ),
+                "replace symlinked lab episode paths with real directories before retrying backup create --include-derived",
+            ));
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            degraded.push(BackupDegradation::warning(
+                "lab_episodes_unreadable",
+                format!(
+                    "lab episode directory '{}' could not be inspected: {error}",
+                    episode_dir.display()
+                ),
+                "inspect ~/.local/share/ee/lab/episodes permissions and retry backup create --include-derived",
+            ));
+            return;
+        }
+    }
     if !episode_dir.exists() {
         return;
     }
@@ -3765,7 +3791,7 @@ fn collect_lab_episode_file_dir(
     };
     for entry in entries.filter_map(Result::ok) {
         let path = entry.path();
-        let metadata = match entry.metadata() {
+        let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) => {
                 degraded.push(BackupDegradation::warning(
@@ -3786,7 +3812,7 @@ fn collect_lab_episode_file_dir(
             continue;
         }
         let safe_name = safe_file_stem(file_name);
-        match fs::read(&path) {
+        match read_lab_episode_source_file(&path) {
             Ok(bytes) => payloads.push(derived_payload(
                 format!("derived/lab/episode_files/{source_label}/{safe_name}"),
                 "lab_episode",
@@ -3803,8 +3829,15 @@ fn collect_lab_episode_file_dir(
                 format!("lab episode file '{}' could not be read: {error}", path.display()),
                 "inspect ~/.local/share/ee/lab/episodes permissions and retry backup create --include-derived",
             )),
-        }
+        };
     }
+}
+
+fn read_lab_episode_source_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = open_backup_artifact_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn is_appledouble_file_name(file_name: &str) -> bool {
@@ -6625,6 +6658,74 @@ mod tests {
         ensure(
             !outside.join("payload.bin").exists(),
             "backup relative artifact write must not follow symlinked parent",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_lab_episode_file_dir_skips_symlinked_episode_file() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let episode_dir = tempdir.path().join("episodes");
+        let outside = tempdir.path().join("outside-secret.json");
+        fs::create_dir_all(&episode_dir).map_err(|error| error.to_string())?;
+        fs::write(&outside, b"secret episode payload").map_err(|error| error.to_string())?;
+        symlink(&outside, episode_dir.join("episode.json")).map_err(|error| error.to_string())?;
+
+        let mut degraded = Vec::new();
+        let mut payloads = Vec::new();
+        collect_lab_episode_file_dir(
+            &episode_dir,
+            "workspace",
+            "2026-05-25T00:00:00Z",
+            &mut degraded,
+            &mut payloads,
+        );
+
+        ensure(
+            payloads.is_empty(),
+            "symlinked lab episode files must not be included as derived backup payloads",
+        )?;
+        ensure(
+            degraded.is_empty(),
+            "skipping a non-regular lab episode directory entry should not degrade the backup",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_lab_episode_file_dir_rejects_symlinked_directory() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_episode_dir = tempdir.path().join("real-episodes");
+        let linked_episode_dir = tempdir.path().join("linked-episodes");
+        fs::create_dir_all(&real_episode_dir).map_err(|error| error.to_string())?;
+        fs::write(real_episode_dir.join("episode.json"), b"outside payload")
+            .map_err(|error| error.to_string())?;
+        symlink(&real_episode_dir, &linked_episode_dir).map_err(|error| error.to_string())?;
+
+        let mut degraded = Vec::new();
+        let mut payloads = Vec::new();
+        collect_lab_episode_file_dir(
+            &linked_episode_dir,
+            "workspace",
+            "2026-05-25T00:00:00Z",
+            &mut degraded,
+            &mut payloads,
+        );
+
+        ensure(
+            payloads.is_empty(),
+            "symlinked lab episode directories must not be traversed for backup payloads",
+        )?;
+        ensure(
+            degraded.iter().any(|degradation| {
+                degradation.code == "lab_episodes_unreadable"
+                    && degradation.message.contains("traverses symbolic link")
+            }),
+            "symlinked lab episode directory should be reported as unreadable",
         )
     }
 
