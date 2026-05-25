@@ -257,6 +257,16 @@ pub fn plan_install(options: &InstallPlanOptions) -> InstallPlanReport {
                             "Regenerate the manifest with safe release artifact names.",
                         ));
                     }
+                    if supported_archive_format(selected.archive_format.as_str()).is_none() {
+                        findings.push(InstallFinding::error(
+                            InstallFindingCode::UpdateApplyUnsupported,
+                            format!(
+                                "archive format '{}' cannot be applied by ee update",
+                                selected.archive_format
+                            ),
+                            "Publish a tar_xz artifact for this target before using update apply.",
+                        ));
+                    }
 
                     checksum_status = if options.artifact_root.is_some() {
                         if verification.findings.iter().any(|finding| {
@@ -2041,6 +2051,48 @@ mod tests {
                 .iter()
                 .any(|finding| matches!(finding.code, InstallFindingCode::DuplicateTarget)),
             "duplicate_target finding",
+        )
+    }
+
+    #[test]
+    fn install_plan_blocks_manifest_archive_formats_apply_cannot_extract() -> TestResult {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let artifact_root = tempdir.path().join("artifacts");
+        fs::create_dir_all(&artifact_root).map_err(|error| error.to_string())?;
+        let artifact_bytes = b"windows zip artifact bytes";
+        let artifact = crate::models::ReleaseArtifact::from_bytes(
+            "9.9.9",
+            "commit-a",
+            "x86_64-pc-windows-msvc",
+            artifact_bytes,
+        );
+        fs::write(artifact_root.join(&artifact.file_name), artifact_bytes)
+            .map_err(|error| error.to_string())?;
+        let manifest = ReleaseManifest::new("9.9.9", "commit-a", vec![artifact]);
+        let manifest_path = tempdir.path().join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = plan_install(&InstallPlanOptions {
+            operation: InstallOperation::Update,
+            manifest: Some(manifest_path),
+            artifact_root: Some(artifact_root),
+            install_dir: Some(tempdir.path().join("bin")),
+            target_triple: Some("x86_64-pc-windows-msvc".to_owned()),
+            offline: true,
+            ..InstallPlanOptions::default()
+        });
+
+        ensure_equal(report.status, InstallPlanStatus::Blocked, "status")?;
+        ensure(
+            report.findings.iter().any(|finding| {
+                matches!(finding.code, InstallFindingCode::UpdateApplyUnsupported)
+                    && finding.message.contains("zip")
+            }),
+            "zip artifact apply should be blocked at plan time",
         )
     }
 
