@@ -2145,12 +2145,41 @@ fn is_json_rpc_notification(request: &Value) -> bool {
     request.get("id").is_none()
 }
 
+fn is_valid_json_rpc_id(id: &Value) -> bool {
+    id.is_string() || id.is_number() || id.is_null()
+}
+
+fn json_rpc_error_id(request: &Value) -> Option<Value> {
+    request
+        .get("id")
+        .filter(|id| is_valid_json_rpc_id(id))
+        .cloned()
+}
+
 fn validate_json_rpc_request(request: &Value) -> Result<&str, Value> {
     if !request.is_object() {
         return Err(json_rpc_error(
             None,
             -32600,
             "Invalid Request: request must be a JSON object",
+        ));
+    }
+    let id = json_rpc_error_id(request);
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        return Err(json_rpc_error(
+            id,
+            -32600,
+            "Invalid Request: jsonrpc must be \"2.0\"",
+        ));
+    }
+    if request
+        .get("id")
+        .is_some_and(|id| !is_valid_json_rpc_id(id))
+    {
+        return Err(json_rpc_error(
+            None,
+            -32600,
+            "Invalid Request: id must be a string, number, or null",
         ));
     }
     let id = request.get("id").cloned();
@@ -3720,6 +3749,51 @@ mod tests {
                 Some(expected_message)
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_invalid_jsonrpc_version_returns_invalid_request() -> Result<(), String> {
+        for request in [
+            json!({"id": "missing-jsonrpc", "method": "initialize"}),
+            json!({"jsonrpc": "1.0", "id": "old-jsonrpc", "method": "initialize"}),
+            json!({"jsonrpc": 2.0, "id": "numeric-jsonrpc", "method": "initialize"}),
+        ] {
+            let response = handle_json_rpc_message(&request)
+                .ok_or_else(|| "invalid jsonrpc request must produce an error".to_string())?;
+            let Some(error) = response.get("error") else {
+                return Err(format!(
+                    "invalid jsonrpc response missing error for {request}"
+                ));
+            };
+            assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32600));
+            assert_eq!(
+                error.get("message").and_then(Value::as_str),
+                Some("Invalid Request: jsonrpc must be \"2.0\"")
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_json_rpc_id_returns_invalid_request_with_null_id() -> Result<(), String> {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": {"nested": "not allowed"},
+            "method": "initialize"
+        });
+        let response = handle_json_rpc_message(&request)
+            .ok_or_else(|| "invalid id request must produce an error".to_string())?;
+        let Some(error) = response.get("error") else {
+            return Err("invalid id response missing error".to_string());
+        };
+
+        assert_eq!(response.get("id"), Some(&Value::Null));
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32600));
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some("Invalid Request: id must be a string, number, or null")
+        );
         Ok(())
     }
 
