@@ -1566,6 +1566,11 @@ impl EffectManifest {
                 "Accept a curation candidate",
             ),
             CommandEffect::durable_write(
+                "curate auto-promote",
+                vec!["memories", "search_index_jobs", "audit_log"],
+                "Threshold-based memory level promotion; dry-run by default, --apply routes through memory.level_transition",
+            ),
+            CommandEffect::durable_write(
                 "curate apply",
                 vec![
                     "curation_candidates",
