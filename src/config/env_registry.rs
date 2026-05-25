@@ -98,6 +98,8 @@ pub enum EnvVar {
     LogJson,
     /// `EE_MAX_TOKENS`
     MaxTokens,
+    /// `EE_MCP_MAX_REQUEST_BYTES`
+    McpMaxRequestBytes,
     /// `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS`
     MeshDiscoveryCacheTtlSeconds,
     /// `EE_MESH_DRIFT_SOFT_STALE_AFTER`
@@ -255,6 +257,7 @@ impl EnvVar {
             Self::LogFormat,
             Self::LogJson,
             Self::MaxTokens,
+            Self::McpMaxRequestBytes,
             Self::MeshDiscoveryCacheTtlSeconds,
             Self::MeshDriftSoftStaleAfter,
             Self::MeshDriftSoftStaleAfterSeconds,
@@ -361,6 +364,7 @@ impl EnvVar {
             Self::LogFormat => "EE_LOG_FORMAT",
             Self::LogJson => "EE_LOG_JSON",
             Self::MaxTokens => "EE_MAX_TOKENS",
+            Self::McpMaxRequestBytes => "EE_MCP_MAX_REQUEST_BYTES",
             Self::MeshDiscoveryCacheTtlSeconds => "EE_MESH_DISCOVERY_CACHE_TTL_SECONDS",
             Self::MeshDriftSoftStaleAfter => "EE_MESH_DRIFT_SOFT_STALE_AFTER",
             Self::MeshDriftSoftStaleAfterSeconds => "EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS",
@@ -518,6 +522,9 @@ impl EnvVar {
             Self::LogFormat => "Select structured log format.",
             Self::LogJson => "Enable JSON command-start logs on stderr.",
             Self::MaxTokens => "Override the default context pack token budget.",
+            Self::McpMaxRequestBytes => {
+                "Override the MCP stdio JSON-RPC request and response byte cap."
+            }
             Self::MeshDiscoveryCacheTtlSeconds => {
                 "Override the mesh autodiscovery cache TTL in seconds."
             }
@@ -695,6 +702,7 @@ impl EnvVar {
             Self::ReflectionRequestTtlSeconds => Some("86400"),
             Self::ReflectionSourceBudgetBytes => Some("65536"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
+            Self::McpMaxRequestBytes => Some("16777216"),
             _ => None,
         }
     }
@@ -788,6 +796,7 @@ impl EnvVar {
             | Self::LexicalIndexHugepages
             | Self::LexicalIndexPinRam
             | Self::MaxTokens
+            | Self::McpMaxRequestBytes
             | Self::Profile
             | Self::PprCacheEntries
             | Self::QueryPlanCacheEntries

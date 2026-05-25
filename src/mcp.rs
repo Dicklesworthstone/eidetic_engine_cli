@@ -23,6 +23,7 @@ use std::io::{BufRead, BufReader, Write};
 
 use serde_json::{Value, json};
 
+use crate::config::env_registry::{EnvVar, read_or_default as read_env_var_or_default};
 use crate::core::agent_docs::AgentDocsTopic;
 use crate::models::{ContextProfileName, ProcessExitCode, RedactionLevel};
 pub use crate::output::MCP_PROTOCOL_VERSION;
@@ -30,6 +31,9 @@ use crate::output::public_schemas;
 
 pub const SUBSYSTEM: &str = "mcp";
 pub const MCP_SCHEMA_V1: &str = "ee.mcp.v1";
+pub const MCP_SIZE_LIMIT_EXCEEDED_CODE: &str = "size_limit_exceeded";
+pub const DEFAULT_MCP_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const MIN_MCP_MAX_REQUEST_BYTES: usize = 1024;
 
 fn trace_mcp_top_level(phase: &'static str, elapsed_ms: u64, degraded_codes: &[&str]) {
     tracing::info!(
@@ -369,12 +373,108 @@ fn json_rpc_error(id: Option<Value>, code: i32, message: &str) -> Value {
     })
 }
 
+fn json_rpc_error_with_data(id: Option<Value>, code: i32, message: &str, data: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message,
+            "data": data
+        }
+    })
+}
+
+fn mcp_stdio_byte_limit() -> usize {
+    read_env_var_or_default(EnvVar::McpMaxRequestBytes)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MCP_MAX_REQUEST_BYTES)
+        .max(MIN_MCP_MAX_REQUEST_BYTES)
+}
+
+fn mcp_size_limit_exceeded_error(
+    id: Option<Value>,
+    direction: &str,
+    actual_bytes: usize,
+    max_bytes: usize,
+) -> Value {
+    json_rpc_error_with_data(
+        id,
+        -32000,
+        MCP_SIZE_LIMIT_EXCEEDED_CODE,
+        json!({
+            "code": MCP_SIZE_LIMIT_EXCEEDED_CODE,
+            "direction": direction,
+            "actualBytes": actual_bytes,
+            "maxBytes": max_bytes
+        }),
+    )
+}
+
 fn json_rpc_result(id: Value, result: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": result
     })
+}
+
+#[derive(Debug)]
+struct LimitedCapture {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    bytes_seen: usize,
+    truncated: bool,
+}
+
+impl LimitedCapture {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+            bytes_seen: 0,
+            truncated: false,
+        }
+    }
+
+    fn into_string(self) -> String {
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+impl Write for LimitedCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes_seen = self.bytes_seen.saturating_add(buf.len());
+        let remaining = self.max_bytes.saturating_sub(self.bytes.len());
+        if remaining == 0 {
+            if !buf.is_empty() {
+                self.truncated = true;
+            }
+            return Ok(buf.len());
+        }
+
+        let keep = remaining.min(buf.len());
+        self.bytes.extend_from_slice(&buf[..keep]);
+        if keep < buf.len() {
+            self.truncated = true;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct McpCliRunResult {
+    exit: ProcessExitCode,
+    stdout: String,
+    stderr: String,
+    stdout_bytes_seen: usize,
+    stderr_bytes_seen: usize,
+    truncated: bool,
 }
 
 fn handle_initialize(id: Value) -> Value {
@@ -1871,19 +1971,39 @@ fn build_cli_args_for_resource(uri: &str) -> Result<Vec<OsString>, String> {
     Ok(args)
 }
 
-fn run_cli_tool(args: Vec<OsString>) -> (ProcessExitCode, String, String) {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
+fn run_cli_tool(args: Vec<OsString>) -> McpCliRunResult {
+    let max_bytes = mcp_stdio_byte_limit();
+    let mut stdout = LimitedCapture::new(max_bytes);
+    let mut stderr = LimitedCapture::new(max_bytes);
     let exit = crate::cli::run(args, &mut stdout, &mut stderr);
-    (
+    let stdout_bytes_seen = stdout.bytes_seen;
+    let stderr_bytes_seen = stderr.bytes_seen;
+    let truncated = stdout.truncated || stderr.truncated;
+    McpCliRunResult {
         exit,
-        String::from_utf8_lossy(&stdout).into_owned(),
-        String::from_utf8_lossy(&stderr).into_owned(),
-    )
+        stdout: stdout.into_string(),
+        stderr: stderr.into_string(),
+        stdout_bytes_seen,
+        stderr_bytes_seen,
+        truncated,
+    }
 }
 
 fn redact_mcp_public_diagnostics(value: &str) -> String {
     crate::output::jsonl_export::redact_content(value, RedactionLevel::Standard)
+}
+
+fn cli_output_size_limit_error(id: Value, run: &McpCliRunResult) -> Option<Value> {
+    if !run.truncated {
+        return None;
+    }
+    let actual_bytes = run.stdout_bytes_seen.max(run.stderr_bytes_seen);
+    Some(mcp_size_limit_exceeded_error(
+        Some(id),
+        "response",
+        actual_bytes,
+        mcp_stdio_byte_limit(),
+    ))
 }
 
 fn resource_read_result(
@@ -1933,8 +2053,11 @@ fn handle_resources_read(id: Value, params: Option<&Value>) -> Value {
         Ok(args) => args,
         Err(message) => return json_rpc_error(Some(id), -32602, &message),
     };
-    let (exit, stdout, stderr) = run_cli_tool(cli_args);
-    resource_read_result(id, uri, exit, stdout, stderr)
+    let run = run_cli_tool(cli_args);
+    if let Some(error) = cli_output_size_limit_error(id.clone(), &run) {
+        return error;
+    }
+    resource_read_result(id, uri, run.exit, run.stdout, run.stderr)
 }
 
 fn cli_tool_result(id: Value, exit: ProcessExitCode, stdout: String, stderr: String) -> Value {
@@ -2000,15 +2123,18 @@ fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
         Ok(args) => args,
         Err(message) => return json_rpc_error(Some(id), -32602, &message),
     };
-    let (exit, stdout, stderr) = run_cli_tool(cli_args);
-    if exit == ProcessExitCode::Success {
-        match extract_mcp_tool_payload(tool.name, &stdout) {
-            Ok(Some(payload)) => return cli_tool_result(id, exit, payload, stderr),
+    let run = run_cli_tool(cli_args);
+    if let Some(error) = cli_output_size_limit_error(id.clone(), &run) {
+        return error;
+    }
+    if run.exit == ProcessExitCode::Success {
+        match extract_mcp_tool_payload(tool.name, &run.stdout) {
+            Ok(Some(payload)) => return cli_tool_result(id, run.exit, payload, run.stderr),
             Ok(None) => {}
             Err(message) => return json_rpc_error(Some(id), -32603, &message),
         }
     }
-    cli_tool_result(id, exit, stdout, stderr)
+    cli_tool_result(id, run.exit, run.stdout, run.stderr)
 }
 
 fn handle_shutdown(id: Value) -> Value {
@@ -2104,6 +2230,131 @@ fn handle_request(request: &Value) -> Value {
     }
 }
 
+fn read_limited_jsonl_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> Result<Option<Result<String, usize>>, String> {
+    let mut bytes = Vec::new();
+    let mut bytes_seen = 0usize;
+
+    loop {
+        let available = reader
+            .fill_buf()
+            .map_err(|error| format!("stdin read error: {error}"))?;
+        if available.is_empty() {
+            if bytes_seen == 0 {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let (chunk, consume_len, done) =
+            if let Some(newline_index) = available.iter().position(|byte| *byte == b'\n') {
+                (&available[..newline_index], newline_index + 1, true)
+            } else {
+                (available, available.len(), false)
+            };
+
+        bytes_seen = bytes_seen.saturating_add(chunk.len());
+        if bytes_seen <= max_bytes {
+            bytes.extend_from_slice(chunk);
+        } else if bytes.len() < max_bytes {
+            let keep = max_bytes - bytes.len();
+            bytes.extend_from_slice(&chunk[..keep]);
+        }
+
+        reader.consume(consume_len);
+        if done {
+            break;
+        }
+    }
+
+    if bytes_seen > max_bytes {
+        return Ok(Some(Err(bytes_seen)));
+    }
+
+    if bytes.ends_with(b"\r") {
+        bytes.pop();
+    }
+    String::from_utf8(bytes)
+        .map(|line| Some(Ok(line)))
+        .map_err(|error| format!("stdin line is not valid UTF-8: {error}"))
+}
+
+struct StdioLineOutcome {
+    response: Option<Value>,
+    shutdown: bool,
+}
+
+fn handle_stdio_line(line: &str, max_bytes: usize) -> StdioLineOutcome {
+    if line.as_bytes().len() > max_bytes {
+        return StdioLineOutcome {
+            response: Some(mcp_size_limit_exceeded_error(
+                None,
+                "request",
+                line.len(),
+                max_bytes,
+            )),
+            shutdown: false,
+        };
+    }
+    if line.trim().is_empty() {
+        return StdioLineOutcome {
+            response: None,
+            shutdown: false,
+        };
+    }
+
+    let request: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(error) => {
+            return StdioLineOutcome {
+                response: Some(json_rpc_error(
+                    None,
+                    -32700,
+                    &format!("Parse error: {error}"),
+                )),
+                shutdown: false,
+            };
+        }
+    };
+    let shutdown = request
+        .get("method")
+        .and_then(Value::as_str)
+        .is_some_and(|method| method == "shutdown");
+    StdioLineOutcome {
+        response: handle_json_rpc_message(&request),
+        shutdown,
+    }
+}
+
+fn write_json_rpc_response<W: Write>(
+    stdout: &mut W,
+    response: &Value,
+    max_bytes: usize,
+) -> Result<(), String> {
+    let response_text = response.to_string();
+    let output_text = if response_text.len() > max_bytes {
+        let id = response.get("id").cloned().filter(|value| !value.is_null());
+        let error = mcp_size_limit_exceeded_error(id, "response", response_text.len(), max_bytes);
+        let error_text = error.to_string();
+        if error_text.len() > max_bytes {
+            return Err(format!(
+                "MCP size_limit_exceeded response is {} bytes, above configured cap {max_bytes}",
+                error_text.len()
+            ));
+        }
+        error_text
+    } else {
+        response_text
+    };
+
+    writeln!(stdout, "{output_text}").map_err(|error| format!("stdout write error: {error}"))?;
+    stdout
+        .flush()
+        .map_err(|error| format!("stdout flush error: {error}"))
+}
+
 /// Run the MCP stdio server.
 ///
 /// Reads JSON-RPC requests from stdin (one per line) and writes responses to stdout.
@@ -2115,38 +2366,27 @@ fn handle_request(request: &Value) -> Value {
 pub fn run_stdio_server() -> Result<(), String> {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let reader = BufReader::new(stdin.lock());
+    let mut reader = BufReader::new(stdin.lock());
+    let max_bytes = mcp_stdio_byte_limit();
 
     eprintln!("[ee-mcp] Server starting, protocol version {MCP_PROTOCOL_VERSION}");
 
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|e| format!("stdin read error: {e}"))?;
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let request: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                let error = json_rpc_error(None, -32700, &format!("Parse error: {e}"));
-                writeln!(stdout, "{error}").map_err(|e| format!("stdout write error: {e}"))?;
-                stdout
-                    .flush()
-                    .map_err(|e| format!("stdout flush error: {e}"))?;
+    while let Some(line_result) = read_limited_jsonl_line(&mut reader, max_bytes)? {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(actual_bytes) => {
+                let error = mcp_size_limit_exceeded_error(None, "request", actual_bytes, max_bytes);
+                write_json_rpc_response(&mut stdout, &error, max_bytes)?;
                 continue;
             }
         };
 
-        if let Some(response) = handle_json_rpc_message(&request) {
-            writeln!(stdout, "{response}").map_err(|e| format!("stdout write error: {e}"))?;
-            stdout
-                .flush()
-                .map_err(|e| format!("stdout flush error: {e}"))?;
+        let outcome = handle_stdio_line(&line, max_bytes);
+        if let Some(response) = outcome.response {
+            write_json_rpc_response(&mut stdout, &response, max_bytes)?;
         }
 
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        if method == "shutdown" {
+        if outcome.shutdown {
             eprintln!("[ee-mcp] Shutdown requested");
             break;
         }
@@ -2200,6 +2440,86 @@ mod tests {
                     .map_err(|arg| format!("non-UTF-8 argument: {arg:?}"))
             })
             .collect()
+    }
+
+    #[test]
+    fn oversized_stdio_request_returns_size_limit_exceeded_error() -> Result<(), String> {
+        let payload = "x".repeat(17 * 1024 * 1024);
+        let request = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"ee_search","arguments":{{"query":"{payload}"}}}}}}"#
+        );
+        assert!(request.len() > DEFAULT_MCP_MAX_REQUEST_BYTES);
+
+        let outcome = handle_stdio_line(&request, DEFAULT_MCP_MAX_REQUEST_BYTES);
+        assert!(!outcome.shutdown);
+        let response = outcome
+            .response
+            .ok_or_else(|| "oversized request must return an error response".to_string())?;
+        let error = response
+            .get("error")
+            .ok_or_else(|| "oversized request response missing error".to_string())?;
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32000));
+        assert_eq!(
+            error.get("message").and_then(Value::as_str),
+            Some(MCP_SIZE_LIMIT_EXCEEDED_CODE)
+        );
+        let data = error
+            .get("data")
+            .ok_or_else(|| "oversized request response missing error.data".to_string())?;
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some(MCP_SIZE_LIMIT_EXCEEDED_CODE)
+        );
+        assert_eq!(
+            data.get("direction").and_then(Value::as_str),
+            Some("request")
+        );
+        assert!(
+            data.get("actualBytes")
+                .and_then(Value::as_u64)
+                .is_some_and(|actual| actual > DEFAULT_MCP_MAX_REQUEST_BYTES as u64)
+        );
+        assert_eq!(
+            data.get("maxBytes").and_then(Value::as_u64),
+            Some(DEFAULT_MCP_MAX_REQUEST_BYTES as u64)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_response_writer_returns_size_limit_exceeded_error() -> Result<(), String> {
+        let response = json_rpc_result(
+            json!("big-response"),
+            json!({
+                "content": "x".repeat(4096)
+            }),
+        );
+        let mut output = Vec::new();
+        write_json_rpc_response(&mut output, &response, 1024)?;
+
+        let rendered = String::from_utf8(output).map_err(|error| error.to_string())?;
+        let parsed: Value =
+            serde_json::from_str(rendered.trim()).map_err(|error| error.to_string())?;
+        let error = parsed
+            .get("error")
+            .ok_or_else(|| "capped response missing error".to_string())?;
+        assert_eq!(
+            parsed.get("id").and_then(Value::as_str),
+            Some("big-response")
+        );
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32000));
+        assert_eq!(
+            error
+                .get("data")
+                .and_then(|data| data.get("direction"))
+                .and_then(Value::as_str),
+            Some("response")
+        );
+        assert!(
+            rendered.len() <= 1025,
+            "rendered capped response should stay within cap plus newline"
+        );
+        Ok(())
     }
 
     fn expect_error<T>(result: Result<T, String>, expected: &str) -> Result<(), String> {

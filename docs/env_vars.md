@@ -51,6 +51,7 @@ must not expose their current value.
 | `EE_LOG_FORMAT` | diagnostics | enum | none | Select structured log format. | `json` selects structured command-start logs on stderr. |
 | `EE_LOG_JSON` | diagnostics | boolean flag | none | Enable JSON command-start logs on stderr. | Shortcut for JSON command logging. |
 | `EE_MAX_TOKENS` | tuning | integer tokens | none | Override the default context pack token budget. | Applies when a command does not pass an explicit token budget. |
+| `EE_MCP_MAX_REQUEST_BYTES` | tuning | integer bytes | `16777216` | Override the MCP stdio JSON-RPC request and response byte cap. | Defaults to 16 MiB. Values below 1024 bytes are clamped upward so the adapter can still emit a structured `size_limit_exceeded` JSON-RPC error. |
 | `EE_MESH_DISCOVERY_CACHE_TTL_SECONDS` | mesh | integer seconds | `30` | Override the mesh autodiscovery cache TTL in seconds. | Used by SRR6.46 discovery-cache decisions; cache rows are derived state and may be refreshed early on workspace, tailnet, explicit-refresh, or auto-enroll invalidation. |
 | `EE_MESH_DRIFT_SOFT_STALE_AFTER` | mesh | integer count | `1` | Override missed mesh hello probes before soft-stale drift grace. | A soft-stale peer is reported as transient unreachable, not removal-class stale drift. |
 | `EE_MESH_DRIFT_SOFT_STALE_AFTER_SECONDS` | mesh | integer seconds | `300` | Override seconds since last successful mesh probe before soft-stale drift grace. | Defaults to five minutes to tolerate laptop sleep and transient tailnet blips. |
