@@ -879,22 +879,47 @@ if [ "$CHECK_REGRESSION" = "true" ]; then
 
         REGRESSION_FOUND=false
 
-        for bench in $BENCHMARKS; do
-            OP_NAME="ee_${bench}"
-            BASELINE_P50=$(jq -r ".operations.${OP_NAME}.p50_ms // 0" "$BASELINE_FILE" 2>/dev/null)
-            CURRENT_P50=$(echo "$PERF_JSON" | jq -r ".operations.${OP_NAME}.p50_ms // 0" 2>/dev/null)
+        # check_regression_for_op OP_NAME
+        # Emitted keys from run_context_l2_warm_bench / run_context_arena_mode_bench
+        # do not follow the `ee_${bench}` form and must be passed in explicitly.
+        # Honors per-op tolerance_pct_p50 from the baseline if set; otherwise uses
+        # the global P50_THRESHOLD from budgets.toml [meta]. unstable=true ops emit
+        # a warning instead of failing the build (bd-3925e).
+        check_regression_for_op() {
+            op_name="$1"
+            baseline_p50=$(jq -r ".operations.${op_name}.p50_ms // 0" "$BASELINE_FILE" 2>/dev/null)
+            current_p50=$(echo "$PERF_JSON" | jq -r ".operations.${op_name}.p50_ms // 0" 2>/dev/null)
+            op_tolerance=$(jq -r ".operations.${op_name}.tolerance_pct_p50 // ${P50_THRESHOLD}" "$BASELINE_FILE" 2>/dev/null)
+            op_unstable=$(jq -r ".operations.${op_name}.unstable // false" "$BASELINE_FILE" 2>/dev/null)
 
-            if [ "$BASELINE_P50" != "0" ] && [ "$BASELINE_P50" != "null" ] && [ "$CURRENT_P50" != "0" ] && [ "$CURRENT_P50" != "null" ]; then
-                # Calculate regression percentage: (current - baseline) / baseline * 100
-                REGRESSION_PCT=$(echo "scale=2; ($CURRENT_P50 - $BASELINE_P50) / $BASELINE_P50 * 100" | bc -l 2>/dev/null || echo "0")
-
-                if [ "$(echo "$REGRESSION_PCT > $P50_THRESHOLD" | bc -l 2>/dev/null)" = "1" ]; then
-                    echo "[-] REGRESSION: $OP_NAME p50 regressed ${REGRESSION_PCT}% (baseline: ${BASELINE_P50}ms, current: ${CURRENT_P50}ms)" >&2
-                    REGRESSION_FOUND=true
-                else
-                    echo "[+] $OP_NAME: p50 within threshold (${REGRESSION_PCT}% change)" >&2
-                fi
+            if [ "$baseline_p50" = "0" ] || [ "$baseline_p50" = "null" ] || [ "$current_p50" = "0" ] || [ "$current_p50" = "null" ]; then
+                return 0
             fi
+
+            regression_pct=$(echo "scale=2; ($current_p50 - $baseline_p50) / $baseline_p50 * 100" | bc -l 2>/dev/null || echo "0")
+            if [ "$(echo "$regression_pct > $op_tolerance" | bc -l 2>/dev/null)" = "1" ]; then
+                if [ "$op_unstable" = "true" ]; then
+                    echo "[!] UNSTABLE REGRESSION (warning): $op_name p50 regressed ${regression_pct}% (baseline: ${baseline_p50}ms, current: ${current_p50}ms, tolerance: ${op_tolerance}%)" >&2
+                else
+                    echo "[-] REGRESSION: $op_name p50 regressed ${regression_pct}% (baseline: ${baseline_p50}ms, current: ${current_p50}ms, tolerance: ${op_tolerance}%)" >&2
+                    REGRESSION_FOUND=true
+                fi
+            else
+                echo "[+] $op_name: p50 within tolerance (${regression_pct}% change, tolerance: ${op_tolerance}%)" >&2
+            fi
+        }
+
+        for bench in $BENCHMARKS; do
+            check_regression_for_op "ee_${bench}"
+        done
+
+        # Extra non-cargo-bench operations that emit under custom keys
+        # (l2_warm_bench, arena_mode_bench). Without this list, their results
+        # land in the perf JSON with regression_status="not_checked" and never
+        # gate the build — review-R5 / bd-3925e.
+        EXTRA_REGRESSION_OPERATIONS="ee_context_pack_l2_warm ee_context_arena_workspace_reuse"
+        for op in $EXTRA_REGRESSION_OPERATIONS; do
+            check_regression_for_op "$op"
         done
 
         if [ "$REGRESSION_FOUND" = "true" ]; then

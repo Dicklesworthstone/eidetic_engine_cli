@@ -805,3 +805,61 @@ fn status_quick_bench_compare_mode_regression_guard() -> TestResult {
 
     Ok(())
 }
+
+// bd-3925e: keep the arena workspace_reuse + l2_warm benches inside the
+// regression gate. Their result rows are emitted by run_context_l2_warm_bench /
+// run_context_arena_mode_bench under custom keys that do NOT match the
+// `ee_${bench}` form iterated by the main $BENCHMARKS loop, so they require an
+// explicit EXTRA_REGRESSION_OPERATIONS pass that honors per-op tolerance and
+// the `unstable` flag in the baseline.
+#[test]
+fn arena_workspace_bench_is_wired_into_regression_gate() -> TestResult {
+    let bench_script = fs::read_to_string("scripts/bench.sh")
+        .map_err(|error| format!("failed to read scripts/bench.sh: {error}"))?;
+    let budgets = budgets_manifest()?;
+    let operations = budgets
+        .get("operations")
+        .ok_or_else(|| "missing TOML field `operations`".to_owned())?
+        .as_table()
+        .ok_or_else(|| "`operations` must be a TOML table".to_owned())?;
+    let baseline = fs::read_to_string(PERF_BASELINE_PATH)
+        .map_err(|error| format!("failed to read `{PERF_BASELINE_PATH}`: {error}"))?;
+    let baseline: Value = serde_json::from_str(&baseline)
+        .map_err(|error| format!("invalid perf baseline JSON: {error}"))?;
+
+    for expected in [
+        "check_regression_for_op()",
+        "EXTRA_REGRESSION_OPERATIONS=\"ee_context_pack_l2_warm ee_context_arena_workspace_reuse\"",
+        "for op in $EXTRA_REGRESSION_OPERATIONS; do",
+        "check_regression_for_op \"$op\"",
+        "tolerance_pct_p50",
+        "UNSTABLE REGRESSION",
+    ] {
+        if !bench_script.contains(expected) {
+            return Err(format!(
+                "scripts/bench.sh missing arena regression wiring `{expected}`"
+            ));
+        }
+    }
+
+    for operation_name in [
+        "ee_context_arena_workspace_reuse",
+        "ee_context_pack_l2_warm",
+    ] {
+        operations.get(operation_name).ok_or_else(|| {
+            format!("benches/budgets.toml missing `{operation_name}` budget entry")
+        })?;
+        let entry = baseline
+            .pointer(&format!("/operations/{operation_name}"))
+            .ok_or_else(|| format!("perf baseline missing operations.{operation_name}"))?;
+        for field in ["p50_ms", "p99_ms", "tolerance_pct_p50"] {
+            if entry.get(field).is_none() {
+                return Err(format!(
+                    "perf baseline `{operation_name}` missing `{field}` (required by EXTRA_REGRESSION_OPERATIONS)"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
