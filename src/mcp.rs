@@ -2142,7 +2142,11 @@ fn handle_shutdown(id: Value) -> Value {
 }
 
 fn is_json_rpc_notification(request: &Value) -> bool {
-    request.get("id").is_none()
+    // Per JSON-RPC 2.0 §4: "A Notification is a Request object without
+    // an 'id' member." Require an object so that bare arrays/scalars do
+    // not get treated as notifications when they reach this helper
+    // (they are malformed requests and must receive an error reply).
+    request.is_object() && request.get("id").is_none()
 }
 
 fn is_valid_json_rpc_id(id: &Value) -> bool {
@@ -2201,11 +2205,22 @@ fn validate_json_rpc_request(request: &Value) -> Result<&str, Value> {
 #[must_use]
 pub fn handle_json_rpc_message(request: &Value) -> Option<Value> {
     trace_mcp_top_level("input", 0, &[]);
+    // Per JSON-RPC 2.0 §4.1: "Notifications ... MUST be processed by
+    // the Server without reply or response." This applies even when
+    // the notification is otherwise invalid (missing jsonrpc, wrong
+    // version, empty method, ...). The pre-validation path returned
+    // None for malformed-but-notification-shaped requests; the
+    // post-validation path regressed by replying. Determine
+    // notification status FIRST so we suppress responses for any
+    // object-without-id, regardless of validation outcome. Non-object
+    // requests are not notifications and continue to receive the
+    // standard invalid-request error reply.
+    let is_notification = is_json_rpc_notification(request);
     if let Err(error) = validate_json_rpc_request(request) {
         trace_mcp_top_level("response", 0, &[]);
-        return Some(error);
+        return (!is_notification).then_some(error);
     }
-    if is_json_rpc_notification(request) {
+    if is_notification {
         trace_mcp_top_level("response", 0, &[]);
         return None;
     }
@@ -3817,6 +3832,48 @@ mod tests {
                 error.get("message").and_then(Value::as_str),
                 Some("Invalid Request: jsonrpc must be \"2.0\"")
             );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_notification_does_not_receive_response() -> Result<(), String> {
+        // Per JSON-RPC 2.0 §4.1, notifications (Request objects without an
+        // `id` member) MUST NOT receive a response, even when otherwise
+        // invalid. The pre-validation path silently dropped malformed
+        // notifications; when the validate-first path was introduced it
+        // regressed by replying. Lock the spec-compliant silence in so the
+        // regression cannot recur.
+        for request in [
+            json!({"method": "initialize"}),
+            json!({"jsonrpc": "1.0", "method": "initialize"}),
+            json!({"jsonrpc": 2.0, "method": "initialize"}),
+            json!({"jsonrpc": "2.0", "method": ""}),
+            json!({"jsonrpc": "2.0", "method": []}),
+            json!({"jsonrpc": "2.0"}),
+            json!({}),
+        ] {
+            let response = handle_json_rpc_message(&request);
+            if let Some(payload) = response {
+                return Err(format!(
+                    "malformed notification {request} must not produce a response, got {payload}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn well_formed_notification_does_not_receive_response() -> Result<(), String> {
+        // Well-formed notifications dispatch silently. Pinning this
+        // case alongside the malformed-notification regression keeps
+        // both spec paths visible at the suite level.
+        let request = json!({"jsonrpc": "2.0", "method": "notifications/cancelled"});
+        let response = handle_json_rpc_message(&request);
+        if let Some(payload) = response {
+            return Err(format!(
+                "well-formed notification must not produce a response, got {payload}"
+            ));
         }
         Ok(())
     }
