@@ -552,6 +552,20 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
     let mut hash_mismatches = Vec::new();
 
     if let Some(ref m) = manifest {
+        if m.schema != SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1 {
+            hash_mismatches.push(MANIFEST_FILE.to_owned());
+        }
+        let declared_total_size = m
+            .files
+            .iter()
+            .fold(0u64, |total, entry| total.saturating_add(entry.size_bytes));
+        if declared_total_size != m.total_size_bytes
+            && !hash_mismatches
+                .iter()
+                .any(|mismatch| mismatch.as_str() == MANIFEST_FILE)
+        {
+            hash_mismatches.push(MANIFEST_FILE.to_owned());
+        }
         for entry in &m.files {
             let Ok(file_path) = resolve_bundle_file_no_symlinks(bundle_dir, &entry.path) else {
                 hash_mismatches.push(entry.path.clone());
@@ -563,10 +577,14 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
             };
 
             files_found.push(entry.path.clone());
-            total_size += content.len() as u64;
+            let actual_size = content.len() as u64;
+            total_size += actual_size;
+            if actual_size != entry.size_bytes && !hash_mismatches.contains(&entry.path) {
+                hash_mismatches.push(entry.path.clone());
+            }
             if options.verify_hashes {
                 let actual_hash = compute_hash(&content);
-                if actual_hash != entry.content_hash {
+                if actual_hash != entry.content_hash && !hash_mismatches.contains(&entry.path) {
                     hash_mismatches.push(entry.path.clone());
                 }
             }
@@ -587,6 +605,7 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         }
     }
 
+    let hash_verified = options.verify_hashes && manifest.is_some();
     let valid = manifest.is_some() && hash_mismatches.is_empty();
 
     Ok(InspectReport {
@@ -595,7 +614,7 @@ pub fn inspect_bundle(options: &InspectOptions) -> Result<InspectReport, DomainE
         manifest,
         files_found,
         total_size_bytes: total_size,
-        hash_verified: options.verify_hashes,
+        hash_verified,
         hash_mismatches,
         valid,
     })
@@ -4319,6 +4338,141 @@ mod tests {
         assert!(
             !report.files_found.contains(&missing_path),
             "missing entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_does_not_claim_hash_verification_without_manifest() -> TestResult {
+        let root = unique_test_path("inspect-missing-manifest-hash-flag");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        fs::write(bundle_dir.join(STATUS_FILE), "{}")
+            .map_err(|error| format!("failed to write bundle file: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(!report.valid, "missing manifest must invalidate inspection");
+        assert!(
+            !report.hash_verified,
+            "inspection must not claim hash verification when no manifest hashes exist"
+        );
+        assert!(
+            report.manifest.is_none(),
+            "test setup must exercise missing manifest handling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_rejects_unsupported_manifest_schema() -> TestResult {
+        let root = unique_test_path("inspect-unsupported-manifest-schema");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let payload = "{}";
+        fs::write(bundle_dir.join(STATUS_FILE), payload)
+            .map_err(|error| format!("failed to write bundle file: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: "ee.support_bundle.manifest.v0".to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: STATUS_FILE.to_owned(),
+                size_bytes: payload.len() as u64,
+                content_hash: compute_hash(payload),
+                redacted: true,
+            }],
+            total_size_bytes: payload.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: true,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            !report.valid,
+            "unsupported manifest schema must not validate as a current support bundle"
+        );
+        assert!(
+            report
+                .hash_mismatches
+                .iter()
+                .any(|mismatch| mismatch.as_str() == MANIFEST_FILE),
+            "unsupported manifest schema should be reported as an integrity mismatch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_bundle_marks_entry_size_mismatch_invalid_without_hashes() -> TestResult {
+        let root = unique_test_path("inspect-entry-size-mismatch-no-hash");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+        let payload = "{}";
+        fs::write(bundle_dir.join(STATUS_FILE), payload)
+            .map_err(|error| format!("failed to write bundle file: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "test-bundle".to_owned(),
+            created_at: "2026-05-16T00:00:00Z".to_owned(),
+            workspace_path: "redacted-workspace".to_owned(),
+            ee_version: "test".to_owned(),
+            files: vec![ManifestEntry {
+                path: STATUS_FILE.to_owned(),
+                size_bytes: 999,
+                content_hash: compute_hash(payload),
+                redacted: true,
+            }],
+            total_size_bytes: 999,
+            redaction_applied: true,
+            redaction_reasons: vec![],
+        };
+        fs::write(
+            bundle_dir.join(MANIFEST_FILE),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("failed to write manifest: {error}"))?;
+
+        let report = inspect_bundle(&InspectOptions {
+            bundle_path: bundle_dir,
+            verify_hashes: false,
+        })
+        .map_err(|error| error.message())?;
+
+        assert!(
+            !report.valid,
+            "manifest entry sizes must be verified even in structure-only inspection"
+        );
+        assert!(
+            !report.hash_verified,
+            "test setup must exercise structure-only inspection"
+        );
+        assert!(
+            report
+                .hash_mismatches
+                .iter()
+                .any(|mismatch| mismatch.as_str() == STATUS_FILE),
+            "entry size mismatch should be reported as an integrity mismatch"
         );
         Ok(())
     }
