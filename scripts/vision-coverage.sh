@@ -183,7 +183,13 @@ normalize_command() {
     third="${3:-}"
 
     case "$first" in
-        ""|0.1.0|COMMAND|COMMANDS|GLOBAL|OPTIONS|USAGE|ee)
+        ""|0.1.0|COMMAND|COMMANDS|GLOBAL|OPTIONS|USAGE|ee|--*)
+            # Flag tokens (e.g., `--fields`, `--json`) are global options,
+            # not commands. README examples like `ee --fields full swarm
+            # brief` would otherwise be classified as a documented `--fields`
+            # command and trip the release-tag coverage gate. The
+            # implementation-side scan (CLI extract_command_path) never
+            # emits flag tokens, so they would always show up as "missing".
             return 0
             ;;
     esac
