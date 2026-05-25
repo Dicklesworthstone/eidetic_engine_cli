@@ -5478,7 +5478,7 @@ fn assemble_mmr_draft_reusing_workspace(
     determinism: &Deterministic<Seed>,
     arena: &mut PackArenaWorkspace,
 ) -> Result<PackDraft, PackValidationError> {
-    let query = query.into();
+    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let candidates = candidates.into_iter().collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let Some(mut scratch) = arena.take_mmr_scratch(candidate_count) else {
@@ -5502,7 +5502,6 @@ fn assemble_mmr_draft_reusing_workspace(
         "threaded deterministic token through MMR pack assembly"
     );
 
-    let query = trim_required(query, PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<MmrCandidate> = candidates
         .into_iter()
         .map(|candidate| MmrCandidate::from_candidate(candidate, options.output_redaction_enabled))
@@ -5940,7 +5939,7 @@ fn assemble_facility_location_draft_reusing_workspace(
     options: PackAssemblyOptions,
     arena: &mut PackArenaWorkspace,
 ) -> Result<PackDraft, PackValidationError> {
-    let query = query.into();
+    let query = trim_required(query.into(), PackValidationError::EmptyQuery)?;
     let candidates = candidates.into_iter().collect::<Vec<_>>();
     let candidate_count = candidates.len();
     let Some(mut scratch) = arena.take_facility_scratch(candidate_count) else {
@@ -5955,7 +5954,6 @@ fn assemble_facility_location_draft_reusing_workspace(
         );
     };
 
-    let query = trim_required(query, PackValidationError::EmptyQuery)?;
     let mut candidates: Vec<PackCandidate> = candidates;
     candidates.sort_by(compare_candidates);
     let mut candidates: Vec<FacilityCandidateProfile> = candidates
@@ -8290,6 +8288,78 @@ mod tests {
         ensure(
             !stats.poisoned,
             "workspace reuse should remain unpoisoned for normal MMR requests",
+        )
+    }
+
+    #[test]
+    fn arena_workspace_reuse_empty_query_preserves_cached_mmr_scratch() -> TestResult {
+        let candidates = facility_benchmark_candidates(12)?;
+        let budget =
+            TokenBudget::new(4_000).map_err(|error| format!("budget rejected: {error:?}"))?;
+        let determinism = Deterministic::from_seed(0xee_a7_e3_3a);
+        let mut workspace = arena_workspace();
+
+        assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        )
+        .map_err(|error| format!("workspace_reuse warmup draft rejected: {error:?}"))?;
+        let after_warmup = workspace.stats();
+        ensure_equal(
+            &after_warmup.fresh_scratch_allocations,
+            &1,
+            "workspace reuse should cache one MMR scratch after warmup",
+        )?;
+
+        let empty_query = assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Balanced,
+            " ",
+            budget,
+            candidates.clone(),
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        );
+        ensure(
+            matches!(empty_query, Err(PackValidationError::EmptyQuery)),
+            "empty workspace-reuse query must be rejected",
+        )?;
+        let after_error = workspace.stats();
+        ensure_equal(
+            &after_error.fresh_scratch_allocations,
+            &after_warmup.fresh_scratch_allocations,
+            "validation errors must not drop cached MMR scratch",
+        )?;
+
+        assemble_draft_with_profile_and_options_seeded_in_workspace(
+            ContextPackProfile::Balanced,
+            "ship arena parity",
+            budget,
+            candidates,
+            PackAssemblyOptions {
+                arena_mode: super::ArenaMode::WorkspaceReuse,
+                ..PackAssemblyOptions::default()
+            },
+            &determinism,
+            &mut workspace,
+        )
+        .map_err(|error| format!("workspace_reuse post-error draft rejected: {error:?}"))?;
+        let after_second_success = workspace.stats();
+        ensure_equal(
+            &after_second_success.fresh_scratch_allocations,
+            &1,
+            "post-error request should reuse cached MMR scratch instead of allocating again",
         )
     }
 

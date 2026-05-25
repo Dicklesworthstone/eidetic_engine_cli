@@ -1479,10 +1479,8 @@ fn is_safe_archive_member_path(member: &str) -> bool {
     for component in path.components() {
         match component {
             Component::Normal(_) => has_normal = true,
-            Component::CurDir
-            | Component::ParentDir
-            | Component::RootDir
-            | Component::Prefix(_) => {
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return false;
             }
         }
@@ -2126,6 +2124,15 @@ mod tests {
             Path::new("artifact.tar.xz"),
             "ee/\nee/ee\n",
             "drwxr-xr-x 0/0 0 Jan 01 00:00 ee/\n-rwxr-xr-x 0/0 10 Jan 01 00:00 ee/ee\n",
+        )
+    }
+
+    #[test]
+    fn tar_archive_member_listing_accepts_current_dir_components() -> TestResult {
+        validate_tar_archive_member_listing(
+            Path::new("artifact.tar.xz"),
+            "./ee\nee/./ee\n",
+            "-rwxr-xr-x 0/0 10 Jan 01 00:00 ./ee\n-rwxr-xr-x 0/0 10 Jan 01 00:00 ee/./ee\n",
         )
     }
 
