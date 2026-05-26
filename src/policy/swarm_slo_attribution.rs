@@ -225,7 +225,7 @@ fn producer_attribution(raw: &str) -> SwarmSloProducerAttribution {
 fn producer_key_needs_redaction(producer: &NormalizedProducerId) -> bool {
     if matches!(
         producer.kind,
-        ProducerIdKind::Human | ProducerIdKind::Unknown
+        ProducerIdKind::AgentName | ProducerIdKind::Human | ProducerIdKind::Unknown
     ) {
         return true;
     }
@@ -489,6 +489,17 @@ mod tests {
         });
 
         assert_eq!(agent_mail.bucket, SwarmSloAttributionBucket::Coordination);
+        assert!(agent_mail.producer.redacted);
+        assert!(
+            agent_mail
+                .producer
+                .attribution_key
+                .starts_with("agent_name:blake3:")
+        );
+        let agent_mail_json =
+            serde_json::to_string(&agent_mail).expect("coordination event serializes");
+        assert!(!agent_mail_json.contains("PinkOriole"));
+        assert!(!agent_mail_json.contains("pinkoriole"));
         assert_eq!(
             agent_mail.repair_command.as_deref(),
             Some("am doctor check --verbose")
