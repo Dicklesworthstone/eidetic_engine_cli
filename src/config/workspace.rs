@@ -466,9 +466,26 @@ pub fn get_or_create_installation_salt() -> Result<Vec<u8>, CanonicalizationErro
     }
 }
 
+/// Hard cap on the installation salt file size. `rand_salt` writes
+/// exactly 32 bytes; 4 KiB is two orders of magnitude of headroom and
+/// matches the cap shape applied to the parallel small-fixed-schema
+/// user-local file at `.git` (gitfile pointer, `WORKTREE_GITFILE_INSPECT_LIMIT`
+/// in this same module, c8f33694) and the workspace-local
+/// `.ee/write-spool/recovery-state.json` cap
+/// (`RECOVERY_STATE_MAX_BYTES`, c4427910). Without the cap, a peer-
+/// planted multi-GB `.salt` file (accidental — `cat /dev/urandom >
+/// ~/.local/share/ee/.salt` — or hostile in a shared-user multi-agent
+/// host) would pin a matching `Vec<u8>` allocation through `fs::read`
+/// AND a matching `blake3::hash` CPU cost on every ee invocation that
+/// resolves a workspace through `canonicalize_workspace_path` — which
+/// is effectively every ee command.
+const INSTALLATION_SALT_INSPECT_LIMIT: u64 = 4 * 1024;
+
 fn read_existing_installation_salt(
     salt_path: &Path,
 ) -> Result<Option<Vec<u8>>, CanonicalizationError> {
+    use std::io::Read as _;
+
     ensure_installation_salt_path_has_no_symlink_components(salt_path).map_err(|source| {
         CanonicalizationError::SaltReadFailure {
             path: salt_path.to_path_buf(),
@@ -500,12 +517,48 @@ fn read_existing_installation_salt(
         });
     }
 
-    fs::read(salt_path)
-        .map(Some)
+    // Reject obvious oversize at stat time before opening the file at
+    // all. See `INSTALLATION_SALT_INSPECT_LIMIT` for the threat model.
+    if metadata.len() > INSTALLATION_SALT_INSPECT_LIMIT {
+        return Err(CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "installation salt size {} exceeds the {INSTALLATION_SALT_INSPECT_LIMIT} byte cap",
+                    metadata.len()
+                ),
+            ),
+        });
+    }
+
+    // Bound the read itself so a peer-driven TOCTOU growth between the
+    // `symlink_metadata` above and the `File::open` here cannot widen
+    // peak allocation beyond `LIMIT + 1` bytes. Same shape as
+    // `src/config/workspace.rs::detect_git_worktree` (c8f33694) and
+    // `src/core/write_owner.rs::read_recovery_state_file` (c4427910).
+    let file =
+        fs::File::open(salt_path).map_err(|source| CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source,
+        })?;
+    let mut bytes = Vec::new();
+    file.take(INSTALLATION_SALT_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|source| CanonicalizationError::SaltReadFailure {
             path: salt_path.to_path_buf(),
             source,
-        })
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > INSTALLATION_SALT_INSPECT_LIMIT {
+        return Err(CanonicalizationError::SaltReadFailure {
+            path: salt_path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "installation salt grew past cap during read",
+            ),
+        });
+    }
+    Ok(Some(bytes))
 }
 
 fn get_salt_path() -> PathBuf {
