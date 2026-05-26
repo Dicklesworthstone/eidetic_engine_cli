@@ -52,6 +52,11 @@ use ee::output::{
     render_memory_list_json, render_memory_show_json, render_reflect_propose_json,
     render_schema_export_json,
 };
+use ee::policy::{
+    SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
+    SwarmSloCoordinationInput, SwarmSloPosture, SwarmSloResourceUsageInput,
+    adapt_swarm_slo_coordination_event, adapt_swarm_slo_resource_usage_event,
+};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -126,6 +131,14 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     (
         "ee.swarm_slo.scorecard.v1",
         "ee.swarm_slo.scorecard.v1.json",
+    ),
+    (
+        SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1,
+        "ee.swarm_slo.resource_usage_event.v1.json",
+    ),
+    (
+        SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1,
+        "ee.swarm_slo.coordination_event.v1.json",
     ),
     ("ee.mcp.manifest.v1", "ee.mcp.manifest.v1.json"),
 ];
@@ -497,6 +510,64 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
             ));
         }
     }
+    Ok(())
+}
+
+#[test]
+fn swarm_slo_event_schemas_match_adapter_output() -> TestResult {
+    let resource_event = serde_json::to_value(adapt_swarm_slo_resource_usage_event(
+        &SwarmSloResourceUsageInput {
+            producer_id: "%4",
+            source: "context_pack",
+            stage: "pack",
+            posture: SwarmSloPosture::Degraded,
+            elapsed_ms: 412,
+            cpu_ms: Some(51),
+            memory_bytes: Some(2_048),
+            io_read_bytes: Some(128),
+            io_write_bytes: None,
+            evidence: &[(
+                "stderr",
+                "api_key=test-redaction-value-abcdefghijklmnopqrstuvwxyz /tmp/private/id_ed25519",
+            )],
+        },
+    ))
+    .map_err(|error| format!("serialize resource event: {error}"))?;
+    let coordination_event = serde_json::to_value(adapt_swarm_slo_coordination_event(
+        &SwarmSloCoordinationInput {
+            producer_id: "PinkOriole",
+            source_kind: "agent_mail",
+            posture: SwarmSloPosture::Unavailable,
+            elapsed_ms: 0,
+            event_count: 0,
+            error_count: 1,
+            degraded_count: 1,
+            evidence: &[("code", "sqlite_malformed")],
+        },
+    ))
+    .map_err(|error| format!("serialize coordination event: {error}"))?;
+
+    for (schema_id, value) in [
+        (SWARM_SLO_RESOURCE_USAGE_EVENT_SCHEMA_V1, resource_event),
+        (SWARM_SLO_COORDINATION_EVENT_SCHEMA_V1, coordination_event),
+    ] {
+        let schema = schema_doc(schema_id)?;
+        ensure_json_str(&schema, "/properties/schema/const", schema_id)?;
+        validate_json_schema(&value, &schema, &schema, schema_id)
+            .map_err(|error| format!("{schema_id} rejected adapter output: {error}"))?;
+
+        let example = schema
+            .pointer("/examples/0")
+            .ok_or_else(|| format!("{schema_id} schema must include an example"))?;
+        validate_json_schema(
+            example,
+            &schema,
+            &schema,
+            &format!("{schema_id}.examples[0]"),
+        )
+        .map_err(|error| format!("{schema_id} example invalid: {error}"))?;
+    }
+
     Ok(())
 }
 

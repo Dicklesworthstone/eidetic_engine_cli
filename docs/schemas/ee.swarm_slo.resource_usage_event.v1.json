@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm_slo.resource_usage_event.v1.json",
+  "title": "ee.swarm_slo.resource_usage_event.v1",
+  "description": "Redaction-safe resource attribution event emitted by the Swarm SLO policy boundary. The event groups resource usage by normalized producer, source, stage, attribution bucket, and posture without raw command output, memory bodies, mail bodies, local paths, or secret-like values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "producer",
+    "source",
+    "stage",
+    "bucket",
+    "posture",
+    "elapsedMs",
+    "cpuMs",
+    "memoryBytes",
+    "ioReadBytes",
+    "ioWriteBytes",
+    "evidence"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.swarm_slo.resource_usage_event.v1"
+    },
+    "producer": {
+      "$ref": "#/$defs/producerAttribution"
+    },
+    "source": {
+      "$ref": "#/$defs/safeLabel"
+    },
+    "stage": {
+      "$ref": "#/$defs/safeLabel"
+    },
+    "bucket": {
+      "$ref": "#/$defs/attributionBucket"
+    },
+    "posture": {
+      "$ref": "#/$defs/posture"
+    },
+    "elapsedMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "cpuMs": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "memoryBytes": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "ioReadBytes": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "ioWriteBytes": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/redactedEvidence"
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "producer", "bucket", "posture"],
+    "summary": ["schema", "producer", "source", "stage", "bucket", "posture", "elapsedMs"],
+    "standard": [
+      "schema",
+      "producer",
+      "source",
+      "stage",
+      "bucket",
+      "posture",
+      "elapsedMs",
+      "cpuMs",
+      "memoryBytes",
+      "evidence"
+    ],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm_slo.resource_usage_event.v1",
+      "producer": {
+        "kind": "agent_pane",
+        "attributionKey": "agent_pane:pane_4",
+        "canonicalHash": "blake3:1111111111111111",
+        "originalHash": "blake3:2222222222222222",
+        "redacted": false
+      },
+      "source": "context_pack",
+      "stage": "pack",
+      "bucket": "pack",
+      "posture": "degraded",
+      "elapsedMs": 412,
+      "cpuMs": 51,
+      "memoryBytes": 2048,
+      "ioReadBytes": 128,
+      "ioWriteBytes": null,
+      "evidence": [
+        {
+          "field": "code",
+          "code": "pack_budget_pressure",
+          "valueHash": "blake3:3333333333333333",
+          "redacted": false,
+          "redactionReasons": []
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "producerAttribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "attributionKey",
+        "canonicalHash",
+        "originalHash",
+        "redacted"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "agent_pane",
+            "agent_name",
+            "harness",
+            "human",
+            "reflection_context",
+            "workflow",
+            "unknown"
+          ]
+        },
+        "attributionKey": {
+          "type": "string"
+        },
+        "canonicalHash": {
+          "$ref": "#/$defs/shortBlake3Hash"
+        },
+        "originalHash": {
+          "$ref": "#/$defs/shortBlake3Hash"
+        },
+        "redacted": {
+          "type": "boolean"
+        }
+      }
+    },
+    "redactedEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field",
+        "code",
+        "valueHash",
+        "redacted",
+        "redactionReasons"
+      ],
+      "properties": {
+        "field": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "code": {
+          "type": ["string", "null"]
+        },
+        "valueHash": {
+          "$ref": "#/$defs/shortBlake3Hash"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "redactionReasons": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "attributionBucket": {
+      "type": "string",
+      "enum": [
+        "storage",
+        "search",
+        "graph",
+        "pack",
+        "output",
+        "coordination",
+        "rch",
+        "tracker",
+        "external_unavailable",
+        "unknown_residual"
+      ]
+    },
+    "posture": {
+      "type": "string",
+      "enum": ["ok", "degraded", "unavailable", "blocked", "unknown"]
+    },
+    "safeLabel": {
+      "type": "string",
+      "pattern": "^[a-z0-9_.-]*$"
+    },
+    "shortBlake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[a-f0-9]{16}$"
+    }
+  }
+}
