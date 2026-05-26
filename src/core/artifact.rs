@@ -4,6 +4,7 @@
 //! optional safe snippets. Raw artifact bytes stay external unless a later
 //! design explicitly adds import/copy semantics.
 
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::{fs, str::FromStr};
 
@@ -760,13 +761,45 @@ fn prepare_file_artifact(
         });
     }
 
-    let bytes = fs::read(&canonical_path).map_err(|error| DomainError::Storage {
+    // Cap the read at `max_bytes + 1` to close the TOCTOU window between
+    // the metadata-based size check above (line ~749) and this read. A
+    // peer that swaps `canonical_path` for a multi-GiB payload between
+    // the stat and `fs::read` would otherwise force `fs::read`'s
+    // internal pre-size-from-metadata path to allocate that full size
+    // before the post-read length check could reject it. The `+ 1`
+    // sentinel lets the post-read length check below distinguish
+    // "exactly at cap" (kept) from "above cap" (rejected as race-
+    // grown). Same defense-in-depth pattern as `read_cache_entry_file`
+    // in src/cache/pack_l2.rs (8ba93c0e) and `read_limited_utf8_file`
+    // in src/hooks/installer.rs.
+    let mut file = fs::File::open(&canonical_path).map_err(|error| DomainError::Storage {
         message: format!(
-            "Failed to read artifact {}: {error}",
+            "Failed to open artifact {}: {error}",
             canonical_path.display()
         ),
         repair: Some("Check artifact file permissions and retry.".to_string()),
     })?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read artifact {}: {error}",
+                canonical_path.display()
+            ),
+            repair: Some("Check artifact file permissions and retry.".to_string()),
+        })?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Artifact grew past the {max_bytes} byte limit between stat and read."
+            ),
+            repair: Some(
+                "Register a smaller log/snippet artifact or raise --max-bytes intentionally."
+                    .to_string(),
+            ),
+        });
+    }
     let content_hash = blake3_hex(&bytes);
     let size_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     let text = if bytes.contains(&0) {
