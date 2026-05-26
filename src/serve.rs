@@ -527,17 +527,43 @@ pub fn parse_serve_http_request(
     let request_line = lines
         .next()
         .ok_or_else(|| serve_usage_error("HTTP request line is missing."))?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| serve_usage_error("HTTP method is missing."))?;
-    let target = parts
-        .next()
-        .ok_or_else(|| serve_usage_error("HTTP request target is missing."))?;
-    let version = parts
-        .next()
-        .ok_or_else(|| serve_usage_error("HTTP version is missing."))?;
-    if parts.next().is_some() || version != "HTTP/1.1" {
+    // RFC 7230 §3.1.1:
+    //   request-line = method SP request-target SP HTTP-version CRLF
+    // SP is a single 0x20 — exactly two of them in the request line, no
+    // leading/trailing/interior runs and no other whitespace characters.
+    //
+    // The previous parser used `split_whitespace`, which accepts ANY
+    // Unicode whitespace (TAB 0x09, VT 0x0B, FF 0x0C, NEL, non-breaking
+    // space, etc.) AND collapses runs of whitespace into a single
+    // separator. That is a request-line whitespace-normalization mismatch
+    // primitive in the same family as the chunked-in-TE smuggling vector
+    // that 1b426516 closed: a strict upstream proxy that parses
+    // `"GET\t/admin\tHTTP/1.1"` as malformed (rejected) while we parse it
+    // as `("GET", "/admin", "HTTP/1.1")` — or, more dangerous, a permissive
+    // proxy that interprets the tab as part of the request-target while we
+    // strip it — produces a routing disagreement that lets an attacker
+    // smuggle requests through whatever fronting layer is deployed in
+    // front of ee serve v2. Defending the parser at the source closes the
+    // class even before the proxy stance is decided.
+    //
+    // Use `split(' ')` and require exactly three non-empty segments. This
+    // rejects:
+    //   - tabs, vertical tab, form feed, NEL, etc. inside the request line
+    //   - consecutive spaces ("GET  /  HTTP/1.1")
+    //   - leading or trailing space ("  GET / HTTP/1.1 ")
+    //   - a fourth segment after the version
+    // while still accepting the canonical `METHOD SP target SP version`
+    // shape that every existing test case uses.
+    let parts: Vec<&str> = request_line.split(' ').collect();
+    if parts.len() != 3 || parts.iter().any(|segment| segment.is_empty()) {
+        return Err(serve_usage_error(
+            "HTTP request line must be exactly `METHOD SP target SP version` with single-space separators.",
+        ));
+    }
+    let method = parts[0];
+    let target = parts[1];
+    let version = parts[2];
+    if version != "HTTP/1.1" {
         return Err(serve_usage_error(
             "Only narrow HTTP/1.1 request lines are supported.",
         ));
@@ -2656,6 +2682,58 @@ mod tests {
             &ServeLimits::default(),
         )
         .map_err(|error| format!("TE: identity must still parse; got {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn serve_http_parser_rejects_non_rfc7230_request_line_whitespace() -> TestResult {
+        // RFC 7230 §3.1.1 fixes the request line to exactly
+        //   `method SP request-target SP HTTP-version CRLF`
+        // where SP is a single 0x20. The prior parser accepted ANY
+        // Unicode whitespace via `split_whitespace`, opening a
+        // request-line normalization mismatch — the same class of
+        // smuggling vector 1b426516 closed for `Transfer-Encoding:
+        // chunked, identity`. Lock the strict shape across the four
+        // practical bypass families and confirm the canonical shape
+        // still parses.
+        let raws: &[&[u8]] = &[
+            // tab between method and target
+            b"GET\t/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // tab between target and version
+            b"GET /v1/status\tHTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // run of two spaces between method and target
+            b"GET  /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // run of two spaces between target and version
+            b"GET /v1/status  HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // leading space before method
+            b" GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // trailing space after version
+            b"GET /v1/status HTTP/1.1 \r\nHost: 127.0.0.1\r\n\r\n",
+            // vertical tab inside the request line
+            b"GET\x0b/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // form feed inside the request line
+            b"GET\x0c/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            // fourth segment after the version
+            b"GET /v1/status HTTP/1.1 extra\r\nHost: 127.0.0.1\r\n\r\n",
+        ];
+        for raw in raws {
+            match parse_serve_http_request(raw, &ServeLimits::default()) {
+                Ok(request) => {
+                    return Err(format!(
+                        "non-RFC7230 request-line whitespace must reject; got {request:?} for {:?}",
+                        String::from_utf8_lossy(raw),
+                    ));
+                }
+                Err(error) => ensure(error.code(), "usage", "request-line shape error code")?,
+            }
+        }
+
+        // Canonical shape must still parse.
+        parse_serve_http_request(
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| format!("canonical request line must still parse; got {error}"))?;
         Ok(())
     }
 
