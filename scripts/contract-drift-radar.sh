@@ -336,6 +336,7 @@ report=$(jq -n \
   --argjson stale_count "$stale_count" \
   --argjson example_count "$example_count" \
   --argjson example_violation_count "$example_violation_count" \
+  --argjson example_skipped_legacy "$example_skipped_legacy" \
   --argjson taxonomy_orphan_count "$taxonomy_orphan_count" \
   --argjson documented_codes "$documented_codes" \
   --argjson fixture_codes "$fixture_codes" \
@@ -350,7 +351,7 @@ report=$(jq -n \
       staleEnvelopeRefs: $stale_count,
       envelopeExamplesScanned: $example_count,
       schemaIdViolations: $example_violation_count,
-      skippedLegacyExamples: ($example_count - $example_violation_count - ($examples | length) ),
+      skippedLegacyExamples: $example_skipped_legacy,
       documentedCodes: $documented_codes,
       fixtureCodes: $fixture_codes,
       documentedMissingFixture: $taxonomy_orphan_count
