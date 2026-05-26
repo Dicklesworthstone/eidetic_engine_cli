@@ -217,17 +217,40 @@ fn validate_fixture(path: &Path) -> TestResult {
     )?;
 
     // (5) cross-reference against src/.
-    let src = src_dir();
-    let appears = code_appears_in_source(code, &src)?;
-    ensure(
-        appears,
-        format!(
-            "{ctx}: code `{code}` does not appear as a literal under {}; \
-             either the fixture documents a fictional code or the code was \
-             removed from production without updating the catalog",
-            src.display()
-        ),
-    )?;
+    //
+    // Retired fixtures (per SCHEMA.md "Retired fixtures keep the
+    // historical `code` and `expected_emission` shape ... while the
+    // e2e driver asserts the production emission pattern is absent")
+    // intentionally outlive their production emission, so the src/
+    // cross-reference is skipped for them. Production emission absence
+    // for retired codes is asserted by the per-emission tests under
+    // `tests/focus_suggest_schema.rs`, `scripts/e2e_overhaul/*.sh`, and
+    // the schema-drift gate, not by this static catalog walker.
+    let retired = value
+        .pointer("/retired")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !retired {
+        let src = src_dir();
+        let appears = code_appears_in_source(code, &src)?;
+        ensure(
+            appears,
+            format!(
+                "{ctx}: code `{code}` does not appear as a literal under {}; \
+                 either the fixture documents a fictional code or the code was \
+                 removed from production without updating the catalog. \
+                 If the code is intentionally retired, set `retired: true` and \
+                 `retired_by: {{ bead, reason }}` on the fixture.",
+                src.display()
+            ),
+        )?;
+    } else {
+        // For retired fixtures, require a `retired_by.bead` reason so the
+        // tombstone always cites the bead that removed the emission. This
+        // keeps catalog forensics simple — every retired entry is traceable.
+        let _ = ensure_string_field(&value, "/retired_by/bead", &ctx)?;
+        let _ = ensure_string_field(&value, "/retired_by/reason", &ctx)?;
+    }
 
     Ok(())
 }

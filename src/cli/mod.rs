@@ -8212,6 +8212,12 @@ pub struct FocusSuggestArgs {
     /// Recency window for CASS spans, in hours. Default 24.
     #[arg(long = "recent-hours", default_value_t = 24)]
     pub recent_hours: u32,
+
+    /// Restrict candidates to the evidence neighborhood of the named
+    /// task frame. When unset the suggest pipeline considers every
+    /// memory created within the recency window.
+    #[arg(long = "task-frame", value_name = "ID")]
+    pub task_frame_id: Option<String>,
 }
 
 /// Subcommands for `ee task-frame`.
@@ -12954,15 +12960,27 @@ where
         }),
         FocusCommand::Explain(_) => explain_focus(&FocusExplainOptions { workspace_path }),
         FocusCommand::Suggest(args) => {
-            // bd-sg5si Phase 1: emit the stable schema with an empty
-            // `recommendations` array and a `degraded` code documenting
-            // that the centrality + CASS-span scoring is owed by the
-            // follow-up `implements-surface:focus_suggest` bead. This is
-            // the AGENTS.md honesty-only pattern — the contract is
-            // pinned so downstream work has a clear target, but the
-            // surface does not pretend to have signals it cannot yet
-            // compute.
-            return write_stdout(stdout, &(render_focus_suggest_envelope(args) + "\n"));
+            // bd-1idcb Phase 2: run the real CASS-span + graph
+            // centrality ranking pipeline. The Phase 1 honesty-only
+            // sentinel (`focus_suggest_unimplemented`) is retired —
+            // the surface now populates `recommendations[]` from the
+            // workspace's recent evidence and emits only situation-
+            // appropriate degraded codes (e.g. `graph_unavailable`
+            // when the feature is off, `no_recent_evidence` when the
+            // window is empty).
+            let options = crate::core::focus_suggest::FocusSuggestOptions {
+                workspace_path: workspace_path.clone(),
+                from_cass: args.from_cass,
+                limit: args.limit,
+                recent_hours: args.recent_hours,
+                task_frame_id: args.task_frame_id.clone(),
+            };
+            return match crate::core::focus_suggest::suggest_focus(&options) {
+                Ok(report) => {
+                    write_stdout(stdout, &(render_focus_suggest_envelope(&report) + "\n"))
+                }
+                Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
         }
     };
 
@@ -12993,31 +13011,58 @@ where
 ///     "limit": 5,
 ///     "recentHours": 24
 ///   },
-///   "degraded": [
-///     { "code": "focus_suggest_unimplemented", "severity": "info",
-///       "message": "...", "repair": "..." }
-///   ]
+///   "degraded": []
 /// }
 /// ```
-fn render_focus_suggest_envelope(args: &FocusSuggestArgs) -> String {
+///
+/// Phase 2 (bd-1idcb) retires the `focus_suggest_unimplemented`
+/// sentinel — `degraded[]` is now populated only when a real signal
+/// is unavailable (graph feature off, empty workspace, no recent
+/// evidence, missing task frame, etc.).
+fn render_focus_suggest_envelope(
+    report: &crate::core::focus_suggest::FocusSuggestReport,
+) -> String {
+    let recommendations: Vec<serde_json::Value> = report
+        .recommendations
+        .iter()
+        .map(|rec| {
+            serde_json::json!({
+                "topic": rec.topic,
+                "spanIds": rec.span_ids,
+                "centralityScore": rec.centrality_score,
+                "rationale": rec.rationale,
+                "suggestedQuery": rec.suggested_query,
+            })
+        })
+        .collect();
+
+    let degraded: Vec<serde_json::Value> = report
+        .degraded
+        .iter()
+        .map(|entry| {
+            let mut value = serde_json::json!({
+                "code": entry.code,
+                "severity": entry.severity,
+                "message": entry.message,
+            });
+            if let Some(repair) = entry.repair.as_deref() {
+                value["repair"] = serde_json::Value::String(repair.to_owned());
+            }
+            value
+        })
+        .collect();
+
     let payload = serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
         "data": {
             "schema": "ee.focus.suggest.v1",
-            "recommendations": [],
-            "fromCass": args.from_cass,
-            "limit": args.limit,
-            "recentHours": args.recent_hours,
+            "recommendations": recommendations,
+            "fromCass": report.from_cass,
+            "limit": report.limit,
+            "recentHours": report.recent_hours,
         },
-        "degraded": [
-            {
-                "code": "focus_suggest_unimplemented",
-                "severity": "info",
-                "message": "ee focus suggest is in Phase 1: CLI surface and schema are pinned, but recent-CASS scoring and graph centrality are not yet wired. Tracked by follow-up bead implements-surface:focus_suggest.",
-                "repair": "Use `ee context` or `ee search` until focus-suggest centrality lands."
-            }
-        ]
+        "degraded": degraded,
     });
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned())
 }

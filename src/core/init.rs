@@ -670,7 +670,16 @@ fn harden_init_database_mode(_path: &Path, _allow_symlink: bool) -> io::Result<(
 
 #[cfg(unix)]
 fn set_init_file_permissions(file: &File, mode: u32) -> io::Result<()> {
-    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode)).map_err(io::Error::from)
+    // rustix 1.1+ tightened `Mode::from_raw_mode` to take `u16` (matching
+    // the POSIX `mode_t` width on platforms where it's narrower). Convert
+    // here; the only callers pass values ≤ 0o777 which always fit.
+    let raw: u16 = mode.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("init file mode {mode:#o} does not fit in u16 mode_t"),
+        )
+    })?;
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(raw)).map_err(io::Error::from)
 }
 
 #[cfg(not(unix))]

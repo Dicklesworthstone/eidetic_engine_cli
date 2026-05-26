@@ -216,7 +216,6 @@ memory bodies in `sources[]`.
 | `agent_detection_unavailable` | agent sources, doctor | (binary detection logic) | Reflects compile-time exclusion of agent-detection paths. |
 | `daemon_background_mode_unimplemented` | serve | (daemon background-mode build) | Background daemon mode not built; foreground still works. |
 | `diagram_backend_unavailable` | doctor, dependency contract | (mermaid renderer feature) | Mermaid backend not linked. |
-| `focus_suggest_unimplemented` | focus suggest | (Phase 1 honesty-only sentinel for bd-sg5si) | `ee focus suggest` CLI surface + `ee.focus.suggest.v1` data schema are pinned, but the recent-CASS scoring and graph-centrality ranking are not yet wired. Tracked by the follow-up `implements-surface:focus_suggest` bead. Per the `_unimplemented` suffix rule this is build-time; the long-term home is `capabilities.unimplemented[]` once that surface is wired for this command. |
 | `lexical_unavailable` | search | `frankensearch/lexical` | BM25 arm disabled at build. |
 | `mcp_feature_disabled` | mcp manifest, mcp serve-stdio | `mcp` | MCP discovery remains available, but the stdio adapter is disabled in this build. |
 | `mcp_unavailable` | doctor, dependency contract | `mcp` | MCP adapter feature off. |

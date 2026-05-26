@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.focus.suggest.v1.json",
   "title": "ee.focus.suggest.v1",
-  "description": "Read-only recommendation surface for `ee focus suggest` (bd-sg5si). Returns the topics, CASS spans, and pre-formatted follow-up queries an agent should pivot attention toward, ranked by graph centrality over recent CASS evidence. Phase 1 pins the schema and emits an empty `recommendations` array plus an `info`-severity `focus_suggest_unimplemented` degraded entry; Phase 2 (`implements-surface:focus_suggest`) lands the PageRank/HITS scoring and CASS-span ranking that populate the array.",
+  "description": "Read-only recommendation surface for `ee focus suggest` (bd-sg5si Phase 1; bd-1idcb Phase 2). Returns the topics, CASS spans, and pre-formatted follow-up queries an agent should pivot attention toward, ranked by `centrality_sum + recency_weight + span_density` over the recent-evidence window. The schema is stable across Phase 1 and Phase 2; the `recommendations` array is populated when the workspace has memories created within `recentHours`. `degraded[]` carries situation-appropriate entries (e.g. `graph_unavailable`, `no_recent_evidence`) only when a real signal is missing — the Phase 1 `focus_suggest_unimplemented` sentinel was retired by Phase 2.",
   "type": "object",
   "required": [
     "schema",

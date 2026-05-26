@@ -1,0 +1,38 @@
+---
+source: tests/focus_suggest_phase2_e2e.rs + tests/focus_suggest_schema.rs
+assertion: ee focus suggest emits the v1 envelope with real recency-weighted, centrality-scored recommendations
+schema:
+  data: ee.focus.suggest.v1
+  envelope: ee.response.v2
+beads:
+  honesty_only: bd-sg5si
+  implements_surface: bd-1idcb
+contracts:
+  - Schema pins (envelope=ee.response.v2, data.schema=ee.focus.suggest.v1)
+  - recommendations[] is populated when the workspace has memories created within --recent-hours
+  - recommendations[] is empty (with a workspace_uninitialized degraded entry) when no .ee/ee.db exists
+  - recommendations[] is empty (with a no_recent_evidence degraded entry) when the workspace has no recent memories
+  - Each recommendation has topic, spanIds[], centralityScore (number), rationale, suggestedQuery (referencing ee context or ee search)
+  - --task-frame <id> restricts candidates to the named frame's evidence_links
+  - --from-cass attaches CASS evidence spans within the recency window to span_ids[]
+  - --limit caps the recommendations[] length; limit=0 emits an empty array
+  - --recent-hours bounds the look-back window (default 24)
+  - The Phase 1 focus_suggest_unimplemented honesty-only sentinel is NEVER emitted (the historical fixture remains as a tombstone in tests/fixtures/failure_modes/ marked retired)
+  - degraded[] entries are situation-driven only: workspace_uninitialized, no_recent_evidence, graph_unavailable, graph_empty, graph_pagerank_failed, graph_projection_failed, task_frame_no_evidence, task_frame_unavailable, cass_unavailable
+determinism:
+  - Same workspace + same --recent-hours window → identical topic ordering across runs (clusters keyed by kind+content-token-preview, sorted by score desc → topic_label asc → first_member_id asc with ULID lexical tie-break)
+  - spanIds[] per recommendation deduped and sorted lexically
+scoring:
+  - score = centrality_sum + recency_weight + span_density
+  - centrality_sum: aggregate PageRank over the memory graph projection (#[cfg(feature = "graph")]; falls back to 0 when graph feature off)
+  - recency_weight: exp(-age_hours / max(recent_hours, 1))
+  - span_density: ln(1 + count(distinct attached CASS span ids))
+evidence:
+  - memories.id
+  - memories.kind
+  - memories.content
+  - memories.created_at
+  - evidence_spans.cass_span_id (when --from-cass)
+  - evidence_spans.memory_id (for attachment to clusters)
+  - task_frames.evidence_links[].id (when --task-frame)
+  - memory graph projection edges (memory_links.src_memory_id → memory_links.dst_memory_id, weighted by .weight × .confidence, when feature=graph)

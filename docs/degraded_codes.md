@@ -4422,30 +4422,6 @@ ee status --workspace . --json
 
 ---
 
-## `focus_suggest_unimplemented`
-
-**Severity:** info
-
-**Surfaces:** focus suggest
-
-**Introduced by:** bd-sg5si (epic G)
-
-**Trigger.** `ee focus suggest` is in Phase 1: the CLI surface and `ee.focus.suggest.v1` data schema are pinned, but the recent-CASS scoring and graph-centrality ranking are not yet wired. The command emits an empty `recommendations` array and this informational degraded entry until the follow-up `implements-surface:focus_suggest` bead lands the actual computation.
-
-**Invocation.**
-
-```bash
-ee focus suggest --json
-```
-
-**Expected emission.** Message contains: `ee focus suggest is in Phase 1 ... implements-surface:focus_suggest`
-
-**Repair hint.** `ee context`
-
-**Fixture.** [`tests/fixtures/failure_modes/focus_suggest_unimplemented.json`](../tests/fixtures/failure_modes/focus_suggest_unimplemented.json)
-
----
-
 ## `future_validity_filtered`
 
 **Severity:** low
