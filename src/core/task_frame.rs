@@ -21,6 +21,23 @@ pub const TASK_FRAME_ID_PREFIX: &str = "tf_";
 pub const TASK_SUBGOAL_ID_PREFIX: &str = "tg_";
 pub const NON_EXECUTING_CONTRACT: &str = "records task state only; never executes shell commands, plans tools, or mutates workspace files";
 
+/// Hard cap on `.ee/task_frames.json` reads. A task-frame store holds
+/// goal/subgoal/blocker/evidence metadata for a workspace; real-world
+/// stores are kilobytes to low hundreds of KiB even for long-running
+/// workspaces with many frames. 4 MiB is generous head-room without
+/// leaving the OOM vector open. Matches the parallel workspace-readable
+/// JSON caps in `core::memory` (e1499deb), `core::memory_scope`
+/// (696d0324), `core::context` (85464736), and the just-landed
+/// `core::focus` cap (5d22e245). Without the cap, a peer-planted
+/// multi-GB `.ee/task_frames.json` (accidental — `cat /dev/urandom >
+/// .ee/task_frames.json` — or hostile in a shared multi-agent checkout)
+/// would pin a matching `read_to_string` allocation on every
+/// `ee task-frame create/show/update/close/subgoal-add` invocation
+/// AND on every `ee focus suggest --task-frame` call (via
+/// `load_task_frame_evidence` in core::focus_suggest), despite the
+/// existing O_NOFOLLOW + regular-file pre-checks.
+const TASK_FRAME_STORE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskFrameStatus {
@@ -551,6 +568,24 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
             repair: Some("Replace .ee/task_frames.json with a regular JSON file.".to_owned()),
         });
     }
+    // Layer-1 of the bounded-read defense: refuse oversized files at
+    // stat time, before any open or allocation. Matches the parallel
+    // `read_workspace_config_if_present` precheck in
+    // `src/core/memory.rs` (e1499deb) and the just-landed
+    // `core::focus::read_focus_state` cap (5d22e245).
+    if metadata.len() > TASK_FRAME_STORE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read task-frame store `{}`: file is {} bytes, exceeding the {TASK_FRAME_STORE_MAX_BYTES}-byte ceiling.",
+                store_path.display(),
+                metadata.len()
+            ),
+            repair: Some(format!(
+                "Trim or remove `{}` so it is under {TASK_FRAME_STORE_MAX_BYTES} bytes.",
+                store_path.display()
+            )),
+        });
+    }
     let text = read_store_file(store_path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to read task-frame store `{}`: {error}",
@@ -558,6 +593,22 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
         ),
         repair: Some("Check workspace .ee permissions.".to_owned()),
     })?;
+    // Layer-2 of the bounded-read defense: post-read length check
+    // distinguishes "exactly at the limit" from "grew past the cap
+    // during the read" (TOCTOU growth window between the metadata
+    // pre-check and the actual `file.take(LIMIT+1).read_to_string`).
+    if (text.len() as u64) > TASK_FRAME_STORE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read task-frame store `{}`: file grew past the {TASK_FRAME_STORE_MAX_BYTES}-byte cap after the metadata check (TOCTOU).",
+                store_path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove `{}` so it is under {TASK_FRAME_STORE_MAX_BYTES} bytes.",
+                store_path.display()
+            )),
+        });
+    }
     serde_json::from_str(&text).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to parse task-frame store `{}`: {error}",
@@ -570,7 +621,15 @@ fn read_store(store_path: &Path) -> Result<TaskFrameStoreDocument, DomainError> 
 fn read_store_file(store_path: &Path) -> std::io::Result<String> {
     let mut file = open_store_file_for_read(store_path)?;
     let mut text = String::new();
-    file.read_to_string(&mut text)?;
+    // Bound the read at `TASK_FRAME_STORE_MAX_BYTES + 1` so peak
+    // allocation is pinned regardless of TOCTOU growth between the
+    // metadata pre-check in `read_store` and this call. Same shape as
+    // the just-landed `core::focus::read_focus_state_file` cap
+    // (5d22e245) and the parallel `read_workspace_config_if_present`
+    // shape (e1499deb).
+    (&mut file)
+        .take(TASK_FRAME_STORE_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut text)?;
     Ok(text)
 }
 
