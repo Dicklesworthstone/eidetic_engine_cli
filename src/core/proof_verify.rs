@@ -15,6 +15,19 @@ pub use crate::models::PROOF_CHECK_SCHEMA_V1;
 pub const PROOF_TOOL_MISSING_CODE: &str = "proof_tool_missing";
 pub const PROOF_VIOLATION_DETECTED_CODE: &str = "proof_violation_detected";
 
+/// Hard upper bound on the byte length of a proof artifact file read by
+/// `extract_invariants`. Realistic Lean4 `.lean` and TLA+ `.tla` proof
+/// files are well under 1 MiB; 4 MiB is a generous ceiling that still
+/// bounds the `read_to_string` allocation when a malformed or hostile
+/// workspace stages a huge file under `proofs/lean4/` or `proofs/tla/`.
+/// Without this cap, `fs::read_to_string` pre-sizes its buffer from the
+/// file's metadata length, so a 100 GB file would trigger an unbounded
+/// allocation attempt during `ee verify proofs`. Matches the bounded-
+/// read ceilings used by the round-2 systematic pass at
+/// `src/core/handoff.rs` (capsule 16 MiB), `src/core/preflight.rs`
+/// (rules 4 MiB), and `src/core/memory.rs` (`.ee/config.toml` 4 MiB).
+const PROOF_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProofArtifactKind {
@@ -270,8 +283,27 @@ fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
 
 fn read_proof_artifact_file(path: &Path) -> io::Result<String> {
     let mut file = open_proof_artifact_file_for_read(path)?;
+    // Early-bail before `read_to_string` so a malformed or hostile
+    // workspace cannot trigger an unbounded allocation by staging a huge
+    // file under `proofs/lean4/` or `proofs/tla/`. `read_to_string`
+    // pre-sizes its buffer from the file metadata length and would
+    // otherwise attempt to allocate the entire file in one block.
+    // See `PROOF_ARTIFACT_MAX_BYTES` for the rationale.
+    let metadata = file.metadata()?;
+    if metadata.len() > PROOF_ARTIFACT_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read proof artifact `{}`: file size {} bytes exceeds the {} byte cap",
+                path.display(),
+                metadata.len(),
+                PROOF_ARTIFACT_MAX_BYTES
+            ),
+        ));
+    }
     let mut body = String::new();
-    file.read_to_string(&mut body)?;
+    file.take(PROOF_ARTIFACT_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut body)?;
     Ok(body)
 }
 
