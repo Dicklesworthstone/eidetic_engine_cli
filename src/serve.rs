@@ -680,10 +680,46 @@ pub fn serve_auth_state(request: &ServeHttpRequest, token: Option<&str>) -> &'st
         return "missing";
     };
     match request.headers.get("authorization") {
-        Some(value) if value == &format!("Bearer {configured_token}") => "accepted",
-        Some(_) => "rejected",
         None => "missing",
+        // The expected header is `Bearer <token>` (case-sensitive on the
+        // scheme, matching the prior format!-then-eq contract). Compare in
+        // constant time so per-byte timing differences cannot recover the
+        // configured bearer token byte-by-byte. The previous
+        // `value == &format!("Bearer {configured_token}")` short-circuited
+        // on the first mismatching byte; with `EE_SERVE_TOKEN` policy-required
+        // to be at least 256 bits AND `--allow-non-loopback` already wired,
+        // that timing channel is a real credential-recovery vector against
+        // a remote attacker who can issue many requests and measure response
+        // latency.
+        Some(value) => {
+            let expected = format!("Bearer {configured_token}");
+            if constant_time_eq_bytes(value.as_bytes(), expected.as_bytes()) {
+                "accepted"
+            } else {
+                "rejected"
+            }
+        }
     }
+}
+
+/// Constant-time byte-slice equality.
+///
+/// Runs in `O(max(a.len(), b.len()))` regardless of how soon a mismatch
+/// appears, and folds the length difference into the accumulator so that
+/// length-mismatched inputs also take constant time. Mirrors
+/// `src/core/preflight_guard.rs:constant_time_eq_str` (private to that
+/// module — duplicated here rather than re-exported to keep the
+/// preflight_guard surface unchanged).
+#[must_use]
+fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    let max_len = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for index in 0..max_len {
+        let x = a.get(index).copied().unwrap_or(0);
+        let y = b.get(index).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    std::hint::black_box(diff) == 0
 }
 
 #[must_use]
@@ -2621,6 +2657,133 @@ mod tests {
         )
         .map_err(|error| format!("TE: identity must still parse; got {error}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn serve_auth_bearer_compare_is_constant_time_shape() -> TestResult {
+        // Regression guard for the bearer-token timing side channel.
+        //
+        // The pre-fix code computed
+        //   `value == &format!("Bearer {configured_token}")`,
+        // a short-circuit string compare that leaked the first mismatching
+        // byte through response-latency analysis. EE_SERVE_TOKEN is policy-
+        // required at >= 256 bits and `--allow-non-loopback` is wired, so
+        // the leak is real-credential-recovery territory.
+        //
+        // This test does NOT measure wall-clock latency (timing assertions
+        // are unstable under CI noise). It locks the structural contract:
+        // (a) the helper is constant-time-shape — runs over `max_len`
+        //     regardless of mismatch position;
+        // (b) length-mismatched inputs are NOT shortcut to false by length
+        //     check; the length difference XOR-folds into the accumulator;
+        // (c) the public `serve_auth_state` accept/reject decision is
+        //     unchanged from the prior `==` semantics.
+        ensure(
+            constant_time_eq_bytes(b"abc", b"abc"),
+            true,
+            "equal byte slices must compare equal",
+        )?;
+        ensure(
+            constant_time_eq_bytes(b"abc", b"abd"),
+            false,
+            "single-byte diff must compare unequal",
+        )?;
+        ensure(
+            constant_time_eq_bytes(b"abc", b""),
+            false,
+            "empty vs non-empty must compare unequal",
+        )?;
+        ensure(
+            constant_time_eq_bytes(b"abc", b"abcd"),
+            false,
+            "prefix-only match must compare unequal",
+        )?;
+        ensure(
+            constant_time_eq_bytes(b"abcd", b"abc"),
+            false,
+            "longer-vs-shorter match must compare unequal",
+        )?;
+        ensure(
+            constant_time_eq_bytes(b"", b""),
+            true,
+            "empty-vs-empty must compare equal",
+        )?;
+
+        // End-to-end through serve_auth_state: bearer header must accept
+        // the exact configured token AND reject any single-byte mutation
+        // (early-bytes, mid, late) — locking the accept/reject decision
+        // unchanged from the prior `==` semantics.
+        let configured = "1234567890abcdef1234567890abcdef"; // 32 ASCII bytes
+        let request_with_auth = |auth_header: &str| -> Result<ServeHttpRequest, String> {
+            parse_serve_http_request(
+                format!(
+                    "GET /v1/search?q=x HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth_header}\r\n\r\n"
+                )
+                .as_bytes(),
+                &ServeLimits::default(),
+            )
+            .map_err(|error| error.to_string())
+        };
+
+        let req_ok = request_with_auth(&format!("Bearer {configured}"))?;
+        ensure(
+            serve_auth_state(&req_ok, Some(configured)),
+            "accepted",
+            "exact bearer must be accepted",
+        )?;
+
+        // First byte differs.
+        let req_first = request_with_auth("Bearer X234567890abcdef1234567890abcdef")?;
+        ensure(
+            serve_auth_state(&req_first, Some(configured)),
+            "rejected",
+            "first-byte mutation must be rejected",
+        )?;
+
+        // Last byte differs.
+        let req_last = request_with_auth("Bearer 1234567890abcdef1234567890abcdeX")?;
+        ensure(
+            serve_auth_state(&req_last, Some(configured)),
+            "rejected",
+            "last-byte mutation must be rejected",
+        )?;
+
+        // Length mismatch — shorter.
+        let req_short = request_with_auth("Bearer short")?;
+        ensure(
+            serve_auth_state(&req_short, Some(configured)),
+            "rejected",
+            "short bearer must be rejected",
+        )?;
+
+        // Length mismatch — longer.
+        let req_long = request_with_auth(&format!("Bearer {configured}XYZ"))?;
+        ensure(
+            serve_auth_state(&req_long, Some(configured)),
+            "rejected",
+            "long bearer must be rejected",
+        )?;
+
+        // Wrong scheme casing — pre-fix accepted exact-case "Bearer "
+        // only (via the format! left-hand side). Preserve that.
+        let req_wrong_scheme = request_with_auth(&format!("bearer {configured}"))?;
+        ensure(
+            serve_auth_state(&req_wrong_scheme, Some(configured)),
+            "rejected",
+            "lowercase scheme must be rejected (matching prior contract)",
+        )?;
+
+        // Missing Authorization header is a separate "missing" state.
+        let req_no_auth = parse_serve_http_request(
+            b"GET /v1/search?q=x HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        ensure(
+            serve_auth_state(&req_no_auth, Some(configured)),
+            "missing",
+            "no Authorization header must report missing",
+        )
     }
 
     #[test]
