@@ -137,7 +137,7 @@ impl PackL2Cache {
         now_epoch_seconds: u64,
     ) -> Result<PackL2CacheLookup, PackL2CacheError> {
         ensure_no_symlink_components(&path, "inspect_entry")?;
-        let bytes = match read_cache_entry_file(&path) {
+        let bytes = match read_cache_entry_file(&path, self.options.max_entry_bytes) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(PackL2CacheLookup::Miss(PackL2CacheMiss {
@@ -454,8 +454,8 @@ impl PackL2Cache {
                 .ok()
                 .and_then(|modified| system_time_seconds(modified).ok())
                 .unwrap_or(0);
-            let stored_epoch_seconds =
-                cache_entry_stored_at(&path).unwrap_or(fallback_epoch_seconds);
+            let stored_epoch_seconds = cache_entry_stored_at(&path, self.options.max_entry_bytes)
+                .unwrap_or(fallback_epoch_seconds);
             let last_used_epoch_seconds = fallback_epoch_seconds;
             let expired = stored_epoch_seconds == 0
                 || is_expired(
@@ -1074,7 +1074,7 @@ fn touch_cache_entry_mtime_best_effort(path: &Path, epoch_seconds: u64) {
     }
 }
 
-fn cache_entry_stored_at(path: &Path) -> Option<u64> {
+fn cache_entry_stored_at(path: &Path, max_entry_bytes: u64) -> Option<u64> {
     if first_existing_symlink_component(path)
         .ok()
         .flatten()
@@ -1082,7 +1082,11 @@ fn cache_entry_stored_at(path: &Path) -> Option<u64> {
     {
         return None;
     }
-    let bytes = read_cache_entry_file(path).ok()?;
+    // Same cap-on-read defense as `read_cache_entry_file`. Eviction
+    // scans call this for every `.json` in the cache root (line 458),
+    // so a single corrupted oversized entry would otherwise pin a
+    // proportional allocation per pass.
+    let bytes = read_cache_entry_file(path, max_entry_bytes).ok()?;
     serde_json::from_slice::<PackL2CacheEntryEnvelope>(&bytes)
         .ok()
         .map(|entry| entry.stored_at_epoch_seconds)
@@ -1215,10 +1219,31 @@ fn sync_directory(path: &Path) -> Result<(), PackL2CacheError> {
         })
 }
 
-fn read_cache_entry_file(path: &Path) -> io::Result<Vec<u8>> {
+fn read_cache_entry_file(path: &Path, max_entry_bytes: u64) -> io::Result<Vec<u8>> {
     let mut file = open_cache_entry_file_for_read(path)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    // Cap the read at `max_entry_bytes + 1`. The post-read size check
+    // in `get_candidate_at` (line 174) rejects entries whose byte_len
+    // exceeds `max_entry_bytes`, but the prior `read_to_end` (uncapped)
+    // would already have pre-sized the buffer from the file's metadata
+    // length BEFORE that check ran — so a peer that swapped a
+    // legitimate ≤1 MiB entry for a multi-GiB regular file between
+    // `put_at` and the next `get_at` would force a multi-GiB
+    // allocation, then trip the post-read cap and treat it as a miss.
+    // Pinning the read to `cap + 1` bytes makes the worst case
+    // proportional to the configured cap regardless of on-disk file
+    // size. The `+ 1` sentinel preserves the existing semantics: an
+    // entry of *exactly* `max_entry_bytes` still parses (the read
+    // captures `cap` bytes), and the post-read check at line 174
+    // distinguishes "exactly at cap" (`byte_len == max_entry_bytes`,
+    // accepted) from "above cap" (`byte_len == max_entry_bytes + 1`,
+    // rejected as `TooLarge`). Same defensive pattern as
+    // `read_limited_utf8_file` in src/hooks/installer.rs (5a4eeab4 /
+    // 4f36dfa8) and the metadata-bound reads added by Round-1 fixes
+    // in src/core/preflight.rs (aac04adb) and src/core/handoff.rs
+    // (6d8d00e5).
+    file.take(max_entry_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
     Ok(bytes)
 }
 
