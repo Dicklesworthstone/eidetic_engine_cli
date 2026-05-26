@@ -139,15 +139,34 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
                 .filter(|memory| evidence_ids.iter().any(|id| id == &memory.id))
                 .collect(),
             Ok(_) => {
+                // The user explicitly scoped the request to a task
+                // frame; silently broadening to every recent memory
+                // would contradict that intent. Return empty and
+                // flag the empty-scope at warning severity so the
+                // caller can react. Early-return here so the empty
+                // scope does NOT also trip the `no_recent_evidence`
+                // check below — there may be plenty of recent memories;
+                // they're just not in this frame's evidence_links, and
+                // emitting both codes would mislead the caller about
+                // why the recommendations are empty.
                 degraded.push(FocusSuggestDegradation {
                     code: "task_frame_no_evidence".to_owned(),
-                    severity: "info".to_owned(),
+                    severity: "warning".to_owned(),
                     message: format!(
-                        "Task frame {frame_id} has no evidence_links; no neighborhood restriction applied."
+                        "Task frame {frame_id} has no evidence_links; returning empty recommendations to honor the explicit scope."
                     ),
-                    repair: None,
+                    repair: Some(
+                        "Attach evidence to the frame or omit --task-frame to consider all recent memories."
+                            .to_owned(),
+                    ),
                 });
-                recent
+                return Ok(FocusSuggestReport {
+                    recommendations: Vec::new(),
+                    from_cass: options.from_cass,
+                    limit: options.limit,
+                    recent_hours: options.recent_hours,
+                    degraded,
+                });
             }
             Err(error) => {
                 degraded.push(FocusSuggestDegradation {
@@ -259,6 +278,13 @@ fn load_task_frame_evidence(
         frame_id: Some(frame_id.to_owned()),
         active: false,
     })?;
+    // Task-frame evidence_links carry `kind` ∈ {"memory", "context_pack",
+    // "recorder_run", "handoff", "bead", ...} (see src/core/task_frame.rs:101,
+    // src/core/handoff.rs callers, src/cli/mod.rs:13230). Only entries with
+    // kind=="memory" can match `StoredMemory::id` in the candidate filter; if
+    // we collected every id regardless of kind, non-memory ids (e.g. a
+    // context_pack id or a handoff id) would silently over-restrict the
+    // candidate set to the empty intersection.
     let mut ids: Vec<String> = report
         .frame
         .as_ref()
@@ -266,6 +292,7 @@ fn load_task_frame_evidence(
             frame
                 .evidence_links
                 .iter()
+                .filter(|link| link.kind == "memory")
                 .map(|link| link.id.clone())
                 .collect::<Vec<_>>()
         })
@@ -287,6 +314,14 @@ fn compute_pagerank_scores(
             Ok(result) => result
                 .scores
                 .into_iter()
+                // Drop non-finite PageRank scores (NaN / ±Inf) before they
+                // reach `centrality_sum`. A single NaN poisons the running
+                // sum, the composite score, and any subsequent `total_cmp`
+                // ordering (NaN sorts to one extreme of total ordering and
+                // would silently pin a meaningless cluster at the top).
+                // Negative scores are also non-physical for PageRank and
+                // would distort the additive composite.
+                .filter(|score| score.score.is_finite() && score.score >= 0.0)
                 .map(|score| (score.node, score.score))
                 .collect(),
             Err(error) => {
@@ -371,7 +406,17 @@ fn score_and_emit_topics(
         });
         cluster.member_ids.push(memory.id.clone());
         if let Some(rank) = pagerank.get(&memory.id) {
-            cluster.centrality_sum += *rank;
+            // Drop non-finite PageRank contributions. A NaN/Inf score
+            // would propagate through the sum and end up in the emitted
+            // `centralityScore` field, which serde_json serializes to
+            // `null` — violating the v1 schema's `"type": "number"`
+            // (`docs/schemas/ee.focus.suggest.v1.json:46`). Non-finite
+            // scores indicate an upstream PageRank pathology, not a
+            // signal worth ranking on, so coercing the contribution to
+            // 0.0 preserves both the JSON contract and determinism.
+            if rank.is_finite() {
+                cluster.centrality_sum += *rank;
+            }
         }
         if let Some(ts) = memory_created_at(memory) {
             cluster.most_recent_at = Some(match cluster.most_recent_at {
@@ -385,6 +430,15 @@ fn score_and_emit_topics(
         let Some(memory_id) = span.memory_id.as_deref() else {
             continue;
         };
+        // `docs/schemas/ee.focus.suggest.v1.json` constrains each spanIds
+        // entry to `minLength: 1`. `StoredEvidenceSpan::cass_span_id` is a
+        // plain `String` with no NOT NULL invariant at the type level, so an
+        // empty `cass_span_id` (corrupt row, partial migration, legacy
+        // import) would otherwise leak into the response and violate the
+        // schema's per-item `minLength` contract.
+        if span.cass_span_id.is_empty() {
+            continue;
+        }
         for cluster in clusters.values_mut() {
             if cluster.member_ids.iter().any(|id| id == memory_id) {
                 cluster.span_ids.push(span.cass_span_id.clone());
@@ -404,7 +458,10 @@ fn score_and_emit_topics(
                 .most_recent_at
                 .map(|ts| {
                     #[allow(clippy::cast_precision_loss)]
-                    let age_hours = (now - ts).num_seconds() as f64 / 3600.0;
+                    // Clamp to >= 0 so a future-dated `created_at`
+                    // (clock skew, manual back-dating) cannot drive
+                    // recency_weight above 1.0 via exp(-negative).
+                    let age_hours = ((now - ts).num_seconds() as f64 / 3600.0).max(0.0);
                     (-age_hours / recent_hours_f).exp()
                 })
                 .unwrap_or(0.0);
@@ -415,11 +472,13 @@ fn score_and_emit_topics(
         })
         .collect();
 
+    // total_cmp keeps ordering total even if a score is NaN (e.g. an
+    // upstream PageRank pathology) — matches the determinism contract
+    // upheld at src/core/search.rs:5375 (sort_search_hits_by_score_order).
     scored.sort_by(|left, right| {
         right
             .0
-            .partial_cmp(&left.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&left.0)
             .then_with(|| left.1.topic_label.cmp(&right.1.topic_label))
             .then_with(|| {
                 let left_first = left.1.member_ids.first().map(String::as_str).unwrap_or("");
@@ -431,14 +490,22 @@ fn score_and_emit_topics(
     scored
         .into_iter()
         .take(options.limit)
-        .map(|(score, cluster)| {
+        .map(|(_score, cluster)| {
+            // The composite `_score` (centrality + recency + spans)
+            // drives the sort above. The exposed `centralityScore`
+            // field is documented in `docs/schemas/ee.focus.suggest.v1.json`
+            // as "Graph centrality contribution to the rank" — i.e.
+            // the centrality term only — so we emit that, keeping
+            // the field aligned with both the schema description and
+            // the "Centrality {:.4}" prefix of the rationale string.
+            let centrality_sum = cluster.centrality_sum;
             let recency_str = cluster
                 .most_recent_at
                 .map(|ts| ts.to_rfc3339())
                 .unwrap_or_else(|| "unknown".to_owned());
             let rationale = format!(
                 "Centrality {:.4} aggregated over {} memory(ies); {} CASS span(s); most recent evidence at {}.",
-                cluster.centrality_sum,
+                centrality_sum,
                 cluster.member_ids.len(),
                 cluster.span_ids.len(),
                 recency_str,
@@ -450,7 +517,7 @@ fn score_and_emit_topics(
             FocusRecommendation {
                 topic: cluster.topic_label,
                 span_ids: cluster.span_ids,
-                centrality_score: score,
+                centrality_score: centrality_sum,
                 rationale,
                 suggested_query,
             }
@@ -482,7 +549,16 @@ fn content_preview_tokens(content: &str, max_chars: usize) -> String {
 }
 
 fn escape_topic_for_query(topic: &str) -> String {
-    topic.replace('\\', "\\\\").replace('"', "\\\"")
+    // The suggested_query embeds the topic inside a double-quoted shell
+    // command (`ee context "<topic>" ...`). Inside double quotes, bash
+    // still expands `$VAR` and `` `cmd` `` (and `\` / `"` would close
+    // the string), so all four must be escaped. Backslash first so the
+    // backslashes introduced by later steps are not themselves doubled.
+    topic
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('$', "\\$")
+        .replace('`', "\\`")
 }
 
 #[cfg(test)]
@@ -559,7 +635,10 @@ mod tests {
     #[test]
     fn recency_weight_decays_within_window() {
         // Two clusters, equal centrality, equal span density, different
-        // age. Newer must outrank older.
+        // age. Newer must outrank older in the emitted ORDER. The
+        // exposed `centrality_score` field reflects pure centrality
+        // (zero here, since the pagerank map is empty), so it is NOT
+        // a proxy for the composite score — order is what matters.
         let mem_new = memory_with("01", "release", "alpha", "2026-05-26T11:30:00Z");
         let mem_old = memory_with("02", "decision", "beta", "2026-05-26T01:00:00Z");
         let options = FocusSuggestOptions {
@@ -577,9 +656,81 @@ mod tests {
             &options,
         );
         assert_eq!(recs.len(), 2);
-        // First (highest score) must be the newer one.
+        // First (highest composite score, driven by recency) must be
+        // the newer one.
         assert!(recs[0].topic.starts_with("release"));
-        assert!(recs[0].centrality_score > recs[1].centrality_score);
+        // Both have empty pagerank, so centrality_score is 0 for both
+        // — confirming the field is centrality-only and not the
+        // composite sort score.
+        assert_eq!(recs[0].centrality_score, 0.0);
+        assert_eq!(recs[1].centrality_score, 0.0);
+    }
+
+    #[test]
+    fn centrality_score_field_is_centrality_only_not_composite() {
+        // The v1 schema documents `centralityScore` as the graph
+        // centrality contribution. Even though recency_weight and
+        // span_density drive the composite sort score, the emitted
+        // field must equal the PageRank aggregate alone.
+        let mem = memory_with("01", "release", "alpha", "2026-05-26T11:30:00Z");
+        let mut pagerank = BTreeMap::new();
+        pagerank.insert("01".to_owned(), 0.42);
+        let options = FocusSuggestOptions {
+            workspace_path: PathBuf::from("/tmp"),
+            from_cass: false,
+            limit: 5,
+            recent_hours: 24,
+            task_frame_id: None,
+        };
+        let recs = score_and_emit_topics(&[mem], &[], &pagerank, fixed_now(), &options);
+        assert_eq!(recs.len(), 1);
+        // centrality_score equals the PageRank aggregate (0.42), not
+        // the composite 0.42 + recency_weight + 0.
+        assert!(
+            (recs[0].centrality_score - 0.42).abs() < 1e-12,
+            "centrality_score must equal pagerank aggregate; got {}",
+            recs[0].centrality_score,
+        );
+        // The rationale string formats the same centrality value.
+        assert!(
+            recs[0].rationale.starts_with("Centrality 0.4200 "),
+            "rationale must lead with the centrality value; got {:?}",
+            recs[0].rationale,
+        );
+    }
+
+    #[test]
+    fn future_dated_memory_does_not_dominate_via_recency() {
+        // Without the age clamp, a memory whose `created_at` is in
+        // the future (clock skew, manual back-dating, etc.) would
+        // get `exp(-negative/positive) > 1` and unfairly outrank
+        // current memories. The clamp pins recency_weight to <= 1.
+        let mem_future = memory_with("01", "zeta_kind", "future", "2026-05-26T20:00:00Z");
+        let mem_now = memory_with("02", "alpha_kind", "current", "2026-05-26T12:00:00Z");
+        let options = FocusSuggestOptions {
+            workspace_path: PathBuf::from("/tmp"),
+            from_cass: false,
+            limit: 5,
+            recent_hours: 24,
+            task_frame_id: None,
+        };
+        let recs = score_and_emit_topics(
+            &[mem_future, mem_now],
+            &[],
+            &BTreeMap::new(),
+            fixed_now(),
+            &options,
+        );
+        assert_eq!(recs.len(), 2);
+        // Both clusters clamp to age 0 → recency_weight = 1.0 →
+        // composite scores tie → topic_label alphabetical tie-break
+        // puts `alpha_kind` first. Without the clamp the future
+        // memory's recency_weight would be > 1.0 and `zeta_kind`
+        // would win.
+        assert!(
+            recs[0].topic.starts_with("alpha_kind"),
+            "clamp violated; recs={recs:?}",
+        );
     }
 
     #[test]
@@ -702,5 +853,124 @@ mod tests {
     fn escape_topic_handles_quotes_and_backslashes() {
         assert_eq!(escape_topic_for_query(r#"foo"bar"#), r#"foo\"bar"#);
         assert_eq!(escape_topic_for_query(r"foo\bar"), r"foo\\bar");
+    }
+
+    #[test]
+    fn non_finite_pagerank_does_not_leak_into_centrality_score() {
+        // serde_json renders NaN/Inf f64s as JSON `null`, which would
+        // violate the v1 schema's `"type": "number"` constraint on
+        // `centralityScore`. The summation must drop non-finite
+        // PageRank contributions so the emitted score is always a
+        // finite number.
+        let mem_nan = memory_with("01", "alpha_kind", "alpha", "2026-05-26T11:30:00Z");
+        let mem_inf = memory_with("02", "beta_kind", "beta", "2026-05-26T11:30:00Z");
+        let mem_neg_inf = memory_with("03", "gamma_kind", "gamma", "2026-05-26T11:30:00Z");
+        let mem_finite = memory_with("04", "delta_kind", "delta", "2026-05-26T11:30:00Z");
+        let mut pagerank = BTreeMap::new();
+        pagerank.insert("01".to_owned(), f64::NAN);
+        pagerank.insert("02".to_owned(), f64::INFINITY);
+        pagerank.insert("03".to_owned(), f64::NEG_INFINITY);
+        pagerank.insert("04".to_owned(), 0.42);
+        let options = FocusSuggestOptions {
+            workspace_path: PathBuf::from("/tmp"),
+            from_cass: false,
+            limit: 10,
+            recent_hours: 24,
+            task_frame_id: None,
+        };
+        let recs = score_and_emit_topics(
+            &[mem_nan, mem_inf, mem_neg_inf, mem_finite],
+            &[],
+            &pagerank,
+            fixed_now(),
+            &options,
+        );
+        assert_eq!(recs.len(), 4);
+        for rec in &recs {
+            assert!(
+                rec.centrality_score.is_finite(),
+                "centrality_score must be finite; rec={rec:?}",
+            );
+            // serde_json round-trip must produce a numeric value, not
+            // null — this is the actual JSON contract we're guarding.
+            let value = serde_json::to_value(rec.centrality_score).expect("score must serialize");
+            assert!(
+                value.is_number(),
+                "centrality_score must serialize as JSON number; got {value:?}",
+            );
+        }
+        // The finite-PR cluster (delta_kind) must surface with the
+        // exact aggregate; the non-finite ones contribute 0.
+        let delta = recs
+            .iter()
+            .find(|r| r.topic.starts_with("delta_kind"))
+            .expect("delta cluster present");
+        assert!((delta.centrality_score - 0.42).abs() < 1e-12);
+        for label in ["alpha_kind", "beta_kind", "gamma_kind"] {
+            let cluster = recs
+                .iter()
+                .find(|r| r.topic.starts_with(label))
+                .unwrap_or_else(|| panic!("{label} cluster present"));
+            assert_eq!(cluster.centrality_score, 0.0);
+        }
+    }
+
+    #[test]
+    fn escape_topic_neutralizes_double_quoted_shell_metacharacters() {
+        // `$` and `` ` `` are still active inside the double quotes
+        // around the topic in `ee context "<topic>" ...`, so the agent
+        // would do parameter / command substitution if they leaked
+        // through unescaped.
+        assert_eq!(escape_topic_for_query("$x"), r"\$x");
+        assert_eq!(escape_topic_for_query("`cmd`"), r"\`cmd\`");
+        // Combined: an attacker-controlled kind like `$(rm -rf /)`
+        // must be reduced to a literal payload.
+        assert_eq!(
+            escape_topic_for_query("$(rm -rf /)"),
+            r"\$(rm -rf /)".to_owned(),
+        );
+        // Backslashes are escaped before the other metacharacters so
+        // the backslash we INTRODUCE for `$` / `` ` `` is not itself
+        // re-doubled.
+        assert_eq!(escape_topic_for_query(r"a\$b"), r"a\\\$b");
+    }
+
+    #[test]
+    fn sort_is_total_under_nan_scores() {
+        // Direct guard against the determinism trap: if an upstream
+        // score happens to be NaN (e.g. PageRank divergence under a
+        // pathological projection), the sort must remain total —
+        // partial_cmp().unwrap_or(Equal) would have produced an
+        // intransitive ordering and tripped the byte-identical
+        // determinism contract.
+        let mk_cluster = |label: &str, member: &str| TopicCluster {
+            topic_label: label.to_owned(),
+            member_ids: vec![member.to_owned()],
+            centrality_sum: 0.0,
+            most_recent_at: None,
+            span_ids: Vec::new(),
+        };
+        let scored = vec![
+            (f64::NAN, mk_cluster("alpha", "01")),
+            (1.0, mk_cluster("bravo", "02")),
+            (f64::NAN, mk_cluster("charlie", "03")),
+            (2.0, mk_cluster("delta", "04")),
+        ];
+        let mut a = scored.clone();
+        let mut b = scored;
+        a.sort_by(|l, r| {
+            r.0.total_cmp(&l.0)
+                .then_with(|| l.1.topic_label.cmp(&r.1.topic_label))
+        });
+        b.sort_by(|l, r| {
+            r.0.total_cmp(&l.0)
+                .then_with(|| l.1.topic_label.cmp(&r.1.topic_label))
+        });
+        let a_labels: Vec<&str> = a.iter().map(|(_, c)| c.topic_label.as_str()).collect();
+        let b_labels: Vec<&str> = b.iter().map(|(_, c)| c.topic_label.as_str()).collect();
+        assert_eq!(a_labels, b_labels);
+        // Finite scores must outrank NaNs in the descending sort.
+        assert_eq!(a_labels[0], "delta");
+        assert_eq!(a_labels[1], "bravo");
     }
 }
