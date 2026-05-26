@@ -1628,7 +1628,12 @@ fn session_input(workspace_id: &str, session: &CassSessionInfo) -> CreateSession
     }
     let (content_hash, content_hash_source) = match session.content_hash.as_deref() {
         Some(hash) if !hash.trim().is_empty() => (
-            hash.to_owned(),
+            // Trim before storing so a whitespace-padded hash like "  abc123  "
+            // dedupes against the same hash without the padding. The match
+            // guard already trims for the empty-check, but storing the raw
+            // value would let one upstream cass emitter that pads with
+            // newlines silently fail dedup against another that doesn't.
+            hash.trim().to_owned(),
             session.content_hash_source.as_deref().unwrap_or("provided"),
         ),
         Some(_) | None => {
@@ -1749,7 +1754,11 @@ fn content_hash_for_session(item: &JsonValue, path: &str) -> SessionContentHash 
         .filter(|hash| !hash.trim().is_empty())
     {
         return SessionContentHash {
-            value: content_hash.to_owned(),
+            // Trim before storing — symmetric with the trim in
+            // session_input() above. A whitespace-padded hash from a noisy
+            // cass emitter must dedupe against the same hash without the
+            // padding; storing the raw value silently breaks dedup.
+            value: content_hash.trim().to_owned(),
             source: "provided".to_owned(),
             missing_metadata: Vec::new(),
         };
