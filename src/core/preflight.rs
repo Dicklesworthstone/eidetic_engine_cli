@@ -39,6 +39,24 @@ pub const PREFLIGHT_RUN_STORE_SCHEMA_V1: &str = "ee.preflight_run_store.v1";
 /// Location of persisted preflight runs, relative to the workspace root.
 pub const PREFLIGHT_RUN_STORE_RELATIVE_PATH: &str = ".ee/preflight_runs.json";
 
+/// Maximum size for `<workspace>/.ee/preflight_runs.json`.
+///
+/// `read_preflight_run_store` is called from `ee preflight run`,
+/// `ee preflight show`, `ee preflight close`, and the
+/// generate-tripwires-from-sources persistence path (see
+/// `persist_preflight_run` at this file:1009). Each call calls
+/// `fs::read_to_string` on the store path with no size bound. A workspace
+/// file accidentally inflated past memory limits (`cat /dev/urandom > .ee/preflight_runs.json`)
+/// or maliciously planted by a peer agent would OOM the CLI on every
+/// preflight surface. Parallel defense to `PREFLIGHT_RULES_MAX_BYTES` in
+/// `src/core/preflight_guard.rs` and `HANDOFF_FILE_MAX_BYTES` in
+/// `src/core/handoff.rs`.
+///
+/// Realistic preflight run stores are O(1KB) per run × maybe a few hundred
+/// runs retained = O(100KB). 4 MiB is a very generous ceiling that still
+/// bounds the worst-case allocation to a single short-lived buffer.
+pub const PREFLIGHT_RUN_STORE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 /// Default minimum score for turning evidence into a tripwire.
 pub const DEFAULT_TRIPWIRE_SOURCE_SCORE: f64 = 0.5;
 
@@ -729,7 +747,29 @@ pub fn preflight_run_store_path(workspace: &Path) -> PathBuf {
 fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocument, DomainError> {
     ensure_no_symlink_components(store_path, "read")?;
     match fs::symlink_metadata(store_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(metadata) if metadata.file_type().is_file() => {
+            // Size cap before the unbounded `read_to_string` below.
+            // Realistic preflight run stores are O(100KB) total; an
+            // inflated file (`cat /dev/urandom >> .ee/preflight_runs.json`
+            // or a stuck-loop writer) would otherwise pin a multi-GB
+            // allocation on every `ee preflight {run,show,close}` call.
+            // Reject early with a structured storage error and a repair
+            // hint so the operator knows what to truncate.
+            if metadata.len() > PREFLIGHT_RUN_STORE_MAX_BYTES {
+                return Err(DomainError::Storage {
+                    message: format!(
+                        "Refusing to read preflight run store `{}`: {} bytes exceeds the {} byte ceiling.",
+                        store_path.display(),
+                        metadata.len(),
+                        PREFLIGHT_RUN_STORE_MAX_BYTES
+                    ),
+                    repair: Some(format!(
+                        "Truncate or rewrite {} (typical stores are <100KB).",
+                        store_path.display()
+                    )),
+                });
+            }
+        }
         Ok(_) => {
             return Err(DomainError::Storage {
                 message: format!(
