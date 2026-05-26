@@ -3060,11 +3060,53 @@ pub fn swarm_incident_summary_evidence_id(summary: &Value) -> String {
     format!("swarm_incident_summary:{short_hash}")
 }
 
+/// Hard cap on the byte length of one swarm-incident fixture JSON file
+/// the summary collector ingests from `<workspace>/tests/fixtures/swarm_incidents/`.
+///
+/// The summary loop at `collect_swarm_incident_summary` walks the
+/// directory, filters to `*.json`, and calls
+/// `summarize_swarm_incident_fixture` on each entry. Without a cap, a
+/// peer-planted multi-GB `.json` file in that directory (or a runaway
+/// fixture writer) would force `fs::read_to_string` to allocate the
+/// whole content before `serde_json::from_str` could even start —
+/// turning a benign `ee swarm brief` (or any support-bundle path that
+/// pulls the swarm-incident summary) into a local OOM.
+///
+/// The shipped fixtures under `tests/fixtures/swarm_incidents/` are all
+/// 3-4 KiB; 1 MiB leaves three orders of magnitude of head-room without
+/// leaving the OOM vector open. Same defensive shape as the bounded
+/// reads added by Round 1+2 across the workspace-config helpers
+/// (`WORKSPACE_CONFIG_MAX_BYTES`, `CURATE_CONFIG_MAX_BYTES`,
+/// `MEMORY_SCOPE_CONFIG_MAX_BYTES`) and `read_agent_mail_snapshot`
+/// (line 1746) in this same file.
+const SWARM_INCIDENT_FIXTURE_MAX_BYTES: u64 = 1024 * 1024;
+
 fn summarize_swarm_incident_fixture(path: &Path) -> Option<Value> {
-    if !fs::symlink_metadata(path).ok()?.file_type().is_file() {
+    use std::io::Read as _;
+
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
         return None;
     }
-    let raw = fs::read_to_string(path).ok()?;
+    if metadata.len() > SWARM_INCIDENT_FIXTURE_MAX_BYTES {
+        // Drop oversize fixtures the same way malformed JSON is dropped
+        // upstream: the loop's `None => malformedIncidentCount++` path
+        // already accounts for unparseable / unreadable entries, so
+        // returning None here keeps the summary counts honest and the
+        // caller does not panic on a bad fixture directory.
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(SWARM_INCIDENT_FIXTURE_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > SWARM_INCIDENT_FIXTURE_MAX_BYTES {
+        // TOCTOU: the fixture grew between the metadata stat and the
+        // read. Drop it for the same reason as the metadata pre-check.
+        return None;
+    }
+    let raw = String::from_utf8(bytes).ok()?;
     let fixture: Value = serde_json::from_str(&raw).ok()?;
     if fixture.get("schema").and_then(Value::as_str) != Some("ee.swarm_incident.v1") {
         return None;
