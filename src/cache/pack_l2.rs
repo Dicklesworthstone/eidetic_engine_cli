@@ -1165,14 +1165,27 @@ fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<(), PackL2CacheError> 
             operation: "write_sync",
             source,
         })?;
+    // Apply 0o600 via the open file descriptor (`File::set_permissions`
+    // → `fchmod`) rather than `fs::set_permissions(path, ...)` →
+    // `chmod`. The prior path-based shape opened a TOCTOU window
+    // between the O_CREAT|O_EXCL|O_NOFOLLOW `open_cache_temp_file_for_create`
+    // call above and this chmod: a peer with write access to the cache
+    // directory could `unlink(path); symlink("/target", path)` between
+    // the two syscalls, and `chmod` would follow the symlink and
+    // tighten permissions on `/target` instead. `fchmod` operates on the
+    // already-open fd, so the symlink swap on the path cannot redirect
+    // the metadata change. The exploit window is narrow (between
+    // `open_cache_temp_file_for_create` and this call) and the practical
+    // impact is bounded by the running user's chown rights, but the
+    // race is real and the fix is mechanical. Same defense the init
+    // hardening pass (edd17760) routed through `rustix::fs::fchmod`.
     #[cfg(unix)]
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-        PackL2CacheError::Io {
+    file.set_permissions(fs::Permissions::from_mode(0o600))
+        .map_err(|source| PackL2CacheError::Io {
             path: path.to_path_buf(),
             operation: "set_file_permissions",
             source,
-        }
-    })?;
+        })?;
     Ok(())
 }
 
