@@ -676,6 +676,62 @@ fn preflight_hook_writes(hook_dir: &Path, writes: &[PlannedHookWrite]) -> Result
     Ok(())
 }
 
+/// Drop-guard that best-effort removes a temporary hook file when the
+/// install path returns early on error.
+///
+/// Once `write_hook_file` calls `OpenOptions::create_new(true)` on
+/// `temp_path`, every subsequent `?` (write_all, set_permissions,
+/// sync_all, or the rename inside `publish_hook_temp_file`) propagates
+/// an error WITHOUT removing the file the function just created. The
+/// next install attempt then trips `preflight_hook_temp_target` at
+/// src/hooks/installer.rs:603 ("Refusing to write temporary hook ...:
+/// temporary hook path already exists") and refuses to run until the
+/// operator manually deletes the orphan — a real reliability failure
+/// mode under transient disk-pressure / EIO / EINTR, and a particular
+/// foot-gun in multi-agent shared checkouts where one stuck pane can
+/// freeze the install surface for everyone else.
+///
+/// Usage:
+///   1. Construct `disarmed(&temp_path)` BEFORE the `open(temp_path)`
+///      call so the guard's drop never tries to remove a path that
+///      was never created (a confusing concurrent-delete race
+///      otherwise).
+///   2. Call `guard.arm()` immediately after the `open` succeeds.
+///   3. After the final `publish_hook_temp_file(...)?` succeeds — the
+///      rename has consumed the temp file — call `guard.disarm()` so
+///      drop is a no-op.
+///
+/// Failures inside drop are intentionally swallowed: by then we are
+/// already returning Err to the caller, the most common cleanup
+/// failure (the rename moved the file) is benign, and panicking from
+/// drop is illegal.
+struct TempHookFileGuard<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> TempHookFileGuard<'a> {
+    fn disarmed(path: &'a Path) -> Self {
+        Self { path, armed: false }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempHookFileGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
 fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result<(), DomainError> {
     ensure_hook_dir_is_not_symlink(hook_dir)?;
 
@@ -693,6 +749,11 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
     preflight_hook_target(target_path)?;
     preflight_hook_temp_target(&temp_path)?;
 
+    // Disarmed at construction: the file does not exist yet, and arming
+    // before the `open(...)` would race a different pane's preflight
+    // failure into accidentally removing a fresh peer-owned temp file.
+    let mut cleanup_guard = TempHookFileGuard::disarmed(&temp_path);
+
     {
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
@@ -706,6 +767,10 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
                 ),
                 repair: Some("Check hook path permissions.".to_owned()),
             })?;
+        // The file at temp_path now exists and is owned by this call.
+        // Arm cleanup so any subsequent `?` removes the orphan before
+        // returning to the caller.
+        cleanup_guard.arm();
         file.write_all(content.as_bytes())
             .map_err(|error| DomainError::Storage {
                 message: format!(
@@ -749,7 +814,12 @@ fn write_hook_file(hook_dir: &Path, target_path: &Path, content: &str) -> Result
         })?;
     }
 
-    publish_hook_temp_file(hook_dir, &temp_path, target_path)
+    publish_hook_temp_file(hook_dir, &temp_path, target_path)?;
+    // Publish succeeded: rename has moved temp_path to target_path, so
+    // there is no orphan to clean up. Disarm the guard so its drop is
+    // a no-op.
+    cleanup_guard.disarm();
+    Ok(())
 }
 
 fn publish_hook_temp_file(
@@ -2060,6 +2130,126 @@ mod tests {
         options: &HookInstallOptions,
     ) -> Result<HookInstallReport, DomainError> {
         install_hooks_with_binary_path(options, std::path::Path::new("/usr/local/bin/ee"))
+    }
+
+    /// Drop-cleanup of the temp-hook orphan after a mid-write failure.
+    ///
+    /// Regression guard: `write_hook_file` creates `<target>.tmp` via
+    /// `OpenOptions::create_new(true)`. Any `?`-propagated error
+    /// between the open and the publishing rename used to leave the
+    /// .tmp file on disk. The next install attempt then trips
+    /// `preflight_hook_temp_target` ("temporary hook path already
+    /// exists") and refuses to run until the operator manually
+    /// deletes the orphan — a real reliability hole under transient
+    /// disk-pressure / EIO / EINTR, and a particular foot-gun in
+    /// multi-agent shared checkouts.
+    ///
+    /// We can't easily inject a write/sync failure into `write_hook_file`
+    /// without an injection seam this module deliberately avoids, but
+    /// we CAN exercise the `TempHookFileGuard` Drop semantics
+    /// directly — that's the load-bearing piece of the fix.
+    #[test]
+    fn temp_hook_file_guard_drops_armed_orphan() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let path = temp.path().join("pre-commit.tmp");
+        fs::write(&path, b"orphan").map_err(|e| e.to_string())?;
+        assert!(path.exists(), "temp file must exist before guard drop");
+        {
+            let mut guard = TempHookFileGuard::disarmed(&path);
+            guard.arm();
+            // Guard drops here at end of block.
+        }
+        if path.exists() {
+            return Err(format!(
+                "armed guard must remove orphan; {} still present",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Disarming after successful publish must NOT touch the final
+    /// target file (which is no longer at temp_path because rename
+    /// moved it, but the principle is the same: a disarmed guard is
+    /// a no-op).
+    #[test]
+    fn temp_hook_file_guard_disarm_skips_cleanup() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let path = temp.path().join("pre-commit.tmp");
+        fs::write(&path, b"survives-disarm").map_err(|e| e.to_string())?;
+        {
+            let mut guard = TempHookFileGuard::disarmed(&path);
+            guard.arm();
+            guard.disarm();
+            // Drop here; armed=false, no removal.
+        }
+        if !path.exists() {
+            return Err(format!(
+                "disarmed guard must NOT remove path; {} was removed",
+                path.display()
+            ));
+        }
+        // And content must be untouched.
+        let content = fs::read(&path).map_err(|e| e.to_string())?;
+        if content != b"survives-disarm" {
+            return Err(format!(
+                "disarmed guard tampered with file contents; got {:?}",
+                content
+            ));
+        }
+        Ok(())
+    }
+
+    /// A guard that was constructed but never armed (e.g. the
+    /// `open(...)` itself failed) must NOT try to remove a path that
+    /// was never created. This is the load-bearing reason the
+    /// constructor starts disarmed instead of armed.
+    #[test]
+    fn temp_hook_file_guard_unarmed_skips_cleanup_for_nonexistent_path() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let path = temp.path().join("never-created.tmp");
+        assert!(
+            !path.exists(),
+            "test precondition: path must not exist beforehand"
+        );
+        {
+            let _guard = TempHookFileGuard::disarmed(&path);
+            // Drop here; armed=false, no remove_file attempt.
+        }
+        // No assertion beyond "we did not panic and the path is still
+        // missing" — the point is that drop never called remove_file
+        // on a path it doesn't own.
+        if path.exists() {
+            return Err(format!(
+                "test invariant violated: {} appeared during guard scope",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+
+    /// End-to-end: a successful install must leave the temp file gone
+    /// (the rename consumed it) AND the target file present.
+    /// Indirectly proves disarm() runs on the success path.
+    #[test]
+    fn write_hook_file_success_path_leaves_no_orphan() -> TestResult {
+        let temp = TempDir::new().map_err(|e| e.to_string())?;
+        let hook_dir = temp.path().join("hooks");
+        fs::create_dir_all(&hook_dir).map_err(|e| e.to_string())?;
+        let target = hook_dir.join("pre-commit");
+        let temp_path = hook_temp_path(&target);
+        write_hook_file(&hook_dir, &target, "#!/bin/sh\necho hi\n")
+            .map_err(|e| format!("write_hook_file: {e:?}"))?;
+        if !target.exists() {
+            return Err(format!("target {} not written", target.display()));
+        }
+        if temp_path.exists() {
+            return Err(format!(
+                "orphan temp file {} present after successful install",
+                temp_path.display()
+            ));
+        }
+        Ok(())
     }
 
     fn configured_git_hook_repo() -> Result<TempDir, String> {
