@@ -33,6 +33,24 @@ pub const PREFLIGHT_PATTERNS_UNAVAILABLE_CODE: &str = "preflight_patterns_unavai
 /// Default location for workspace-side rules, relative to the workspace root.
 pub const PREFLIGHT_RULES_RELATIVE_PATH: &str = ".ee/preflight_rules.toml";
 
+/// Maximum size for `<workspace>/.ee/preflight_rules.toml`.
+///
+/// The trauma-guard preflight is a hot path: every protected shell command an
+/// agent issues triggers `PreflightGuardRegistry::load(...)`, which reads this
+/// file before matching against the command string (see callers in
+/// `src/cli/mod.rs:17653,17897,18190,40768`). Without a ceiling, a workspace
+/// file accidentally or maliciously inflated to multi-GB would (a) cause
+/// `fs::read_to_string`'s pre-sized buffer allocation to OOM the CLI and (b)
+/// stall every guarded shell command in a tight allocation/copy loop instead
+/// of returning a clean policy decision.
+///
+/// Realistic rule files are kilobytes to low tens of kilobytes. 4 MiB is a
+/// very generous ceiling that still bounds the worst case to a single
+/// short-lived allocation. Anything larger is treated as a misconfiguration
+/// and surfaces as a structured `DomainError::Configuration` with a repair
+/// hint, not a panic.
+pub const PREFLIGHT_RULES_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 const TRAUMA_GUARD_PREFLIGHT_SURFACE: &str = "trauma_guard_preflight";
 
 fn elapsed_ms_since(started: Instant) -> u64 {
@@ -358,6 +376,31 @@ fn validate_preflight_rules_path(path: &Path) -> Result<(), DomainError> {
                 path.display()
             ),
             repair: Some("Replace .ee/preflight_rules.toml with a regular TOML file.".to_owned()),
+        });
+    }
+    // Size cap before the unbounded `read_to_string` in
+    // `read_preflight_rules_file_no_follow`. The hot path is
+    // `PreflightGuardRegistry::load(...)`, which agents hit on every
+    // protected shell command via the install-time hook integration —
+    // an inflated rule file (accidentally `cat /dev/urandom > .ee/preflight_rules.toml`,
+    // or maliciously planted by a peer agent) would otherwise stall the
+    // entire trauma-guard surface and starve the agent of shell-command
+    // policy decisions. Reject early with a structured configuration
+    // error and a repair hint pointing the operator at the offending
+    // path; the bundled-builtins still match because `Registry::load`
+    // returns the bare-builtin registry on this Err path's caller side.
+    if metadata.len() > PREFLIGHT_RULES_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to load preflight rule file {}: {} bytes exceeds the {} byte ceiling.",
+                path.display(),
+                metadata.len(),
+                PREFLIGHT_RULES_MAX_BYTES
+            ),
+            repair: Some(format!(
+                "Truncate or rewrite {} (typical files are a few KB); the bundled builtins still apply.",
+                path.display()
+            )),
         });
     }
     Ok(())
@@ -3309,6 +3352,65 @@ message = "Reject curl|sh installers per workspace policy."
 
         assert_eq!(report.exit_code, 0);
         assert!(report.matches.is_empty());
+        Ok(())
+    }
+
+    /// Regression guard for the trauma-guard rule-file size cap.
+    ///
+    /// Without `PREFLIGHT_RULES_MAX_BYTES`, a workspace
+    /// `.ee/preflight_rules.toml` inflated past memory limits would let
+    /// `fs::read_to_string` pre-size a single allocation matching the
+    /// file's metadata length — turning every protected shell command
+    /// (every agent-hook-driven `ee preflight check`) into an OOM
+    /// risk. This test writes a sentinel rules file one byte past the
+    /// cap and asserts `Registry::load` fails closed with a
+    /// configuration error that names the ceiling.
+    #[test]
+    fn preflight_rules_oversize_load_rejects_with_configuration_error() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = tempdir.path().join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let rules_path = ee_dir.join("preflight_rules.toml");
+        // Build a payload (PREFLIGHT_RULES_MAX_BYTES + 1) bytes long
+        // composed of valid TOML (a long inline comment) so the size
+        // gate fires BEFORE the parser would have a chance to.
+        let cap = usize::try_from(PREFLIGHT_RULES_MAX_BYTES).map_err(|error| error.to_string())?;
+        let mut payload = String::with_capacity(cap + 1);
+        payload.push_str("# preflight rules size-cap fixture\n");
+        // Fill with a single-byte filler ('#' line-comment chars) so
+        // each byte is valid TOML if the parser ever got to it.
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        assert!(
+            payload.len() > cap,
+            "payload must exceed PREFLIGHT_RULES_MAX_BYTES; got {}",
+            payload.len(),
+        );
+        std::fs::write(&rules_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = PreflightGuardRegistry::load(tempdir.path())
+            .expect_err("oversize preflight rules file must be rejected before read");
+        // Error should be a configuration error citing the ceiling, NOT
+        // a parse error (which would mean we already paid the
+        // allocation cost the cap is meant to bound).
+        assert!(
+            error.message().contains("ceiling")
+                || error
+                    .message()
+                    .contains(&PREFLIGHT_RULES_MAX_BYTES.to_string()),
+            "configuration error must name the size ceiling; got {}",
+            error.message(),
+        );
+        // And the repair hint must point at the path so the operator
+        // knows what to truncate.
+        assert!(
+            error
+                .repair()
+                .is_some_and(|repair| repair.contains(rules_path.to_string_lossy().as_ref())),
+            "repair hint must reference the oversize rules path; got {:?}",
+            error.repair(),
+        );
         Ok(())
     }
 
