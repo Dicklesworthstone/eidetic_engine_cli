@@ -574,10 +574,25 @@ pub fn parse_serve_http_request(
             .map_err(|_| serve_usage_error("Content-Length must be a non-negative integer."))?,
         None => 0,
     };
-    if headers
-        .get("transfer-encoding")
-        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
-    {
+    // Reject any `Transfer-Encoding` codings list that names `chunked`,
+    // not just the bare exact-match `chunked` token. RFC 7230 §3.3.3
+    // declares that a request carrying BOTH Transfer-Encoding and
+    // Content-Length is a request-smuggling indicator: a permissive
+    // upstream proxy can parse a list like `chunked, identity` as
+    // chunked and forward a CL-framed body to this parser, which would
+    // otherwise read the declared Content-Length bytes and split the
+    // next request boundary on attacker-chosen bytes (classic CL.TE
+    // smuggling). The exact-match check at the previous shape only
+    // caught `chunked` in isolation, so `chunked, identity`,
+    // `identity, chunked`, and `CHUNKED, gzip` all slipped through to
+    // Content-Length framing. ee serve v1 still defers the whole HTTP
+    // surface, but the parser ships with v2 unchanged unless the
+    // smuggling vector is closed now.
+    if headers.get("transfer-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+    }) {
         return Err(serve_usage_error(
             "Chunked uploads are not accepted by the first ee serve v2 slice.",
         ));
@@ -2503,6 +2518,50 @@ mod tests {
             Err(error) => error,
         };
         ensure(error.code(), "usage", "extra body byte error code")
+    }
+
+    #[test]
+    fn serve_http_parser_rejects_chunked_in_te_codings_list() -> TestResult {
+        // RFC 7230 §3.3.3 smuggling guard: a coding list like
+        // `chunked, identity` or `identity, chunked` MUST be treated as
+        // chunked (and therefore rejected by v1's no-chunked policy).
+        // The previous exact-match check on `eq_ignore_ascii_case("chunked")`
+        // accepted both shapes silently, letting a CL.TE smuggling pair
+        // (CL framed for ee, chunked framed for the upstream proxy)
+        // slip through. Lock the defense.
+        let raws: [&[u8]; 4] = [
+            // chunked first in list
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked, identity\r\nContent-Length: 0\r\n\r\n",
+            // chunked last in list
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: identity, chunked\r\nContent-Length: 0\r\n\r\n",
+            // case-insensitive, with internal whitespace
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding:  CHUNKED , gzip \r\nContent-Length: 0\r\n\r\n",
+            // bare chunked (regression guard for the original exact match)
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+        ];
+        for raw in raws {
+            match parse_serve_http_request(raw, &ServeLimits::default()) {
+                Ok(request) => {
+                    return Err(format!(
+                        "Transfer-Encoding with chunked-in-list must reject; got {request:?}",
+                    ));
+                }
+                Err(error) => ensure(
+                    error.code(),
+                    "usage",
+                    "chunked-in-TE-list rejection error code",
+                )?,
+            }
+        }
+        // Sanity check: a TE without `chunked` (e.g. `identity` alone)
+        // must still be accepted — the smuggling guard targets `chunked`
+        // specifically, not all TE values.
+        parse_serve_http_request(
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: identity\r\nContent-Length: 0\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| format!("TE: identity must still parse; got {error}"))?;
+        Ok(())
     }
 
     #[test]
