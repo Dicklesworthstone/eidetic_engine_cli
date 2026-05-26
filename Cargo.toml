@@ -41,8 +41,14 @@ exclude = [
     ".beads/*",
     ".beads.snapshot_*",
     ".beads.snapshot_*/*",
+    "perf-target/*",
     "perf.data",
     "*.profraw",
+    "*.json,bak",
+    "tmp/*",
+    "temp/*",
+    ".tmp/*",
+    ".temp/*",
 ]
 
 [lib]

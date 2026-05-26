@@ -44,8 +44,9 @@ set -euo pipefail
 #   4.5. Bridge Staleness      - advisory signal when CLOSE_THE_GAP_PLAN needs refresh
 #   4.6. Plan Drift Advisory   - advisory plan_doc_section drift hints for Beads triage
 #   4.65. Contract Drift Radar - advisory schema/docs/taxonomy drift scanner (bd-31nul.5)
-#   4.7. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
-#   4.8. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
+#   4.7. Package Artifact Leak - cargo package list gate for generated artifacts
+#   4.8. Fuzz Target Audit     - static cargo-fuzz target registration/docs check
+#   4.9. Fuzz Smoke            - optional 30s search query parser cargo-fuzz sweep
 #   5. Vision Coverage         - report documented implemented/stubbed/missing surfaces
 #   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
@@ -733,7 +734,12 @@ run_stage "Plan Drift Advisory" "with_beads_read_locks ./scripts/plan-drift.sh -
 # under cargo test -p ee --test contracts and stays an RCH-only surface.
 run_stage "Contract Drift Radar Advisory" "./scripts/contract-drift-radar.sh --quiet"
 
-# Gate 4.7: Static cargo-fuzz target registration/docs audit. This is a
+# Gate 4.7: Package artifact leakage guard. This is a quick packaging gate:
+# it runs cargo package --list without building and fails if local/generated
+# tracker, perf, backup, or temp artifact paths would enter the published crate.
+run_stage "Package Artifact Leak Check (bd-2ifvx)" "./scripts/package-artifact-leak-check.sh"
+
+# Gate 4.8: Static cargo-fuzz target registration/docs audit. This is a
 # no-build guard; actual cargo-fuzz sweeps remain explicit RCH-only evidence.
 run_stage "Fuzz Target Audit (bd-bife.10)" "fuzz_target_audit"
 
