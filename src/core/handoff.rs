@@ -94,6 +94,22 @@ const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
 /// would attempt to slurp the entire file into a single allocation.
 const HANDOFF_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Hard upper bound on the byte length of handoff HMAC key material (the
+/// workspace secret and the machine-bound salt). The HMAC key is exactly
+/// 32 raw bytes — `bytes_to_32_byte_secret` enforces that downstream via
+/// `try_into::<[u8; 32]>`. That post-read check is correct for *what*
+/// the bytes hold but it does not protect the read itself: `fs::read`
+/// pre-sizes its `Vec<u8>` from the file's metadata length, so a peer
+/// agent (or stray pipeline) that planted a multi-GiB file at the key
+/// path would force a multi-GiB allocation on every `ee handoff create`
+/// / `ee handoff resume` invocation before the length mismatch was
+/// surfaced. 1 KiB is two orders of magnitude above any realistic
+/// secret/salt file and bounds the worst-case allocation while keeping
+/// the 32-byte length-check as the load-bearing rejection. Parallel to
+/// the round-1 size caps at `PREFLIGHT_RULES_MAX_BYTES`,
+/// `PREFLIGHT_RUN_STORE_MAX_BYTES`, and `GITDIR_POINTER_INSPECT_LIMIT`.
+const HANDOFF_KEY_MATERIAL_MAX_BYTES: u64 = 1024;
+
 /// ID prefix for handoff capsules.
 pub const HANDOFF_CAPSULE_ID_PREFIX: &str = "hcap_";
 
@@ -1445,6 +1461,7 @@ fn machine_salt_path(override_path: Option<&Path>) -> PathBuf {
 
 fn read_or_create_secret(path: &Path) -> Result<[u8; 32], DomainError> {
     if handoff_read_path_is_regular_file(path, "handoff HMAC key")? {
+        ensure_handoff_key_material_within_cap(path)?;
         let bytes = fs::read(path).map_err(|error| DomainError::Storage {
             message: format!("Failed to read handoff HMAC key: {error}"),
             repair: Some(format!("Check permissions for {}", path.display())),
@@ -1471,6 +1488,7 @@ fn read_existing_secret(path: &Path, missing_code: &'static str) -> Result<[u8; 
             "Resume on the machine/workspace that created the capsule, or recreate the capsule.",
         ));
     }
+    ensure_handoff_key_material_within_cap(path)?;
     let bytes = fs::read(path).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             handoff_hmac_error(
@@ -1497,6 +1515,45 @@ fn bytes_to_32_byte_secret(bytes: &[u8], path: &Path) -> Result<[u8; 32], Domain
         repair: Some("Regenerate handoff keys after backing up existing key files.".to_owned()),
     })?;
     Ok(array)
+}
+
+/// Reject HMAC key material whose on-disk size exceeds the ceiling.
+///
+/// Callers are about to `fs::read(path)` for HMAC key bytes, which
+/// pre-sizes its destination `Vec<u8>` from the file's metadata length
+/// on every supported platform. The downstream `bytes_to_32_byte_secret`
+/// post-check correctly rejects a non-32-byte payload, but it only
+/// fires AFTER the read has already allocated `metadata.len()` bytes.
+/// A peer-planted multi-GiB file at the key path would force a matching
+/// allocation on every `ee handoff create` / `ee handoff resume` before
+/// the length mismatch was surfaced. The metadata stat is cheap and
+/// fails closed; see `HANDOFF_KEY_MATERIAL_MAX_BYTES` for the rationale
+/// behind the 1 KiB ceiling. Parallel defensive pattern to the round-1
+/// reads guarded by `PREFLIGHT_RULES_MAX_BYTES`,
+/// `PREFLIGHT_RUN_STORE_MAX_BYTES`, and `GITDIR_POINTER_INSPECT_LIMIT`.
+fn ensure_handoff_key_material_within_cap(path: &Path) -> Result<(), DomainError> {
+    let metadata = fs::metadata(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to inspect handoff HMAC key size at {}: {error}",
+            path.display()
+        ),
+        repair: Some(format!("Check permissions for {}", path.display())),
+    })?;
+    if metadata.len() > HANDOFF_KEY_MATERIAL_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read handoff HMAC key at {}: file is {} bytes, exceeding the {} byte ceiling.",
+                path.display(),
+                metadata.len(),
+                HANDOFF_KEY_MATERIAL_MAX_BYTES
+            ),
+            repair: Some(format!(
+                "Real handoff key material is exactly 32 bytes; remove or replace {} after backing it up.",
+                path.display()
+            )),
+        });
+    }
+    Ok(())
 }
 
 fn random_secret() -> Result<[u8; 32], DomainError> {
@@ -6008,5 +6065,76 @@ memories_revised = 3
         ensure_equal(&ValidationStatus::Invalid.as_str(), &"invalid", "invalid")?;
         ensure_equal(&ValidationStatus::Stale.as_str(), &"stale", "stale")?;
         ensure_equal(&ValidationStatus::Partial.as_str(), &"partial", "partial")
+    }
+
+    /// Regression guard for the HMAC key-material size cap.
+    ///
+    /// Pre-fix: `fs::read(path)` pre-sized its `Vec<u8>` from the file's
+    /// metadata length, so a peer-planted multi-GiB file at the
+    /// workspace HMAC key path would force a matching allocation on
+    /// every `ee handoff create` / `ee handoff resume` before
+    /// `bytes_to_32_byte_secret`'s 32-byte check could reject the
+    /// payload. Post-fix: `ensure_handoff_key_material_within_cap`
+    /// stat's the file FIRST and refuses anything over the 1 KiB
+    /// ceiling. This test exercises the read paths directly so it
+    /// fails closed even when the broader handoff create/resume e2e
+    /// is unavailable.
+    #[test]
+    fn handoff_hmac_key_read_rejects_oversize_payload() -> TestResult {
+        let dir = repo_tempdir()?;
+        let key_path = hmac_workspace_secret_path(dir.path());
+        if let Some(parent) = key_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        // Write a file exactly one byte past the ceiling. Real key
+        // files are 32 bytes; the ceiling is two orders of magnitude
+        // above that, so this is unambiguously oversize regardless of
+        // future tuning of the constant.
+        let payload = vec![b'x'; (HANDOFF_KEY_MATERIAL_MAX_BYTES + 1) as usize];
+        fs::write(&key_path, &payload).map_err(|error| error.to_string())?;
+
+        // read_or_create_secret takes the regular-file path; the
+        // pre-check has already passed because we just wrote a regular
+        // file, so the size check is what must reject this.
+        match read_or_create_secret(&key_path) {
+            Ok(_) => {
+                return Err("oversize handoff HMAC key must reject; got Ok(...)".to_owned());
+            }
+            Err(DomainError::Storage { message, repair }) => {
+                ensure(
+                    message.contains("byte ceiling"),
+                    format!("error must name the ceiling; got {message:?}"),
+                )?;
+                ensure(
+                    repair
+                        .as_deref()
+                        .is_some_and(|hint| hint.contains("exactly 32 bytes")),
+                    format!("repair hint must reference the 32-byte invariant; got {repair:?}"),
+                )?;
+            }
+            Err(other) => {
+                return Err(format!(
+                    "expected DomainError::Storage from oversize key read; got {other:?}",
+                ));
+            }
+        }
+
+        // read_existing_secret must reject the same way. The
+        // missing_code is irrelevant on the size-rejection branch
+        // because the size check fires before the bytes_to_32_byte_secret
+        // length-mismatch check.
+        match read_existing_secret(&key_path, "test_missing") {
+            Ok(_) => Err(
+                "oversize handoff HMAC key (existing-secret path) must reject; got Ok(...)"
+                    .to_owned(),
+            ),
+            Err(DomainError::Storage { message, .. }) => ensure(
+                message.contains("byte ceiling"),
+                format!("existing-secret error must name the ceiling; got {message:?}"),
+            ),
+            Err(other) => Err(format!(
+                "expected DomainError::Storage from oversize key read; got {other:?}",
+            )),
+        }
     }
 }
