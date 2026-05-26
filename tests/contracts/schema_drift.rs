@@ -170,6 +170,11 @@ pub const CONTEXT_SCHEMAS: &[SchemaEntry] = &[
         SchemaCategory::Context,
     ),
     SchemaEntry::new(
+        "focus_suggest",
+        "ee.focus.suggest.v1",
+        SchemaCategory::Context,
+    ),
+    SchemaEntry::new(
         "pack_replay_ledger",
         "ee.pack_replay_ledger.v1",
         SchemaCategory::Context,
@@ -2617,6 +2622,10 @@ mod tests {
         ensure(
             versions.contains(&"ee.focus.schemas.v1"),
             "context schemas must include focus schema catalog",
+        )?;
+        ensure(
+            versions.contains(&"ee.focus.suggest.v1"),
+            "context schemas must include focus suggest (bd-1me0m / bd-1n0wl)",
         )
     }
 
