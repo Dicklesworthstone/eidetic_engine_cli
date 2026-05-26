@@ -8190,15 +8190,17 @@ pub struct FocusClearArgs {
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct FocusExplainArgs {}
 
-/// Arguments for `ee focus suggest` (bd-sg5si).
+/// Arguments for `ee focus suggest` (bd-sg5si Phase 1; bd-1idcb Phase 2).
 ///
 /// Read-only surface that combines recent CASS spans and graph centrality
-/// signals to recommend focus areas. The current implementation is the
-/// Phase 1 CLI surface plus stable schema; the centrality computation and
-/// CASS-span scoring are tracked by a follow-up `implements-surface:focus_suggest`
-/// bead. When no signals are available the surface emits an empty
-/// `recommendations` array and a documented degraded code so the agent
-/// can distinguish "no work to suggest" from "computation unavailable".
+/// signals to recommend focus areas. Phase 2 (bd-1idcb) retired the
+/// Phase 1 honesty-only sentinel: the pipeline now ranks topic clusters
+/// by `centrality_sum + recency_weight + span_density` and populates
+/// `recommendations[]` from a real CASS-span + PageRank scoring path.
+/// `degraded[]` carries only situation-appropriate entries (e.g.
+/// `workspace_uninitialized`, `no_recent_evidence`, `graph_unavailable`,
+/// `task_frame_no_evidence`) so an agent can distinguish "no work to
+/// suggest" from "a real signal is missing".
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct FocusSuggestArgs {
     /// Source recent CASS spans for span_ids and recency signals.
