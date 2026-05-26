@@ -6,6 +6,7 @@
 # - implements-surface:* beads cannot close while *_UNAVAILABLE_CODE exists
 # - implements-surface:* beads must have a golden snapshot
 # - math-ambition beads cannot close without explicit rejection-threshold evidence
+# - *_unimplemented failure-mode fixtures must be marked honesty_only:true
 # - honesty-only beads must have an open implements-surface sibling, unless a
 #   matching implementation sibling is already closed and no sentinel remains
 #
@@ -839,6 +840,27 @@ check_failure_mode_fixture_obligation() {
     done
 }
 
+check_unimplemented_failure_mode_honesty_only() {
+    local fixture_path
+    local code
+
+    [ -d "$FAILURE_MODE_FIXTURE_DIR" ] || return 0
+
+    for fixture_path in "$FAILURE_MODE_FIXTURE_DIR"/*.json; do
+        [ -f "$fixture_path" ] || continue
+
+        code=$(jq -r '.code // ""' "$fixture_path" 2>/dev/null || printf "")
+        case "$code" in
+            *_unimplemented)
+                if ! jq -e '.honesty_only == true' "$fixture_path" >/dev/null 2>&1; then
+                    add_violation "bd-38mpa" "failure-mode-taxonomy" "$code" \
+                        "$fixture_path declares *_unimplemented degraded code without honesty_only:true"
+                fi
+                ;;
+        esac
+    done
+}
+
 close_reason_contains_abstention() {
     local close_reason="$1"
     local scrubbed
@@ -1172,6 +1194,7 @@ check_graph_schema_docs() {
 }
 
 check_graph_schema_docs
+check_unimplemented_failure_mode_honesty_only
 
 write_closure_quality_report
 

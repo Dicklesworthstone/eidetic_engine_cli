@@ -25,6 +25,10 @@
       "pattern": "^[a-z][a-z0-9_]*$",
       "description": "Exact degraded[] code emitted by production responses."
     },
+    "honesty_only": {
+      "type": "boolean",
+      "description": "True when the fixture documents an explicit honesty-only degraded code rather than an implemented runtime failure mode. Required by closure-lint for codes ending in _unimplemented."
+    },
     "introduced_by": {
       "type": "object",
       "required": ["bead"],

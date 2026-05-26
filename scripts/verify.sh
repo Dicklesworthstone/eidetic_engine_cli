@@ -649,6 +649,9 @@ PY
 }
 
 closure_lint_or_tracked_drift() {
+    # The closure-lint audit covers both bead closure discipline and the
+    # failure-mode fixture taxonomy (including *_unimplemented honesty-only
+    # markers), so verify routes that full gate through drift tracking.
     if with_beads_read_locks ./scripts/closure-lint.sh --audit --json; then
         return 0
     fi

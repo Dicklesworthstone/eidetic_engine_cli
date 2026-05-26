@@ -1,6 +1,7 @@
 {
   "schema": "ee.failure_mode_fixture.v1",
   "code": "focus_suggest_unimplemented",
+  "honesty_only": true,
   "introduced_by": {
     "bead": "bd-sg5si",
     "epic_letter": "G"

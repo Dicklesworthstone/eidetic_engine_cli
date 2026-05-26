@@ -566,6 +566,55 @@ fn closure_lint_requires_failure_mode_fixtures_for_part_ii_codes() -> TestResult
 }
 
 #[test]
+fn closure_lint_requires_unimplemented_failure_modes_to_be_honesty_only() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-unimplemented-honesty-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"open-unrelated","title":"unrelated open bead","status":"open","description":"","close_reason":"","labels":[]}"#,
+        ],
+        "",
+        &[],
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/valid_unimplemented.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"valid_unimplemented","honesty_only":true}"#,
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/missing_unimplemented.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"missing_unimplemented"}"#,
+    )?;
+    write_text_file(
+        temp.path(),
+        "tests/fixtures/failure_modes/state_degraded.json",
+        r#"{"schema":"ee.failure_mode_fixture.v1","code":"state_degraded"}"#,
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail *_unimplemented fixtures without honesty_only:true\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 1, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![(
+            "bd-38mpa".to_owned(),
+            "missing_unimplemented".to_owned(),
+            "tests/fixtures/failure_modes/missing_unimplemented.json declares *_unimplemented degraded code without honesty_only:true".to_owned(),
+        )],
+        "only *_unimplemented fixtures missing honesty_only:true should fail",
+    )?;
+    Ok(())
+}
+
+#[test]
 fn closure_lint_skips_when_beads_write_lock_is_held() -> TestResult {
     if !flock_available() {
         return Ok(());
