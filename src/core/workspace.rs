@@ -33,8 +33,8 @@ use crate::core::hygiene_coordination::{
     AgentMailCoordinationInput, HygieneCoordinationOverlay, overlay_coordination_state,
 };
 use crate::core::swarm_brief::{
-    SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot, WorkspaceGitSnapshotOptions,
-    collect_workspace_git_snapshot, parse_agent_mail_snapshot_json,
+    AGENT_MAIL_SNAPSHOT_MAX_BYTES, SystemSwarmBriefCommandRunner, WorkspaceGitSnapshot,
+    WorkspaceGitSnapshotOptions, collect_workspace_git_snapshot, parse_agent_mail_snapshot_json,
 };
 use crate::core::symbol_graph::SymbolGraphExtractor;
 use crate::db::{
@@ -1307,7 +1307,55 @@ fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
             ),
         ));
     }
-    fs::read_to_string(path)
+    // Bound the read at AGENT_MAIL_SNAPSHOT_MAX_BYTES so a peer-grown
+    // snapshot file (the file is written by the MCP Agent Mail server
+    // and the path is shared across every agent in a swarm checkout)
+    // cannot pin a matching allocation on the workspace-hygiene hot
+    // path. `build_workspace_hygiene_report` calls this helper on
+    // every `ee workspace hygiene` invocation (line 683), so the
+    // amplification factor is the swarm-of-agents invocation rate.
+    // Sibling reader `swarm_brief::read_agent_mail_snapshot_file` has
+    // used the same cap since bd-1sdr5; this helper was overlooked
+    // when the workspace-side hygiene path forked off, leaving
+    // `fs::read_to_string` (which pre-sizes its buffer from the
+    // file's metadata length) as the only allocation gate. A 4 GiB
+    // peer-planted file would force a 4 GiB String allocation before
+    // the downstream `parse_agent_mail_snapshot_json` could reject
+    // it. Two layers of defense:
+    //
+    //  1. The `metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES`
+    //     pre-check rejects at stat time with a friendly repair
+    //     hint (same as the regular-file gate above).
+    //  2. `file.take(LIMIT + 1).read_to_end(...)` closes the TOCTOU
+    //     growth window between the stat and the read — if the file
+    //     grew past the cap after the stat, the bounded read still
+    //     pins peak allocation to LIMIT + 1 bytes and the post-read
+    //     check trips. Same defensive shape as the WORKTREE_GITFILE
+    //     cap added by c8f33694 and the PREFLIGHT_RULES /
+    //     PREFLIGHT_RUN_STORE caps added by 7f56d89b / aac04adb.
+    if metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' exceeds the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    let file = fs::File::open(path)?;
+    let read_limit = (AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64).saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' grew past the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap after the metadata check (TOCTOU); refusing to read",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
@@ -2690,6 +2738,60 @@ mod tests {
         assert_eq!(reservations[0].holder_agent, "OtherAgent");
         assert_eq!(active_agents.len(), 1);
         assert_eq!(active_agents[0].name, "OtherAgent");
+        Ok(())
+    }
+
+    /// Regression guard for the unbounded `fs::read_to_string` that
+    /// `read_agent_mail_snapshot` used before this commit. Pre-fix the
+    /// helper would pre-size a `String` from the snapshot file's
+    /// metadata length and allocate the whole file before the
+    /// downstream `parse_agent_mail_snapshot_json` could reject it —
+    /// so a peer-planted multi-GiB file at the snapshot path would
+    /// pin a matching allocation on every `ee workspace hygiene`
+    /// invocation. The fix bounds the read at
+    /// `AGENT_MAIL_SNAPSHOT_MAX_BYTES + 1` and surfaces `Unavailable`
+    /// at the coordination layer so hygiene continues without the
+    /// snapshot signal instead of trying (and failing) to materialize
+    /// the oversized file. Sibling
+    /// `swarm_brief::read_agent_mail_snapshot_file` already enforces
+    /// this cap (bd-1sdr5); this test pins the parallel
+    /// workspace-side guard.
+    #[test]
+    fn agent_mail_snapshot_read_refuses_oversized_file() -> TestResult {
+        let workspace = unique_dir("ee-agent-mail-snapshot-oversize")?;
+        let snapshot_path = workspace.join("agent-mail-oversize.json");
+        if let Some(parent) = snapshot_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        // CAP + 1 bytes of ASCII filler so the rejection trips on the
+        // size bound, not the UTF-8 decode. Filling the whole buffer
+        // also defeats any future "trust the metadata size" shortcut
+        // in `parse_agent_mail_snapshot_json`.
+        let payload = vec![b' '; AGENT_MAIL_SNAPSHOT_MAX_BYTES + 1];
+        fs::write(&snapshot_path, &payload).map_err(|error| error.to_string())?;
+
+        // The helper itself must reject the oversized file with
+        // InvalidData and a message that names the cap, so the caller
+        // can map it to the canonical `agent_mail_unavailable`
+        // degraded code without first materializing the file in
+        // memory.
+        let direct = read_agent_mail_snapshot(&snapshot_path)
+            .expect_err("oversized snapshot must be refused before allocation");
+        assert_eq!(direct.kind(), io::ErrorKind::InvalidData);
+        let message = direct.to_string();
+        assert!(
+            message.contains(&AGENT_MAIL_SNAPSHOT_MAX_BYTES.to_string()),
+            "rejection must cite the cap; got {message:?}",
+        );
+
+        // The coordination loader must propagate the refusal as
+        // Unavailable (not panic, not surface a giant body, not
+        // silently fall back to an empty snapshot).
+        let input = load_agent_mail_coordination_input(Some(&snapshot_path));
+        assert!(
+            matches!(input, AgentMailCoordinationInput::Unavailable),
+            "oversized snapshot must surface as Unavailable at the coordination layer; got {input:?}",
+        );
         Ok(())
     }
 
