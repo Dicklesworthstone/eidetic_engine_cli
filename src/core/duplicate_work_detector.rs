@@ -318,7 +318,20 @@ fn path_pattern_matches(pattern: &str, path: &str) -> bool {
         return true;
     }
     if let Some(prefix) = pattern.strip_suffix("/**") {
-        return path.starts_with(prefix);
+        // "src/core/**" must NOT match "src/core_other/foo.rs". Plain
+        // `path.starts_with(prefix)` strips the trailing `/` along with
+        // the `**`, losing the directory boundary and silently producing
+        // false-positive duplicate-edit advisories whenever one
+        // reserved-path prefix happens to be a textual prefix of an
+        // unrelated edit path. Require the rest after `prefix` to begin
+        // with `/`, or accept path == prefix as the directory-itself
+        // overlap case.
+        if path == prefix {
+            return true;
+        }
+        return path
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('/'));
     }
     if let Some(prefix) = pattern.strip_suffix("**") {
         return path.starts_with(prefix);
@@ -614,6 +627,28 @@ mod tests {
         assert!(path_pattern_matches("src/*", "src/foo.rs"));
         assert!(!path_pattern_matches("src/core/**", "tests/lib.rs"));
         assert!(!path_pattern_matches("src/core/foo.rs", "src/core/bar.rs"));
+    }
+
+    #[test]
+    fn path_pattern_double_star_respects_directory_boundary() {
+        // Regression: `src/core/**` must NOT match `src/core_other/foo.rs`
+        // just because "src/core" is a textual prefix of "src/core_other".
+        // The detector previously emitted bogus CoordinateWithOwner
+        // advisories whenever one swarm agent had reserved an `<dir>/**`
+        // pattern that happened to be a string prefix of another agent's
+        // unrelated edit path.
+        assert!(!path_pattern_matches(
+            "src/core/**",
+            "src/core_other/foo.rs"
+        ));
+        assert!(!path_pattern_matches("src/core/**", "src/coresomething"));
+        assert!(!path_patterns_overlap(
+            "src/core/**",
+            "src/core_other/foo.rs"
+        ));
+        // The directory-itself overlap case is preserved.
+        assert!(path_pattern_matches("src/core/**", "src/core"));
+        assert!(path_pattern_matches("src/core/**", "src/core/x"));
     }
 
     #[test]
