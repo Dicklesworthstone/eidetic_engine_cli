@@ -373,8 +373,17 @@ fn detect_git_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Maximum bytes inspected when reading a `.git` gitfile pointer during
+/// workspace discovery. Real gitfiles are ~30 bytes (`gitdir: <path>\n`);
+/// 4 KiB is two orders of magnitude of headroom and matches the
+/// `GITDIR_POINTER_INSPECT_LIMIT` constant the hooks installer uses for
+/// the same gitfile shape (4f36dfa8).
+const WORKTREE_GITFILE_INSPECT_LIMIT: u64 = 4 * 1024;
+
 /// Detect if the git repository is a worktree.
 fn detect_git_worktree(git_root: &Path) -> Option<String> {
+    use std::io::Read as _;
+
     let git_file = git_root.join(".git");
     let Ok(metadata) = fs::symlink_metadata(&git_file) else {
         return None;
@@ -382,17 +391,57 @@ fn detect_git_worktree(git_root: &Path) -> Option<String> {
     if !metadata.file_type().is_file() {
         return None;
     }
+    // Bound the read so a peer-planted multi-GB `.git` file (whether
+    // accidental — `cat tarball.bin > .git` — or hostile in a shared
+    // multi-agent checkout) cannot pin a matching allocation on the
+    // workspace-discovery hot path. `detect_git_worktree` is called by
+    // `discover()` (line 288), which runs on every `ee` command that
+    // resolves a workspace from cwd; without the cap, a single bad
+    // `.git` file would OOM every `ee` invocation in that directory.
+    // Same defect class that 4f36dfa8 (`read_gitdir_pointer` in
+    // src/hooks/installer.rs) just fixed for the parallel install-check
+    // gitfile read.
+    if metadata.len() > WORKTREE_GITFILE_INSPECT_LIMIT {
+        return None;
+    }
 
     // This is a worktree - .git is a file pointing to the main repo.
-    if let Ok(content) = fs::read_to_string(&git_file) {
-        if content.starts_with("gitdir:") {
-            // Extract worktree name from path like .git/worktrees/<name>
-            if let Some(worktree_path) = content.strip_prefix("gitdir:") {
-                let trimmed = worktree_path.trim();
-                if let Some(idx) = trimmed.rfind("/worktrees/") {
-                    let name = &trimmed[idx + 11..];
-                    return Some(name.to_string());
-                }
+    //
+    // Two layers of defense against the metadata cap:
+    //
+    // 1. The metadata.len() check above rejects a file that was
+    //    oversized at stat time.
+    // 2. The `take(LIMIT + 1).read_to_end` below closes the TOCTOU
+    //    growth window: if the file grew between `symlink_metadata`
+    //    and the `File::open`, the bounded read still pins peak
+    //    allocation to LIMIT + 1 bytes. Same pattern the peer just
+    //    landed in `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    //    and the reflect-ingest size guard (1bd36744 +
+    //    `src/cli/mod.rs::read_reflection_result_file`).
+    let Ok(file) = fs::File::open(&git_file) else {
+        return None;
+    };
+    let mut bytes = Vec::new();
+    if file
+        .take(WORKTREE_GITFILE_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return None;
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > WORKTREE_GITFILE_INSPECT_LIMIT {
+        return None;
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        return None;
+    };
+    if content.starts_with("gitdir:") {
+        // Extract worktree name from path like .git/worktrees/<name>
+        if let Some(worktree_path) = content.strip_prefix("gitdir:") {
+            let trimmed = worktree_path.trim();
+            if let Some(idx) = trimmed.rfind("/worktrees/") {
+                let name = &trimmed[idx + 11..];
+                return Some(name.to_string());
             }
         }
     }
@@ -1719,6 +1768,40 @@ mod tests {
             .map_err(|error| format!("symlink .git: {error}"))?;
 
         assert_eq!(detect_git_worktree(&repo), None);
+        Ok(())
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `detect_git_worktree`. Pre-fix the helper called
+    /// `fs::read_to_string(&git_file)` with no size guard, so a
+    /// peer-planted multi-GB `.git` file would pin a matching
+    /// allocation on the workspace-discovery hot path (every `ee`
+    /// command's `discover()` call). Same defect class that 4f36dfa8
+    /// closed for `read_gitdir_pointer` in `src/hooks/installer.rs`.
+    ///
+    /// This test plants a one-byte-over-cap `.git` file with a valid
+    /// `gitdir:` prefix so the prefix gate would otherwise accept it,
+    /// then asserts the helper returns `None` (bounded-read refusal)
+    /// instead of allocating past `WORKTREE_GITFILE_INSPECT_LIMIT`.
+    #[test]
+    fn detect_git_worktree_rejects_oversize_gitfile() -> TestResult {
+        let scratch = ScratchDir::new("git-worktree-oversize")?;
+        let repo = scratch.make_dir("repo")?;
+        let cap = usize::try_from(super::WORKTREE_GITFILE_INSPECT_LIMIT)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::from("gitdir: /tmp/main-repo/.git/worktrees/oversize\n");
+        // Pad past the cap so the bounded read must refuse even though
+        // the prefix gate would otherwise accept the leading bytes.
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        scratch.make_file("repo/.git", &payload)?;
+
+        assert_eq!(
+            detect_git_worktree(&repo),
+            None,
+            "oversize .git file must be refused before unbounded allocation"
+        );
         Ok(())
     }
 
