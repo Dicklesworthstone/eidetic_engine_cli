@@ -1,0 +1,38 @@
+Round 4 final audit report
+Date: 2026-05-26
+
+Status
+- All eight assigned Round 4 follow-up beads are closed:
+  bd-3dfzy, bd-xs08p, bd-1n0wl, bd-1me0m, bd-3vmyr, bd-2bbtw, bd-3t75s, bd-3swij.
+- Final local closure check:
+  br show bd-3dfzy bd-xs08p bd-1n0wl bd-1me0m bd-3vmyr bd-2bbtw bd-3t75s bd-3swij --json
+  reported status=closed for every bead.
+
+cod_4 closeouts
+- bd-3swij was already shipped and closed before the final idle reassignment.
+- bd-3vmyr: ADR 0044 collision resolved by renumbering the newer high-risk
+  reflection routing ADR to ADR 0045 and updating the ADR index.
+  Code/doc commits: 44490ced, tracker commit: 5d1cf374.
+- bd-2bbtw: ee init symlink_refused now emits success=false and a top-level
+  workspace_symlink_refused degraded[] entry with a realpath repair hint.
+  The failure-mode fixture, generated degraded-code catalog, fixture README,
+  and degraded-code taxonomy are registered.
+  Code/doc commit: 6026b29d, tracker commit: b692cda7.
+
+Verification
+- Static checks for bd-2bbtw passed:
+  rustup run nightly rustfmt --edition 2024 --check src/cli/mod.rs
+  jq fixture validation for workspace_symlink_refused
+  rg catalog/code reference check
+  git diff --check for touched files
+- RCH remote-required verification was attempted for:
+  cargo test --lib init_json_symlink_refusal_marks_failure_and_degraded -- --exact --nocapture
+  via scripts/rch_verify.sh with RCH_REQUIRE_REMOTE=1.
+- RCH reached worker vmi1227854 but failed before ee tests ran because
+  /data/projects/asupersync did not compile on the worker. First reported
+  error location: /data/projects/asupersync/src/atp/adapter/webtransport.rs:279.
+  RCH degraded code: rch_verify_remote_command_failed.
+
+Repository state
+- Latest pushed HEAD after this report should include b692cda7 plus the report
+  commit that adds this file.
