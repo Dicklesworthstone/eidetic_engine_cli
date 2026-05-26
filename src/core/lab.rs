@@ -2049,11 +2049,44 @@ fn read_frozen_episode(
     Ok(Some(artifact))
 }
 
+/// Maximum size of a lab artifact (frozen episode JSON) accepted by the
+/// reader. Frozen episodes carry capture metadata (ids, hashes,
+/// timestamps, evidence id lists) and are KB-sized in normal use; the
+/// 16 MiB cap leaves ample headroom for a captured episode with thousands
+/// of evidence ids while still bounding worst-case allocation. Mirrors
+/// the handoff-capsule cap in `src/core/handoff.rs` (6d8d00e5) and the
+/// repro pack-artifact cap in `src/core/repro.rs` (b771869b).
+const MAX_LAB_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_lab_file_to_string_no_follow(path: &Path) -> std::io::Result<String> {
-    let mut file = open_lab_file_for_read_no_follow(path)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
+    // Cap the read at `MAX_LAB_FILE_BYTES + 1` so a peer agent that
+    // pre-stages a multi-GiB file at the lab artifact path (`.ee/lab/
+    // episodes/<id>.json` or `.ee/lab/replays/...`) between the
+    // `read_frozen_episode` size check and this read cannot inflate the
+    // String allocation past the policy cap. The prior `read_to_string`
+    // path grew the String on demand and would OOM the process if the
+    // file ballooned after the stat. The `+ 1` sentinel preserves the
+    // existing semantics: a file of exactly `MAX_LAB_FILE_BYTES` parses
+    // normally; a race-grown file lands as `cap + 1` bytes and trips
+    // the explicit "above cap" branch with `InvalidData`. Same defense-
+    // in-depth pattern as `read_cache_entry_file` in pack_l2.rs
+    // (8ba93c0e), `prepare_file_artifact` in artifact.rs (1e55cde7),
+    // and `read_pack_file_no_symlinks` in repro.rs (b771869b).
+    let file = open_lab_file_for_read_no_follow(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LAB_FILE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_LAB_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "lab artifact {} exceeds the {MAX_LAB_FILE_BYTES} byte cap",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn open_lab_file_for_read_no_follow(path: &Path) -> std::io::Result<File> {
