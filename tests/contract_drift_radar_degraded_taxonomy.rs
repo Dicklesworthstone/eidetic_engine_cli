@@ -35,6 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -500,6 +501,94 @@ fn generated_degraded_codes_doc_uses_taxonomy_categories() -> TestResult {
 fn run_validator_inline(value: Value) -> FixtureValidation {
     let path = PathBuf::from("<inline-negative-fixture>");
     validate_failure_mode_fixture(&path, &value)
+}
+
+#[test]
+fn contract_drift_radar_pins_json_example_count_semantics() -> TestResult {
+    let temp = tempfile::Builder::new()
+        .prefix("ee-contract-radar-counts-")
+        .tempdir_in("/tmp")
+        .or_else(|_| tempfile::tempdir())
+        .map_err(|error| format!("create tempdir: {error}"))?;
+    let root = temp.path();
+    let scripts_dir = root.join("scripts");
+    let schemas_dir = root.join("docs").join("schemas");
+    fs::create_dir_all(&scripts_dir).map_err(|error| format!("create scripts dir: {error}"))?;
+    fs::create_dir_all(&schemas_dir).map_err(|error| format!("create schemas dir: {error}"))?;
+    fs::create_dir_all(root.join("docs")).map_err(|error| format!("create docs dir: {error}"))?;
+
+    fs::copy(
+        repo_root().join("scripts").join("contract-drift-radar.sh"),
+        scripts_dir.join("contract-drift-radar.sh"),
+    )
+    .map_err(|error| format!("copy contract-drift-radar.sh: {error}"))?;
+    fs::write(schemas_dir.join("ee.response.v2.json"), "{}\n")
+        .map_err(|error| format!("write schema inventory fixture: {error}"))?;
+    fs::write(
+        root.join("docs").join("contract-drift-radar.md"),
+        r#"# Canned Contract Examples
+
+```json
+{ "schema": "ee.response.v2", "success": true }
+```
+
+```jsonc
+{ "schema": "ee.unknown_contract.v1", "success": true }
+```
+
+<!-- legacy-example -->
+```json
+{ "schema": "ee.legacy_allowed.v1", "success": true }
+```
+"#,
+    )
+    .map_err(|error| format!("write canned docs fixture: {error}"))?;
+
+    let output = Command::new("bash")
+        .arg(root.join("scripts").join("contract-drift-radar.sh"))
+        .arg("--json")
+        .arg("--quiet")
+        .output()
+        .map_err(|error| format!("run contract-drift-radar.sh: {error}"))?;
+    ensure(
+        output.status.success(),
+        format!(
+            "contract-drift-radar.sh failed: status={:?}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("radar stdout was not UTF-8: {error}"))?;
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("radar stdout was not JSON: {error}\nstdout={stdout}"))?;
+    let summary = report
+        .get("summary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("summary object missing from report: {report}"))?;
+
+    ensure(
+        summary
+            .get("envelopeExamplesScanned")
+            .and_then(Value::as_u64)
+            == Some(3),
+        format!("expected 3 scanned examples; summary={summary:?}"),
+    )?;
+    ensure(
+        summary.get("schemaIdViolations").and_then(Value::as_u64) == Some(1),
+        format!("expected 1 unknown-schema violation; summary={summary:?}"),
+    )?;
+    ensure(
+        summary.get("skippedLegacyExamples").and_then(Value::as_u64) == Some(1),
+        format!("expected 1 skipped legacy example; summary={summary:?}"),
+    )?;
+    ensure(
+        report
+            .pointer("/violations/jsonExampleCheck")
+            .and_then(Value::as_array)
+            .is_some_and(|violations| violations.len() == 1),
+        format!("expected exactly one json example violation: {report}"),
+    )
 }
 
 #[test]
