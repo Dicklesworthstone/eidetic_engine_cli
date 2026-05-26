@@ -12978,9 +12978,7 @@ where
                 task_frame_id: args.task_frame_id.clone(),
             };
             return match crate::core::focus_suggest::suggest_focus(&options) {
-                Ok(report) => {
-                    write_stdout(stdout, &(render_focus_suggest_envelope(&report) + "\n"))
-                }
+                Ok(report) => write_focus_suggest_report(cli, &report, stdout),
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
             };
         }
@@ -13054,11 +13052,19 @@ fn render_focus_suggest_envelope(
         })
         .collect();
 
+    // Source the inner `schema` from the canonical constant in
+    // `core::focus_suggest` instead of a hand-typed string literal. The
+    // outer envelope schema, the inner data schema, the v1 JSON schema
+    // file (`docs/schemas/ee.focus.suggest.v1.json`), and the static
+    // test fixtures must agree byte-for-byte; reading both halves from
+    // their defining constants makes any future rename (e.g. to v2) a
+    // compile-time error at the call site rather than a silent
+    // string-literal drift that ships with agents parsing the old name.
     let payload = serde_json::json!({
         "schema": "ee.response.v2",
         "success": true,
         "data": {
-            "schema": "ee.focus.suggest.v1",
+            "schema": crate::core::focus_suggest::FOCUS_SUGGEST_SCHEMA_V1,
             "recommendations": recommendations,
             "fromCass": report.from_cass,
             "limit": report.limit,
@@ -13067,6 +13073,84 @@ fn render_focus_suggest_envelope(
         "degraded": degraded,
     });
     serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned())
+}
+
+/// Render a `FocusSuggestReport` to the right format per the CLI's
+/// `--format` flag.
+///
+/// Mirrors `write_focus_report` (line 13086) for the other focus
+/// subcommands: prior to this routing the `Suggest` arm always emitted
+/// JSON regardless of `--format`, so `ee focus suggest --format markdown`
+/// silently returned a JSON envelope instead of the requested format.
+/// Renderer mapping matches the rest of the CLI: machine-facing variants
+/// (`Json`, `Jsonl`, `Compact`, `Hook`) emit the `ee.response.v2`
+/// envelope; `Toon` projects that envelope through the TOON adapter;
+/// `Human` and `Markdown` get a compact bullet list with the top
+/// recommendations, rationale, and any `degraded[]` codes.
+fn write_focus_suggest_report<W>(
+    cli: &Cli,
+    report: &crate::core::focus_suggest::FocusSuggestReport,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_focus_suggest_human(report))
+        }
+        output::Renderer::Toon => write_stdout(
+            stdout,
+            &(output::render_toon_from_json(&render_focus_suggest_envelope(report)) + "\n"),
+        ),
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            write_stdout(stdout, &(render_focus_suggest_envelope(report) + "\n"))
+        }
+    }
+}
+
+fn render_focus_suggest_human(report: &crate::core::focus_suggest::FocusSuggestReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# Focus suggestions (window: {}h, from CASS: {}, limit: {})",
+        report.recent_hours, report.from_cass, report.limit
+    );
+    if report.recommendations.is_empty() {
+        out.push_str("\n(no recommendations)\n");
+    } else {
+        out.push('\n');
+        for (idx, rec) in report.recommendations.iter().enumerate() {
+            let _ = writeln!(out, "## {}. {}", idx + 1, rec.topic);
+            let _ = writeln!(out, "- centralityScore: {:.4}", rec.centrality_score);
+            let _ = writeln!(out, "- rationale: {}", rec.rationale);
+            if rec.span_ids.is_empty() {
+                out.push_str("- spans: (none)\n");
+            } else {
+                let _ = writeln!(out, "- spans: {}", rec.span_ids.join(", "));
+            }
+            let _ = writeln!(out, "- try: `{}`", rec.suggested_query);
+            out.push('\n');
+        }
+    }
+    if !report.degraded.is_empty() {
+        out.push_str("## degraded\n");
+        for entry in &report.degraded {
+            let _ = writeln!(
+                out,
+                "- [{}] {}: {}",
+                entry.severity, entry.code, entry.message
+            );
+            if let Some(repair) = entry.repair.as_deref() {
+                let _ = writeln!(out, "  repair: {repair}");
+            }
+        }
+    }
+    out
 }
 
 fn focus_scope(
@@ -37998,7 +38082,23 @@ fn read_reflection_result_file(path: &Path) -> Result<String, String> {
         )
     })?;
     reject_oversized_reflection_result_input(metadata.len())?;
-    let input = fs::read_to_string(path).map_err(|error| {
+    // Bound the read itself: the previous `fs::read_to_string` followed
+    // the metadata size check, but if the file grew between the
+    // `metadata` call and the read, `read_to_string` would still allocate
+    // the post-growth size before the second size check could reject —
+    // making the second check too late to prevent OOM. Wrapping the
+    // handle in `.take(MAX + 1)` mirrors the stdin path above and pins
+    // peak allocation to `REFLECTION_RESULT_MAX_JSON_BYTES + 1` bytes
+    // regardless of TOCTOU growth.
+    let file = fs::File::open(path).map_err(|error| {
+        format!(
+            "Failed to read reflection result input '{}': {error}",
+            path.display()
+        )
+    })?;
+    let mut input = String::new();
+    let mut bounded = file.take((REFLECTION_RESULT_MAX_JSON_BYTES + 1) as u64);
+    bounded.read_to_string(&mut input).map_err(|error| {
         format!(
             "Failed to read reflection result input '{}': {error}",
             path.display()
@@ -43712,6 +43812,17 @@ const COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1: &str =
     "ee.coordination_fallback_ledger_record.v1";
 const COORDINATION_FALLBACK_INGEST_SCHEMA_V1: &str = "ee.coordination_fallback_ingest.v1";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
+// Mirror the cap on the parallel readers in src/core/why.rs and
+// src/core/support_bundle.rs (commit b040cde7). A peer agent in the
+// multi-agent swarm can grow this workspace-local append-only ledger;
+// the unbounded `BufReader::new(file).lines()` shape below would pre-size
+// each `String` to fit the line, so a single multi-GB record (or a
+// multi-GB ledger with no `\n`) would OOM `ee coordination evidence
+// ingest`'s dedup check. 16 MiB matches the two parallel readers on the
+// same file. A truncated tail line trips the existing serde_json parse
+// error, which surfaces as a Storage DomainError — the same observable
+// shape an actually-corrupt record would produce.
+const COORDINATION_FALLBACK_LEDGER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 fn handle_coordination_evidence_ingest<W, E>(
     cli: &Cli,
@@ -43999,7 +44110,7 @@ fn coordination_fallback_ledger_contains_hash(
         }
     };
 
-    for line in io::BufReader::new(file).lines() {
+    for line in io::BufReader::new(file.take(COORDINATION_FALLBACK_LEDGER_MAX_BYTES)).lines() {
         let line = line.map_err(|error| DomainError::Storage {
             message: format!(
                 "Failed to read coordination fallback ledger {}: {error}",

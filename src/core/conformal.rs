@@ -5,10 +5,9 @@
 //! need a prediction-set view over already-ranked memory candidates.
 
 use std::{
-    cmp::Ordering,
     collections::BTreeMap,
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::Path,
 };
 
@@ -17,6 +16,19 @@ use serde_json::Value;
 pub const WHY_CONFORMAL_CONFIDENCE_INTERVALS_SCHEMA_V1: &str = "ee.why.conformal_prediction_set.v1";
 pub const DEFAULT_CONFORMAL_COVERAGE: f32 = 0.95;
 pub const MIN_WHY_CONFORMAL_CALIBRATION_SAMPLES: usize = 20;
+
+// Mirror the cap on the parallel reader in
+// `src/core/search.rs::MAX_SEARCH_SCORE_CALIBRATION_BYTES` (commit 27f6ad4d).
+// `.ee/search/calibration.jsonl` is workspace-local and grown by feedback
+// events, so a peer agent or a runaway emitter can plant a large file
+// between `ee why` invocations. The previous unbounded
+// `BufReader::new(file).lines()` shape would pre-size each `String` to fit
+// the line, so a multi-GB record (or multi-GB single-line file) would OOM
+// `ee why <id>`'s conformal prediction-set surface. 64 MiB matches the
+// parallel reader on the same file; a truncated tail line just fails the
+// JSON parse via `serde_json::from_str(...).ok()?` and is silently
+// dropped — the same observable shape an actually-corrupt row produces.
+const CONFORMAL_CALIBRATION_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WhyConformalCandidate {
@@ -99,11 +111,18 @@ pub fn why_conformal_confidence_intervals(
         });
 
     let mut ranked = by_memory_id.into_values().collect::<Vec<_>>();
+    // `total_cmp` gives a total order on f32 even if a NaN sneaks past
+    // `clamp_unit_score`. `partial_cmp(...).unwrap_or(Equal)` would
+    // collapse all NaN scores onto whatever the comparator hit first,
+    // making the resulting `rank` field at line 118 sensitive to
+    // upstream HashMap iteration order. This sort feeds the
+    // deterministic conformal `prediction_set[]` field shape, so a non-
+    // total ordering here is a determinism hazard, not just a ranking
+    // ambiguity.
     ranked.sort_by(|left, right| {
         right
             .score
-            .partial_cmp(&left.score)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&left.score)
             .then_with(|| left.memory_id.cmp(&right.memory_id))
             .then_with(|| left.source.cmp(&right.source))
     });
@@ -149,7 +168,16 @@ pub fn split_conformal_quantile(mut scores: Vec<f32>, coverage: f32) -> f32 {
     if scores.is_empty() {
         return 1.0;
     }
-    scores.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    // Use `total_cmp` instead of `partial_cmp(...).unwrap_or(Equal)` for a
+    // total ordering. The `retain(is_finite)` above already filters NaN
+    // so the two are observationally equivalent today, but defense-in-
+    // depth matters because the quantile lookup at the next line trusts
+    // a total order: a NaN sneaking past the filter (e.g. through a
+    // future caller that bypasses `split_conformal_quantile` and reads
+    // `scores` directly, or a refactor that moves the retain elsewhere)
+    // would silently scramble the rank lookup and yield a non-
+    // deterministic conformal threshold without breaking any test.
+    scores.sort_by(|left, right| left.total_cmp(right));
     let coverage = clamp_unit_score(coverage);
     let rank = ((scores.len() as f32 + 1.0) * coverage).ceil() as usize;
     scores[rank.saturating_sub(1).min(scores.len() - 1)]
@@ -163,7 +191,7 @@ fn load_conformal_nonconformity_scores(workspace_path: &Path) -> Vec<f32> {
     let Ok(file) = File::open(path) else {
         return Vec::new();
     };
-    let reader = BufReader::new(file);
+    let reader = BufReader::new(file.take(CONFORMAL_CALIBRATION_MAX_BYTES));
     reader
         .lines()
         .map_while(Result::ok)
