@@ -780,14 +780,37 @@ fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<V
         ));
     }
     let mut file = open_pack_file_for_read_no_symlinks(&target_path)?;
-    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
-    file.read_to_end(&mut bytes).map_err(|error| {
-        format!(
-            "pack_artifact_unavailable: {}: {}",
+    // Cap the read at `MAX_PACK_ARTIFACT_BYTES + 1` so a peer that swaps
+    // `target_path` for a multi-GiB payload between the metadata-based
+    // size check above and this read cannot inflate the allocation past
+    // the policy cap. The prior `Vec::with_capacity(metadata.len()) +
+    // read_to_end` pattern would pre-size from the *old* metadata then
+    // grow `bytes` to accommodate the swapped-in file's full length,
+    // OOMing the process. The `+ 1` sentinel preserves prior semantics:
+    // a file of exactly `MAX_PACK_ARTIFACT_BYTES` still parses (read
+    // captures `MAX_PACK_ARTIFACT_BYTES` bytes) and the post-read length
+    // check distinguishes "exactly at cap" (accepted) from "above cap"
+    // (rejected as race-grown). Same defense-in-depth pattern as
+    // `read_cache_entry_file` in src/cache/pack_l2.rs (8ba93c0e),
+    // `read_limited_utf8_file` in src/hooks/installer.rs, and the
+    // `prepare_file_artifact` cap in src/core/artifact.rs (1e55cde7).
+    let mut bytes = Vec::new();
+    file.take(MAX_PACK_ARTIFACT_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "pack_artifact_unavailable: {}: {}",
+                target_path.display(),
+                error
+            )
+        })?;
+    if bytes.len() as u64 > MAX_PACK_ARTIFACT_BYTES {
+        return Err(format!(
+            "pack_artifact_too_large: {}: exceeds maximum size of {} bytes",
             target_path.display(),
-            error
-        )
-    })?;
+            MAX_PACK_ARTIFACT_BYTES
+        ));
+    }
     Ok(bytes)
 }
 
