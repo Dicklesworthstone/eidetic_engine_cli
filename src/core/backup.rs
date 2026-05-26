@@ -3871,10 +3871,49 @@ fn collect_lab_episode_file_dir(
     }
 }
 
+/// Hard upper bound on the byte length of a lab-episode source file read
+/// by `read_lab_episode_source_file` during `backup create
+/// --include-derived`. Matches the parallel cap that `src/core/lab.rs`
+/// (5491131c) uses for `read_lab_file_to_string_no_follow`, so the
+/// backup-side and lab-side readers share a single ceiling and a file
+/// rejected by one is also rejected by the other.
+///
+/// 16 MiB is generous: realistic lab episode files are tens of KB to a
+/// few MB, and the cap leaves headroom for captures with thousands of
+/// evidence ids while bounding worst-case allocation. A peer agent that
+/// pre-stages a multi-GiB file under `~/.local/share/ee/lab/episodes/`
+/// (the shared lab episode store) would otherwise OOM every `backup
+/// create --include-derived` invocation that scans the directory.
+const LAB_EPISODE_SOURCE_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_lab_episode_source_file(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = open_backup_artifact_for_read(path)?;
+    // Bounded read: cap at `LAB_EPISODE_SOURCE_FILE_MAX_BYTES + 1` so
+    // the post-read size check distinguishes "exactly at cap" (accepted)
+    // from "above cap" (rejected) without a separate stat call on the
+    // read path. The caller (line 3853) only checks
+    // `metadata.file_type().is_file()` before reaching this read — NO
+    // size guard — so an unbounded `read_to_end` on a multi-GiB
+    // peer-planted lab episode would force a matching `Vec<u8>` pre-size
+    // and OOM the backup hot path. The error path is already mapped to
+    // a per-file `lab_episodes_unreadable` degraded entry at the caller,
+    // so an over-cap file gracefully degrades to a warning instead of
+    // crashing the whole backup. Same defensive pattern as the parallel
+    // cap at `src/core/lab.rs::read_lab_file_to_string_no_follow`
+    // (5491131c), `src/cache/pack_l2.rs::read_cache_entry_file`
+    // (8ba93c0e), and the round-2 cap pass on workspace metadata.
+    let file = open_backup_artifact_for_read(path)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(LAB_EPISODE_SOURCE_FILE_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > LAB_EPISODE_SOURCE_FILE_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read lab episode source `{}`: exceeded the {LAB_EPISODE_SOURCE_FILE_MAX_BYTES}-byte cap",
+                path.display(),
+            ),
+        ));
+    }
     Ok(bytes)
 }
 
