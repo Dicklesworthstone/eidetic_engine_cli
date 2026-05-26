@@ -276,8 +276,38 @@ fn read_existing_hook_content(path: &Path) -> Result<String, ExistingHookStatus>
         .map_err(|_| ExistingHookStatus::Unreadable)
 }
 
+/// Open `path` for reading without following a terminal symlink.
+///
+/// The prior shape (`std::fs::File::open(path)`) silently followed a
+/// symlink at the leaf, creating a TOCTOU window between the
+/// `symlink_metadata` check at line 253 / 1370 and this open: a peer
+/// agent in the multi-agent swarm could swap the regular hook file
+/// for `~/.claude/hooks/pre-task → /etc/passwd` (or any other
+/// readable file) between the check and the open, and the function
+/// would return up to `HOOK_CONTENT_INSPECT_LIMIT` bytes of the
+/// target's content to the idempotency-comparison path. Using
+/// `O_NOFOLLOW` on Unix closes the window inside the kernel: if the
+/// leaf became a symlink after the check, `open(2)` fails with ELOOP
+/// and the caller sees `ExistingHookStatus::Unreadable` instead of
+/// arbitrary content. Non-Unix targets keep the legacy
+/// `File::open` shape since the symlink-on-shared-home threat model
+/// is Unix-specific.
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 fn read_limited_utf8_file(path: &Path, limit: usize) -> std::io::Result<String> {
-    let file = std::fs::File::open(path)?;
+    let file = open_no_follow(path)?;
     let mut limited = file.take(limit.saturating_add(1) as u64);
     let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
     limited.read_to_end(&mut bytes)?;
