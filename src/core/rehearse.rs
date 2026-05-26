@@ -35,6 +35,23 @@ const SANDBOX_SNAPSHOT_FILE: &str = "sandbox_snapshot.json";
 const REHEARSAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REHEARSAL_STDERR_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
+/// Hard cap on the byte length of a rehearsal manifest read by
+/// `inspect_rehearsal` and `promote_plan_rehearsal`.
+///
+/// The manifest is a `RehearseRunReport` JSON document — typically well
+/// under 1 MiB even for a verbose rehearsal. 16 MiB matches the cap
+/// shape adopted across the convergence pass for adjacent
+/// workspace-readable artifact reads (`src/core/lab.rs` frozen-episode
+/// artifacts via 5491131c, `src/core/repro.rs` pack artifacts via
+/// b771869b, `src/core/swarm_brief.rs` swarm-incident fixtures via
+/// 1f564cab). Without this cap, a peer-planted multi-GiB file at
+/// `<workspace>/.ee/rehearsals/<id>/manifest.json` (shared multi-agent
+/// checkout, accidental `cat tarball > manifest.json`) would force
+/// `fs::read` to allocate the full file before `serde_json::from_slice`
+/// ever ran — the same TOCTOU/OOM lever closed across the convergence
+/// pass for sibling artifact reads.
+const MAX_REHEARSE_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
 // ============================================================================
 // Command Spec Types
 // ============================================================================
@@ -641,8 +658,7 @@ pub fn inspect_rehearsal(
 ) -> Result<RehearseInspectReport, DomainError> {
     let inspected_at = Utc::now().to_rfc3339();
     let manifest_path = resolve_manifest_path(&options.artifact_id, &options.workspace)?;
-    let manifest_bytes = fs::read(&manifest_path)
-        .map_err(|error| storage_error("read rehearsal manifest", error))?;
+    let manifest_bytes = read_rehearse_manifest_bounded(&manifest_path)?;
     let report: RehearseRunReport =
         serde_json::from_slice(&manifest_bytes).map_err(|error| DomainError::Storage {
             message: format!("Failed to parse rehearsal manifest: {error}"),
@@ -802,14 +818,12 @@ pub fn promote_plan_rehearsal(
 ) -> Result<RehearsePromotePlanReport, DomainError> {
     let created_at = Utc::now().to_rfc3339();
     let manifest_path = resolve_manifest_path(&options.artifact_id, &options.workspace)?;
-    let report: RehearseRunReport = serde_json::from_slice(
-        &fs::read(&manifest_path)
-            .map_err(|error| storage_error("read rehearsal manifest for promote plan", error))?,
-    )
-    .map_err(|error| DomainError::Storage {
-        message: format!("Failed to parse rehearsal manifest: {error}"),
-        repair: Some("ee rehearse run --json".to_string()),
-    })?;
+    let manifest_bytes = read_rehearse_manifest_bounded(&manifest_path)?;
+    let report: RehearseRunReport =
+        serde_json::from_slice(&manifest_bytes).map_err(|error| DomainError::Storage {
+            message: format!("Failed to parse rehearsal manifest: {error}"),
+            repair: Some("ee rehearse run --json".to_string()),
+        })?;
     let plan_steps = report
         .command_results
         .iter()
@@ -1474,6 +1488,56 @@ fn storage_error(context: &str, error: io::Error) -> DomainError {
         message: format!("Failed to {context}: {error}"),
         repair: Some("ee rehearse run --json".to_string()),
     }
+}
+
+/// Bounded-read shape for the rehearsal manifest.
+///
+/// `fs::read(&manifest_path)` (the prior shape at the two call sites in
+/// `inspect_rehearsal` and `promote_plan_rehearsal`) pre-sizes its
+/// `Vec<u8>` from the file's stat-time length, so a peer-planted
+/// multi-GiB file at the manifest path would pin a matching allocation
+/// before `serde_json::from_slice` could reject it. The two-layer
+/// defense matches the recipe used by the convergence pass:
+///
+/// 1. `fs::metadata(...)` rejects an oversized file at stat time.
+/// 2. `file.take(MAX + 1).read_to_end(...)` closes the TOCTOU growth
+///    window: if the file grew between the stat and the open, the
+///    bounded read still pins peak allocation to `MAX + 1` bytes.
+///
+/// Both rejections route through `DomainError::Storage` with the
+/// matching repair hint, so the agent-facing failure shape is the same
+/// for the stat-time and read-time cases.
+fn read_rehearse_manifest_bounded(manifest_path: &Path) -> Result<Vec<u8>, DomainError> {
+    let metadata = fs::metadata(manifest_path)
+        .map_err(|error| storage_error("read rehearsal manifest", error))?;
+    if metadata.len() > MAX_REHEARSE_MANIFEST_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Rehearsal manifest `{}` is {} bytes, exceeding the {} byte limit.",
+                manifest_path.display(),
+                metadata.len(),
+                MAX_REHEARSE_MANIFEST_BYTES,
+            ),
+            repair: Some("ee rehearse run --json to regenerate the manifest.".to_string()),
+        });
+    }
+    let file = fs::File::open(manifest_path)
+        .map_err(|error| storage_error("read rehearsal manifest", error))?;
+    let mut buffer = Vec::new();
+    file.take(MAX_REHEARSE_MANIFEST_BYTES.saturating_add(1))
+        .read_to_end(&mut buffer)
+        .map_err(|error| storage_error("read rehearsal manifest", error))?;
+    if buffer.len() as u64 > MAX_REHEARSE_MANIFEST_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Rehearsal manifest `{}` grew past the {} byte limit during the bounded read.",
+                manifest_path.display(),
+                MAX_REHEARSE_MANIFEST_BYTES,
+            ),
+            repair: Some("ee rehearse run --json to regenerate the manifest.".to_string()),
+        });
+    }
+    Ok(buffer)
 }
 
 fn ensure_rehearsal_artifact_regular_or_missing(
