@@ -104,11 +104,27 @@ pub fn load_bearing_memory_items(
         })
         .collect::<Vec<_>>();
 
+    // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`.
+    // The `filter(score.is_finite() && *score > 0.0)` above excludes
+    // NaN today (`NaN > 0.0 == false`), and the `memory_id` tiebreaker
+    // would stabilize any NaN-collapse anyway, so the two orderings are
+    // observationally equivalent. But `load_bearing_memory_items`
+    // feeds the `HITS_REPORT_SCHEMA_V1` envelope (G9.b
+    // `ee why --load-bearing` + insights), which is a determinism
+    // contract — same bipartite graph → byte-identical `rank` field —
+    // and the `partial_cmp(...).unwrap_or(Equal)` pattern collapses
+    // NaN onto an unspecified equivalence class. A future caller that
+    // bypasses the upstream filter (refactor that feeds raw HITS
+    // scores in, or a numerical edge case in `fnx_algorithms::
+    // hits_centrality` that produces a non-finite authority value)
+    // would silently break the envelope contract without tripping any
+    // existing test. Mirrors the equivalent hardening of
+    // `top_positive_influencers` / `top_negative_influencers` in
+    // `src/core/influence.rs`.
     scored_memories.sort_by(|left, right| {
         right
             .1
-            .partial_cmp(&left.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&left.1)
             .then_with(|| left.0.cmp(&right.0))
     });
 
