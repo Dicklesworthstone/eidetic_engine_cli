@@ -23,6 +23,18 @@ const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
 const EXTRACT_TEMP_PREFIX: &str = "ee-extract-";
 const MAX_BACKUP_PATH_ATTEMPTS: usize = 1000;
 
+/// Hard upper bound on the byte length of a release manifest read from a
+/// user-supplied `--manifest <path>`. Realistic manifests are on the order
+/// of a few KB; 4 MiB is a generous ceiling that still bounds memory if a
+/// user (accidentally or otherwise) passes a non-manifest path to
+/// `ee install plan` / `ee install check`. The `symlink_metadata` check
+/// above already refuses FIFOs/sockets/dirs by requiring a regular file,
+/// so the only remaining unbounded vector was a large regular file —
+/// `fs::read_to_string` would otherwise pre-size its buffer from the
+/// file's metadata length and attempt a giant single allocation. Same
+/// pattern as `HANDOFF_FILE_MAX_BYTES` in src/core/handoff.rs (6d8d00e5).
+const RELEASE_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InstallCheckOptions {
     pub install_dir: Option<PathBuf>,
@@ -600,7 +612,23 @@ fn load_manifest(
         }
     }
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(metadata) if metadata.file_type().is_file() => {
+            // Cap before `fs::read_to_string` so a (regular) but enormous
+            // file passed via `--manifest <path>` cannot pre-size the
+            // read buffer to an unbounded allocation. Realistic
+            // manifests are kilobytes; 4 MiB is the design ceiling.
+            if metadata.len() > RELEASE_MANIFEST_MAX_BYTES {
+                return Err(InstallFinding::error(
+                    InstallFindingCode::ManifestInvalid,
+                    format!(
+                        "release manifest '{}' is {} bytes, exceeding the {RELEASE_MANIFEST_MAX_BYTES}-byte ceiling.",
+                        path.display(),
+                        metadata.len(),
+                    ),
+                    "Confirm the file is a real ee.release_manifest.v1 (typically <10 KB) and not a stray large file.",
+                ));
+            }
+        }
         Ok(_) => {
             return Err(InstallFinding::error(
                 InstallFindingCode::ManifestInvalid,
@@ -629,7 +657,18 @@ fn load_manifest(
             ));
         }
     }
-    let raw = fs::read_to_string(path).map_err(|error| {
+    // Bounded read with `take(CAP + 1)`. The metadata pre-check above is
+    // TOCTOU-racy: a peer process can grow the file between the
+    // `fs::symlink_metadata` stat and the open here, so the underlying
+    // `fs::read_to_string` would still allocate past
+    // `RELEASE_MANIFEST_MAX_BYTES`. The bounded read closes the window —
+    // if the file has grown to CAP + 1 bytes by the time we hit it, bail
+    // with a `ManifestInvalid` finding instead of allocating without
+    // limit. Parallel defense to the `take(CAP + 1)` shape used in
+    // `read_preflight_rules_file_no_follow` and
+    // `read_preflight_run_store_file_no_follow`.
+    use io::Read;
+    let file = fs::File::open(path).map_err(|error| {
         InstallFinding::error(
             InstallFindingCode::ManifestMissing,
             format!(
@@ -637,6 +676,38 @@ fn load_manifest(
                 path.display()
             ),
             "Pass a readable --manifest path.",
+        )
+    })?;
+    let limit = RELEASE_MANIFEST_MAX_BYTES.saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes).map_err(|error| {
+        InstallFinding::error(
+            InstallFindingCode::ManifestMissing,
+            format!(
+                "failed to read release manifest '{}': {error}",
+                path.display()
+            ),
+            "Pass a readable --manifest path.",
+        )
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > RELEASE_MANIFEST_MAX_BYTES {
+        return Err(InstallFinding::error(
+            InstallFindingCode::ManifestInvalid,
+            format!(
+                "release manifest '{}' grew past the {RELEASE_MANIFEST_MAX_BYTES}-byte cap after the metadata check (TOCTOU).",
+                path.display()
+            ),
+            "Confirm the file is a real ee.release_manifest.v1 (typically <10 KB) and not a stray large file.",
+        ));
+    }
+    let raw = String::from_utf8(bytes).map_err(|error| {
+        InstallFinding::error(
+            InstallFindingCode::ManifestInvalid,
+            format!(
+                "release manifest '{}' is not valid UTF-8: {error}",
+                path.display()
+            ),
+            "Regenerate the release manifest as a UTF-8 JSON file.",
         )
     })?;
     collect_manifest_shape_findings(&raw, target_triple, findings);

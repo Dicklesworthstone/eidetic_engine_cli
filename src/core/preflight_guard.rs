@@ -303,10 +303,31 @@ impl PreflightGuardRegistry {
 }
 
 fn read_preflight_rules_file_no_follow(path: &Path) -> std::io::Result<String> {
-    let mut file = open_preflight_rules_file_for_read(path)?;
-    let mut body = String::new();
-    file.read_to_string(&mut body)?;
-    Ok(body)
+    // Bounded read with `take(CAP + 1)`. The upstream
+    // `validate_preflight_rules_path` already rejects an oversized rule
+    // file via `fs::symlink_metadata().len() > PREFLIGHT_RULES_MAX_BYTES`,
+    // but that stat-then-read shape is TOCTOU-racy: a peer process can
+    // grow the file between the stat and the open so the underlying
+    // `read_to_string` would still allocate past the cap. The bounded
+    // read closes the window — if the file has grown to CAP + 1 bytes
+    // by the time we hit it, bail with InvalidData and the registry
+    // load path falls back to the bundled builtins instead of OOMing
+    // the trauma-guard hot path on every protected shell command.
+    let file = open_preflight_rules_file_for_read(path)?;
+    let limit = PREFLIGHT_RULES_MAX_BYTES.saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > PREFLIGHT_RULES_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "preflight rule file at {} grew past the {PREFLIGHT_RULES_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn open_preflight_rules_file_for_read(path: &Path) -> std::io::Result<fs::File> {
@@ -4126,5 +4147,50 @@ action = "explode"
             Some("Check preflight rule sources.")
         );
         assert_eq!(degraded[0]["sources"][0].as_str(), Some("preflight_guard"));
+    }
+
+    /// Regression guard for the TOCTOU bounded-read defense in
+    /// `read_preflight_rules_file_no_follow`.
+    ///
+    /// Pre-fix, the helper called `file.read_to_string(...)` which
+    /// returns *all* bytes regardless of the upstream metadata cap. The
+    /// upstream `validate_preflight_rules_path` check correctly
+    /// rejected oversized files, but a peer process growing the file
+    /// between `symlink_metadata().len()` and the open would defeat
+    /// the cap and pin a multi-MiB allocation on the trauma-guard hot
+    /// path. This test calls the helper directly on a one-byte-over-
+    /// cap file, simulating the TOCTOU window, and asserts the bounded
+    /// `take(CAP + 1)` reader returns `InvalidData` instead of
+    /// allocating past `PREFLIGHT_RULES_MAX_BYTES`.
+    #[test]
+    fn preflight_rules_bounded_read_rejects_toctou_growth() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = tempdir.path().join(".ee");
+        std::fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let rules_path = ee_dir.join("preflight_rules.toml");
+        let cap = usize::try_from(PREFLIGHT_RULES_MAX_BYTES).map_err(|error| error.to_string())?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        std::fs::write(&rules_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = read_preflight_rules_file_no_follow(&rules_path)
+            .expect_err("bounded read must reject CAP+1 bytes even if metadata check is bypassed");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::InvalidData,
+            "bounded read TOCTOU rejection must surface InvalidData; got {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("TOCTOU"),
+            "rejection message must name the TOCTOU defense; got {message:?}"
+        );
+        assert!(
+            message.contains(&PREFLIGHT_RULES_MAX_BYTES.to_string()),
+            "rejection message must cite the cap constant; got {message:?}"
+        );
+        Ok(())
     }
 }

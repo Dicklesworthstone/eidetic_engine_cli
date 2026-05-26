@@ -831,10 +831,32 @@ fn read_preflight_run_store(store_path: &Path) -> Result<PreflightRunStoreDocume
 }
 
 fn read_preflight_run_store_file_no_follow(store_path: &Path) -> Result<String, std::io::Error> {
-    let mut file = open_preflight_run_store_file_for_read(store_path)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
+    // Bounded read with `take(CAP + 1)`. The caller already rejects an
+    // oversized file via the `fs::symlink_metadata().len() > CAP` check
+    // above, but that stat-then-read shape is TOCTOU-racy: a peer
+    // process can grow the file between the stat and the open so the
+    // underlying `read_to_string` would still allocate past CAP. The
+    // bounded read closes the window — if the file has grown to
+    // CAP + 1 bytes by the time we hit it, we bail with InvalidData
+    // and the caller wraps that into a structured Storage error. The
+    // metadata pre-check is kept as a cheap fast-path rejection that
+    // also surfaces a friendlier repair hint for the common non-racy
+    // case.
+    let file = open_preflight_run_store_file_for_read(store_path)?;
+    let limit = PREFLIGHT_RUN_STORE_MAX_BYTES.saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(limit).read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > PREFLIGHT_RUN_STORE_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "preflight run store at {} grew past the {PREFLIGHT_RUN_STORE_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                store_path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn open_preflight_run_store_file_for_read(store_path: &Path) -> Result<fs::File, std::io::Error> {
@@ -4086,5 +4108,50 @@ RULE NUMBER 2: NO WORKTREES. EVER.
 
         ensure(report.tripwires_set, 0, "tripwires disabled")?;
         ensure(report.tripwires.is_empty(), true, "no tripwire views")
+    }
+
+    /// Regression guard for the TOCTOU bounded-read defense in
+    /// `read_preflight_run_store_file_no_follow`.
+    ///
+    /// Pre-fix, the helper called `file.read_to_string(...)` which
+    /// returns *all* bytes regardless of the upstream metadata cap
+    /// at `read_preflight_run_store`. A peer process growing
+    /// `.ee/preflight_runs.json` between the `symlink_metadata().len()`
+    /// check and the open would defeat the cap and pin a multi-MiB
+    /// allocation on every `ee preflight {run,show,close}` call. This
+    /// test calls the helper directly on a CAP+1 byte file —
+    /// simulating the TOCTOU growth scenario — and asserts the bounded
+    /// `take(CAP + 1)` reader returns `InvalidData` instead of
+    /// allocating past `PREFLIGHT_RUN_STORE_MAX_BYTES`.
+    #[test]
+    fn preflight_run_store_bounded_read_rejects_toctou_growth() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let store_path = tempdir.path().join("preflight_runs.json");
+        let cap =
+            usize::try_from(PREFLIGHT_RUN_STORE_MAX_BYTES).map_err(|error| error.to_string())?;
+        // Fill with a single-byte filler so each byte is valid UTF-8
+        // (so the rejection trips on the size bound, not from_utf8).
+        let mut payload = Vec::with_capacity(cap + 1);
+        payload.resize(cap + 1, b' ');
+        std::fs::write(&store_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = read_preflight_run_store_file_no_follow(&store_path)
+            .expect_err("bounded read must reject CAP+1 bytes even if metadata check is bypassed");
+        ensure(
+            error.kind() == std::io::ErrorKind::InvalidData,
+            true,
+            "bounded read TOCTOU rejection must surface InvalidData",
+        )?;
+        let message = error.to_string();
+        ensure(
+            message.contains("TOCTOU"),
+            true,
+            "rejection message must name the TOCTOU defense",
+        )?;
+        ensure(
+            message.contains(&PREFLIGHT_RUN_STORE_MAX_BYTES.to_string()),
+            true,
+            "rejection message must cite the cap constant",
+        )
     }
 }

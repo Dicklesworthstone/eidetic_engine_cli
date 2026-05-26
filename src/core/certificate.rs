@@ -1517,7 +1517,13 @@ fn required_certificate_field(
     index: usize,
 ) -> Result<String, CertificateManifestError> {
     match value {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        // Trim BEFORE storing so a whitespace-padded emission (e.g. a
+        // noisy upstream signing pipeline that emits " signer_id\n")
+        // doesn't persist distinct from its canonical form and break
+        // equality checks against trimmed values elsewhere. Same
+        // defensive pattern as src/cass/import.rs (a135ab06) and
+        // required_claim_field above.
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
         _ => Err(CertificateManifestError::new(format!(
             "missing certificate {field_name} at certificates[{index}]"
         ))),

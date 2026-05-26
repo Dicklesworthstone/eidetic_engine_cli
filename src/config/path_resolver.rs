@@ -37,7 +37,7 @@ impl std::error::Error for PlatformDataDirError {}
 pub fn resolve_dir_windows_appdata(
     env: &BTreeMap<String, OsString>,
 ) -> Result<PathBuf, PlatformDataDirError> {
-    required_env_path(env, "APPDATA")
+    required_env_path_with_repair(env, "APPDATA", "set APPDATA or pass --workspace explicitly")
 }
 
 /// Resolve the local Windows app data directory used for machine-local caches.
@@ -49,7 +49,11 @@ pub fn resolve_dir_windows_appdata(
 pub fn resolve_dir_windows_localappdata(
     env: &BTreeMap<String, OsString>,
 ) -> Result<PathBuf, PlatformDataDirError> {
-    required_env_path(env, "LOCALAPPDATA")
+    required_env_path_with_repair(
+        env,
+        "LOCALAPPDATA",
+        "set LOCALAPPDATA or pass --workspace explicitly",
+    )
 }
 
 /// Resolve the Unix XDG data directory for `app_name`.
@@ -73,13 +77,6 @@ pub fn resolve_dir_unix_xdg(
         "set HOME, set XDG_DATA_HOME, or pass --workspace explicitly",
     )?;
     Ok(home.join(".local").join("share").join(app_name))
-}
-
-fn required_env_path(
-    env: &BTreeMap<String, OsString>,
-    variable: &'static str,
-) -> Result<PathBuf, PlatformDataDirError> {
-    required_env_path_with_repair(env, variable, "set APPDATA or pass --workspace explicitly")
 }
 
 fn required_env_path_with_repair(
@@ -147,6 +144,43 @@ mod tests {
         )]))
         .map_err(|error| error.to_string())?;
         assert_eq!(resolved, PathBuf::from(r"C:\Users\agent\AppData\Local"));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_windows_data_dir_repair_text_names_the_actual_variable() -> TestResult {
+        // The repair string must name the variable the operator should
+        // actually set. Hard-coding "set APPDATA" for both surfaces (the
+        // pre-fix behavior) misled operators whose missing variable was
+        // LOCALAPPDATA into setting the wrong env var.
+        let appdata_err = resolve_dir_windows_appdata(&BTreeMap::new())
+            .expect_err("missing APPDATA should be reported");
+        assert!(
+            appdata_err.repair.contains("APPDATA"),
+            "APPDATA repair must reference APPDATA; got {:?}",
+            appdata_err.repair,
+        );
+        assert!(
+            !appdata_err.repair.contains("LOCALAPPDATA"),
+            "APPDATA repair must not reference LOCALAPPDATA; got {:?}",
+            appdata_err.repair,
+        );
+
+        let localappdata_err = resolve_dir_windows_localappdata(&BTreeMap::new())
+            .expect_err("missing LOCALAPPDATA should be reported");
+        assert!(
+            localappdata_err.repair.contains("LOCALAPPDATA"),
+            "LOCALAPPDATA repair must reference LOCALAPPDATA; got {:?}",
+            localappdata_err.repair,
+        );
+        // The substring check would pass on "set APPDATA" too because
+        // "APPDATA" is a suffix of "LOCALAPPDATA". Pin the exact prefix
+        // form so the bug cannot regress silently.
+        assert!(
+            localappdata_err.repair.starts_with("set LOCALAPPDATA"),
+            "LOCALAPPDATA repair must start with `set LOCALAPPDATA`; got {:?}",
+            localappdata_err.repair,
+        );
         Ok(())
     }
 

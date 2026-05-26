@@ -622,9 +622,24 @@ fn host_pressure(degraded: &mut Vec<PerfLiveDegradation>) -> PerfLiveHostPressur
 
 #[cfg(target_os = "linux")]
 fn current_rss_mb() -> Option<u64> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let rss_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
-    Some(rss_pages.saturating_mul(4096) / (1024 * 1024))
+    // Read VmRSS from /proc/self/status — reported in kB directly so the
+    // result is correct regardless of kernel page size. The previous
+    // implementation read RSS pages from /proc/self/statm and multiplied
+    // by a hardcoded 4096 byte page size, which silently under-reports
+    // RSS by 4× on ARM64 with CONFIG_ARM64_64K_PAGES (16 KiB pages) and
+    // by 16× on PowerPC with 64 KiB pages — both supported Linux
+    // configurations. status's VmRSS line ("VmRSS:    1234 kB") carries
+    // the byte count in kilobytes irrespective of page size, so the
+    // conversion no longer needs to ask sysconf or rustix::param (which
+    // requires an extra Cargo feature that isn't enabled here).
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb / 1024);
+        }
+    }
+    None
 }
 
 #[cfg(not(target_os = "linux"))]

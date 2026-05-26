@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -2303,11 +2303,11 @@ fn read_regular_file_no_symlinks(path: &Path, label: &str) -> Result<String, Dom
             repair: Some(format!("Verify {} exists and is readable", path.display())),
         });
     }
-    // Early-bail before `read_to_string` so a user-supplied path to a huge
+    // Early-bail before the bounded read so a user-supplied path to a huge
     // file (passed via `ee handoff resume --capsule <path>`,
-    // `ee handoff inspect`, or `ee handoff preview`) cannot trigger an
-    // unbounded allocation. The metadata read is cheap and `read_to_string`
-    // pre-sizes its buffer from this same length on most platforms.
+    // `ee handoff inspect`, or `ee handoff preview`) is rejected with a
+    // friendly repair hint instead of an opaque InvalidData below. The
+    // metadata stat is cheap and surfaces the size in the error message.
     let metadata = fs::metadata(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to inspect {label} size: {error}"),
         repair: Some(format!("Verify {} exists and is readable", path.display())),
@@ -2324,9 +2324,44 @@ fn read_regular_file_no_symlinks(path: &Path, label: &str) -> Result<String, Dom
             )),
         });
     }
-    let content = fs::read_to_string(path).map_err(|error| DomainError::Storage {
+    // Bounded read with `take(CAP + 1)`. The metadata pre-check above is
+    // TOCTOU-racy: a peer process can grow the file between the stat and
+    // the open so the underlying `read_to_string` would still allocate
+    // past CAP. The bounded read closes the window — if the file has
+    // grown to CAP + 1 bytes by the time we hit it, bail with a Storage
+    // error instead of allocating without limit. Parallel defense to the
+    // `take(CAP + 1)` shape used by `read_preflight_run_store_file_no_follow`
+    // (`src/core/preflight.rs`) and `read_preflight_rules_file_no_follow`
+    // (`src/core/preflight_guard.rs`).
+    let file = fs::File::open(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read {label}: {error}"),
         repair: Some(format!("Verify {} exists and is readable", path.display())),
+    })?;
+    let limit = HANDOFF_FILE_MAX_BYTES.saturating_add(1);
+    let mut bytes = Vec::new();
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| DomainError::Storage {
+            message: format!("Failed to read {label}: {error}"),
+            repair: Some(format!("Verify {} exists and is readable", path.display())),
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > HANDOFF_FILE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read {label}: file grew past the {HANDOFF_FILE_MAX_BYTES}-byte cap after the metadata check (TOCTOU)."
+            ),
+            repair: Some(format!(
+                "Confirm {} is a real handoff capsule (typically <100KB) and not a stray large file.",
+                path.display()
+            )),
+        });
+    }
+    let content = String::from_utf8(bytes).map_err(|error| DomainError::Storage {
+        message: format!("Failed to read {label}: {error}"),
+        repair: Some(format!(
+            "Confirm {} is a UTF-8 text capsule.",
+            path.display()
+        )),
     })?;
     reject_existing_symlink_component(path, label)?;
     Ok(content)

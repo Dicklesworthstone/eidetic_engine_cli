@@ -1264,8 +1264,17 @@ pub fn classify_task(text: &str) -> ClassifyResult {
         review_signals,
     ));
 
-    // Sort by score descending
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by score descending. `total_cmp` over the previous
+    // `partial_cmp(...).unwrap_or(Equal)` matches the determinism
+    // hardening shipped at `src/core/conformal.rs:160` and
+    // `src/core/focus_suggest.rs:566`. Today every `*_score` is a
+    // pure sum of positive constants and could not become NaN, but
+    // a future signal that divides or takes a log would silently
+    // break the byte-identical JSON contract from AGENTS.md (same
+    // DB + indexes + config + query ⇒ stable JSON output). Use the
+    // total ordering now so the determinism guarantee survives any
+    // such refactor.
+    scores.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let (category, raw_confidence_score, signals) = scores
         .first()

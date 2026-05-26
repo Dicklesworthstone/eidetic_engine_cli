@@ -1352,7 +1352,17 @@ pub fn recommend_recipes(options: &PlanRecommendOptions) -> PlanRecommendReport 
         }
     }
 
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`
+    // matches the determinism hardening shipped at
+    // `src/core/conformal.rs:160` and `src/core/focus_suggest.rs:566`.
+    // Today the recipe `score` is a pure sum of finite positive
+    // constants (0.3 / 0.2 / 0.1) so partial_cmp returns `Some(...)`
+    // in every case, but the byte-identical JSON contract from
+    // AGENTS.md (same DB + indexes + config + query ⇒ stable JSON)
+    // requires a total ordering at every render-path sort site so
+    // future signals (e.g. confidence-weighted multipliers, log-
+    // scaled frequencies) cannot regress determinism silently.
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored.truncate(options.limit as usize);
 
     let matches_found = scored.len();
