@@ -96,6 +96,21 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.curate.auto_promote.v1",
+      "status": "current",
+      "surface": "curate_auto_promote_payload",
+      "owner": "src/output/mod.rs::public_schemas",
+      "schemaFile": "docs/schemas/ee.curate.auto_promote.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.curate.auto_promote.v1.json"
+      ],
+      "currentFacingContexts": [
+        "docs/schemas/ee.curate.auto_promote.v1.json"
+      ],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.response.v1",
       "status": "legacy",
       "surface": "response_success_envelope",

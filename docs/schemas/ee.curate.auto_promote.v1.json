@@ -1,0 +1,303 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.curate.auto_promote.v1.json",
+  "title": "ee.curate.auto_promote.v1",
+  "description": "Threshold-driven memory level-transition proposals emitted by `ee curate auto-promote` (bd-2r8vp). The report enumerates every scanned memory with its eligibility decision, the threshold that fired, and a deterministic ordered list of disqualifiers. When `apply=true` the report also records the audit row id and apply error code/message for each transition that committed or failed. Dry-run runs never mutate the database and always emit `durableMutation: false`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "actor",
+    "dryRun",
+    "apply",
+    "durableMutation",
+    "thresholds",
+    "scannedMemoryCount",
+    "eligibleCount",
+    "disqualifiedCount",
+    "appliedCount",
+    "applyFailedCount",
+    "proposals",
+    "nextAction"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.curate.auto_promote.v1"
+    },
+    "command": {
+      "type": "string",
+      "const": "curate auto-promote"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspaceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "workspacePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "databasePath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "actor": {
+      "type": ["string", "null"]
+    },
+    "dryRun": {
+      "type": "boolean"
+    },
+    "apply": {
+      "type": "boolean"
+    },
+    "durableMutation": {
+      "type": "boolean"
+    },
+    "thresholds": {
+      "$ref": "#/$defs/thresholds"
+    },
+    "scannedMemoryCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "eligibleCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "disqualifiedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "appliedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "applyFailedCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "proposals": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/proposal"
+      }
+    },
+    "nextAction": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.curate.auto_promote.v1",
+      "command": "curate auto-promote",
+      "version": "0.2.0",
+      "workspaceId": "ws_example",
+      "workspacePath": "/workspace",
+      "databasePath": "/workspace/.ee/ee.sqlite",
+      "actor": null,
+      "dryRun": true,
+      "apply": false,
+      "durableMutation": false,
+      "thresholds": {
+        "minAccessCountEpisodic": 3,
+        "minConfidenceEpisodic": 0.85,
+        "minAccessCountSemantic": 5,
+        "minConfidenceSemantic": 0.9,
+        "maxPerRun": 25
+      },
+      "scannedMemoryCount": 1,
+      "eligibleCount": 1,
+      "disqualifiedCount": 0,
+      "appliedCount": 0,
+      "applyFailedCount": 0,
+      "proposals": [
+        {
+          "memoryId": "mem_eligible",
+          "currentLevel": "episodic",
+          "proposedLevel": "semantic",
+          "accessCount": 4,
+          "harmfulCount": 0,
+          "confidence": 0.91,
+          "eligibility": "eligible",
+          "thresholdFired": "min_confidence_episodic",
+          "disqualifiers": [],
+          "explanation": "memory mem_eligible qualifies for semantic promotion",
+          "applyCommand": "ee memory level mem_eligible --to semantic --expected episodic --json",
+          "applyStatus": "not_applied",
+          "auditId": null,
+          "applyErrorCode": null,
+          "applyErrorMessage": null
+        }
+      ],
+      "nextAction": "ee curate auto-promote --apply --json"
+    }
+  ],
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "command",
+      "scannedMemoryCount",
+      "eligibleCount",
+      "appliedCount"
+    ],
+    "summary": [
+      "schema",
+      "command",
+      "dryRun",
+      "apply",
+      "durableMutation",
+      "scannedMemoryCount",
+      "eligibleCount",
+      "disqualifiedCount",
+      "appliedCount",
+      "applyFailedCount",
+      "nextAction"
+    ],
+    "standard": [
+      "schema",
+      "command",
+      "version",
+      "workspaceId",
+      "workspacePath",
+      "databasePath",
+      "actor",
+      "dryRun",
+      "apply",
+      "durableMutation",
+      "thresholds",
+      "scannedMemoryCount",
+      "eligibleCount",
+      "disqualifiedCount",
+      "appliedCount",
+      "applyFailedCount",
+      "nextAction"
+    ],
+    "full": ["*"]
+  },
+  "$defs": {
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minAccessCountEpisodic",
+        "minConfidenceEpisodic",
+        "minAccessCountSemantic",
+        "minConfidenceSemantic",
+        "maxPerRun"
+      ],
+      "properties": {
+        "minAccessCountEpisodic": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minConfidenceEpisodic": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minAccessCountSemantic": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "minConfidenceSemantic": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "maxPerRun": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryId",
+        "currentLevel",
+        "proposedLevel",
+        "accessCount",
+        "harmfulCount",
+        "confidence",
+        "eligibility",
+        "thresholdFired",
+        "disqualifiers",
+        "explanation",
+        "applyCommand",
+        "applyStatus",
+        "auditId",
+        "applyErrorCode",
+        "applyErrorMessage"
+      ],
+      "properties": {
+        "memoryId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "currentLevel": {
+          "type": "string",
+          "minLength": 1
+        },
+        "proposedLevel": {
+          "type": ["string", "null"]
+        },
+        "accessCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "harmfulCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "eligibility": {
+          "type": "string",
+          "enum": ["eligible", "disqualified"]
+        },
+        "thresholdFired": {
+          "type": ["string", "null"]
+        },
+        "disqualifiers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "applyCommand": {
+          "type": ["string", "null"]
+        },
+        "applyStatus": {
+          "type": "string",
+          "enum": ["not_applied", "applied", "apply_failed"]
+        },
+        "auditId": {
+          "type": ["string", "null"]
+        },
+        "applyErrorCode": {
+          "type": ["string", "null"]
+        },
+        "applyErrorMessage": {
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

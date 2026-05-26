@@ -8485,6 +8485,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: curate_candidates_response_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::CURATE_AUTO_PROMOTE_SCHEMA_V1,
+            version: "1",
+            description: "Threshold-driven memory level-transition proposals emitted by `ee curate auto-promote` (bd-2r8vp).",
+            category: "curate",
+            definition: curate_auto_promote_schema_definition,
+        },
+        SchemaEntry {
             id: crate::curate::REFLECTION_SOURCE_PACKAGE_SCHEMA,
             version: "1",
             description: "Redacted and bounded source package for reflection request artifacts",
@@ -9415,6 +9422,10 @@ fn export_response_schema_definition() -> String {
 
 fn curate_candidates_response_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.candidates.v1.json").to_string()
+}
+
+fn curate_auto_promote_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.auto_promote.v1.json").to_string()
 }
 
 fn reflection_source_package_schema_definition() -> String {
