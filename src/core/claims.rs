@@ -456,9 +456,10 @@ fn manifest_path_for_claim(artifacts_root: &Path, claim_id: &ClaimId) -> PathBuf
 fn read_claims_file(path: &Path) -> Result<Vec<ParsedClaim>, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claims file")?;
     ensure_claim_metadata_regular_file(path, "claims file")?;
-    let input = read_claim_file_to_string_no_follow(path).map_err(|error| {
-        ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
-    })?;
+    let input =
+        read_claim_file_to_string_no_follow(path, MAX_CLAIM_METADATA_BYTES).map_err(|error| {
+            ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
+        })?;
     parse_claims_file_yaml(&input)
 }
 
@@ -561,7 +562,13 @@ fn required_claim_field(
     claim_index: usize,
 ) -> Result<String, ClaimParseError> {
     match value {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        // Trim BEFORE storing so that a whitespace-padded emission like
+        // " bd-abc " never persists distinct from the canonical "bd-abc"
+        // and breaks downstream equality checks (claim id lookups, audit
+        // chain hashes). Same defensive pattern as the cass/import.rs
+        // content_hash trim fix (a135ab06): guard `!trim().is_empty()`
+        // and STORE the trimmed value, not the raw input.
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
         _ => Err(ClaimParseError::new(format!(
             "missing {field_name} at claims[{claim_index}]"
         ))),
@@ -713,9 +720,10 @@ fn parse_demo_ids(ids: &[String], claim_index: usize) -> Result<Vec<DemoId>, Cla
 fn read_claim_manifest(path: &Path) -> Result<ParsedManifest, ClaimParseError> {
     ensure_no_claim_metadata_symlink_components(path, "read claim manifest")?;
     ensure_claim_metadata_regular_file(path, "claim manifest")?;
-    let input = read_claim_file_to_string_no_follow(path).map_err(|error| {
-        ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
-    })?;
+    let input =
+        read_claim_file_to_string_no_follow(path, MAX_CLAIM_METADATA_BYTES).map_err(|error| {
+            ClaimParseError::new(format!("failed to read {}: {error}", path.display()))
+        })?;
     parse_claim_manifest_json(&input)
 }
 
@@ -809,7 +817,13 @@ fn required_manifest_field(
     artifact_index: usize,
 ) -> Result<String, ClaimParseError> {
     match value {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        // Mirror the trim of `required_claim_field` so manifest artifact
+        // fields (path, hash, signer, etc.) are dedup-stable across
+        // tidier/noisier upstream emitters. Without the trim, a hash
+        // like " sha256:abc " would persist distinct from "sha256:abc"
+        // and silently break manifest equality checks. Same defensive
+        // pattern as a135ab06.
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
         _ => Err(ClaimParseError::new(format!(
             "missing {field_name} at artifacts[{artifact_index}]"
         ))),
@@ -926,21 +940,46 @@ fn read_claim_artifact_bytes(
     let artifact_path =
         resolve_claim_artifact_path_no_symlinks(claim_artifacts_dir, relative_path)?;
     ensure_claim_artifact_regular_file(&artifact_path)?;
-    read_claim_file_bytes_no_follow(&artifact_path)
+    read_claim_file_bytes_no_follow(&artifact_path, MAX_CLAIM_ARTIFACT_BYTES)
         .map_err(|error| format!("artifact_not_found: {}: {}", artifact_path.display(), error))
 }
 
-fn read_claim_file_to_string_no_follow(path: &Path) -> io::Result<String> {
-    let mut file = open_claim_file_for_read_no_follow(path)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
+fn read_claim_file_to_string_no_follow(path: &Path, max_bytes: u64) -> io::Result<String> {
+    let bytes = read_claim_file_bytes_no_follow(path, max_bytes)?;
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
-fn read_claim_file_bytes_no_follow(path: &Path) -> io::Result<Vec<u8>> {
+fn read_claim_file_bytes_no_follow(path: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+    // Bounded read: cap at `max_bytes + 1` so the post-read size check
+    // can distinguish "exactly at cap" (accepted) from "above cap"
+    // (rejected) without a separate stat call on the read path. The
+    // metadata pre-check at the call site (`ensure_claim_artifact_regular_file`
+    // for artifact reads, `ensure_claim_metadata_regular_file` for YAML/JSON
+    // reads) fails fast on an oversized file but is TOCTOU-racy: a peer
+    // can grow the file between the stat and the open, so an unbounded
+    // `read_to_end` would still pre-size its `Vec<u8>` to the new on-disk
+    // length and OOM the process. Pinning the read closes that window.
+    //
+    // Same defensive pattern as the Round-2 caps at
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // (7f56d89b), `src/core/memory.rs::read_workspace_config_if_present`
+    // (e1499deb), `src/core/curate.rs::structural_decay_config_contents`
+    // (0fe4a339), `src/cache/pack_l2.rs::read_cache_entry_file` (8ba93c0e),
+    // and `src/core/handoff.rs::ensure_handoff_key_material_within_cap`
+    // (f067c32c).
     let mut file = open_claim_file_for_read_no_follow(path)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read claim file `{}`: exceeded the {max_bytes}-byte cap after the metadata check (TOCTOU)",
+                path.display(),
+            ),
+        ));
+    }
     Ok(bytes)
 }
 
@@ -1007,14 +1046,26 @@ fn ensure_claim_metadata_regular_file(
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         ClaimParseError::new(format!("failed to inspect {}: {error}", path.display()))
     })?;
-    if metadata.file_type().is_file() {
-        Ok(())
-    } else {
-        Err(ClaimParseError::new(format!(
+    if !metadata.file_type().is_file() {
+        return Err(ClaimParseError::new(format!(
             "refusing to read {label} `{}` because it is not a regular file",
             path.display()
-        )))
+        )));
     }
+    // Fail fast on an oversized metadata file before the read helper
+    // would also reject it. The `take(cap + 1)` cap inside
+    // `read_claim_file_bytes_no_follow` is the load-bearing OOM guard;
+    // this pre-check just returns a clearer error message (file size +
+    // cap, not "TOCTOU") on the common case where the file was already
+    // oversized when ee looked at it.
+    if metadata.len() > MAX_CLAIM_METADATA_BYTES {
+        return Err(ClaimParseError::new(format!(
+            "refusing to read {label} `{}`: {} bytes exceeds the {MAX_CLAIM_METADATA_BYTES}-byte ceiling",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_claim_artifact_path_no_symlinks(
@@ -1034,6 +1085,19 @@ fn resolve_claim_artifact_path_no_symlinks(
 }
 
 const MAX_CLAIM_ARTIFACT_BYTES: u64 = 100 * 1024 * 1024;
+
+/// Hard ceiling for claim metadata files (claims.yaml, manifest.json) read
+/// by `read_claims_file` / `read_claim_manifest`. The two helpers run on
+/// every `ee verify`, `ee claim list`, and `ee claim show` invocation;
+/// without a cap, a peer-planted or accidentally-inflated multi-GiB
+/// claims.yaml would force a matching `Vec<u8>` pre-size on the
+/// `read_to_end` path and OOM the CLI before the YAML parser could even
+/// look at the contents. Realistic claim manifests are kilobytes; 4 MiB
+/// is the parallel ceiling used by the Round-2
+/// `WORKSPACE_CONFIG_MAX_BYTES` / `CURATE_CONFIG_MAX_BYTES` /
+/// `CONFIG_SURFACE_MAX_BYTES` / `PREFLIGHT_RULES_MAX_BYTES` caps for the
+/// same defect class on workspace metadata.
+const MAX_CLAIM_METADATA_BYTES: u64 = 4 * 1024 * 1024;
 
 fn ensure_claim_artifact_regular_file(path: &Path) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
@@ -1174,7 +1238,7 @@ fn verify_file_hash_evidence(
         .ok_or_else(|| format!("missing_expected_hash: {}", evidence.target))?;
     let path = resolve_claim_artifact_path_no_symlinks(workspace_path, &evidence.target)?;
     ensure_claim_artifact_regular_file(&path)?;
-    let bytes = read_claim_file_bytes_no_follow(&path)
+    let bytes = read_claim_file_bytes_no_follow(&path, MAX_CLAIM_ARTIFACT_BYTES)
         .map_err(|error| format!("artifact_not_found: {}: {error}", path.display()))?;
     let actual_hash = blake3::hash(&bytes).to_hex().to_string();
     if actual_hash == expected_hash {
@@ -1300,7 +1364,13 @@ fn read_first_existing_claim_store(
             Err(_) => continue,
         };
         if path.exists() {
-            return read_claim_file_to_string_no_follow(&path)
+            // `MAX_CLAIM_ARTIFACT_BYTES` (100 MiB) is the right ceiling here:
+            // candidates are memory/rule stores (memories.jsonl, rules.jsonl,
+            // …), which grow with the workspace's evidence corpus and are
+            // not the small metadata files that `MAX_CLAIM_METADATA_BYTES`
+            // caps. The bounded read still prevents an arbitrary-size
+            // peer-planted file from OOMing the verify path.
+            return read_claim_file_to_string_no_follow(&path, MAX_CLAIM_ARTIFACT_BYTES)
                 .map_err(|error| format!("{missing_code}: {}: {error}", path.display()));
         }
     }
