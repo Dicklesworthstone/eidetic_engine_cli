@@ -4,7 +4,8 @@
 //! Supports dry-run mode and idempotent re-runs.
 
 use std::{
-    fs::{self, OpenOptions},
+    ffi::OsString,
+    fs::{self, File, OpenOptions},
     io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
 };
@@ -369,7 +370,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                         status,
                     });
                     any_failed = true;
-                } else if harden_init_directory_mode(&ee_dir).is_err() {
+                } else if harden_init_directory_mode(&ee_dir, options.allow_symlink).is_err() {
                     actions.push(InitAction {
                         action: "create_directory",
                         path: ee_dir.clone(),
@@ -419,7 +420,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                         status,
                     });
                     any_failed = true;
-                } else if harden_init_directory_mode(&index_dir).is_err() {
+                } else if harden_init_directory_mode(&index_dir, options.allow_symlink).is_err() {
                     actions.push(InitAction {
                         action: "create_directory",
                         path: index_dir.clone(),
@@ -582,13 +583,13 @@ fn initialize_database(
     workspace_path: &Path,
     allow_symlink: bool,
 ) -> Result<(), String> {
-    ensure_init_path_has_no_symlink_components(database_path, allow_symlink)?;
+    prepare_init_database_path(database_path, allow_symlink)?;
     let connection = DbConnection::open_file(database_path)
         .map_err(|error| format!("failed to open database: {error}"))?;
     connection
         .migrate()
         .map_err(|error| format!("failed to migrate database: {error}"))?;
-    harden_init_database_mode(database_path)
+    harden_init_database_mode(database_path, allow_symlink)
         .map_err(|error| format!("failed to harden database permissions: {error}"))?;
 
     // Create workspace row if it doesn't exist (idempotent).
@@ -612,6 +613,17 @@ fn initialize_database(
     Ok(())
 }
 
+fn prepare_init_database_path(path: &Path, allow_symlink: bool) -> Result<(), String> {
+    ensure_init_path_has_no_symlink_components(path, allow_symlink)?;
+    if allow_symlink {
+        return Ok(());
+    }
+    let file = open_init_database_file_no_follow(path)
+        .map_err(|error| format!("failed to prepare database file safely: {error}"))?;
+    set_init_file_permissions(&file, 0o600)
+        .map_err(|error| format!("failed to harden database permissions: {error}"))
+}
+
 /// Tighten ee storage directory permissions to owner-only (0700) on Unix.
 ///
 /// `.ee/` and `.ee/index/` hold workspace identity state and the search
@@ -620,14 +632,18 @@ fn initialize_database(
 /// data-at-rest even before any other agent writes secrets into them, so
 /// init now hardens both directory roots up front.
 #[cfg(unix)]
-fn harden_init_directory_mode(path: &Path) -> io::Result<()> {
+fn harden_init_directory_mode(path: &Path, allow_symlink: bool) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    if allow_symlink {
+        return fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    }
+    let directory = open_init_directory_no_follow(path)?;
+    set_init_file_permissions(&directory, 0o700)
 }
 
 #[cfg(not(unix))]
-fn harden_init_directory_mode(_path: &Path) -> io::Result<()> {
+fn harden_init_directory_mode(_path: &Path, _allow_symlink: bool) -> io::Result<()> {
     Ok(())
 }
 
@@ -637,15 +653,160 @@ fn harden_init_directory_mode(_path: &Path) -> io::Result<()> {
 /// created 0644 (group/world readable). Init now restricts the file before
 /// returning a successful workspace setup.
 #[cfg(unix)]
-fn harden_init_database_mode(path: &Path) -> io::Result<()> {
+fn harden_init_database_mode(path: &Path, allow_symlink: bool) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+    if allow_symlink {
+        return fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    let database = open_init_database_file_no_follow(path)?;
+    set_init_file_permissions(&database, 0o600)
 }
 
 #[cfg(not(unix))]
-fn harden_init_database_mode(_path: &Path) -> io::Result<()> {
+fn harden_init_database_mode(_path: &Path, _allow_symlink: bool) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_init_file_permissions(file: &File, mode: u32) -> io::Result<()> {
+    rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(mode)).map_err(io::Error::from)
+}
+
+#[cfg(not(unix))]
+fn set_init_file_permissions(_file: &File, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_init_database_file_no_follow(path: &Path) -> io::Result<File> {
+    open_init_leaf_no_follow(
+        path,
+        rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CREATE,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_init_database_file_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_init_directory_no_follow(path: &Path) -> io::Result<File> {
+    open_init_leaf_no_follow(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+        rustix::fs::Mode::from_raw_mode(0),
+    )
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn open_init_directory_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new().read(true).open(path)
+}
+
+fn open_init_boilerplate_file(path: &Path, allow_symlink: bool) -> io::Result<File> {
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    if !allow_symlink {
+        return open_init_leaf_no_follow(
+            path,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::CREATE | rustix::fs::OFlags::EXCL,
+            rustix::fs::Mode::from_raw_mode(0o600),
+        );
+    }
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_init_leaf_no_follow(
+    path: &Path,
+    flags: rustix::fs::OFlags,
+    create_mode: rustix::fs::Mode,
+) -> io::Result<File> {
+    let (parent, leaf) = open_init_parent_directory_no_follow(path)?;
+    let fd = rustix::fs::openat(
+        &parent,
+        leaf.as_os_str(),
+        flags | rustix::fs::OFlags::NOFOLLOW,
+        create_mode,
+    )
+    .map_err(io::Error::from)?;
+    Ok(File::from(fd))
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_init_parent_directory_no_follow(path: &Path) -> io::Result<(File, OsString)> {
+    let leaf = path.file_name().map(OsString::from).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("init path {} has no final component", path.display()),
+        )
+    })?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok((open_init_directory_chain_no_follow(parent)?, leaf))
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn open_init_directory_chain_no_follow(path: &Path) -> io::Result<File> {
+    use std::path::Component;
+
+    let directory_flags =
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::NOFOLLOW;
+    let mut directory = if path.is_absolute() {
+        let fd = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("/"),
+            directory_flags,
+            rustix::fs::Mode::from_raw_mode(0),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
+    } else {
+        let fd = rustix::fs::openat(
+            rustix::fs::CWD,
+            Path::new("."),
+            directory_flags,
+            rustix::fs::Mode::from_raw_mode(0),
+        )
+        .map_err(io::Error::from)?;
+        File::from(fd)
+    };
+
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => {}
+            Component::Normal(_) | Component::ParentDir => {
+                let fd = rustix::fs::openat(
+                    &directory,
+                    component,
+                    directory_flags,
+                    rustix::fs::Mode::from_raw_mode(0),
+                )
+                .map_err(io::Error::from)?;
+                directory = File::from(fd);
+            }
+            Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("unsupported init path prefix in {}", path.display()),
+                ));
+            }
+        }
+    }
+
+    Ok(directory)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -660,7 +821,7 @@ fn create_boilerplate_file(
     allow_symlink: bool,
 ) -> Result<BoilerplateCreateStatus, std::io::Error> {
     ensure_boilerplate_path_has_no_symlink_components(path, allow_symlink)?;
-    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+    let mut file = match open_init_boilerplate_file(path, allow_symlink) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::AlreadyExists => {
             ensure_existing_boilerplate_path_is_file(path, allow_symlink)?;
@@ -945,6 +1106,140 @@ mod tests {
             .mode()
             & 0o777;
         ensure(database_mode, 0o600, ".ee/ee.db mode must be 0600")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_directory_hardening_refuses_final_symlink() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let target_dir = temp_dir.path().join("target-ee");
+        let linked_dir = temp_dir.path().join("linked-ee");
+        fs::create_dir(&target_dir).map_err(|error| error.to_string())?;
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        symlink(&target_dir, &linked_dir).map_err(|error| error.to_string())?;
+
+        let error = harden_init_directory_mode(&linked_dir, false)
+            .expect_err("directory hardening must refuse a final symlink");
+        ensure(
+            error.kind() != ErrorKind::NotFound,
+            true,
+            "final symlink refusal error should come from the symlinked path",
+        )?;
+        let target_mode = fs::metadata(&target_dir)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(
+            target_mode,
+            0o755,
+            "directory hardening must not chmod the symlink target",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_database_hardening_refuses_final_symlink() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let target_database = temp_dir.path().join("target.db");
+        let linked_database = temp_dir.path().join("ee.db");
+        fs::write(&target_database, b"not sqlite").map_err(|error| error.to_string())?;
+        fs::set_permissions(&target_database, fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+        symlink(&target_database, &linked_database).map_err(|error| error.to_string())?;
+
+        let error = harden_init_database_mode(&linked_database, false)
+            .expect_err("database hardening must refuse a final symlink");
+        ensure(
+            error.kind() != ErrorKind::NotFound,
+            true,
+            "final symlink refusal error should come from the symlinked path",
+        )?;
+        let target_mode = fs::metadata(&target_database)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(
+            target_mode,
+            0o644,
+            "database hardening must not chmod the symlink target",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_directory_hardening_refuses_parent_symlink_swap() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let real_workspace = temp_dir.path().join("real-workspace");
+        let linked_workspace = temp_dir.path().join("linked-workspace");
+        let target_dir = real_workspace.join(".ee");
+        fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        fs::create_dir(&target_dir).map_err(|error| error.to_string())?;
+        fs::set_permissions(&target_dir, fs::Permissions::from_mode(0o755))
+            .map_err(|error| error.to_string())?;
+        symlink(&real_workspace, &linked_workspace).map_err(|error| error.to_string())?;
+
+        let error = harden_init_directory_mode(&linked_workspace.join(".ee"), false)
+            .expect_err("directory hardening must refuse a swapped parent symlink");
+        ensure(
+            error.kind() != ErrorKind::NotFound,
+            true,
+            "parent symlink refusal error should come from the symlinked path",
+        )?;
+        let target_mode = fs::metadata(&target_dir)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(
+            target_mode,
+            0o755,
+            "directory hardening must not chmod through a parent symlink",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_database_hardening_refuses_parent_symlink_swap() -> TestResult {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let real_workspace = temp_dir.path().join("real-workspace");
+        let linked_workspace = temp_dir.path().join("linked-workspace");
+        let ee_dir = real_workspace.join(".ee");
+        let target_database = ee_dir.join("ee.db");
+        fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        fs::write(&target_database, b"not sqlite").map_err(|error| error.to_string())?;
+        fs::set_permissions(&target_database, fs::Permissions::from_mode(0o644))
+            .map_err(|error| error.to_string())?;
+        symlink(&real_workspace, &linked_workspace).map_err(|error| error.to_string())?;
+
+        let error = harden_init_database_mode(&linked_workspace.join(".ee").join("ee.db"), false)
+            .expect_err("database hardening must refuse a swapped parent symlink");
+        ensure(
+            error.kind() != ErrorKind::NotFound,
+            true,
+            "parent symlink refusal error should come from the symlinked path",
+        )?;
+        let target_mode = fs::metadata(&target_database)
+            .map_err(|error| error.to_string())?
+            .permissions()
+            .mode()
+            & 0o777;
+        ensure(
+            target_mode,
+            0o644,
+            "database hardening must not chmod through a parent symlink",
+        )
     }
 
     #[test]
