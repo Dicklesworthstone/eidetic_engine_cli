@@ -1666,11 +1666,24 @@ fn causal_bottlenecks_section_from_reports(reports: &[CausalBottleneckInput]) ->
         .iter()
         .filter(|report| report.betweenness.is_finite() && report.betweenness > 0.0)
         .collect::<Vec<_>>();
+    // `total_cmp` gives a total order on f64 even if NaN sneaks past
+    // the upstream `is_finite()` filter at line 1667. Without an
+    // in-comparator total order, `sort_by`'s output order is documented
+    // as "unspecified" when any pair returns `Greater`/`Equal`/`Less`
+    // inconsistently (i.e. when NaN collapses onto `Equal` via
+    // `partial_cmp(...).unwrap_or(Equal)`). This sort feeds the
+    // `causal_bottlenecks` insights section (`ee.insights.section.v1`),
+    // which is a determinism-contract surface — same input snapshot →
+    // byte-identical `rank` field. The `memory_id` tiebreaker below
+    // would still stabilize a NaN-collapse, so the two orderings are
+    // observationally equivalent today; this is defense-in-depth for
+    // future callers that bypass the upstream filter. Mirrors
+    // `top_positive_influencers` in `src/core/influence.rs` and
+    // `load_bearing_memory_items` in `src/graph/bipartite_provenance.rs`.
     reports.sort_by(|left, right| {
         right
             .betweenness
-            .partial_cmp(&left.betweenness)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&left.betweenness)
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
 
@@ -1758,11 +1771,13 @@ fn hits_section_from_inputs(
     mut inputs: Vec<HitsInsightInput>,
 ) -> InsightsSection {
     inputs.retain(|input| input.score.is_finite() && input.score > 0.0);
+    // See `causal_bottlenecks_section_from_reports` for the `total_cmp`
+    // rationale: defense-in-depth for the insights determinism contract
+    // even though the upstream `retain(is_finite)` excludes NaN today.
     inputs.sort_by(|left, right| {
         right
             .score
-            .partial_cmp(&left.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&left.score)
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
 
