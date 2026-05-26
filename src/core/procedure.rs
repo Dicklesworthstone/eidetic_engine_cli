@@ -2362,6 +2362,83 @@ fn persisted_source_storage_failure(
     )
 }
 
+/// Maximum bytes inspected when reading a procedure verification source JSON
+/// file (eval fixture scenario, repro pack manifest, claim evidence JSON,
+/// recorder-run sample). Real `scenario.json` and verification source files
+/// are well under 100 KB in practice; 4 MiB gives ample headroom while still
+/// bounding peer-planted oversize plants on shared multi-agent checkouts.
+///
+/// Without this cap, a peer (accidentally — `cat tarball.bin > scenario.json`
+/// — or hostile, in a shared multi-agent checkout) can pin a matching
+/// allocation on every `ee procedure verify` invocation by planting a
+/// multi-GB file at any candidate path resolved by
+/// `verification_source_candidate_paths` or `find_eval_fixture_scenario`:
+///
+///   - `<workspace>/tests/fixtures/procedure/<kind>/<id>`
+///   - `<workspace>/.ee/procedure-verification/<kind>/<id>`
+///   - `<workspace>/tests/fixtures/eval/<scenario>/scenario.json`
+///   - `<absolute-source-id>` when `Path::is_absolute()` is true on the
+///     CLI-supplied source id
+///
+/// Matches the cap and read-shape the parallel hardening pass applied to
+/// `src/config/workspace.rs::detect_git_worktree` (c8f33694) and
+/// `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+/// (7f56d89b), plus the `.ee/config.toml` 4 MiB reads landed on the
+/// remember / profile / curate / config-surface hot paths.
+const PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
+
+/// Read a procedure verification JSON source path with a hard size cap.
+///
+/// Two layers of defense against the metadata cap:
+///
+/// 1. The `metadata.len()` check rejects a file that was already oversized at
+///    `symlink_metadata` time, so we never even open `File::open` on a known
+///    multi-GB peer plant.
+/// 2. The `take(LIMIT + 1).read_to_end` below closes the TOCTOU growth window:
+///    if the file grew between `symlink_metadata` and `File::open` (a peer
+///    swap, an active writer, etc.), the bounded read still pins peak
+///    allocation to `LIMIT + 1` bytes. Same pattern landed in
+///    `src/config/workspace.rs::detect_git_worktree` (c8f33694),
+///    `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+///    (7f56d89b), and the reflect-ingest size guard (1bd36744).
+///
+/// Callers map any error from this helper through the existing
+/// "failed to read verification source ..." failure-result branch in
+/// `inspect_verification_json_file`, and `find_eval_fixture_scenario` skips
+/// the file via its existing `continue` arm. Behavior for normal-size files
+/// is byte-identical to the previous `fs::read_to_string` shape, so existing
+/// goldens and contracts that exercise the verify surface remain stable.
+fn read_procedure_verification_source_capped(path: &Path) -> Result<String, std::io::Error> {
+    use std::io::Read as _;
+
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.len() > PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "verification source exceeds {PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT} byte cap (size={size})",
+                    size = metadata.len(),
+                ),
+            ));
+        }
+    }
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "verification source exceeds {PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT} byte cap during read"
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
+}
+
 fn inspect_verification_json_file(
     path: &Path,
     source_kind: &str,
@@ -2388,7 +2465,7 @@ fn inspect_verification_json_file(
         }
         Err(error) => return procedure_source_path_failure(path, source_kind, source_id, error),
     }
-    let content = match fs::read_to_string(path) {
+    let content = match read_procedure_verification_source_capped(path) {
         Ok(content) => content,
         Err(error) => {
             return verification_source_result(
@@ -2844,7 +2921,7 @@ fn find_eval_fixture_scenario(root: &Path, source_id: &str) -> Option<PathBuf> {
         if !is_file {
             continue;
         }
-        let Ok(content) = fs::read_to_string(&path) else {
+        let Ok(content) = read_procedure_verification_source_capped(&path) else {
             continue;
         };
         let Ok(value) = serde_json::from_str::<Value>(&content) else {
@@ -5424,6 +5501,44 @@ mod tests {
         assert!(!report.drift_detected);
         assert_eq!(report.counts.total, 0);
         assert_eq!(report.next_actions, vec!["No drift action required."]);
+        Ok(())
+    }
+
+    /// Plant a file one byte over `PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT`
+    /// and confirm the bounded read refuses it before the prior
+    /// `fs::read_to_string` shape would have pinned a matching allocation on
+    /// every `ee procedure verify`. Mirrors
+    /// `detect_git_worktree_rejects_oversize_gitfile` in
+    /// `src/config/workspace.rs` for the workspace-discovery gitfile cap.
+    #[test]
+    fn read_procedure_verification_source_rejects_oversize_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("scenario.json");
+
+        let cap =
+            usize::try_from(PROCEDURE_VERIFICATION_SOURCE_INSPECT_LIMIT).unwrap_or(usize::MAX);
+        let payload = vec![b'a'; cap.saturating_add(1)];
+        fs::write(&path, &payload).map_err(|error| error.to_string())?;
+
+        let error = read_procedure_verification_source_capped(&path)
+            .expect_err("oversize verification source must be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        Ok(())
+    }
+
+    /// Confirm a normal-size verification source still round-trips byte-
+    /// identically through the cap so existing goldens and contracts that
+    /// exercise `ee procedure verify` with real `scenario.json` files stay
+    /// stable.
+    #[test]
+    fn read_procedure_verification_source_accepts_normal_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let path = temp.path().join("scenario.json");
+        let payload = r#"{"fixture_id":"demo"}"#;
+        fs::write(&path, payload).map_err(|error| error.to_string())?;
+        let content =
+            read_procedure_verification_source_capped(&path).map_err(|error| error.to_string())?;
+        assert_eq!(content, payload);
         Ok(())
     }
 }
