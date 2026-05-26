@@ -53,6 +53,7 @@ set -euo pipefail
 #   6. Basic E2E               - scripts/e2e_test.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
+#   6.5.1. Swarm SLO Replay    - scripts/e2e_overhaul/swarm_slo_replay.sh
 #   6.6. Fake Tailscale Harness - deterministic SRR6.46 fake tailnet self-test
 #   7. Advanced E2E            - scripts/e2e_advanced.sh
 #   8. Boundary Migration      - scripts/e2e_boundary_migration.sh
@@ -782,7 +783,11 @@ if [ "$CI_SMOKE" != "true" ]; then
     # exits 0 without running, so this stage stays fast in default CI.
     run_stage "Overhaul Integration E2E (J4)" "./scripts/e2e_overhaul.sh"
 
-    # Gate 6.5.1: Lightweight swarm next-action recommendation-card contract.
+    # Gate 6.5.1: Swarm SLO replay proof. This exercises the read-only replay
+    # driver and fixture pair so ordering drift fails the normal verifier.
+    run_stage "Swarm SLO Replay Proof E2E (bd-36tzt)" "./scripts/e2e_overhaul/swarm_slo_replay.sh"
+
+    # Gate 6.5.2: Lightweight swarm next-action recommendation-card contract.
     # This keeps SWA6's golden next-action overlap proof in the default gate
     # without requiring the heavier no-mock multi-agent harness.
     run_stage "Swarm Next-Action Recommendation Cards E2E (bd-3vwx0.6)" "./scripts/e2e_overhaul/swarm_next_action_recommendation_cards.sh"
