@@ -4530,7 +4530,18 @@ fn structural_decay_feature_enabled(workspace_path: &Path) -> Result<bool, Domai
         .unwrap_or(false))
 }
 
+/// Maximum bytes inspected when reading `<workspace>/.ee/config.toml` from
+/// the curate-side structural-decay feature check. Matches
+/// `WORKSPACE_CONFIG_MAX_BYTES` in `src/core/memory.rs` (e1499deb), which
+/// reads the same file from the `ee remember` hot path. The two helpers
+/// must use the same ceiling so a config that loads for one surface also
+/// loads for the other; divergent caps would silently break feature
+/// detection on workspaces with legitimately large configs.
+const CURATE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, DomainError> {
+    use std::io::Read as _;
+
     if let Some(symlink_path) = first_existing_structural_decay_config_symlink_component(path)? {
         return Err(DomainError::Configuration {
             message: format!(
@@ -4574,16 +4585,81 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
             repair: Some("Replace .ee/config.toml with a regular TOML file.".to_owned()),
         });
     }
+    // Bound the read so a peer-planted multi-GB `.ee/config.toml` (whether
+    // accidental — `cat /dev/urandom > .ee/config.toml` — or hostile in a
+    // shared multi-agent checkout) cannot pin a matching allocation on
+    // the curate hot path. `structural_decay_feature_enabled` is called
+    // during `ee curate` to gate the structural-decay graph multiplier;
+    // without the cap, one bad config silently OOMs every curate
+    // invocation in the workspace. Same defect class that 7f56d89b
+    // (`PREFLIGHT_RULES_MAX_BYTES`), aac04adb
+    // (`PREFLIGHT_RUN_STORE_MAX_BYTES`), and e1499deb
+    // (`WORKSPACE_CONFIG_MAX_BYTES` on the parallel
+    // `src/core/memory.rs::read_workspace_config_if_present`) just
+    // closed for the parallel workspace-local `.ee/` reads.
+    //
+    // Two layers of defense, matching the peer's
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // shape:
+    //  1. `metadata.len() > LIMIT` pre-check rejects an oversized file
+    //     at stat time, before any `File::open` or allocation.
+    //  2. `file.take(LIMIT + 1).read_to_end` closes the TOCTOU growth
+    //     window where a peer could grow the file between the stat
+    //     above and the open below.
+    if metadata.len() > CURATE_CONFIG_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read workspace curation config {}: file is {} bytes, exceeding the {CURATE_CONFIG_MAX_BYTES}-byte ceiling.",
+                path.display(),
+                metadata.len(),
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {CURATE_CONFIG_MAX_BYTES} bytes.",
+                path.display()
+            )),
+        });
+    }
 
-    fs::read_to_string(path)
-        .map(Some)
-        .map_err(|error| DomainError::Configuration {
+    let file = fs::File::open(path).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read workspace curation config {}: {error}",
+            path.display()
+        ),
+        repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+    })?;
+    let mut bytes = Vec::new();
+    if let Err(error) = file
+        .take(CURATE_CONFIG_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+    {
+        return Err(DomainError::Configuration {
             message: format!(
                 "Failed to read workspace curation config {}: {error}",
                 path.display()
             ),
             repair: Some("Fix or remove .ee/config.toml.".to_owned()),
-        })
+        });
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CURATE_CONFIG_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read workspace curation config {}: file grew past the {CURATE_CONFIG_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {CURATE_CONFIG_MAX_BYTES} bytes.",
+                path.display()
+            )),
+        });
+    }
+    let contents = String::from_utf8(bytes).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read workspace curation config {}: contents are not valid UTF-8: {error}",
+            path.display()
+        ),
+        repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+    })?;
+    Ok(Some(contents))
 }
 
 fn first_existing_structural_decay_config_symlink_component(
@@ -15237,6 +15313,58 @@ mod tests {
             .map_err(|error| error.to_string())?;
 
         assert!(!enabled);
+        Ok(())
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `structural_decay_config_contents`. Pre-fix the helper called
+    /// `fs::read_to_string` on `.ee/config.toml` with no size guard,
+    /// so a peer-planted multi-MiB config would pin a matching
+    /// allocation on every `ee curate` invocation (via
+    /// `structural_decay_feature_enabled` at line 4514). Same defect
+    /// class that e1499deb closed for the parallel
+    /// `src/core/memory.rs::read_workspace_config_if_present`.
+    ///
+    /// This test plants a one-byte-over-cap `.ee/config.toml` and
+    /// asserts the helper rejects with a structured Configuration
+    /// error before the unbounded allocation. The error message must
+    /// name the offending path and the ceiling so an operator can
+    /// fix the file directly.
+    #[test]
+    fn structural_decay_feature_rejects_oversize_workspace_config() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path();
+        let ee_dir = workspace_path.join(".ee");
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let config_path = ee_dir.join("config.toml");
+        let cap = usize::try_from(super::CURATE_CONFIG_MAX_BYTES)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        fs::write(&config_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = match super::structural_decay_feature_enabled(workspace_path) {
+            Ok(enabled) => {
+                return Err(format!(
+                    "expected oversize rejection before unbounded allocation, got {enabled}"
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.message().contains("exceeding the"),
+            "rejection message must cite the ceiling; got: {}",
+            error.message()
+        );
+        assert!(
+            error
+                .message()
+                .contains(&super::CURATE_CONFIG_MAX_BYTES.to_string()),
+            "rejection message must name the cap constant; got: {}",
+            error.message()
+        );
         Ok(())
     }
 
