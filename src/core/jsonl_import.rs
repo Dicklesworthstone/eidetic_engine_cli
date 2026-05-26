@@ -30,6 +30,28 @@ use crate::models::{
 const DEFAULT_DB_FILE: &str = "ee.db";
 pub(crate) const IMPORT_ACTION: &str = "memory.import.jsonl";
 
+/// Hard cap on the byte length of an `ee import jsonl --source-path` file.
+///
+/// `import_jsonl_records` previously called `fs::read_to_string(source_path)`
+/// directly, which has no upper bound: a multi-GB JSONL file (whether
+/// authored maliciously, accumulated from a long-running export, or handed
+/// off by another agent) would be slurped into a `String` in one allocation
+/// before `parse_jsonl_source` ever ran. That allocation could OOM the
+/// process under disk-pressure on the dev host or trip the swap thrashing
+/// path described in feedback_hung_subprocess_paralyzes_agent — a benign
+/// `ee import jsonl <path>` then becomes a local denial-of-service against
+/// the agent that ran it.
+///
+/// 256 MiB is the same order-of-magnitude as other bulk-import surfaces
+/// (e.g. the 4 MiB `.ee/config.toml` reads under `src/core/curate.rs`,
+/// `src/config/path_resolver.rs`, etc., scaled up because a JSONL export
+/// is bulk material rather than a single config record). At 1 KiB per
+/// memory record this is ~262_000 records; at the 65_536-byte memory
+/// content CHECK ceiling it is ~4_000 records — generous for ordinary
+/// workspace bulk-import. Users with larger exports should stream them in
+/// chunks rather than rely on a single mmap-style read.
+pub const JSONL_IMPORT_MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Options for one `ee import jsonl` run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonlImportOptions {
@@ -442,10 +464,7 @@ pub fn import_jsonl_records(
     ensure_import_source_path_is_regular_file(&options.source_path)?;
     let source_path = normalize_path(&options.source_path);
     let source_id = source_id(&source_path);
-    let input = std::fs::read_to_string(&source_path).map_err(|error| JsonlImportError::Io {
-        path: source_path.clone(),
-        message: error.to_string(),
-    })?;
+    let input = read_jsonl_source_bounded(&source_path)?;
 
     let parsed = parse_jsonl_source(&input);
     let mut report = report_from_parsed(
@@ -1341,6 +1360,64 @@ fn ensure_import_database_path_is_safe_for_write(path: &Path) -> Result<(), Json
             message: error.to_string(),
         }),
     }
+}
+
+/// Read a JSONL import source into a `String` with a hard byte cap.
+///
+/// Mirrors the bounded-read pattern that `src/cli/mod.rs::read_reflection_result_file`
+/// uses for the much smaller `REFLECTION_RESULT_MAX_JSON_BYTES` surface:
+/// `fs::metadata` rejects obviously oversized files up front, then the
+/// actual read goes through `File::open` + `.take(MAX + 1)` so the
+/// allocation is bounded even under TOCTOU growth between the metadata
+/// stat and the open. The `+ 1` byte lets the post-read length check
+/// distinguish "exactly at the limit" from "grew past the limit during
+/// the read" and emit a clear oversize error in the latter case.
+///
+/// `read_to_string` is preserved (rather than `read_to_end` followed by
+/// `String::from_utf8`) because the downstream `parse_jsonl_source`
+/// requires UTF-8 input and would otherwise silently coerce or fail
+/// later; rejecting invalid UTF-8 here keeps the error close to its
+/// cause.
+fn read_jsonl_source_bounded(source_path: &Path) -> Result<String, JsonlImportError> {
+    use std::io::Read;
+
+    let metadata = fs::metadata(source_path).map_err(|error| JsonlImportError::Io {
+        path: source_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    if metadata.len() > JSONL_IMPORT_MAX_INPUT_BYTES {
+        return Err(JsonlImportError::Io {
+            path: source_path.to_path_buf(),
+            message: format!(
+                "JSONL source is too large: {} bytes exceeds the {} byte limit",
+                metadata.len(),
+                JSONL_IMPORT_MAX_INPUT_BYTES,
+            ),
+        });
+    }
+    let file = fs::File::open(source_path).map_err(|error| JsonlImportError::Io {
+        path: source_path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let mut input = String::new();
+    let mut bounded = file.take(JSONL_IMPORT_MAX_INPUT_BYTES + 1);
+    bounded
+        .read_to_string(&mut input)
+        .map_err(|error| JsonlImportError::Io {
+            path: source_path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+    if input.len() as u64 > JSONL_IMPORT_MAX_INPUT_BYTES {
+        return Err(JsonlImportError::Io {
+            path: source_path.to_path_buf(),
+            message: format!(
+                "JSONL source is too large: read {} bytes exceeds the {} byte limit",
+                input.len(),
+                JSONL_IMPORT_MAX_INPUT_BYTES,
+            ),
+        });
+    }
+    Ok(input)
 }
 
 fn ensure_import_source_path_is_regular_file(path: &Path) -> Result<(), JsonlImportError> {
