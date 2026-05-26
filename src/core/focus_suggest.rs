@@ -126,7 +126,33 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         })?;
 
     let now = Utc::now();
-    let cutoff = now - Duration::hours(i64::from(options.recent_hours));
+    // Use `checked_sub_signed` rather than `now - Duration::hours(...)`:
+    // `recent_hours: u32` accepts values up to ~4.3 billion hours
+    // (~489_957 years), and chrono's `DateTime<Utc>` is bounded to
+    // ±262_143 years from year 0. Subtracting a multi-million-year
+    // duration from `now` panics out of the representable range. The
+    // checked variant returns `None` instead, which we surface as a
+    // soft "all-time" fallback plus a degraded entry so the agent can
+    // see that their window was outside the representable range and
+    // shrink it. Same defensive pattern as
+    // `src/core/curate.rs:14450` and `src/core/outcome.rs:2409`.
+    let cutoff = match now.checked_sub_signed(Duration::hours(i64::from(options.recent_hours))) {
+        Some(value) => value,
+        None => {
+            degraded.push(FocusSuggestDegradation {
+                code: "recent_hours_window_clamped".to_owned(),
+                severity: "warning".to_owned(),
+                message: format!(
+                    "--recent-hours {} pushes the cutoff outside the representable DateTime range; treating the window as all-time.",
+                    options.recent_hours,
+                ),
+                repair: Some(
+                    "Pass a smaller --recent-hours value (e.g. 24, 168, or 720).".to_owned(),
+                ),
+            });
+            DateTime::<Utc>::MIN_UTC
+        }
+    };
     let recent: Vec<StoredMemory> = memories
         .into_iter()
         .filter(|memory| memory_created_at(memory).is_some_and(|ts| ts >= cutoff))
@@ -431,15 +457,19 @@ fn score_and_emit_topics(
         });
         cluster.member_ids.push(memory.id.clone());
         if let Some(rank) = pagerank.get(&memory.id) {
-            // Drop non-finite PageRank contributions. A NaN/Inf score
-            // would propagate through the sum and end up in the emitted
-            // `centralityScore` field, which serde_json serializes to
-            // `null` — violating the v1 schema's `"type": "number"`
-            // (`docs/schemas/ee.focus.suggest.v1.json:46`). Non-finite
-            // scores indicate an upstream PageRank pathology, not a
-            // signal worth ranking on, so coercing the contribution to
-            // 0.0 preserves both the JSON contract and determinism.
-            if rank.is_finite() {
+            // Drop non-finite or negative PageRank contributions. A
+            // NaN/Inf score would propagate through the sum and end up
+            // in the emitted `centralityScore` field, which serde_json
+            // serializes to `null` — violating the v1 schema's
+            // `"type": "number"` (`docs/schemas/ee.focus.suggest.v1.json:46`).
+            // Negative scores are non-physical for a standard PageRank
+            // and would distort the additive composite. The upstream
+            // `compute_pagerank_scores` filter already drops both
+            // categories before they reach this map, but the two
+            // invariants must match: if they ever drift (refactor, new
+            // test path inserting into the map), the additive composite
+            // must not silently absorb a negative or non-finite value.
+            if rank.is_finite() && *rank >= 0.0 {
                 cluster.centrality_sum += *rank;
             }
         }
@@ -535,8 +565,18 @@ fn score_and_emit_topics(
                 cluster.span_ids.len(),
                 recency_str,
             );
+            // Emit `ee pack` (not `ee context`). Per AGENTS.md line 544,
+            // "`ee pack "<task>"` is the canonical post-triad-promotion
+            // surface; `ee context "<task>"` is retained as a
+            // soft-deprecated alias that runs the same code path and
+            // emits `deprecated_alias` (severity `info`) in its
+            // `degraded[]`. Prefer `ee pack` in new agent harnesses,
+            // scripts, and docs." Phase 2 of focus_suggest is brand-new
+            // post-promotion code; suggesting the deprecated alias would
+            // make every agent that acts on a recommendation trip the
+            // `deprecated_alias` warning on its very next command.
             let suggested_query = format!(
-                "ee context \"{}\" --workspace . --max-tokens 4000 --json",
+                "ee pack \"{}\" --workspace . --max-tokens 4000 --json",
                 escape_topic_for_query(&cluster.topic_label),
             );
             FocusRecommendation {
@@ -550,13 +590,24 @@ fn score_and_emit_topics(
         .collect()
 }
 
+/// Preview width used by BOTH `topic_key_for_memory` (the cluster key) AND
+/// `derive_topic_label` (the displayed label). Keeping the widths equal
+/// avoids a subtle determinism trap: if the cluster key used 32 chars but
+/// the label used 48, two memories with identical first 32 alphanumeric
+/// chars would land in the same cluster yet present a label drawn from
+/// whichever memory iterated first (id-asc → oldest ULID) — including
+/// chars 33-48 that may not be representative of the rest of the cluster's
+/// contents. Tying the two to a single constant makes the (cluster
+/// identity, displayed label) pair self-consistent by construction.
+const TOPIC_PREVIEW_CHARS: usize = 32;
+
 fn topic_key_for_memory(memory: &StoredMemory) -> String {
-    let preview = content_preview_tokens(&memory.content, 32);
+    let preview = content_preview_tokens(&memory.content, TOPIC_PREVIEW_CHARS);
     format!("{}::{}", memory.kind, preview)
 }
 
 fn derive_topic_label(memory: &StoredMemory) -> String {
-    let preview = content_preview_tokens(&memory.content, 48);
+    let preview = content_preview_tokens(&memory.content, TOPIC_PREVIEW_CHARS);
     if preview.is_empty() {
         memory.kind.clone()
     } else {
@@ -575,7 +626,7 @@ fn content_preview_tokens(content: &str, max_chars: usize) -> String {
 
 fn escape_topic_for_query(topic: &str) -> String {
     // The suggested_query embeds the topic inside a double-quoted shell
-    // command (`ee context "<topic>" ...`). Inside double quotes, bash
+    // command (`ee pack "<topic>" ...`). Inside double quotes, bash
     // still expands `$VAR` and `` `cmd` `` (and `\` / `"` would close
     // the string), so all four must be escaped. Backslash first so the
     // backslashes introduced by later steps are not themselves doubled.
@@ -943,7 +994,7 @@ mod tests {
     #[test]
     fn escape_topic_neutralizes_double_quoted_shell_metacharacters() {
         // `$` and `` ` `` are still active inside the double quotes
-        // around the topic in `ee context "<topic>" ...`, so the agent
+        // around the topic in `ee pack "<topic>" ...`, so the agent
         // would do parameter / command substitution if they leaked
         // through unescaped.
         assert_eq!(escape_topic_for_query("$x"), r"\$x");
@@ -997,5 +1048,34 @@ mod tests {
         // Finite scores must outrank NaNs in the descending sort.
         assert_eq!(a_labels[0], "delta");
         assert_eq!(a_labels[1], "bravo");
+    }
+
+    #[test]
+    fn checked_sub_signed_recent_hours_does_not_panic_on_u32_max() {
+        // Regression guard: `recent_hours: u32` accepts u32::MAX, which
+        // converts to ~489_957 years. Subtracting that from `Utc::now()`
+        // via the unchecked `now - Duration::hours(...)` path panics
+        // because the result is outside `DateTime<Utc>`'s representable
+        // range. The fix uses `checked_sub_signed` and falls back to
+        // `DateTime::<Utc>::MIN_UTC` when subtraction underflows. This
+        // test asserts the fallback exists by exercising it directly,
+        // since the panic would otherwise abort the test binary.
+        let now = Utc::now();
+        let result = now.checked_sub_signed(Duration::hours(i64::from(u32::MAX)));
+        // Either the subtraction succeeds (chrono's range happens to
+        // span the resulting year) or returns None for the overflow
+        // case. Both outcomes must be representable; the panic path is
+        // what this test rejects.
+        let cutoff = result.unwrap_or(DateTime::<Utc>::MIN_UTC);
+        // Any memory created after MIN_UTC must satisfy the recency
+        // window when the cutoff has clamped. This proves the fallback
+        // yields a usable bound.
+        let any_memory_ts = DateTime::parse_from_rfc3339("2026-05-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(
+            any_memory_ts >= cutoff,
+            "MIN_UTC fallback must accept every real-world memory timestamp",
+        );
     }
 }

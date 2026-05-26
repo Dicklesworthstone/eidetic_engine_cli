@@ -163,10 +163,17 @@ fn focus_suggest_phase2_non_empty_recommendations() -> TestResult {
         let query = rec["suggestedQuery"].as_str().ok_or_else(|| {
             format!("recommendations[{idx}].suggestedQuery must be a string; got {rec:?}")
         })?;
+        // Per AGENTS.md line 544, `ee pack` is the canonical
+        // post-triad-promotion surface and `ee context` is the
+        // soft-deprecated alias. Phase 2 of focus_suggest should
+        // emit `ee pack` so agents acting on a recommendation do not
+        // immediately trip the `deprecated_alias` info-severity
+        // degraded entry. `ee search` is also acceptable for queries
+        // that want the raw retrieval rather than a packed surface.
         ensure(
-            query.contains("ee context") || query.contains("ee search"),
+            query.contains("ee pack") || query.contains("ee search"),
             format!(
-                "recommendations[{idx}].suggestedQuery must reference ee context/search; got {query:?}"
+                "recommendations[{idx}].suggestedQuery must reference `ee pack` or `ee search` (NOT the deprecated `ee context` alias); got {query:?}"
             ),
         )?;
     }
@@ -462,6 +469,63 @@ fn focus_suggest_task_frame_unavailable_honors_scope() -> TestResult {
         format!(
             "task_frame_unavailable must short-circuit before the no_recent_evidence check; \
              got both codes in degraded={degraded:?}"
+        ),
+    )
+}
+
+/// `--recent-hours <u32::MAX>` must NOT panic the binary.
+///
+/// `recent_hours: u32` accepts up to u32::MAX (~489_957 years).
+/// Subtracting that duration from `Utc::now()` via the unchecked
+/// `now - Duration::hours(...)` path overflows `DateTime<Utc>`'s
+/// representable range and panics chrono — turning a benign CLI flag
+/// into a denial-of-service for the local CLI. The fix uses
+/// `checked_sub_signed` with a `MIN_UTC` fallback and surfaces a
+/// `recent_hours_window_clamped` degraded entry.
+///
+/// This E2E proves the panic is no longer reachable through the real
+/// binary surface: the process exits zero, emits valid JSON, and (when
+/// the overflow clamp fires) carries the documented degraded code.
+/// Note that `DateTime<Utc>` may span the resulting year on some
+/// configurations, in which case the overflow clamp does not fire and
+/// the degraded entry is simply absent — the panic-absence is the
+/// load-bearing assertion either way.
+#[test]
+fn focus_suggest_recent_hours_u32_max_does_not_panic() -> TestResult {
+    let workspace = unique_workspace("recent-hours-overflow")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    seed_workspace(&workspace_arg)?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "focus",
+        "suggest",
+        "--recent-hours",
+        "4294967295", // u32::MAX
+        "--limit",
+        "5",
+    ])?;
+    // Load-bearing assertion: NO panic. A pre-fix `cargo run -- focus
+    // suggest --recent-hours 4294967295` produced an abort with
+    // `thread 'main' panicked at ...DateTime...`; that path must be
+    // unreachable now.
+    must_succeed(
+        &output,
+        "ee focus suggest --recent-hours 4294967295 must not panic",
+    )?;
+
+    let parsed: Value = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("stdout must remain valid JSON even at the overflow boundary: {e}"))?;
+    ensure(
+        parsed["data"]["schema"].as_str() == Some("ee.focus.suggest.v1"),
+        format!(
+            "envelope must keep the v1 data schema; got {:?}",
+            parsed["data"]["schema"]
         ),
     )
 }

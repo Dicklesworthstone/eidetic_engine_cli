@@ -37,7 +37,7 @@
           },
           "spanIds": {
             "type": "array",
-            "description": "CASS span IDs that support this recommendation. At least one entry when `fromCass` is true.",
+            "description": "CASS span IDs attached to memories in this cluster within the recency window. Populated only when `fromCass` is true AND matching evidence_spans exist; may be empty otherwise. Entries are deduplicated and sorted lexically.",
             "items": {
               "type": "string",
               "minLength": 1
@@ -53,7 +53,7 @@
           },
           "suggestedQuery": {
             "type": "string",
-            "description": "Concrete ee command (typically `ee context` or `ee search`) the agent can run to act on the recommendation."
+            "description": "Concrete ee command (typically `ee pack` or `ee search`) the agent can run to act on the recommendation. New recommendations emit `ee pack` (the canonical post-triad-promotion surface); the soft-deprecated `ee context` alias is intentionally avoided so agents acting on a recommendation do not immediately trip the `deprecated_alias` degraded entry."
           }
         }
       }
@@ -95,7 +95,7 @@
           "spanIds": ["span_release_audit_2026-05-25", "span_verify_chain_2026-05-25"],
           "centralityScore": 0.42,
           "rationale": "PageRank dominator over the last 24h of CASS evidence; six bead closures cite this topic.",
-          "suggestedQuery": "ee context 'release readiness gate' --workspace . --max-tokens 4000 --json"
+          "suggestedQuery": "ee pack \"release readiness gate\" --workspace . --max-tokens 4000 --json"
         }
       ],
       "fromCass": true,
