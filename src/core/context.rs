@@ -50,7 +50,8 @@ use crate::cache::pack_l2::{
 };
 use crate::config::{
     ConfigFile, EnvVar, GRAPH_FEATURE_PACK_DNA_ENABLED_KEY, GRAPH_FEATURE_PPR_ENABLED_KEY,
-    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, ReadPoolConfig, WorkspaceLocation, read_env_var,
+    GRAPH_FEATURE_PROXIMITY_ENABLED_KEY, GRAPH_PACK_DNA_MAX_EDGES_KEY,
+    GRAPH_PACK_DNA_MAX_ITEMS_KEY, ReadPoolConfig, WorkspaceLocation, read_env_var,
 };
 use crate::core::budget::RequestBudget;
 use crate::core::focus::{focus_state_hash, focus_state_path, read_active_focus_state};
@@ -900,10 +901,19 @@ pub fn run_context_pack_seeded(
 }
 
 const PACK_DNA_SERIAL_GRAPH_TASK_COUNT: u64 = 1;
+const DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS: usize = 10;
+const DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES: usize = 30;
 const PACK_DNA_SERIAL_MERGE_ORDER_KEY: &str = concat!(
     "serial:normalize_inputs>voronoi_dominator>community_of_mass>",
     "ego_subgraph>ppr_neighbors>degraded"
 );
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ContextPackDnaConfig {
+    enabled: bool,
+    max_items: usize,
+    max_edges: usize,
+}
 
 fn elapsed_millis_u64(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -969,13 +979,16 @@ fn compute_context_pack_dna(
 
 pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut ContextResponse) {
     let workspace_path = workspace_path_from_database_path(database_path);
-    match workspace_path
+    let pack_dna_config = match workspace_path
         .as_deref()
-        .map(context_pack_dna_feature_enabled)
-        .unwrap_or(Ok(false))
-    {
-        Ok(true) => {}
-        Ok(false) => {
+        .map(context_pack_dna_config)
+        .unwrap_or(Ok(ContextPackDnaConfig {
+            enabled: false,
+            max_items: DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS,
+            max_edges: DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES,
+        })) {
+        Ok(config) if config.enabled => config,
+        Ok(_) => {
             response.data.pack_dna = Some(serde_json::Value::Null);
             push_pack_dna_feature_disabled_degradation(&mut response.data.degraded);
             return;
@@ -991,7 +1004,7 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
             );
             return;
         }
-    }
+    };
 
     let graph_explain_start = Instant::now();
     let connection = match DbConnection::open_file(database_path) {
@@ -1004,29 +1017,6 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
                 ContextResponseSeverity::Low,
                 format!("Pack DNA was requested but the memory graph could not be opened: {error}"),
                 Some("ee status --json".to_string()),
-            );
-            trace_pack_dna_explain_orchestration(
-                graph_explain_start,
-                "context_graph_snapshot_unavailable",
-                0,
-            );
-            return;
-        }
-    };
-
-    let projection = match crate::graph::build_memory_graph(
-        &connection,
-        &crate::graph::ProjectionOptions::default(),
-    ) {
-        Ok(projection) => projection,
-        Err(error) => {
-            response.data.pack_dna = Some(serde_json::Value::Null);
-            push_degradation(
-                &mut response.data.degraded,
-                "context_graph_snapshot_unavailable",
-                ContextResponseSeverity::Low,
-                format!("Pack DNA was requested but memory graph projection failed: {error}"),
-                Some("ee graph centrality-refresh --workspace .".to_string()),
             );
             trace_pack_dna_explain_orchestration(
                 graph_explain_start,
@@ -1074,6 +1064,35 @@ pub fn attach_pack_dna_to_context_response(database_path: &Path, response: &mut 
         trust_anchor_memory_ids,
         ego_radius: crate::graph::pack_dna::DEFAULT_PACK_DNA_EGO_RADIUS,
         ppr_neighbor_limit: crate::graph::pack_dna::DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT,
+    };
+    let projection_seed_ids = pack_dna_projection_seed_ids(&input, pack_dna_config.max_items);
+    let projection = match crate::graph::build_memory_graph_for_frontier(
+        &connection,
+        &projection_seed_ids,
+        &crate::graph::FrontierProjectionOptions {
+            max_depth: input.ego_radius,
+            max_edges: pack_dna_config.max_edges,
+            min_weight: None,
+            min_confidence: None,
+        },
+    ) {
+        Ok(projection) => projection,
+        Err(error) => {
+            response.data.pack_dna = Some(serde_json::Value::Null);
+            push_degradation(
+                &mut response.data.degraded,
+                "context_graph_snapshot_unavailable",
+                ContextResponseSeverity::Low,
+                format!("Pack DNA was requested but memory graph projection failed: {error}"),
+                Some("ee graph centrality-refresh --workspace .".to_string()),
+            );
+            trace_pack_dna_explain_orchestration(
+                graph_explain_start,
+                "context_graph_snapshot_unavailable",
+                0,
+            );
+            return;
+        }
     };
     let pack_dna = match compute_context_pack_dna(&projection, &input) {
         Ok(pack_dna) => pack_dna,
@@ -1163,11 +1182,89 @@ fn workspace_path_from_database_path(database_path: &Path) -> Option<PathBuf> {
     (ee_dir.file_name()? == ".ee").then(|| ee_dir.parent().map(Path::to_path_buf))?
 }
 
-fn context_pack_dna_feature_enabled(workspace_path: &Path) -> Result<bool, String> {
+fn context_pack_dna_config(workspace_path: &Path) -> Result<ContextPackDnaConfig, String> {
     let config = context_workspace_config(workspace_path, "Pack DNA")?;
-    Ok(config
-        .and_then(|config| config.graph.feature.pack_dna_enabled)
-        .unwrap_or(false))
+    let Some(config) = config else {
+        return Ok(ContextPackDnaConfig {
+            enabled: false,
+            max_items: DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS,
+            max_edges: DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES,
+        });
+    };
+    Ok(ContextPackDnaConfig {
+        enabled: config.graph.feature.pack_dna_enabled.unwrap_or(false),
+        max_items: pack_dna_usize_config(
+            config.graph.pack_dna.max_items,
+            GRAPH_PACK_DNA_MAX_ITEMS_KEY,
+        )?
+        .unwrap_or(DEFAULT_CONTEXT_PACK_DNA_MAX_ITEMS),
+        max_edges: pack_dna_usize_config(
+            config.graph.pack_dna.max_edges,
+            GRAPH_PACK_DNA_MAX_EDGES_KEY,
+        )?
+        .unwrap_or(DEFAULT_CONTEXT_PACK_DNA_MAX_EDGES),
+    })
+}
+
+fn pack_dna_usize_config(value: Option<u64>, key: &str) -> Result<Option<usize>, String> {
+    value
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                format!("Pack DNA skipped because {key}={value} does not fit this platform")
+            })
+        })
+        .transpose()
+}
+
+fn pack_dna_projection_seed_ids(
+    input: &crate::graph::pack_dna::PackDnaInput,
+    max_items: usize,
+) -> Vec<String> {
+    let mut seeds = Vec::new();
+    let mut seen = BTreeSet::new();
+    pack_dna_push_seed_ids(
+        &mut seeds,
+        &mut seen,
+        input.trust_anchor_memory_ids.iter().copied(),
+        max_items,
+    );
+    pack_dna_push_seed_ids(
+        &mut seeds,
+        &mut seen,
+        input.query_seed_weights.keys().copied(),
+        max_items,
+    );
+    pack_dna_push_seed_ids(
+        &mut seeds,
+        &mut seen,
+        input.pack_memory_ids.iter().copied(),
+        max_items,
+    );
+    seeds
+}
+
+fn pack_dna_push_seed_ids(
+    seeds: &mut Vec<String>,
+    seen: &mut BTreeSet<String>,
+    memory_ids: impl IntoIterator<Item = MemoryId>,
+    max_items: usize,
+) {
+    if seeds.len() >= max_items {
+        return;
+    }
+    let mut memory_ids = memory_ids
+        .into_iter()
+        .map(|memory_id| memory_id.to_string())
+        .collect::<Vec<_>>();
+    sort_by_ulid_payload_or_lexical(&mut memory_ids, String::as_str);
+    for memory_id in memory_ids {
+        if seeds.len() >= max_items {
+            return;
+        }
+        if seen.insert(memory_id.clone()) {
+            seeds.push(memory_id);
+        }
+    }
 }
 
 fn push_pack_dna_feature_disabled_degradation(degraded: &mut Vec<ContextResponseDegradation>) {
@@ -9180,6 +9277,27 @@ pub fn unrelated_context() -> u64 {
         .map_err(|error| error.to_string())?;
         crate::pack::ContextResponse::new(request, draft, Vec::new())
             .map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn pack_dna_projection_seed_ids_prioritize_trust_query_then_pack() {
+        let trust_a = MemoryId::from_uuid(uuid::Uuid::from_u128(910));
+        let trust_b = MemoryId::from_uuid(uuid::Uuid::from_u128(911));
+        let query = MemoryId::from_uuid(uuid::Uuid::from_u128(912));
+        let pack_only = MemoryId::from_uuid(uuid::Uuid::from_u128(913));
+        let input = crate::graph::pack_dna::PackDnaInput {
+            pack_memory_ids: vec![pack_only, trust_a],
+            query_seed_weights: BTreeMap::from([(query, 0.9)]),
+            trust_anchor_memory_ids: vec![trust_b, trust_a],
+            ego_radius: crate::graph::pack_dna::DEFAULT_PACK_DNA_EGO_RADIUS,
+            ppr_neighbor_limit: crate::graph::pack_dna::DEFAULT_PACK_DNA_PPR_NEIGHBOR_LIMIT,
+        };
+
+        assert_eq!(
+            super::pack_dna_projection_seed_ids(&input, 3),
+            vec![trust_a.to_string(), trust_b.to_string(), query.to_string()]
+        );
+        assert!(super::pack_dna_projection_seed_ids(&input, 0).is_empty());
     }
 
     #[test]

@@ -1265,6 +1265,19 @@ pub struct ProjectionOptions {
     pub min_confidence: Option<f32>,
 }
 
+/// Options for building a bounded seed-neighborhood graph projection.
+#[derive(Debug, Clone)]
+pub struct FrontierProjectionOptions {
+    /// Maximum incident-neighborhood expansion depth from the seed memories.
+    pub max_depth: usize,
+    /// Maximum distinct source links to include in the projection.
+    pub max_edges: usize,
+    /// Minimum weight threshold for including edges.
+    pub min_weight: Option<f32>,
+    /// Minimum confidence threshold for including edges.
+    pub min_confidence: Option<f32>,
+}
+
 /// Build a graph projection from memory links in the database.
 ///
 /// Each memory becomes a node. Each memory_link becomes a directed edge
@@ -1276,6 +1289,66 @@ pub fn build_memory_graph(
 ) -> GraphResult<MemoryGraphProjection> {
     let links = graph_projection_links(conn, options)?;
     // Live build from DB → version 0 (not from a persisted snapshot)
+    build_memory_graph_from_links(&links, 0)
+}
+
+/// Build a bounded graph projection around a seed frontier.
+///
+/// This avoids loading every `memory_links` row for explain-only surfaces that
+/// operate on a small pack/query seed set.
+pub fn build_memory_graph_for_frontier(
+    conn: &DbConnection,
+    seed_memory_ids: &[String],
+    options: &FrontierProjectionOptions,
+) -> GraphResult<MemoryGraphProjection> {
+    let mut frontier = seed_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut visited = BTreeSet::new();
+    let mut links_by_id = BTreeMap::new();
+    let projection_options = ProjectionOptions {
+        link_limit: None,
+        min_weight: options.min_weight,
+        min_confidence: options.min_confidence,
+    };
+
+    for _ in 0..=options.max_depth {
+        if frontier.is_empty() || links_by_id.len() >= options.max_edges {
+            break;
+        }
+
+        let frontier_refs = frontier.iter().map(String::as_str).collect::<Vec<_>>();
+        let incident_links = conn
+            .list_memory_links_for_memories(&frontier_refs, None)
+            .map_err(|error| GraphError::storage("query memory link frontier", error))?;
+        visited.extend(frontier.iter().cloned());
+
+        let mut next_frontier = BTreeSet::new();
+        for link in incident_links {
+            if !graph_link_matches_options(&link, &projection_options)
+                || !memory_link_mesh_metadata_visible(link.metadata_json.as_deref())
+            {
+                continue;
+            }
+
+            if !links_by_id.contains_key(&link.id) && links_by_id.len() >= options.max_edges {
+                break;
+            }
+            next_frontier.insert(link.src_memory_id.clone());
+            next_frontier.insert(link.dst_memory_id.clone());
+            links_by_id.entry(link.id.clone()).or_insert(link);
+        }
+
+        next_frontier.retain(|memory_id| !visited.contains(memory_id));
+        frontier = next_frontier;
+    }
+
+    let mut links = links_by_id.into_values().collect::<Vec<_>>();
+    links.sort_by(|left, right| {
+        left.relation
+            .cmp(&right.relation)
+            .then_with(|| left.src_memory_id.cmp(&right.src_memory_id))
+            .then_with(|| left.dst_memory_id.cmp(&right.dst_memory_id))
+            .then_with(|| left.id.cmp(&right.id))
+    });
     build_memory_graph_from_links(&links, 0)
 }
 
@@ -7598,6 +7671,89 @@ mod tests {
         assert!(!projection.graph.has_edge(MEMORY_B, MEMORY_A));
         assert!(projection.graph.has_edge(MEMORY_B, MEMORY_C));
         assert!(projection.graph.has_edge(MEMORY_C, MEMORY_B));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn frontier_projection_uses_seed_neighborhood_instead_of_full_graph() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_memory(&connection, MEMORY_D, "Unrelated graph memory")?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000031",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000032",
+            MEMORY_C,
+            MEMORY_D,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let projection = graph_result(super::build_memory_graph_for_frontier(
+            &connection,
+            &[MEMORY_A.to_string()],
+            &super::FrontierProjectionOptions {
+                max_depth: 2,
+                max_edges: 30,
+                min_weight: None,
+                min_confidence: None,
+            },
+        ))?;
+
+        assert_eq!(projection.node_count, 2);
+        assert_eq!(projection.edge_count, 1);
+        assert!(projection.graph.has_edge(MEMORY_A, MEMORY_B));
+        assert!(!projection.graph.has_node(MEMORY_C));
+        assert!(!projection.graph.has_node(MEMORY_D));
+
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "graph")]
+    #[test]
+    fn frontier_projection_respects_edge_cap() -> TestResult {
+        let connection = open_projection_db()?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000033",
+            MEMORY_A,
+            MEMORY_B,
+            true,
+            0.9,
+            0.9,
+        )?;
+        insert_link(
+            &connection,
+            "link_00000000000000000000000034",
+            MEMORY_A,
+            MEMORY_C,
+            true,
+            0.9,
+            0.9,
+        )?;
+
+        let projection = graph_result(super::build_memory_graph_for_frontier(
+            &connection,
+            &[MEMORY_A.to_string()],
+            &super::FrontierProjectionOptions {
+                max_depth: 2,
+                max_edges: 1,
+                min_weight: None,
+                min_confidence: None,
+            },
+        ))?;
+
+        assert_eq!(projection.edge_count, 1);
 
         connection.close().map_err(|error| error.to_string())
     }
