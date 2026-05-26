@@ -4752,9 +4752,25 @@ impl fmt::Display for PackRejectionStage {
 fn compare_omissions_for_output(left: &PackOmission, right: &PackOmission) -> Ordering {
     let left_score = left.relevance.into_inner() + left.utility.into_inner();
     let right_score = right.relevance.into_inner() + right.utility.into_inner();
+    // `total_cmp` over `partial_cmp(...).unwrap_or(Equal)`: `UnitScore`
+    // validates its inner f32 at construction time (finite, in [0, 1] — see
+    // `src/models/memory.rs::UnitScore::parse` at line ~378), so the sum
+    // here is always finite in [0, 2] and `partial_cmp` always returns
+    // `Some(Ordering)` today. The `unwrap_or(Equal)` is unreachable. But
+    // the pack omissions list feeds `ee context "<task>"` / `ee pack "<task>"`
+    // — a determinism-contract surface where "same DB + indexes + config +
+    // query → byte-identical JSON output" (per AGENTS.md). If a future
+    // `PackOmission` constructor bypasses `UnitScore::parse` (e.g. via
+    // `transmute`-shaped fixtures or a `#[cfg(test)]` raw-construction
+    // path), a NaN that reaches this sort under `partial_cmp(...).unwrap_or(Equal)`
+    // would collapse the ordering into intransitivity and silently scramble
+    // the `omitted[]` order on the pack JSON output. Defense-in-depth pattern
+    // shipped in 96505dc7 (memory.rs dedupe), 9b83f9a9 (insights
+    // proximityHotspots), 4a067ecb (insights causalBottlenecks + hits),
+    // 23719e1e (graph loadBearing), 18f20375 (influence.rs), and 2eab2028
+    // (focus_suggest.rs).
     right_score
-        .partial_cmp(&left_score)
-        .unwrap_or(Ordering::Equal)
+        .total_cmp(&left_score)
         .then_with(|| left.memory_id.cmp(&right.memory_id))
 }
 
