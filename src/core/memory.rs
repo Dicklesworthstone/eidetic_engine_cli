@@ -7114,13 +7114,24 @@ pub fn check_for_duplicates(options: &DedupeCheckOptions<'_>) -> DedupeCheckRepo
         }
     }
 
-    // Sort by severity (exact first), then by similarity score (descending)
+    // Sort by severity (exact first), then by similarity score (descending).
+    // `total_cmp` over `partial_cmp(...).unwrap_or(Equal)`: `similarity_score`
+    // is `jaccard_similarity(...)` (always finite in [0, 1] by construction;
+    // see fn body at line ~6600), so `partial_cmp` always returns
+    // `Some(Ordering)` today and the `unwrap_or(Equal)` is unreachable. The
+    // dedupe-check report is a `ee remember` user-facing surface that runs
+    // on every remember call — same DB + same input → same warning order.
+    // If a future refactor changes `jaccard_similarity` (e.g. ratio of two
+    // u64 counts where the second could be zero) and lets a NaN through,
+    // the bare `partial_cmp(...).unwrap_or(Equal)` would collapse the sort
+    // into intransitivity and silently scramble the warning order across
+    // re-runs against the same inputs. Defense-in-depth pattern shipped in
+    // 4a067ecb (causalBottlenecks + hits), 9b83f9a9 (proximityHotspots),
+    // 18f20375 (influence.rs), and 2eab2028 (focus_suggest.rs).
     warnings.sort_by(|a, b| {
-        a.severity.cmp(&b.severity).then_with(|| {
-            b.similarity_score
-                .partial_cmp(&a.similarity_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        a.severity
+            .cmp(&b.severity)
+            .then_with(|| b.similarity_score.total_cmp(&a.similarity_score))
     });
 
     // Limit warnings
