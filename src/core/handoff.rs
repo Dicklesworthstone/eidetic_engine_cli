@@ -86,6 +86,14 @@ const HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND: &str = "workspace_secret_machine_boun
 const HANDOFF_WORKSPACE_SECRET_FILE: &str = "handoff_hmac_key";
 const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
 
+/// Hard upper bound on the byte length of a handoff capsule file or key
+/// material read from a user-supplied path. Realistic capsules are on the
+/// order of 10-100 KB; 16 MiB is an extremely generous ceiling that still
+/// bounds memory if a user (accidentally or otherwise) passes a non-capsule
+/// path to `ee handoff resume`. Without this cap, `fs::read_to_string`
+/// would attempt to slurp the entire file into a single allocation.
+const HANDOFF_FILE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// ID prefix for handoff capsules.
 pub const HANDOFF_CAPSULE_ID_PREFIX: &str = "hcap_";
 
@@ -2236,6 +2244,27 @@ fn read_regular_file_no_symlinks(path: &Path, label: &str) -> Result<String, Dom
         return Err(DomainError::Storage {
             message: format!("Failed to read {label}: No such file or directory"),
             repair: Some(format!("Verify {} exists and is readable", path.display())),
+        });
+    }
+    // Early-bail before `read_to_string` so a user-supplied path to a huge
+    // file (passed via `ee handoff resume --capsule <path>`,
+    // `ee handoff inspect`, or `ee handoff preview`) cannot trigger an
+    // unbounded allocation. The metadata read is cheap and `read_to_string`
+    // pre-sizes its buffer from this same length on most platforms.
+    let metadata = fs::metadata(path).map_err(|error| DomainError::Storage {
+        message: format!("Failed to inspect {label} size: {error}"),
+        repair: Some(format!("Verify {} exists and is readable", path.display())),
+    })?;
+    if metadata.len() > HANDOFF_FILE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read {label}: file is {} bytes, exceeding the {HANDOFF_FILE_MAX_BYTES}-byte ceiling.",
+                metadata.len()
+            ),
+            repair: Some(format!(
+                "Confirm {} is a real handoff capsule (typically <100KB) and not a stray large file.",
+                path.display()
+            )),
         });
     }
     let content = fs::read_to_string(path).map_err(|error| DomainError::Storage {
