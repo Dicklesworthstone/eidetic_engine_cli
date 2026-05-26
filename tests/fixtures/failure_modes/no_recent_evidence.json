@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "no_recent_evidence",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest` found no memories created within the `--recent-hours` look-back window. The pipeline returns an empty `recommendations[]` and flags this informational degraded entry so the caller can react by widening the window or seeding more evidence.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee focus suggest --workspace . --recent-hours 24 --json"
+  },
+  "expected_emission": {
+    "code": "no_recent_evidence",
+    "severity": "info",
+    "message_contains": [
+      "No memories created within",
+      "hour"
+    ],
+    "repair_contains": "--recent-hours"
+  }
+}

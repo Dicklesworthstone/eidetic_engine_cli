@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "task_frame_unavailable",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest --task-frame <id>` could not resolve the named task frame — the frame id is unknown, the `.ee/task_frames.json` store is unreadable, or `show_task_frame` returned an error. The pipeline honors the explicit scope by returning empty `recommendations[]` and emits this degraded entry so the caller can verify the frame id; the unscoped fallback behavior the earlier draft described was removed in fix 0261a4ab to mirror the `Ok(empty)` arm above (silently broadening would mask the configuration error behind a populated recommendation list).",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee focus suggest --task-frame tf_unknown_id --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "task_frame_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "Failed to load task frame"
+    ],
+    "repair_contains": "ee task-frame show"
+  }
+}

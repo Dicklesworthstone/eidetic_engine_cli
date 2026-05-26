@@ -1,0 +1,31 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "recent_hours_window_clamped",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest --recent-hours <N>` was passed an N so large that subtracting `Duration::hours(N)` from `Utc::now()` overflowed chrono's representable `DateTime<Utc>` range (~262_143 years on either side of year 0). `--recent-hours` accepts a `u32` (up to ~4.3 billion hours / ~489_957 years), so any value beyond ~262_000 years × 8766 hours/year ≈ 2_296_000_000 trips the bound. The pipeline uses `checked_sub_signed` and falls back to `DateTime::<Utc>::MIN_UTC` so the surface stays usable (the window is effectively treated as all-time); this degraded entry surfaces the clamp so the caller can shrink the window.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee focus suggest --workspace . --recent-hours 4294967295 --json"
+  },
+  "expected_emission": {
+    "code": "recent_hours_window_clamped",
+    "severity": "warning",
+    "message_contains": [
+      "--recent-hours",
+      "representable DateTime range",
+      "all-time"
+    ],
+    "repair_contains": "smaller --recent-hours",
+    "repair_string": "Pass a smaller --recent-hours value (e.g. 24, 168, or 720)."
+  }
+}

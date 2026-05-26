@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "task_frame_intersect_empty",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest --task-frame <id> --recent-hours N` resolved a task frame that DOES carry memory-kind `evidence_links[]`, but none of those memories fall within the last N hours. Distinct from `task_frame_no_evidence` (frame is empty) and `no_recent_evidence` (no memories in window regardless of frame): here the window is non-empty AND the frame is non-empty, but the intersection is empty. The pipeline returns empty `recommendations[]` honoring the explicit scope, and emits this degraded entry so the caller can distinguish the three failure modes and choose the right repair.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember \"unrelated recent note\" --workspace . --level episodic --kind fact --json",
+      "ee task-frame create --goal \"older work\" --actor reviewer --json"
+    ],
+    "invocation": "ee focus suggest --task-frame <frame-id-with-only-stale-evidence> --recent-hours 1 --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "task_frame_intersect_empty",
+    "severity": "info",
+    "message_contains": [
+      "Task frame",
+      "evidence",
+      "hour(s)"
+    ],
+    "repair_contains": "--task-frame"
+  }
+}

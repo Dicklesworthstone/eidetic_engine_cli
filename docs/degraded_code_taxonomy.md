@@ -800,6 +800,17 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `load_bearing_tombstone_requires_override` | medium | (TBD) |
 | `unattributed_compile_blocker` | low | (TBD) |
 
+#### Focus suggest (7 — `response_time`)
+| Code | Severity | Bead |
+|------|----------|------|
+| `workspace_uninitialized` | warning | bd-1idcb (G) — `.ee/ee.db` missing; repair: `ee init --workspace .` |
+| `no_recent_evidence` | info | bd-1idcb (G) — no memories within `--recent-hours`; repair: widen window or `ee remember` |
+| `task_frame_no_evidence` | warning | bd-1idcb (G) — `--task-frame` resolved a frame whose `evidence_links[]` has no `kind == "memory"` entries; explicit scope honored with empty result |
+| `task_frame_unavailable` | warning | bd-1idcb (G) — `--task-frame <id>` could not be resolved; surface falls back to unscoped recent set |
+| `graph_pagerank_failed` | warning | bd-1idcb (G) — PageRank algorithm returned an error; centrality contribution forced to zero |
+| `graph_empty` | info | bd-1idcb (G) — memory graph projection has no nodes; centrality contribution is zero by construction |
+| `graph_projection_failed` | warning | bd-1idcb (G) — `build_memory_graph` returned an error; centrality contribution unavailable |
+
 #### Mixed: storage_unavailable
 | Code | Severity | Bead |
 |------|----------|------|

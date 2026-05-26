@@ -248,8 +248,48 @@ fn validate_fixture(path: &Path) -> TestResult {
         // For retired fixtures, require a `retired_by.bead` reason so the
         // tombstone always cites the bead that removed the emission. This
         // keeps catalog forensics simple — every retired entry is traceable.
-        let _ = ensure_string_field(&value, "/retired_by/bead", &ctx)?;
-        let _ = ensure_string_field(&value, "/retired_by/reason", &ctx)?;
+        // Both fields must be non-empty: an empty `bead` or `reason` would
+        // satisfy the structural string-type check but defeat the
+        // forensics purpose (an unattributed retirement is exactly the
+        // drift the tombstone exists to prevent).
+        let bead = ensure_string_field(&value, "/retired_by/bead", &ctx)?;
+        ensure(
+            !bead.trim().is_empty(),
+            format!("{ctx}: retired_by.bead must be a non-empty string"),
+        )?;
+        let reason = ensure_string_field(&value, "/retired_by/reason", &ctx)?;
+        ensure(
+            !reason.trim().is_empty(),
+            format!("{ctx}: retired_by.reason must be a non-empty string"),
+        )?;
+        // Assert the retirement is HONEST: the retired code must NOT
+        // appear as a quoted string literal anywhere under src/. Without
+        // this check, the retired flag is a unilateral assertion the
+        // catalog walker takes on faith — a developer could flip
+        // `retired: true` while leaving the live emission in place, or a
+        // later commit could re-introduce the code as a string literal,
+        // and nothing in this static gate would catch it. The leading
+        // comment notes "Production emission absence for retired codes
+        // is asserted by the per-emission tests under
+        // tests/focus_suggest_schema.rs, scripts/e2e_overhaul/*.sh, and
+        // the schema-drift gate" — but that's only true for codes that
+        // happen to have a focused absence-asserting test. For a newly
+        // retired code without such a test, this is the only line of
+        // defense.
+        let src = src_dir();
+        let appears = code_appears_in_source(code, &src)?;
+        ensure(
+            !appears,
+            format!(
+                "{ctx}: code `{code}` is marked retired (retired_by.bead = `{bead}`) \
+                 but still appears as a quoted string literal under {}. \
+                 Either the retirement is incomplete (remove the live emission) \
+                 or the code was re-introduced after retirement. \
+                 If the new emission is intentional, drop the retired flag and \
+                 ship a fresh fixture for the resurrected code.",
+                src.display()
+            ),
+        )?;
     }
 
     Ok(())

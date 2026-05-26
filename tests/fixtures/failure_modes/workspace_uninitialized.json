@@ -1,0 +1,27 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_uninitialized",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest` was invoked against a workspace that has not yet been initialized — `.ee/ee.db` does not exist. The surface is read-only and reports the missing database via this degraded entry rather than aborting with a storage error so an agent harness can chain `ee init` as the suggested repair.",
+    "setup_commands": [],
+    "invocation": "ee focus suggest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "workspace_uninitialized",
+    "severity": "warning",
+    "message_contains": [
+      "No initialized workspace",
+      "ee init"
+    ],
+    "repair_contains": "ee init"
+  }
+}

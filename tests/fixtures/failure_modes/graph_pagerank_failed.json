@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_pagerank_failed",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "`ee focus suggest` built the memory graph projection but `compute_pagerank` returned an error (algorithm budget exhaustion, projection pathology, cancellation, etc.). The scoring pipeline falls back to recency-only ranking and emits this degraded entry so the caller knows centrality contributions are zero across all clusters.",
+    "setup_commands": [
+      "ee init --workspace ."
+    ],
+    "invocation": "ee focus suggest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_pagerank_failed",
+    "severity": "warning",
+    "message_contains": [
+      "PageRank computation failed",
+      "recency-only scoring"
+    ]
+  }
+}

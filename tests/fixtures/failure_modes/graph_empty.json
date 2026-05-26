@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "graph_empty",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "`ee focus suggest` built the memory graph projection but it contains zero nodes — the workspace has no `memory_links` rows (newly initialized workspace, isolated memories, freshly imported corpus before linking, etc.). The pipeline emits this informational entry to document that centrality contributions to the composite score are zero.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee remember 'first memory' --workspace . --level episodic --kind release --json"
+    ],
+    "invocation": "ee focus suggest --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "graph_empty",
+    "severity": "info",
+    "message_contains": [
+      "Memory graph has no nodes",
+      "centrality contribution is zero"
+    ]
+  }
+}

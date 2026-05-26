@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "task_frame_no_evidence",
+  "introduced_by": {
+    "bead": "bd-1idcb",
+    "epic_letter": "G"
+  },
+  "surfaces": [
+    "focus suggest"
+  ],
+  "severity": "warning",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee focus suggest --task-frame <id>` resolved a task frame whose `evidence_links[]` contains no memory-kind entries (the frame is empty or only carries non-memory references such as `context_pack`/`handoff`/`bead`). Per the explicit-scope contract the pipeline returns empty `recommendations[]` rather than silently broadening to every recent memory, and emits this degraded entry so the caller knows why the scope was honored.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "ee task-frame create --goal \"empty frame\" --actor reviewer --json"
+    ],
+    "invocation": "ee focus suggest --task-frame <frame-id> --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "task_frame_no_evidence",
+    "severity": "warning",
+    "message_contains": [
+      "no evidence_links",
+      "explicit scope"
+    ],
+    "repair_contains": "--task-frame"
+  }
+}
