@@ -2622,10 +2622,44 @@ fn read_side_path_no_symlinks(path: &Path) -> Result<Vec<u8>, DomainError> {
     })
 }
 
+/// Maximum size of a portable playbook JSON source accepted by
+/// `ee playbook import`. Portable playbook documents carry rule text,
+/// hashes, maturity tags, and per-rule metadata; in practice they are
+/// KB-sized. The 16 MiB cap leaves ample headroom for a multi-thousand-
+/// rule playbook while bounding worst-case allocation. Matches the
+/// `MAX_LAB_FILE_BYTES` cap in `src/core/lab.rs` and the handoff capsule
+/// cap in `src/core/handoff.rs` (6d8d00e5).
+const MAX_PLAYBOOK_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
 fn read_playbook_source_file_no_follow(path: &Path) -> std::io::Result<Vec<u8>> {
-    let mut file = open_playbook_source_file_for_read(path)?;
+    // Bounded read with `take(CAP + 1)`. The caller
+    // (`read_side_path_no_symlinks`) only checks symlink components and
+    // `is_file()` — no size pre-check — so this read is the sole
+    // defense against a `--source` path pointing at (or a peer planting)
+    // a multi-GiB file. The prior unbounded `read_to_end` would grow
+    // its `Vec<u8>` on demand and OOM the process before
+    // `serde_json::from_slice` could reject the body. The bounded read
+    // pins peak allocation to CAP + 1 bytes; the post-read length check
+    // distinguishes "exactly at cap" (accepted) from "above cap"
+    // (rejected as `InvalidData`). Same defense-in-depth pattern as
+    // `read_lab_file_to_string_no_follow` in `src/core/lab.rs`,
+    // `read_handoff_regular_file_no_symlinks` in `src/core/handoff.rs`
+    // (6d8d00e5), `read_preflight_rules_file_no_follow` in
+    // `src/core/preflight_guard.rs` (7f56d89b), and
+    // `read_claim_file_bytes_no_follow` in `src/core/claims.rs`.
+    let file = open_playbook_source_file_for_read(path)?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(MAX_PLAYBOOK_SOURCE_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PLAYBOOK_SOURCE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "playbook source `{}` exceeds the {MAX_PLAYBOOK_SOURCE_BYTES}-byte cap",
+                path.display()
+            ),
+        ));
+    }
     Ok(bytes)
 }
 
