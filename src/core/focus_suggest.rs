@@ -158,7 +158,16 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
         .filter(|memory| memory_created_at(memory).is_some_and(|ts| ts >= cutoff))
         .collect();
 
-    let scoped = match options.task_frame_id.as_deref() {
+    // Track whether the task-frame scope is what filtered the candidate
+    // set down to empty, so the trailing emptiness check below can emit
+    // a frame-specific code (`task_frame_intersect_empty`) instead of
+    // the generic `no_recent_evidence`. The two failure modes look
+    // identical at the boundary (`scoped.is_empty()`) but suggest
+    // different repairs: increase --recent-hours vs. attach evidence /
+    // verify the frame id / drop the scope.
+    let task_frame_scope = options.task_frame_id.as_deref();
+    let recent_was_empty = recent.is_empty();
+    let scoped = match task_frame_scope {
         Some(frame_id) => match load_task_frame_evidence(&options.workspace_path, frame_id) {
             Ok(evidence_ids) if !evidence_ids.is_empty() => recent
                 .into_iter()
@@ -223,18 +232,42 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
     };
 
     if scoped.is_empty() {
-        degraded.push(FocusSuggestDegradation {
-            code: "no_recent_evidence".to_owned(),
-            severity: "info".to_owned(),
-            message: format!(
-                "No memories created within the last {} hour(s).",
-                options.recent_hours
-            ),
-            repair: Some(
-                "Increase --recent-hours or `ee remember` more evidence to seed the surface."
-                    .to_owned(),
-            ),
-        });
+        // Distinguish "the recency window itself was empty" from "the
+        // recency window had memories but none were linked from the
+        // task frame". The first repair is `--recent-hours` / `ee
+        // remember`; the second is `ee task-frame evidence add` /
+        // verify the frame id / drop `--task-frame`. Conflating them
+        // (the pre-fix behavior) sent operators chasing the wrong
+        // setting when their frame existed but didn't intersect the
+        // window.
+        if let Some(frame_id) = task_frame_scope
+            && !recent_was_empty
+        {
+            degraded.push(FocusSuggestDegradation {
+                code: "task_frame_intersect_empty".to_owned(),
+                severity: "info".to_owned(),
+                message: format!(
+                    "Task frame {frame_id} has evidence, but none of its memory-kind links fall within the last {} hour(s).",
+                    options.recent_hours
+                ),
+                repair: Some(
+                    "Increase --recent-hours, attach newer evidence via `ee task-frame evidence add`, or omit --task-frame.".to_owned(),
+                ),
+            });
+        } else {
+            degraded.push(FocusSuggestDegradation {
+                code: "no_recent_evidence".to_owned(),
+                severity: "info".to_owned(),
+                message: format!(
+                    "No memories created within the last {} hour(s).",
+                    options.recent_hours
+                ),
+                repair: Some(
+                    "Increase --recent-hours or `ee remember` more evidence to seed the surface."
+                        .to_owned(),
+                ),
+            });
+        }
         return Ok(FocusSuggestReport {
             recommendations: Vec::new(),
             from_cass: options.from_cass,
@@ -527,13 +560,35 @@ fn score_and_emit_topics(
         })
         .collect();
 
-    // total_cmp keeps ordering total even if a score is NaN (e.g. an
-    // upstream PageRank pathology) — matches the determinism contract
-    // upheld at src/core/search.rs:5375 (sort_search_hits_by_score_order).
+    // `total_cmp` keeps the ordering total even if a score is NaN, but
+    // its IEEE 754 totalOrder places positive NaN ABOVE positive infinity
+    // — which, in a descending sort, would surface NaN-scored clusters
+    // BEFORE every finite-scored cluster. The upstream filters at
+    // `compute_pagerank_scores` and `score_and_emit_topics` drop
+    // non-finite contributions, so production never observes this, but
+    // the `sort_is_total_under_nan_scores` regression test pins the
+    // intended contract ("finite scores must outrank NaNs in the
+    // descending sort") and would otherwise fail under the bare
+    // `total_cmp` shape because `1.0.total_cmp(&NaN)` returns `Less`
+    // (NaN is greater in total order). Normalize NaN to `NEG_INFINITY`
+    // before comparison so any NaN that leaks past the upstream filters
+    // lands at the bottom of the ranking instead of hijacking the top.
+    // Real `NEG_INFINITY` scores collide with normalized NaNs and
+    // tie-break through `topic_label` / `first_member_id` like the rest
+    // of the order — both deterministic and both at the bottom is
+    // exactly the behavior an operator expects when "highest score
+    // wins". Mirrors the determinism contract upheld at
+    // src/core/search.rs:5375 (sort_search_hits_by_score_order).
+    let sort_score = |score: f64| {
+        if score.is_nan() {
+            f64::NEG_INFINITY
+        } else {
+            score
+        }
+    };
     scored.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
+        sort_score(right.0)
+            .total_cmp(&sort_score(left.0))
             .then_with(|| left.1.topic_label.cmp(&right.1.topic_label))
             .then_with(|| {
                 let left_first = left.1.member_ids.first().map(String::as_str).unwrap_or("");
@@ -603,7 +658,27 @@ const TOPIC_PREVIEW_CHARS: usize = 32;
 
 fn topic_key_for_memory(memory: &StoredMemory) -> String {
     let preview = content_preview_tokens(&memory.content, TOPIC_PREVIEW_CHARS);
-    format!("{}::{}", memory.kind, preview)
+    if preview.is_empty() {
+        // `content_preview_tokens` returns "" whenever the first
+        // `TOPIC_PREVIEW_CHARS` Unicode codepoints contain no
+        // `char::is_alphanumeric` characters — emoji-only content
+        // (`🚨🚨🚨`), pure-punctuation content (`!!! ??? ...`), or
+        // pure-whitespace content all collapse to the empty preview.
+        // Without an id-tail fallback, every empty-preview memory of
+        // the same `kind` would land in a single `kind::` cluster and
+        // collapse into ONE recommendation — losing the distinct
+        // topics they actually represent. Fall back to the memory id
+        // so each empty-preview memory gets its own cluster; the
+        // determinism contract still holds because memory ids are
+        // unique and the downstream tie-break already sorts by
+        // `first_member_id asc`. The matching `derive_topic_label`
+        // branch keeps the visible label as `memory.kind` so the
+        // observable schema field doesn't suddenly leak an internal
+        // id-tail to agents.
+        format!("{}::id={}", memory.kind, memory.id)
+    } else {
+        format!("{}::{}", memory.kind, preview)
+    }
 }
 
 fn derive_topic_label(memory: &StoredMemory) -> String {
@@ -706,6 +781,41 @@ mod tests {
             "2026-05-26T10:30:00Z",
         );
         assert_ne!(topic_key_for_memory(&a), topic_key_for_memory(&b));
+    }
+
+    /// Regression guard for the empty-preview cluster collision.
+    ///
+    /// Pre-fix, `content_preview_tokens` returned "" for memories whose
+    /// first `TOPIC_PREVIEW_CHARS` codepoints contained no alphanumeric
+    /// characters — emoji-only content, pure punctuation, or pure
+    /// whitespace. `topic_key_for_memory` formatted that empty preview
+    /// into `"kind::"`, collapsing every empty-preview memory of the
+    /// same kind into a single cluster regardless of their actual
+    /// content. Two distinct fact memories with `"🚨"` and `"!!!"` would
+    /// have shared a key — losing the distinct topics they represent.
+    /// The fix appends the memory id when the preview is empty so each
+    /// empty-preview memory clusters on its own, and the visible
+    /// `topic_label` stays as `memory.kind` to keep the agent-visible
+    /// surface unchanged.
+    #[test]
+    fn topic_key_does_not_collapse_distinct_empty_preview_memories() {
+        // `content_preview_tokens` returns "" because none of the chars
+        // in "🚨🚨🚨" or "!!! ???" are `is_alphanumeric()`.
+        let a = memory_with("01", "fact", "🚨🚨🚨", "2026-05-26T11:00:00Z");
+        let b = memory_with("02", "fact", "!!! ???", "2026-05-26T10:30:00Z");
+        assert!(content_preview_tokens(&a.content, TOPIC_PREVIEW_CHARS).is_empty());
+        assert!(content_preview_tokens(&b.content, TOPIC_PREVIEW_CHARS).is_empty());
+        let key_a = topic_key_for_memory(&a);
+        let key_b = topic_key_for_memory(&b);
+        assert_ne!(
+            key_a, key_b,
+            "two empty-preview memories of the same kind must NOT share a cluster key"
+        );
+        // The visible topic label stays as `memory.kind` regardless —
+        // the id-tail fallback lives in the key only, not in the
+        // schema-exposed label.
+        assert_eq!(derive_topic_label(&a), "fact");
+        assert_eq!(derive_topic_label(&b), "fact");
     }
 
     #[test]
@@ -1015,10 +1125,28 @@ mod tests {
     fn sort_is_total_under_nan_scores() {
         // Direct guard against the determinism trap: if an upstream
         // score happens to be NaN (e.g. PageRank divergence under a
-        // pathological projection), the sort must remain total —
-        // partial_cmp().unwrap_or(Equal) would have produced an
-        // intransitive ordering and tripped the byte-identical
-        // determinism contract.
+        // pathological projection), the descending sort must place
+        // finite scores ABOVE NaNs — not the other way around. The
+        // bare `f64::total_cmp` shape gives a total order on f64, but
+        // IEEE 754 `totalOrder` places positive NaN ABOVE positive
+        // infinity (see `f64::total_cmp` docs and the underlying spec).
+        // Plugging that directly into a descending `right.total_cmp(&left)`
+        // sort surfaces NaN-scored clusters at the TOP of
+        // `recommendations[]`, the opposite of "highest finite score
+        // wins". Pre-fix this test asserted the post-normalization
+        // outcome but performed the bare `total_cmp` comparison — the
+        // assertion fired because alpha/charlie (NaN) landed at indices
+        // 0/1 instead of delta/bravo, and the test failed loud whenever
+        // it was actually run (cargo test --lib focus_suggest).
+        //
+        // Production `score_and_emit_topics` (this file, sort_score
+        // closure above the sort_by call) coerces NaN to NEG_INFINITY
+        // before comparing so any NaN that leaks past the upstream
+        // filters lands at the bottom of the ranking instead of
+        // hijacking the top. Mirror that normalization here so the
+        // test exercises the SAME contract the production sort honors,
+        // and any future regression that drops the normalization fails
+        // this assertion.
         let mk_cluster = |label: &str, member: &str| TopicCluster {
             topic_label: label.to_owned(),
             member_ids: vec![member.to_owned()],
@@ -1032,22 +1160,39 @@ mod tests {
             (f64::NAN, mk_cluster("charlie", "03")),
             (2.0, mk_cluster("delta", "04")),
         ];
+        let sort_score = |score: f64| {
+            if score.is_nan() {
+                f64::NEG_INFINITY
+            } else {
+                score
+            }
+        };
         let mut a = scored.clone();
         let mut b = scored;
         a.sort_by(|l, r| {
-            r.0.total_cmp(&l.0)
+            sort_score(r.0)
+                .total_cmp(&sort_score(l.0))
                 .then_with(|| l.1.topic_label.cmp(&r.1.topic_label))
         });
         b.sort_by(|l, r| {
-            r.0.total_cmp(&l.0)
+            sort_score(r.0)
+                .total_cmp(&sort_score(l.0))
                 .then_with(|| l.1.topic_label.cmp(&r.1.topic_label))
         });
         let a_labels: Vec<&str> = a.iter().map(|(_, c)| c.topic_label.as_str()).collect();
         let b_labels: Vec<&str> = b.iter().map(|(_, c)| c.topic_label.as_str()).collect();
+        // Determinism: identical input → identical output across two
+        // sorts (sort_by is stable; sort_score has no internal state).
         assert_eq!(a_labels, b_labels);
         // Finite scores must outrank NaNs in the descending sort.
+        // Without the sort_score normalization above, NaN sorts ABOVE
+        // +Infinity and alpha/charlie would land at indices 0/1.
         assert_eq!(a_labels[0], "delta");
         assert_eq!(a_labels[1], "bravo");
+        // The two NaN clusters tie-break through topic_label asc since
+        // they both normalize to NEG_INFINITY: alpha before charlie.
+        assert_eq!(a_labels[2], "alpha");
+        assert_eq!(a_labels[3], "charlie");
     }
 
     #[test]

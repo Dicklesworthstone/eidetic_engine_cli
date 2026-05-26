@@ -12,7 +12,7 @@ contracts:
   - recommendations[] is populated when the workspace has memories created within --recent-hours
   - recommendations[] is empty (with a workspace_uninitialized degraded entry) when no .ee/ee.db exists
   - recommendations[] is empty (with a no_recent_evidence degraded entry) when the workspace has no recent memories
-  - Each recommendation has topic, spanIds[], centralityScore (number), rationale, suggestedQuery (referencing ee context or ee search)
+  - Each recommendation has topic, spanIds[], centralityScore (number), rationale, suggestedQuery (canonical `ee pack "<topic>" --workspace . --max-tokens 4000 --json`)
   - --task-frame <id> restricts candidates to the named frame's evidence_links
   - --from-cass attaches CASS evidence spans within the recency window to span_ids[]
   - --limit caps the recommendations[] length; limit=0 emits an empty array
