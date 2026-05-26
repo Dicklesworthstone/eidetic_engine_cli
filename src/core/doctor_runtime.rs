@@ -1721,13 +1721,72 @@ fn stage_backup(
     Ok(rel)
 }
 
+/// Maximum bytes inspected when reading `<run_dir>/state.json`. Real
+/// `RunState` is a tiny JSON object (`schema`, `run_id`, `target_sha`,
+/// `workspace`, two timestamps, `status` enum, `action_count`, `dry_run` —
+/// well under 1 KiB in practice); 4 MiB gives many orders of magnitude of
+/// headroom while bounding peer plants on shared multi-agent checkouts.
+///
+/// Without this cap, a peer-planted or accidentally-inflated state.json
+/// (corrupt write, `cat /dev/urandom > state.json`, hostile multi-agent
+/// checkout) would pin a matching allocation through `fs::read` on every
+/// `replay_undo` (`ee doctor --undo`) invocation. The previous shape also
+/// had no symlink guard: a peer-swapped symlink at the same path would
+/// have followed off-tree to attacker-chosen bytes. Matches the cap +
+/// read-shape the parallel hardening pass applied to
+/// `src/core/index.rs::read_index_metadata_contents` (ad2d302e) and
+/// `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+/// (7f56d89b).
+const DOCTOR_RUN_STATE_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
+
 /// Read the persisted [`RunState`] from `<run_dir>/state.json`.
 fn read_state(run_dir: &Path) -> Result<RunState, DoctorRuntimeError> {
     let path = run_dir.join("state.json");
-    let bytes = fs::read(&path).map_err(|source| DoctorRuntimeError::Io {
+    let metadata = fs::symlink_metadata(&path).map_err(|source| DoctorRuntimeError::Io {
         context: format!("read state.json {}", path.display()),
         source,
     })?;
+    if !metadata.file_type().is_file() {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read state.json {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "state.json is not a regular file",
+            ),
+        });
+    }
+    if metadata.len() > DOCTOR_RUN_STATE_INSPECT_LIMIT {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read state.json {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "state.json size {} exceeds {DOCTOR_RUN_STATE_INSPECT_LIMIT} byte cap",
+                    metadata.len()
+                ),
+            ),
+        });
+    }
+    let file = fs::File::open(&path).map_err(|source| DoctorRuntimeError::Io {
+        context: format!("read state.json {}", path.display()),
+        source,
+    })?;
+    let mut bytes = Vec::new();
+    file.take(DOCTOR_RUN_STATE_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| DoctorRuntimeError::Io {
+            context: format!("read state.json {}", path.display()),
+            source,
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > DOCTOR_RUN_STATE_INSPECT_LIMIT {
+        return Err(DoctorRuntimeError::Io {
+            context: format!("read state.json {}", path.display()),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "state.json grew past cap during read",
+            ),
+        });
+    }
     serde_json::from_slice(&bytes).map_err(|e| DoctorRuntimeError::Io {
         context: format!("parse state.json {}", path.display()),
         source: io::Error::new(io::ErrorKind::InvalidData, e),
