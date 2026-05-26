@@ -2520,10 +2520,15 @@ ee init --workspace .
 ee remember --workspace . --level procedural --kind rule \
   "Run cargo fmt --check before release." --json
 ee search "format before release" --workspace . --json
-ee context "prepare release" --workspace . --format markdown
+ee pack "prepare release" --workspace . --format markdown
 ee why <memory-id> --json
 ee status --json
 ```
+
+Note: `ee pack "<task>"` is the canonical post-triad-promotion surface;
+`ee context "<task>"` runs the same code path and is retained as a soft-deprecated
+alias that emits `deprecated_alias` (severity `info`). See
+`docs/triad_compat_plan.md` for the disposition table.
 
 Acceptance criteria:
 - All commands work without daemon mode.

@@ -48,12 +48,19 @@ outcomes; indexes them with lexical and semantic search; connects them with
 graph features; and emits compact context packs with provenance.
 
 ```bash
-ee context "prepare release for this project" --workspace . --max-tokens 4000 --format markdown
+ee pack "prepare release for this project" --workspace . --max-tokens 4000 --format markdown
 ```
 
 The command returns a Markdown pack with project release rules, prior release
 incidents from `cass`, verification commands, branch traps, and high-severity
 warnings. Each item carries an evidence pointer and a score breakdown.
+
+> `ee pack "<task>"` is the canonical context-pack command after the triad
+> promotion. `ee context "<task>"` runs the same code path and is retained as a
+> soft-deprecated alias that emits `deprecated_alias` (severity `info`) in its
+> `degraded[]`. Examples elsewhere in this README that still use `ee context`
+> remain valid during the deprecation window; new harnesses and scripts should
+> prefer `ee pack`. See `docs/triad_compat_plan.md` for the disposition table.
 
 ### What You Get
 
@@ -492,7 +499,8 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
-| `ee context "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
+| `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command, post-triad-promotion canonical) |
+| `ee context "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Soft-deprecated alias of `ee pack`; emits `deprecated_alias` (severity `info`) and runs the same code path |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
@@ -545,7 +553,7 @@ Machine readers should inspect the JSON contract before trusting a result:
 | Posture | `ee status --json` uses `data.posture.overall`; `ee doctor --json` returns a doctor-specific posture view |
 | Provenance | `provenance[]`, `evidence_spans[]`, and `trustClass` on memory and pack items |
 | Pack identity | `data.pack.hash` for batch packs; `packHash` on stream trailer frames |
-| Graph explanation | `data.pack.packDna` when `ee context --explain --json` is used |
+| Graph explanation | `data.pack.packDna` when `ee pack --explain --json` (or its alias `ee context --explain --json`) is used |
 | Feature gaps | `ee capabilities --json` at `data.unimplemented[]`, not command `degraded[]` |
 | Streams | `ee.pack.stream.v1` NDJSON frames: `header`, `item`, terminal `trailer`, `error`, or `cancelled` |
 

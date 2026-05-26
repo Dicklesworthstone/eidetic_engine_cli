@@ -489,10 +489,16 @@ Required commands for the first slice:
 ee init --workspace .
 ee remember --workspace . --level procedural --kind rule "Run cargo fmt --check before release." --json
 ee search "format before release" --workspace . --json
-ee context "prepare release" --workspace . --format markdown
+ee pack "prepare release" --workspace . --format markdown
 ee why <memory-id> --json
 ee status --json
 ```
+
+> `ee pack "<task>"` is the canonical context-pack surface after the triad promotion
+> (see `docs/triad_compat_plan.md`). `ee context "<task>"` is retained as a
+> soft-deprecated alias and emits a `deprecated_alias` info-severity degraded entry
+> pointing to `ee pack`. The alias still executes the same behavior during the
+> deprecation window.
 
 Acceptance gate:
 
@@ -531,23 +537,24 @@ The 2026-05 agent-first UX overhaul rewrote how `ee` talks to coding agents. Thi
 ee init    --workspace . --json
 ee remember "<text>" --workspace . --level <l> --kind <k> --json
 ee search   "<query>" --workspace . --json
-ee context  "<task>"  --workspace . --max-tokens N --json  # use pack.text as a ready-to-prepend prompt fragment
+ee pack     "<task>"  --workspace . --max-tokens N --json   # use pack.text as a ready-to-prepend prompt fragment
 ee why      <id>      --workspace . --json                  # explain why a memory was selected
 ```
 
-Everything else (`ee curate`, `ee graph`, `ee handoff`, `ee diag`, `ee lab`, …) is in service of these five. `ee --help` opens with this list under "Most-used commands (start here)".
+`ee pack "<task>"` is the canonical post-triad-promotion surface; `ee context "<task>"` is retained as a soft-deprecated alias that runs the same code path and emits `deprecated_alias` (severity `info`) in its `degraded[]`. Prefer `ee pack` in new agent harnesses, scripts, and docs (see `docs/triad_compat_plan.md`). Everything else (`ee curate`, `ee graph`, `ee handoff`, `ee diag`, `ee lab`, …) is in service of these five.
 
 #### Graph-derived explanation surfaces
 
 Pack DNA explains why graph structure shaped a context pack. When debugging a
-surprising `ee context --explain --json` result, inspect
-`data.pack.packDna` before changing retrieval code or weakening tests. The
-block is explanatory, not authoritative: ordinary pack items, provenance, and
-degraded signals still decide whether the pack is usable.
+surprising `ee pack --explain --json` result (or the equivalent
+`ee context --explain --json` alias), inspect `data.pack.packDna` before
+changing retrieval code or weakening tests. The block is explanatory, not
+authoritative: ordinary pack items, provenance, and degraded signals still
+decide whether the pack is usable.
 
 Agent rules:
 
-- Use `ee context "<task>" --explain --json` when selected memories look
+- Use `ee pack "<task>" --explain --json` when selected memories look
   plausible but their graph relationship is unclear.
 - Inspect `packDna.voronoiDominator`, `packDna.communityOfMass`,
   `packDna.egoSubgraph`, and `packDna.pprNeighbors` as separate signals.
