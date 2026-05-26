@@ -28,6 +28,12 @@ required = {
     "tests/artifacts/*",
     ".beads.snapshot_*",
     ".beads.snapshot_*/*",
+    "FINAL_AUDIT_REPORT",
+    "FINAL_AUDIT_REPORT.*",
+    ".audit_log",
+    ".audit_log/*",
+    "*.audit_log",
+    ".*-report.json",
     "perf-target/*",
     "perf.data",
     "*.profraw",
@@ -56,7 +62,7 @@ if ! package_list="$(cargo package --list --allow-dirty)"; then
     exit 1
 fi
 
-forbidden_regex='(^|/)(\.beads\.snapshot_[^/]*|tests/artifacts|perf-target|tmp|temp|\.tmp|\.temp)(/|$)|(^|/)perf\.data$|\.profraw$|\.json,bak$'
+forbidden_regex='(^|/)(FINAL_AUDIT_REPORT([^/]*)?|\.audit_log|\.beads\.snapshot_[^/]*|tests/artifacts|perf-target|tmp|temp|\.tmp|\.temp)(/|$)|(^|/)perf\.data$|(^|/)\.[A-Za-z0-9_.-]*-report\.json$|\.profraw$|\.json,bak$|\.audit_log$'
 violations="$(printf '%s\n' "$package_list" | grep -E "$forbidden_regex" || true)"
 if [ -n "$violations" ]; then
     echo "error: cargo package would include generated/local artifact paths:" >&2
