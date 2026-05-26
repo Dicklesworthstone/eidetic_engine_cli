@@ -74,6 +74,28 @@ const WRITE_QUEUE_REPORT_FILE: &str = "scale_write_queue_report.json";
 const PERFORMANCE_EXPLAIN_SAMPLES_FILE: &str = "scale_performance_explain_samples.json";
 const PERFORMANCE_EXPLAIN_SAMPLE_DIR: &str = "performance-explain";
 const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
+
+/// Hard upper bound on the byte length of an individual support-bundle
+/// JSON sample file (per-sample, not per-summary). Applies to the
+/// per-file reads in `summarize_performance_explain_sample` and
+/// `summarize_swarm_report`. Each underlying file is a single
+/// `ee.search.performance_explain.v1` (~few KB typical) or
+/// `swarm-contention` report (~few KB typical) JSON document.
+///
+/// Without this cap, both call sites' `fs::read_to_string(path).ok()?`
+/// shape would pre-size its destination `String` from the file's
+/// metadata length and allocate the entire body before
+/// `serde_json::from_str` could reject it. A peer-planted or
+/// runaway-writer multi-GiB file at
+/// `<workspace>/.ee/performance-explain/<name>.json` or
+/// `<workspace>/.ee/swarm-contention/<name>.json` would OOM every
+/// `ee support bundle` invocation. The count-cap
+/// (`MAX_PERFORMANCE_EXPLAIN_SAMPLES`, `paths.truncate(16)` for swarm
+/// reports) bounds the number of files; this cap bounds the per-file
+/// allocation. Parallel to `COORDINATION_FALLBACK_LEDGER_MAX_BYTES`
+/// (same file, sibling sample reader) and the convergence-pass shape
+/// at `EVALUATION_SNAPSHOT_MAX_BYTES` (`src/science/mod.rs`).
+const MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
@@ -2364,6 +2386,45 @@ struct SupportDiagnosticRedaction {
     redacted_reasons: Vec<String>,
 }
 
+/// Bounded read for per-sample workspace JSON files.
+///
+/// The prior shape `fs::read_to_string(path).ok()?` (used by both
+/// `summarize_performance_explain_sample` and `summarize_swarm_report`)
+/// pre-sized its destination `String` from the file's stat-time
+/// metadata length. A peer-planted or runaway-writer multi-GiB file at
+/// `<workspace>/.ee/performance-explain/<name>.json` or
+/// `<workspace>/.ee/swarm-contention/<name>.json` would force a
+/// matching allocation BEFORE `serde_json::from_str` could reject the
+/// payload. The two-layer cap matches the recipe used by the
+/// convergence-pass siblings (`src/science/mod.rs::EVALUATION_SNAPSHOT_MAX_BYTES`,
+/// `src/core/symbol_graph.rs` Rust source cap via 27a3cb9b,
+/// `src/core/jsonl_import.rs::read_jsonl_source_bounded`):
+///
+/// 1. `fs::metadata(...)` rejects an oversized file at stat time.
+/// 2. `file.take(MAX + 1).read_to_string(...)` closes the growth
+///    window: if the file grew between stat and open, the bounded read
+///    still pins peak allocation to MAX + 1 bytes; the post-read
+///    `len > MAX` check then drops the sample.
+///
+/// Returns `None` on any failure (matches the existing `.ok()?` flow at
+/// the call sites — an unparseable sample is dropped from the summary,
+/// not surfaced as a hard error, since the summary already truncates to
+/// 16 samples per directory).
+fn read_support_bundle_sample_file_bounded(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    if metadata.len() > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES {
+        return None;
+    }
+    let file = fs::File::open(path).ok()?;
+    let mut content = String::new();
+    let mut limited = file.take(MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES.saturating_add(1));
+    limited.read_to_string(&mut content).ok()?;
+    if content.len() as u64 > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES {
+        return None;
+    }
+    Some(content)
+}
+
 fn discover_performance_explain_samples(workspace: &Path) -> Vec<Value> {
     let report_dir = workspace.join(".ee").join(PERFORMANCE_EXPLAIN_SAMPLE_DIR);
     let Ok(entries) = fs::read_dir(report_dir) else {
@@ -2390,7 +2451,7 @@ fn summarize_performance_explain_sample(workspace: &Path, path: &Path) -> Option
     if !regular_file_no_symlink(path) {
         return None;
     }
-    let raw_content = fs::read_to_string(path).ok()?;
+    let raw_content = read_support_bundle_sample_file_bounded(path)?;
     let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
     if parsed.get("schema") != Some(&json!(super::search::PERFORMANCE_EXPLAIN_SCHEMA_V1)) {
@@ -2537,7 +2598,7 @@ fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
     if !regular_file_no_symlink(path) {
         return None;
     }
-    let raw_content = fs::read_to_string(path).ok()?;
+    let raw_content = read_support_bundle_sample_file_bounded(path)?;
     let redaction = redact_support_diagnostic_content(&raw_content);
     let parsed = serde_json::from_str::<Value>(&raw_content).ok()?;
     let relative_path = path.strip_prefix(workspace).unwrap_or(path);
