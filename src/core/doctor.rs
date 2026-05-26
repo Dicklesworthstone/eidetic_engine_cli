@@ -801,7 +801,26 @@ fn steward_state_file_readable() -> bool {
     else {
         return false;
     };
-    std::fs::read_to_string(base.join("ee/steward/auto_enroll_state.json")).is_ok()
+    // The doctor check `steward_state_file_readable` (rendered as
+    // "Auto-enrollment steward state file is readable.") is a binary
+    // "does this state file exist as a regular file?" probe. The
+    // previous shape ran `fs::read_to_string(...).is_ok()` which
+    // allocated the WHOLE file body just to discard it — a
+    // peer-planted multi-GB `auto_enroll_state.json` (corrupt
+    // steward write, `cat /dev/urandom > auto_enroll_state.json`,
+    // hostile multi-agent host that shares $HOME) would OOM every
+    // `ee doctor` invocation. Switch to `fs::metadata` + `is_file()`,
+    // which returns the same "exists as a regular file" verdict
+    // with no body allocation. Behavior change for one edge case:
+    // a non-UTF-8 regular file now reports `true` (the steward
+    // can still inspect it; the doctor check is about presence,
+    // not content shape). Mirrors the bounded-read pass landed on
+    // `.ee/config.toml`, `.ee/index/meta.json` (ad2d302e), and the
+    // procedure verification sources (131fd011).
+    let path = base.join("ee/steward/auto_enroll_state.json");
+    std::fs::metadata(&path)
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
 }
 
 fn doctor_mesh_auto_enrollment_checks(
