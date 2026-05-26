@@ -19,6 +19,28 @@ pub const DEFAULT_INDEX_SUBDIR: &str = "index";
 const INDEX_METADATA_FILE: &str = "meta.json";
 const INDEX_STAGING_PREFIX: &str = ".publish-";
 const INDEX_RETAINED_SUFFIX: &str = ".previous";
+
+/// Maximum bytes inspected when reading `<workspace>/.ee/index/meta.json`.
+/// Real index metadata is a single tiny JSON object (`generation`,
+/// `lastRebuildAt`, `lastCheckError` — well under 1 KiB in practice);
+/// 4 MiB gives many orders of magnitude of headroom while still bounding
+/// peer-planted oversize plants on shared multi-agent checkouts.
+///
+/// Without this cap, a peer-planted or accidentally-inflated meta.json
+/// (corrupt write, `cat /dev/urandom > meta.json`, hostile multi-agent
+/// checkout) would pin a matching allocation through `fs::read_to_string`
+/// on every caller of `get_index_status` — and `get_index_status` fires
+/// on at least three production paths:
+///   - `ee index status` (`cli/mod.rs:16614`)
+///   - `ee status` (`cli/mod.rs:30302`)
+///   - `ee capabilities` via `IndexCapabilitySummary::gather`
+///     (`core/capabilities.rs:193`)
+///
+/// Matches the cap and read-shape the parallel hardening pass applied to
+/// `src/config/workspace.rs::detect_git_worktree` (c8f33694),
+/// `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+/// (7f56d89b), and the procedure verification source cap (131fd011).
+const INDEX_METADATA_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
 const READ_SURFACE_AUDIT_ACTIONS: [&str; 6] = [
     crate::db::audit_actions::SEARCH_EXECUTED,
     crate::db::audit_actions::SEARCH_RETURNED_MEM,
@@ -2906,8 +2928,8 @@ fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, Stri
         ));
     }
 
-    match std::fs::symlink_metadata(meta_path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
+    let metadata = match std::fs::symlink_metadata(meta_path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
             return Err(format!(
                 "index metadata '{}' is not a regular file",
@@ -2928,16 +2950,52 @@ fn read_index_metadata_contents(meta_path: &Path) -> Result<Option<String>, Stri
                 meta_path.display()
             ));
         }
+    };
+
+    // Reject an obvious oversize at stat time before opening the file
+    // at all — see `INDEX_METADATA_INSPECT_LIMIT` for the threat model.
+    if metadata.len() > INDEX_METADATA_INSPECT_LIMIT {
+        return Err(format!(
+            "index metadata '{}' exceeds the {INDEX_METADATA_INSPECT_LIMIT} byte cap (size={size})",
+            meta_path.display(),
+            size = metadata.len(),
+        ));
     }
 
-    std::fs::read_to_string(meta_path)
-        .map(Some)
+    // Bound the read itself so a peer-driven TOCTOU growth between the
+    // `symlink_metadata` above and the `File::open` here cannot widen
+    // peak allocation beyond `LIMIT + 1` bytes. Same shape as
+    // `src/config/workspace.rs::detect_git_worktree` (c8f33694) and
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // (7f56d89b).
+    use std::io::Read as _;
+    let file = std::fs::File::open(meta_path).map_err(|error| {
+        format!(
+            "failed to read index metadata '{}': {error}",
+            meta_path.display()
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(INDEX_METADATA_INSPECT_LIMIT.saturating_add(1))
+        .read_to_end(&mut bytes)
         .map_err(|error| {
             format!(
                 "failed to read index metadata '{}': {error}",
                 meta_path.display()
             )
-        })
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > INDEX_METADATA_INSPECT_LIMIT {
+        return Err(format!(
+            "index metadata '{}' exceeds the {INDEX_METADATA_INSPECT_LIMIT} byte cap during read",
+            meta_path.display(),
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        format!(
+            "index metadata '{}' is not valid UTF-8: {error}",
+            meta_path.display()
+        )
+    })
 }
 
 fn determine_health(
