@@ -27,6 +27,21 @@ pub const FOCUS_COMMAND_SCHEMA_V1: &str = "ee.focus.command.v1";
 pub const DEFAULT_FOCUS_CAPACITY: usize = 7;
 pub const FOCUS_STATE_RELATIVE_PATH: &str = ".ee/focus/state.json";
 
+/// Hard cap on `.ee/focus/state.json` reads. Real focus state is at most
+/// a few KiB (default capacity 7 items, each ~200 bytes of JSON), so
+/// 4 MiB is generous head-room without leaving the OOM vector open.
+/// Matches the parallel workspace-local caps in `core::memory`
+/// (e1499deb), `core::memory_scope` (696d0324), `core::context`
+/// (the just-landed pack hot-path cap), and the rest of the Round 3
+/// systematic hardening pass over workspace-readable JSON files.
+/// Without the cap, a peer-planted multi-GB `.ee/focus/state.json`
+/// (accidental — `cat /dev/urandom > .ee/focus/state.json` — or
+/// hostile in a shared multi-agent checkout) would pin a matching
+/// `read_to_string` allocation on every `ee focus show/set/add/clear`
+/// invocation despite the existing O_NOFOLLOW + regular-file checks
+/// (which guard path safety but not size).
+const FOCUS_STATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 const UNSET_FOCUS_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
 
 /// Cached focus state to avoid re-reading unchanged files on every context request.
@@ -779,16 +794,52 @@ fn load_focus(workspace_path: &Path) -> Result<LoadedFocus, DomainError> {
 }
 
 fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
-    let Some(_) = focus_state_metadata_for_read(path)? else {
+    let Some(metadata) = focus_state_metadata_for_read(path)? else {
         return Err(DomainError::Storage {
             message: format!("Focus state {} is missing.", path.display()),
             repair: Some("Run ee focus set --help to choose memory IDs.".to_owned()),
         });
     };
+    // Layer 1 of the bounded-read defense: refuse oversized files at
+    // stat time, before any open or allocation. Matches the parallel
+    // `WORKSPACE_CONFIG_MAX_BYTES` precheck in
+    // `src/core/memory.rs::read_workspace_config_if_present` (e1499deb).
+    if metadata.len() > FOCUS_STATE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read focus state {}: file is {} bytes, exceeding the {FOCUS_STATE_MAX_BYTES}-byte ceiling.",
+                path.display(),
+                metadata.len()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {FOCUS_STATE_MAX_BYTES} bytes (or `ee focus clear --json` to reset).",
+                path.display()
+            )),
+        });
+    }
     let raw = read_focus_state_file(path).map_err(|error| DomainError::Storage {
         message: format!("Failed to read focus state {}: {error}", path.display()),
         repair: Some("Check workspace .ee/focus permissions.".to_owned()),
     })?;
+    // Layer 2 of the bounded-read defense: post-read size check
+    // distinguishes "exactly at the limit" from "grew past the cap
+    // during the read" (TOCTOU growth window between the metadata
+    // pre-check and the actual `file.take(LIMIT+1).read_to_end`).
+    // `read_focus_state_file` reads through `.take(LIMIT+1)`, so a
+    // post-read length over `LIMIT` means the file grew during the
+    // read, not that an oversized file slipped past the stat.
+    if (raw.len() as u64) > FOCUS_STATE_MAX_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read focus state {}: file grew past the {FOCUS_STATE_MAX_BYTES}-byte cap after the metadata check (TOCTOU).",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {FOCUS_STATE_MAX_BYTES} bytes (or `ee focus clear --json` to reset).",
+                path.display()
+            )),
+        });
+    }
     let stored: StoredFocusState =
         serde_json::from_str(&raw).map_err(|error| DomainError::Storage {
             message: format!("Failed to parse focus state {}: {error}", path.display()),
@@ -802,7 +853,16 @@ fn read_focus_state(path: &Path) -> Result<FocusState, DomainError> {
 fn read_focus_state_file(path: &Path) -> std::io::Result<String> {
     let mut file = open_focus_state_file_for_read(path)?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
+    // Bound the read at `FOCUS_STATE_MAX_BYTES + 1` so peak allocation
+    // is pinned regardless of TOCTOU growth between
+    // `focus_state_metadata_for_read` and this call. The +1 lets the
+    // caller's post-read size check distinguish "at the limit" from
+    // "grew past the limit". Same shape as
+    // `read_workspace_config_if_present` (e1499deb) and the just-landed
+    // `context_workspace_config` bounded read.
+    (&mut file)
+        .take(FOCUS_STATE_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut raw)?;
     Ok(raw)
 }
 
