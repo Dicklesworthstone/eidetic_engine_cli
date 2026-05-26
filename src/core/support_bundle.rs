@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -81,6 +81,18 @@ const SWARM_INCIDENT_SUMMARY_FILE: &str = "swarm_incident_summary.json";
 const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
 const MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS: usize = 16;
+/// Hard upper bound on the byte length of the coordination-fallback ledger
+/// read into the support bundle summary. The ledger is an append-only
+/// workspace-local JSONL file at `.ee/coordination-fallback-evidence.jsonl`
+/// that grows on every `ee coordination evidence ingest`. The previous
+/// `fs::read_to_string(&ledger_path)` shape pre-sized its buffer from the
+/// file's metadata length, so a peer-planted multi-GB ledger would OOM the
+/// support-bundle hot path. 16 MiB matches the parallel cap in
+/// `src/core/why.rs::COORDINATION_FALLBACK_LEDGER_MAX_BYTES` (same file,
+/// parallel reader); the support bundle only summarizes the first
+/// `MAX_COORDINATION_FALLBACK_SUMMARY_RECORDS = 16` records anyway so the
+/// cap is generous for legitimate ledgers and bounded against hostile growth.
+const COORDINATION_FALLBACK_LEDGER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_VERIFICATION_EVIDENCE_SUMMARY_RECORDS: usize = 16;
 const SINGLEFLIGHT_POSTURE_FILE: &str = "singleflight_posture.json";
 const QOS_LANE_SUMMARY_FILE: &str = "qos_lane_summary.json";
@@ -2192,9 +2204,26 @@ fn collect_coordination_fallback_summary(workspace: &Path) -> Value {
         return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
     }
 
-    let Ok(content) = fs::read_to_string(&ledger_path) else {
+    // Bounded read: previous `fs::read_to_string(&ledger_path)` allocated
+    // the entire (peer-controllable, append-only) ledger into memory before
+    // we even looked at the bytes. A peer-planted or runaway-emitter multi-
+    // GB ledger would OOM the support-bundle hot path with no signal. Cap
+    // at `COORDINATION_FALLBACK_LEDGER_MAX_BYTES` to bound peak allocation;
+    // the function only summarizes the first 16 matching records anyway,
+    // so silently truncating past the cap loses nothing the summary surfaces.
+    // Matches the parallel cap on the same file in
+    // `src/core/why.rs::fetch_coordination_fallback_evidence`.
+    let mut content = String::new();
+    let Ok(mut file) = fs::File::open(&ledger_path) else {
         return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
     };
+    if (&mut file)
+        .take(COORDINATION_FALLBACK_LEDGER_MAX_BYTES)
+        .read_to_string(&mut content)
+        .is_err()
+    {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    }
     ledger["readable"] = json!(true);
 
     let mut records = Vec::new();

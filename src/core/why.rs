@@ -11,7 +11,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -2807,6 +2807,20 @@ const COORDINATION_FALLBACK_EVIDENCE_SCHEMA_V1: &str = "ee.coordination_fallback
 const COORDINATION_FALLBACK_LEDGER_RECORD_SCHEMA_V1: &str =
     "ee.coordination_fallback_ledger_record.v1";
 const COORDINATION_FALLBACK_LEDGER_FILE: &str = "coordination-fallback-evidence.jsonl";
+/// Hard upper bound on the byte length of the coordination-fallback ledger
+/// read by `ee why`. The ledger is workspace-local and APPEND-ONLY: every
+/// `ee coordination evidence ingest` call writes another JSONL record. A
+/// peer agent (or a runaway emitter) could grow the file unboundedly,
+/// and the previous `BufReader::new(file).lines()` shape allocated each
+/// line into a fresh String — so a single multi-GB line (no `\n`) or an
+/// accidentally-inflated multi-GB ledger would force a matching `String`
+/// pre-size and OOM `ee why`. 16 MiB matches `HANDOFF_FILE_MAX_BYTES` and
+/// is generous for a realistic ledger of evidence summaries (each record
+/// is a few KB at most). Truncation past this cap surfaces silently as
+/// "malformed" lines through the existing `malformed_count` accounting;
+/// the leading-comment in `support_bundle.rs::collect_coordination_fallback_summary`
+/// uses the same cap on the same file.
+const COORDINATION_FALLBACK_LEDGER_MAX_BYTES: u64 = 16 * 1024 * 1024;
 
 fn fetch_history(conn: &DbConnection, memory_id: &str) -> WhyEvidenceFetch<MemoryHistorySummary> {
     let stored_entries = match conn.list_audit_by_target("memory", memory_id, None) {
@@ -2927,7 +2941,20 @@ fn fetch_coordination_fallback_evidence(
     let mut malformed_count = 0_u32;
     let mut items = Vec::new();
 
-    for line in BufReader::new(file).lines() {
+    // Cap the read at `COORDINATION_FALLBACK_LEDGER_MAX_BYTES`. The previous
+    // unbounded `BufReader::new(file).lines()` would allocate each line into
+    // a `String` whose capacity grows to fit the line; a peer-planted multi-
+    // GB single-line record (no embedded `\n`) would OOM `ee why`. Wrapping
+    // the handle in `file.take(MAX)` bounds peak allocation while preserving
+    // the streaming line-by-line shape — a truncated tail line just becomes
+    // "malformed" through the existing `malformed_count` path. Same defense
+    // as the bounded reads on `.ee/config.toml` (`memory.rs::WORKSPACE_CONFIG_MAX_BYTES`,
+    // `curate.rs::CURATE_CONFIG_MAX_BYTES`, `profile.rs::PROFILE_CONFIG_MAX_BYTES`,
+    // `config_surface.rs::CONFIG_SURFACE_MAX_BYTES`) and on the handoff capsule
+    // (`handoff.rs::HANDOFF_FILE_MAX_BYTES`) — and the parallel reader in
+    // `support_bundle.rs::collect_coordination_fallback_summary` uses the same
+    // cap on the same file.
+    for line in BufReader::new(file.take(COORDINATION_FALLBACK_LEDGER_MAX_BYTES)).lines() {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
