@@ -230,8 +230,24 @@ setup_proxy() {
 
 # Curl wrapper that honors proxy and standard timeouts. Treat as `curl -fsSL`
 # with proxy + retry pre-wired.
+#
+# Defaults --connect-timeout / --max-time so a hung proxy or stalled mirror
+# can't make the installer wait indefinitely (the previous shape relied
+# only on default kernel TCP timeouts, which can hold the installer in
+# read() forever once a connection is established). Callers can override
+# either ceiling by passing the flag again — curl honors the LAST
+# occurrence of each option, so the preflight check at line 626
+# (--connect-timeout 3 --max-time 5) and any other tighter caller still
+# tightens, never loosens. The 600s --max-time is generous enough for the
+# largest expected tarball download on a slow link without letting a stuck
+# server pin the installer past a normal operator's patience window.
 ee_curl() {
-  curl -fsSL --retry 2 --retry-delay 1 "${PROXY_ARGS[@]}" "$@"
+  curl -fsSL \
+    --connect-timeout 15 \
+    --max-time 600 \
+    --retry 2 \
+    --retry-delay 1 \
+    "${PROXY_ARGS[@]}" "$@"
 }
 
 # ───────────────────────────────────────────────────────────────────────────

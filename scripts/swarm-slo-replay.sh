@@ -146,8 +146,14 @@ def read_rows(path: Path):
                 ) from error
             if not isinstance(payload, dict):
                 raise SystemExit(f"swarm-slo-replay: line {line_no} is not a JSON object")
-            schema = str(payload.get("schema", ""))
-            if schema == "":
+            schema = payload.get("schema")
+            # Reject non-string schemas (None, int, list, dict, ...) here
+            # instead of coercing through str(...) — the prior shape
+            # `str(payload.get("schema", ""))` accepted `{"schema": null}`
+            # as the literal string "None" and bypassed the missing-schema
+            # check, leaking a corrupt row through replay with the spurious
+            # schema "None" in downstream counts.
+            if not isinstance(schema, str) or schema == "":
                 raise SystemExit(f"swarm-slo-replay: line {line_no} missing schema")
             rows.append((line_no, raw, payload))
     return rows
