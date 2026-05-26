@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.reflect.ingest.v1.json",
+  "title": "ee.reflect.ingest.v1",
+  "description": "Data payload returned by ee reflect ingest after validating an ee.reflect.result.v1 artifact against the local request ledger.",
+  "type": "object",
+  "required": [
+    "schema",
+    "command",
+    "version",
+    "workspaceId",
+    "workspacePath",
+    "databasePath",
+    "reflectionKind",
+    "requestId",
+    "requestHash",
+    "resultHash",
+    "sourceRefs",
+    "candidateId",
+    "consumedAt",
+    "dryRun",
+    "durableMutation",
+    "outcome",
+    "durableIngestOutcome",
+    "validation",
+    "result",
+    "nextCommands"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"type": "string", "const": "ee.reflect.ingest.v1"},
+    "command": {"type": "string", "const": "reflect ingest"},
+    "version": {"type": "string", "minLength": 1},
+    "workspaceId": {"type": "string", "minLength": 1},
+    "workspacePath": {"type": "string", "minLength": 1},
+    "databasePath": {"type": "string", "minLength": 1},
+    "reflectionKind": {"$ref": "#/$defs/reflectionKind"},
+    "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
+    "requestHash": {"$ref": "#/$defs/blake3Hash"},
+    "resultHash": {"$ref": "#/$defs/blake3Hash"},
+    "sourceRefs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/sourceRef"}
+    },
+    "candidateId": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "pattern": "^curate_[0-9a-f]{26}$"}
+      ]
+    },
+    "consumedAt": {"type": "string", "format": "date-time"},
+    "dryRun": {"type": "boolean"},
+    "durableMutation": {"type": "boolean"},
+    "outcome": {
+      "type": "string",
+      "enum": [
+        "would_insert",
+        "inserted",
+        "idempotent_replay",
+        "missing_ledger",
+        "expired",
+        "mismatched_replay",
+        "unavailable_status",
+        "not_run"
+      ]
+    },
+    "durableIngestOutcome": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/durableIngestOutcome"}
+      ]
+    },
+    "validation": {
+      "type": "object",
+      "required": ["requestLedger", "challenge", "sourceLock", "replayGate"],
+      "additionalProperties": false,
+      "properties": {
+        "requestLedger": {"type": "string", "const": "matched"},
+        "challenge": {"type": "string", "enum": ["verified", "replayed"]},
+        "sourceLock": {"type": "string", "const": "current"},
+        "replayGate": {
+          "type": "string",
+          "enum": [
+            "missing",
+            "pending",
+            "expired",
+            "accepted_replay",
+            "mismatched_replay",
+            "unavailable_status"
+          ]
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "description": "The submitted ee.reflect.result.v1 artifact. Validate with docs/schemas/ee.reflect.result.v1.json for full shape.",
+      "required": ["schema", "requestId", "requestHash", "reflectionKind"],
+      "additionalProperties": true,
+      "properties": {
+        "schema": {"type": "string", "const": "ee.reflect.result.v1"},
+        "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
+        "requestHash": {"$ref": "#/$defs/blake3Hash"},
+        "reflectionKind": {"$ref": "#/$defs/reflectionKind"}
+      }
+    },
+    "nextCommands": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    }
+  },
+  "field_presets": {
+    "minimal": ["candidateId", "outcome", "resultHash"],
+    "summary": ["command", "workspaceId", "reflectionKind", "requestId", "resultHash", "candidateId", "outcome", "validation", "nextCommands"],
+    "standard": ["command", "version", "workspaceId", "reflectionKind", "requestId", "requestHash", "resultHash", "sourceRefs", "candidateId", "consumedAt", "dryRun", "durableMutation", "outcome", "durableIngestOutcome", "validation", "nextCommands"],
+    "full": ["*"]
+  },
+  "$defs": {
+    "reflectionKind": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "insight",
+        "gaps",
+        "strengths",
+        "question",
+        "plan",
+        "summary_insight_strengths",
+        "plan_kinds",
+        "procedural_extract",
+        "contradiction_resolve"
+      ]
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[0-9a-f]{64}$"
+    },
+    "sourceRef": {
+      "type": "object",
+      "required": ["kind", "id", "contentHash"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"type": "string", "enum": ["memory", "evidence_span"]},
+        "id": {"type": "string", "minLength": 1},
+        "contentHash": {"$ref": "#/$defs/blake3Hash"}
+      }
+    },
+    "durableIngestOutcome": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": true,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "inserted",
+            "idempotentReplay",
+            "missingLedger",
+            "expired",
+            "mismatchedReplay",
+            "unavailableStatus"
+          ]
+        },
+        "candidateId": {"type": "string", "pattern": "^curate_[0-9a-f]{26}$"}
+      }
+    }
+  }
+}

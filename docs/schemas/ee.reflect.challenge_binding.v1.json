@@ -24,7 +24,7 @@
     "requestId": {"type": "string", "pattern": "^reflect_req_[0-9a-f]{16}$"},
     "requestHash": {"$ref": "#/$defs/blake3Hash"},
     "workspaceId": {"type": "string", "minLength": 1},
-    "reflectionKind": {"type": "string", "minLength": 1},
+    "reflectionKind": {"$ref": "#/$defs/reflectionKind"},
     "sourcePackageHash": {"$ref": "#/$defs/blake3Hash"},
     "sourceContentHashes": {
       "type": "array",
@@ -42,6 +42,21 @@
     "full": ["*"]
   },
   "$defs": {
+    "reflectionKind": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "insight",
+        "gaps",
+        "strengths",
+        "question",
+        "plan",
+        "summary_insight_strengths",
+        "plan_kinds",
+        "procedural_extract",
+        "contradiction_resolve"
+      ]
+    },
     "blake3Hash": {
       "type": "string",
       "pattern": "^blake3:[0-9a-f]{64}$"

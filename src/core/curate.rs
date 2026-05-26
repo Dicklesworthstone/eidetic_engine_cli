@@ -3290,11 +3290,25 @@ fn mi_dedup_proposals_from_memories(
             proposals.push(candidate);
         }
     }
+    // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`
+    // shape. `StoredCurationCandidate::confidence: f32` is loaded from
+    // SQLite and is finite today because every insert path runs the
+    // value through `UnitScore::parse`, which rejects NaN / Inf. But
+    // the proposals returned here render through `mi_dedup_curation_candidates`
+    // into `ee curate list` and `ee curate review` output — a
+    // determinism-contract surface (same workspace + same memories →
+    // byte-identical proposal order). `partial_cmp(NaN, x)` returns
+    // `None`, which `unwrap_or(Equal)` then collapses onto an
+    // unspecified equivalence class; a future refactor (raw SQL
+    // insert, a new derivation that bypasses `UnitScore`) could leak
+    // NaN here and silently break the contract without tripping any
+    // existing test. Mirrors `src/core/influence.rs` (18f20375) and
+    // `src/graph/bipartite_provenance.rs::load_bearing_memory_items`
+    // (23719e1e).
     proposals.sort_by(|left, right| {
         right
             .confidence
-            .partial_cmp(&left.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&left.confidence)
             .then_with(|| left.id.cmp(&right.id))
     });
     proposals
@@ -3571,10 +3585,18 @@ fn sort_curate_candidates(
                 .created_at
                 .cmp(&left.created_at)
                 .then_with(|| left.id.cmp(&right.id)),
+            // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`
+            // shape — see the equivalent comment at the
+            // `mi_dedup_curation_candidates` sort site above for the
+            // determinism-contract rationale. The `confidence` field is
+            // finite today because every insert path runs the value
+            // through `UnitScore::parse`, but a future refactor that
+            // bypasses `UnitScore` (raw SQL insert, new derivation
+            // path) would silently break the byte-identical ordering
+            // contract under `partial_cmp(NaN, x) == None`.
             CurateCandidateSortMode::Confidence => right
                 .confidence
-                .partial_cmp(&left.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&left.confidence)
                 .then_with(|| right.created_at.cmp(&left.created_at))
                 .then_with(|| left.id.cmp(&right.id)),
         };

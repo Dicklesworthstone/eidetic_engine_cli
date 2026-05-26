@@ -12,6 +12,7 @@
     "workspacePath",
     "databasePath",
     "reflectionKind",
+    "gapsOnly",
     "requestId",
     "requestHash",
     "sourcePackageHash",
@@ -54,7 +55,21 @@
     },
     "reflectionKind": {
       "type": "string",
-      "minLength": 1
+      "enum": [
+        "summary",
+        "insight",
+        "gaps",
+        "strengths",
+        "question",
+        "plan",
+        "summary_insight_strengths",
+        "plan_kinds",
+        "procedural_extract",
+        "contradiction_resolve"
+      ]
+    },
+    "gapsOnly": {
+      "type": "boolean"
     },
     "requestId": {
       "type": "string",
@@ -147,8 +162,8 @@
   },
   "field_presets": {
     "minimal": ["requestId", "requestHash", "expiresAt"],
-    "summary": ["command", "workspaceId", "reflectionKind", "requestId", "requestHash", "sourceRefs", "persisted", "nextCommands"],
-    "standard": ["command", "version", "workspaceId", "reflectionKind", "requestId", "requestHash", "sourcePackageHash", "createdAt", "expiresAt", "hmacKeyId", "sourceRefs", "dryRun", "durableMutation", "persisted", "ledgerOutcome", "nextCommands"],
+    "summary": ["command", "workspaceId", "reflectionKind", "gapsOnly", "requestId", "requestHash", "sourceRefs", "persisted", "nextCommands"],
+    "standard": ["command", "version", "workspaceId", "reflectionKind", "gapsOnly", "requestId", "requestHash", "sourcePackageHash", "createdAt", "expiresAt", "hmacKeyId", "sourceRefs", "dryRun", "durableMutation", "persisted", "ledgerOutcome", "nextCommands"],
     "full": ["*"]
   },
   "$defs": {

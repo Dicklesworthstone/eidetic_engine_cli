@@ -23,7 +23,21 @@
     "requestHash": {"$ref": "#/$defs/blake3Hash"},
     "challenge": {"$ref": "#/$defs/challengeEcho"},
     "producer": {"$ref": "#/$defs/producer"},
-    "reflectionKind": {"type": "string", "minLength": 1},
+    "reflectionKind": {
+      "type": "string",
+      "enum": [
+        "summary",
+        "insight",
+        "gaps",
+        "strengths",
+        "question",
+        "plan",
+        "summary_insight_strengths",
+        "plan_kinds",
+        "procedural_extract",
+        "contradiction_resolve"
+      ]
+    },
     "citedSourceIds": {
       "type": "array",
       "maxItems": 64,
@@ -33,6 +47,7 @@
     "body": {"type": "string", "minLength": 1, "maxLength": 32768},
     "kindFields": {
       "type": "object",
+      "description": "Kind-specific structured fields. Gaps results must include knowledgeGaps; summary_insight_strengths should include summary, insights, or strengths; plan_kinds should include planKinds or steps.",
       "maxProperties": 32,
       "properties": {
         "knowledgeGaps": {
