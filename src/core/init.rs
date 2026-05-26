@@ -670,13 +670,22 @@ fn harden_init_database_mode(_path: &Path, _allow_symlink: bool) -> io::Result<(
 
 #[cfg(unix)]
 fn set_init_file_permissions(file: &File, mode: u32) -> io::Result<()> {
-    // rustix 1.1+ tightened `Mode::from_raw_mode` to take `u16` (matching
-    // the POSIX `mode_t` width on platforms where it's narrower). Convert
-    // here; the only callers pass values ≤ 0o777 which always fit.
-    let raw: u16 = mode.try_into().map_err(|_| {
+    // `rustix::fs::Mode::from_raw_mode` takes a `RawMode` that aliases
+    // the platform's POSIX `mode_t` and is therefore target-dependent:
+    // `u32` on Linux (both the `linux_raw` and libc/glibc backends use
+    // `ffi::c_uint`) and `u16` on macOS / BSDs (where `c::mode_t` is
+    // narrower). Pinning a fixed integer width here breaks the build on
+    // whichever platform doesn't match — `u16` would fail to compile on
+    // Linux (`expected u32, found u16` at the call site) and `u32`
+    // would fail to compile on macOS. Convert through the
+    // platform-aliased `rustix::fs::RawMode` so the same call site
+    // works on every supported target: on Linux `try_into` is the
+    // identity `u32 → u32`, on macOS it is the range-checked
+    // `u32 → u16` (callers always pass values ≤ 0o777, which fit).
+    let raw: rustix::fs::RawMode = mode.try_into().map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("init file mode {mode:#o} does not fit in u16 mode_t"),
+            format!("init file mode {mode:#o} does not fit in the target platform's mode_t"),
         )
     })?;
     rustix::fs::fchmod(file, rustix::fs::Mode::from_raw_mode(raw)).map_err(io::Error::from)
