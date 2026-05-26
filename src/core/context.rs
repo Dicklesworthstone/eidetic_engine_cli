@@ -5444,6 +5444,23 @@ fn adaptive_budget_decision_for_context(
     )))
 }
 
+/// Upper bound on `.ee/config.toml` reads from the `ee pack` / `ee context`
+/// hot path. Real configs are kilobytes to low tens of KiB; 4 MiB is a very
+/// generous ceiling that matches the parallel cap `WORKSPACE_CONFIG_MAX_BYTES`
+/// in `core::memory` (e1499deb), the operating-profile apply cap (31be37fd),
+/// the `ee config get/set` surface cap (47d6b07c), the structural-decay
+/// feature-check cap (0fe4a339), and the `load_team_members` cap (696d0324).
+/// Without the cap, a peer-planted multi-GB `.ee/config.toml` (accidental
+/// — `cat /dev/urandom > .ee/config.toml` — or hostile in a shared
+/// multi-agent checkout) would pin a matching allocation on every
+/// `ee pack` / `ee context` invocation through eight distinct sub-paths
+/// (Pack DNA, L2 pack cache, PPR rerank, memory-tier admission, adaptive
+/// pack budget, read-pool snapshot pin, proximity-to-seed scoring, PPR
+/// weight). The blast radius is amplified by `ee pack` being the canonical
+/// agent surface — one bad config silently OOMs every other agent's
+/// pack/context calls for the workspace.
+const CONTEXT_WORKSPACE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn context_workspace_config(
     workspace_path: &Path,
     surface: &str,
@@ -5459,12 +5476,56 @@ fn context_workspace_config(
             ));
         }
     }
-    let contents = match read_context_file_to_string_no_follow(&config_path) {
-        Ok(contents) => contents,
+    // Two layers of defense against an oversized `.ee/config.toml`,
+    // matching the `read_workspace_config_if_present` shape landed in
+    // e1499deb for the parallel `ee remember` hot path:
+    //  1. `symlink_metadata().len()` pre-check at stat time, before any
+    //     allocation. Refuses with a structured error naming the path
+    //     and the ceiling.
+    //  2. `file.take(LIMIT + 1).read_to_end(...)` for the actual read,
+    //     closing the TOCTOU growth window where a peer could grow the
+    //     file between stat and read. Post-read length re-check
+    //     converts the bounded read to a TOCTOU-specific error.
+    if let Ok(metadata) = fs::symlink_metadata(&config_path) {
+        if metadata.len() > CONTEXT_WORKSPACE_CONFIG_MAX_BYTES {
+            return Err(format!(
+                "{surface} skipped because workspace config {} is {} bytes, exceeding the {CONTEXT_WORKSPACE_CONFIG_MAX_BYTES}-byte ceiling.",
+                config_path.display(),
+                metadata.len()
+            ));
+        }
+    }
+    let mut file = match open_context_file_for_read_no_follow(&config_path) {
+        Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(format!(
                 "{surface} skipped because workspace config {} could not be read: {error}",
+                config_path.display()
+            ));
+        }
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = (&mut file)
+        .take(CONTEXT_WORKSPACE_CONFIG_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+    {
+        return Err(format!(
+            "{surface} skipped because workspace config {} could not be read: {error}",
+            config_path.display()
+        ));
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CONTEXT_WORKSPACE_CONFIG_MAX_BYTES {
+        return Err(format!(
+            "{surface} skipped because workspace config {} grew past the {CONTEXT_WORKSPACE_CONFIG_MAX_BYTES}-byte cap after the metadata check (TOCTOU).",
+            config_path.display()
+        ));
+    }
+    let contents = match String::from_utf8(bytes) {
+        Ok(contents) => contents,
+        Err(error) => {
+            return Err(format!(
+                "{surface} skipped because workspace config {} contents are not valid UTF-8: {error}",
                 config_path.display()
             ));
         }
@@ -11582,6 +11643,44 @@ pub fn unrelated_context() -> u64 {
         assert!(
             error.contains("symbolic link"),
             "expected symlink rejection, got {error}"
+        );
+        Ok(())
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `context_workspace_config`. Pre-fix the helper called
+    /// `read_context_file_to_string_no_follow` on `.ee/config.toml` with no
+    /// size guard, so a peer-planted multi-MiB config would pin a matching
+    /// allocation on every `ee pack` invocation through eight distinct
+    /// sub-paths (Pack DNA, L2 pack cache, PPR rerank, memory-tier
+    /// admission, adaptive pack budget, read-pool snapshot pin,
+    /// proximity-to-seed scoring, PPR weight). Same defect class that
+    /// e1499deb closed for the parallel `ee remember` hot path.
+    #[test]
+    fn context_workspace_config_rejects_oversize_config_file() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let workspace = tempdir.path().join("workspace");
+        let ee_dir = workspace.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        let config_path = ee_dir.join("config.toml");
+        let cap = usize::try_from(super::CONTEXT_WORKSPACE_CONFIG_MAX_BYTES)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        std::fs::write(&config_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = super::context_workspace_config(&workspace, "test context config")
+            .expect_err("oversize context config must be rejected before unbounded allocation");
+
+        assert!(
+            error.contains("exceeding the"),
+            "rejection message must cite the ceiling; got: {error}"
+        );
+        assert!(
+            error.contains(&super::CONTEXT_WORKSPACE_CONFIG_MAX_BYTES.to_string()),
+            "rejection message must name the cap constant; got: {error}"
         );
         Ok(())
     }
