@@ -254,6 +254,7 @@ in the same commit, keeping the catalog complete by construction.
 | `graph_dominance_no_revision_chain` | memory revise | info | bd-bife.6 |
 | `graph_skyline_degenerate_communities` | status, insights | info | bd-bife.6 |
 | `graph_hits_convergence_failure` | context, why | warning | bd-bife.6 |
+| `git_ahead_unavailable` | hook git-readiness | warning | bd-2gc7r.3 |
 | `maintenance_job_history_write_failed` | job run | high | bd-17c65.10.6 (J6) |
 | `maintenance_job_since_invalid` | job list | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_history_read_failed` | job list, job show | medium | bd-17c65.10.6 (J6) |

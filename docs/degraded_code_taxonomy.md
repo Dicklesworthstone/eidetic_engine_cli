@@ -347,6 +347,11 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `stale_line_span` | warning | (TBD) |
 | `symbol_index_stale` | warning | (TBD) |
 
+#### Hook readiness (1)
+| Code | Severity (canonical) | Bead |
+|------|----------------------|------|
+| `git_ahead_unavailable` | warning | bd-2gc7r.3 |
+
 #### Disk pressure and build admission (4)
 | Code | Severity | Bead |
 |------|----------|------|

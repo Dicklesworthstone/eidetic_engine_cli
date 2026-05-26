@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "git_ahead_unavailable",
+  "introduced_by": {
+    "bead": "bd-2gc7r.3",
+    "epic_letter": "E"
+  },
+  "surfaces": [
+    "hook git-readiness"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "`ee hook git-readiness` could not run the read-only Git status probe used to summarize pre-push ahead risk. The command still reports hook readiness, but `data.report.aheadRisk.available` is false and `data.report.aheadRisk.degradedCodes` contains this code.",
+    "setup_commands": [
+      "git init --initial-branch=main /tmp/ee-git-ahead-unavailable-fixture",
+      "PATH=/nonexistent /path/to/ee hook git-readiness --repository-root /tmp/ee-git-ahead-unavailable-fixture --json"
+    ],
+    "invocation": "ee hook git-readiness --repository-root <repo-with-git-status-unavailable> --json"
+  },
+  "expected_emission": {
+    "code": "git_ahead_unavailable",
+    "severity": "warning",
+    "message_contains": [
+      "git_ahead_unavailable"
+    ]
+  }
+}
