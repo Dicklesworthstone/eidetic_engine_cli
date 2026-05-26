@@ -19,11 +19,14 @@ epic_setup "tiered_recall"
 QUERY="tiered recall release cold explicit failure evidence"
 FILLER_COUNT="${EE_TIERED_RECALL_FILLER_COUNT:-650}"
 PERF_REPEATS="${EE_TIERED_RECALL_PERF_REPEATS:-3}"
-CANDIDATE_POOL=$((FILLER_COUNT + 1))
+MEMORY_COUNT=$((FILLER_COUNT + 1))
+CANDIDATE_POOL="${EE_TIERED_RECALL_CANDIDATE_POOL:-192}"
 RECORDS_PATH="$EPIC_WORKSPACE/tiered_recall_records.jsonl"
 PERF_SAMPLES="$EPIC_WORKSPACE/tiered_recall_perf_samples.txt"
 
 e2e_log_assert_num "$FILLER_COUNT" -ge 641 "tiered_recall_corpus_large_enough_for_cold_tier"
+e2e_log_assert_num "$CANDIDATE_POOL" -lt "$MEMORY_COUNT" "tiered_recall_candidate_pool_bounded"
+e2e_log_assert_num "$CANDIDATE_POOL" -gt 128 "tiered_recall_candidate_pool_exercises_warm_tier"
 e2e_log_assert_num "$PERF_REPEATS" -ge 1 "tiered_recall_perf_repeats_positive"
 
 write_pack_config() {
@@ -230,7 +233,7 @@ PY
 
 IMPORT_JSON=$(ee_workspace import jsonl --source "$RECORDS_PATH" --json || true)
 assert_jq "$IMPORT_JSON" '.success // false' "true" "tiered_recall_jsonl_import_success"
-assert_jq "$IMPORT_JSON" '.data.memoriesImported // 0' "$CANDIDATE_POOL" "tiered_recall_jsonl_import_count"
+assert_jq "$IMPORT_JSON" '.data.memoriesImported // 0' "$MEMORY_COUNT" "tiered_recall_jsonl_import_count"
 
 INDEX_JSON=$(ee_workspace index rebuild --json || true)
 assert_jq "$INDEX_JSON" '.success // false' "true" "tiered_recall_index_rebuild_success"

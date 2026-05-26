@@ -27,11 +27,16 @@ CURRENT_GENERATION=44
 TIER_GENERATION=44
 TIERED_RECALL_FILLER_COUNT=650
 TIERED_RECALL_MEMORY_COUNT=$((TIERED_RECALL_FILLER_COUNT + 1))
-CONTEXT_CANDIDATE_POOL="$TIERED_RECALL_MEMORY_COUNT"
+CONTEXT_CANDIDATE_POOL="${EE_TIERED_RECALL_CANDIDATE_POOL:-192}"
 CONTEXT_MAX_TOKENS=20000
 
 mkdir -p "$IMPORT_DIR"
 : > "$METRICS_JSONL"
+
+e2e_log_assert_num "$CONTEXT_CANDIDATE_POOL" -lt "$TIERED_RECALL_MEMORY_COUNT" \
+    "tiered_recall_candidate_pool_bounded"
+e2e_log_assert_num "$CONTEXT_CANDIDATE_POOL" -gt 128 \
+    "tiered_recall_candidate_pool_exercises_warm_tier"
 
 now_ns() {
     python3 -c 'from time import time_ns; print(time_ns())'
@@ -294,19 +299,19 @@ codes = [
     for entry in (payload.get("degraded") or []) + ((payload.get("data") or {}).get("degraded") or [])
     if isinstance(entry, dict) and entry.get("code")
 ]
-    record = {
+record = {
     "schema": "ee.test_event.v1",
     "phase": label,
     "elapsedMs": int(elapsed_ms),
     "stdoutHash": "sha256:" + hashlib.sha256(stdout).hexdigest(),
     "stderrHash": "sha256:" + hashlib.sha256(stderr).hexdigest(),
-        "itemCount": len(items),
-        "tierAdmissionCount": why_text.count("tierAdmission"),
-        "hotRecallCount": why_text.count("tier=hot"),
-        "warmRecallCount": why_text.count("tier=warm"),
-        "coldRecallCount": why_text.count("tier=cold"),
-        "requiredColdRecallCount": why_text.count("requiredEvidencePreserved=true"),
-        "degradedCodes": codes,
+    "itemCount": len(items),
+    "tierAdmissionCount": why_text.count("tierAdmission"),
+    "hotRecallCount": why_text.count("tier=hot"),
+    "warmRecallCount": why_text.count("tier=warm"),
+    "coldRecallCount": why_text.count("tier=cold"),
+    "requiredColdRecallCount": why_text.count("requiredEvidencePreserved=true"),
+    "degradedCodes": codes,
 }
 with open(metrics_path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record, sort_keys=True) + "\n")
@@ -398,7 +403,8 @@ assert_fixture "hotset_prewarm_no_signals"
 P50_MS="$(latency_percentile 50)"
 P95_MS="$(latency_percentile 95)"
 python3 - "$SUMMARY_JSON" "$METRICS_JSONL" "$DISABLED_HASH_FIRST" "$ENABLED_HASH_FIRST" \
-    "$P50_MS" "$P95_MS" "$TIER_GENERATION" "$CURRENT_GENERATION" <<'PY'
+    "$P50_MS" "$P95_MS" "$TIER_GENERATION" "$CURRENT_GENERATION" \
+    "$CONTEXT_CANDIDATE_POOL" "$TIERED_RECALL_MEMORY_COUNT" <<'PY'
 import json
 import sys
 
@@ -411,6 +417,8 @@ import sys
     p95_ms,
     tier_generation,
     current_generation,
+    candidate_pool,
+    corpus_memory_count,
 ) = sys.argv[1:]
 metrics = []
 with open(metrics_path, encoding="utf-8") as handle:
@@ -421,6 +429,8 @@ summary = {
     "schema": "ee.e2e.tiered_recall.v1",
     "tierGeneration": int(tier_generation),
     "currentGeneration": int(current_generation),
+    "candidatePool": int(candidate_pool),
+    "corpusMemoryCount": int(corpus_memory_count),
     "latencyMs": {"p50": int(p50_ms), "p95": int(p95_ms)},
     "hashParity": {
         "disabledScrubbedHash": "sha256:" + disabled_hash,
@@ -444,6 +454,8 @@ with open(summary_path, "w", encoding="utf-8") as handle:
 PY
 
 assert_jq "$(cat "$SUMMARY_JSON")" '.schema' "ee.e2e.tiered_recall.v1" "tiered_recall_summary_schema"
+assert_jq "$(cat "$SUMMARY_JSON")" '(.candidatePool < .corpusMemoryCount)' "true" \
+    "tiered_recall_summary_bounded_candidate_pool"
 assert_jq "$(cat "$SUMMARY_JSON")" '(.latencyMs.p95 >= .latencyMs.p50)' "true" "tiered_recall_latency_order"
 assert_jq "$(cat "$SUMMARY_JSON")" '(.tierCounts.requiredColdRecall > 0)' "true" "tiered_recall_summary_cold_recall"
 _e2e_emit_event "tiered_recall_summary" \

@@ -8794,6 +8794,39 @@ mod tests {
     }
 
     #[test]
+    fn memory_tier_admission_does_not_need_full_pool_to_mark_required_cold() -> Result<(), String> {
+        let hot_id = MemoryId::from_uuid(uuid::Uuid::from_u128(936));
+        let warm_id = MemoryId::from_uuid(uuid::Uuid::from_u128(937));
+        let required_id = MemoryId::from_uuid(uuid::Uuid::from_u128(938));
+        let mut candidates = vec![
+            tier_candidate(hot_id, 0.91, "matched 'release failure' via lexical")?,
+            tier_candidate(warm_id, 0.89, "matched 'release failure' via lexical")?,
+            tier_candidate(required_id, 0.87, "matched 'release failure' via lexical")?,
+        ];
+        let memories = tier_memory_map(vec![
+            tier_memory(hot_id, 0.95, 0.95, 0.95, "rule"),
+            tier_memory(warm_id, 0.60, 0.60, 0.60, "rule"),
+            tier_memory(required_id, 0.05, 0.05, 0.05, "failure"),
+        ]);
+
+        let metrics = super::apply_memory_tier_candidate_admission_from_memories(
+            &mut candidates,
+            &memories,
+            crate::cache::hotset::MemoryTierPolicyConfig::new(1, 8, 700),
+        );
+
+        assert_eq!(metrics.cold_candidates, 1);
+        assert_eq!(metrics.required_cold_candidates, 1);
+        let required = candidates
+            .iter()
+            .find(|candidate| candidate.memory_id == required_id)
+            .expect("required cold candidate");
+        assert!(required.why.contains("tierAdmission tier=cold"));
+        assert!(required.why.contains("requiredEvidencePreserved=true"));
+        Ok(())
+    }
+
+    #[test]
     fn memory_tier_admission_is_deterministic_for_tied_inputs() -> Result<(), String> {
         let lower_id = MemoryId::from_uuid(uuid::Uuid::from_u128(934));
         let higher_id = MemoryId::from_uuid(uuid::Uuid::from_u128(935));

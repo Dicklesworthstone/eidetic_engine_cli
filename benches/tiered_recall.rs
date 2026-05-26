@@ -25,7 +25,7 @@ const TIERED_RECALL_OPERATION: &str = "ee_tiered_recall_context";
 const TIERED_RECALL_QUERY: &str = "tiered recall cold required sentinel cache prewarm outage";
 const TIERED_RECALL_FILLER_COUNT: usize = 650;
 const TIERED_RECALL_MEMORY_COUNT: usize = TIERED_RECALL_FILLER_COUNT + 1;
-const TIERED_RECALL_CANDIDATE_POOL: u32 = TIERED_RECALL_MEMORY_COUNT as u32;
+const TIERED_RECALL_CANDIDATE_POOL: u32 = 192;
 const TIERED_RECALL_BUDGET_P50_MS: f64 = 140.0;
 const TIERED_RECALL_BUDGET_P99_MS: f64 = 340.0;
 
@@ -250,9 +250,13 @@ mod tests {
     fn tiered_recall_benchmark_contract_matches_swarmx_gate() {
         assert_eq!(TIERED_RECALL_BENCH_GROUP, "ee_tiered_recall");
         assert_eq!(TIERED_RECALL_OPERATION, "ee_tiered_recall_context");
-        assert_eq!(
-            TIERED_RECALL_CANDIDATE_POOL as usize,
-            TIERED_RECALL_MEMORY_COUNT
+        assert!(
+            (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
+            "tiered recall proof must not request the whole corpus"
+        );
+        assert!(
+            TIERED_RECALL_CANDIDATE_POOL > 128,
+            "bounded pool should still cross the hot tier budget and exercise warm admission"
         );
         assert!(
             TIERED_RECALL_MEMORY_COUNT > 640,

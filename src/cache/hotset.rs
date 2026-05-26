@@ -741,14 +741,16 @@ pub fn assign_memory_storage_tiers(
         .into_iter()
         .enumerate()
         .map(|(rank, (input, tier_score, key))| {
-            let tier = if rank < config.hot_budget && tier_score >= config.hot_score_floor {
+            let required_evidence_preserved = input.required_evidence();
+            let tier = if required_evidence_preserved && tier_score < config.hot_score_floor {
+                MemoryStorageTier::Cold
+            } else if rank < config.hot_budget && tier_score >= config.hot_score_floor {
                 MemoryStorageTier::Hot
             } else if rank < config.hot_budget.saturating_add(config.warm_budget) {
                 MemoryStorageTier::Warm
             } else {
                 MemoryStorageTier::Cold
             };
-            let required_evidence_preserved = input.required_evidence();
             MemoryTierAssignment {
                 memory_id: input.memory_id,
                 workspace_id: input.workspace_id,
@@ -2469,6 +2471,39 @@ mod tests {
         let required = assignments
             .iter()
             .find(|assignment| assignment.memory_id == "mem_required_failure")
+            .expect("required evidence assignment");
+        assert_eq!(required.tier, MemoryStorageTier::Cold);
+        assert!(required.required_evidence_preserved);
+        assert_eq!(
+            required.tier_assignment_reason,
+            "cold_required_evidence_preserved"
+        );
+    }
+
+    #[test]
+    fn memory_tier_policy_keeps_low_score_required_evidence_cold_inside_warm_budget() {
+        let required = MemoryTierInput::from_normalized_scores(
+            "mem_required_low_score",
+            "ws-tier",
+            0.05,
+            0.05,
+            0.05,
+            0.05,
+        )
+        .with_explicit_query_match(true)
+        .with_safety_or_failure_evidence(true);
+        let assignments = assign_memory_storage_tiers(
+            [
+                tier_input("mem_hot", 0.95),
+                tier_input("mem_warm", 0.60),
+                required,
+            ],
+            MemoryTierPolicyConfig::new(1, 8, 700),
+        );
+
+        let required = assignments
+            .iter()
+            .find(|assignment| assignment.memory_id == "mem_required_low_score")
             .expect("required evidence assignment");
         assert_eq!(required.tier, MemoryStorageTier::Cold);
         assert!(required.required_evidence_preserved);

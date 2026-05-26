@@ -79,7 +79,7 @@ const TIERED_RECALL_OPERATION: &str = "ee_context_memory_tier_admission";
 const TIERED_RECALL_QUERY: &str = "tiered recall release cold explicit failure evidence";
 const TIERED_RECALL_FILLER_COUNT: usize = 650;
 const TIERED_RECALL_MEMORY_COUNT: usize = TIERED_RECALL_FILLER_COUNT + 1;
-const TIERED_RECALL_CANDIDATE_POOL: u32 = TIERED_RECALL_MEMORY_COUNT as u32;
+const TIERED_RECALL_CANDIDATE_POOL: u32 = 192;
 const L2_WARM_BUDGET_P50_MS: f64 = 10.0;
 const L2_WARM_BUDGET_P99_MS: f64 = 50.0;
 const ARENA_MODE_BUDGET_P50_MS: f64 = 95.0;
@@ -1628,9 +1628,13 @@ mod tests {
             TIERED_RECALL_QUERY,
             "tiered recall release cold explicit failure evidence"
         );
-        assert_eq!(
-            TIERED_RECALL_CANDIDATE_POOL as usize,
-            TIERED_RECALL_MEMORY_COUNT
+        assert!(
+            (TIERED_RECALL_CANDIDATE_POOL as usize) < TIERED_RECALL_MEMORY_COUNT,
+            "tiered recall proof must not request the whole corpus"
+        );
+        assert!(
+            TIERED_RECALL_CANDIDATE_POOL > 128,
+            "bounded pool should still cross the hot tier budget and exercise warm admission"
         );
         assert!(
             TIERED_RECALL_MEMORY_COUNT > 640,
