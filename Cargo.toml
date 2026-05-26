@@ -37,7 +37,10 @@ publish = true
 exclude = [
     "tests/fixtures/*",
     "tests/golden/*",
+    "tests/artifacts/*",
     ".beads/*",
+    ".beads.snapshot_*",
+    ".beads.snapshot_*/*",
     "perf.data",
     "*.profraw",
 ]
