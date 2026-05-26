@@ -1998,10 +1998,29 @@ fn proximity_hotspots_section_from_reports(reports: &[ProximityHotspotInput]) ->
         .iter()
         .filter(|report| report.min_cut.is_some_and(f64::is_finite))
         .collect::<Vec<_>>();
+    // `total_cmp` over `partial_cmp(...).unwrap_or(Equal)`: even though
+    // the `is_some_and(f64::is_finite)` filter above guarantees both
+    // values are `Some(finite)` (so `partial_cmp` always returns
+    // `Some(Ordering)` and the `unwrap_or(Equal)` is unreachable today),
+    // the determinism contract documented at AGENTS.md ("same DB +
+    // indexes + config + query → byte-identical JSON output") extends
+    // to every f64 sort along a render path. If a future caller path
+    // bypasses the upstream filter — or a refactor moves it elsewhere —
+    // a NaN that reaches this sort under `partial_cmp(...).unwrap_or(Equal)`
+    // would collapse the ordering into intransitivity and silently
+    // scramble the `rank` field on the `ee.insights.section.v1`
+    // proximityHotspots surface. Defense-in-depth pattern shipped in
+    // 4a067ecb (causalBottlenecks + hits sorts in this same file) and
+    // 18f20375 (influence.rs `top_positive_influencers`); same fix
+    // class as the recent `models/economy.rs::AggregateUtility` peer
+    // change. After the filter, `unwrap_or(NEG_INFINITY)` is dead-code
+    // for the None branch (and matches `Option::partial_cmp`'s
+    // "None < Some" semantic if a None ever slipped through).
     reports.sort_by(|left, right| {
-        left.min_cut
-            .partial_cmp(&right.min_cut)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let left_value = left.min_cut.unwrap_or(f64::NEG_INFINITY);
+        let right_value = right.min_cut.unwrap_or(f64::NEG_INFINITY);
+        left_value
+            .total_cmp(&right_value)
             .then_with(|| left.memory_a.cmp(&right.memory_a))
             .then_with(|| left.memory_b.cmp(&right.memory_b))
     });
