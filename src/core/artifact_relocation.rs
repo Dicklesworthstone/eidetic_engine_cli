@@ -14,6 +14,23 @@ use serde::{Deserialize, Serialize};
 use crate::models::DomainError;
 
 pub const ARTIFACT_RELOCATION_SCHEMA_V1: &str = "ee.artifact.relocation.v1";
+
+/// Hard upper bound on the byte length of an `ee.artifact.relocation.v1`
+/// manifest file read by `read_relocation_manifest_file_no_follow`. The
+/// manifest is a list of (source path, destination path, expected hash)
+/// triples; realistic files are kilobytes, never megabytes. 4 MiB is the
+/// parallel ceiling used by the round-2 cap pass on workspace metadata
+/// files (`WORKSPACE_CONFIG_MAX_BYTES`, `CURATE_CONFIG_MAX_BYTES`,
+/// `CONFIG_SURFACE_MAX_BYTES`, `PREFLIGHT_RULES_MAX_BYTES`,
+/// `MAX_CLAIM_METADATA_BYTES`, `QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES`).
+///
+/// Without this cap, `File::read_to_string` pre-sizes its destination
+/// `String` from the file's metadata length on every supported platform,
+/// so a user-supplied or accidentally-inflated multi-GiB manifest would
+/// force a matching allocation on every `ee artifact relocate --apply`
+/// invocation. The `read_manifest` pre-check at the caller only verifies
+/// `is_file()` — no size guard.
+const ARTIFACT_RELOCATION_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const RELOCATION_DIR: &str = "ee-relocated-artifacts";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -715,10 +732,35 @@ fn read_manifest(path: &Path) -> Result<ArtifactRelocationManifest, DomainError>
 }
 
 fn read_relocation_manifest_file_no_follow(path: &Path) -> io::Result<String> {
-    let mut file = open_relocation_manifest_file_for_read(path)?;
-    let mut text = String::new();
-    file.read_to_string(&mut text)?;
-    Ok(text)
+    // Bounded read: cap at `ARTIFACT_RELOCATION_MANIFEST_MAX_BYTES + 1`
+    // so the post-read size check distinguishes "exactly at cap"
+    // (accepted) from "above cap" (rejected) without a separate stat
+    // call on the read path. The metadata-only `file_type().is_file()`
+    // check at the caller (`read_manifest` line 681) does NOT bound
+    // size, so without this cap an unbounded `read_to_string` would
+    // pre-size from the on-disk length and OOM the CLI on a multi-GiB
+    // manifest. Same defensive pattern as the round-2 caps at
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // (7f56d89b), `src/core/memory.rs::read_workspace_config_if_present`
+    // (e1499deb), `src/core/curate.rs::structural_decay_config_contents`
+    // (0fe4a339), `src/cache/pack_l2.rs::read_cache_entry_file` (8ba93c0e),
+    // `src/core/handoff.rs::ensure_handoff_key_material_within_cap`
+    // (f067c32c), `src/core/claims.rs` (52276a68), and `src/core/qos.rs`
+    // (e0b11daa).
+    let file = open_relocation_manifest_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.take(ARTIFACT_RELOCATION_MANIFEST_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > ARTIFACT_RELOCATION_MANIFEST_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read relocation manifest `{}`: exceeded the {ARTIFACT_RELOCATION_MANIFEST_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display(),
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn open_relocation_manifest_file_for_read(path: &Path) -> io::Result<fs::File> {
