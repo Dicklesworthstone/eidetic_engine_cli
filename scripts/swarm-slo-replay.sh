@@ -93,18 +93,34 @@ def read_rows(path: Path):
     return rows
 
 
+def stable_event_tie_key(raw, payload):
+    stable_parts = {
+        "schema": payload.get("schema"),
+        "traceId": payload.get("traceId", payload.get("trace_id")),
+        "agentId": payload.get("agentId", payload.get("agent_id")),
+        "runId": payload.get("runId", payload.get("run_id")),
+        "source": payload.get("surface", payload.get("source")),
+        "phase": payload.get("phase"),
+        "kind": payload.get("kind"),
+    }
+    material = json.dumps(stable_parts, sort_keys=True, separators=(",", ":")) + "\0" + raw
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def canonical_event_key(row):
-    line_no, _raw, payload = row
+    line_no, raw, payload = row
     event_index = payload.get("eventIndex", payload.get("event_index"))
     if isinstance(event_index, int):
-        return (0, event_index, line_no)
-    return (1, line_no, line_no)
+        return (0, event_index, stable_event_tie_key(raw, payload), line_no)
+    return (1, line_no, "", line_no)
 
 
 def replay_bytes(rows):
-    # Deterministic event ordering: explicit eventIndex first, then source order
-    # for ties and unindexed CASS/test-event streams. The original row bytes are
-    # emitted unchanged, so replay cannot smuggle runtime timestamps into output.
+    # Deterministic event ordering: explicit eventIndex first; colliding
+    # explicit indexes use a content-derived tie-breaker so parallel producer
+    # merge order cannot change replay bytes. Unindexed CASS/test-event streams
+    # retain source order. The original row bytes are emitted unchanged, so
+    # replay cannot smuggle runtime timestamps into output.
     ordered = sorted(rows, key=canonical_event_key)
     if not ordered:
         return b""

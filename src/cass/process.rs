@@ -476,7 +476,7 @@ impl CassInvocation {
                     &mut stdout_bytes_seen,
                     &mut peak_stdout_line_bytes,
                 );
-                let _ = join_stdout_line_reader(&mut stdout_thread);
+                let _ = join_finished_stdout_line_reader_after_timeout(&mut stdout_thread);
                 return Err(CassStreamError::Cass(error));
             }
             if stdout_done {

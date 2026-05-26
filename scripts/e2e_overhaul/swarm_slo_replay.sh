@@ -25,6 +25,23 @@ bash -n "$RUNNER"
 
 diff -u "$EXPECTED" "$OUT_ONE"
 diff -u "$OUT_ONE" "$OUT_TWO"
+
+TIE_ONE="$TMP_ROOT/event-index-tie-one.jsonl"
+TIE_TWO="$TMP_ROOT/event-index-tie-two.jsonl"
+TIE_OUT_ONE="$TMP_ROOT/event-index-tie-one.out.jsonl"
+TIE_OUT_TWO="$TMP_ROOT/event-index-tie-two.out.jsonl"
+cat >"$TIE_ONE" <<'EOF'
+{"schema":"ee.test_event.v1","eventIndex":7,"phase":"parallel","kind":"command_end","surface":"swarm_slo_replay","agentId":"cod_a","elapsedMs":11,"degradedCodes":[]}
+{"schema":"ee.test_event.v1","eventIndex":7,"phase":"parallel","kind":"command_end","surface":"swarm_slo_replay","agentId":"cod_b","elapsedMs":13,"degradedCodes":[]}
+EOF
+cat >"$TIE_TWO" <<'EOF'
+{"schema":"ee.test_event.v1","eventIndex":7,"phase":"parallel","kind":"command_end","surface":"swarm_slo_replay","agentId":"cod_b","elapsedMs":13,"degradedCodes":[]}
+{"schema":"ee.test_event.v1","eventIndex":7,"phase":"parallel","kind":"command_end","surface":"swarm_slo_replay","agentId":"cod_a","elapsedMs":11,"degradedCodes":[]}
+EOF
+"$RUNNER" --input "$TIE_ONE" --output "$TIE_OUT_ONE" --verify-determinism
+"$RUNNER" --input "$TIE_TWO" --output "$TIE_OUT_TWO" --verify-determinism
+diff -u "$TIE_OUT_ONE" "$TIE_OUT_TWO"
+
 jq -e '
   .schema == "ee.swarm_slo.replay.v1"
   and .eventCount == 4
