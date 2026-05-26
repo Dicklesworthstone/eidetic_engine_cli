@@ -1,4 +1,4 @@
-# ADR 0044: High-Risk Reflection Routing
+# ADR 0045: High-Risk Reflection Routing
 
 Status: proposed
 Date: 2026-05-23
