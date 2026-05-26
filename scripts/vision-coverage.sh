@@ -467,9 +467,6 @@ release_tag_commit() {
     fi
 }
 
-DOCUMENTED_JSON=$(documented_commands | json_array_from_lines)
-IMPLEMENTED_JSON=$(implemented_commands | json_array_from_lines)
-STUBS_JSON=$(stub_surfaces)
 GENERATED_AT=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 if release_tag_commit; then

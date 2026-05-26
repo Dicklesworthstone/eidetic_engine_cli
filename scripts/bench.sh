@@ -503,12 +503,14 @@ run_context_l2_warm_bench() {
 run_context_arena_mode_bench() {
     bench="context"
     key="ee_context_arena_workspace_reuse"
+    filter="/workspace_reuse"
 
     echo "" >&2
     echo "[*] Benchmark: context_arena_mode" >&2
+    echo "    filter: $filter" >&2
     # BENCH_ARGS intentionally expands into separate Criterion CLI arguments.
     # shellcheck disable=SC2086
-    if output=$(cargo bench --bench "$bench" -- ee_context_arena_mode $BENCH_ARGS 2>&1); then
+    if output=$(cargo bench --bench "$bench" -- "$filter" $BENCH_ARGS 2>&1); then
         status=0
     else
         status=$?

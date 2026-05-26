@@ -212,9 +212,30 @@ else:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(first)
 
+def _kind_label(payload):
+    # Parallel to the schema-validation fix at line 149-157: the prior
+    # shape `str(payload.get("kind", payload.get("phase", "unknown")))`
+    # leaked `{"kind": null}` through as the literal string "None"
+    # (dict.get with a default returns the explicit None value, not the
+    # default, and `str(None) == "None"`), and `{"kind": 123}` as the
+    # string "123". Both shapes corrupt `kindCounts` totals that
+    # downstream consumers expect to be a stable string vocabulary.
+    # Reject non-string kinds, fall through to `phase` (also string-
+    # checked, so `{"kind": null, "phase": "x"}` resolves to "x"
+    # instead of "None"), and default to "unknown" only when neither
+    # field carries a non-empty string.
+    kind = payload.get("kind")
+    if isinstance(kind, str) and kind:
+        return kind
+    phase = payload.get("phase")
+    if isinstance(phase, str) and phase:
+        return phase
+    return "unknown"
+
+
 if summary_path:
     schema_counts = Counter(str(payload.get("schema", "")) for _line_no, _raw, payload in rows)
-    kind_counts = Counter(str(payload.get("kind", payload.get("phase", "unknown"))) for _line_no, _raw, payload in rows)
+    kind_counts = Counter(_kind_label(payload) for _line_no, _raw, payload in rows)
     mutating_rows = []
     mutating_verbs = {
         "remember",
