@@ -43351,6 +43351,27 @@ fn maintenance_job_history_path(workspace_path: &Path) -> PathBuf {
     workspace_path.join(".ee").join("maintenance-jobs.jsonl")
 }
 
+/// Hard cap on `.ee/maintenance-jobs.jsonl` reads in
+/// `load_maintenance_job_history`. Matches the parallel cap on the
+/// `.ee/coordination-fallback-evidence.jsonl` reader at
+/// `COORDINATION_FALLBACK_LEDGER_MAX_BYTES` (e0bf4921), the
+/// `.ee/daemon-jobs.jsonl` cap at `DAEMON_JOB_TABLE_MAX_BYTES` in
+/// `src/serve.rs` (aaa7dda7), and the two parallel readers on the
+/// fallback ledger in `src/core/why.rs` + `src/core/support_bundle.rs`
+/// (b040cde7). The maintenance-jobs ledger is a peer-controllable
+/// append-only JSONL file in a shared multi-agent workspace; the
+/// unbounded `BufReader::new(file).lines()` shape would pre-size each
+/// per-line `String` to fit the line, so a peer-planted multi-GB
+/// single-line record (no embedded `\n`, accidental
+/// `cat /dev/urandom > .ee/maintenance-jobs.jsonl` or hostile) would
+/// OOM the `ee maintenance list/show` hot path read on every
+/// invocation. 16 MiB matches the parallel ledger caps and is
+/// thousands of rows of head-room for normal maintenance job records
+/// (a few hundred bytes each). A truncated tail line trips the
+/// existing `serde_json::from_str` error path, surfacing as a parse
+/// error rather than silent data loss.
+const MAINTENANCE_JOB_HISTORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 fn append_maintenance_job_history(
     workspace_path: &Path,
     row: &serde_json::Value,
@@ -43381,7 +43402,14 @@ fn load_maintenance_job_history(workspace_path: &Path) -> Result<Vec<serde_json:
     let file = fs::File::open(&path)
         .map_err(|error| format!("Failed to open {}: {error}", path.display()))?;
     let mut rows = Vec::new();
-    for (line_index, line) in io::BufReader::new(file).lines().enumerate() {
+    // Cap the per-line allocation at `MAINTENANCE_JOB_HISTORY_MAX_BYTES`
+    // — see the constant docs for the parallel-reader rationale.
+    // Matches the just-landed `coordination_fallback_ledger_contains_hash`
+    // shape (e0bf4921) and the `load_daemon_job_rows` cap (aaa7dda7).
+    for (line_index, line) in io::BufReader::new(file.take(MAINTENANCE_JOB_HISTORY_MAX_BYTES))
+        .lines()
+        .enumerate()
+    {
         let line = line.map_err(|error| format!("Failed to read {}: {error}", path.display()))?;
         if line.trim().is_empty() {
             continue;
