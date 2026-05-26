@@ -2196,6 +2196,14 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ProfileConfigErro
     }
 }
 
+/// Maximum bytes inspected when reading the workspace profile config.
+/// Matches `WORKSPACE_CONFIG_MAX_BYTES` (e1499deb),
+/// `CURATE_CONFIG_MAX_BYTES` (0fe4a339), and `CONFIG_SURFACE_MAX_BYTES`
+/// (47d6b07c) — the other parallel `.ee/config.toml` readers. The four
+/// helpers must use the same ceiling so a config that loads for one
+/// surface also loads for the others.
+const PROFILE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn read_profile_config_if_regular(
     path: &Path,
     operation: &'static str,
@@ -2222,14 +2230,56 @@ fn read_profile_config_if_regular(
             ),
         ));
     }
-    read_profile_config_file_no_follow(path).map(Some)
+    // Bound the read so a peer-planted multi-GB profile config cannot
+    // pin a matching allocation on the profile-surface hot path. Same
+    // self-DoS amplification pattern that e1499deb, 0fe4a339, and
+    // 47d6b07c just closed for the parallel
+    // `src/core/memory.rs::read_workspace_config_if_present`,
+    // `src/core/curate.rs::structural_decay_config_contents`, and
+    // `src/core/config_surface.rs::read_optional_config_contents`. The
+    // metadata pre-check at stat time is layer 1; the
+    // `file.take(LIMIT + 1).read_to_end` inside
+    // `read_profile_config_file_no_follow` is layer 2, closing the
+    // TOCTOU growth window between the stat above and the open below.
+    if metadata.len() > PROFILE_CONFIG_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to {operation} profile config `{}`: file is {} bytes, exceeding the {PROFILE_CONFIG_MAX_BYTES}-byte ceiling",
+                path.display(),
+                metadata.len(),
+            ),
+        ));
+    }
+    read_profile_config_file_no_follow(path, operation).map(Some)
 }
 
-fn read_profile_config_file_no_follow(path: &Path) -> Result<String, io::Error> {
-    let mut file = open_profile_config_file_for_read(path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    Ok(contents)
+fn read_profile_config_file_no_follow(
+    path: &Path,
+    operation: &'static str,
+) -> Result<String, io::Error> {
+    let file = open_profile_config_file_for_read(path)?;
+    let mut bytes = Vec::new();
+    file.take(PROFILE_CONFIG_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > PROFILE_CONFIG_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to {operation} profile config `{}`: file grew past the {PROFILE_CONFIG_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to {operation} profile config `{}`: contents are not valid UTF-8: {error}",
+                path.display()
+            ),
+        )
+    })
 }
 
 fn open_profile_config_file_for_read(path: &Path) -> Result<fs::File, io::Error> {
@@ -3456,6 +3506,47 @@ mod tests {
         ensure_true(
             config_path.is_dir(),
             "write preflight leaves non-regular config path untouched",
+        )
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `read_profile_config_if_regular` /
+    /// `read_profile_config_file_no_follow`. Pre-fix the inner helper
+    /// called `file.read_to_string(&mut contents)` with no size guard
+    /// after the O_NOFOLLOW open, so a peer-planted multi-MiB profile
+    /// config would pin a matching allocation on every
+    /// `ee profile config apply` invocation. Same defect class that
+    /// e1499deb, 0fe4a339, and 47d6b07c closed for the parallel
+    /// memory.rs / curate.rs / config_surface.rs readers.
+    ///
+    /// This test plants a one-byte-over-cap `.ee/config.toml` and
+    /// asserts `apply_profile_config` rejects with a Read error
+    /// citing the ceiling.
+    #[test]
+    fn profile_config_apply_rejects_oversize_workspace_config() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let config_path = ee_dir.join("config.toml");
+        let cap = usize::try_from(PROFILE_CONFIG_MAX_BYTES)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        fs::write(&config_path, &payload).map_err(|error| error.to_string())?;
+
+        let options = config_options(temp.path(), OperatingProfile::Workstation, false);
+        let error = apply_profile_config(&options)
+            .expect_err("oversize config should reject apply before unbounded allocation")
+            .to_string();
+        ensure_true(
+            error.contains("exceeding the"),
+            "rejection message must cite the ceiling",
+        )?;
+        ensure_true(
+            error.contains(&PROFILE_CONFIG_MAX_BYTES.to_string()),
+            "rejection message must name the cap constant",
         )
     }
 
