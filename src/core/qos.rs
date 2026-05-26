@@ -15,6 +15,21 @@ use sha2::{Digest, Sha256};
 use crate::core::degraded_aggregation::{DegradationAggregationInput, aggregate_degraded_entries};
 use crate::models::DomainError;
 
+/// Hard upper bound on the byte length of `<workspace>/.ee/qos/active-lanes.json`
+/// read by `read_registry_file_no_follow`. Realistic QoS registries are
+/// tens of kilobytes at most (one record per active lane × ~10–100
+/// lanes). 4 MiB is the parallel ceiling used by the round-2 systematic
+/// cap pass on workspace metadata files (`WORKSPACE_CONFIG_MAX_BYTES`,
+/// `CURATE_CONFIG_MAX_BYTES`, `CONFIG_SURFACE_MAX_BYTES`,
+/// `PREFLIGHT_RULES_MAX_BYTES`, `MAX_CLAIM_METADATA_BYTES`).
+///
+/// Without this cap, `File::read_to_string` pre-sizes its destination
+/// `String` from the file's metadata length on every supported platform,
+/// so a peer-planted multi-GiB `active-lanes.json` would force a matching
+/// allocation on every QoS-touching command — and the metadata-only
+/// `file_type().is_file()` check at the call site does NOT bound size.
+const QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 pub const QOS_ACTIVE_LANE_REGISTRY_SCHEMA_V1: &str = "ee.qos.active_lane_registry.v1";
 pub const QOS_ACTIVE_LANE_RECORD_SCHEMA_V1: &str = "ee.qos.active_lane_record.v1";
 pub const QOS_ACTIVE_LANE_SUMMARY_SCHEMA_V1: &str = "ee.qos.active_lane_summary.v1";
@@ -516,10 +531,35 @@ fn read_registry_document(path: &Path) -> Result<Option<QosActiveLaneRegistry>, 
 }
 
 fn read_registry_file_no_follow(path: &Path) -> std::io::Result<String> {
+    // Bounded read: cap at `QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES + 1` so
+    // the post-read size check distinguishes "exactly at cap" (accepted)
+    // from "above cap" (rejected) without a separate stat call on the
+    // read path. The metadata-only `file_type().is_file()` check at the
+    // caller (line 475) does NOT bound size, so without this cap an
+    // unbounded `read_to_string` would pre-size from the on-disk length
+    // and OOM the QoS hot path on a peer-planted multi-GiB registry.
+    // Same defensive pattern as the round-2 caps at
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // (7f56d89b), `src/core/memory.rs::read_workspace_config_if_present`
+    // (e1499deb), `src/core/curate.rs::structural_decay_config_contents`
+    // (0fe4a339), `src/cache/pack_l2.rs::read_cache_entry_file` (8ba93c0e),
+    // `src/core/handoff.rs::ensure_handoff_key_material_within_cap`
+    // (f067c32c), and the recent `src/core/claims.rs` cap (52276a68).
     let mut file = open_registry_file_for_read(path)?;
-    let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
-    Ok(raw)
+    let mut bytes = Vec::new();
+    file.take(QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read QoS active-lane registry `{}`: exceeded the {QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display(),
+            ),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 fn open_registry_file_for_read(path: &Path) -> std::io::Result<fs::File> {
