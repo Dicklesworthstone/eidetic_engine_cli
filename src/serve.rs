@@ -18,6 +18,23 @@ use crate::steward::{DaemonForegroundOptions, DaemonForegroundReport, JobRunResu
 pub const SUBSYSTEM: &str = "serve";
 pub const DAEMON_JOB_TABLE_SCHEMA_V1: &str = "ee.steward.daemon_job_table.v1";
 pub const DAEMON_JOB_ROW_SCHEMA_V1: &str = "ee.steward.daemon_job_row.v1";
+/// Hard upper bound on the byte length of the daemon-job table read by
+/// `load_daemon_job_rows`. The table at `.ee/daemon-jobs.jsonl` is an
+/// append-only JSONL ledger that grows on every foreground daemon start
+/// (`record_daemon_foreground_start` → `append_daemon_job_rows`). The
+/// previous `BufReader::new(file).lines()` shape allocated each line into
+/// a fresh `String` whose capacity grows to fit the line, so a peer-planted
+/// (or runaway-emitter) multi-GB single line (no embedded `\n`) would
+/// force a matching String pre-size and OOM the daemon read path.
+/// 16 MiB matches `HANDOFF_FILE_MAX_BYTES` and the parallel cap on
+/// `.ee/coordination-fallback-evidence.jsonl` in
+/// `src/core/why.rs::COORDINATION_FALLBACK_LEDGER_MAX_BYTES`; daemon job
+/// rows are small JSON records (a few hundred bytes each), so 16 MiB is
+/// thousands of rows of headroom while still bounding worst-case
+/// allocation. Truncation past the cap surfaces through the existing
+/// `serde_json::from_str` error path, so callers see an explicit parse
+/// failure instead of silent data loss.
+const DAEMON_JOB_TABLE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const DAEMON_STATUS_SCHEMA_V1: &str = "ee.steward.daemon_status.v1";
 pub const DAEMON_RECOVERY_SCHEMA_V1: &str = "ee.steward.daemon_recovery.v1";
 pub const DAEMON_WRITE_OWNER_IDENTITY: &str = "ee-daemon-single-write-owner";
@@ -1947,7 +1964,16 @@ pub fn load_daemon_job_rows(workspace_path: &Path) -> Result<Vec<DaemonJobRow>, 
     }
     let file = open_daemon_job_table_for_read(&table_path)
         .map_err(|error| format!("Failed to open daemon job table: {error}"))?;
-    let reader = BufReader::new(file);
+    // Cap the read at `DAEMON_JOB_TABLE_MAX_BYTES`. The previous
+    // `BufReader::new(file)` shape was unbounded; a peer-planted multi-GB
+    // single-line record (no embedded `\n`) would force the underlying
+    // `String` line allocation to grow without limit and OOM the daemon
+    // read path before any happy-path filter could reject it. Wrapping
+    // the handle in `file.take(MAX)` bounds peak allocation while
+    // preserving the streaming line-by-line shape. Same defense pattern
+    // as the parallel ledger reader at
+    // `src/core/why.rs::fetch_coordination_fallback_evidence` (b040cde7).
+    let reader = BufReader::new(file.take(DAEMON_JOB_TABLE_MAX_BYTES));
     let mut rows = Vec::new();
     for (index, line) in reader.lines().enumerate() {
         let line = line.map_err(|error| format!("Failed to read daemon job row: {error}"))?;
