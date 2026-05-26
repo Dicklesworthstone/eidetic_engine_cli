@@ -5633,18 +5633,56 @@ fn search_config_hash_for_plan_cache(
     compute_search_config_hash(&bytes)
 }
 
+/// Maximum byte length read from `<index_dir>/meta.json` or
+/// `<index_dir>/manifest.json` while computing the plan-cache key.
+///
+/// Real index metadata is a small JSON object (well under 1 KiB in
+/// practice — `generation`, `lastRebuildAt`, fingerprint fields).
+/// 4 MiB matches `INDEX_METADATA_INSPECT_LIMIT` in `src/core/index.rs:43`
+/// (the parallel reader hardened by ad2d302e for the
+/// `get_index_status` path). Without this cap,
+/// `std::fs::read(&path)` would pre-size its destination `Vec<u8>` from
+/// the file's metadata length and allocate the entire body — and this
+/// function is on the SEARCH HOT PATH (`search_plan_cache_key`, line
+/// 5542), invoked on every `ee search` / `ee pack` invocation, so a
+/// peer-planted or runaway-writer multi-GiB
+/// `<workspace>/.ee/index/meta.json` would OOM every search.
+///
+/// A read past the cap (oversize file or post-stat growth) is treated
+/// as "manifest unavailable" by falling through to the time-based
+/// fallback below — this is strictly safe for plan-cache invalidation
+/// since the next legitimate index publish will refresh the cache key
+/// once the file is back within bounds.
+const MAX_PLAN_CACHE_INDEX_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
+
 fn index_manifest_version_for_plan_cache(index_dir: &Path) -> u64 {
     const DOMAIN: &[u8] = b"ee.search.plan_cache.index_manifest.v1";
     for relative in ["meta.json", "manifest.json"] {
         let path = index_dir.join(relative);
-        if let Ok(bytes) = std::fs::read(&path) {
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(DOMAIN);
-            append_blake3_str(&mut hasher, relative);
-            hasher.update(&(bytes.len() as u64).to_le_bytes());
-            hasher.update(&bytes);
-            return truncate_blake3_to_u64(hasher.finalize().as_bytes());
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if file
+            .take(MAX_PLAN_CACHE_INDEX_MANIFEST_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            continue;
         }
+        if bytes.len() as u64 > MAX_PLAN_CACHE_INDEX_MANIFEST_BYTES {
+            // Race-grown past the cap between open and read. Treat as
+            // unavailable so the cache key falls through to the
+            // time-based fallback; the next legitimate index publish
+            // will refresh the cache key on the next search.
+            continue;
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(DOMAIN);
+        append_blake3_str(&mut hasher, relative);
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+        return truncate_blake3_to_u64(hasher.finalize().as_bytes());
     }
 
     let mut hasher = blake3::Hasher::new();
