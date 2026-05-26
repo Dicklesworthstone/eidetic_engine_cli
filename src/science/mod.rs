@@ -130,6 +130,23 @@ pub const DEGRADATION_CODE_DRIFT_UNAVAILABLE: &str = "drift_analysis_unavailable
 /// Degradation code for missing evaluation snapshots.
 pub const DEGRADATION_CODE_NO_SNAPSHOTS: &str = "drift_no_evaluation_snapshots";
 
+/// Hard cap on the byte length of an evaluation snapshot JSON file the
+/// drift analyzer ingests from `--baseline` / `--current` (or discovered
+/// snapshot directory entries).
+///
+/// `load_evaluation_snapshot` previously called `std::fs::read_to_string`
+/// directly: the symlink-component and regular-file pre-checks guarded
+/// path safety, but a multi-GB regular file (operator typo pointing at a
+/// large blob, runaway evaluation writer, or peer-handed-off sidecar)
+/// would allocate the whole content into a `String` before
+/// `serde_json::from_str` ever ran — turning `ee science drift --baseline
+/// <huge-file>` into a local OOM. Evaluation snapshots are bounded JSON
+/// reports (typical size: KB to low-MB); 16 MiB is generous head-room
+/// without leaving the OOM vector open. Same defensive pattern as
+/// `EVAL_FIXTURE_FILE_MAX_BYTES` (`src/eval/runner.rs:1293`) and
+/// `JSONL_IMPORT_MAX_INPUT_BYTES` (`src/core/jsonl_import.rs`).
+pub const EVALUATION_SNAPSHOT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Degradation code for snapshots that cannot be compared.
 pub const DEGRADATION_CODE_NO_COMPARABLE_METRICS: &str = "drift_no_comparable_metrics";
 
@@ -1050,15 +1067,7 @@ fn load_evaluation_snapshot(path: &Path) -> Result<EvaluationSnapshot, DriftDegr
         });
     }
 
-    let text = std::fs::read_to_string(path).map_err(|error| DriftDegradation {
-        code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
-        message: format!(
-            "Evaluation snapshot {} could not be read: {error}",
-            path.display()
-        ),
-        severity: "high".to_string(),
-        repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
-    })?;
+    let text = read_evaluation_snapshot_bounded(path)?;
     let json =
         serde_json::from_str::<serde_json::Value>(&text).map_err(|error| DriftDegradation {
             code: DEGRADATION_CODE_NO_COMPARABLE_METRICS.to_string(),
@@ -1078,6 +1087,99 @@ fn load_evaluation_snapshot(path: &Path) -> Result<EvaluationSnapshot, DriftDegr
         source_path: path.to_path_buf(),
         sort_key: snapshot_sort_key(&json, path),
         metrics,
+    })
+}
+
+/// Read an evaluation snapshot JSON file into a `String` with a hard byte cap.
+///
+/// The unbounded `std::fs::read_to_string(path)` shape that previously
+/// lived inside `load_evaluation_snapshot` had to allocate the entire
+/// file before the `serde_json::from_str` parse could even start, so a
+/// multi-GB path passed via `--baseline` / `--current` (operator typo,
+/// runaway evaluation writer, peer-handed-off sidecar) would OOM the
+/// CLI before the JSON shape was inspected. The bounded path mirrors
+/// `src/eval/runner.rs::read_eval_fixture_file` and the just-landed
+/// `src/core/jsonl_import.rs::read_jsonl_source_bounded`:
+///
+///   1. `fs::metadata` rejects obviously oversized files up front (cheap
+///      stat — no allocation),
+///   2. `File::open` + `.take(MAX + 1)` pins peak allocation to MAX + 1
+///      bytes regardless of TOCTOU growth between the stat and the open,
+///   3. the post-read length check distinguishes "exactly at the limit"
+///      from "grew during the read" and emits a clear oversize error.
+///
+/// `read_to_end` followed by `String::from_utf8` is used (rather than
+/// `read_to_string`) so a UTF-8 split at the cap boundary surfaces as a
+/// dedicated UTF-8 error from `from_utf8` instead of an
+/// `InvalidData::Stream did not contain valid UTF-8` from inside the
+/// read — same shape as the eval-runner sibling.
+fn read_evaluation_snapshot_bounded(path: &Path) -> Result<String, DriftDegradation> {
+    use std::io::Read;
+
+    let metadata = std::fs::metadata(path).map_err(|error| DriftDegradation {
+        code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+        message: format!(
+            "Evaluation snapshot {} could not be read: {error}",
+            path.display()
+        ),
+        severity: "high".to_string(),
+        repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+    })?;
+    if metadata.len() > EVALUATION_SNAPSHOT_MAX_BYTES {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is too large: {} bytes exceeds the {} byte limit",
+                path.display(),
+                metadata.len(),
+                EVALUATION_SNAPSHOT_MAX_BYTES,
+            ),
+            severity: "high".to_string(),
+            repair: "Pass a smaller evaluation snapshot or split it into chunks.".to_string(),
+        });
+    }
+    let file = std::fs::File::open(path).map_err(|error| DriftDegradation {
+        code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+        message: format!(
+            "Evaluation snapshot {} could not be read: {error}",
+            path.display()
+        ),
+        severity: "high".to_string(),
+        repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+    })?;
+    let mut bytes = Vec::new();
+    file.take(EVALUATION_SNAPSHOT_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} could not be read: {error}",
+                path.display()
+            ),
+            severity: "high".to_string(),
+            repair: "Pass readable --baseline and --current snapshot paths.".to_string(),
+        })?;
+    if bytes.len() as u64 > EVALUATION_SNAPSHOT_MAX_BYTES {
+        return Err(DriftDegradation {
+            code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+            message: format!(
+                "Evaluation snapshot {} is too large: read {} bytes exceeds the {} byte limit",
+                path.display(),
+                bytes.len(),
+                EVALUATION_SNAPSHOT_MAX_BYTES,
+            ),
+            severity: "high".to_string(),
+            repair: "Pass a smaller evaluation snapshot or split it into chunks.".to_string(),
+        });
+    }
+    String::from_utf8(bytes).map_err(|error| DriftDegradation {
+        code: DEGRADATION_CODE_NO_SNAPSHOTS.to_string(),
+        message: format!(
+            "Evaluation snapshot {} is not valid UTF-8: {error}",
+            path.display()
+        ),
+        severity: "high".to_string(),
+        repair: "Persist evaluation snapshots as UTF-8 JSON.".to_string(),
     })
 }
 
