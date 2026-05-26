@@ -263,8 +263,20 @@ fn focus_suggest_phase2_deterministic_across_runs() -> TestResult {
     )
 }
 
+/// Flag-echo / schema-stability assertion only.
+///
+/// This test seeds the workspace with `ee remember` but does NOT seed any
+/// CASS evidence_spans, so the `--from-cass` branch and the default branch
+/// produce structurally identical recommendations. The narrow contract
+/// pinned here is just that:
+///   - `data.fromCass` echoes back the flag (false vs true), and
+///   - `data.schema` stays at `ee.focus.suggest.v1` across the toggle.
+///
+/// A real pipeline-divergence test (where `--from-cass` populates non-empty
+/// `spanIds`) needs evidence_spans seeded via `ee import cass` or an
+/// equivalent fixture, and is intentionally out of scope here.
 #[test]
-fn focus_suggest_from_cass_toggle_changes_pipeline_state() -> TestResult {
+fn focus_suggest_from_cass_flag_echoes_to_response() -> TestResult {
     let workspace = unique_workspace("fromcass")?;
     let workspace_arg = workspace
         .to_str()
@@ -320,5 +332,136 @@ fn focus_suggest_from_cass_toggle_changes_pipeline_state() -> TestResult {
         parsed_default["data"]["schema"].as_str() == Some("ee.focus.suggest.v1")
             && parsed_cass["data"]["schema"].as_str() == Some("ee.focus.suggest.v1"),
         "data.schema must be ee.focus.suggest.v1 in both branches".to_owned(),
+    )
+}
+
+/// `--task-frame <nonexistent>` must honor the explicit scope.
+///
+/// The Phase 2 surface is documented as scope-honoring: when the user
+/// passes a `--task-frame` id, the recommendations[] must be drawn from
+/// the frame's evidence_links neighborhood, not from every recent
+/// memory. The original Phase 2 wire-up at src/core/focus_suggest.rs
+/// already honors that intent in the `Ok(empty)` arm (frame has no
+/// evidence_links) by early-returning empty recommendations. The
+/// symmetric `Err` arm (frame id typo'd, task-frame store missing,
+/// store corrupt) historically fell back to ALL recent memories,
+/// silently broadening the scope the caller asked to narrow.
+///
+/// This test pins the fix: a `--task-frame` id that cannot be resolved
+/// must produce an empty recommendations[] AND a `task_frame_unavailable`
+/// degraded entry, even when the workspace has plenty of recent
+/// memories that would otherwise satisfy the surface.
+#[test]
+fn focus_suggest_task_frame_unavailable_honors_scope() -> TestResult {
+    let workspace = unique_workspace("taskframe-unavailable")?;
+    let workspace_arg = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path must be UTF-8".to_string())?
+        .to_owned();
+    seed_workspace(&workspace_arg)?;
+
+    // Sanity check: without `--task-frame`, the seeded workspace MUST
+    // return at least one recommendation. This proves the "no
+    // recommendations" assertion below comes from the task-frame scope
+    // honoring path, not from an unrelated empty-workspace state.
+    let unscoped = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "focus",
+        "suggest",
+        "--limit",
+        "10",
+    ])?;
+    must_succeed(&unscoped, "ee focus suggest (unscoped baseline)")?;
+    let unscoped_parsed: Value = serde_json::from_slice(&unscoped.stdout)
+        .map_err(|e| format!("unscoped stdout must be JSON: {e}"))?;
+    let unscoped_recommendations = unscoped_parsed["data"]["recommendations"]
+        .as_array()
+        .ok_or_else(|| "unscoped recommendations must be an array".to_string())?;
+    ensure(
+        !unscoped_recommendations.is_empty(),
+        "baseline must populate recommendations[]; seed_workspace contract violated".to_owned(),
+    )?;
+
+    // Now drive the surface with a `--task-frame` id that will fail to
+    // resolve. The workspace has never run `ee task-frame`, so the
+    // task-frame store does not exist; `show_task_frame` errors, and
+    // `load_task_frame_evidence` propagates the error to the Err arm.
+    let scoped = run_ee(&[
+        "--workspace",
+        &workspace_arg,
+        "--json",
+        "focus",
+        "suggest",
+        "--task-frame",
+        "tf_does_not_exist_12345",
+        "--limit",
+        "10",
+    ])?;
+    must_succeed(&scoped, "ee focus suggest --task-frame nonexistent")?;
+
+    let parsed: Value = serde_json::from_slice(&scoped.stdout)
+        .map_err(|e| format!("scoped stdout must be JSON: {e}"))?;
+    let recommendations = parsed["data"]["recommendations"]
+        .as_array()
+        .ok_or_else(|| {
+            format!(
+                "scoped recommendations must be an array; got {:?}",
+                parsed["data"]["recommendations"]
+            )
+        })?;
+    ensure(
+        recommendations.is_empty(),
+        format!(
+            "explicit --task-frame scope must yield empty recommendations[] when the frame cannot be resolved; \
+             silently broadening to ALL recent memories defeats the scope. Got {recommendations:?}"
+        ),
+    )?;
+
+    // The unavailable signal must surface as a degraded entry so the
+    // caller can distinguish "frame typo / missing store" from "frame
+    // exists but had no evidence_links" (task_frame_no_evidence).
+    let degraded = parsed["degraded"]
+        .as_array()
+        .ok_or_else(|| format!("degraded must be an array; got {:?}", parsed["degraded"]))?;
+    let unavailable_entry = degraded
+        .iter()
+        .find(|entry| entry["code"].as_str() == Some("task_frame_unavailable"))
+        .ok_or_else(|| {
+            format!(
+                "task_frame_unavailable degraded entry must appear when --task-frame cannot be resolved; \
+                 got degraded={degraded:?}"
+            )
+        })?;
+    ensure(
+        unavailable_entry["severity"].as_str() == Some("warning"),
+        format!(
+            "task_frame_unavailable severity must be warning; got {:?}",
+            unavailable_entry["severity"]
+        ),
+    )?;
+    ensure(
+        unavailable_entry["repair"]
+            .as_str()
+            .is_some_and(|r| r.contains("ee task-frame")),
+        format!(
+            "task_frame_unavailable repair hint must reference `ee task-frame`; got {:?}",
+            unavailable_entry["repair"]
+        ),
+    )?;
+
+    // The `no_recent_evidence` code must NOT also appear: emitting both
+    // would tell the caller two contradictory stories about why the
+    // recommendations are empty (frame-scope vs empty-workspace).
+    let no_recent = degraded
+        .iter()
+        .find(|entry| entry["code"].as_str() == Some("no_recent_evidence"));
+    ensure(
+        no_recent.is_none(),
+        format!(
+            "task_frame_unavailable must short-circuit before the no_recent_evidence check; \
+             got both codes in degraded={degraded:?}"
+        ),
     )
 }

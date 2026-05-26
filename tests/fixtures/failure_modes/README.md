@@ -60,8 +60,8 @@ in the same commit, keeping the catalog complete by construction.
 | `runtime_unavailable` | status, doctor | high | bd-17c65.10.6 (J6) |
 | `storage_unavailable` | status, dependency contract | high | bd-17c65.10.6 (J6) |
 | `search_unavailable` | status, dependency contract | medium | bd-17c65.10.6 (J6) |
-| `graph_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
-| `cass_unavailable` | doctor, import cass | medium | bd-17c65.10.6 (J6) |
+| `graph_unavailable` | diag dependencies, dependency contract, focus suggest | medium | bd-17c65.10.6 (J6) |
+| `cass_unavailable` | doctor, import cass, dependency contract, focus suggest | medium | bd-17c65.10.6 (J6) |
 | `toon_unavailable` | status, doctor | medium | bd-17c65.10.6 (J6) |
 | `diagram_backend_unavailable` | diag dependencies, dependency contract | medium | bd-17c65.10.6 (J6) |
 | `agent_detection_unavailable` | agent status, doctor | medium | bd-17c65.10.6 (J6) |
@@ -330,6 +330,13 @@ in the same commit, keeping the catalog complete by construction.
 | `maintenance_job_skipped` | job run | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_lock_busy` | job run | medium | bd-17c65.10.6 (J6) |
 | `maintenance_job_lock_open_failed` | job run | high | bd-17c65.10.6 (J6) |
+| `workspace_uninitialized` | focus suggest | warning | bd-1idcb (G) |
+| `no_recent_evidence` | focus suggest | info | bd-1idcb (G) |
+| `task_frame_no_evidence` | focus suggest | warning | bd-1idcb (G) |
+| `task_frame_unavailable` | focus suggest | warning | bd-1idcb (G) |
+| `graph_pagerank_failed` | focus suggest | warning | bd-1idcb (G) |
+| `graph_empty` | focus suggest | info | bd-1idcb (G) |
+| `graph_projection_failed` | focus suggest | warning | bd-1idcb (G) |
 
 ## Adding a fixture
 

@@ -169,13 +169,28 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
                 });
             }
             Err(error) => {
+                // Mirror the `Ok(empty)` arm above: honor the explicit
+                // `--task-frame` scope when the frame itself cannot be
+                // loaded (typo'd id, no task-frame store yet, corrupt
+                // store). Falling back to every recent memory would
+                // silently broaden the scope the caller asked us to
+                // narrow, mask the configuration error behind a
+                // populated recommendations list, and contradict the
+                // intent the `Ok(empty)` early-return already encodes
+                // for the same surface.
                 degraded.push(FocusSuggestDegradation {
                     code: "task_frame_unavailable".to_owned(),
                     severity: "warning".to_owned(),
                     message: format!("Failed to load task frame {frame_id}: {error}"),
                     repair: Some("Verify the frame id with `ee task-frame show --all`.".to_owned()),
                 });
-                recent
+                return Ok(FocusSuggestReport {
+                    recommendations: Vec::new(),
+                    from_cass: options.from_cass,
+                    limit: options.limit,
+                    recent_hours: options.recent_hours,
+                    degraded,
+                });
             }
         },
         None => recent,
@@ -215,9 +230,14 @@ pub fn suggest_focus(options: &FocusSuggestOptions) -> Result<FocusSuggestReport
                 })
                 .collect::<Vec<StoredEvidenceSpan>>(),
             Err(error) => {
+                // Severity `medium` matches the canonical catalog entry
+                // at `tests/fixtures/failure_modes/cass_unavailable.json`
+                // (introduced by bd-17c65.10.6). Surfaces that emit a
+                // shared degraded code must use the catalog's severity
+                // so per-code parsing on the agent side stays stable.
                 degraded.push(FocusSuggestDegradation {
                     code: "cass_unavailable".to_owned(),
-                    severity: "warning".to_owned(),
+                    severity: "medium".to_owned(),
                     message: format!("Failed to list evidence spans for from-cass pass: {error}"),
                     repair: Some("ee doctor".to_owned()),
                 });
@@ -364,9 +384,14 @@ fn compute_pagerank_scores(
     _connection: &DbConnection,
     degraded: &mut Vec<FocusSuggestDegradation>,
 ) -> BTreeMap<String, f64> {
+    // Severity `medium` matches the canonical catalog entry at
+    // `tests/fixtures/failure_modes/graph_unavailable.json` (introduced
+    // by bd-17c65.10.6). Surfaces that emit a shared degraded code must
+    // use the catalog's severity so per-code parsing on the agent side
+    // stays stable.
     degraded.push(FocusSuggestDegradation {
         code: "graph_unavailable".to_owned(),
-        severity: "warning".to_owned(),
+        severity: "medium".to_owned(),
         message: "Graph feature disabled at build time; falling back to recency-only scoring."
             .to_owned(),
         repair: Some("Rebuild ee with --features graph to enable centrality scoring.".to_owned()),

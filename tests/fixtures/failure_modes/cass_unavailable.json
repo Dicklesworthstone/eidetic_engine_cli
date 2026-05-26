@@ -8,7 +8,8 @@
   "surfaces": [
     "doctor",
     "import cass",
-    "dependency contract"
+    "dependency contract",
+    "focus suggest"
   ],
   "severity": "medium",
   "repair_present": true,
