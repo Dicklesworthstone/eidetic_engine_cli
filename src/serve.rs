@@ -564,6 +564,28 @@ pub fn parse_serve_http_request(
         if normalized_name.is_empty() {
             return Err(serve_usage_error("HTTP header name must not be empty."));
         }
+        // Reject duplicate headers outright. RFC 7230 §3.3.3 bullet 4
+        // already requires rejecting requests with multiple
+        // Content-Length values (even when the values match, the
+        // disagreement between an upstream proxy that keeps the first
+        // and this parser that previously kept the last via
+        // `BTreeMap::insert` is the classic CL.CL smuggling pair).
+        // Multiple Transfer-Encoding rows have the same framing-
+        // disagreement risk. The chunked-in-TE-list guard below only
+        // fires when a *single* TE row names chunked; two distinct TE
+        // rows like `Transfer-Encoding: identity` + `Transfer-Encoding:
+        // chunked` would have collapsed to a last-wins value before
+        // that guard ran. A v2 parser that does not implement RFC 7230
+        // §3.2.2 comma-combining for repeated names should reject all
+        // duplicates loudly instead of silently overwriting; the v2
+        // surface ships with this defense from the first slice.
+        if headers.contains_key(&normalized_name) {
+            return Err(serve_usage_error(format!(
+                "HTTP header `{normalized_name}` appears more than once; \
+                 the ee serve v2 parser rejects duplicate header rows \
+                 to close request-smuggling framing disagreements."
+            )));
+        }
         headers.insert(normalized_name, value.trim().to_owned());
     }
 
@@ -588,10 +610,23 @@ pub fn parse_serve_http_request(
     // Content-Length framing. ee serve v1 still defers the whole HTTP
     // surface, but the parser ships with v2 unchanged unless the
     // smuggling vector is closed now.
+    //
+    // Also strip the `;`-delimited transfer-parameter suffix from each
+    // coding before the case-insensitive token match. RFC 7230 §4.1
+    // declares that `chunked` itself has no parameters, but a
+    // permissive upstream proxy can still accept `chunked; foo=bar`
+    // and frame the body as chunked. Without this strip, an attacker
+    // who controls header construction at the fronting proxy can
+    // append a no-op parameter (`chunked; q=1`, `chunked;ext=v`) to
+    // any coding-list entry and bypass the bare-string guard that
+    // 1b426516 just landed — letting `parse_serve_http_request` fall
+    // through to Content-Length framing and reintroducing the same
+    // CL.TE smuggling pair that fix was meant to close.
     if headers.get("transfer-encoding").is_some_and(|value| {
-        value
-            .split(',')
-            .any(|encoding| encoding.trim().eq_ignore_ascii_case("chunked"))
+        value.split(',').any(|encoding| {
+            let token = encoding.split(';').next().unwrap_or("").trim();
+            token.eq_ignore_ascii_case("chunked")
+        })
     }) {
         return Err(serve_usage_error(
             "Chunked uploads are not accepted by the first ee serve v2 slice.",
@@ -1014,12 +1049,36 @@ fn serve_request_complete_len(
 
     let header_text = std::str::from_utf8(&bytes[..header_end])
         .map_err(|_| serve_usage_error("HTTP request headers must be valid UTF-8."))?;
+    // Reject duplicate Content-Length rows at the framing layer for the
+    // same reason `parse_serve_http_request` rejects them at the parser
+    // layer: a permissive upstream proxy may frame on the first value
+    // while this loop previously kept the last (last-write-wins on the
+    // `content_length` local). Two CL rows like `Content-Length: 100`
+    // then `Content-Length: 50` would frame this side's socket read on
+    // 50 bytes while a proxy framed on 100 — the classic CL.CL
+    // smuggling shape. The parser-layer rejection at
+    // `parse_serve_http_request` would catch the request afterwards,
+    // but the framing layer is what decides how many bytes to consume
+    // from the socket; aligning both layers ensures the bytes for any
+    // smuggled trailing request never enter the buffer in the first
+    // place. Same defense-in-depth pattern as the parser-layer check
+    // at `src/serve.rs:567`.
     let mut content_length = 0_usize;
+    let mut content_length_seen = false;
     for line in header_text.split("\r\n").skip(1) {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         if name.trim().eq_ignore_ascii_case("content-length") {
+            if content_length_seen {
+                return Err(serve_usage_error(
+                    "HTTP header `content-length` appears more than once; \
+                     the ee serve v2 framing layer rejects duplicate \
+                     Content-Length rows to close request-smuggling \
+                     framing disagreements.",
+                ));
+            }
+            content_length_seen = true;
             content_length = value
                 .trim()
                 .parse::<usize>()
@@ -2561,6 +2620,102 @@ mod tests {
             &ServeLimits::default(),
         )
         .map_err(|error| format!("TE: identity must still parse; got {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn serve_http_parser_rejects_chunked_with_transfer_extension_parameters() -> TestResult {
+        // RFC 7230 §4.1 declares that `chunked` has no parameters, but
+        // a permissive upstream proxy may still accept
+        // `Transfer-Encoding: chunked; foo=bar` and frame the body as
+        // chunked. The bare-string guard at 1b426516 compared the full
+        // trimmed segment against the literal `chunked`, so any token
+        // with a `;`-delimited parameter slipped through and let the
+        // parser fall through to Content-Length framing — the same
+        // CL.TE smuggling shape the prior fix was meant to close.
+        //
+        // Lock the param-strip extension across the four practical
+        // bypass shapes: trailing param, parameterized chunked inside
+        // a list, leading-CHUNKED with whitespace around the `;`, and
+        // a bare `chunked;abc` with no equals-sign value.
+        let raws: [&[u8]; 4] = [
+            // trailing parameter on bare chunked
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked; foo=bar\r\nContent-Length: 0\r\n\r\n",
+            // parameterized chunked at end of coding list
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: gzip, chunked; q=1\r\nContent-Length: 0\r\n\r\n",
+            // case-insensitive + whitespace around `;`, parameterized chunked at head of list
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: CHUNKED ; ext=v, identity\r\nContent-Length: 0\r\n\r\n",
+            // parameter without equals sign
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: identity, chunked;abc\r\nContent-Length: 0\r\n\r\n",
+        ];
+        for raw in raws {
+            match parse_serve_http_request(raw, &ServeLimits::default()) {
+                Ok(request) => {
+                    return Err(format!(
+                        "Transfer-Encoding with parameterized chunked must reject; got {request:?}",
+                    ));
+                }
+                Err(error) => ensure(
+                    error.code(),
+                    "usage",
+                    "parameterized-chunked rejection error code",
+                )?,
+            }
+        }
+        // Sanity check: a parameterized NON-chunked coding (e.g.
+        // `gzip; q=0.5`) must still parse — the param-strip extension
+        // targets `chunked` specifically, not all parameterized codings.
+        parse_serve_http_request(
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: gzip; q=0.5\r\nContent-Length: 0\r\n\r\n",
+            &ServeLimits::default(),
+        )
+        .map_err(|error| format!("TE: gzip; q=0.5 must still parse; got {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn serve_http_parser_rejects_duplicate_headers() -> TestResult {
+        // RFC 7230 §3.3.3 bullet 4 smuggling guard: a request that
+        // repeats Content-Length MUST be rejected regardless of
+        // whether the duplicate values agree, because an upstream
+        // proxy may parse the first while this parser previously kept
+        // the last (BTreeMap::insert last-wins). The same disagreement
+        // hazard applies to repeated Transfer-Encoding rows — the
+        // chunked-in-TE-list guard only fires when a *single* row
+        // names chunked, so a paired `identity` + `chunked` would have
+        // collapsed to whichever survived BTreeMap::insert before the
+        // smuggling check ran. The v2 parser rejects all duplicate
+        // header rows, not only Content-Length / Transfer-Encoding;
+        // the v2 surface does not implement RFC 7230 §3.2.2 list
+        // combining for repeated names, so collapsing them silently
+        // would lose information without any matching defense.
+        let raws: [&[u8]; 5] = [
+            // Two differing Content-Length rows — classic CL.CL split
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\nContent-Length: 50\r\n\r\n",
+            // Two matching Content-Length rows — still a framing-
+            // disagreement risk against permissive proxies
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nContent-Length: 0\r\n\r\n",
+            // Case-insensitive duplicate (normalized_name lowercases)
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-length: 0\r\nContent-Length: 0\r\n\r\n",
+            // Paired Transfer-Encoding rows would have bypassed the
+            // chunked-in-TE-list check via last-wins overwrite
+            b"POST /v1/durable-write HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n",
+            // Generic duplicate header (Host) — the v2 surface does
+            // not silently collapse repeats
+            b"GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\nHost: attacker.example\r\n\r\n",
+        ];
+        for raw in raws {
+            match parse_serve_http_request(raw, &ServeLimits::default()) {
+                Ok(request) => {
+                    return Err(format!("duplicate header row must reject; got {request:?}",));
+                }
+                Err(error) => ensure(
+                    error.code(),
+                    "usage",
+                    "duplicate-header rejection error code",
+                )?,
+            }
+        }
         Ok(())
     }
 
