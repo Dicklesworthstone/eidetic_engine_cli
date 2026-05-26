@@ -1583,9 +1583,77 @@ fn read_provenance_file_text(source_path: &Path) -> Result<Option<String>, Strin
         }
     }
 
-    fs::read_to_string(source_path).map(Some).map_err(|error| {
+    // Bounded read with `take(CAP + 1)`. The metadata pre-check above is
+    // TOCTOU-racy: a peer can grow the provenance file between the
+    // `symlink_metadata().len()` check and the read, so the underlying
+    // `fs::read_to_string` would still pre-size its destination `String`
+    // from the (now-grown) metadata length on every supported platform
+    // and OOM the evidence-freshness path before the body could be
+    // inspected. `take(CAP + 1)` pins peak allocation to CAP + 1 bytes
+    // regardless of on-disk file size; the post-read length check then
+    // distinguishes "exactly at cap" (accepted) from "above cap"
+    // (rejected as TOCTOU). Same defensive pattern as the Round-2 caps
+    // at `src/core/handoff.rs::read_regular_file_no_symlinks`
+    // (6d8d00e5), `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // (7f56d89b), `src/core/claims.rs::read_claim_file_bytes_no_follow`,
+    // and the workspace-side Agent Mail snapshot guard added by
+    // ed0f69f8.
+    //
+    // After the read, re-check that no path component became a symlink
+    // during the read window. The opening `first_existing_symlink_component`
+    // scan above plus this trailing re-check together close the
+    // symlink-swap TOCTOU window without requiring O_NOFOLLOW on the
+    // file handle itself — same shape as
+    // `handoff::read_regular_file_no_symlinks`.
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    let file = match fs::File::open(source_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "Referenced provenance file {} could not be read: {error}.",
+                source_path.display()
+            ));
+        }
+    };
+    let read_limit = MAX_PROVENANCE_FILE_BYTES.saturating_add(1);
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            format!(
+                "Referenced provenance file {} could not be read: {error}.",
+                source_path.display()
+            )
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PROVENANCE_FILE_BYTES {
+        return Err(format!(
+            "Referenced provenance file {} grew past the {} byte cap after the metadata check (TOCTOU).",
+            source_path.display(),
+            MAX_PROVENANCE_FILE_BYTES
+        ));
+    }
+    // Symlink swap detection. If the opening scan saw no symlinks but
+    // the path acquired a symlink component during the read, the bytes
+    // we just hashed came from the swapped target rather than the
+    // regular file the caller asked us to verify. Fail closed.
+    if let Some(symlink_path) = first_existing_symlink_component(source_path).map_err(|error| {
         format!(
-            "Referenced provenance file {} could not be read: {error}.",
+            "Referenced provenance file {} could not be inspected at {}: {}.",
+            source_path.display(),
+            error.path.display(),
+            error.source
+        )
+    })? {
+        return Err(format!(
+            "Referenced provenance file {} acquired symlinked path component {} during read.",
+            source_path.display(),
+            symlink_path.display()
+        ));
+    }
+    String::from_utf8(bytes).map(Some).map_err(|error| {
+        format!(
+            "Referenced provenance file {} could not be read as UTF-8: {error}.",
             source_path.display()
         )
     })
@@ -7663,6 +7731,66 @@ mod tests {
                 freshness.detail
             ))
         }
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `read_provenance_file_text`.
+    ///
+    /// Pre-fix, the helper checked `metadata.len() > MAX_PROVENANCE_FILE_BYTES`
+    /// and then handed the path to `fs::read_to_string`. That second
+    /// call pre-sizes its destination `String` from the file's
+    /// metadata length on every supported platform and ignores the
+    /// downstream UTF-8 size cap — so a peer that grew the file
+    /// between the metadata stat and the read would defeat the cap
+    /// and pin a matching multi-GiB allocation on every
+    /// `ee remember` / `ee why <id>` evidence-freshness invocation
+    /// in a shared swarm checkout. The fix bounds the read at
+    /// `MAX_PROVENANCE_FILE_BYTES + 1` via `file.take(...)` so peak
+    /// allocation is proportional to the cap regardless of on-disk
+    /// growth, and surfaces the refusal as
+    /// `UnreachableSource` at the freshness-check layer instead of
+    /// materializing the oversized payload. Same defensive pattern
+    /// as the parallel guards in handoff.rs (6d8d00e5),
+    /// preflight_guard.rs (7f56d89b), and workspace.rs (ed0f69f8).
+    #[test]
+    fn read_provenance_file_refuses_oversize_payload() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source_path = temp.path().join("oversize.md");
+        // CAP + 1 bytes of valid UTF-8 filler. Filling the whole
+        // buffer past the cap is what asserts the bounded read
+        // didn't silently truncate at exactly CAP and accept the
+        // result as a normal "freshness source".
+        let cap = usize::try_from(MAX_PROVENANCE_FILE_BYTES).map_err(|error| error.to_string())?;
+        let payload = vec![b' '; cap + 1];
+        std::fs::write(&source_path, &payload).map_err(|error| error.to_string())?;
+
+        let direct = read_provenance_file_text(&source_path)
+            .expect_err("oversized provenance file must be refused before allocation");
+        assert!(
+            direct.contains(&MAX_PROVENANCE_FILE_BYTES.to_string()),
+            "rejection must cite the cap; got {direct:?}",
+        );
+        // The freshness-check wrapper must propagate the refusal as
+        // UnreachableSource (not Fresh, not ChangedSource — both
+        // would imply the body was successfully materialized).
+        let freshness = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "freshness source release evidence line",
+                Some(format!(
+                    "file://{}",
+                    source_path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("oversize.md")
+                )),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            freshness.status,
+            EvidenceFreshnessStatus::UnreachableSource,
+            "oversized provenance source status",
+        )
     }
 
     fn remember_revisable_memory(
