@@ -25,6 +25,10 @@ fn verify_budget_path() -> PathBuf {
     project_root().join("scripts/verify-budget.toml")
 }
 
+fn overhaul_script_path() -> PathBuf {
+    project_root().join("scripts/e2e_overhaul.sh")
+}
+
 fn output_excerpt(output: &Output) -> String {
     format!(
         "status={:?}\nstdout:\n{}\nstderr:\n{}",
@@ -231,6 +235,34 @@ fn verify_budget_manifest_has_p50_and_regression_factor_for_every_stage() {
     assert!(
         budget_manifest.contains("total_expected_seconds = 600"),
         "manifest should document the total 10-minute verification budget"
+    );
+}
+
+#[test]
+fn overhaul_registry_wires_tiered_recall_e2e_driver() {
+    let overhaul_script = fs::read_to_string(overhaul_script_path()).expect("read e2e_overhaul.sh");
+
+    assert!(
+        overhaul_script.contains("EPIC_LETTERS=(A B C D Q E F G H I J K L M N O P R S T U V W)"),
+        "scripts/e2e_overhaul.sh must include tiered recall's W epic in EPIC_LETTERS"
+    );
+    assert_eq!(
+        overhaul_script
+            .matches("[W]=\"tiered_recall_e2e.sh\"")
+            .count(),
+        1,
+        "tiered_recall_e2e.sh must be registered exactly once in EPIC_SCRIPTS"
+    );
+    assert_eq!(
+        overhaul_script.matches("[W]=\"tiered_recall_e2e\"").count(),
+        1,
+        "tiered_recall_e2e must be registered exactly once in EPIC_NAMES"
+    );
+    assert!(
+        project_root()
+            .join("scripts/e2e_overhaul/tiered_recall_e2e.sh")
+            .is_file(),
+        "registered tiered recall E2E script must exist on disk"
     );
 }
 
