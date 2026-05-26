@@ -2007,21 +2007,107 @@ fn load_secret_detector_allow_config(
     })
 }
 
+/// Maximum bytes inspected when reading `<workspace>/.ee/config.toml`.
+/// Realistic workspace configs are kilobytes to low tens of KiB; 4 MiB
+/// is a very generous ceiling. Same magnitude as `PREFLIGHT_RULES_MAX_BYTES`
+/// (7f56d89b) and `PREFLIGHT_RUN_STORE_MAX_BYTES` (aac04adb) for the
+/// parallel workspace-local `.ee/preflight_rules.toml` and
+/// `.ee/preflight_runs.json` paths. The cap bounds the per-call
+/// allocation on the `ee remember` hot path so a peer-planted oversized
+/// config cannot OOM the CLI through repeated invocation.
+const WORKSPACE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn read_workspace_config_if_present(
     workspace_path: &Path,
     purpose: &str,
 ) -> Result<Option<(PathBuf, String)>, DomainError> {
+    use std::io::Read as _;
+
     let path = workspace_path.join(".ee").join("config.toml");
     ensure_workspace_config_path_is_not_symlink(&path, purpose)?;
     ensure_workspace_config_path_is_regular_file(&path, purpose)?;
-    match fs::read_to_string(&path) {
-        Ok(contents) => Ok(Some((path, contents))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(DomainError::Configuration {
+
+    // Bound the read so a peer-planted multi-GB `.ee/config.toml`
+    // (accidental — `cat /dev/urandom > .ee/config.toml` — or hostile
+    // in a shared multi-agent checkout) cannot pin a matching
+    // allocation on every `ee remember` invocation. Both
+    // `load_secret_detector_allow_config` (line 1981) and
+    // `remember_cluster_coherence_config` (line 3447) call this
+    // helper on the `ee remember` hot path; without the cap, one bad
+    // config silently disables every other agent's memory writes.
+    // Same self-DoS amplification pattern that 7f56d89b
+    // (`PREFLIGHT_RULES_MAX_BYTES`) and aac04adb
+    // (`PREFLIGHT_RUN_STORE_MAX_BYTES`) just closed for the parallel
+    // workspace-local `.ee/` files.
+    //
+    // Two layers of defense, matching the peer's
+    // `read_preflight_rules_file_no_follow` shape:
+    //  1. `metadata.len() > LIMIT` pre-check at stat time, before any
+    //     open or allocation.
+    //  2. `file.take(LIMIT + 1).read_to_end` for the actual read,
+    //     closing the TOCTOU growth window where a peer could grow
+    //     the file between the stat and the read itself.
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.len() > WORKSPACE_CONFIG_MAX_BYTES => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Refusing to read {purpose} {}: file is {} bytes, exceeding the {WORKSPACE_CONFIG_MAX_BYTES}-byte ceiling.",
+                    path.display(),
+                    metadata.len(),
+                ),
+                repair: Some(format!(
+                    "Trim or remove {} so it is under {WORKSPACE_CONFIG_MAX_BYTES} bytes.",
+                    path.display()
+                )),
+            });
+        }
+        Ok(_) => {}
+        // Missing or stat-failed paths fall through to `File::open`,
+        // which classifies NotFound as `Ok(None)` per the original
+        // semantics. Other stat errors will resurface there too.
+        Err(_) => {}
+    }
+
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!("Failed to read {purpose} {}: {error}", path.display()),
+                repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    if let Err(error) = file
+        .take(WORKSPACE_CONFIG_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+    {
+        return Err(DomainError::Configuration {
             message: format!("Failed to read {purpose} {}: {error}", path.display()),
             repair: Some("Fix or remove .ee/config.toml.".to_owned()),
-        }),
+        });
     }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > WORKSPACE_CONFIG_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read {purpose} {}: file grew past the {WORKSPACE_CONFIG_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {WORKSPACE_CONFIG_MAX_BYTES} bytes.",
+                path.display()
+            )),
+        });
+    }
+    let contents = String::from_utf8(bytes).map_err(|error| DomainError::Configuration {
+        message: format!(
+            "Failed to read {purpose} {}: contents are not valid UTF-8: {error}",
+            path.display()
+        ),
+        repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+    })?;
+    Ok(Some((path, contents)))
 }
 
 fn ensure_workspace_config_path_is_regular_file(
@@ -10324,6 +10410,57 @@ mod tests {
         assert!(
             error.to_string().contains("not a regular file"),
             "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `read_workspace_config_if_present`. Pre-fix the helper called
+    /// `fs::read_to_string` on `.ee/config.toml` with no size guard,
+    /// so a peer-planted multi-MiB config would pin a matching
+    /// allocation on every `ee remember` invocation
+    /// (via both `load_secret_detector_allow_config` and
+    /// `remember_cluster_coherence_config`). Same defect class that
+    /// 7f56d89b (`PREFLIGHT_RULES_MAX_BYTES`) and aac04adb
+    /// (`PREFLIGHT_RUN_STORE_MAX_BYTES`) closed for the parallel
+    /// workspace-local `.ee/` files.
+    ///
+    /// This test plants a one-byte-over-cap `.ee/config.toml` and
+    /// asserts the helper rejects with a structured Configuration
+    /// error before the unbounded allocation. The error message
+    /// names the offending path and the ceiling so an operator can
+    /// fix the file directly.
+    #[test]
+    fn memory_config_reads_reject_oversize_config_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let ee_dir = temp.path().join(".ee");
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let config_path = ee_dir.join("config.toml");
+        let cap = usize::try_from(super::WORKSPACE_CONFIG_MAX_BYTES)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        fs::write(&config_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = match load_secret_detector_allow_config(temp.path()) {
+            Ok(config) => {
+                return Err(format!(
+                    "expected oversize rejection before unbounded allocation, got {config:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("exceeding the"),
+            "rejection message must cite the ceiling; got: {error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains(&super::WORKSPACE_CONFIG_MAX_BYTES.to_string()),
+            "rejection message must name the cap constant; got: {error}"
         );
         Ok(())
     }
