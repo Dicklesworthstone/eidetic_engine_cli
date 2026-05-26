@@ -12,7 +12,7 @@ use crate::core::check::CheckReport;
 use crate::core::context::ContextPackOutputOptions;
 use crate::core::curate::{
     CurateApplyReport, CurateCandidatesReport, CurateDispositionReport, CurateReviewReport,
-    CurateShowReport, CurateValidateReport, ReflectionProposeReport,
+    CurateShowReport, CurateValidateReport, ReflectionIngestReport, ReflectionProposeReport,
 };
 use crate::core::degraded_aggregation::{
     AggregatedDegradation, DegradationAggregationInput, aggregate_degraded_entries,
@@ -7482,6 +7482,20 @@ pub fn render_reflect_propose_toon(report: &ReflectionProposeReport) -> String {
     render_toon_from_json(&render_reflect_propose_json(report))
 }
 
+/// Render a reflection result ingest report as JSON (`ee.response.v2` envelope).
+#[must_use]
+pub fn render_reflect_ingest_json(report: &ReflectionIngestReport) -> String {
+    let data_raw = serde_json::to_string(report)
+        .unwrap_or_else(|_| r#"{"schema":"ee.reflect.ingest.v1"}"#.to_owned());
+    ResponseEnvelope::success().data_raw(&data_raw).finish()
+}
+
+/// Render a reflection result ingest report as TOON.
+#[must_use]
+pub fn render_reflect_ingest_toon(report: &ReflectionIngestReport) -> String {
+    render_toon_from_json(&render_reflect_ingest_json(report))
+}
+
 /// Render a curation apply report as JSON (`ee.response.v2` envelope).
 #[must_use]
 pub fn render_curate_apply_json(report: &CurateApplyReport) -> String {
@@ -8527,6 +8541,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: reflection_propose_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::REFLECTION_INGEST_SCHEMA_V1,
+            version: "1",
+            description: "Reflect ingest data report with candidate creation outcome",
+            category: "reflect",
+            definition: reflection_ingest_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::curate::REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1,
             version: "1",
             description: "Read-only reflection request ledger diagnostics report",
@@ -9446,6 +9467,10 @@ fn reflection_result_schema_definition() -> String {
 
 fn reflection_propose_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.reflect.propose.v1.json").to_string()
+}
+
+fn reflection_ingest_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.reflect.ingest.v1.json").to_string()
 }
 
 fn reflection_request_ledger_diagnostics_schema_definition() -> String {

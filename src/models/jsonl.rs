@@ -355,7 +355,13 @@ fn required_string(
     value: Option<String>,
 ) -> Result<String, ExportRecordBuildError> {
     match value {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        // Trim BEFORE returning so JSONL export records keep canonical
+        // string forms across noisier upstream emitters. Without this,
+        // a value like " mem_abc\n" round-trips through export/import
+        // as the literal whitespace-padded string, distinct from the
+        // clean "mem_abc" and breaking dedup-on-id semantics. Same
+        // defensive pattern as src/cass/import.rs (a135ab06).
+        Some(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
         _ => Err(missing_required(record_type, field)),
     }
 }

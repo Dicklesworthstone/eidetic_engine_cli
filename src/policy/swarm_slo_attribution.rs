@@ -286,36 +286,46 @@ fn classify_attribution_bucket(
     evidence: &[SwarmSloRedactedEvidence],
 ) -> SwarmSloAttributionBucket {
     let haystack = attribution_haystack(source, stage, evidence);
-    if haystack.contains("rch") || haystack.contains("e327") {
+    // Tokenize on every non-alphanumeric so `agent_mail` splits to
+    // `["agent","mail"]` and the substring trap that mapped any source
+    // containing `search` to `Rch` (`"search".contains("rch")` is true)
+    // disappears. Without this, the test at
+    // `unsafe_source_and_stage_labels_are_sanitized` (source `context/search`)
+    // would classify as Rch instead of Search.
+    let tokens: Vec<&str> = haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |needle: &str| tokens.iter().any(|t| *t == needle);
+    // Source-specific Rch / Tracker buckets MUST outrank the generic
+    // "coordination" stage that `adapt_swarm_slo_coordination_event`
+    // injects unconditionally — otherwise every coordination event
+    // (source = `bv`, `beads`, `rch`, …) maps to Coordination because
+    // the hardcoded stage token wins the race, breaking the
+    // `coordination_event_distinguishes_agent_mail_bv_and_rch_buckets`
+    // test expectations for bv → Tracker and rch → Rch.
+    if has("rch") || has("e327") {
         return SwarmSloAttributionBucket::Rch;
     }
-    if haystack.contains("agent_mail")
-        || haystack.contains("mail")
-        || haystack.contains("reservation")
-        || haystack.contains("coordination")
-    {
-        return SwarmSloAttributionBucket::Coordination;
-    }
-    if haystack.contains("beads")
-        || haystack.contains("br")
-        || haystack.contains("bv")
-        || haystack.contains("tracker")
-    {
+    if has("beads") || has("br") || has("bv") || has("tracker") {
         return SwarmSloAttributionBucket::Tracker;
     }
-    if haystack.contains("sqlite") || haystack.contains("db") || haystack.contains("storage") {
+    if has("mail") || has("reservation") || has("coordination") {
+        return SwarmSloAttributionBucket::Coordination;
+    }
+    if has("sqlite") || has("db") || has("storage") {
         return SwarmSloAttributionBucket::Storage;
     }
-    if haystack.contains("search") || haystack.contains("index") {
+    if has("search") || has("index") {
         return SwarmSloAttributionBucket::Search;
     }
-    if haystack.contains("graph") {
+    if has("graph") {
         return SwarmSloAttributionBucket::Graph;
     }
-    if haystack.contains("pack") || haystack.contains("context") {
+    if has("pack") || has("context") {
         return SwarmSloAttributionBucket::Pack;
     }
-    if haystack.contains("output") || haystack.contains("render") {
+    if has("output") || has("render") {
         return SwarmSloAttributionBucket::Output;
     }
     if posture.is_unavailable_or_blocked() {
@@ -350,16 +360,28 @@ fn repair_command_for(
     evidence: &[SwarmSloRedactedEvidence],
 ) -> Option<String> {
     let haystack = attribution_haystack(source_kind, "coordination", evidence);
-    if haystack.contains("rch") || haystack.contains("e327") {
+    // Same `"search".contains("rch") == true` substring trap as
+    // `classify_attribution_bucket` — without tokenization a coordination
+    // event for a search-flavored source would emit the rch-diagnose
+    // repair hint. Split on non-alphanumeric so `agent_mail` →
+    // `["agent","mail"]`, `bv_timeout_no_output` →
+    // `["bv","timeout","no","output"]`, etc., and only the intended
+    // tokens trigger their repair commands.
+    let tokens: Vec<&str> = haystack
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has = |needle: &str| tokens.iter().any(|t| *t == needle);
+    if has("rch") || has("e327") {
         return Some(r#"rch diagnose --dry-run "cargo test --workspace""#.to_owned());
     }
-    if haystack.contains("agent_mail") || haystack.contains("mail") || haystack.contains("sqlite") {
+    if has("mail") || has("sqlite") {
         return Some("am doctor check --verbose".to_owned());
     }
-    if haystack.contains("bv") {
+    if has("bv") {
         return Some("bv --robot-triage".to_owned());
     }
-    if haystack.contains("beads") || haystack.contains("br") || haystack.contains("tracker") {
+    if has("beads") || has("br") || has("tracker") {
         return Some("br doctor --json".to_owned());
     }
     if posture.is_unavailable_or_blocked() {

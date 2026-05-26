@@ -1728,7 +1728,21 @@ impl AggregateUtility {
         let mean: f64 = scores.iter().sum::<f64>() / total as f64;
 
         let mut sorted = scores.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // `total_cmp` over `partial_cmp(...).unwrap_or(Equal)`: the
+        // caller passes a `&[f64]` and there is no `is_finite` filter
+        // here, so a NaN reaches this sort. `partial_cmp` returns
+        // `None` for NaN comparisons, which the `unwrap_or(Equal)`
+        // pattern collapses into an intransitive ordering. The Vec
+        // sort observes that intransitive order, so the median index
+        // resolves to a different value across runs depending on
+        // (a) the initial slice layout and (b) the sort's internal
+        // pivot choices — both implementation-defined. Same defense
+        // already shipped at `src/core/conformal.rs:160` and the
+        // focus_suggest sort at `src/core/focus_suggest.rs:566`; the
+        // determinism contract documented at AGENTS.md (same DB +
+        // indexes + config + query ⇒ byte-identical JSON) extends to
+        // every f64 sort along a render path.
+        sorted.sort_by(|a, b| a.total_cmp(b));
         let median = sorted[sorted.len() / 2];
 
         let variance: f64 = scores.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / total as f64;

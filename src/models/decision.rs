@@ -380,7 +380,13 @@ impl DecisionRecordBuilder {
     /// audit field that callers must commit to.
     pub fn try_build(self) -> Result<DecisionRecord, DecisionBuildError> {
         let outcome = match self.outcome {
-            Some(value) if !value.trim().is_empty() => value,
+            // Trim BEFORE storing so the `outcome` field on the
+            // persisted DecisionRecord is in canonical form. A value
+            // like " approved\n" would otherwise round-trip through
+            // export/replay distinct from the trimmed "approved" and
+            // silently fork the audit chain on equality checks. Same
+            // defensive pattern as src/cass/import.rs (a135ab06).
+            Some(value) if !value.trim().is_empty() => value.trim().to_owned(),
             Some(_) => return Err(DecisionBuildError::EmptyOutcome),
             None => return Err(DecisionBuildError::MissingOutcome),
         };

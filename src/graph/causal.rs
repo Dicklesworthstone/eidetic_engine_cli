@@ -223,9 +223,39 @@ fn compare_explanation_cost(
     left: &MinCostExplanation,
     right: &MinCostExplanation,
 ) -> std::cmp::Ordering {
-    left.total_cost
-        .partial_cmp(&right.total_cost)
-        .unwrap_or(std::cmp::Ordering::Equal)
+    // `total_cmp` over `partial_cmp(...).unwrap_or(Equal)` for two
+    // reasons:
+    //
+    // 1. Determinism with NaN. `partial_cmp(NaN, x)` returns `None` and
+    //    `unwrap_or(Equal)` collapses every NaN-vs-finite pair onto the
+    //    same equivalence class. Without an in-comparator tiebreaker
+    //    (this function has none — the only sort key is total_cost),
+    //    the result violates transitivity (NaN == 1.0, NaN == 2.0,
+    //    but 1.0 < 2.0). Rust's `sort_by` documents the order as
+    //    "unspecified" when the comparator is not a total order. The
+    //    caller at line 187 (`explanations.sort_by(compare_explanation_cost)`)
+    //    relies on stable order across runs — `ee why <id> --causal-explain`
+    //    is part of the deterministic context-pack surface — so an
+    //    unspecified sort here would silently scramble the emitted
+    //    `causalExplanation` block across invocations.
+    //
+    // 2. Live NaN risk. `total_cost` comes from `min_cost_flow.cost`
+    //    (line 278). `compute_min_cost_explanation_unbudgeted` clamps
+    //    edge weights via `contribution_score`/`causal_cost` (lines
+    //    390-404) so the production path is currently NaN-free, but
+    //    `min_cost_flow` is an upstream `fnx_algorithms` routine and
+    //    a future change to its summation order, an unclamped
+    //    contribution_score, or a malformed graph edge could let NaN
+    //    leak into the cost field without breaking any compile-time
+    //    check.
+    //
+    // Same defense-in-depth pattern that `src/core/conformal.rs:158`,
+    // `src/core/focus_suggest.rs:569`, `src/core/plan.rs:1355`, and
+    // `src/core/situation.rs:1268` migrated to. The pre-sort by
+    // `sort_by_ulid_payload_or_lexical` at line 183-185 still
+    // provides the cause_id-order tiebreak for true cost ties via
+    // Rust's stable `sort_by`.
+    left.total_cost.total_cmp(&right.total_cost)
 }
 
 fn terminal_ancestors(graph: &DiGraph, failure_id: &str) -> Vec<String> {
@@ -785,5 +815,93 @@ mod tests {
         add_causal_edge(&mut graph, "failure", "cause", 0.8);
 
         assert!(compute_min_cost_explanation(&graph, "cause").is_none());
+    }
+
+    /// Regression guard for the NaN-determinism defense in
+    /// `compare_explanation_cost`. Before the migration to `total_cmp`,
+    /// the comparator used `partial_cmp(...).unwrap_or(Ordering::Equal)`
+    /// which collapses every NaN-vs-finite pair onto the same
+    /// equivalence class. With no in-comparator tiebreaker (this
+    /// comparator has none — `total_cost` is the only key), that
+    /// violates transitivity (NaN == 1.0, NaN == 2.0, but 1.0 < 2.0)
+    /// and Rust's `sort_by` documents the resulting order as
+    /// "unspecified". `total_cmp` is a total order on f64 (positive
+    /// NaN sorts above +Inf, negative NaN sorts below -Inf, with
+    /// payloads ordered lexicographically), so the result is stable
+    /// across runs regardless of NaN inputs.
+    ///
+    /// Production `total_cost` comes from `min_cost_flow.cost` and is
+    /// currently NaN-free because `contribution_score` clamps to
+    /// [0.0, 1.0] and `causal_cost = 1.0 - clamped` is in [0.0, 1.0].
+    /// This test exercises the comparator directly with synthetic
+    /// inputs to lock the post-fix behavior against a future change
+    /// that lets NaN reach the cost field (e.g., an unclamped
+    /// contribution score or a refactor of fnx_algorithms' summation
+    /// order).
+    #[test]
+    fn compare_explanation_cost_is_total_under_nan() {
+        fn make(cause: &str, cost: f64) -> MinCostExplanation {
+            MinCostExplanation {
+                failure_id: "failure".to_owned(),
+                cause_id: cause.to_owned(),
+                total_cost: cost,
+                path: Vec::new(),
+            }
+        }
+
+        // Transitivity probe: NaN, 1.0, 2.0 must produce a consistent
+        // ordering. `partial_cmp(...).unwrap_or(Equal)` would return
+        // Equal for both NaN comparisons and Less for 1.0-vs-2.0,
+        // which is non-transitive (NaN == 1.0, NaN == 2.0, but
+        // 1.0 < 2.0). `total_cmp` returns a deterministic Greater for
+        // positive NaN-vs-finite (positive NaN sorts above +Inf).
+        let nan = make("nan_cause", f64::NAN);
+        let one = make("one_cause", 1.0);
+        let two = make("two_cause", 2.0);
+
+        let nan_vs_one = compare_explanation_cost(&nan, &one);
+        let one_vs_two = compare_explanation_cost(&one, &two);
+        let nan_vs_two = compare_explanation_cost(&nan, &two);
+
+        // 1.0 < 2.0 must always hold (the only finite-vs-finite comparison).
+        assert_eq!(one_vs_two, std::cmp::Ordering::Less);
+        // The comparator MUST give consistent (non-Equal) answers for
+        // NaN-vs-finite so that the transitive chain holds. `total_cmp`
+        // returns Greater for positive NaN above finite values; either
+        // direction is acceptable as long as it's consistent across
+        // both NaN-vs-finite pairs.
+        assert_ne!(
+            nan_vs_one,
+            std::cmp::Ordering::Equal,
+            "NaN-vs-finite must not collapse to Equal under total_cmp"
+        );
+        assert_eq!(
+            nan_vs_one, nan_vs_two,
+            "NaN must compare consistently against all finite values"
+        );
+
+        // End-to-end sort lock: shuffled inputs must produce the same
+        // byte-identical order after `sort_by(compare_explanation_cost)`.
+        // This is the actual call-site invariant at line 187.
+        let mut order_a = vec![
+            make("nan_a", f64::NAN),
+            make("two_b", 2.0),
+            make("one_c", 1.0),
+            make("nan_d", f64::NAN),
+        ];
+        let mut order_b = vec![
+            make("two_b", 2.0),
+            make("nan_d", f64::NAN),
+            make("one_c", 1.0),
+            make("nan_a", f64::NAN),
+        ];
+        order_a.sort_by(compare_explanation_cost);
+        order_b.sort_by(compare_explanation_cost);
+        let cause_ids_a: Vec<_> = order_a.iter().map(|e| e.cause_id.clone()).collect();
+        let cause_ids_b: Vec<_> = order_b.iter().map(|e| e.cause_id.clone()).collect();
+        assert_eq!(
+            cause_ids_a, cause_ids_b,
+            "compare_explanation_cost must sort to the same order regardless of input permutation, even with NaN present"
+        );
     }
 }

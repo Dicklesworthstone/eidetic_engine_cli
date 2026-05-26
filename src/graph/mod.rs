@@ -3702,16 +3702,33 @@ fn sort_scores_by_metrics_desc_then_memory_id(
     secondary: impl Fn(&MemoryCentralityScore) -> f64,
 ) {
     sort_by_ulid_payload_or_lexical(scores, |score| score.memory_id.as_str());
-    scores.sort_by(|left, right| {
-        secondary(right)
-            .partial_cmp(&secondary(left))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scores.sort_by(|left, right| {
-        primary(right)
-            .partial_cmp(&primary(left))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // `total_cmp` over the previous `partial_cmp(...).unwrap_or(Equal)`
+    // in both chained stages. The chained-stable-sort pattern here is
+    // (memory_id ASC) → (secondary DESC) → (primary DESC); each stage
+    // relies on Rust's `sort_by` being stable to preserve the prior
+    // order on ties. But Rust's `sort_by` only guarantees stability
+    // when the comparator is a total order — `partial_cmp(NaN, x)`
+    // returns `None` and `unwrap_or(Equal)` collapses every NaN-vs-
+    // finite pair onto the same equivalence class without an in-
+    // comparator tiebreaker (these closures sort on a single f64
+    // metric), so the result violates transitivity when any score is
+    // NaN. `sort_by`'s API documents the resulting order as
+    // "unspecified" in that case, which would silently scramble the
+    // PageRank / betweenness / HITS / authority rank emitted by every
+    // centrality surface that flows through this helper.
+    //
+    // `total_cmp` is a total order on f64 (NaN sorts to one extreme
+    // by sign bit, deterministically). With stable `sort_by`, NaN
+    // entries cluster at the high end (we're sorting `secondary(right)
+    // vs secondary(left)` for descending order, so positive-NaN lands
+    // at the high-rank end) but the memory_id-ASC pre-sort from
+    // `sort_by_ulid_payload_or_lexical` is still preserved as the
+    // ultimate tiebreak. Same defense-in-depth pattern that
+    // `src/core/conformal.rs:158`, `src/core/focus_suggest.rs:569`,
+    // `src/core/plan.rs:1355`, and `src/core/situation.rs:1268`
+    // migrated to.
+    scores.sort_by(|left, right| secondary(right).total_cmp(&secondary(left)));
+    scores.sort_by(|left, right| primary(right).total_cmp(&primary(left)));
 }
 
 pub(crate) fn merge_centrality_scores(
