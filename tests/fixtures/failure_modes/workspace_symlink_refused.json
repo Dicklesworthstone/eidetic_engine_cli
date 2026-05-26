@@ -1,0 +1,33 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "workspace_symlink_refused",
+  "introduced_by": {
+    "bead": "bd-2bbtw",
+    "epic_letter": "E"
+  },
+  "surfaces": [
+    "init"
+  ],
+  "severity": "medium",
+  "repair_present": true,
+  "trigger": {
+    "description": "ee init is invoked with a workspace path that traverses a symlink while --allow-symlink is not set. On macOS, /tmp paths naturally hit this guard because /tmp points at /private/tmp.",
+    "setup_commands": [
+      "mkdir -p /tmp/ee-symlink-target",
+      "ln -s /tmp/ee-symlink-target /tmp/ee-symlink-workspace"
+    ],
+    "invocation": "ee init --workspace /tmp/ee-symlink-workspace --json"
+  },
+  "expected_emission": {
+    "code": "workspace_symlink_refused",
+    "severity": "medium",
+    "message_contains": [
+      "Init refused path",
+      "symlink"
+    ],
+    "repair_contains": "realpath",
+    "repair_strings": [
+      "Resolve the workspace path with realpath and retry ee init, or pass --allow-symlink only after confirming the target is safe."
+    ]
+  }
+}

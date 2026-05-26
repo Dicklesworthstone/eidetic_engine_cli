@@ -791,6 +791,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `unsupported_schema` | medium | (TBD) |
 | `windows_appdata_unavailable` | medium | bd-3usjw.68 |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
+| `workspace_symlink_refused` | medium | bd-2bbtw |
 | `ambiguous_containing_symbols` | warning | (TBD) |
 | `load_bearing_tombstone_requires_override` | medium | (TBD) |
 | `unattributed_compile_blocker` | low | (TBD) |

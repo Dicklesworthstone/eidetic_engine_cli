@@ -260,6 +260,7 @@ in the same commit, keeping the catalog complete by construction.
 | `maintenance_job_not_found` | job show | medium | bd-17c65.10.6 (J6) |
 | `mcp_feature_disabled` | mcp manifest | low | bd-17c65.10.6 (J6) |
 | `workspace_nested_markers` | workspace discovery, status | warning | bd-17c65.10.6 (J6) |
+| `workspace_symlink_refused` | init | medium | bd-2bbtw (E) |
 | `causal_ledger_empty` | causal estimate, causal compare | warning | bd-17c65.10.6 (J6) |
 | `causal_evidence_unavailable` | causal commands | warning | bd-17c65.10.6 (J6) |
 | `causal_workspace_id_required` | causal trace | warning | bd-17c65.10.6 (J6) |

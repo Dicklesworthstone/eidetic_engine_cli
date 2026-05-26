@@ -123,7 +123,7 @@ use crate::core::index::{
     IndexRebuildStatus, IndexReembedOptions, IndexStatusOptions, IndexVacuumOptions,
     get_index_status, get_index_vacuum_report, rebuild_index, reembed_index,
 };
-use crate::core::init::{InitOptions, init_workspace};
+use crate::core::init::{InitOptions, InitReport, init_workspace};
 use crate::core::install::{
     InstallCheckOptions, InstallExecutionResult, InstallPlanOptions, check_install,
     execute_install_plan, plan_install,
@@ -10443,11 +10443,7 @@ where
                 | output::Renderer::Jsonl
                 | output::Renderer::Compact
                 | output::Renderer::Hook => {
-                    let json = serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V2,
-                        "success": true,
-                        "data": report.data_json(),
-                    });
+                    let json = init_response_json(&report);
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
             }
@@ -13508,6 +13504,53 @@ where
             })
         })
         .collect()
+}
+
+const INIT_WORKSPACE_SYMLINK_REFUSED_CODE: &str = "workspace_symlink_refused";
+const INIT_WORKSPACE_SYMLINK_REFUSED_REPAIR: &str = "Resolve the workspace path with realpath and retry ee init, or pass --allow-symlink only after confirming the target is safe.";
+
+fn init_response_json(report: &InitReport) -> serde_json::Value {
+    let degraded = init_degraded_json(report);
+    let mut response = serde_json::json!({
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
+        "success": report.status.is_success(),
+        "data": report.data_json(),
+    });
+    if !degraded.is_empty()
+        && let Some(object) = response.as_object_mut()
+    {
+        object.insert("degraded".to_string(), serde_json::Value::Array(degraded));
+    }
+    response
+}
+
+fn init_degraded_json(report: &InitReport) -> Vec<serde_json::Value> {
+    let refused_paths: Vec<String> = report
+        .actions
+        .iter()
+        .filter(|action| action.status == "symlink_refused")
+        .map(|action| action.path.display().to_string())
+        .collect();
+    if refused_paths.is_empty() {
+        return Vec::new();
+    }
+
+    let message = if let [path] = refused_paths.as_slice() {
+        format!("Init refused path {path} because it traverses a symlink.")
+    } else {
+        format!(
+            "Init refused {} paths because they traverse symlinks: {}",
+            refused_paths.len(),
+            refused_paths.join(", ")
+        )
+    };
+    vec![serde_json::json!({
+        "code": INIT_WORKSPACE_SYMLINK_REFUSED_CODE,
+        "severity": "medium",
+        "message": message,
+        "repair": INIT_WORKSPACE_SYMLINK_REFUSED_REPAIR,
+        "sources": ["init"]
+    })]
 }
 
 fn aggregate_why_degraded_json(
@@ -46725,6 +46768,70 @@ mod tests {
             "init workspace JSON stdout present",
         )?;
         Ok(workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_json_symlink_refusal_marks_failure_and_degraded() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let real_workspace = temp_dir.path().join("real-workspace");
+        let linked_workspace = temp_dir.path().join("linked-workspace");
+        fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        symlink(&real_workspace, &linked_workspace).map_err(|error| error.to_string())?;
+        let linked_workspace = linked_workspace.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "--workspace", &linked_workspace, "init"]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "init symlink refusal keeps CLI exit stable",
+        )?;
+        ensure(stderr.is_empty(), "init symlink refusal stderr clean")?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "init symlink refusal response schema",
+        )?;
+        ensure_equal(
+            &value["success"],
+            &serde_json::json!(false),
+            "init symlink refusal success bit",
+        )?;
+        ensure_equal(
+            &value["data"]["status"],
+            &serde_json::json!("failed"),
+            "init symlink refusal data status",
+        )?;
+        let degraded = value["degraded"]
+            .as_array()
+            .ok_or_else(|| format!("init symlink refusal missing degraded[]: {value:?}"))?;
+        ensure_equal(&degraded.len(), &1usize, "init symlink degraded count")?;
+        ensure_equal(
+            &degraded[0]["code"],
+            &serde_json::json!("workspace_symlink_refused"),
+            "init symlink degraded code",
+        )?;
+        ensure_equal(
+            &degraded[0]["severity"],
+            &serde_json::json!("medium"),
+            "init symlink degraded severity",
+        )?;
+        ensure_contains(
+            degraded[0]["message"].as_str().unwrap_or_default(),
+            "symlink",
+            "init symlink degraded message",
+        )?;
+        ensure_contains(
+            degraded[0]["repair"].as_str().unwrap_or_default(),
+            "realpath",
+            "init symlink degraded repair",
+        )
     }
 
     #[test]
