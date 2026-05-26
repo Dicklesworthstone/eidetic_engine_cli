@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.focus.suggest.v1.json",
+  "title": "ee.focus.suggest.v1",
+  "description": "Read-only recommendation surface for `ee focus suggest` (bd-sg5si). Returns the topics, CASS spans, and pre-formatted follow-up queries an agent should pivot attention toward, ranked by graph centrality over recent CASS evidence. Phase 1 pins the schema and emits an empty `recommendations` array plus an `info`-severity `focus_suggest_unimplemented` degraded entry; Phase 2 (`implements-surface:focus_suggest`) lands the PageRank/HITS scoring and CASS-span ranking that populate the array.",
+  "type": "object",
+  "required": [
+    "schema",
+    "recommendations",
+    "fromCass",
+    "limit",
+    "recentHours"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.focus.suggest.v1"
+    },
+    "recommendations": {
+      "type": "array",
+      "description": "Ranked focus recommendations. Empty in Phase 1; populated by the centrality + recent-CASS scoring pipeline in Phase 2.",
+      "items": {
+        "type": "object",
+        "required": [
+          "topic",
+          "spanIds",
+          "centralityScore",
+          "rationale",
+          "suggestedQuery"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "topic": {
+            "type": "string",
+            "description": "Short topic label summarizing what the agent should focus on next."
+          },
+          "spanIds": {
+            "type": "array",
+            "description": "CASS span IDs that support this recommendation. At least one entry when `fromCass` is true.",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "centralityScore": {
+            "type": "number",
+            "description": "Graph centrality contribution to the rank. Higher is more central; absolute scale is implementation-dependent."
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Why this topic surfaced. Cites the centrality signal and the recent-CASS evidence."
+          },
+          "suggestedQuery": {
+            "type": "string",
+            "description": "Concrete ee command (typically `ee context` or `ee search`) the agent can run to act on the recommendation."
+          }
+        }
+      }
+    },
+    "fromCass": {
+      "type": "boolean",
+      "description": "True when the recommendations were derived from CASS evidence; false when only the durable memory graph contributed."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Maximum number of recommendations the response may return. Mirrors `--limit` (default 5)."
+    },
+    "recentHours": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Look-back window in hours for the recent-CASS evidence. Mirrors `--recent-hours` (default 24)."
+    }
+  },
+  "field_presets": {
+    "minimal": ["schema", "recommendations"],
+    "summary": ["schema", "recommendations", "fromCass"],
+    "standard": ["schema", "recommendations", "fromCass", "limit", "recentHours"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.focus.suggest.v1",
+      "recommendations": [],
+      "fromCass": false,
+      "limit": 5,
+      "recentHours": 24
+    },
+    {
+      "schema": "ee.focus.suggest.v1",
+      "recommendations": [
+        {
+          "topic": "release readiness",
+          "spanIds": ["span_release_audit_2026-05-25", "span_verify_chain_2026-05-25"],
+          "centralityScore": 0.42,
+          "rationale": "PageRank dominator over the last 24h of CASS evidence; six bead closures cite this topic.",
+          "suggestedQuery": "ee context 'release readiness gate' --workspace . --max-tokens 4000 --json"
+        }
+      ],
+      "fromCass": true,
+      "limit": 5,
+      "recentHours": 24
+    }
+  ]
+}
