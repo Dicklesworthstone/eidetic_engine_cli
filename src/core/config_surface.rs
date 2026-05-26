@@ -420,15 +420,27 @@ fn read_optional_config(path: &Path) -> Result<(bool, String), ConfigSurfaceErro
     }
 }
 
+/// Maximum bytes inspected when reading `<workspace>/.ee/config.toml`
+/// from the `ee config get|set` surfaces. Matches
+/// `WORKSPACE_CONFIG_MAX_BYTES` in `src/core/memory.rs` (e1499deb) and
+/// `CURATE_CONFIG_MAX_BYTES` in `src/core/curate.rs` (0fe4a339), which
+/// read the same file from parallel surfaces. The three helpers must
+/// use the same ceiling so a config that loads for one surface also
+/// loads for the others; divergent caps would silently make
+/// `ee config get` reject a config that `ee remember` happily accepts.
+const CONFIG_SURFACE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSurfaceError> {
+    use std::io::Read as _;
+
     ensure_no_config_symlink_components(path, "read").map_err(|source| {
         ConfigSurfaceError::Read {
             path: path.to_path_buf(),
             source,
         }
     })?;
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
         Ok(_) => {
             return Err(ConfigSurfaceError::Read {
                 path: path.to_path_buf(),
@@ -452,13 +464,71 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
                 source,
             });
         }
+    };
+    // Bound the read so a peer-planted multi-GB `.ee/config.toml`
+    // (accidental or hostile in a shared multi-agent checkout) cannot
+    // pin a matching allocation on every `ee config get|set`
+    // invocation. Same defect class that e1499deb closed for the
+    // parallel `src/core/memory.rs::read_workspace_config_if_present`
+    // and 0fe4a339 closed for
+    // `src/core/curate.rs::structural_decay_config_contents`. Two
+    // layers of defense, matching the peer's
+    // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
+    // shape:
+    //  1. `metadata.len() > LIMIT` pre-check at stat time, before the
+    //     File::open or allocation.
+    //  2. `file.take(LIMIT + 1).read_to_end` closes the TOCTOU growth
+    //     window between the stat above and the open below.
+    if metadata.len() > CONFIG_SURFACE_MAX_BYTES {
+        return Err(ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to read config `{}`: file is {} bytes, exceeding the {CONFIG_SURFACE_MAX_BYTES}-byte ceiling",
+                    path.display(),
+                    metadata.len(),
+                ),
+            ),
+        });
     }
-    fs::read_to_string(path)
-        .map(Some)
-        .map_err(|source| ConfigSurfaceError::Read {
+    let file = fs::File::open(path).map_err(|source| ConfigSurfaceError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut bytes = Vec::new();
+    if let Err(source) = file
+        .take(CONFIG_SURFACE_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+    {
+        return Err(ConfigSurfaceError::Read {
             path: path.to_path_buf(),
             source,
-        })
+        });
+    }
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CONFIG_SURFACE_MAX_BYTES {
+        return Err(ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to read config `{}`: file grew past the {CONFIG_SURFACE_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                    path.display()
+                ),
+            ),
+        });
+    }
+    let contents = String::from_utf8(bytes).map_err(|error| ConfigSurfaceError::Read {
+        path: path.to_path_buf(),
+        source: io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read config `{}`: contents are not valid UTF-8: {error}",
+                path.display()
+            ),
+        ),
+    })?;
+    Ok(Some(contents))
 }
 
 fn ensure_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
@@ -1062,6 +1132,50 @@ mod tests {
         } else {
             Err(format!("unexpected non-regular config error: {error}"))
         }
+    }
+
+    /// Regression guard for the bounded-read defense in
+    /// `read_optional_config_contents`. Pre-fix the helper called
+    /// `fs::read_to_string` on `.ee/config.toml` with no size guard,
+    /// so a peer-planted multi-MiB config would pin a matching
+    /// allocation on every `ee config get|set` invocation. Same
+    /// defect class that e1499deb closed for
+    /// `src/core/memory.rs::read_workspace_config_if_present` and
+    /// 0fe4a339 closed for
+    /// `src/core/curate.rs::structural_decay_config_contents`.
+    ///
+    /// This test plants a one-byte-over-cap `.ee/config.toml` and
+    /// asserts `get_config` rejects with a Read error before the
+    /// unbounded allocation. The error message must cite the
+    /// ceiling so an operator can fix the file directly.
+    #[test]
+    fn graph_get_rejects_oversize_config_file() -> TestResult {
+        let temp = workspace()?;
+        let ee_dir = temp.path().join(".ee");
+        fs::create_dir(&ee_dir).map_err(|error| error.to_string())?;
+        let config_path = ee_dir.join("config.toml");
+        let cap = usize::try_from(super::CONFIG_SURFACE_MAX_BYTES)
+            .map_err(|error| format!("cap fits in usize: {error}"))?;
+        let mut payload = String::with_capacity(cap + 1);
+        while payload.len() <= cap {
+            payload.push('#');
+        }
+        fs::write(&config_path, &payload).map_err(|error| error.to_string())?;
+
+        let error = get_config(&options(temp.path()), "graph.ppr.alpha")
+            .expect_err("oversize config should reject config get before unbounded allocation")
+            .to_string();
+        if !error.contains("exceeding the") {
+            return Err(format!(
+                "rejection message must cite the ceiling; got: {error}"
+            ));
+        }
+        if !error.contains(&super::CONFIG_SURFACE_MAX_BYTES.to_string()) {
+            return Err(format!(
+                "rejection message must name the cap constant; got: {error}"
+            ));
+        }
+        Ok(())
     }
 
     #[test]
