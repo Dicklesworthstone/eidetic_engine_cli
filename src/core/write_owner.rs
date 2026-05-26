@@ -75,6 +75,20 @@ pub const WRITE_SPOOL_RECOVERY_STATE_SCHEMA_V1: &str = "ee.write_spool.recovery_
 /// Relative path to the durable write-spool crash-recovery state marker.
 pub const WRITE_SPOOL_RECOVERY_STATE_PATH: &str = ".ee/write-spool/recovery-state.json";
 
+/// Hard cap on `.ee/write-spool/recovery-state.json` reads. The schema
+/// is `{"schema": "ee.write_spool.recovery_state.v1", "state":
+/// "clean"|"uncommitted_write_replay_required"}` — well under 200
+/// bytes. 4 KiB is overwhelmingly generous head-room. Without the cap,
+/// a peer-planted multi-GB recovery-state file (accidental — `cat
+/// /dev/urandom > .ee/write-spool/recovery-state.json` — or hostile in
+/// a shared multi-agent checkout) would pin a matching
+/// `read_to_string` allocation on every `ee status` invocation (via
+/// `workspace_write_replay_required` at status.rs:2611) and on every
+/// `mark_write_replay_*` write path call site. Mirrors the
+/// `.git`-gitfile 4 KiB cap (c8f33694) and the HMAC key material 1 KiB
+/// cap (f067c32c) for parallel small-fixed-schema workspace files.
+const RECOVERY_STATE_MAX_BYTES: u64 = 4 * 1024;
+
 const WRITE_SPOOL_RECOVERY_STATE_CLEAN: &str = "clean";
 const WRITE_SPOOL_RECOVERY_STATE_REPLAY_REQUIRED: &str = "uncommitted_write_replay_required";
 const WRITE_SPOOL_RECOVERY_TEMP_CREATE_ATTEMPTS: usize = 16;
@@ -153,6 +167,16 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
     if !metadata.file_type().is_file() {
         return false;
     }
+    // Refuse oversized recovery-state files at stat time. The
+    // recovery JSON is well under 200 bytes; anything over the 4 KiB
+    // cap is corrupt or hostile and we treat it like a missing/
+    // unreadable file (return false → no replay) rather than
+    // allocating the file into memory. Layer-1 of the bounded-read
+    // defense, mirroring the .git-gitfile pre-check shape from
+    // c8f33694.
+    if metadata.len() > RECOVERY_STATE_MAX_BYTES {
+        return false;
+    }
     let Ok(raw) = read_recovery_state_file(&path) else {
         return false;
     };
@@ -171,7 +195,17 @@ pub fn workspace_write_replay_required(workspace_path: &Path) -> bool {
 fn read_recovery_state_file(path: &Path) -> io::Result<String> {
     let mut file = open_recovery_state_file_for_read(path)?;
     let mut raw = String::new();
-    file.read_to_string(&mut raw)?;
+    // Layer-2 of the bounded-read defense: cap peak allocation at
+    // `RECOVERY_STATE_MAX_BYTES + 1` regardless of TOCTOU growth
+    // between the stat in `workspace_write_replay_required` and this
+    // open. The caller treats any read error as
+    // `replay_not_required` (returns false), so growth past the cap
+    // also degrades to "no replay" rather than crashing. Same shape
+    // as the just-landed `read_focus_state_file` (5d22e245) and
+    // `context_workspace_config` (85464736) caps.
+    (&mut file)
+        .take(RECOVERY_STATE_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut raw)?;
     Ok(raw)
 }
 
