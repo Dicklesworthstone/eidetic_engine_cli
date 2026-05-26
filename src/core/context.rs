@@ -6115,7 +6115,10 @@ fn symbol_sources_for_paths(
             continue;
         }
         let absolute_path = workspace_path.join(&relative_path);
-        match read_context_file_to_string_no_follow(&absolute_path) {
+        match read_symbol_source_no_follow_bounded(
+            &absolute_path,
+            crate::core::symbol_graph::DEFAULT_MAX_RUST_SOURCE_BYTES,
+        ) {
             Ok(contents) => sources.push(SymbolSourceText {
                 relative_path,
                 contents,
@@ -6129,6 +6132,35 @@ fn symbol_sources_for_paths(
     sources.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     sources.dedup_by(|left, right| left.relative_path == right.relative_path);
     sources
+}
+
+/// Read a Rust source file via the no-follow opener with a hard cap on the
+/// allocation. The unbounded `read_context_file_to_string_no_follow` path
+/// pre-sizes the `String` from the file's current length on every read, so a
+/// peer-grown `.rs` file matching one of the `changed_symbols` paths would
+/// inflate the allocation without bound on every `ee pack` invocation.
+/// Wrapping the handle in `file.take(max_bytes + 1)` mirrors the
+/// `symbol_graph::extract_paths` fix (27a3cb9b) so the parallel reader in
+/// the pack hot path obeys the same `DEFAULT_MAX_RUST_SOURCE_BYTES` ceiling.
+/// Over-cap reads land in the existing `symbol_index_stale` degraded code via
+/// the caller's `Err` arm — same observable behavior as an unreadable
+/// source.
+fn read_symbol_source_no_follow_bounded(path: &Path, max_bytes: u64) -> io::Result<String> {
+    let file = open_context_file_for_read_no_follow(path)?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Rust source {} exceeds the {max_bytes}-byte changed-symbol context cap",
+                path.display()
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 fn normalize_symbol_workspace_path(workspace_path: &Path, raw_path: &str) -> Option<String> {
