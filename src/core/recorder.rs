@@ -2131,6 +2131,38 @@ pub fn execute_recorder_import(
 
     let ended_at = Utc::now().to_rfc3339();
 
+    // Stamp ended_at on the run row that was inserted with `ended_at = None`
+    // before the event loop. Without this, the API response says the import
+    // completed at `ended_at` but the persisted row stays NULL forever —
+    // breaking `ee recorder list` filtering on completion time, breaking
+    // every join that gates on `ended_at IS NOT NULL`, and silently
+    // disagreeing with what the import report just told the caller.
+    //
+    // We pre-insert the run BEFORE the event loop because recorder_events
+    // has a foreign key into recorder_runs(run_id) (src/db/mod.rs:3637) —
+    // events cannot be persisted before the run row exists. The
+    // post-event-loop stamp is the only correct shape under that FK.
+    //
+    // Errors from this UPDATE are surfaced as DatabaseError so the caller
+    // knows the import is structurally incomplete; they are NOT silently
+    // dropped (the prior shape silently dropped the entire `ended_at`
+    // semantic because no UPDATE existed at all).
+    connection
+        .stamp_recorder_run_ended_at(&plan.run_id, &ended_at)
+        .map_err(|error| RecorderImportError {
+            code: RecorderImportErrorCode::DatabaseError,
+            message: format!(
+                "Failed to stamp ended_at on recorder run {}: {error}",
+                plan.run_id
+            ),
+            repair: "Check database connectivity.".to_string(),
+            details: Box::new(json!({
+                "runId": plan.run_id,
+                "endedAt": ended_at,
+                "dbError": error.to_string(),
+            })),
+        })?;
+
     Ok(RecorderImportResult {
         schema: RECORDER_IMPORT_RESULT_SCHEMA_V1,
         source_type: plan.source_type,
@@ -3732,6 +3764,66 @@ mod tests {
         ensure(stored_events.len(), 2, "stored events count")?;
         ensure(stored_events[0].sequence, 1, "first event sequence")?;
         ensure(stored_events[1].sequence, 2, "second event sequence")
+    }
+
+    /// Regression: `execute_recorder_import` previously inserted the run
+    /// row with `ended_at = NULL` and never updated it, so the DB row's
+    /// `ended_at` stayed NULL forever even though the API response stamped
+    /// a non-empty timestamp into `RecorderImportResult.ended_at`. A
+    /// downstream `ee recorder list --completed-only` or any JOIN on
+    /// `ended_at IS NOT NULL` would silently miss every imported run.
+    /// Lock the persisted-state contract: after a successful import, the
+    /// row's `ended_at` MUST equal the result's `ended_at`.
+    #[test]
+    fn recorder_import_persists_ended_at_into_run_row() -> TestResult {
+        use crate::db::DbConnection;
+
+        let connection = DbConnection::open_memory().map_err(|e| e.to_string())?;
+        connection.migrate().map_err(|e| e.to_string())?;
+
+        let input = json!({
+            "lines": [
+                {"line": 1, "content": "ended-at regression a"},
+                {"line": 2, "content": "ended-at regression b"},
+            ]
+        });
+        let options = RecorderImportOptions {
+            source_type: ImportSourceType::Cass,
+            source_id: "cass://ended-at-regression".to_string(),
+            input_json: Some(input.to_string()),
+            input_path: None,
+            agent_id: Some("regression-agent".to_string()),
+            session_id: Some("regression-session".to_string()),
+            workspace_id: None,
+            max_events: DEFAULT_RECORDER_IMPORT_LIMIT,
+            redact: false,
+            max_payload_bytes: DEFAULT_MAX_RECORDER_PAYLOAD_BYTES,
+            dry_run: false,
+        };
+
+        let result = execute_recorder_import(&options, &connection).map_err(|e| e.message)?;
+
+        // API response stamps a non-empty ended_at.
+        if result.ended_at.trim().is_empty() {
+            return Err("API result.ended_at must not be empty".to_string());
+        }
+
+        // Persisted row's ended_at must also be populated (the previous
+        // shape left this NULL — that was the bug).
+        let stored_run = connection
+            .get_recorder_run(&result.run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("run not found in database")?;
+        let persisted_ended_at = stored_run.ended_at.ok_or_else(|| {
+            "persisted recorder_runs.ended_at is NULL after successful import (was the bug)"
+                .to_string()
+        })?;
+
+        ensure(
+            persisted_ended_at,
+            result.ended_at,
+            "persisted ended_at must equal API result ended_at",
+        )
     }
 
     #[test]

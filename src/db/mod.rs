@@ -18140,6 +18140,39 @@ impl DbConnection {
         Ok(())
     }
 
+    /// Stamp `ended_at` on an existing recorder run row.
+    ///
+    /// `execute_recorder_import` (src/core/recorder.rs) inserts the run row
+    /// BEFORE the event loop (so the events' foreign key has something to
+    /// point at) with `ended_at = NULL`, then computes the real `ended_at`
+    /// only after every event has been inserted. Without this stamp the
+    /// API response says the import completed at `ended_at` but the
+    /// persisted row stays NULL forever — a real DB/API consistency split
+    /// that breaks `ee recorder list` filtering on completion time and
+    /// breaks every consumer that joins recorder_runs on `ended_at IS NOT
+    /// NULL`.
+    ///
+    /// Uses parameterized `execute_for` rather than the
+    /// `format!`-into-`execute_raw` shape that `finish_and_persist_recording`
+    /// uses today — that older call site is safe by construction (every
+    /// interpolated value is either an enum-static-str, a chrono RFC3339
+    /// string, or a u64 / bool), but the safety relies on the caller
+    /// validating every input. Channeling new writes through the
+    /// parameterized path removes the validation-discipline dependency
+    /// for the new call site, and gives a single place to add cross-cutting
+    /// instrumentation later.
+    pub fn stamp_recorder_run_ended_at(&self, run_id: &str, ended_at: &str) -> Result<()> {
+        self.execute_for(
+            DbOperation::Execute,
+            "UPDATE recorder_runs SET ended_at = ?1 WHERE run_id = ?2",
+            &[
+                Value::Text(ended_at.to_string()),
+                Value::Text(run_id.to_string()),
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Insert a recorder event record.
     pub fn insert_recorder_event(
         &self,
