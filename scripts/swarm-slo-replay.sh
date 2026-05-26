@@ -74,22 +74,82 @@ output_path = sys.argv[2]
 summary_path = sys.argv[3]
 verify_determinism = sys.argv[4] == "1"
 
+DEFAULT_MAX_INPUT_BYTES = 8 * 1024 * 1024
+DEFAULT_MAX_LINE_BYTES = 256 * 1024
+DEFAULT_MAX_ROWS = 100_000
+
+
+def positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise SystemExit(f"swarm-slo-replay: {name} must be a positive integer") from error
+    if value <= 0:
+        raise SystemExit(f"swarm-slo-replay: {name} must be a positive integer")
+    return value
+
+
+MAX_INPUT_BYTES = positive_int_env(
+    "EE_SWARM_SLO_REPLAY_MAX_INPUT_BYTES",
+    DEFAULT_MAX_INPUT_BYTES,
+)
+MAX_LINE_BYTES = positive_int_env(
+    "EE_SWARM_SLO_REPLAY_MAX_LINE_BYTES",
+    DEFAULT_MAX_LINE_BYTES,
+)
+MAX_ROWS = positive_int_env("EE_SWARM_SLO_REPLAY_MAX_ROWS", DEFAULT_MAX_ROWS)
+
 
 def read_rows(path: Path):
+    try:
+        input_bytes = path.stat().st_size
+    except OSError as error:
+        raise SystemExit(f"swarm-slo-replay: cannot stat input: {error}") from error
+    if input_bytes > MAX_INPUT_BYTES:
+        raise SystemExit(
+            f"swarm-slo-replay: input exceeds max bytes ({input_bytes} > {MAX_INPUT_BYTES})"
+        )
+
     rows = []
-    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if raw == "":
-            continue
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise SystemExit(f"swarm-slo-replay: invalid JSONL at line {line_no}: {error}") from error
-        if not isinstance(payload, dict):
-            raise SystemExit(f"swarm-slo-replay: line {line_no} is not a JSON object")
-        schema = str(payload.get("schema", ""))
-        if schema == "":
-            raise SystemExit(f"swarm-slo-replay: line {line_no} missing schema")
-        rows.append((line_no, raw, payload))
+    try:
+        handle = path.open("rb")
+    except OSError as error:
+        raise SystemExit(f"swarm-slo-replay: cannot open input: {error}") from error
+    with handle:
+        for line_no, raw_bytes in enumerate(handle, start=1):
+            raw_bytes = raw_bytes.rstrip(b"\r\n")
+            if raw_bytes == b"":
+                continue
+            if len(raw_bytes) > MAX_LINE_BYTES:
+                raise SystemExit(
+                    "swarm-slo-replay: line "
+                    f"{line_no} exceeds max bytes ({len(raw_bytes)} > {MAX_LINE_BYTES})"
+                )
+            if len(rows) >= MAX_ROWS:
+                raise SystemExit(
+                    f"swarm-slo-replay: input exceeds max rows ({len(rows) + 1} > {MAX_ROWS})"
+                )
+            try:
+                raw = raw_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise SystemExit(
+                    f"swarm-slo-replay: invalid UTF-8 at line {line_no}: {error}"
+                ) from error
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise SystemExit(
+                    f"swarm-slo-replay: invalid JSONL at line {line_no}: {error}"
+                ) from error
+            if not isinstance(payload, dict):
+                raise SystemExit(f"swarm-slo-replay: line {line_no} is not a JSON object")
+            schema = str(payload.get("schema", ""))
+            if schema == "":
+                raise SystemExit(f"swarm-slo-replay: line {line_no} missing schema")
+            rows.append((line_no, raw, payload))
     return rows
 
 
