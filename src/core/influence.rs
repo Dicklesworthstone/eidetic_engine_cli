@@ -191,11 +191,24 @@ fn top_positive_influencers(entries: &[WhyInfluenceEntry]) -> Vec<WhyInfluenceEn
         .filter(|entry| entry.influence_delta > 0.0)
         .cloned()
         .collect::<Vec<_>>();
+    // `total_cmp` gives a total order on f32 even if a NaN ever escapes
+    // upstream filtering. `partial_cmp(...).unwrap_or(Equal)` would
+    // collapse all NaN entries onto whatever the comparator hit first,
+    // making the emitted `top_positive[]` (a `ee.why.influence.v1`
+    // schema field) sensitive to candidate iteration order. The
+    // `filter(influence_delta > 0.0)` above already excludes NaN
+    // (`NaN > 0.0 == false`), so the two are observationally equivalent
+    // today — but the `ee.why.influence.v1` envelope is a determinism-
+    // contract surface (same target_memory_id + same candidates → byte-
+    // identical JSON), and a defense-in-depth ordering keeps that
+    // contract from silently breaking when a future caller path lets a
+    // non-finite `influence_delta` through. Mirrors the equivalent
+    // hardening of `why_conformal_confidence_intervals` and
+    // `split_conformal_quantile` in `src/core/conformal.rs`.
     positive.sort_by(|left, right| {
         right
             .influence_delta
-            .partial_cmp(&left.influence_delta)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&left.influence_delta)
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     positive.truncate(3);
@@ -208,10 +221,10 @@ fn top_negative_influencers(entries: &[WhyInfluenceEntry]) -> Vec<WhyInfluenceEn
         .filter(|entry| entry.influence_delta < 0.0)
         .cloned()
         .collect::<Vec<_>>();
+    // See `top_positive_influencers` for the `total_cmp` rationale.
     negative.sort_by(|left, right| {
         left.influence_delta
-            .partial_cmp(&right.influence_delta)
-            .unwrap_or(Ordering::Equal)
+            .total_cmp(&right.influence_delta)
             .then_with(|| left.memory_id.cmp(&right.memory_id))
     });
     negative.truncate(3);
@@ -222,10 +235,16 @@ fn compare_entries_by_absolute_influence(
     left: &WhyInfluenceEntry,
     right: &WhyInfluenceEntry,
 ) -> Ordering {
+    // `total_cmp` keeps the sort total even when `absolute_influence`
+    // somehow holds a NaN (the `filter(absolute_influence > 0.0)` at
+    // line 135 excludes them today, but the `ee.why.influence.v1`
+    // envelope must produce byte-identical JSON for the same
+    // `target_memory_id` + candidate set, and a non-total ordering here
+    // would be a silent determinism break under any future refactor.
+    // Mirrors `src/core/conformal.rs::why_conformal_confidence_intervals`.
     right
         .absolute_influence
-        .partial_cmp(&left.absolute_influence)
-        .unwrap_or(Ordering::Equal)
+        .total_cmp(&left.absolute_influence)
         .then_with(|| left.memory_id.cmp(&right.memory_id))
         .then_with(|| left.relation.cmp(&right.relation))
 }
