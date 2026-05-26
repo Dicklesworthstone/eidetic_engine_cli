@@ -2670,7 +2670,32 @@ pub fn recalibrate_search_score_calibration(
     }
 
     if feedback_events.unavailable_reason.is_some() {
-        let existing = std::fs::read(&calibration_path).unwrap_or_default();
+        // Bounded read of the existing calibration JSONL to compute its
+        // blake3 hash for the unavailable-feedback report. Same TOCTOU
+        // shape that 27f6ad4d closed for `stream_search_score_calibration_jsonl`:
+        // `std::fs::read` pre-sizes its `Vec<u8>` from the file's
+        // metadata length, so a peer-planted multi-GiB calibration
+        // JSONL between the recalibrate-trigger and this branch would
+        // pin a matching allocation. The cap reuses
+        // `MAX_SEARCH_SCORE_CALIBRATION_BYTES` (the same 64 MiB cap the
+        // streaming reader uses for the same file). A read failure or
+        // over-cap result falls back to empty bytes (matches the prior
+        // `.unwrap_or_default()` shape — the hash of empty is reported
+        // honestly, the recalibrate run is non-mutating in this branch
+        // anyway since feedback is unavailable).
+        let existing = std::fs::File::open(&calibration_path)
+            .ok()
+            .and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take(MAX_SEARCH_SCORE_CALIBRATION_BYTES.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .ok()?;
+                if bytes.len() as u64 > MAX_SEARCH_SCORE_CALIBRATION_BYTES {
+                    return None;
+                }
+                Some(bytes)
+            })
+            .unwrap_or_default();
         return Ok(SearchScoreRecalibrationReport {
             schema: SEARCH_SCORE_RECALIBRATION_SCHEMA_V1,
             status: "feedback_unavailable",
