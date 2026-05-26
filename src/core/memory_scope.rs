@@ -1212,17 +1212,64 @@ fn load_team_members(workspace_path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// Hard cap on the byte length of `<workspace>/.ee/config.toml` when
+/// `load_team_members` reads it through this helper.
+///
+/// `read_memory_scope_config` previously called `std::fs::read_to_string`
+/// directly after a symlink + regular-file pre-check. The pre-check
+/// guarded path safety, but the read was unbounded: a peer-planted
+/// multi-GB `.ee/config.toml` (accidental — `cat /dev/urandom > ...` —
+/// or hostile in a shared multi-agent checkout) would allocate the
+/// whole content before `ConfigFile::parse` ever ran, OOM'ing every
+/// retrieval surface that resolves a memory's scope.
+///
+/// Round 1+2 of the audit swarm bounded every other `.ee/config.toml`
+/// reader (e1499deb `WORKSPACE_CONFIG_MAX_BYTES` in `src/core/memory.rs`
+/// for the `ee remember` hot path; 0fe4a339 `CURATE_CONFIG_MAX_BYTES`
+/// in `src/core/curate.rs` for the structural-decay feature check;
+/// 47d6b07c for `ee config get/set`; 31be37fd for operating-profile
+/// apply) — `read_memory_scope_config` was missed because it sits
+/// behind a private `.ok()?`-swallowing entry point in a different
+/// module.
+///
+/// 4 MiB matches the canonical ceiling those four sibling helpers
+/// share. Divergent caps would silently break workspace-config
+/// behaviour: a config that loads for `ee remember` but fails for
+/// `load_team_members` would surface as scope drift between agents on
+/// the same workspace.
+const MEMORY_SCOPE_CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
 fn read_memory_scope_config(config_path: &Path) -> Option<String> {
+    use std::io::Read as _;
+
     if memory_scope_path_has_symlink_component(config_path).ok()? {
         return None;
     }
-    if !std::fs::symlink_metadata(config_path)
-        .map(|metadata| metadata.file_type().is_file())
-        .unwrap_or(false)
-    {
+    let metadata = std::fs::symlink_metadata(config_path).ok()?;
+    if !metadata.file_type().is_file() {
         return None;
     }
-    std::fs::read_to_string(config_path).ok()
+    if metadata.len() > MEMORY_SCOPE_CONFIG_MAX_BYTES {
+        // Silently drop oversize configs so `load_team_members` returns
+        // an empty set rather than panicking out — same shape as the
+        // upstream `.ok()?` chain that this function already used to
+        // swallow read errors. The audit trail lives in the per-call
+        // `ee why <memory-id> --json` graph output (scope inference is
+        // explicit there) and in the workspace hygiene surface; this
+        // helper deliberately stays quiet.
+        return None;
+    }
+    let file = std::fs::File::open(config_path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MEMORY_SCOPE_CONFIG_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MEMORY_SCOPE_CONFIG_MAX_BYTES {
+        // TOCTOU: the file grew between the metadata stat and the
+        // read. Drop it for the same reason as the pre-check above.
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 fn memory_scope_path_has_symlink_component(path: &Path) -> io::Result<bool> {
