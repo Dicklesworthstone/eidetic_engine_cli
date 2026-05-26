@@ -1023,56 +1023,84 @@ pub struct EffectManifest {
 
 impl EffectManifest {
     /// Build the manifest from the canonical command list.
+    ///
+    /// Panics if any `command_path` appears in more than one of the nine
+    /// category vectors. The contract is "a command must be classified
+    /// in exactly one effect class"; a duplicate would mean the second
+    /// category silently overwrites the first via `HashMap::insert`,
+    /// and a command's declared effect would depend on the order
+    /// `build()` walks the category functions. The mid-task safety
+    /// classifier (`is_safe_mid_task`), the doctor capability surface,
+    /// and the audit log all key off this manifest, so a silent
+    /// miscategorization here would route a mutating command through a
+    /// safe-read code path. The duplicate check turns that drift into a
+    /// loud, immediate failure at startup.
     #[must_use]
     pub fn build() -> Self {
         let mut entries = HashMap::new();
 
         // Read-only commands
         for entry in Self::read_only_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Explicitly unavailable commands that must not mutate.
         for entry in Self::degraded_unavailable_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Derived artifact write commands
         for entry in Self::derived_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Audited external command execution surfaces
         for entry in Self::external_io_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Supervised steward jobs
         for entry in Self::supervised_job_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Append-only write commands
         for entry in Self::append_only_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Durable write commands
         for entry in Self::durable_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Config write commands
         for entry in Self::config_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         // Workspace file write commands
         for entry in Self::workspace_file_write_commands() {
-            entries.insert(entry.command_path, entry);
+            Self::insert_unique(&mut entries, entry);
         }
 
         Self { entries }
+    }
+
+    fn insert_unique(entries: &mut HashMap<&'static str, CommandEffect>, entry: CommandEffect) {
+        let path = entry.command_path;
+        let previous_class = entries.get(path).map(|prior| prior.default_effect);
+        if entries.insert(path, entry).is_some() {
+            panic!(
+                "EffectManifest::build: duplicate command path `{path}` registered in two \
+                 categories (previous default_effect = {previous_class:?}). A command must \
+                 appear in exactly one of {{read_only, degraded_unavailable, derived_write, \
+                 external_io_write, supervised_job, append_only_write, durable_write, \
+                 config_write, workspace_file_write}} — the second registration would \
+                 silently overwrite the first and the command's declared effect class \
+                 would depend on the build()-walk order."
+            );
+        }
     }
 
     fn read_only_commands() -> Vec<CommandEffect> {
@@ -2383,6 +2411,58 @@ mod tests {
 
         let mutating = manifest.mutating_commands();
         ensure_at_least(mutating.len(), 2, "at least 2 mutating commands")
+    }
+
+    #[test]
+    fn manifest_build_has_no_duplicate_command_paths() -> TestResult {
+        // Pin the no-duplicate invariant directly via the category-
+        // vector unions rather than only via `build()` (which already
+        // panics on duplicate via `insert_unique`). The vector unions
+        // exhibit the same drift surface but with a clearer test-
+        // failure message identifying the offending category pair —
+        // and the test also fails cleanly in release builds (where
+        // `debug_assert!` would be a no-op).
+        use std::collections::HashMap;
+        let mut origins: HashMap<&'static str, &'static str> = HashMap::new();
+        let category_vectors: &[(&'static str, Vec<CommandEffect>)] = &[
+            ("read_only", EffectManifest::read_only_commands()),
+            (
+                "degraded_unavailable",
+                EffectManifest::degraded_unavailable_commands(),
+            ),
+            ("derived_write", EffectManifest::derived_write_commands()),
+            (
+                "external_io_write",
+                EffectManifest::external_io_write_commands(),
+            ),
+            ("supervised_job", EffectManifest::supervised_job_commands()),
+            (
+                "append_only_write",
+                EffectManifest::append_only_write_commands(),
+            ),
+            ("durable_write", EffectManifest::durable_write_commands()),
+            ("config_write", EffectManifest::config_write_commands()),
+            (
+                "workspace_file_write",
+                EffectManifest::workspace_file_write_commands(),
+            ),
+        ];
+        for (category, entries) in category_vectors {
+            // Iterating `&[(K, Vec<V>)]` makes `category: &&'static str`
+            // and `entries: &Vec<CommandEffect>`; dereference `category`
+            // so the HashMap value type matches and the error message
+            // shows the bare category name, not a `&str` debug form.
+            let category = *category;
+            for entry in entries {
+                if let Some(previous_category) = origins.insert(entry.command_path, category) {
+                    return Err(format!(
+                        "command path `{}` is declared in both `{previous_category}` and `{category}` categories; a command must appear in exactly one",
+                        entry.command_path
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
