@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -2302,8 +2302,24 @@ fn stream_search_score_calibration_jsonl(
     // provenance hash AND parse residuals from the same buffer. The
     // size has already been bounded by MAX_SEARCH_SCORE_CALIBRATION_BYTES,
     // so this is safe to materialise in memory.
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
+    //
+    // Cap the read at `MAX_SEARCH_SCORE_CALIBRATION_BYTES + 1` to close
+    // the TOCTOU window between the metadata-based size pre-check at
+    // line ~2266 and this read. A peer that swaps the calibration JSONL
+    // for a multi-GiB file between the stat and `fs::read` would
+    // otherwise force `fs::read` to allocate the full grown size
+    // before any code could route the response through the existing
+    // `too_large` branch. The `+ 1` sentinel preserves prior semantics:
+    // a file of exactly `MAX_SEARCH_SCORE_CALIBRATION_BYTES` parses
+    // normally; a race-grown file lands as `cap + 1` bytes and is
+    // surfaced via the same `too_large` shape the metadata check uses.
+    // Same defense-in-depth pattern as `read_cache_entry_file` in
+    // src/cache/pack_l2.rs (8ba93c0e), `prepare_file_artifact` in
+    // src/core/artifact.rs (1e55cde7), `read_pack_file_no_symlinks`
+    // in src/core/repro.rs (b771869b), and the symbol-graph fix in
+    // src/core/symbol_graph.rs (27a3cb9b).
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         Err(error) => {
             // bd-25z97: metadata said the file is present, so an open
             // failure here is by definition NOT a "the file is absent"
@@ -2314,6 +2330,27 @@ fn stream_search_score_calibration_jsonl(
             return SearchScoreCalibrationJsonlLoad::unreadable(reason);
         }
     };
+    let mut bytes = Vec::new();
+    let read_result = file
+        .take(MAX_SEARCH_SCORE_CALIBRATION_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes);
+    if let Err(error) = read_result {
+        let reason = classify_calibration_io_error(&error).unwrap_or("not_found_after_stat");
+        return SearchScoreCalibrationJsonlLoad::unreadable(reason);
+    }
+    if bytes.len() as u64 > MAX_SEARCH_SCORE_CALIBRATION_BYTES {
+        return SearchScoreCalibrationJsonlLoad {
+            exists: true,
+            too_large: true,
+            unreadable_reason: None,
+            file_size_bytes: Some(bytes.len() as u64),
+            jsonl_hash: None,
+            residuals: Vec::new(),
+            sample_count: 0,
+            corrupt_row_count: 0,
+            corrupt_line_numbers: Vec::new(),
+        };
+    }
     let jsonl_hash = format!("blake3:{}", blake3::hash(&bytes).to_hex());
 
     let mut residuals = Vec::new();
