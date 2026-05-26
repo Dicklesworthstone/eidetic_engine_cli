@@ -30,9 +30,10 @@ use crate::curate::{
     ReflectionSourceMetadata, ReflectionSourcePackageLimits, ReviewQueueState,
     build_reflection_request_artifact_with_profile, build_reflection_source_package,
     canonical_derivation_metadata_json, canonical_derivation_source_refs_json,
-    prepare_reflection_request_with_config, reflection_ledger_source_refs,
-    reflection_result_artifact_hash, reflection_result_ingest_decision_from_ledger,
-    resolve_derivation_memory_scores, validate_candidate, validate_candidate_trust_evidence,
+    parse_reflection_result_artifact_json, prepare_reflection_request_with_config,
+    reflection_ledger_source_refs, reflection_result_artifact_hash,
+    reflection_result_ingest_decision_from_ledger, resolve_derivation_memory_scores,
+    validate_candidate, validate_candidate_trust_evidence,
     validate_reflection_request_matches_ledger_material, validate_review_queue_transition,
 };
 use crate::db::{
@@ -6395,13 +6396,8 @@ pub fn ingest_reflection_result(
     options: &ReflectionIngestOptions<'_>,
 ) -> Result<ReflectionIngestReport, DomainError> {
     let prepared = prepare_curate_read(options.workspace_path, options.database_path)?;
-    let result: ReflectionResultArtifact =
-        serde_json::from_str(options.result_json).map_err(|error| {
-            curate_usage_error(
-                format!("Invalid reflection result JSON: {error}"),
-                "ee reflect ingest --help",
-            )
-        })?;
+    let result = parse_reflection_result_artifact_json(options.result_json)
+        .map_err(reflection_result_validation_error)?;
     let request_id = result.request_id.trim();
     if request_id.is_empty() {
         return Err(curate_usage_error(

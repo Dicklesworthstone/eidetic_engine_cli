@@ -96,7 +96,7 @@ use crate::core::doctor::{
     DependencyDiagnosticsReport, DoctorReport, FrankenHealthReport, IntegrityDiagnosticsOptions,
     IntegrityDiagnosticsReport,
 };
-use crate::curate::ReflectionSourcePackageLimits;
+use crate::curate::{REFLECTION_RESULT_MAX_JSON_BYTES, ReflectionSourcePackageLimits};
 // `crate::core::doctor_runtime::CapabilitiesReport` is referenced via its
 // fully-qualified path at the single call site below to avoid colliding with
 // `crate::core::capabilities::CapabilitiesReport` (line 48), which has
@@ -37926,23 +37926,49 @@ where
 
 fn read_reflection_result_input(args: &ReflectIngestArgs) -> Result<String, String> {
     match (&args.file, args.stdin) {
-        (Some(path), false) => fs::read_to_string(path).map_err(|error| {
-            format!(
-                "Failed to read reflection result input '{}': {error}",
-                path.display()
-            )
-        }),
+        (Some(path), false) => read_reflection_result_file(path),
         (None, true) => {
             let mut input = String::new();
-            io::stdin()
+            let mut stdin = io::stdin().take((REFLECTION_RESULT_MAX_JSON_BYTES + 1) as u64);
+            stdin
                 .read_to_string(&mut input)
                 .map_err(|error| format!("Failed to read reflection result from stdin: {error}"))?;
+            reject_oversized_reflection_result_input(input.len() as u64)?;
             Ok(input)
         }
         (None, false) => {
             Err("reflect ingest requires --file <reflection-result.json> or --stdin".to_owned())
         }
         (Some(_), true) => Err("pass only one of --file or --stdin".to_owned()),
+    }
+}
+
+fn read_reflection_result_file(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|error| {
+        format!(
+            "Failed to read reflection result input '{}': {error}",
+            path.display()
+        )
+    })?;
+    reject_oversized_reflection_result_input(metadata.len())?;
+    let input = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Failed to read reflection result input '{}': {error}",
+            path.display()
+        )
+    })?;
+    reject_oversized_reflection_result_input(input.len() as u64)?;
+    Ok(input)
+}
+
+fn reject_oversized_reflection_result_input(bytes: u64) -> Result<(), String> {
+    let max_bytes = REFLECTION_RESULT_MAX_JSON_BYTES as u64;
+    if bytes > max_bytes {
+        Err(format!(
+            "reflection result input is too large: {bytes} bytes exceeds the {max_bytes} byte limit"
+        ))
+    } else {
+        Ok(())
     }
 }
 

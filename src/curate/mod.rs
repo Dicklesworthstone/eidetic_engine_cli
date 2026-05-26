@@ -780,7 +780,7 @@ Use only source ids present in sources[].id. Do not cite hidden evidence or inve
 Return distilled output for the requested reflection kind using schema ee.reflect.result.v1.
 Do not include private reasoning. Do not ask ee or the harness to take follow-up actions.
 ";
-const REFLECTION_RESULT_SCHEMA_CONTRACT: &str = r#"{"schema":"ee.reflect.result.v1","required":["requestId","requestHash","challenge","producer","reflectionKind","citedSourceIds","body","kindFields","selfReportedConfidence"],"rules":["citedSourceIds must be a subset of request source ids","body is distilled output only","body must not contain private reasoning markers, instructions, or secret material","kindFields carries kind-specific structured fields","selfReportedConfidence is informational only"]}"#;
+const REFLECTION_RESULT_SCHEMA_CONTRACT: &str = r#"{"schema":"ee.reflect.result.v1","required":["requestId","requestHash","challenge","producer","reflectionKind","citedSourceIds","body","kindFields","selfReportedConfidence"],"limits":{"jsonBytes":262144,"bodyBytes":32768,"citedSourceIds":64,"citedSourceIdBytes":512,"kindFields":32,"knowledgeGaps":128,"producerExtraFields":16},"rules":["citedSourceIds must be a subset of request source ids","body is distilled output only","body must not contain private reasoning markers, instructions, or secret material","kindFields carries kind-specific structured fields","selfReportedConfidence is informational only"]}"#;
 const REFLECTION_REQUEST_NEXT_COMMAND_KIND_DIAGNOSTICS: &str = "reflect_request_ledger_diagnostics";
 const REFLECTION_REQUEST_NEXT_COMMAND_WHEN: &str =
     "after reviewing or producing an ee.reflect.result.v1 artifact for this request";
@@ -788,6 +788,19 @@ const REFLECTION_REQUEST_NEXT_COMMAND_SAFETY: &str = "inspects pending reflectio
 const DEFAULT_REFLECTION_MAX_SOURCES: usize = 8;
 const DEFAULT_REFLECTION_MAX_TOTAL_EXCERPT_BYTES: usize = 8 * 1024;
 const DEFAULT_REFLECTION_MAX_EXCERPT_BYTES_PER_SOURCE: usize = 1024;
+pub const REFLECTION_RESULT_MAX_JSON_BYTES: usize = 256 * 1024;
+pub const REFLECTION_RESULT_MAX_BODY_BYTES: usize = 32 * 1024;
+pub const REFLECTION_RESULT_MAX_CITED_SOURCE_IDS: usize = 64;
+pub const REFLECTION_RESULT_MAX_CITED_SOURCE_ID_BYTES: usize = 512;
+pub const REFLECTION_RESULT_MAX_KIND_FIELDS: usize = 32;
+pub const REFLECTION_RESULT_MAX_KNOWLEDGE_GAPS: usize = 128;
+pub const REFLECTION_RESULT_MAX_PRODUCER_EXTRA_FIELDS: usize = 16;
+const REFLECTION_RESULT_MAX_FIELD_BYTES: usize = 512;
+const REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_DEPTH: usize = 8;
+const REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_NODES: usize = 512;
+const REFLECTION_RESULT_MAX_KIND_FIELD_STRING_BYTES: usize = 4 * 1024;
+const REFLECTION_RESULT_MAX_KIND_FIELD_ARRAY_ITEMS: usize = 128;
+const REFLECTION_RESULT_MAX_KIND_FIELD_OBJECT_FIELDS: usize = 32;
 const REFLECTION_OMIT_SOURCE_COUNT_LIMIT: &str = "source_count_limit";
 const REFLECTION_OMIT_TOTAL_EXCERPT_BYTE_LIMIT: &str = "total_excerpt_byte_limit";
 const REFLECTION_OMIT_PER_SOURCE_EXCERPT_BYTE_LIMIT: &str = "per_source_excerpt_byte_limit";
@@ -2816,6 +2829,27 @@ pub fn canonical_reflection_result_artifact_json(
     })
 }
 
+pub fn parse_reflection_result_artifact_json(
+    input: &str,
+) -> Result<ReflectionResultArtifact, ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        input.len() <= REFLECTION_RESULT_MAX_JSON_BYTES,
+        "json",
+        format!(
+            "reflection result JSON must be <= {REFLECTION_RESULT_MAX_JSON_BYTES} bytes; got {}",
+            input.len()
+        ),
+    )?;
+    let result = serde_json::from_str::<ReflectionResultArtifact>(input).map_err(|error| {
+        ReflectionResultValidationError::InvalidResultField {
+            field: "json",
+            message: error.to_string(),
+        }
+    })?;
+    validate_reflection_result_parse_bounds(&result)?;
+    Ok(result)
+}
+
 pub fn reflection_result_artifact_hash(
     result: &ReflectionResultArtifact,
 ) -> Result<String, ReflectionResultValidationError> {
@@ -3246,6 +3280,7 @@ fn validate_reflection_result_shape_and_identity(
         "schema",
         format!("expected {REFLECTION_RESULT_SCHEMA}"),
     )?;
+    validate_reflection_result_parse_bounds(result)?;
     expect_reflection_result_match(
         "requestId",
         request.request_id.as_str(),
@@ -3285,6 +3320,220 @@ fn validate_reflection_result_shape_and_identity(
     )?;
     reflection_result_cited_source_refs(request, result)?;
     Ok(())
+}
+
+fn validate_reflection_result_parse_bounds(
+    result: &ReflectionResultArtifact,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_string_bytes(
+        "schema",
+        result.schema.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "requestId",
+        result.request_id.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "requestHash",
+        result.request_hash.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "challenge.keyId",
+        result.challenge.key_id.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "challenge.algorithm",
+        result.challenge.algorithm.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "challenge.hmac",
+        result.challenge.hmac.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "producer.kind",
+        result.producer.kind.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_string_bytes(
+        "producer.id",
+        result.producer.id.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    if let Some(version) = result.producer.version.as_deref() {
+        ensure_reflection_result_string_bytes(
+            "producer.version",
+            version,
+            REFLECTION_RESULT_MAX_FIELD_BYTES,
+        )?;
+    }
+    ensure_reflection_result_field(
+        result.producer.extra.len() <= REFLECTION_RESULT_MAX_PRODUCER_EXTRA_FIELDS,
+        "producer",
+        format!(
+            "producer may include at most {REFLECTION_RESULT_MAX_PRODUCER_EXTRA_FIELDS} extra fields; got {}",
+            result.producer.extra.len()
+        ),
+    )?;
+    for (key, value) in &result.producer.extra {
+        ensure_reflection_result_string_bytes(
+            "producer",
+            key.as_str(),
+            REFLECTION_RESULT_MAX_FIELD_BYTES,
+        )?;
+        let mut node_budget = REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_NODES;
+        validate_reflection_result_json_value_bounds("producer", value, 0, &mut node_budget)?;
+    }
+    ensure_reflection_result_string_bytes(
+        "reflectionKind",
+        result.reflection_kind.as_str(),
+        REFLECTION_RESULT_MAX_FIELD_BYTES,
+    )?;
+    ensure_reflection_result_field(
+        result.cited_source_ids.len() <= REFLECTION_RESULT_MAX_CITED_SOURCE_IDS,
+        "citedSourceIds",
+        format!(
+            "citedSourceIds may include at most {REFLECTION_RESULT_MAX_CITED_SOURCE_IDS} entries; got {}",
+            result.cited_source_ids.len()
+        ),
+    )?;
+    for source_id in &result.cited_source_ids {
+        ensure_reflection_result_string_bytes(
+            "citedSourceIds",
+            source_id.as_str(),
+            REFLECTION_RESULT_MAX_CITED_SOURCE_ID_BYTES,
+        )?;
+    }
+    ensure_reflection_result_string_bytes(
+        "body",
+        result.body.as_str(),
+        REFLECTION_RESULT_MAX_BODY_BYTES,
+    )?;
+    ensure_reflection_result_field(
+        result.kind_fields.len() <= REFLECTION_RESULT_MAX_KIND_FIELDS,
+        "kindFields",
+        format!(
+            "kindFields may include at most {REFLECTION_RESULT_MAX_KIND_FIELDS} fields; got {}",
+            result.kind_fields.len()
+        ),
+    )?;
+    if let Some(gaps) = result
+        .kind_fields
+        .get("knowledgeGaps")
+        .and_then(serde_json::Value::as_array)
+    {
+        ensure_reflection_result_field(
+            gaps.len() <= REFLECTION_RESULT_MAX_KNOWLEDGE_GAPS,
+            "kindFields.knowledgeGaps",
+            format!(
+                "knowledgeGaps may include at most {REFLECTION_RESULT_MAX_KNOWLEDGE_GAPS} entries; got {}",
+                gaps.len()
+            ),
+        )?;
+    }
+    for (key, value) in &result.kind_fields {
+        ensure_reflection_result_string_bytes(
+            "kindFields",
+            key.as_str(),
+            REFLECTION_RESULT_MAX_FIELD_BYTES,
+        )?;
+        let mut node_budget = REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_NODES;
+        validate_reflection_result_json_value_bounds("kindFields", value, 0, &mut node_budget)?;
+    }
+    Ok(())
+}
+
+fn ensure_reflection_result_string_bytes(
+    field: &'static str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        value.len() <= max_bytes,
+        field,
+        format!("{field} must be <= {max_bytes} bytes; got {}", value.len()),
+    )
+}
+
+fn validate_reflection_result_json_value_bounds(
+    field: &'static str,
+    value: &serde_json::Value,
+    depth: usize,
+    remaining_nodes: &mut usize,
+) -> Result<(), ReflectionResultValidationError> {
+    ensure_reflection_result_field(
+        depth <= REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_DEPTH,
+        field,
+        format!(
+            "{field} JSON values may nest at most {REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_DEPTH} levels"
+        ),
+    )?;
+    ensure_reflection_result_field(
+        *remaining_nodes > 0,
+        field,
+        format!(
+            "{field} JSON values may contain at most {REFLECTION_RESULT_MAX_KIND_FIELD_VALUE_NODES} nodes"
+        ),
+    )?;
+    *remaining_nodes -= 1;
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+        serde_json::Value::String(text) => ensure_reflection_result_string_bytes(
+            field,
+            text.as_str(),
+            REFLECTION_RESULT_MAX_KIND_FIELD_STRING_BYTES,
+        ),
+        serde_json::Value::Array(items) => {
+            ensure_reflection_result_field(
+                items.len() <= REFLECTION_RESULT_MAX_KIND_FIELD_ARRAY_ITEMS,
+                field,
+                format!(
+                    "{field} arrays may include at most {REFLECTION_RESULT_MAX_KIND_FIELD_ARRAY_ITEMS} entries; got {}",
+                    items.len()
+                ),
+            )?;
+            for item in items {
+                validate_reflection_result_json_value_bounds(
+                    field,
+                    item,
+                    depth + 1,
+                    remaining_nodes,
+                )?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(object) => {
+            ensure_reflection_result_field(
+                object.len() <= REFLECTION_RESULT_MAX_KIND_FIELD_OBJECT_FIELDS,
+                field,
+                format!(
+                    "{field} objects may include at most {REFLECTION_RESULT_MAX_KIND_FIELD_OBJECT_FIELDS} fields; got {}",
+                    object.len()
+                ),
+            )?;
+            for (key, item) in object {
+                ensure_reflection_result_string_bytes(
+                    field,
+                    key.as_str(),
+                    REFLECTION_RESULT_MAX_FIELD_BYTES,
+                )?;
+                validate_reflection_result_json_value_bounds(
+                    field,
+                    item,
+                    depth + 1,
+                    remaining_nodes,
+                )?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn validate_reflection_result_body_policy(
@@ -8000,15 +8249,15 @@ mod tests {
         canonical_reflection_challenge_binding_json, canonical_reflection_request_artifact_json,
         canonical_reflection_source_package_json, check_duplicate_rule,
         check_duplicate_rule_with_config, evaluate_trauma_guard,
-        prepare_reflection_request_with_config, reflection_prompt_template_descriptor,
-        reflection_request_ledger_material, reflection_request_source_content_hashes_json,
-        reflection_request_source_refs_json, reflection_response_schema_descriptor,
-        reflection_result_artifact_hash, reflection_result_candidate_material,
-        reflection_result_cited_source_refs_json, reflection_result_ingest_decision,
-        reflection_result_schema_contract_json, render_reflection_prompt,
-        render_reflection_request_prompt, resolve_derivation_memory_scores, specificity_score,
-        subsystem_name, validate_candidate, validate_reflection_request_artifact,
-        validate_reflection_request_matches_ledger_material,
+        parse_reflection_result_artifact_json, prepare_reflection_request_with_config,
+        reflection_prompt_template_descriptor, reflection_request_ledger_material,
+        reflection_request_source_content_hashes_json, reflection_request_source_refs_json,
+        reflection_response_schema_descriptor, reflection_result_artifact_hash,
+        reflection_result_candidate_material, reflection_result_cited_source_refs_json,
+        reflection_result_ingest_decision, reflection_result_schema_contract_json,
+        render_reflection_prompt, render_reflection_request_prompt,
+        resolve_derivation_memory_scores, specificity_score, subsystem_name, validate_candidate,
+        validate_reflection_request_artifact, validate_reflection_request_matches_ledger_material,
         validate_reflection_result_artifact_with_key, validate_reflection_source_package,
         validate_review_queue_transition, validate_status_transition,
         verify_reflection_request_challenge, verify_reflection_request_challenge_with_key,
@@ -10940,6 +11189,57 @@ Then update src/policy/mod.rs on main."
         Ok((request, result, key))
     }
 
+    fn malformed_reflection_result_json_strategy() -> impl Strategy<Value = String> {
+        prop_oneof![
+            proptest::collection::vec(any::<u8>(), 0..4096)
+                .prop_map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+            (0usize..=256).prop_map(|depth| format!("{}0{}", "[".repeat(depth), "]".repeat(depth))),
+            (REFLECTION_RESULT_MAX_JSON_BYTES + 1..=REFLECTION_RESULT_MAX_JSON_BYTES + 2048)
+                .prop_map(|len| " ".repeat(len)),
+            (REFLECTION_RESULT_MAX_BODY_BYTES + 1..=REFLECTION_RESULT_MAX_BODY_BYTES + 1024)
+                .prop_map(|len| {
+                    serde_json::json!({
+                        "schema": REFLECTION_RESULT_SCHEMA,
+                        "requestId": "reflect_req_0123456789abcdef",
+                        "requestHash": format!("blake3:{}", "a".repeat(64)),
+                        "challenge": {
+                            "keyId": "k",
+                            "algorithm": REFLECTION_CHALLENGE_ALGORITHM,
+                            "hmac": format!("base64url:{}", "b".repeat(43)),
+                        },
+                        "producer": {
+                            "kind": "agent_harness",
+                            "id": "fuzz",
+                        },
+                        "reflectionKind": "gaps",
+                        "citedSourceIds": ["mem_a"],
+                        "body": "x".repeat(len),
+                        "kindFields": {
+                            "knowledgeGaps": ["Which bounded parser cases still need coverage?"],
+                        },
+                        "selfReportedConfidence": 0.5,
+                    })
+                    .to_string()
+                }),
+        ]
+    }
+
+    fn expect_reflection_result_parse_field_error(
+        json: &str,
+        expected_field: &'static str,
+    ) -> TestResult {
+        match parse_reflection_result_artifact_json(json) {
+            Err(ReflectionResultValidationError::InvalidResultField { field, .. })
+                if field == expected_field =>
+            {
+                Ok(())
+            }
+            other => Err(format!(
+                "expected parse error for field `{expected_field}`, got {other:?}"
+            )),
+        }
+    }
+
     #[test]
     fn reflection_result_artifact_validates_request_binding_and_citations() -> TestResult {
         let (request, result, key) = reflection_result_fixture()?;
@@ -10969,6 +11269,9 @@ Then update src/policy/mod.rs on main."
         let parsed: ReflectionResultArtifact =
             serde_json::from_str(&result_json).map_err(|error| error.to_string())?;
         assert_eq!(parsed, result);
+        let parsed_via_ingest_parser = parse_reflection_result_artifact_json(&result_json)
+            .map_err(|error| error.to_string())?;
+        assert_eq!(parsed_via_ingest_parser, result);
         let result_hash =
             reflection_result_artifact_hash(&result).map_err(|error| error.to_string())?;
         assert!(result_hash.starts_with("blake3:"));
@@ -11047,6 +11350,81 @@ Then update src/policy/mod.rs on main."
         assert!(tags.iter().any(|tag| tag == "reflection-gaps"));
         assert!(tags.iter().any(|tag| tag == "source.lock"));
         Ok(())
+    }
+
+    #[test]
+    fn reflection_result_json_parser_enforces_size_and_count_bounds() -> TestResult {
+        let (_, base, _) = reflection_result_fixture()?;
+
+        let mut oversized_body = base.clone();
+        oversized_body.body = "x".repeat(REFLECTION_RESULT_MAX_BODY_BYTES + 1);
+        let json = serde_json::to_string(&oversized_body).map_err(|error| error.to_string())?;
+        expect_reflection_result_parse_field_error(&json, "body")?;
+
+        let mut too_many_citations = base.clone();
+        too_many_citations.cited_source_ids = (0..=REFLECTION_RESULT_MAX_CITED_SOURCE_IDS)
+            .map(|index| format!("mem_{index}"))
+            .collect();
+        let json = serde_json::to_string(&too_many_citations).map_err(|error| error.to_string())?;
+        expect_reflection_result_parse_field_error(&json, "citedSourceIds")?;
+
+        let mut too_many_kind_fields = base.clone();
+        too_many_kind_fields.kind_fields = (0..=REFLECTION_RESULT_MAX_KIND_FIELDS)
+            .map(|index| {
+                (
+                    format!("field{index}"),
+                    serde_json::Value::String("bounded".to_owned()),
+                )
+            })
+            .collect();
+        let json =
+            serde_json::to_string(&too_many_kind_fields).map_err(|error| error.to_string())?;
+        expect_reflection_result_parse_field_error(&json, "kindFields")?;
+
+        let mut too_many_producer_extras = base.clone();
+        too_many_producer_extras.producer.extra = (0..=REFLECTION_RESULT_MAX_PRODUCER_EXTRA_FIELDS)
+            .map(|index| {
+                (
+                    format!("extra{index}"),
+                    serde_json::Value::String("bounded".to_owned()),
+                )
+            })
+            .collect();
+        let json =
+            serde_json::to_string(&too_many_producer_extras).map_err(|error| error.to_string())?;
+        expect_reflection_result_parse_field_error(&json, "producer")?;
+
+        let mut too_many_gaps = base;
+        too_many_gaps.kind_fields.insert(
+            "knowledgeGaps".to_owned(),
+            serde_json::Value::Array(
+                (0..=REFLECTION_RESULT_MAX_KNOWLEDGE_GAPS)
+                    .map(|index| {
+                        serde_json::Value::String(format!("Bounded knowledge gap {index}"))
+                    })
+                    .collect(),
+            ),
+        );
+        let json = serde_json::to_string(&too_many_gaps).map_err(|error| error.to_string())?;
+        expect_reflection_result_parse_field_error(&json, "kindFields.knowledgeGaps")?;
+
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn reflection_result_json_parser_rejects_fuzzed_malformed_oversized_and_nested_inputs(
+            json in malformed_reflection_result_json_strategy(),
+        ) {
+            let outcome = std::panic::catch_unwind(|| parse_reflection_result_artifact_json(&json));
+            prop_assert!(outcome.is_ok(), "reflect result parser panicked");
+            prop_assert!(
+                outcome.expect("checked parser panic").is_err(),
+                "malformed/oversized/nested fuzz input unexpectedly parsed"
+            );
+        }
     }
 
     #[test]
