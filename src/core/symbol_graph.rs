@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::models::{
@@ -165,8 +166,64 @@ impl SymbolGraphExtractor {
                 continue;
             }
 
-            let source = match fs::read_to_string(&path) {
-                Ok(source) => source,
+            // Cap the read at `max_file_bytes + 1` to close the TOCTOU
+            // window between the metadata-based size check above (line
+            // ~155) and this read: a peer that swaps `path` for a
+            // multi-GiB file between the stat and the read would
+            // otherwise force `fs::read_to_string` to allocate the
+            // full grown size before any code could compare against
+            // the policy cap. The `+ 1` sentinel lets the post-read
+            // length check distinguish "exactly at cap" (kept) from
+            // "above cap" (rejected as race-grown). Same defense-in-
+            // depth pattern as `read_cache_entry_file` in
+            // src/cache/pack_l2.rs (8ba93c0e), `prepare_file_artifact`
+            // in src/core/artifact.rs (1e55cde7), `read_pack_file_no_-
+            // symlinks` in src/core/repro.rs (b771869b), and
+            // `read_lab_file_to_string_no_follow` in src/core/lab.rs
+            // (5491131c).
+            let source = match fs::File::open(&path) {
+                Ok(file) => {
+                    let mut bytes = Vec::new();
+                    let read_result = file
+                        .take(self.config.max_file_bytes.saturating_add(1))
+                        .read_to_end(&mut bytes);
+                    match read_result {
+                        Ok(_) => {
+                            if bytes.len() as u64 > self.config.max_file_bytes {
+                                degraded.push(degradation(
+                                    SymbolGraphDegradationCode::SourceTooLarge,
+                                    Some(display_path),
+                                    format!(
+                                        "Rust source grew past the {} byte symbol extraction cap between stat and read.",
+                                        self.config.max_file_bytes
+                                    ),
+                                ));
+                                continue;
+                            }
+                            match String::from_utf8(bytes) {
+                                Ok(source) => source,
+                                Err(error) => {
+                                    degraded.push(degradation(
+                                        SymbolGraphDegradationCode::SourceUnreadable,
+                                        Some(display_path),
+                                        format!(
+                                            "Rust source could not be read as UTF-8 text: {error}"
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            degraded.push(degradation(
+                                SymbolGraphDegradationCode::SourceUnreadable,
+                                Some(display_path),
+                                format!("Rust source could not be read as UTF-8 text: {error}"),
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 Err(error) => {
                     degraded.push(degradation(
                         SymbolGraphDegradationCode::SourceUnreadable,
