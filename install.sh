@@ -55,8 +55,49 @@ CHECKSUM_URL="${CHECKSUM_URL:-}"
 
 # Sigstore trust anchors are part of the installer security boundary. Do not
 # honor environment overrides here; curl-pipe-bash callers can set env inline.
-CERT_IDENTITY_REGEXP="^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$"
-CERT_OIDC_ISSUER="https://token.actions.githubusercontent.com"
+#
+# Parallel arrays of (identity_regexp, oidc_issuer) trust pairs. Verification
+# accepts an artifact if ANY pair matches. The first entry is the canonical
+# CI-built identity (release.yml on GitHub Actions); subsequent entries are
+# explicitly enumerated manual-release fallbacks for releases cut while
+# release.yml is throttled, broken, or otherwise unavailable. Manual-release
+# anchors MUST be pinned to a specific maintainer's verified identity + the
+# exact OIDC issuer that maintainer used at signing time; do not relax these
+# to wildcards.
+CERT_IDENTITY_REGEXPS=(
+  "^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$"
+  '^jeff141421@gmail\.com$'
+)
+CERT_OIDC_ISSUERS=(
+  "https://token.actions.githubusercontent.com"
+  "https://github.com/login/oauth"
+)
+# First entry is also exposed under the legacy single-value names so the
+# informational logs and any downstream consumer that still reads them
+# continue to surface the canonical CI identity.
+CERT_IDENTITY_REGEXP="${CERT_IDENTITY_REGEXPS[0]}"
+CERT_OIDC_ISSUER="${CERT_OIDC_ISSUERS[0]}"
+
+# Try every (identity, issuer) pair in CERT_IDENTITY_REGEXPS / CERT_OIDC_ISSUERS
+# against $bundle + $payload. Returns 0 on the first success, 1 if no pair
+# matched. Stderr is suppressed per attempt so a manual-signed artifact does
+# not surface the CI identity's "no matching certificate" message as an error
+# when the second pair will succeed. Caller is responsible for the final
+# user-facing failure message.
+verify_blob_against_anchors() {
+  local bundle="$1" payload="$2"
+  local i
+  for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
+    if cosign verify-blob \
+          --bundle "$bundle" \
+          --certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}" \
+          --certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}" \
+          "$payload" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 EASY=0
 QUIET=0
@@ -758,12 +799,13 @@ verify_sigstore_bundle() {
     return 1
   fi
 
-  if ! cosign verify-blob \
-        --bundle "$bundle_file" \
-        --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
-        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
-        "$file" >/dev/null 2>&1; then
+  if ! verify_blob_against_anchors "$bundle_file" "$file"; then
     err "Sigstore signature verification failed for $file"
+    err "Trusted anchors tried:"
+    local i
+    for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
+      err "  - identity_regexp='${CERT_IDENTITY_REGEXPS[$i]}' issuer='${CERT_OIDC_ISSUERS[$i]}'"
+    done
     return 1
   fi
   ok "Sigstore signature verified"
@@ -808,12 +850,13 @@ verify_provenance_bundle() {
     return 1
   fi
 
-  if ! cosign verify-blob \
-        --bundle "$bundle_file" \
-        --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
-        --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
-        "$provenance_file" >/dev/null 2>&1; then
+  if ! verify_blob_against_anchors "$bundle_file" "$provenance_file"; then
     err "Provenance Sigstore verification failed for $provenance_file"
+    err "Trusted anchors tried:"
+    local i
+    for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
+      err "  - identity_regexp='${CERT_IDENTITY_REGEXPS[$i]}' issuer='${CERT_OIDC_ISSUERS[$i]}'"
+    done
     return 1
   fi
 
