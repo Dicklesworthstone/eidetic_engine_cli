@@ -17,11 +17,10 @@ use ee::core::completion_audit::{
     build_completion_audit_report_for_workspace, extract_completion_checklist,
 };
 use ee::core::curate::{
-    CURATE_AUTO_PROMOTE_SCHEMA_V1, CURATE_CANDIDATES_SCHEMA_V1, CURATE_SHOW_SCHEMA_V1,
-    CurateAutoPromoteProposal, CurateAutoPromoteReport, CurateAutoPromoteThresholds,
-    CurateCandidateAudit, CurateCandidateEvidenceSummary, CurateCandidateSource,
-    CurateCandidateSummary, CurateCandidateValidation, CurateCandidatesFilter,
-    CurateCandidatesReport, CurateShowPlannedApplication, CurateShowPlannedDerivedLink,
+    CURATE_CANDIDATES_SCHEMA_V1, CURATE_SHOW_SCHEMA_V1, CurateCandidateAudit,
+    CurateCandidateEvidenceSummary, CurateCandidateSource, CurateCandidateSummary,
+    CurateCandidateValidation, CurateCandidatesFilter, CurateCandidatesReport,
+    CurateShowPlannedApplication, CurateShowPlannedDerivedLink,
     CurateShowPlannedEvidenceAttachment, CurateShowReport, CurateValidationIssue,
     ProposeDerivedSourceRef, REFLECTION_PROPOSE_SCHEMA_V1,
     REFLECTION_REQUEST_LEDGER_DIAGNOSTICS_SCHEMA_V1, ReflectionHmacKeyDiagnostic,
@@ -78,10 +77,6 @@ const SCHEMA_DOCS: &[(&str, &str)] = &[
     ("ee.export.v1", "ee.export.v1.json"),
     ("ee.curate.candidates.v1", "ee.curate.candidates.v1.json"),
     (CURATE_SHOW_SCHEMA_V1, "ee.curate.show.v1.json"),
-    (
-        CURATE_AUTO_PROMOTE_SCHEMA_V1,
-        "ee.curate.auto_promote.v1.json",
-    ),
     (
         "ee.diag.incident.replay.v1",
         "ee.diag.incident.replay.v1.json",
@@ -516,74 +511,6 @@ fn public_schema_exports_match_docs_schema_files() -> TestResult {
         }
     }
     Ok(())
-}
-
-#[test]
-fn curate_auto_promote_schema_matches_report_shape() -> TestResult {
-    let report = CurateAutoPromoteReport {
-        schema: CURATE_AUTO_PROMOTE_SCHEMA_V1,
-        command: "curate auto-promote",
-        version: "0.2.0",
-        workspace_id: "ws_example".to_owned(),
-        workspace_path: "/workspace".to_owned(),
-        database_path: "/workspace/.ee/ee.sqlite".to_owned(),
-        actor: None,
-        dry_run: true,
-        apply: false,
-        durable_mutation: false,
-        thresholds: CurateAutoPromoteThresholds {
-            min_access_count_episodic: 3,
-            min_confidence_episodic: 0.85,
-            min_access_count_semantic: 5,
-            min_confidence_semantic: 0.9,
-            max_per_run: 25,
-        },
-        scanned_memory_count: 1,
-        eligible_count: 1,
-        disqualified_count: 0,
-        applied_count: 0,
-        apply_failed_count: 0,
-        proposals: vec![CurateAutoPromoteProposal {
-            memory_id: "mem_eligible".to_owned(),
-            current_level: "episodic".to_owned(),
-            proposed_level: Some("semantic".to_owned()),
-            access_count: 4,
-            harmful_count: 0,
-            confidence: 0.91,
-            eligibility: "eligible".to_owned(),
-            threshold_fired: Some("min_confidence_episodic".to_owned()),
-            disqualifiers: Vec::new(),
-            explanation: "memory mem_eligible qualifies for semantic promotion".to_owned(),
-            apply_command: Some(
-                "ee memory level mem_eligible --to semantic --expected episodic --json".to_owned(),
-            ),
-            apply_status: "not_applied".to_owned(),
-            audit_id: None,
-            apply_error_code: None,
-            apply_error_message: None,
-        }],
-        next_action: "ee curate auto-promote --apply --json".to_owned(),
-    };
-    let value =
-        serde_json::to_value(report).map_err(|error| format!("serialize report: {error}"))?;
-    let schema = schema_doc(CURATE_AUTO_PROMOTE_SCHEMA_V1)?;
-    ensure_json_str(
-        &schema,
-        "/properties/schema/const",
-        CURATE_AUTO_PROMOTE_SCHEMA_V1,
-    )?;
-    validate_json_schema(&value, &schema, &schema, CURATE_AUTO_PROMOTE_SCHEMA_V1)
-        .map_err(|error| format!("auto-promote report rejected by schema: {error}"))?;
-    let example = schema
-        .pointer("/examples/0")
-        .ok_or("auto-promote schema must include an example")?;
-    validate_json_schema(
-        example,
-        &schema,
-        &schema,
-        "ee.curate.auto_promote.v1.examples[0]",
-    )
-    .map_err(|error| format!("auto-promote example rejected by schema: {error}"))
 }
 
 #[test]
