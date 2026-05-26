@@ -1139,7 +1139,22 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                             observed_hash: None,
                         });
                     }
-                    let backup_hash = hash_file(&backup)?;
+                    // Read the backup ONCE into memory, then hash the
+                    // in-memory bytes and write those same bytes. The
+                    // prior shape opened the file twice — first via
+                    // `hash_file` (streaming hash, then drop), then via
+                    // `fs::read` for the write — which left a TOCTOU
+                    // window: a peer with write access to
+                    // `.doctor/runs/<run_id>/backups/` could swap the
+                    // file between the hash and the read so the integrity
+                    // check passed on the original backup while
+                    // `fs::read` returned attacker-controlled bytes that
+                    // `write_file_atomic` then wrote to `action.path`.
+                    // Reading once + hashing the bytes binds the integrity
+                    // check to exactly what gets written. No second open,
+                    // no race window.
+                    let backup_bytes = fs::read(&backup)?;
+                    let backup_hash = hash_bytes(&backup_bytes);
                     if &backup_hash != expected_before {
                         return Err(DoctorRuntimeError::UndoBackupCorrupt {
                             backup_path: backup,
@@ -1147,7 +1162,6 @@ fn undo_one(run_dir: &Path, action: &ActionLine) -> Result<(), DoctorRuntimeErro
                             observed_hash: Some(backup_hash),
                         });
                     }
-                    let backup_bytes = fs::read(&backup)?;
                     write_file_atomic(&action.path, &backup_bytes)?;
                 }
                 (None, _) => {
