@@ -1052,6 +1052,111 @@ impl SwarmBriefCommandRunner for SystemSwarmBriefCommandRunner {
     }
 }
 
+/// Bridge `SwarmBriefCommandRunner` calls onto the unified
+/// `source_run::run_source_command` watchdog (bd-12v87.3).
+///
+/// This is the harness seam that lets swarm-brief / work-packet / doctor
+/// source collectors share the same bounded-subprocess machinery as the
+/// rest of `ee` instead of reinventing timeout + pipe-drain logic each
+/// place. Wiring the existing call sites onto this adapter is deferred to
+/// follow-up integration slices; the seam exists so those slices can land
+/// behind a single API change rather than scattering source-run plumbing
+/// across every collector.
+///
+/// `kind` labels every spawned subprocess with its caller class so the
+/// emitted `SourceRunEvidence` carries enough provenance for the watchdog
+/// to attribute hangs and degraded outcomes back to the source family
+/// (Beads, BV, Agent Mail, CASS, RCH, Git, ...).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SourceRunSwarmBriefRunner {
+    kind: crate::core::source_run::SourceRunKind,
+}
+
+impl SourceRunSwarmBriefRunner {
+    #[must_use]
+    pub const fn new(kind: crate::core::source_run::SourceRunKind) -> Self {
+        Self { kind }
+    }
+
+    fn build_request(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        timeout_ms: u64,
+    ) -> crate::core::source_run::SourceRunRequest {
+        let command = crate::core::source_run::SourceRunCommand::new(program)
+            .with_args(args.iter().map(|arg| (*arg).to_string()))
+            .with_cwd(cwd.to_path_buf());
+        let source = crate::core::source_run::SourceRunSource::new(
+            self.kind,
+            program.to_string(),
+            "swarm_brief_command".to_string(),
+        );
+        // Match `SystemSwarmBriefCommandRunner`'s 10 MiB cap so the
+        // adapter is a behavior-compatible drop-in for the existing
+        // collectors. Without raising `tail_bytes_max`, source_run's
+        // default 8 KiB tail would silently truncate long `git log`
+        // / `br ready` outputs that the consuming parsers expect to
+        // see in full.
+        crate::core::source_run::SourceRunRequest::new(
+            source,
+            command,
+            Duration::from_millis(timeout_ms.max(1)),
+        )
+        .with_tail_bytes_max(SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES)
+    }
+}
+
+/// Translate a `SourceRunEvidence` into the legacy
+/// `Result<SwarmBriefCommandOutput, SwarmBriefCommandError>` shape every
+/// swarm-brief source adapter already consumes. Capped output tails carry
+/// the same semantics as `SystemSwarmBriefCommandRunner` (truncate-and-
+/// keep) so consumers do not need to learn a new partial-read contract.
+fn translate_source_run_evidence(
+    evidence: crate::core::source_run::SourceRunEvidence,
+) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+    use crate::core::source_run::SourceRunStatus;
+    let stdout = evidence.output.stdout_tail.clone().unwrap_or_default();
+    let stderr = evidence.output.stderr_tail.clone().unwrap_or_default();
+    match evidence.status {
+        SourceRunStatus::Passed => Ok(SwarmBriefCommandOutput { stdout, stderr }),
+        SourceRunStatus::Failed => Err(SwarmBriefCommandError::Failed {
+            status: evidence.exit.exit_code,
+            stderr,
+        }),
+        SourceRunStatus::TimedOut => Err(SwarmBriefCommandError::TimedOut {
+            timeout_ms: evidence.timing.timeout_ms,
+        }),
+        SourceRunStatus::SpawnFailed => Err(SwarmBriefCommandError::Unavailable(format!(
+            "{} spawn failed",
+            evidence.source.source_id
+        ))),
+        SourceRunStatus::ParseFailed
+        | SourceRunStatus::StaleSource
+        | SourceRunStatus::MalformedStore
+        | SourceRunStatus::Blocked => Err(SwarmBriefCommandError::Unavailable(format!(
+            "{} returned status {}",
+            evidence.source.source_id,
+            evidence.status.as_str()
+        ))),
+    }
+}
+
+impl SwarmBriefCommandRunner for SourceRunSwarmBriefRunner {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        timeout_ms: u64,
+    ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+        let request = self.build_request(program, args, cwd, timeout_ms);
+        let evidence = crate::core::source_run::run_source_command(&request);
+        translate_source_run_evidence(evidence)
+    }
+}
+
 fn read_swarm_brief_pipe_limited<R: io::Read>(reader: &mut R, limit: usize) -> Vec<u8> {
     let mut output = Vec::new();
     let mut buffer = [0_u8; SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES];
@@ -10426,6 +10531,153 @@ mod tests {
                 .iter()
                 .any(|source| source.source == SwarmBriefSourceKind::AgentMail
                     && source.status == SwarmBriefSourceStatus::NotConfigured)
+        );
+    }
+}
+
+#[cfg(test)]
+mod source_run_adapter_tests {
+    //! bd-12v87.3 — focused tests for the `SourceRunSwarmBriefRunner`
+    //! adapter that bridges `SwarmBriefCommandRunner` calls onto the
+    //! shared `source_run` watchdog (bd-12v87.2). Each test injects a
+    //! `SourceRunExecutor` outcome and checks that the
+    //! `SwarmBriefCommandError`/`SwarmBriefCommandOutput` translation
+    //! preserves the contract the existing collectors already consume.
+    //!
+    //! These tests exercise the seam directly (via
+    //! `run_source_command_with`) rather than spawning real
+    //! subprocesses; the `SystemSwarmBriefCommandRunner` integration
+    //! tests above still cover the spawn-and-drain path against the
+    //! filesystem so we are not double-counting.
+    use super::*;
+    use crate::core::source_run::{
+        SourceRunExecution, SourceRunExecutor, SourceRunKind, SourceRunPipeCapture,
+        SourceRunRequest, SystemSourceRunClock, run_source_command_with,
+    };
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    fn pipe(text: &str) -> SourceRunPipeCapture {
+        SourceRunPipeCapture::from_bytes(text.as_bytes(), SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES)
+    }
+
+    struct FixedExecutor(SourceRunExecution);
+
+    impl SourceRunExecutor for FixedExecutor {
+        fn execute(&self, _request: &SourceRunRequest) -> SourceRunExecution {
+            self.0.clone()
+        }
+    }
+
+    fn run_through_adapter(
+        program: &str,
+        args: &[&str],
+        timeout_ms: u64,
+        execution: SourceRunExecution,
+    ) -> Result<SwarmBriefCommandOutput, SwarmBriefCommandError> {
+        let runner = SourceRunSwarmBriefRunner::new(SourceRunKind::Beads);
+        let request = runner.build_request(program, args, &PathBuf::from("."), timeout_ms);
+        let evidence =
+            run_source_command_with(&request, &FixedExecutor(execution), &SystemSourceRunClock);
+        translate_source_run_evidence(evidence)
+    }
+
+    #[test]
+    fn passed_execution_returns_stdout_and_stderr() {
+        let result = run_through_adapter(
+            "br",
+            &["ready", "--json"],
+            1_500,
+            SourceRunExecution::Completed {
+                exit_code: Some(0),
+                signal: None,
+                stdout: pipe("[\n  {\"id\": \"bd-1\"}\n]\n"),
+                stderr: pipe(""),
+                elapsed: Duration::from_millis(12),
+            },
+        );
+        let output = result.expect("passed execution must translate to Ok");
+        assert!(output.stdout.contains("bd-1"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
+    fn nonzero_exit_translates_to_failed_with_exit_code() {
+        let result = run_through_adapter(
+            "br",
+            &["ready", "--json"],
+            1_500,
+            SourceRunExecution::Completed {
+                exit_code: Some(2),
+                signal: None,
+                stdout: pipe(""),
+                stderr: pipe("br: storage error\n"),
+                elapsed: Duration::from_millis(8),
+            },
+        );
+        match result {
+            Err(SwarmBriefCommandError::Failed { status, stderr }) => {
+                assert_eq!(status, Some(2));
+                assert!(stderr.contains("storage error"));
+            }
+            other => panic!("expected Failed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn timed_out_execution_propagates_timeout_ms() {
+        let result = run_through_adapter(
+            "br",
+            &["ready", "--json"],
+            1_500,
+            SourceRunExecution::TimedOut {
+                exit_code: None,
+                signal: None,
+                stdout: pipe(""),
+                stderr: pipe(""),
+                elapsed: Duration::from_millis(1_500),
+                killed_own_child: true,
+            },
+        );
+        match result {
+            Err(SwarmBriefCommandError::TimedOut { timeout_ms }) => {
+                assert_eq!(timeout_ms, 1_500);
+            }
+            other => panic!("expected TimedOut; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_failure_translates_to_unavailable() {
+        let result = run_through_adapter(
+            "br",
+            &["ready", "--json"],
+            1_500,
+            SourceRunExecution::SpawnFailed {
+                error: "No such file or directory".to_string(),
+                elapsed: Duration::from_millis(1),
+            },
+        );
+        match result {
+            Err(SwarmBriefCommandError::Unavailable(message)) => {
+                assert!(message.contains("spawn failed"), "got {message}");
+            }
+            other => panic!("expected Unavailable; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adapter_uses_swarm_brief_output_byte_cap_not_default_tail() {
+        // Regression guard: source_run's DEFAULT_TAIL_BYTES_MAX (8 KiB)
+        // would silently truncate `git log` / `br ready --json` payloads
+        // that the existing parsers expect to see in full. The adapter
+        // raises tail_bytes_max to SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES
+        // (10 MiB) at build_request time.
+        let runner = SourceRunSwarmBriefRunner::new(SourceRunKind::Beads);
+        let request = runner.build_request("br", &["ready", "--json"], &PathBuf::from("."), 1_500);
+        assert_eq!(
+            request.tail_bytes_max,
+            SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES
         );
     }
 }
