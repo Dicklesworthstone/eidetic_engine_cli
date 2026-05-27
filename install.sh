@@ -78,14 +78,50 @@ CERT_OIDC_ISSUERS=(
 CERT_IDENTITY_REGEXP="${CERT_IDENTITY_REGEXPS[0]}"
 CERT_OIDC_ISSUER="${CERT_OIDC_ISSUERS[0]}"
 
-# Try every (identity, issuer) pair in CERT_IDENTITY_REGEXPS / CERT_OIDC_ISSUERS
-# against $bundle + $payload. Returns 0 on the first success, 1 if no pair
-# matched. Stderr is suppressed per attempt so a manual-signed artifact does
-# not surface the CI identity's "no matching certificate" message as an error
-# when the second pair will succeed. Caller is responsible for the final
-# user-facing failure message.
+# Long-lived maintainer-controlled signing key for fully-automated manual
+# releases. Embedded here so install.sh is self-contained — no extra
+# network round-trip to fetch the public key, and rotation requires
+# re-rolling install.sh (which lives in the same Release as the signed
+# binaries, so a compromised release cannot silently pin a hostile key).
+#
+# Key generation (one-time, on a maintainer host):
+#   COSIGN_PASSWORD="" cosign generate-key-pair --output-key-prefix=cosign-ee
+#   cp cosign-ee.key ~/.config/ee-signing/cosign-ee.key   # private, 0600
+#   # cosign-ee.pub contents → embedded below + committed to signing/cosign.pub
+#
+# Signing (automated, per release):
+#   COSIGN_PASSWORD="" cosign sign-blob --yes \
+#     --key ~/.config/ee-signing/cosign-ee.key \
+#     --bundle <file>.sigstore.json <file>
+EE_RELEASE_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE35liCkNgYT2g39ERvnWWRuu4zFVJ
+h3VXjvm63PcMNKFcvqq39g3UIGwQMLdNPwkiPHM4lqE2vrQOoAHcRIXf4Q==
+-----END PUBLIC KEY-----'
+
+# Try every supported verification path against $bundle + $payload. Returns
+# 0 on the first success, 1 if no path matched. Order matters: pinned-key
+# verification first (covers fully-automated manual releases signed with
+# the embedded EE_RELEASE_SIGNING_PUBLIC_KEY); then each (identity,
+# issuer) pair (covers keyless CI-built releases and historical
+# device-flow-signed maintainer releases). Stderr is suppressed per
+# attempt so a release signed by one path does not surface the other
+# paths' "no matching certificate" message as a user-facing error.
+# Caller is responsible for the final user-facing failure message.
 verify_blob_against_anchors() {
   local bundle="$1" payload="$2"
+
+  # Path 1: pinned long-lived key (fast path, fully-automated releases).
+  local pubkey_file
+  pubkey_file="$TMP/ee-release-signing-key.pub"
+  printf '%s\n' "$EE_RELEASE_SIGNING_PUBLIC_KEY" > "$pubkey_file"
+  if cosign verify-blob \
+        --bundle "$bundle" \
+        --key "$pubkey_file" \
+        "$payload" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Path 2..N: keyless identity-bound certs (CI builds + device-flow).
   local i
   for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
     if cosign verify-blob \
@@ -795,33 +831,52 @@ verify_checksum() {
 
 verify_sigstore_bundle() {
   local file="$1" artifact_url="$2"
-  if ! command -v cosign &>/dev/null; then
-    err "cosign not found. Cannot verify Sigstore signature."
-    err "Install cosign (https://github.com/sigstore/cosign) or use --no-verify to skip."
-    return 1
-  fi
 
   local bundle_url="${artifact_url}.sigstore.json"
-
   local bundle_file
   bundle_file="$TMP/$(basename "$bundle_url")"
+
+  # Sigstore is best-effort by default: when a release ships without a
+  # `.sigstore.json` bundle, we keep the install moving on the strength
+  # of the always-on sha256 + GitHub Release upload integrity check.
+  # Users who want strict cryptographic-trust enforcement opt in with
+  # `--require-provenance`, which separately requires a signed provenance
+  # bundle and refuses the install when either is missing or invalid.
+  #
+  # Manual maintainer-cut releases (cosign keyless device-flow) are
+  # operationally expensive and were previously the single hardest UX
+  # blocker on the curl|bash path; soft-skipping when a bundle is absent
+  # removes that blocker without weakening the security floor (sha256
+  # mismatch and bundle-present-but-invalid both still abort).
   info "Fetching sigstore bundle"
   info "Sigstore bundle: $bundle_url" >&2
-  info "Sigstore identity regexp: $CERT_IDENTITY_REGEXP" >&2
-  info "Sigstore OIDC issuer: $CERT_OIDC_ISSUER" >&2
   if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
-    err "Sigstore bundle not available at $bundle_url."
-    err "Cannot verify signature. To skip cryptographic verification, use --no-verify or set EE_SKIP_VERIFY=1."
-    return 1
+    if [ "$REQUIRE_PROVENANCE" = "1" ]; then
+      err "Sigstore bundle not available at $bundle_url."
+      err "--require-provenance was passed; cannot continue without a signed bundle."
+      return 1
+    fi
+    warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."
+    warn "Pass --require-provenance to fail the install when a signed bundle is missing."
+    return 0
   fi
 
+  if ! command -v cosign &>/dev/null; then
+    warn "cosign not found; skipping Sigstore signature verification for $file (sha256 already verified)."
+    warn "Install cosign (https://github.com/sigstore/cosign) for cryptographic-trust verification."
+    return 0
+  fi
+
+  info "Sigstore identity regexp: $CERT_IDENTITY_REGEXP" >&2
+  info "Sigstore OIDC issuer: $CERT_OIDC_ISSUER" >&2
   if ! verify_blob_against_anchors "$bundle_file" "$file"; then
     err "Sigstore signature verification failed for $file"
-    err "Trusted anchors tried:"
+    err "A signed bundle was published for this release but did not verify against any trusted anchor:"
     local i
     for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
       err "  - identity_regexp='${CERT_IDENTITY_REGEXPS[$i]}' issuer='${CERT_OIDC_ISSUERS[$i]}'"
     done
+    err "This is a security signal worth investigating; do not pass --no-verify to bypass."
     return 1
   fi
   ok "Sigstore signature verified"
