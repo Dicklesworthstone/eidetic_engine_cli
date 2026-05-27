@@ -277,6 +277,10 @@ harness = false
 name = "ulid_tiebreak"
 harness = false
 
+[[bench]]
+name = "adaptive_budget"
+harness = false
+
 [[test]]
 name = "cass_contracts"
 path = "tests/conformance/cass_contracts.rs"
