@@ -4892,7 +4892,39 @@ fn pin_lexical_ram_tier_for_search(
     index_dir: &Path,
 ) -> LexicalRamTierResult {
     let started = Instant::now();
-    let config = LexicalRamTierConfig::from_environment_with_reader(
+    let config = lexical_ram_tier_config_for_search(workspace_path);
+    let result = pin_lexical_index_files(&index_dir.join("lexical"), &config);
+    trace_lexical_ram_tier(
+        &crate::core::curate::stable_workspace_id(workspace_path),
+        &result,
+        started.elapsed().as_secs_f64() * 1000.0,
+    );
+    result
+}
+
+/// Resolve the lexical RAM-tier runtime posture for the search hot path.
+///
+/// Production callers go through `merged_workspace_config` so a workspace
+/// `.ee/config.toml` with `[search.lexical_ram_tier] enabled = true` (or
+/// `request_hugepages` / `populate_on_open`) drives the runtime posture
+/// without requiring `EE_LEXICAL_INDEX_PIN_RAM` / `EE_LEXICAL_INDEX_HUGEPAGES`
+/// to be exported. The merge precedence is preserved by `merge_config`:
+/// CLI > environment > project > user, so env-var overrides still beat
+/// the workspace config file. The env-only branch is the
+/// load-config-failed fallback (no workspace context, parse error, IO
+/// error) — it keeps the prior behavior so this slice never regresses
+/// the existing env-driven deployments.
+///
+/// Mirrors `lexical_ram_tier_config_for_status_with` at
+/// `src/core/status.rs:2176` so search and status agree on the resolved
+/// posture for the same workspace, satisfying the bd-21xbi.1 acceptance
+/// ("Search and status agree on enabled, hugepages requested, and
+/// populate-on-open.").
+fn lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierConfig {
+    if let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path) {
+        return LexicalRamTierConfig::from_config_overrides(&merged.values.search.lexical_ram_tier);
+    }
+    LexicalRamTierConfig::from_environment_with_reader(
         |name| match name {
             LEXICAL_RAM_TIER_PIN_RAM_ENV => {
                 crate::config::read_env_var(crate::config::EnvVar::LexicalIndexPinRam)
@@ -4903,14 +4935,7 @@ fn pin_lexical_ram_tier_for_search(
             _ => None,
         },
         |_name, _raw| {},
-    );
-    let result = pin_lexical_index_files(&index_dir.join("lexical"), &config);
-    trace_lexical_ram_tier(
-        &crate::core::curate::stable_workspace_id(workspace_path),
-        &result,
-        started.elapsed().as_secs_f64() * 1000.0,
-    );
-    result
+    )
 }
 
 fn push_lexical_ram_tier_search_degradations(
@@ -11298,5 +11323,38 @@ mod tests {
             "got {}",
             many.message
         );
+    }
+
+    /// bd-21xbi.1 acceptance: a workspace `.ee/config.toml` with
+    /// `[search.lexical_ram_tier] enabled = true` changes the
+    /// search-side runtime posture without requiring
+    /// `EE_LEXICAL_INDEX_PIN_RAM` to be set in the environment.
+    /// Mirror of the status-side regression at
+    /// `src/core/status.rs::lexical_ram_tier_status_reads_workspace_config_file`.
+    #[test]
+    fn lexical_ram_tier_search_reads_workspace_config_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[search.lexical_ram_tier]\nenabled = true\npopulate_on_open = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let config = lexical_ram_tier_config_for_search(temp.path());
+        if !config.enabled {
+            return Err(format!(
+                "workspace config enabled=true must drive search posture; got {:?}",
+                config
+            ));
+        }
+        if config.populate_on_open {
+            return Err(format!(
+                "workspace config populate_on_open=false must drive search posture; got {:?}",
+                config
+            ));
+        }
+        Ok(())
     }
 }
