@@ -23,6 +23,7 @@ pub mod beads_integrity;
 pub mod budget;
 pub mod budget_delta_recommender;
 pub mod capabilities;
+pub mod cass_prefetch;
 pub mod causal;
 pub mod certificate;
 pub mod check;
