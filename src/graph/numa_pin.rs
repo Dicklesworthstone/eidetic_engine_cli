@@ -518,6 +518,190 @@ pub fn pin_snapshot_blob(snapshot_path: &Path, config: &NumaPinConfig) -> NumaPi
     }
 }
 
+// ---------------------------------------------------------------------------
+// NumaPinningAdapter — bd-1prrl.3 (swarmx.4 trait abstraction)
+//
+// The trait isolates the platform-specific bits (NUMA-node affinity, mmap
+// pinning) behind a single adapter so the snapshot-load path stays uniform
+// across Linux + macOS while still emitting honest per-platform degraded
+// codes. The bead body deliberately allows the `mmap` portion to ship on
+// macOS as a portable best-effort path, while the NUMA hooks stay
+// Linux-only — Mac returns `numa_unavailable_on_macos` from
+// `set_node_affinity` and the snapshot loader keeps running without NUMA
+// guidance.
+//
+// `#![forbid(unsafe_code)]` is intact at the crate level. The real libnuma
+// FFI must land behind a safe adapter dependency (memmap2 + a safe
+// numa-lib wrapper) in a follow-up slice; this slice ships the trait
+// shape, both impls, the factory, and Mac-runnable tests so downstream
+// wiring can target the trait now instead of the concrete function.
+// ---------------------------------------------------------------------------
+
+/// Degraded code emitted by `MacosNumaPinningAdapter::set_node_affinity` so
+/// `ee status --json` / `ee doctor --json` can surface the platform-honest
+/// "NUMA is a Linux-only concept here" message without claiming a fallback
+/// the kernel cannot deliver. Pairs with the existing
+/// `numa_pin_unsupported_platform` (which describes the platform as a
+/// whole); the new code names the specific affinity-set operation, so
+/// downstream parsers can react to the syscall-shaped gap separately from
+/// the umbrella unavailability.
+pub const NUMA_UNAVAILABLE_ON_MACOS_CODE: &str = "numa_unavailable_on_macos";
+
+/// Outcome of a single adapter operation. Shape is intentionally tiny so
+/// callers can fold it into the existing `NumaPinResult` envelope without
+/// introducing a second schema.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NumaPinningAdapterOutcome {
+    /// `true` when the operation actually executed against the platform
+    /// (Linux + NUMA available). `false` when the adapter fell through
+    /// to a degraded no-op.
+    pub executed: bool,
+    /// Stable code naming the degraded path, if any. `None` on a
+    /// successful platform-native execution.
+    pub degraded_code: Option<&'static str>,
+}
+
+impl NumaPinningAdapterOutcome {
+    #[must_use]
+    pub const fn executed() -> Self {
+        Self {
+            executed: true,
+            degraded_code: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn degraded(code: &'static str) -> Self {
+        Self {
+            executed: false,
+            degraded_code: Some(code),
+        }
+    }
+}
+
+/// Adapter that hides the platform-specific NUMA + mmap calls from the
+/// snapshot-load path. Two ops:
+///
+/// - `pin_mmap` — request that the snapshot blob be mapped with
+///   pre-faulting and (on Linux) hugepage advice. The portable
+///   memmap2-backed implementation is acceptable on macOS as a
+///   best-effort path; the Linux impl additionally requests hugepages
+///   when the operator enables them.
+/// - `set_node_affinity` — bind the calling thread to the requested
+///   NUMA node so subsequent allocations land on the local memory
+///   controller. Linux-only; macOS returns
+///   `NUMA_UNAVAILABLE_ON_MACOS_CODE`.
+///
+/// The trait deliberately does not return a `Mapping` handle yet. The
+/// scaffold's `pin_snapshot_blob` keeps owning the result envelope; the
+/// adapter only reports whether each operation actually ran. The follow-up
+/// slice that adds memmap2 will introduce a handle-returning variant.
+pub trait NumaPinningAdapter: Send + Sync {
+    /// Coarse platform label for this adapter (used to populate the
+    /// `platform` field of `NumaPinResult` consistently with the existing
+    /// `platform_support()` detector).
+    fn platform(&self) -> NumaPinPlatform;
+
+    /// Request mmap pinning of the snapshot blob at `snapshot_path`.
+    /// `populate` mirrors `NumaPinConfig::populate_on_load`. The default
+    /// implementation here is a deterministic no-op so the scaffold
+    /// remains test-runnable on every target; concrete impls override
+    /// with the real syscall path when their platform allows.
+    fn pin_mmap(&self, snapshot_path: &Path, populate: bool) -> NumaPinningAdapterOutcome {
+        let _ = (snapshot_path, populate);
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
+    }
+
+    /// Bind the calling thread to the requested NUMA node. `node` is the
+    /// resolved Linux NUMA node id (or `None` for "let the kernel pick").
+    fn set_node_affinity(&self, node: Option<i32>) -> NumaPinningAdapterOutcome;
+}
+
+/// macOS adapter. macOS has no NUMA primitives; the snapshot loader can
+/// still benefit from the portable mmap path (mlock + MADV_WILLNEED via
+/// memmap2 in the follow-up slice), so `pin_mmap` is a best-effort
+/// no-op-then-degraded today and the affinity op explicitly emits the
+/// new `numa_unavailable_on_macos` code.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MacosNumaPinningAdapter;
+
+impl NumaPinningAdapter for MacosNumaPinningAdapter {
+    fn platform(&self) -> NumaPinPlatform {
+        NumaPinPlatform::MacosUnsupported
+    }
+
+    fn pin_mmap(&self, _snapshot_path: &Path, _populate: bool) -> NumaPinningAdapterOutcome {
+        // The portable mmap path is acceptable on macOS, but the scaffold
+        // ships before the memmap2 safe-wrapper dep lands. Honestly mark
+        // the op as not-executed under the umbrella platform code so
+        // status output stays truthful.
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+    }
+
+    fn set_node_affinity(&self, _node: Option<i32>) -> NumaPinningAdapterOutcome {
+        // macOS has no NUMA primitives. This is the load-bearing degraded
+        // code the bead body names: every macOS host reports the
+        // operation as deliberately unavailable rather than silently
+        // succeeding.
+        NumaPinningAdapterOutcome::degraded(NUMA_UNAVAILABLE_ON_MACOS_CODE)
+    }
+}
+
+/// Linux adapter. The trait shape ships now; the libnuma + mmap syscall
+/// payload lands in the follow-up slice once a safe-wrapper dep
+/// (memmap2 + safe-numa) is approved. Until then both ops emit
+/// `numa_pin_linux_not_implemented` so the production path keeps the
+/// honest scaffold behavior already pinned by the existing tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LinuxNumaPinningAdapter;
+
+impl NumaPinningAdapter for LinuxNumaPinningAdapter {
+    fn platform(&self) -> NumaPinPlatform {
+        NumaPinPlatform::Linux
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pin_mmap(&self, _snapshot_path: &Path, _populate: bool) -> NumaPinningAdapterOutcome {
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn pin_mmap(&self, _snapshot_path: &Path, _populate: bool) -> NumaPinningAdapterOutcome {
+        // The Linux adapter constructed on a non-Linux build is a
+        // pure-architecture object (used by tests that exercise the
+        // trait dispatch shape). Surface the umbrella platform code
+        // rather than pretending the Linux path executed.
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_node_affinity(&self, _node: Option<i32>) -> NumaPinningAdapterOutcome {
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_node_affinity(&self, _node: Option<i32>) -> NumaPinningAdapterOutcome {
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+    }
+}
+
+/// Returns the adapter for the running host. Linux returns
+/// `LinuxNumaPinningAdapter`; every other platform returns
+/// `MacosNumaPinningAdapter` (the only non-Linux concrete impl, which
+/// happens to map cleanly to BSD/Windows-Unsupported in this scaffold —
+/// the umbrella code distinguishes the cases for now).
+#[must_use]
+pub fn default_numa_pinning_adapter() -> Box<dyn NumaPinningAdapter> {
+    #[cfg(target_os = "linux")]
+    {
+        Box::new(LinuxNumaPinningAdapter)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Box::new(MacosNumaPinningAdapter)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -1002,5 +1186,124 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("disabled_by_operator")
         );
+    }
+
+    // bd-1prrl.3 — trait abstraction regression guards.
+    //
+    // Pin the contract that the trait shape is Mac-runnable and that the
+    // load-bearing degraded codes flow through the adapter ops correctly.
+    // These tests exercise the architecture surface, not the (still
+    // owed) libnuma + memmap2 syscall payload — that lands in the
+    // follow-up safe-adapter-dep slice once memmap2 is promoted to a
+    // direct dependency.
+
+    use super::{
+        LinuxNumaPinningAdapter, MacosNumaPinningAdapter, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE,
+        NUMA_UNAVAILABLE_ON_MACOS_CODE, NumaPinningAdapter, NumaPinningAdapterOutcome,
+        default_numa_pinning_adapter,
+    };
+
+    #[test]
+    fn macos_adapter_set_node_affinity_emits_numa_unavailable_on_macos() {
+        let adapter = MacosNumaPinningAdapter;
+        let outcome = adapter.set_node_affinity(Some(0));
+        assert!(!outcome.executed, "macOS adapter must not claim execution");
+        assert_eq!(
+            outcome.degraded_code,
+            Some(NUMA_UNAVAILABLE_ON_MACOS_CODE),
+            "macOS adapter must emit the load-bearing bd-1prrl.3 degraded code"
+        );
+        // `Auto` (None) must also degrade — the affinity-set op is
+        // unavailable regardless of which node was requested.
+        let auto_outcome = adapter.set_node_affinity(None);
+        assert_eq!(
+            auto_outcome.degraded_code,
+            Some(NUMA_UNAVAILABLE_ON_MACOS_CODE),
+            "macOS adapter must emit the same code for the auto-node request"
+        );
+    }
+
+    #[test]
+    fn macos_adapter_pin_mmap_falls_through_to_unsupported_platform() {
+        // The portable mmap path will land with memmap2 in a follow-up
+        // slice; until then macOS reports the umbrella platform code so
+        // status output stays truthful and does not claim residency.
+        let adapter = MacosNumaPinningAdapter;
+        let outcome = adapter.pin_mmap(fake_snapshot_path(), true);
+        assert!(!outcome.executed);
+        assert_eq!(
+            outcome.degraded_code,
+            Some(super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE),
+        );
+        assert_eq!(adapter.platform(), NumaPinPlatform::MacosUnsupported);
+    }
+
+    #[test]
+    fn linux_adapter_emits_not_implemented_until_safe_wrapper_lands() {
+        // Constructed-on-non-Linux behavior: the adapter is a pure
+        // architecture object (used by trait-dispatch tests) and falls
+        // through to the umbrella platform code rather than pretending
+        // the Linux path executed. On a real Linux build the same
+        // adapter emits `numa_pin_linux_not_implemented` until the
+        // libnuma + memmap2 syscall payload lands.
+        let adapter = LinuxNumaPinningAdapter;
+        assert_eq!(adapter.platform(), NumaPinPlatform::Linux);
+        let outcome = adapter.pin_mmap(fake_snapshot_path(), true);
+        let expected_code = if cfg!(target_os = "linux") {
+            NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE
+        } else {
+            super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE
+        };
+        assert!(!outcome.executed);
+        assert_eq!(outcome.degraded_code, Some(expected_code));
+    }
+
+    #[test]
+    fn default_adapter_selects_platform_specific_implementation() {
+        // The factory must return the Linux adapter on Linux and the
+        // macOS adapter elsewhere. Tested via the `platform()` accessor
+        // so the assertion stays Mac-runnable (no `is_a` reflection).
+        let adapter = default_numa_pinning_adapter();
+        let expected = if cfg!(target_os = "linux") {
+            NumaPinPlatform::Linux
+        } else if cfg!(target_os = "macos") {
+            NumaPinPlatform::MacosUnsupported
+        } else {
+            // Other non-Linux platforms still receive the macOS-shaped
+            // adapter under this scaffold; the umbrella platform code
+            // distinguishes the cases at the result-envelope layer.
+            NumaPinPlatform::MacosUnsupported
+        };
+        assert_eq!(adapter.platform(), expected);
+    }
+
+    #[test]
+    fn outcome_helpers_round_trip_through_executed_and_degraded() {
+        let executed = NumaPinningAdapterOutcome::executed();
+        assert!(executed.executed);
+        assert_eq!(executed.degraded_code, None);
+
+        let degraded = NumaPinningAdapterOutcome::degraded(NUMA_UNAVAILABLE_ON_MACOS_CODE);
+        assert!(!degraded.executed);
+        assert_eq!(degraded.degraded_code, Some(NUMA_UNAVAILABLE_ON_MACOS_CODE));
+    }
+
+    #[test]
+    fn trait_dispatch_through_box_dyn_compiles_and_runs_on_every_platform() {
+        // Compile-time + runtime guard that the trait object stays
+        // dyn-safe. Without `Send + Sync` bounds this assertion would
+        // fail to compile; pin both bounds so future refactors cannot
+        // silently break supervised threading.
+        fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+        assert_send_sync::<dyn NumaPinningAdapter>();
+
+        let adapter: Box<dyn NumaPinningAdapter> = default_numa_pinning_adapter();
+        let outcome = adapter.set_node_affinity(Some(0));
+        // The platform-specific code is whichever adapter we got; the
+        // load-bearing invariant is just that *some* honest degraded
+        // code surfaces — production never sees executed=true here
+        // until the safe-wrapper slice lands.
+        assert!(!outcome.executed);
+        assert!(outcome.degraded_code.is_some());
     }
 }
