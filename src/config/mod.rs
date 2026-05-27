@@ -153,6 +153,36 @@ pub fn workspace_config(workspace_path: &Path) -> Option<ConfigFile> {
     ConfigFile::parse(&contents).ok()
 }
 
+/// Hard cap on `<workspace>/.ee/config.toml` reads in the shared
+/// config-loader path. Real config files are kilobytes at most (even the
+/// kitchen-sink shape in `src/config/file.rs` tops out well under 16 KiB);
+/// 4 MiB is multiple orders of magnitude of headroom while bounding peer
+/// plants on shared multi-agent checkouts. Matches the caps the parallel
+/// hardening pass applied to the per-module config.toml readers in
+/// `src/core/memory.rs` (e1499deb), `src/core/profile.rs` (31be37fd),
+/// `src/cli/mod.rs::ee config get/set` (47d6b07c),
+/// `src/core/curate.rs` (0fe4a339), `src/core/memory_scope.rs` (696d0324),
+/// and `src/core/context.rs::context_workspace_config` (85464736).
+///
+/// Without the cap, a peer-planted multi-GB `.ee/config.toml` (corrupt
+/// write, `cat /dev/urandom > .ee/config.toml`, hostile multi-agent
+/// checkout) would pin a matching `String` allocation through this
+/// shared reader on every:
+///   - `workspace_output_redaction_enabled` call (this module, line 104),
+///     consulted from every output-redaction-aware surface.
+///   - `configured_workspace_redaction_default` call (this module),
+///     consulted from `src/cli/mod.rs:1347` on every redaction-default
+///     resolution path.
+///   - `workspace_config` call (this module, line 151), consulted from
+///     `src/cli/mesh.rs:2902` on every foreground mesh command.
+///   - `read_workspace_config_contents` direct call (consulted from
+///     `src/cli/mod.rs:42916, 42949`).
+///
+/// The previous shape pre-checked `symlink_metadata` + `is_file` (both
+/// preserved here) but NOT size, so any of these hot paths inherited an
+/// uncapped read despite their per-module siblings having been hardened.
+const SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT: u64 = 4 * 1024 * 1024;
+
 pub(crate) fn read_workspace_config_contents(
     workspace_path: &Path,
 ) -> std::io::Result<Option<String>> {
@@ -176,13 +206,42 @@ pub(crate) fn read_workspace_config_contents(
     if !metadata.file_type().is_file() {
         return Ok(None);
     }
+    // Reject oversize at stat time before opening the file at all. See
+    // `SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT` for the threat model and
+    // the parallel per-module config.toml caps this aligns with.
+    if metadata.len() > SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "workspace config '{}' is {} bytes, above the {SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT} byte cap",
+                config_path.display(),
+                metadata.len()
+            ),
+        ));
+    }
     read_config_file_no_follow(&config_path).map(Some)
 }
 
 fn read_config_file_no_follow(path: &Path) -> std::io::Result<String> {
-    let mut file = open_workspace_config_file_for_read(path)?;
+    let file = open_workspace_config_file_for_read(path)?;
+    // Bound the read itself so a peer-driven TOCTOU growth between the
+    // `symlink_metadata` pre-check in `read_workspace_config_contents` and
+    // this open cannot widen peak allocation beyond `LIMIT + 1` bytes.
+    // Same shape as the parallel per-module config.toml readers
+    // (e1499deb / 31be37fd / 47d6b07c / 0fe4a339 / 696d0324 / 85464736)
+    // and `src/core/index.rs::read_index_metadata_contents` (ad2d302e).
     let mut content = String::new();
-    file.read_to_string(&mut content)?;
+    file.take(SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT.saturating_add(1))
+        .read_to_string(&mut content)?;
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "workspace config '{}' grew past the {SHARED_WORKSPACE_CONFIG_INSPECT_LIMIT} byte cap during read",
+                path.display()
+            ),
+        ));
+    }
     Ok(content)
 }
 
