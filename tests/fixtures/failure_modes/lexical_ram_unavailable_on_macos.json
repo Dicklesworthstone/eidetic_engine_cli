@@ -1,0 +1,32 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "lexical_ram_unavailable_on_macos",
+  "introduced_by": {
+    "bead": "bd-21xbi.2",
+    "epic_letter": "bd-21xbi"
+  },
+  "surfaces": [
+    "status",
+    "doctor"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "Operator enabled `[search.lexical_ram_tier] enabled = true` on a macOS host. macOS exposes `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API, so the Linux-equivalent pinning shape cannot be reproduced; the optimization remains experimental on the Mac dev path while the production target stays Linux 256GB+ hosts (bd-21xbi parent). The Mac arm emits this code instead of the generic `lexical_ram_tier_not_implemented` so operators can distinguish 'wrong host class for this optimization' from 'Linux adapter slice has not landed yet'.",
+    "setup_commands": [
+      "ee init --workspace .",
+      "printf '%s\\n' '[search.lexical_ram_tier]' 'enabled = true' >> .ee/config.toml"
+    ],
+    "invocation": "ee status --workspace . --json"
+  },
+  "expected_emission": {
+    "code": "lexical_ram_unavailable_on_macos",
+    "severity": "info",
+    "message_contains": [
+      "lexical RAM-tier",
+      "macOS"
+    ],
+    "repair_contains": "Linux",
+    "repair_string": "Run ee on a Linux 256GB+ host to opt into lexical posting-list RAM-tier pinning; macOS keeps the optimization as an explicit no-op while the bd-21xbi.2 Linux mmap+mlock+madvise adapter ships under the unsafe-policy escape hatch."
+  }
+}

@@ -49,6 +49,22 @@ pub const LEXICAL_RAM_TIER_DISABLED_CODE: &str = "lexical_ram_tier_disabled";
 /// claim the index was actually pinned).
 pub const LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE: &str = "lexical_ram_tier_not_implemented";
 
+/// `degraded[]` code emitted on macOS hosts where the lexical RAM-tier
+/// optimization is intentionally a no-op. macOS exposes
+/// `madvise(MADV_WILLNEED)` + `mlock` but no transparent-hugepage API,
+/// so a Linux-equivalent pinning shape cannot be reproduced; the
+/// optimization remains experimental on the Mac dev path while the
+/// production target stays Linux 256GB+ hosts (bd-21xbi parent).
+///
+/// Distinguishing this from the generic
+/// [`LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE`] lets agents and operators
+/// see at a glance that the Mac dev host is not the target host class
+/// rather than "Linux adapter slice has not landed yet" — separate
+/// remediations for separate root causes. Pairs with the per-platform
+/// taxonomy row in `docs/degraded_code_taxonomy.md` and the fixture at
+/// `tests/fixtures/failure_modes/lexical_ram_unavailable_on_macos.json`.
+pub const LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE: &str = "lexical_ram_unavailable_on_macos";
+
 /// Forward-looking schema id for the `ee status --json` lexicalRamTier
 /// block, kept in sync with
 /// `docs/schemas/ee.status.search.lexical_ram_tier.v1.json`. The wiring
@@ -427,8 +443,17 @@ pub fn pin_lexical_index_files(
             result
         }
         LexicalRamTierPlatform::MacosLimited => {
+            // macOS no-op per bd-21xbi.2: surface the platform-specific
+            // `lexical_ram_unavailable_on_macos` degraded code so
+            // operators can distinguish "wrong host class for this
+            // optimization" from the Linux scaffold's
+            // `lexical_ram_tier_not_implemented` ("adapter slice has
+            // not landed yet"). The MadviseWillneed fallback name is
+            // preserved because madvise(MADV_WILLNEED) IS what the Mac
+            // path would attempt if the adapter were wired; the code
+            // simply makes the not-attempted reality explicit.
             result.fallback_path = LexicalRamTierFallbackPath::MadviseWillneed;
-            result.push_unique_code(LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE);
+            result.push_unique_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
             result
         }
         LexicalRamTierPlatform::WindowsLimited | LexicalRamTierPlatform::OtherUnsupported => {
@@ -445,9 +470,10 @@ mod tests {
 
     use super::{
         LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_DISABLED_CODE,
-        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LexicalRamTierConfig, LexicalRamTierFallbackPath,
-        LexicalRamTierPlatform, LexicalRamTierResult, STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1,
-        pin_lexical_index_files, platform_support,
+        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+        LexicalRamTierConfig, LexicalRamTierFallbackPath, LexicalRamTierPlatform,
+        LexicalRamTierResult, STATUS_SEARCH_LEXICAL_RAM_TIER_SCHEMA_V1, pin_lexical_index_files,
+        platform_support,
     };
 
     fn fake_index_dir() -> &'static Path {
@@ -514,7 +540,7 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn non_linux_platform_returns_not_implemented_code() {
+    fn non_linux_platform_returns_platform_specific_degraded_code() {
         let result = pin_lexical_index_files(
             fake_index_dir(),
             &LexicalRamTierConfig {
@@ -533,11 +559,24 @@ mod tests {
             result.fallback_path,
             LexicalRamTierFallbackPath::MadviseWillneed | LexicalRamTierFallbackPath::HeapOnly
         ));
+        // macOS gets the platform-specific `lexical_ram_unavailable_on_macos`
+        // (bd-21xbi.2); Windows / other-unsupported keep the generic
+        // `lexical_ram_tier_not_implemented` until their own Mac-style
+        // platform-specific codes land. Either is acceptable so long as
+        // it is surfaced — operators distinguish "wrong host class" from
+        // "Linux adapter not landed" via the specific code.
+        let expected_code = if cfg!(target_os = "macos") {
+            LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE
+        } else {
+            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE
+        };
         assert!(
             result
                 .degraded_codes
                 .iter()
-                .any(|code| code == LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE)
+                .any(|code| code == expected_code),
+            "expected degraded code `{expected_code}` for target_os; got {:?}",
+            result.degraded_codes
         );
         assert_no_duplicate_codes(&result);
     }
@@ -571,6 +610,49 @@ mod tests {
                 .degraded_codes
                 .iter()
                 .any(|code| code == LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE)
+        );
+        assert_no_duplicate_codes(&result);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_emits_platform_specific_lexical_ram_unavailable_code() {
+        // bd-21xbi.2 platform-specific code routing. Per the bead, the
+        // Mac dev path is a no-op (transparent-hugepage API absent;
+        // production target is Linux 256GB+). The Mac arm emits
+        // `lexical_ram_unavailable_on_macos` so operators can
+        // distinguish the wrong-host-class case from the Linux
+        // adapter-not-landed case without parsing a generic code.
+        let result = pin_lexical_index_files(
+            fake_index_dir(),
+            &LexicalRamTierConfig {
+                enabled: true,
+                ..LexicalRamTierConfig::default()
+            },
+        );
+        assert_eq!(result.platform, LexicalRamTierPlatform::MacosLimited);
+        assert_eq!(
+            result.fallback_path,
+            LexicalRamTierFallbackPath::MadviseWillneed
+        );
+        assert!(
+            result
+                .degraded_codes
+                .iter()
+                .any(|code| code == LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE),
+            "macos must emit `lexical_ram_unavailable_on_macos`; got {:?}",
+            result.degraded_codes
+        );
+        // The generic NOT_IMPLEMENTED code MUST NOT be emitted on Mac:
+        // emitting both would defeat the purpose of the platform-
+        // specific routing.
+        assert!(
+            !result
+                .degraded_codes
+                .iter()
+                .any(|code| code == LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE),
+            "macos must NOT emit the generic NOT_IMPLEMENTED code; got {:?}",
+            result.degraded_codes
         );
         assert_no_duplicate_codes(&result);
     }

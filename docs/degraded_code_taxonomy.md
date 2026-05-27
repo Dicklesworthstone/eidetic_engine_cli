@@ -672,6 +672,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `lexical_hugepages_unavailable` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_tier_disabled` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_tier_not_implemented` | info | bd-1hvzh (bd-21xbi scaffold) |
+| `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
 
 #### Integrity / schema (15)
 | Code | Severity | Bead |
