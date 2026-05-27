@@ -49,3 +49,5 @@ including rejected alternatives and verification hooks.
 - [ADR 0042: Symbol Graph Derived Index](0042-symbol-graph-derived-index.md)
 - [ADR 0044: No-LLM Reflection Handshake](0044-no-llm-reflection-handshake.md)
 - [ADR 0045: High-Risk Reflection Routing](0045-high-risk-reflection-routing.md)
+- [ADR 0046: v0.1.0 Tag Recovery Strategy — Forward-Roll, Don't Re-Tag](0046-v0.1.0-tag-recovery-strategy.md)
+- [ADR 0047: `Cargo.toml` `publish = true` Gate](0047-publish-flip-cargo-toml-gate.md)
