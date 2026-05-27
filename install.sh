@@ -1200,7 +1200,19 @@ else
     exit 1
   fi
 
-  BIN=$(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" -perm -111 2>/dev/null | head -n 1)
+  # NOTE: -perm -u+x (owner-execute) rather than -perm -111 — macOS tarballs
+  # historically ship the binary with mode 700, so requiring g+x/o+x falsely
+  # rejects a valid binary (see issue #4).
+  BIN=$(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" -perm -u+x 2>/dev/null | head -n 1)
+  # Fallback: if -perm -u+x found nothing (e.g. some older `find` variants),
+  # accept any matching regular file and let the `[ ! -x ]` chmod-aware check
+  # below validate it after we touch its permissions.
+  if [ -z "$BIN" ]; then
+    BIN=$(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" 2>/dev/null | head -n 1)
+  fi
+  if [ -n "$BIN" ] && [ ! -x "$BIN" ]; then
+    chmod u+x "$BIN" 2>/dev/null || true
+  fi
   if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
     err "Binary '$BINARY' not found in archive after extraction"
     exit 1

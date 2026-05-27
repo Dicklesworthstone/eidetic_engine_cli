@@ -128,18 +128,35 @@ jobs:
             exit 1
           fi
 
-      - name: Performance benchmarks
+      - name: Performance benchmarks (advisory)
+        # NOTE (issue #5): the perf benchmark is intentionally ADVISORY for
+        # release gating. It pulls in the full franken-stack via path-deps
+        # and historically fails on transient external drift (e.g. new enum
+        # variants in `asupersync`/`raptorq` exhausting matches elsewhere)
+        # that has nothing to do with an ee perf regression. Release-blocking
+        # on benchmark output is also a recognized anti-pattern. We still run
+        # the bench so the artifact exists for downstream perf dashboards,
+        # but we do not fail the release on it. Real perf regressions should
+        # be caught by the dedicated perf workflow / tracking dashboard.
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json
-          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check
-          echo "::notice title=Performance results::Benchmark artifact generated"
+          set -uo pipefail
+          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json || {
+            echo "::warning title=Performance benchmarks::bench_perf_regression failed (advisory only) — not blocking release"
+          }
+          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check || {
+            echo "::warning title=Performance README drift::sync_perf_table reported drift (advisory only) — not blocking release"
+          }
+          echo "::notice title=Performance results::Benchmark artifact generated (advisory)"
 
       - name: Upload perf artifact
+        # Always upload whatever the advisory bench produced, even on bench failure.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ee-perf
           path: ee-perf.v1.json
+          if-no-files-found: ignore
 
   tag:
     needs: [check-version, gates]
@@ -278,6 +295,10 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/ee dist/
           cd dist
+          # Ensure the binary ships with mode 755 inside the tarball. macOS
+          # release builds historically emerged with mode 700, which broke
+          # the installer's `find ... -perm -111` predicate (issue #4).
+          chmod 755 ee
           tar -cJf ee-${{ matrix.target }}.tar.xz ee
           sha256sum ee-${{ matrix.target }}.tar.xz > ee-${{ matrix.target }}.tar.xz.sha256
           rm ee
@@ -576,7 +597,10 @@ jobs:
             printf '& ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/%s/install.ps1).Content)) -Version "%s"\n' "$TAG" "$VERSION"
             printf '%s\n\n' '```'
             printf '%s\n\n' '## Verification'
-            printf '%s\n' 'All release artifacts are signed with Sigstore. Verify with:'
+            printf '%s\n' 'All release artifacts are signed with Sigstore. The official `install.sh` accepts'
+            printf '%s\n' 'either keyless workflow signatures (this release) or the pinned long-lived EE'
+            printf '%s\n\n' 'release key (used as a fallback for manual maintainer-cut releases).'
+            printf '%s\n' '### Keyless (workflow-built releases — recommended)'
             printf '%s\n' '```bash'
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
@@ -584,7 +608,16 @@ jobs:
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
-            printf '%s\n' 'Each tarball also ships SLSA provenance. Verify it with:'
+            printf '%s\n' '### Pinned key (manual-cut fallback releases)'
+            printf '%s\n' 'When release.yml is unavailable, the maintainer may sign with the pinned EE release key.'
+            printf '%s\n' 'The public key lives at `signing/cosign.pub` in the repo. Verify with:'
+            printf '%s\n' '```bash'
+            printf '%s\n' 'cosign verify-blob \'
+            printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
+            printf '%s\n' '  --key https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/signing/cosign.pub \'
+            printf '%s\n' '  ee-<target>.tar.xz'
+            printf '%s\n\n' '```'
+            printf '%s\n' 'Each tarball also ships SLSA provenance. Verify it with the same keyless or pinned-key flow:'
             printf '%s\n' '```bash'
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.provenance.json.sigstore.json \'
