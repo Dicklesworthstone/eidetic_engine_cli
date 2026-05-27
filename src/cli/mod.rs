@@ -1935,10 +1935,46 @@ pub struct HelpArgs {
 pub enum DaemonCommand {
     /// Report daemon supervisor status.
     Status(DaemonStatusArgs),
+    /// Start the optional hot-mode UDS RPC daemon (bd-oja31 skeleton).
+    /// The daemon is opt-in; every CLI command continues to work
+    /// without it. Binds a Unix-domain socket at
+    /// `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux, falling back to
+    /// `${TMPDIR:-/tmp}/ee-daemon.sock` on macOS.
+    Start(DaemonHotModeStartArgs),
+    /// Stop a running hot-mode daemon by removing its UDS file. Best-
+    /// effort: a daemon started in a separate process tree needs an
+    /// out-of-band signal to actually exit; this command unlinks the
+    /// socket so subsequent `ee` invocations stop short-circuiting to
+    /// the (now-dead) daemon.
+    Stop(DaemonHotModeStopArgs),
 }
 
 #[derive(Clone, Debug, Parser, PartialEq)]
 pub struct DaemonStatusArgs {}
+
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DaemonHotModeStartArgs {
+    /// Override the UDS path. When absent, falls back to
+    /// `${XDG_RUNTIME_DIR}/ee/daemon.sock` (Linux) or
+    /// `${TMPDIR:-/tmp}/ee-daemon.sock` (macOS).
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+    /// Run in foreground (block until terminated). When false the
+    /// command spawns the accept thread and returns immediately; the
+    /// daemon handle is leaked and the OS reaps the thread at process
+    /// exit. The foreground path is the canonical agent-driven shape;
+    /// the detached path is reserved for a follow-up daemonization
+    /// slice that adds setsid + fork.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub foreground: bool,
+}
+
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct DaemonHotModeStopArgs {
+    /// Override the UDS path. Same defaults as `daemon start`.
+    #[arg(long, value_name = "PATH")]
+    pub socket: Option<PathBuf>,
+}
 
 /// Arguments for `ee serve`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
@@ -41804,6 +41840,12 @@ where
     W: Write,
     E: Write,
 {
+    if let Some(DaemonCommand::Start(start_args)) = &args.command {
+        return handle_daemon_hot_mode_start(cli, start_args, stdout, stderr);
+    }
+    if let Some(DaemonCommand::Stop(stop_args)) = &args.command {
+        return handle_daemon_hot_mode_stop(cli, stop_args, stdout, stderr);
+    }
     if matches!(args.command, Some(DaemonCommand::Status(_))) || !args.foreground {
         return write_daemon_status(cli, args, stdout, stderr);
     }
@@ -41877,6 +41919,145 @@ where
             };
             write_domain_error(&error, cli.wants_json(), stdout, stderr)
         }
+    }
+}
+
+/// Skeleton handler for `ee daemon start` (bd-oja31). Binds the UDS,
+/// spawns the accept loop, and either reports the socket path and
+/// returns (default) or blocks until the process is terminated when
+/// `--foreground` is set. The detached path leaks the handle so the
+/// accept thread continues running until process exit; a follow-up
+/// daemonization slice will add proper setsid + double-fork.
+fn handle_daemon_hot_mode_start<W, E>(
+    cli: &Cli,
+    args: &DaemonHotModeStartArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    #[cfg(unix)]
+    {
+        use crate::daemon::server::start_server;
+        let socket_path = args
+            .socket
+            .clone()
+            .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        match start_server(&socket_path) {
+            Ok(mut handle) => {
+                let payload = serde_json::json!({
+                    "schema": "ee.response.v2",
+                    "success": true,
+                    "data": {
+                        "schema": "ee.daemon.start.v1",
+                        "socketPath": handle.socket_path().display().to_string(),
+                        "foreground": args.foreground,
+                    },
+                    "degraded": []
+                });
+                let rendered =
+                    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+                write_stdout(stdout, &(rendered + "\n"));
+                if args.foreground {
+                    // Block indefinitely so an operator running this
+                    // in the foreground keeps the daemon alive; the
+                    // handle drop on Ctrl-C unlinks the socket.
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    }
+                }
+                // Detached path: leak the handle so the accept thread
+                // outlives this function. The OS will reap it at
+                // process exit. A follow-up slice adds setsid + fork
+                // so the daemon survives the CLI process exit.
+                std::mem::forget(handle);
+                ProcessExitCode::Success
+            }
+            Err(error) => {
+                let domain_error = DomainError::Configuration {
+                    message: format!("Failed to start daemon: {error}"),
+                    repair: Some(
+                        "Inspect the socket parent directory and retry `ee daemon start`."
+                            .to_owned(),
+                    ),
+                };
+                write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        let domain_error = DomainError::Configuration {
+            message: "ee daemon UDS RPC is only supported on Unix targets; the in-process CLI path remains available on Windows.".to_owned(),
+            repair: Some("Use `ee context` / `ee search` directly without --daemon-socket.".to_owned()),
+        };
+        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+    }
+}
+
+/// Skeleton handler for `ee daemon stop`. Best-effort: removes the
+/// UDS file so subsequent CLI invocations stop trying to dial it. A
+/// follow-up daemonization slice will add a proper shutdown RPC.
+fn handle_daemon_hot_mode_stop<W, E>(
+    cli: &Cli,
+    args: &DaemonHotModeStopArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    #[cfg(unix)]
+    {
+        let socket_path = args
+            .socket
+            .clone()
+            .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        let removed = if socket_path.exists() {
+            match fs::remove_file(&socket_path) {
+                Ok(()) => true,
+                Err(error) => {
+                    let domain_error = DomainError::Configuration {
+                        message: format!(
+                            "Failed to remove daemon socket {}: {error}",
+                            socket_path.display()
+                        ),
+                        repair: Some(
+                            "Remove the socket manually with `rm <path>` and retry.".to_owned(),
+                        ),
+                    };
+                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+                }
+            }
+        } else {
+            false
+        };
+        let payload = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": true,
+            "data": {
+                "schema": "ee.daemon.stop.v1",
+                "socketPath": socket_path.display().to_string(),
+                "removed": removed,
+            },
+            "degraded": []
+        });
+        let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+        write_stdout(stdout, &(rendered + "\n"));
+        ProcessExitCode::Success
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = args;
+        let domain_error = DomainError::Configuration {
+            message: "ee daemon UDS RPC is only supported on Unix targets.".to_owned(),
+            repair: None,
+        };
+        write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
     }
 }
 

@@ -1,0 +1,420 @@
+//! Wire framing + envelope parsing for the daemon UDS RPC (bd-oja31).
+//!
+//! Wire framing:
+//! ```text
+//! [4-byte big-endian unsigned length] [JSON bytes]
+//! ```
+//!
+//! The 4-byte prefix is a `u32` in network byte order. Implementations
+//! MUST refuse a length above [`super::DAEMON_REQUEST_MAX_BYTES`] (for
+//! inbound requests) or [`super::DAEMON_RESPONSE_MAX_BYTES`] (for
+//! outbound responses) to bound peak per-connection allocation.
+//!
+//! JSON shape: pin the field set canonically through this module's
+//! `DaemonRequest` / `DaemonResponse` types. The matching JSON Schemas
+//! at `docs/schemas/ee.daemon.{request,response}.v1.json` are the
+//! agent-facing contract; agents that don't speak Rust read those
+//! schemas directly, but the Rust types here are the source of truth
+//! for what `ee daemon` accepts/emits.
+
+use std::io::{self, Read, Write};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::{
+    DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES,
+    DAEMON_RESPONSE_SCHEMA_V1,
+};
+
+/// Wire-level request envelope. Mirrors
+/// `docs/schemas/ee.daemon.request.v1.json` exactly: `schema` is pinned
+/// to the v1 constant, `request_id` is caller-chosen (ULID/UUIDv7
+/// recommended), `method` is one of the dispatch names, and `params`
+/// is a method-specific JSON object.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DaemonRequest {
+    pub schema: String,
+    pub request_id: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: Value,
+}
+
+impl DaemonRequest {
+    /// Construct a request envelope with the canonical schema id
+    /// already populated. Helper for tests and the CLI client.
+    #[must_use]
+    pub fn new(request_id: impl Into<String>, method: impl Into<String>, params: Value) -> Self {
+        Self {
+            schema: DAEMON_REQUEST_SCHEMA_V1.to_owned(),
+            request_id: request_id.into(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
+/// Wire-level error envelope inside [`DaemonResponse`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DaemonResponseError {
+    pub code: String,
+    pub message: String,
+}
+
+/// Wire-level response envelope. Exactly one of `result` or `error` is
+/// populated per response; the other field is serialized as `null`
+/// (via `Option<...>` defaulting to `None`, then `skip_serializing_if =
+/// "Option::is_none"`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DaemonResponse {
+    pub schema: String,
+    pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<DaemonResponseError>,
+    #[serde(default)]
+    pub degraded_codes: Vec<String>,
+}
+
+impl DaemonResponse {
+    /// Build a success response with the supplied result value.
+    #[must_use]
+    pub fn ok(request_id: impl Into<String>, result: Value) -> Self {
+        Self {
+            schema: DAEMON_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: request_id.into(),
+            result: Some(result),
+            error: None,
+            degraded_codes: Vec::new(),
+        }
+    }
+
+    /// Build an error response with the supplied code and message.
+    #[must_use]
+    pub fn err(
+        request_id: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            schema: DAEMON_RESPONSE_SCHEMA_V1.to_owned(),
+            request_id: request_id.into(),
+            result: None,
+            error: Some(DaemonResponseError {
+                code: code.into(),
+                message: message.into(),
+            }),
+            degraded_codes: Vec::new(),
+        }
+    }
+
+    /// Attach a degraded code to the response. Returns the modified
+    /// response so callers can chain in a builder style.
+    #[must_use]
+    pub fn with_degraded(mut self, code: impl Into<String>) -> Self {
+        self.degraded_codes.push(code.into());
+        self
+    }
+}
+
+/// Errors that can occur on the read side of the wire framing.
+#[derive(Debug)]
+pub enum FrameReadError {
+    /// The peer closed the connection cleanly before sending a length
+    /// prefix. Distinct from `Io` so the accept loop can break without
+    /// logging a misleading error.
+    Eof,
+    /// The peer announced a payload larger than the configured cap.
+    /// Defends against unbounded `Vec` allocation.
+    TooLarge { announced: u32, max: usize },
+    /// A short read happened mid-frame (the connection died after the
+    /// length prefix but before the full payload arrived).
+    Truncated { expected: u32, got: usize },
+    /// Underlying `io::Error`, including timeouts.
+    Io(io::Error),
+    /// The framed payload was not valid UTF-8 JSON.
+    Decode(serde_json::Error),
+}
+
+impl std::fmt::Display for FrameReadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Eof => formatter.write_str("peer closed connection before sending a frame"),
+            Self::TooLarge { announced, max } => write!(
+                formatter,
+                "request frame announced {announced} bytes which exceeds the {max}-byte cap"
+            ),
+            Self::Truncated { expected, got } => write!(
+                formatter,
+                "request frame truncated after {got} of {expected} announced bytes"
+            ),
+            Self::Io(source) => write!(formatter, "io error reading frame: {source}"),
+            Self::Decode(source) => write!(formatter, "frame payload was not valid JSON: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for FrameReadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            Self::Decode(source) => Some(source),
+            Self::Eof | Self::TooLarge { .. } | Self::Truncated { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for FrameReadError {
+    fn from(source: io::Error) -> Self {
+        Self::Io(source)
+    }
+}
+
+/// Read one length-prefixed JSON request from `reader`. Returns `Err`
+/// at EOF (`FrameReadError::Eof`), on length overflow
+/// (`FrameReadError::TooLarge`), on short reads
+/// (`FrameReadError::Truncated`), on raw I/O errors
+/// (`FrameReadError::Io`), and on JSON decode failures
+/// (`FrameReadError::Decode`). The cap is per-frame; the caller is
+/// free to read multiple frames on the same reader by re-entering this
+/// function.
+pub fn read_request<R: Read>(reader: &mut R) -> Result<DaemonRequest, FrameReadError> {
+    let mut length_prefix = [0_u8; 4];
+    match reader.read_exact(&mut length_prefix) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            return Err(FrameReadError::Eof);
+        }
+        Err(error) => return Err(FrameReadError::Io(error)),
+    }
+    let announced = u32::from_be_bytes(length_prefix);
+    let announced_usize = usize::try_from(announced).map_err(|_| FrameReadError::TooLarge {
+        announced,
+        max: DAEMON_REQUEST_MAX_BYTES,
+    })?;
+    if announced_usize > DAEMON_REQUEST_MAX_BYTES {
+        return Err(FrameReadError::TooLarge {
+            announced,
+            max: DAEMON_REQUEST_MAX_BYTES,
+        });
+    }
+    let mut buffer = vec![0_u8; announced_usize];
+    match reader.read_exact(&mut buffer) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            return Err(FrameReadError::Truncated {
+                expected: announced,
+                got: 0,
+            });
+        }
+        Err(error) => return Err(FrameReadError::Io(error)),
+    }
+    let request: DaemonRequest = serde_json::from_slice(&buffer).map_err(FrameReadError::Decode)?;
+    Ok(request)
+}
+
+/// Errors that can occur on the write side of the wire framing.
+#[derive(Debug)]
+pub enum FrameWriteError {
+    /// The serialized response exceeded
+    /// [`super::DAEMON_RESPONSE_MAX_BYTES`]. Methods that would
+    /// produce a larger response MUST truncate before serialization.
+    TooLarge { actual: usize, max: usize },
+    /// Underlying `io::Error`, including timeouts.
+    Io(io::Error),
+    /// The response failed to serialize (a `Value::Number` with a NaN
+    /// payload, for instance, would trip this).
+    Encode(serde_json::Error),
+}
+
+impl std::fmt::Display for FrameWriteError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge { actual, max } => write!(
+                formatter,
+                "response frame is {actual} bytes which exceeds the {max}-byte cap"
+            ),
+            Self::Io(source) => write!(formatter, "io error writing frame: {source}"),
+            Self::Encode(source) => {
+                write!(formatter, "response failed to encode as JSON: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(source) => Some(source),
+            Self::Encode(source) => Some(source),
+            Self::TooLarge { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for FrameWriteError {
+    fn from(source: io::Error) -> Self {
+        Self::Io(source)
+    }
+}
+
+/// Serialize and write one length-prefixed JSON response to `writer`.
+/// Refuses to send a response above
+/// [`super::DAEMON_RESPONSE_MAX_BYTES`] (returns `TooLarge`); callers
+/// MUST truncate or split before this point.
+pub fn write_response<W: Write>(
+    writer: &mut W,
+    response: &DaemonResponse,
+) -> Result<(), FrameWriteError> {
+    let body = serde_json::to_vec(response).map_err(FrameWriteError::Encode)?;
+    if body.len() > DAEMON_RESPONSE_MAX_BYTES {
+        return Err(FrameWriteError::TooLarge {
+            actual: body.len(),
+            max: DAEMON_RESPONSE_MAX_BYTES,
+        });
+    }
+    let length = u32::try_from(body.len()).map_err(|_| FrameWriteError::TooLarge {
+        actual: body.len(),
+        max: DAEMON_RESPONSE_MAX_BYTES,
+    })?;
+    writer.write_all(&length.to_be_bytes())?;
+    writer.write_all(&body)?;
+    writer.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn roundtrip_echo_request_through_read_request() {
+        let request = DaemonRequest::new(
+            "req-echo-001",
+            "ee.daemon.echo",
+            serde_json::json!({"hello": "world", "n": 42}),
+        );
+        let body = serde_json::to_vec(&request).expect("request must serialize");
+        let length = u32::try_from(body.len()).expect("body length must fit u32");
+        let mut buffer = Vec::with_capacity(4 + body.len());
+        buffer.extend_from_slice(&length.to_be_bytes());
+        buffer.extend_from_slice(&body);
+        let mut cursor = Cursor::new(buffer);
+        let parsed = read_request(&mut cursor).expect("frame must parse");
+        assert_eq!(parsed, request);
+    }
+
+    #[test]
+    fn read_request_refuses_oversize_length_prefix() {
+        // Announce a 4 GiB payload — well above DAEMON_REQUEST_MAX_BYTES.
+        // The reader must refuse without allocating the buffer.
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut cursor = Cursor::new(buffer);
+        let error = read_request(&mut cursor).expect_err("oversized prefix must be refused");
+        match error {
+            FrameReadError::TooLarge { announced, max } => {
+                assert_eq!(announced, u32::MAX);
+                assert_eq!(max, DAEMON_REQUEST_MAX_BYTES);
+            }
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_request_eof_before_prefix_yields_eof() {
+        // An empty connection (peer closed before sending anything)
+        // must surface as `Eof`, NOT as a generic `Io` error. The
+        // accept loop relies on this distinction to break cleanly
+        // without logging a misleading message.
+        let mut cursor = Cursor::new(Vec::<u8>::new());
+        let error = read_request(&mut cursor).expect_err("empty stream must EOF");
+        assert!(matches!(error, FrameReadError::Eof), "got {error:?}");
+    }
+
+    #[test]
+    fn read_request_decode_error_surfaces_decode_variant() {
+        // Frame the JSON body as a length-prefix + garbage bytes. The
+        // length-prefix check passes (under the cap), the read
+        // succeeds, and serde_json fails to parse — that error must
+        // round-trip as `Decode` so the server can return a
+        // `daemon_request_decode_failed` envelope.
+        let garbage = b"not even close to valid JSON";
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&(garbage.len() as u32).to_be_bytes());
+        buffer.extend_from_slice(garbage);
+        let mut cursor = Cursor::new(buffer);
+        let error = read_request(&mut cursor).expect_err("garbage body must fail decode");
+        assert!(matches!(error, FrameReadError::Decode(_)), "got {error:?}");
+    }
+
+    #[test]
+    fn write_response_emits_length_prefixed_frame() {
+        let response = DaemonResponse::ok("req-echo-001", serde_json::json!({"hello": "world"}));
+        let mut buffer = Vec::new();
+        write_response(&mut buffer, &response).expect("response must write");
+        assert!(buffer.len() > 4, "frame must include length + body");
+        let announced = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+        assert_eq!(announced, buffer.len() - 4);
+        let parsed: DaemonResponse =
+            serde_json::from_slice(&buffer[4..]).expect("body must round-trip as JSON");
+        assert_eq!(parsed, response);
+    }
+
+    #[test]
+    fn write_response_refuses_oversize_payload() {
+        // Build a response whose serialized form deliberately exceeds
+        // DAEMON_RESPONSE_MAX_BYTES. The writer must refuse rather
+        // than emit a frame that downstream clients would reject.
+        let huge_payload = "x".repeat(DAEMON_RESPONSE_MAX_BYTES + 1);
+        let response = DaemonResponse::ok("req-too-large", Value::String(huge_payload));
+        let mut buffer = Vec::new();
+        let error =
+            write_response(&mut buffer, &response).expect_err("oversize response must be refused");
+        assert!(
+            matches!(error, FrameWriteError::TooLarge { .. }),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn response_with_degraded_appends_code() {
+        let response = DaemonResponse::err(
+            "req-stub-001",
+            "daemon_ann_warmload_not_yet_implemented",
+            "stub",
+        )
+        .with_degraded(super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+        assert_eq!(response.degraded_codes.len(), 1);
+        assert_eq!(
+            response.degraded_codes[0],
+            super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE
+        );
+    }
+
+    #[test]
+    fn response_serializes_only_one_of_result_or_error() {
+        // The schema invariant: exactly one of `result` / `error` is
+        // populated per response. Test the serialization shape so the
+        // wire bytes match the JSON Schema in
+        // `docs/schemas/ee.daemon.response.v1.json`.
+        let ok_response = DaemonResponse::ok("req-ok", serde_json::json!({"k": "v"}));
+        let ok_serialized = serde_json::to_value(&ok_response).expect("ok must serialize");
+        assert!(ok_serialized.get("result").is_some());
+        assert!(
+            ok_serialized.get("error").is_none(),
+            "got {ok_serialized:?}"
+        );
+
+        let err_response = DaemonResponse::err("req-err", "code", "msg");
+        let err_serialized = serde_json::to_value(&err_response).expect("err must serialize");
+        assert!(err_serialized.get("error").is_some());
+        assert!(
+            err_serialized.get("result").is_none(),
+            "got {err_serialized:?}"
+        );
+    }
+}
