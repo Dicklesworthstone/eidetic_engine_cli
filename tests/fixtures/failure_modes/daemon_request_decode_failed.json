@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_request_decode_failed",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-oja31",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "An inbound daemon frame fails to decode because the JSON body is malformed, the length prefix exceeds DAEMON_REQUEST_MAX_BYTES (4 MiB), required fields are missing, or the socket is read short. handle_connection returns a structured error envelope with request_id `<unknown>` so the client sees a real frame rather than a connection reset.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "Send a 4-byte length prefix followed by a truncated or non-JSON body to the UDS socket"
+  },
+  "expected_emission": {
+    "code": "daemon_request_decode_failed",
+    "severity": "medium",
+    "message_contains": [
+      "request"
+    ]
+  }
+}

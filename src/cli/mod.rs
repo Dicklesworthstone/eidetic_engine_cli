@@ -42199,6 +42199,39 @@ where
         } else {
             false
         };
+        // When no socket was present, the daemon was not running. Emit
+        // an informational `daemon_socket_unavailable` entry so an
+        // operator (or harness) that expected hot-mode acceleration
+        // sees the honest signal rather than a bare `removed: false`.
+        // This is the canonical emission site for the code declared in
+        // `src/daemon/mod.rs`. bd-1feff.
+        let degraded: Vec<serde_json::Value> = if removed {
+            Vec::new()
+        } else {
+            crate::core::degraded_aggregation::aggregate_degraded_entries([
+                crate::core::degraded_aggregation::DegradationAggregationInput::new(
+                    "daemon_stop",
+                    crate::daemon::DAEMON_SOCKET_UNAVAILABLE_CODE,
+                    "info",
+                    format!(
+                        "No daemon socket was present at {}; the daemon was not running.",
+                        socket_path.display()
+                    ),
+                    "Run `ee daemon start` if you expected hot-mode acceleration.",
+                ),
+            ])
+            .into_iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "code": entry.code,
+                    "severity": entry.severity,
+                    "message": entry.message,
+                    "repair": entry.repair,
+                    "sources": entry.sources,
+                })
+            })
+            .collect()
+        };
         let payload = serde_json::json!({
             "schema": "ee.response.v2",
             "success": true,
@@ -42207,7 +42240,7 @@ where
                 "socketPath": socket_path.display().to_string(),
                 "removed": removed,
             },
-            "degraded": []
+            "degraded": degraded
         });
         let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
         write_stdout(stdout, &(rendered + "\n"));

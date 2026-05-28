@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_ann_warmload_not_yet_implemented",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-oja31",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "An ee.daemon.context RPC arrives at the UDS daemon before the ANN warm-load slice has shipped; the skeleton dispatch table returns the stub error envelope and tags the response with daemon_ann_warmload_not_yet_implemented so the CLI client knows to fall back to the in-process ee context path.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "ee.daemon.context RPC sent over the UDS socket (see tests/daemon_uds_rpc_round_trip.rs)"
+  },
+  "expected_emission": {
+    "code": "daemon_ann_warmload_not_yet_implemented",
+    "severity": "medium",
+    "message_contains": [
+      "ee.daemon.context is a stub",
+      "ANN warm-load"
+    ]
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_request_schema_mismatch",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-oja31",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "A daemon request decodes successfully but its `schema` field does not equal ee.daemon.request.v1. The dispatcher refuses the call with a structured envelope so a future protocol revision cannot silently accept an old client.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "DaemonRequest{schema=\"ee.daemon.request.v0_wrong\", method=\"ee.daemon.echo\"} sent over the UDS socket"
+  },
+  "expected_emission": {
+    "code": "daemon_request_schema_mismatch",
+    "severity": "medium",
+    "message_contains": [
+      "expected schema",
+      "ee.daemon.request.v1"
+    ]
+  }
+}

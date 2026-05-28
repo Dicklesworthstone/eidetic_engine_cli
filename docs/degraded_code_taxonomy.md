@@ -508,12 +508,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `serialization_failed` | medium | bd-17c65.10.6 (J6) |
 | `trust_promotion_evidence_rejected` | medium | bd-17c65.7.4 (G4) |
 
-#### Concurrency + write owner (9)
+#### Concurrency + write owner (10)
 | Code | Severity | Bead |
 |------|----------|------|
 | `advisory_lock_timeout` | medium | bd-3usjw.57 |
 | `audit_backpressure` | warning | bd-wp5ac.1 |
 | `audit_lane_shutdown_drain_timeout` | medium | bd-wp5ac.1 |
+| `daemon_overloaded` | warning | bd-jnyui — bounded `ee daemon` accept loop refuses excess connections to bound peak RSS amplification |
 | `index_publish_lock_contention` | warning | bd-17c65.12.2 (L1) |
 | `write_owner_busy` | warning | bd-17c65.12.2 (L1) |
 | `write_spool_backpressure` | warning | bd-17c65.12.2 (L1) |
@@ -673,6 +674,27 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `lexical_ram_tier_disabled` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_tier_not_implemented` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
+
+#### Daemon UDS RPC (6 — response_time)
+
+The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits these
+codes from the per-connection dispatcher (`src/daemon/server.rs`) and
+the `ee daemon stop` CLI handler (`src/cli/mod.rs`). The wire envelope
+(`ee.daemon.response.v1`) carries no `repair` field; the CLI client maps
+the daemon-side codes onto the canonical `degraded[]` array on fallback.
+`daemon_socket_unavailable` is emitted CLI-side with a repair hint. The
+bounded-pool `daemon_overloaded` and peer-credential
+`daemon_peer_unauthorized` codes are catalogued under their own concurrency
+and security rows respectively.
+
+| Code | Severity | Bead |
+|------|----------|------|
+| `daemon_ann_warmload_not_yet_implemented` | medium | bd-oja31 |
+| `daemon_handler_panic` | high | bd-b82q4 |
+| `daemon_request_decode_failed` | medium | bd-oja31 |
+| `daemon_request_schema_mismatch` | medium | bd-oja31 |
+| `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
+| `daemon_unknown_method` | medium | bd-oja31 |
 
 #### Integrity / schema (15)
 | Code | Severity | Bead |

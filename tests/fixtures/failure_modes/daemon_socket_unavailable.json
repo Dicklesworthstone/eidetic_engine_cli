@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_socket_unavailable",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-oja31",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon stop"
+  ],
+  "severity": "info",
+  "repair_present": true,
+  "trigger": {
+    "description": "`ee daemon stop` was invoked but no daemon socket exists at the resolved path (the operator stopped a daemon that was not running). The handler emits an informational degraded entry so a caller who expected hot-mode acceleration sees the honest signal instead of a bare `removed: false`.",
+    "setup_commands": [
+      "(no daemon currently running)"
+    ],
+    "invocation": "ee daemon stop --json"
+  },
+  "expected_emission": {
+    "code": "daemon_socket_unavailable",
+    "severity": "info",
+    "message_contains": [
+      "No daemon socket was present",
+      "the daemon was not running"
+    ],
+    "repair_contains": "ee daemon start"
+  }
+}

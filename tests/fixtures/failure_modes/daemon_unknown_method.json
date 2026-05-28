@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_unknown_method",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-oja31",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "A UDS daemon request arrives with a method name that is not registered in the dispatch table (anything other than ee.daemon.echo or ee.daemon.context today). The dispatcher refuses the call with a structured error envelope rather than crashing or silently dropping the frame.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "DaemonRequest{method=\"ee.daemon.nope\"} sent over the UDS socket"
+  },
+  "expected_emission": {
+    "code": "daemon_unknown_method",
+    "severity": "medium",
+    "message_contains": [
+      "unknown daemon method"
+    ]
+  }
+}
