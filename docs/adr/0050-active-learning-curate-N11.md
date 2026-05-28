@@ -1,7 +1,8 @@
 # ADR 0050: Active-learning curate-candidate selection (N11) — defer to research backlog
 
-Status: deferred
+Status: Deferred (research backlog)
 Date: 2026-05-27
+Bead: bd-17c65.14.11 (N11)
 
 ## Context
 
@@ -50,7 +51,7 @@ Specifically:
    on synthetic labeled data show a stable ≥ 30 % reduction in validations
    to reach the eval-fixture accept ratio.
 
-### Re-evaluation triggers
+### Re-open Criteria
 
 - Accept/reject ledger ≥ 1,000 labeled candidates across ≥ 3 procedural-rule
   families (today: order of magnitude below that).

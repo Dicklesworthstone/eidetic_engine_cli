@@ -1,6 +1,6 @@
 # ADR 0049: Memory-Mapped Frankensearch Index for Zero-Copy Hot Reads — Deferred to Research Backlog
 
-Status: deferred
+Status: Deferred (research backlog)
 Date: 2026-05-27
 Bead: bd-17c65.14.9 (N9)
 
@@ -97,7 +97,7 @@ must change for it to land cleanly.
   Frankensearch contract, not in `ee`-side code that just needs to be
   written.
 
-### Reopen conditions (any one is sufficient to reopen N9)
+### Re-open Criteria
 
 1. **Frankensearch on-disk-format stability ADR lands upstream.** A
    stable layout commitment with an `#[repr(C)]` or zerocopy-validated

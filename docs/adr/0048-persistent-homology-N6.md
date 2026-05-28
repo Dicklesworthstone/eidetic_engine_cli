@@ -1,8 +1,11 @@
 # ADR 0048: N6 persistent homology on the memory-link graph — defer to research backlog
 
-Status: Accepted (defer). The design is captured here so a future research
-slice has a load-bearing entry point; no implementation lands now.
-Tracker: bd-17c65.14.6.
+Status: Deferred (research backlog)
+Date: 2026-05-27
+Bead: bd-17c65.14.6 (N6)
+
+The design is captured here so a future research slice has a load-bearing
+entry point; no implementation lands now.
 
 ## Context
 
@@ -166,7 +169,7 @@ broken down as:
 The spike output is a focused PR + ADR addendum + benchmark artifact;
 nothing requires standing up new infrastructure.
 
-## Decision criteria for un-deferral
+### Re-open Criteria
 
 Re-open bd-17c65.14.6 (or open a successor) when ALL of:
 
