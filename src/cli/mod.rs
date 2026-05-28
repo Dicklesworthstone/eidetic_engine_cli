@@ -41922,12 +41922,22 @@ where
     }
 }
 
-/// Skeleton handler for `ee daemon start` (bd-oja31). Binds the UDS,
-/// spawns the accept loop, and either reports the socket path and
-/// returns (default) or blocks until the process is terminated when
-/// `--foreground` is set. The detached path leaks the handle so the
-/// accept thread continues running until process exit; a follow-up
-/// daemonization slice will add proper setsid + double-fork.
+/// Handler for `ee daemon start` (bd-oja31 skeleton, lifecycle fix
+/// bd-37o8k).
+///
+/// Two paths:
+///
+/// - `--foreground`: bind the UDS in-process via [`start_server`], emit
+///   the success envelope, then block until terminated. This is also
+///   the process shape the detached path spawns as a child.
+/// - default (detached): spawn `current_exe daemon start --foreground
+///   --socket <path>` as a true child process detached via `setsid(2)`
+///   so it survives the parent CLI exit, then poll the socket for
+///   connectability. Only emit `success:true` once `connect(2)` to the
+///   published path succeeds; on probe-timeout kill the child, best-
+///   effort unlink the orphan socket file, and emit `success:false`
+///   with the [`DAEMON_START_FAILED_CODE`] degraded entry so callers
+///   never see "success" for a daemon that did not actually come up.
 fn handle_daemon_hot_mode_start<W, E>(
     cli: &Cli,
     args: &DaemonHotModeStartArgs,
@@ -41945,46 +41955,200 @@ where
             .socket
             .clone()
             .unwrap_or_else(crate::daemon::default_daemon_socket_path);
-        match start_server(&socket_path) {
-            Ok(mut handle) => {
-                let payload = serde_json::json!({
-                    "schema": "ee.response.v2",
-                    "success": true,
-                    "data": {
-                        "schema": "ee.daemon.start.v1",
-                        "socketPath": handle.socket_path().display().to_string(),
-                        "foreground": args.foreground,
-                    },
-                    "degraded": []
-                });
-                let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
-                write_stdout(stdout, &(rendered + "\n"));
-                if args.foreground {
-                    // Block indefinitely so an operator running this
-                    // in the foreground keeps the daemon alive; the
-                    // handle drop on Ctrl-C unlinks the socket.
+
+        if args.foreground {
+            return match start_server(&socket_path) {
+                Ok(handle) => {
+                    let payload = serde_json::json!({
+                        "schema": "ee.response.v2",
+                        "success": true,
+                        "data": {
+                            "schema": "ee.daemon.start.v1",
+                            "socketPath": handle.socket_path().display().to_string(),
+                            "foreground": true,
+                        },
+                        "degraded": []
+                    });
+                    let rendered =
+                        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+                    write_stdout(stdout, &(rendered + "\n"));
+                    // Keep the handle alive across the sleep loop. When
+                    // the process is terminated the handle's Drop runs
+                    // and unlinks the socket file.
+                    let _kept = handle;
                     loop {
                         std::thread::sleep(std::time::Duration::from_secs(60));
                     }
                 }
-                // Detached path: leak the handle so the accept thread
-                // outlives this function. The OS will reap it at
-                // process exit. A follow-up slice adds setsid + fork
-                // so the daemon survives the CLI process exit.
-                std::mem::forget(handle);
-                ProcessExitCode::Success
-            }
+                Err(error) => {
+                    let domain_error = DomainError::Configuration {
+                        message: format!("Failed to start daemon: {error}"),
+                        repair: Some(
+                            "Inspect the socket parent directory and retry \
+                             `ee daemon start --foreground`."
+                                .to_owned(),
+                        ),
+                    };
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
+            };
+        }
+
+        // Detached path: spawn a true child process so the daemon
+        // survives the parent CLI exit. The previous implementation
+        // called `std::mem::forget(handle)` and exited; the in-process
+        // accept thread died with the process and left an orphan
+        // socket file behind while still claiming success (bd-37o8k).
+        //
+        // bd-37o8k tuning. `DAEMON_START_FAILED_CODE` is declared here
+        // (rather than in `src/daemon/mod.rs`) to keep the lifecycle
+        // fix in one diff zone; a follow-up (bd-1feff) promotes it to
+        // the daemon module alongside its failure-mode fixture.
+        const DAEMON_START_FAILED_CODE: &str = "daemon_start_failed";
+        // Readiness-probe deadline: long enough for a forked child to
+        // import its allocator, run `start_server`, and reach
+        // `listener.accept()` on a cold cache; past it the operator
+        // wants the honest failure envelope to investigate.
+        const PROBE_TIMEOUT: Duration = Duration::from_millis(5_000);
+        // Poll cadence: small enough that startup latency is dominated
+        // by the child itself, large enough not to busy-wait CPU.
+        const PROBE_INTERVAL: Duration = Duration::from_millis(50);
+
+        let exe = match std::env::current_exe() {
+            Ok(path) => path,
             Err(error) => {
                 let domain_error = DomainError::Configuration {
-                    message: format!("Failed to start daemon: {error}"),
+                    message: format!(
+                        "Failed to resolve current executable for detached daemon: {error}"
+                    ),
                     repair: Some(
-                        "Inspect the socket parent directory and retry `ee daemon start`."
-                            .to_owned(),
+                        "Run `ee daemon start --foreground` to bind in-process instead.".to_owned(),
                     ),
                 };
-                write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+
+        let mut command = std::process::Command::new(&exe);
+        command
+            .arg("daemon")
+            .arg("start")
+            .arg("--foreground")
+            .arg("--socket")
+            .arg(&socket_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        {
+            use std::os::unix::process::CommandExt;
+            // setsid() in the child puts it in its own session +
+            // process group so it survives parent SIGHUP and the
+            // parent CLI exit. `pre_exec` runs after fork but before
+            // exec; the closure must be async-signal-safe. setsid is
+            // explicitly listed as async-signal-safe in POSIX.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
             }
         }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let domain_error = DomainError::Configuration {
+                    message: format!("Failed to spawn detached daemon child: {error}"),
+                    repair: Some(
+                        "Run `ee daemon start --foreground` to bind in-process instead.".to_owned(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+
+        // Poll the published socket path for connectability. The
+        // success envelope is held back until the child has actually
+        // bound + reached `listener.accept()`; that is the only
+        // contract-honest signal that a subsequent client `connect(2)`
+        // will not see ECONNREFUSED.
+        let timeout = PROBE_TIMEOUT;
+        let interval = PROBE_INTERVAL;
+        let started = Instant::now();
+        let mut connected = false;
+        let mut child_died_early = false;
+        while started.elapsed() < timeout {
+            // If the child died before binding (e.g. socket-occupied
+            // refusal), stop polling early — the deadline would only
+            // delay the honest failure envelope.
+            if let Ok(Some(_status)) = child.try_wait() {
+                child_died_early = true;
+                break;
+            }
+            if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+                connected = true;
+                break;
+            }
+            std::thread::sleep(interval);
+        }
+
+        if connected {
+            let payload = serde_json::json!({
+                "schema": "ee.response.v2",
+                "success": true,
+                "data": {
+                    "schema": "ee.daemon.start.v1",
+                    "socketPath": socket_path.display().to_string(),
+                    "foreground": false,
+                },
+                "degraded": []
+            });
+            let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+            write_stdout(stdout, &(rendered + "\n"));
+            // Intentionally drop (not kill) the Child handle: std's
+            // `Drop for Child` is a no-op so the detached daemon keeps
+            // running until it receives an out-of-band signal or
+            // `ee daemon stop` unlinks its socket.
+            drop(child);
+            return ProcessExitCode::Success;
+        }
+
+        // Probe deadline elapsed (or child died). Kill any lingering
+        // child, best-effort unlink the orphan socket file, and emit
+        // the honest failure envelope.
+        if !child_died_early {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        if socket_path.exists() {
+            let _ = fs::remove_file(&socket_path);
+        }
+        let elapsed_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+        let why = if child_died_early {
+            "Daemon child process exited before its socket became connectable."
+        } else {
+            "Daemon child process did not become connectable within the readiness-probe deadline."
+        };
+        let payload = serde_json::json!({
+            "schema": "ee.response.v2",
+            "success": false,
+            "data": {
+                "schema": "ee.daemon.start.v1",
+                "socketPath": socket_path.display().to_string(),
+                "foreground": false,
+            },
+            "degraded": [{
+                "code": DAEMON_START_FAILED_CODE,
+                "severity": "high",
+                "message": format!("{why} (deadline: {elapsed_ms}ms)"),
+                "repair": "Run `ee daemon start --foreground` to bind in-process and inspect startup output, then retry."
+            }]
+        });
+        let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+        write_stdout(stdout, &(rendered + "\n"));
+        ProcessExitCode::UnsatisfiedDegradedMode
     }
     #[cfg(not(unix))]
     {
