@@ -113,18 +113,6 @@ pub const DAEMON_MAX_INFLIGHT: usize = 32;
 /// IS the cross-tenant exfil defense.
 pub const DAEMON_PEER_UNAUTHORIZED_CODE: &str = "daemon_peer_unauthorized";
 
-/// Degraded code emitted when the daemon fails to install the
-/// per-connection read/write deadline (`setsockopt(SO_RCVTIMEO /
-/// SO_SNDTIMEO)`) on a freshly accepted stream. The 30s read timeout is
-/// the only backstop preventing a half-open peer from pinning a worker
-/// thread forever; if `setsockopt` fails (low memory, a seccomp filter
-/// that blocks it, certain BSD kernel modes) the daemon refuses the
-/// connection with this code and drops it rather than entering a
-/// deadline-less `read` that would hang the worker indefinitely. The
-/// CLI client maps it onto the canonical envelope's `degraded[]` array
-/// with severity `high` per `docs/degraded_code_taxonomy.md`. bd-3pnno.
-pub const DAEMON_SETSOCKOPT_FAILED_CODE: &str = "daemon_setsockopt_failed";
-
 /// Compute the canonical daemon socket path for the current platform.
 /// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` (the
 /// runtime dir is already mode 0700 per the systemd-user contract);

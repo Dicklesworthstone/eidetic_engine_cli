@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_overloaded",
+  "introduced_by": {
+    "bead": "bd-jnyui",
+    "epic_letter": "J"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "warning",
+  "repair_present": false,
+  "trigger": {
+    "description": "ee daemon accept loop refuses a new UDS connection because the bounded worker pool (capped at EE_DAEMON_MAX_INFLIGHT, default 32) is saturated; further accepts return a framed daemon_overloaded response and close until inflight workers drain.",
+    "setup_commands": [
+      "ee daemon start --foreground &",
+      "for i in $(seq 1 64); do (nc -U \"${XDG_RUNTIME_DIR:-/tmp}/ee/daemon.sock\" >/dev/null 2>&1 &); done"
+    ],
+    "invocation": "nc -U ${XDG_RUNTIME_DIR:-/tmp}/ee/daemon.sock"
+  },
+  "expected_emission": {
+    "code": "daemon_overloaded",
+    "severity": "warning",
+    "message_contains": [
+      "daemon worker pool saturated"
+    ]
+  }
+}
