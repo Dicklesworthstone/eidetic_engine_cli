@@ -162,7 +162,7 @@ fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
     );
     assert!(matches!(
         evidence.recovery[0].kind,
-        SourceRunRecoveryKind::Retry | SourceRunRecoveryKind::UseStaticFallback
+        SourceRunRecoveryKind::RetryWithLongerTimeout | SourceRunRecoveryKind::UseStaticFallback
     ));
 
     let serialized = serde_json::to_string(&evidence).expect("evidence must serialize");
