@@ -225,6 +225,7 @@ in the same commit, keeping the catalog complete by construction.
 | `legacy_memory` | context | high | bd-17c65.10.6 (J6) |
 | `degraded_context` | context | info | bd-17c65.5.2 (E2, retired tombstone) |
 | `daemon_background_mode_unimplemented` | daemon | low | bd-17c65.10.6 (J6) |
+| `daemon_overloaded` | daemon | warning | bd-jnyui |
 | `cusum_baseline_underpowered` | daemon, maintenance run | info | bd-17c65.14.13 (N13) |
 | `cusum_regime_change_detected` | daemon, maintenance run | warning | bd-17c65.14.13 (N13) |
 | `decay_sweep_database_unresolved` | job run | medium | bd-17c65.10.6 (J6) |

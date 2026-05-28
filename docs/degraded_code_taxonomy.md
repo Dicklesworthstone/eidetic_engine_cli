@@ -649,17 +649,20 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `graph_skyline_degenerate_communities` | info | bd-bife.6 |
 | `graph_hits_convergence_failure` | warning | bd-bife.6 |
 
-#### Graph NUMA pinning (3 — response_time)
+#### Graph NUMA pinning (4 — response_time)
 
 Surfaced under `data.graph.numaPin` (`ee.status.graph.numa_pin.v1`).
-All three codes are scaffolded by bd-ldstd and consumed by the wiring
-slices under bd-1prrl.3 (swarmx.4); see `docs/agent-ux/numa-pin.md`.
+The scaffold codes are scaffolded by bd-ldstd and consumed by the wiring
+slices under bd-1prrl.3 (swarmx.4); `numa_unavailable_on_macos` is the
+macOS platform fallback emitted by the `NumaPinningAdapter` trait
+(bd-1prrl.3). See `docs/agent-ux/numa-pin.md`.
 
 | Code | Severity | Bead |
 |------|----------|------|
 | `numa_pin_disabled` | info | bd-ldstd (swarmx.4 scaffold) |
 | `numa_pin_linux_not_implemented` | info | bd-ldstd (swarmx.4 scaffold) |
 | `numa_pin_unsupported_platform` | info | bd-ldstd (swarmx.4 scaffold) |
+| `numa_unavailable_on_macos` | info | bd-1prrl.3 (macOS platform fallback) |
 
 #### Lexical RAM-tier pinning (3 — response_time)
 

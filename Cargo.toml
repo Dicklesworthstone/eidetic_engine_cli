@@ -115,13 +115,12 @@ fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtim
 frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
 getrandom = { version = "0.3.4" }
 regex-lite = { version = "0.1" }
-# Direct dep for `libc::getpeereid` / `libc::ucred` / `libc::geteuid`,
-# used by the daemon UDS RPC peer-credential gate in `src/daemon/server.rs`
-# (bd-3j0td). Already transitively present via rustix, sqlmodel, etc.
+# Direct libc remains available for low-level platform adapters; daemon gates
+# use safe wrappers in source to keep the crate-level unsafe-code ban intact.
 libc = { version = "0.2" }
 ring = { version = "0.17" }
 roaring = { version = "0.11.4" }
-rustix = { version = "1.1.4", features = ["fs", "process"] }
+rustix = { version = "1.1.4", features = ["fs", "net", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0.149", features = ["preserve_order"] }
 serde_yaml = { version = "0.9.34" }

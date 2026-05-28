@@ -117,7 +117,7 @@ fn seed_fixture(workspace_path: &Path, candidate_count: usize) -> CurateFixture 
         let input = CreateCurationCandidateInput {
             workspace_id: workspace_id.clone(),
             candidate_type: "promote".to_owned(),
-            target_memory_id: target_memory_id.clone(),
+            target_memory_id: Some(target_memory_id.clone()),
             proposed_content: Some(format!("Proposed curated content #{index}.")),
             proposed_confidence: Some(0.73),
             proposed_trust_class: Some("agent_assertion".to_owned()),
@@ -128,6 +128,8 @@ fn seed_fixture(workspace_path: &Path, candidate_count: usize) -> CurateFixture 
             status: Some("pending".to_owned()),
             created_at: None,
             ttl_expires_at: None,
+            derivation_source_refs_json: None,
+            derivation_metadata_json: None,
         };
 
         let id = candidate_id(index);

@@ -45,6 +45,10 @@ use std::time::Duration;
 
 pub mod protocol;
 
+/// Metrics-collection seam for the dispatch path (bd-3vkyp). Platform-
+/// agnostic: depends only on the wire types in [`protocol`].
+pub mod metrics;
+
 #[cfg(unix)]
 pub mod server;
 
@@ -113,6 +117,32 @@ pub const DAEMON_MAX_INFLIGHT: usize = 32;
 /// IS the cross-tenant exfil defense.
 pub const DAEMON_PEER_UNAUTHORIZED_CODE: &str = "daemon_peer_unauthorized";
 
+/// Degraded code emitted when the daemon fails to install the
+/// per-connection read/write deadline (`setsockopt(SO_RCVTIMEO /
+/// SO_SNDTIMEO)`) on a freshly accepted stream. The 30s read timeout is
+/// the only backstop preventing a half-open peer from pinning a worker
+/// thread forever; if `setsockopt` fails (low memory, a seccomp filter
+/// that blocks it, certain BSD kernel modes) the daemon refuses the
+/// connection with this code and drops it rather than entering a
+/// deadline-less `read` that would hang the worker indefinitely. The
+/// CLI client maps it onto the canonical envelope's `degraded[]` array
+/// with severity `high` per `docs/degraded_code_taxonomy.md`. bd-3pnno.
+pub const DAEMON_SETSOCKOPT_FAILED_CODE: &str = "daemon_setsockopt_failed";
+
+/// Degraded code written to a peer whose connection was accepted while
+/// the daemon was already shutting down. The accept loop checks the
+/// shutdown latch after each `accept`; if it is set, a connection may
+/// still have been established (the shutdown wake itself connects, and
+/// a legitimate client can race in between the shutdown signal and the
+/// listener teardown). Rather than dropping that stream silently —
+/// which the client observes as an inscrutable connection reset — the
+/// daemon writes a framed envelope carrying this code so the client can
+/// cleanly fall back to the in-process path or retry against a fresh
+/// daemon. The CLI client maps it onto the canonical envelope's
+/// `degraded[]` array with severity `medium` per
+/// `docs/degraded_code_taxonomy.md`. bd-36dp2.
+pub const DAEMON_SHUTTING_DOWN_CODE: &str = "daemon_shutting_down";
+
 /// Compute the canonical daemon socket path for the current platform.
 /// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` (the
 /// runtime dir is already mode 0700 per the systemd-user contract);
@@ -143,9 +173,7 @@ pub fn default_daemon_socket_path() -> PathBuf {
 #[cfg(unix)]
 #[must_use]
 pub fn current_euid() -> u32 {
-    // SAFETY: `geteuid(2)` is async-signal-safe, has no preconditions,
-    // and cannot fail. It does not touch errno.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 #[cfg(not(unix))]

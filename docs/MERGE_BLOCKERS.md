@@ -2,7 +2,7 @@
 
 **Author:** reviewer-triage-p7
 **Date:** 2026-05-27
-**Source:** FINAL_REVIEW_REPORT_ROUND5 (Rounds 1-3, 113 findings on b21bc8df..f518de3b)
+**Source:** docs/reports/FINAL_REVIEW_REPORT_ROUND5 (Rounds 1-3, 113 findings on b21bc8df..f518de3b)
 **Gate:** The daemon code (bd-oja31, SRR1 UDS RPC skeleton in `src/daemon/`) MUST NOT be exposed to multi-agent traffic until every bead listed here is closed with shipped code.
 
 ## Method
