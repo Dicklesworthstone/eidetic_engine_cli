@@ -7,21 +7,20 @@
 **Durable, local-first, explainable memory for coding agents.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions)
-[![crates.io planned](https://img.shields.io/badge/crates.io-planned-lightgrey.svg)](#installation-status)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
-**Install**
+**Install (from source — pre-release)**
 
 ```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
+git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
+cd eidetic_engine_cli && cargo build --release
 ```
 
-Verifies checksums, drops the `ee` binary into `~/.local/bin`, installs shell
-completions, and auto-configures the Claude Code / Codex / Gemini agent hooks
-if those harnesses are detected. Pass `--help` (e.g. `bash install.sh --help`)
-for offline tarballs, proxy options, `--no-gum`, and `--force` reinstall.
+Signed release binaries with a `curl | bash` installer (checksums, shell
+completions, and auto-configured Claude Code / Codex / Gemini hooks) are
+planned but not yet published.
 
 </div>
 
@@ -55,13 +54,6 @@ The command returns a Markdown pack with project release rules, prior release
 incidents from `cass`, verification commands, branch traps, and high-severity
 warnings. Each item carries an evidence pointer and a score breakdown.
 
-> `ee pack "<task>"` is the canonical context-pack command after the triad
-> promotion. `ee context "<task>"` runs the same code path and is retained as a
-> soft-deprecated alias that emits `deprecated_alias` (severity `info`) in its
-> `degraded[]`. Examples elsewhere in this README that still use `ee context`
-> remain valid during the deprecation window; new harnesses and scripts should
-> prefer `ee pack`. See `docs/triad_compat_plan.md` for the disposition table.
-
 ### What You Get
 
 | Capability | What you get |
@@ -76,23 +68,10 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 | **Local-first** | No cloud. No paid LLM APIs required. Embeddings run locally through Frankensearch |
 | **Stable JSON contract** | Every machine-facing command emits versioned JSON with `schema` field for parsing and validation |
 | **Deterministic** | Same DB + indexes + config + query → identical pack hash |
-| **Cancellation-aware core** | Runtime-facing async APIs use Asupersync `&Cx` and `Outcome`; cancellable storage retry loops remain tracked by `bd-37r5a` |
+| **Cancellation-aware core** | Runtime-facing async APIs use Asupersync `&Cx` and `Outcome` |
 | **CLI first, daemon optional** | Every essential workflow runs as a one-shot. No background process required |
 | **Auditable curation** | Promotions, consolidations, and tombstones produce audit entries; no silent rewrites |
 | **Crowded-agent posture** | Swarm brief, workspace hygiene, verification broker, QoS lanes, and flight recorder help agents coordinate without taking over the loop |
-
-### Current State Snapshot
-
-| Area | Current status |
-|---|---|
-| Latest tag | `v0.1.0` git tag exists |
-| GitHub Releases | No published release assets yet |
-| crates.io | Package name selected as `eidetic-engine`; `publish = false` in current `Cargo.toml` |
-| Live install path | Source build with Cargo |
-| Default feature set | `fts5`, `json`, `embed-fast`, `lexical-bm25`, `graph` |
-| Optional adapters | MCP adapter is feature-gated; `serve` and `science-analytics` remain reserved/degraded |
-| Mesh | Optional and off by default; foreground CLI, Tailscale probe/autodiscovery, policy, hello, and sync surfaces exist |
-| Verification | `scripts/verify.sh` is the central gate runner; heavy Cargo work in agent sessions should go through RCH |
 
 ### Agent Operating Loop
 
@@ -100,7 +79,7 @@ For agent use, the core rhythm is small and repetitive:
 
 ```bash
 ee swarm brief --workspace . --json
-ee context "<task>" --workspace . --max-tokens 4000 --format markdown
+ee pack "<task>" --workspace . --max-tokens 4000 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee why <memory-id> --workspace . --json
 ee preflight check --cmd "<risky shell command>" --workspace . --json
@@ -110,31 +89,15 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 
 | Situation | First `ee` command |
 |---|---|
-| Starting substantive work | `ee context "<task>" --workspace . --max-tokens 4000 --format markdown` |
+| Starting substantive work | `ee pack "<task>" --workspace . --max-tokens 4000 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
 | A high-ranked memory looks suspicious | `ee why <id> --workspace . --json` |
-| A context pack looks odd | `ee context "<task>" --workspace . --explain --json` |
+| A context pack looks odd | `ee pack "<task>" --workspace . --explain --json` |
 | About to run a destructive command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
 | You need a safe handoff | `ee handoff create --workspace . --out <capsule.json> --json` |
 | You need a support artifact | `ee support bundle --out <dir> --workspace . --json` |
-
-### Operator rules in practice
-
-The private operator playbook boils down to a few habits:
-
-| ID | Rule | Command habit |
-|---|---|---|
-| EE-001 | Pull task context before real work | `ee context "<task>" --workspace . --max-tokens 4000 --format markdown` |
-| EE-002 / EE-003 | Choose memory level and kind by what the fact is | Use `working`, `episodic`, `semantic`, `procedural`; use `rule`, `fact`, `decision`, `failure`, `command`, `convention`, `anti-pattern`, `risk`, or `playbook-step` |
-| EE-004 / EE-025 | Inspect surprising results before discarding them | `ee context "<task>" --explain --json`; `ee why <id> --workspace . --json` |
-| EE-005 / EE-017 | Treat pack replay as forensics | `ee pack replay <pack-id> --json`; rerun live `ee context` when evidence freshness changed |
-| EE-009 / EE-011 | Save memory IDs and close the feedback loop promptly | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
-| EE-010 / EE-030 | Run preflight per risky command | `ee preflight check --cmd "<exact command>" --workspace . --json` |
-| EE-013 / EE-021 | In crowded repos, coordinate before staging | `ee swarm brief --workspace . --json`; `ee workspace hygiene --workspace . --json` |
-| EE-019 | Use TOON for tight prompt budgets and JSON for parsers | `ee context "<task>" --format toon`; `ee context "<task>" --json` |
-| EE-020 / EE-026 | Use the right sharing artifact | `ee support bundle` for bug reports; `ee handoff create` for resumable work |
 
 ---
 
@@ -167,7 +130,7 @@ $ ee import cass --workspace . --limit 50 --json | jq '.summary'
 }
 
 # 4. Ask for context before working
-$ ee context "fix the failing release workflow" --workspace . --profile thorough
+$ ee pack "fix the failing release workflow" --workspace . --profile thorough
 ## procedural_rules
 
 ### 1. mem_01HQ3K5Z (42 tokens)
@@ -241,7 +204,7 @@ for supervised foreground maintenance and write-owner work; bounded `job` and
 
 Given the same database, indexes, config, profile, budget, seed, and query, the JSON output is byte-stable, ranking ties resolve deterministically, and context pack hashes reproduce exactly. Golden tests assert this.
 
-Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1`; `ee verify proofs` and the non-blocking `verify.sh` stage are tracked under `bd-nnfq4`.
+Mechanized proof artifacts now live alongside the test suite: [`proofs/lean4/pack_determinism.lean`](proofs/lean4/pack_determinism.lean) models the pack-hash determinism invariant, and [`proofs/tla/agent_mail_coordination.tla`](proofs/tla/agent_mail_coordination.tla) models exclusive Agent Mail reservation safety. The proof-check report schema is registered as `ee.proof_check.v1` and is checkable via `ee verify proofs`.
 
 ### 5. Explainable Retrieval
 
@@ -320,62 +283,8 @@ Hard constraints. CI fails if any of them break.
 
 ## Installation
 
-### Installation status
-
-`ee` is still pre-release. The GitHub release, Homebrew tap, and crates.io
-install paths below are planned channels, not live distribution channels yet.
-Current release posture:
-
-| Path | Status | Provenance | Tracking |
-|---|---|---|---|
-| Git tag | `v0.1.0` exists | n/a | [`CHANGELOG.md`](CHANGELOG.md) |
-| GitHub release installer | planned; no release assets published yet | SLSA provenance planned; installer supports `--require-provenance` | `bd-3usjw.9` / `bd-3usjw.9.1` |
-| Homebrew tap | planned; tap formula not published yet | release-asset provenance applies after tap publish | `bd-3usjw.13` |
-| crates.io | planned; package name selected as `eidetic-engine`; binary remains `ee`; `publish = false` today | n/a | `bd-3usjw.10` |
-| Source build | available now | local build only | this README |
-
-### Release installer (planned)
-
-Planned after the first signed GitHub release ships; see `bd-3usjw.9`.
-
-```bash
-curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.sh \
-  | EE_VERSION=v0.1.0 bash
-```
-
-This will verify the binary against the published Sigstore bundle, drop it in
-`~/.local/bin/ee`, and run `ee doctor` to confirm. Pass
-`--require-provenance` when invoking `install.sh` to also require the
-SLSA provenance JSON and its Sigstore bundle.
-
-PowerShell (Windows):
-
-Planned after the first signed GitHub release ships; see `bd-3usjw.9`.
-
-```powershell
-& ([scriptblock]::Create((iwr -useb https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/download/v0.1.0/install.ps1).Content)) -Version "0.1.0"
-```
-
-### Homebrew (macOS / Linux)
-
-Planned after `Dicklesworthstone/homebrew-tap` publishes `Formula/ee.rb`; see
-`bd-3usjw.13`.
-
-```bash
-brew install Dicklesworthstone/tap/ee
-```
-
-### Cargo
-
-Planned as the `eidetic-engine` package, which installs the `ee` binary. The
-short crate name `ee` remains unavailable because `crates.io/crates/ee` points
-at `https://github.com/ewpratten/ee`, not this project; see `bd-3usjw.10`.
-
-```bash
-cargo install eidetic-engine
-```
-
-### From source
+`ee` is pre-release. Building from source with a nightly Rust toolchain is the
+live install path today:
 
 ```bash
 git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
@@ -383,6 +292,10 @@ cd eidetic_engine_cli
 cargo build --release
 ./target/release/ee --version
 ```
+
+Signed GitHub-release binaries (with a `curl | bash` installer and Sigstore
+provenance), a Homebrew tap, and a `cargo install eidetic-engine` path are
+planned but not yet published.
 
 ### Verify
 
@@ -415,7 +328,7 @@ ee init --workspace .
 ee import cass --workspace . --limit 50
 
 # 3. Get context for a task
-ee context "what should I know before refactoring the storage layer?" \
+ee pack "what should I know before refactoring the storage layer?" \
   --workspace . --profile thorough --max-tokens 4000 --format markdown
 
 # 4. When you learn something durable, capture it
@@ -499,8 +412,7 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
-| `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command, post-triad-promotion canonical) |
-| `ee context "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Soft-deprecated alias of `ee pack`; emits `deprecated_alias` (severity `info`) and runs the same code path |
+| `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
 | `ee outcome <id> --signal helpful\|harmful [--reason "<reason>"]` | Record feedback, updating utility/confidence |
@@ -553,7 +465,7 @@ Machine readers should inspect the JSON contract before trusting a result:
 | Posture | `ee status --json` uses `data.posture.overall`; `ee doctor --json` returns a doctor-specific posture view |
 | Provenance | `provenance[]`, `evidence_spans[]`, and `trustClass` on memory and pack items |
 | Pack identity | `data.pack.hash` for batch packs; `packHash` on stream trailer frames |
-| Graph explanation | `data.pack.packDna` when `ee pack --explain --json` (or its alias `ee context --explain --json`) is used |
+| Graph explanation | `data.pack.packDna` when `ee pack --explain --json` is used |
 | Feature gaps | `ee capabilities --json` at `data.unimplemented[]`, not command `degraded[]` |
 | Streams | `ee.pack.stream.v1` NDJSON frames: `header`, `item`, terminal `trailer`, `error`, or `cancelled` |
 
@@ -600,7 +512,7 @@ Common red flags:
 
 ### Context pack controls
 
-`ee context` and `ee pack build` expose three layers of control:
+`ee pack` and `ee pack build` expose three layers of control:
 
 | Layer | Flags | Use |
 |---|---|---|
@@ -619,7 +531,7 @@ Common red flags:
 Examples:
 
 ```bash
-ee context "debug release failure" \
+ee pack "debug release failure" \
   --workspace . \
   --profile thorough \
   --pack-profile verbose \
@@ -628,14 +540,14 @@ ee context "debug release failure" \
   --explain \
   --json
 
-ee context "small hook context" \
+ee pack "small hook context" \
   --workspace . \
   --profile compact \
   --pack-profile lean \
   --max-tokens 1200 \
   --format toon
 
-ee context "large agent handoff" \
+ee pack "large agent handoff" \
   --workspace . \
   --stream \
   --format jsonl
@@ -646,7 +558,7 @@ a budget from retrieval entropy, graph fanout, and task keywords. Passing
 `--max-tokens N` pins the budget for prompt caches, eval fixtures, CI gates, or
 multi-pack composition.
 
-When `[pack] memory_tier_admission = true`, `ee context` treats hot/warm/cold
+When `[pack] memory_tier_admission = true`, `ee pack` treats hot/warm/cold
 memory tiers as advisory candidate signals. Hot and warm candidates can receive
 small deterministic ranking boosts, but cold items are not filtered; explicit
 query matches and safety/failure evidence remain eligible for the pack.
@@ -661,7 +573,7 @@ themselves.
 |---|---|
 | `ee insights --json` | Bundle graph-derived findings such as top memories, bridges, contradiction clusters, proximity hotspots, load-bearing memories, HITS hubs/authorities, and skyline posture |
 | `ee insights --section <name> --json` | Return one deterministic section when a full bundle is too broad |
-| `ee context "<task>" --explain --json` | Include a Pack DNA block that explains pack composition with dominators, communities, ego subgraphs, and PPR neighbors when available |
+| `ee pack "<task>" --explain --json` | Include a Pack DNA block that explains pack composition with dominators, communities, ego subgraphs, and PPR neighbors when available |
 | `ee why <memory-id> --causal-explain --json` | Add a causalExplanation block with causal ancestry and min-cost path evidence |
 | `ee insights --section causalBottlenecks --json` | Inspect causal bottleneck findings across failure-oriented causal evidence |
 | `ee health --robot-insights --json` | Surface structural health through k-truss and contradiction-cluster summaries |
@@ -685,7 +597,7 @@ ee insights --section bridges --workspace . --json \
 Worked example: debug a surprising context pack.
 
 ```bash
-ee context "prepare release" --workspace . --explain --json \
+ee pack "prepare release" --workspace . --explain --json \
   | jq '.data.pack.packDna'
 ```
 
@@ -729,7 +641,7 @@ for snapshot lifecycle rules.
 Use `ee pack replay <pack-id> --json` when you need to explain what a historical
 pack actually selected from its persisted ledger. Replay is forensic: it reads
 the stored non-secret ledger and does not claim that a fresh search would make
-the same choices today. Use a new `ee context` or `ee pack` run when you want
+the same choices today. Use a new `ee pack` run when you want
 live re-retrieval against current memories, indexes, graph snapshots, and trust
 state.
 
@@ -926,7 +838,7 @@ Mesh command mode can be selected per command or through `EE_MESH_MODE`:
 
 ```bash
 ee search "release proof" --workspace . --mesh off --json
-ee context "handoff this bead" --workspace . --mesh cache --json
+ee pack "handoff this bead" --workspace . --mesh cache --json
 ee status --workspace . --mesh revisable --json
 ee mesh discovery-policy --explain --json
 ```
@@ -1255,7 +1167,7 @@ tracked owner and status of each flag.
                 │  Coding Agent (Claude Code · Codex · Cursor …)  │
                 └──────────────────────┬──────────────────────────┘
                                        │
-                  ee context · search · remember · import · curate
+                   ee pack · search · remember · import · curate
                                        ▼
                 ┌─────────────────────────────────────────────────┐
                 │                     ee-cli                      │
@@ -1284,7 +1196,7 @@ tracked owner and status of each flag.
 
 **Strict dependency direction.** `cli → core → { db, search, cass, graph, pack, curate, policy, output } → models`. No upward edges. Repositories never render output. Command handlers never write SQL.
 
-**Native Asupersync.** Runtime-facing async APIs take `&Cx`, return `Outcome<T>`, and preserve budget/cancellation semantics where wired. Contended storage retry sleeps are not yet universally cancellable; `bd-37r5a` tracks the implementation and LabRuntime/e2e proof needed before restoring that broader claim.
+**Native Asupersync.** Runtime-facing async APIs take `&Cx`, return `Outcome<T>`, and preserve budget/cancellation semantics where wired.
 
 Additional runtime-adjacent modules:
 
@@ -1445,7 +1357,7 @@ measurement or source that proves it lost.
 | Capture a failed attempt | `ee remember "...what lost and why..." --level episodic --kind failure --tags family-...,cause-...,regression-... --source <artifact-uri> --json` |
 | Cluster repeated failures | `ee playbook extract --workspace ./optimization/<campaign> --dry-run --json` |
 | Promote a validated anti-pattern | `ee curate validate <candidate-id>` then `ee curate apply <candidate-id>` |
-| Prime the next attempt | `ee context "<next hypothesis>" --workspace ./optimization/<campaign> --profile thorough --format markdown` |
+| Prime the next attempt | `ee pack "<next hypothesis>" --workspace ./optimization/<campaign> --profile thorough --format markdown` |
 
 Example capture:
 
@@ -1483,7 +1395,7 @@ Add to your `AGENTS.md` or hook setup:
 ```text
 Before starting substantial work, run:
   ee swarm brief --workspace . --json
-  ee context "<task>" --workspace . --max-tokens 4000 --format markdown
+  ee pack "<task>" --workspace . --max-tokens 4000 --format markdown
 
 When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
@@ -1497,11 +1409,11 @@ After a remembered rule helps or harms:
 ```
 
 You can also wire it into a PreToolUse hook that injects context before risky
-commands. The `ee context` JSON is stable and parseable.
+commands. The `ee pack` JSON is stable and parseable.
 
 ### Codex
 
-Codex shells out, so the same calls work. `ee context "<task>" --json` can be
+Codex shells out, so the same calls work. `ee pack "<task>" --json` can be
 inserted directly into a system or developer message.
 
 ### MCP
@@ -1650,7 +1562,7 @@ hardware class.
 |---|---|---:|---:|
 | `ee remember` (single record) | `mac-m3-pro` | 8 ms | 22 ms |
 | `ee search "<q>"` (hybrid) | `mac-m3-pro` | 38 ms | 110 ms |
-| `ee context "<task>"` (markdown, 4k tokens) | `mac-m3-pro` | 95 ms | 240 ms |
+| `ee pack "<task>"` (markdown, 4k tokens) | `mac-m3-pro` | 95 ms | 240 ms |
 | `ee why <id>` | `mac-m3-pro` | 25 ms | 100 ms |
 | `ee init --workspace <dir>` (clean) | `mac-m3-pro` | 100 ms | 250 ms |
 | `ee audit timeline --limit 1000` | `mac-m3-pro` | 35 ms | 100 ms |
@@ -1873,7 +1785,7 @@ The runtime is Asupersync, which gives us structured concurrency, capability nar
 The storage layer is FrankenSQLite via SQLModel. `rusqlite` is forbidden in the dep tree, audited by CI.
 
 **Can I use `ee` without `cass`?**
-Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee remember`, `ee context`, `ee search`, curation, graph, and packing all work normally.
+Yes. `cass` is an evidence source, not a hard dependency. Without it, `ee remember`, `ee pack`, `ee search`, curation, graph, and packing all work normally.
 
 **How big does the database get?**
 On a typical multi-project developer machine, expect 50-500 MB after a year.
@@ -1910,7 +1822,7 @@ Use `ee --help`, `ee help <command path>`, `ee --help-json`, `ee schema list`,
 and `ee capabilities --json`.
 
 **How do I integrate with my CI?**
-Run `ee context "<the task this CI run is doing>" --json` and pipe relevant
+Run `ee pack "<the task this CI run is doing>" --json` and pipe relevant
 rules into your agent's system prompt. JSON output is stable across patch
 versions.
 
