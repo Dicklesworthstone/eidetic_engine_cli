@@ -45,6 +45,10 @@ use std::time::Duration;
 
 pub mod protocol;
 
+/// Metrics-collection seam for the dispatch path (bd-3vkyp). Platform-
+/// agnostic: depends only on the wire types in [`protocol`].
+pub mod metrics;
+
 #[cfg(unix)]
 pub mod server;
 

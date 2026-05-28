@@ -751,8 +751,21 @@ fn handle_connection(mut stream: UnixStream) {
     // captured by the closure is a borrow of `request`; the
     // `DaemonResponse` value is produced fresh inside the closure and
     // the `UnixStream` is touched only after the closure returns.
+    //
+    // Metrics seam (bd-3vkyp): the live dispatch goes through
+    // `instrument_dispatch` with the zero-cost `NoopMetricsCollector`,
+    // so a perf-investigation build turns on per-method counters /
+    // histograms by swapping the collector at THIS call site — no edit
+    // to `dispatch` or any of its match arms, hence no recompile of the
+    // hot dispatch table.
     let request_id = request.request_id.clone();
-    let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch(&request)));
+    let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        super::metrics::instrument_dispatch(
+            &request.method,
+            &super::metrics::NoopMetricsCollector,
+            || dispatch(&request),
+        )
+    }));
     let response = match dispatched {
         Ok(response) => response,
         Err(payload) => build_panic_response(&request_id, payload.as_ref()),
