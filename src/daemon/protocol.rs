@@ -277,6 +277,20 @@ impl From<io::Error> for FrameReadError {
     }
 }
 
+/// Initial body-buffer capacity for an inbound frame. The 4-byte length
+/// prefix is attacker-controlled, so [`read_request`] MUST NOT
+/// pre-allocate the announced size: a slow-loris client could announce
+/// [`super::DAEMON_REQUEST_MAX_BYTES`] (4 MiB) and then stall, pinning a
+/// zero-filled 4 MiB heap buffer per connection for the full read
+/// timeout. Instead the body buffer starts at this small cap and grows
+/// only as real bytes arrive, so peak per-connection allocation tracks
+/// bytes actually delivered rather than bytes announced. bd-26jks.
+const REQUEST_BODY_PREALLOC_CAP: usize = 8 * 1024;
+
+/// Chunk size for the streaming body read. Bounds the transient stack
+/// copy and the granularity at which the body buffer grows.
+const REQUEST_BODY_READ_CHUNK: usize = 8 * 1024;
+
 /// Read one length-prefixed JSON request from `reader`. Returns `Err`
 /// at EOF (`FrameReadError::Eof`), on length overflow
 /// (`FrameReadError::TooLarge`), on short reads
@@ -285,6 +299,13 @@ impl From<io::Error> for FrameReadError {
 /// (`FrameReadError::Decode`). The cap is per-frame; the caller is
 /// free to read multiple frames on the same reader by re-entering this
 /// function.
+///
+/// The body is streamed in [`REQUEST_BODY_READ_CHUNK`]-sized reads and
+/// the buffer grows incrementally, so a client that announces a large
+/// frame but trickles (or never sends) the body holds at most the bytes
+/// it actually delivered — not the announced size. The announced length
+/// is still hard-capped at [`super::DAEMON_REQUEST_MAX_BYTES`] before
+/// the read begins. bd-26jks.
 pub fn read_request<R: Read>(reader: &mut R) -> Result<DaemonRequest, FrameReadError> {
     let mut length_prefix = [0_u8; 4];
     match reader.read_exact(&mut length_prefix) {
@@ -305,16 +326,30 @@ pub fn read_request<R: Read>(reader: &mut R) -> Result<DaemonRequest, FrameReadE
             max: DAEMON_REQUEST_MAX_BYTES,
         });
     }
-    let mut buffer = vec![0_u8; announced_usize];
-    match reader.read_exact(&mut buffer) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-            return Err(FrameReadError::Truncated {
-                expected: announced,
-                got: 0,
-            });
+    // Stream the body in bounded chunks so a hostile (or merely stuck)
+    // client that announces up to DAEMON_REQUEST_MAX_BYTES but trickles
+    // the body cannot pin the announced size in heap. The buffer grows
+    // only as bytes actually arrive; peak allocation tracks delivered
+    // bytes, not announced bytes. bd-26jks.
+    let mut buffer = Vec::with_capacity(announced_usize.min(REQUEST_BODY_PREALLOC_CAP));
+    let mut chunk = [0_u8; REQUEST_BODY_READ_CHUNK];
+    while buffer.len() < announced_usize {
+        let remaining = announced_usize - buffer.len();
+        let want = remaining.min(REQUEST_BODY_READ_CHUNK);
+        match reader.read(&mut chunk[..want]) {
+            // Peer closed mid-frame before delivering the announced
+            // bytes. Report how many actually arrived so the caller can
+            // tell a stalled slow-loris from a clean EOF.
+            Ok(0) => {
+                return Err(FrameReadError::Truncated {
+                    expected: announced,
+                    got: buffer.len(),
+                });
+            }
+            Ok(read) => buffer.extend_from_slice(&chunk[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(FrameReadError::Io(error)),
         }
-        Err(error) => return Err(FrameReadError::Io(error)),
     }
     let request: DaemonRequest = serde_json::from_slice(&buffer).map_err(FrameReadError::Decode)?;
     Ok(request)
@@ -427,6 +462,54 @@ mod tests {
             }
             other => panic!("expected TooLarge, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_request_truncated_body_reports_delivered_bytes() {
+        // Slow-loris shape (bd-26jks): announce a frame far larger than
+        // REQUEST_BODY_PREALLOC_CAP, then deliver only a few body bytes
+        // before EOF. The reader must NOT pre-allocate the announced
+        // size; it must surface `Truncated` with the count of bytes that
+        // actually arrived (not the old hard-coded `got: 0`).
+        let announced: u32 = 1_048_576; // 1 MiB announced
+        let delivered: &[u8] = b"{\"partial\":";
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&announced.to_be_bytes());
+        buffer.extend_from_slice(delivered);
+        let mut cursor = Cursor::new(buffer);
+        let error = read_request(&mut cursor).expect_err("truncated frame must be refused");
+        match error {
+            FrameReadError::Truncated { expected, got } => {
+                assert_eq!(expected, announced);
+                assert_eq!(got, delivered.len());
+            }
+            other => panic!("expected Truncated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_request_chunked_body_spanning_multiple_reads_parses() {
+        // A legitimate body larger than REQUEST_BODY_READ_CHUNK must
+        // round-trip through the streaming read loop unchanged, proving
+        // the incremental-growth path reassembles the frame correctly.
+        let filler = "x".repeat(REQUEST_BODY_READ_CHUNK * 3);
+        let request = DaemonRequest::new(
+            "req-chunked-001",
+            "ee.daemon.echo",
+            serde_json::json!({ "blob": filler }),
+        );
+        let body = serde_json::to_vec(&request).expect("request must serialize");
+        assert!(
+            body.len() > REQUEST_BODY_READ_CHUNK,
+            "body must exceed one read chunk to exercise the loop"
+        );
+        let length = u32::try_from(body.len()).expect("body length must fit u32");
+        let mut buffer = Vec::with_capacity(4 + body.len());
+        buffer.extend_from_slice(&length.to_be_bytes());
+        buffer.extend_from_slice(&body);
+        let mut cursor = Cursor::new(buffer);
+        let parsed = read_request(&mut cursor).expect("multi-chunk frame must parse");
+        assert_eq!(parsed, request);
     }
 
     #[test]
