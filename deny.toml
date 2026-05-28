@@ -50,6 +50,17 @@ allow = [
 ]
 
 [advisories]
-# Advisories are intentionally informational at this stage; gate when M0
-# wraps and replace with `version = 2` style ignore lists if needed.
-yanked = "warn"
+# Gate mode (bd-2efax). `cargo deny check advisories` now FAILS the build on
+# any open RustSec advisory (vulnerability / unmaintained / unsound) or yanked
+# crate anywhere in the resolved tree — including the `fsqlite`/`frankensearch`
+# path-dep stack and `serde_json`. Sigstore signing (release.yml) proves the
+# binary's provenance; this gate proves the signed tree excluded known-CVE
+# crates, closing the false-assurance gap reviewer-p2-r3 flagged.
+#
+# With `version = 2` the deprecated per-class severity fields are removed and
+# every advisory class defaults to `deny`. Time-boxed exceptions go in
+# `ignore` below with a RUSTSEC id + justification (and, ideally, an expiry
+# date the ban-gate review revisits) — never a blanket downgrade.
+version = 2
+yanked = "deny"
+ignore = []

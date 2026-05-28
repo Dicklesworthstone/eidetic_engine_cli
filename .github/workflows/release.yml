@@ -115,6 +115,18 @@ jobs:
       - name: Forbidden dependency audit
         run: ./scripts/check-forbidden-deps.sh
 
+      # Supply-chain RustSec advisory gate (bd-2efax). Runs in the pre-flight
+      # guard job — BEFORE the tag is pushed and the build/sign matrix runs —
+      # so a release cannot ship a Sigstore-signed binary whose resolved tree
+      # (incl. the fsqlite/frankensearch path-dep stack) carries an open
+      # RustSec advisory. Mirrors the CI gate; `deny.toml [advisories]` is
+      # version=2 gate mode. Closes the "signed but unscanned" false-assurance
+      # gap: provenance != freedom from known CVEs.
+      - name: RustSec advisory audit (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
       - name: Closure linter
         run: ./scripts/closure-lint.sh --json
 

@@ -62,6 +62,21 @@ jobs:
       - name: Forbidden dependency audit
         run: ./scripts/check-forbidden-deps.sh
 
+      # Supply-chain RustSec advisory gate (bd-2efax). `deny.toml [advisories]`
+      # is now version=2 gate mode, so this fails the build on any open
+      # vulnerability / unmaintained / unsound / yanked crate in the resolved
+      # tree (fsqlite/frankensearch path-dep stack + serde_json included).
+      # Runs against the Cargo.toml already rewritten to the cloned Franken
+      # stack above, so the full transitive graph is in scope. NOTE: this is a
+      # step in `verify` rather than the isolated job reviewer-p2-r3 suggested,
+      # because a standalone job would have to duplicate the ~24-line Franken
+      # stack checkout; splitting it cleanly is a follow-up once that checkout
+      # is factored into a reusable composite action.
+      - name: RustSec advisory audit (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
       - name: Closure linter
         run: ./scripts/closure-lint.sh --audit --json
 
