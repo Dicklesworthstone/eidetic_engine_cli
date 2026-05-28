@@ -28,7 +28,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -42,7 +42,8 @@ use super::protocol::{
 };
 use super::{
     DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT,
-    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DaemonStartError, current_euid,
+    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DAEMON_SETSOCKOPT_FAILED_CODE,
+    DaemonStartError, current_euid,
 };
 
 /// Method dispatch name for the round-trip integrity check.
@@ -162,6 +163,14 @@ pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
+    /// Once-guard for [`DaemonServerHandle::shutdown`]. The first call
+    /// performs the real teardown; any later call — typically the
+    /// `Drop` impl running after an explicit `shutdown()` — observes
+    /// this latch and returns `Ok(())` without re-touching the socket
+    /// file. Distinct from the `shutdown` signal field above, which
+    /// tells the accept loop to stop; this tracks whether the teardown
+    /// *body* has already run. bd-wj6v9.
+    shutdown_done: AtomicBool,
 }
 
 impl DaemonServerHandle {
@@ -176,6 +185,16 @@ impl DaemonServerHandle {
     /// `start_server` call against the same path does not need a
     /// manual cleanup step.
     pub fn shutdown(&mut self) -> io::Result<()> {
+        // Once-guard (bd-wj6v9): the first call performs the real
+        // teardown; a second call — typically `Drop` running after an
+        // explicit `shutdown()` — observes the latch and returns Ok
+        // without re-entering the teardown. Before this guard, the
+        // second pass relied on `accept_thread.take()` already being
+        // `None` and the socket already gone, and any residual
+        // `remove_file` could surface a misleading ENOENT.
+        if self.shutdown_done.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         self.shutdown.store(true, Ordering::SeqCst);
         // Wake the accept loop by connecting to the socket from the
         // current process; the loop checks the shutdown flag between
@@ -187,10 +206,20 @@ impl DaemonServerHandle {
                 .join()
                 .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
         }
-        if self.socket_path.exists() {
-            fs::remove_file(&self.socket_path)?;
+        // Idempotent unlink (bd-wj6v9): drop the prior
+        // `exists()`-then-`remove_file` check-then-act, which had a
+        // TOCTOU window — an external unlinker (a peer `ee daemon
+        // stop`, an operator, or a tmpreaper) removing the socket
+        // between the `exists()` probe and the `remove_file` call
+        // turned a successful shutdown into a spurious `io::Error`
+        // with `NotFound`. Unconditionally unlink and treat NotFound
+        // as success: the post-condition we care about ("the socket
+        // file is gone") already holds.
+        match fs::remove_file(&self.socket_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 }
 
@@ -241,10 +270,21 @@ pub fn start_server(
             })?;
     }
 
+    // Refuse to clobber a non-socket file already occupying the
+    // canonical path, but do NOT pre-`remove_file` it. The former
+    // stat → remove_file → bind sequence had two TOCTOU windows: an
+    // attacker with write access to the parent directory could swap
+    // the socket for a regular file between the `is_socket()` check
+    // and the `remove_file` (falsifying the daemon's "this is my
+    // stale socket" belief), or recreate the path between
+    // `remove_file` and `bind`. We instead bind a per-attempt temp
+    // path and `rename(2)` it onto the canonical name atomically
+    // (below); `rename` replaces any existing socket cleanly with no
+    // unlink step, collapsing both windows into one operation. The
+    // parent directory is per-UID 0o700 (bd-3j0td), so no other UID
+    // can race us inside it. Sentinel: bd-3ik2d atomic-rename.
     match fs::symlink_metadata(&socket_path) {
         Ok(metadata) => {
-            // The path exists. Only proceed if it is itself a socket
-            // (a stale daemon left it behind); refuse anything else.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileTypeExt;
@@ -257,11 +297,8 @@ pub fn start_server(
                 let _ = metadata;
                 return Err(DaemonStartError::PlatformUnsupported);
             }
-            // Stale socket: unlink so bind succeeds.
-            fs::remove_file(&socket_path).map_err(|source| DaemonStartError::Bind {
-                path: socket_path.clone(),
-                source,
-            })?;
+            // A stale socket from a prior daemon: the `rename` below
+            // atomically replaces it, so there is nothing to unlink.
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
@@ -272,32 +309,59 @@ pub fn start_server(
         }
     }
 
-    let listener = UnixListener::bind(&socket_path).map_err(|source| DaemonStartError::Bind {
+    // Bind a per-attempt temporary path inside the same (per-UID
+    // 0o700) parent directory, tighten its mode to 0o600 BEFORE it is
+    // ever visible at the canonical name, then `rename(2)` it into
+    // place. Because the chmod happens on the temp path, the canonical
+    // path never exists in a world-connectable (0o755) state for even
+    // an instant — a strict improvement over chmod-after-bind. The
+    // temp name carries the pid plus a process-global counter so two
+    // concurrent binds (same process or across processes) never
+    // collide on the temp path and each `rename` is a clean atomic
+    // publish. Sentinel: bd-3ik2d atomic-rename.
+    let tmp_path = temp_bind_path(&socket_path);
+    // Clear any temp left by a crashed prior attempt that happened to
+    // reuse this pid+counter; best-effort, the bind below is the
+    // authoritative step.
+    let _ = fs::remove_file(&tmp_path);
+
+    let listener = UnixListener::bind(&tmp_path).map_err(|source| DaemonStartError::Bind {
         path: socket_path.clone(),
         source,
     })?;
 
-    // Tighten the socket file to mode 0o600 immediately after bind.
-    // `UnixListener::bind` honours the process umask, which is
-    // typically 0o022 → mode 0o755 on the resulting socket: world-
-    // connectable on every Unix host. Without this chmod, any local
-    // UID can `connect(2)` and reach the dispatch table — the
-    // pre-fix attack surface documented in bd-3j0td. The chmod is
-    // best-effort but failures are surfaced so an operator running
-    // on a filesystem that rejects `chmod` (rare, but possible on
-    // certain network mounts) sees the bind step error rather than
-    // a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-        // The socket is bound but world-open at this instant; remove
-        // it before returning so a half-secured artifact does not
-        // linger. The remove is best-effort — the chmod failure is
-        // the actionable error.
-        let _ = fs::remove_file(&socket_path);
-        DaemonStartError::Bind {
-            path: socket_path.clone(),
+    // Tighten the temp socket to mode 0o600 before it is published.
+    // `UnixListener::bind` honours the process umask (typically 0o022
+    // → mode 0o755): world-connectable on every Unix host. Without
+    // this chmod, any local UID could `connect(2)` and reach the
+    // dispatch table — the attack surface documented in bd-3j0td. The
+    // chmod failure is surfaced (not swallowed) so an operator on a
+    // filesystem that rejects `chmod` sees the bind step error rather
+    // than a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
+    if let Err(source) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+        // The temp socket is bound but world-open at this instant;
+        // remove it before returning so a half-secured artifact does
+        // not linger under the temp name.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(DaemonStartError::Bind {
+            path: socket_path,
             source,
-        }
-    })?;
+        });
+    }
+
+    // Atomically publish the secured socket at the canonical path.
+    // `rename(2)` is atomic and replaces a stale socket left by a
+    // prior daemon in a single step.
+    if let Err(source) = fs::rename(&tmp_path, &socket_path) {
+        // Publish failed (e.g. cross-device move, or the parent dir
+        // was removed underneath us). Drop the temp socket so it does
+        // not linger, then surface the failure.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(DaemonStartError::Bind {
+            path: socket_path,
+            source,
+        });
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_in_thread = Arc::clone(&shutdown);
@@ -318,7 +382,32 @@ pub fn start_server(
         socket_path,
         shutdown,
         accept_thread: Some(accept_thread),
+        shutdown_done: AtomicBool::new(false),
     })
+}
+
+/// Construct a per-attempt temporary socket path next to `socket_path`,
+/// of the form `<socket>.tmp.<pid>.<counter>`. The pid plus a
+/// process-global monotonic counter guarantees the path is unique to
+/// this bind attempt, so two concurrent [`start_server`] calls — in the
+/// same process or across processes — never collide on the temp name
+/// and the subsequent `rename(2)` is always a clean atomic publish.
+/// Sentinel: bd-3ik2d atomic-rename.
+fn temp_bind_path(socket_path: &Path) -> PathBuf {
+    static TEMP_BIND_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TEMP_BIND_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut file_name = socket_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    file_name.push(&suffix);
+    let mut tmp_path = socket_path.to_path_buf();
+    tmp_path.set_file_name(file_name);
+    tmp_path
 }
 
 fn run_accept_loop(
@@ -405,9 +494,170 @@ fn write_overloaded_response(stream: &mut UnixStream) {
     let _ = write_response(stream, &response);
 }
 
+/// Wall-clock milliseconds since `started`, saturating at `u64::MAX`
+/// per the tracing-field convention
+/// (docs/observability/tracing_field_convention.md).
+fn elapsed_ms_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Classify a dispatch [`DaemonResponse`] into the observability tuple
+/// bd-qwlzu records: the outcome code (`"ok"` or the wire error code)
+/// plus the `schema_mismatch` / `unknown_method` protocol-shape booleans
+/// the audit stream branches on. Pure so the per-method attribution
+/// mapping is unit-testable without a live socket. The `result` /
+/// `params` payload is deliberately NOT inspected — payload redaction is
+/// bd-3uev6's surface; this reads only the stable error code.
+#[must_use]
+fn classify_dispatch_response(response: &DaemonResponse) -> (&str, bool, bool) {
+    match response.error.as_ref() {
+        None => ("ok", false, false),
+        Some(error) => (
+            error.code.as_str(),
+            error.code == DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
+            error.code == DAEMON_UNKNOWN_METHOD_CODE,
+        ),
+    }
+}
+
+/// Stable, leak-free category for a frame read failure. Returns a fixed
+/// discriminant string rather than the error `Display` so a decode
+/// failure can be recorded in the audit stream WITHOUT echoing any
+/// attacker-controlled frame bytes into the log (orthogonal to the
+/// wire-side reflection tracked by bd-3uev6).
+#[must_use]
+fn frame_error_kind(error: &FrameReadError) -> &'static str {
+    match error {
+        FrameReadError::Eof => "eof",
+        FrameReadError::TooLarge { .. } => "too_large",
+        FrameReadError::Truncated { .. } => "truncated",
+        FrameReadError::Io(_) => "io",
+        FrameReadError::Decode(_) => "decode",
+    }
+}
+
+/// Emit one structured `ee.daemon.rpc` tracing event for a completed
+/// dispatch (bd-qwlzu). Fields follow the canonical tracing-field
+/// convention (workspace_id / request_id / bead_id / surface / phase /
+/// elapsed_ms / degraded_codes) plus daemon-specific `method` + `peer_uid`
+/// attribution and the `schema_mismatch` / `unknown_method` booleans.
+/// This is the per-RPC audit trail the daemon dispatch path previously
+/// lacked entirely.
+fn trace_daemon_rpc_dispatch(
+    request_id: &str,
+    method: &str,
+    peer: u32,
+    elapsed_ms: u64,
+    code: &str,
+    degraded_codes: &[&str],
+    schema_mismatch: bool,
+    unknown_method: bool,
+) {
+    tracing::info!(
+        workspace_id = "daemon-rpc",
+        request_id,
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "dispatch",
+        elapsed_ms,
+        method,
+        peer_uid = peer,
+        code,
+        degraded_codes = ?degraded_codes,
+        schema_mismatch,
+        unknown_method,
+        "ee.daemon.rpc dispatch outcome"
+    );
+}
+
+/// Emit a `warn`-level `ee.daemon.rpc` event for a peer-credential
+/// refusal (bd-qwlzu × bd-3j0td). The `SO_PEERCRED` / `getpeereid` gate
+/// writes a refusal envelope on the wire but, before this, left no
+/// server-side record — cross-UID probing was invisible to operators.
+/// `peer` is `-1` when the credential lookup itself failed (the UID
+/// could not be verified).
+fn trace_daemon_rpc_unauthorized(peer: i64, elapsed_ms: u64, reason: &str) {
+    let degraded = [DAEMON_PEER_UNAUTHORIZED_CODE];
+    tracing::warn!(
+        workspace_id = "daemon-rpc",
+        request_id = "<unauthorized>",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "dependency_check",
+        elapsed_ms,
+        method = "<unauthenticated>",
+        peer_uid = peer,
+        code = DAEMON_PEER_UNAUTHORIZED_CODE,
+        degraded_codes = ?degraded,
+        reason,
+        "ee.daemon.rpc peer authorization refused"
+    );
+}
+
+/// Emit a `warn`-level `ee.daemon.rpc` event for a frame that failed to
+/// decode (bd-qwlzu). Carries only the stable `frame_error_kind`
+/// category — never the raw bytes — so the audit stream cannot itself
+/// become the leak channel bd-3uev6 warns about.
+fn trace_daemon_rpc_decode_failure(peer: u32, elapsed_ms: u64, kind: &str) {
+    let degraded = [DAEMON_REQUEST_DECODE_FAILED_CODE];
+    tracing::warn!(
+        workspace_id = "daemon-rpc",
+        request_id = "<undecoded>",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "input",
+        elapsed_ms,
+        method = "<undecoded>",
+        peer_uid = peer,
+        code = DAEMON_REQUEST_DECODE_FAILED_CODE,
+        degraded_codes = ?degraded,
+        frame_error_kind = kind,
+        "ee.daemon.rpc request decode failed"
+    );
+}
+
 fn handle_connection(mut stream: UnixStream) {
-    let _ = stream.set_read_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT));
+    // Install the per-connection deadlines BEFORE any read. The read
+    // timeout is the only backstop that stops a half-open peer from
+    // pinning this worker thread forever; if `setsockopt` fails (low
+    // memory, a seccomp filter that blocks SO_RCVTIMEO/SO_SNDTIMEO,
+    // certain BSD kernel modes) we MUST NOT fall through into a
+    // deadline-less `read_request`. The pre-fix code discarded these
+    // errors with `let _ =`, leaving exactly that permanent-hang path.
+    // Set the write deadline first so the refusal envelope below cannot
+    // itself block on a wedged client. Sentinel: bd-3pnno setsockopt.
+    if let Err(error) = stream.set_write_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT)) {
+        // No write deadline could be installed. We still attempt a
+        // best-effort framed refusal — a freshly accepted UDS send
+        // buffer almost always accepts a small envelope without
+        // blocking — then drop. `write_response`'s own error is
+        // swallowed; the connection closes either way and the worker
+        // exits instead of hanging.
+        let response = DaemonResponse::err(
+            "<setsockopt>",
+            DAEMON_SETSOCKOPT_FAILED_CODE,
+            format!("daemon could not set the connection write timeout: {error}"),
+        )
+        .with_degraded(DAEMON_SETSOCKOPT_FAILED_CODE);
+        let _ = write_response(&mut stream, &response);
+        return;
+    }
+    if let Err(error) = stream.set_read_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT)) {
+        // The critical case: without a read deadline, `read_request`
+        // could block forever on a peer that opened the connection and
+        // stopped sending. Refuse with a framed envelope and drop so
+        // the worker thread is reclaimed.
+        let response = DaemonResponse::err(
+            "<setsockopt>",
+            DAEMON_SETSOCKOPT_FAILED_CODE,
+            format!("daemon could not set the connection read timeout: {error}"),
+        )
+        .with_degraded(DAEMON_SETSOCKOPT_FAILED_CODE);
+        let _ = write_response(&mut stream, &response);
+        return;
+    }
+
+    let started = std::time::Instant::now();
 
     // Peer-credential gate (bd-3j0td). Even with the socket file
     // tightened to 0o600 — and the per-UID parent dir at 0o700 — the
@@ -419,7 +669,7 @@ fn handle_connection(mut stream: UnixStream) {
     // We do not read the request frame on refusal because doing so
     // would leak the request body's framed length back to a peer the
     // daemon is intentionally refusing. Sentinel: bd-3j0td getpeereid.
-    match peer_uid(&stream) {
+    let peer = match peer_uid(&stream) {
         Ok(peer) => {
             let own = current_euid();
             if peer != own {
@@ -432,9 +682,15 @@ fn handle_connection(mut stream: UnixStream) {
                     ),
                 )
                 .with_degraded(DAEMON_PEER_UNAUTHORIZED_CODE);
+                trace_daemon_rpc_unauthorized(
+                    i64::from(peer),
+                    elapsed_ms_since(started),
+                    "peer uid does not match daemon owner uid",
+                );
                 let _ = write_response(&mut stream, &response);
                 return;
             }
+            peer
         }
         Err(error) => {
             // getpeereid/SO_PEERCRED itself failed — treat this as a
@@ -450,10 +706,15 @@ fn handle_connection(mut stream: UnixStream) {
                 format!("daemon could not verify peer credential: {error}"),
             )
             .with_degraded(DAEMON_PEER_UNAUTHORIZED_CODE);
+            trace_daemon_rpc_unauthorized(
+                -1,
+                elapsed_ms_since(started),
+                "peer credential lookup failed",
+            );
             let _ = write_response(&mut stream, &response);
             return;
         }
-    }
+    };
 
     // Skeleton: one request per accepted connection. A follow-up
     // multiplexing slice will loop here so a single client can run
@@ -463,11 +724,13 @@ fn handle_connection(mut stream: UnixStream) {
         Ok(request) => request,
         Err(FrameReadError::Eof) => return,
         Err(other) => {
+            let kind = frame_error_kind(&other);
             let response = DaemonResponse::err(
                 "<unknown>",
                 DAEMON_REQUEST_DECODE_FAILED_CODE,
                 other.to_string(),
             );
+            trace_daemon_rpc_decode_failure(peer, elapsed_ms_since(started), kind);
             let _ = write_response(&mut stream, &response);
             return;
         }
@@ -494,6 +757,18 @@ fn handle_connection(mut stream: UnixStream) {
         Ok(response) => response,
         Err(payload) => build_panic_response(&request_id, payload.as_ref()),
     };
+    let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+    let degraded: Vec<&str> = response.degraded_codes.iter().map(String::as_str).collect();
+    trace_daemon_rpc_dispatch(
+        &request_id,
+        &request.method,
+        peer,
+        elapsed_ms_since(started),
+        code,
+        &degraded,
+        schema_mismatch,
+        unknown_method,
+    );
     let _ = write_response(&mut stream, &response);
 }
 
@@ -791,6 +1066,68 @@ mod tests {
         assert_eq!(error.code, DAEMON_UNKNOWN_METHOD_CODE);
     }
 
+    // bd-qwlzu: the dispatch-observability classifiers feed the
+    // `ee.daemon.rpc` audit event. Pin the code+boolean mapping so the
+    // per-method attribution cannot silently drift.
+    #[test]
+    fn classify_dispatch_response_ok_has_no_error_flags() {
+        let response = DaemonResponse::ok("r", serde_json::json!({"x": 1}));
+        assert_eq!(classify_dispatch_response(&response), ("ok", false, false));
+    }
+
+    #[test]
+    fn classify_dispatch_response_schema_mismatch_sets_only_schema_flag() {
+        let bogus = DaemonRequest {
+            schema: "ee.daemon.request.v0_wrong".to_owned(),
+            request_id: "r".to_owned(),
+            method: METHOD_ECHO.to_owned(),
+            params: serde_json::Value::Null,
+        };
+        let response = dispatch(&bogus);
+        let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+        assert_eq!(code, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE);
+        assert!(schema_mismatch);
+        assert!(!unknown_method);
+    }
+
+    #[test]
+    fn classify_dispatch_response_unknown_method_sets_only_unknown_flag() {
+        let request = DaemonRequest::new("r", "ee.daemon.nope", serde_json::Value::Null);
+        let response = dispatch(&request);
+        let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+        assert_eq!(code, DAEMON_UNKNOWN_METHOD_CODE);
+        assert!(!schema_mismatch);
+        assert!(unknown_method);
+    }
+
+    #[test]
+    fn frame_error_kind_categories_are_stable_and_leak_free() {
+        assert_eq!(frame_error_kind(&FrameReadError::Eof), "eof");
+        assert_eq!(
+            frame_error_kind(&FrameReadError::TooLarge {
+                announced: 9,
+                max: 4
+            }),
+            "too_large"
+        );
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Truncated {
+                expected: 9,
+                got: 2
+            }),
+            "truncated"
+        );
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Io(std::io::Error::other("boom"))),
+            "io"
+        );
+        let decode_err = serde_json::from_str::<DaemonRequest>("{").unwrap_err();
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Decode(decode_err)),
+            "decode"
+        );
+    }
+
     #[test]
     fn dispatch_schema_mismatch_returns_schema_mismatch_code() {
         let bogus = DaemonRequest {
@@ -982,5 +1319,151 @@ mod tests {
         assert_eq!(response.result, Some(serde_json::json!({"peer": "self"})));
 
         handle.shutdown().expect("shutdown");
+    }
+
+    /// bd-3ik2d: a stale socket left by a crashed prior daemon must be
+    /// replaced atomically. The fix binds a temp path and `rename(2)`s
+    /// it over the stale socket — there is no `remove_file` step that a
+    /// racing attacker could exploit (the former TOCTOU window). Here we
+    /// leave a dead socket file behind (bind, then drop the listener
+    /// without unlinking) and assert the next `start_server` publishes a
+    /// fresh, live, 0o600 socket over it.
+    #[test]
+    fn start_server_replaces_stale_socket_atomically() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-stale.sock");
+
+        // Simulate a crashed daemon: bind then drop the listener WITHOUT
+        // unlinking, leaving a dead socket file on disk.
+        {
+            let stale = UnixListener::bind(&socket_path).expect("stale bind");
+            drop(stale);
+        }
+        assert!(
+            fs::symlink_metadata(&socket_path)
+                .expect("stale socket must remain on disk")
+                .file_type()
+                .is_socket(),
+            "precondition: a stale socket file occupies the path",
+        );
+
+        let mut handle = start_server(&socket_path).expect("server must replace stale socket");
+        thread::sleep(Duration::from_millis(50));
+
+        let metadata = fs::symlink_metadata(handle.socket_path()).expect("socket metadata");
+        assert!(
+            metadata.file_type().is_socket(),
+            "published path must be a socket"
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "replaced socket must be 0o600 (bd-3j0td invariant preserved across rename)",
+        );
+        let request =
+            DaemonRequest::new("req-stale-001", METHOD_ECHO, serde_json::json!({"ping": 1}));
+        let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
+        assert_eq!(response.result, Some(serde_json::json!({"ping": 1})));
+
+        handle.shutdown().expect("shutdown");
+    }
+
+    /// bd-3ik2d: two concurrent `start_server` calls on the same path
+    /// must never leave the canonical path in a corrupt state. The old
+    /// stat → remove_file → bind sequence could unlink a peer's fresh
+    /// socket or leave the path momentarily absent / a regular file (the
+    /// TOCTOU window). The atomic bind-temp → chmod → rename path
+    /// guarantees the canonical name always resolves to a valid 0o600
+    /// socket regardless of who wins the race, and neither bind errors.
+    #[test]
+    fn start_server_concurrent_binds_no_toctou() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::sync::Barrier;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-race.sock");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let path = socket_path.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    start_server(&path)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|t| t.join().expect("bind thread must not panic"))
+            .collect();
+
+        // The atomic rename replaces rather than racing on remove_file,
+        // so both concurrent binds succeed. If someone reintroduces the
+        // stat → remove → bind window, one bind will observe EADDRINUSE
+        // or unlink the other's socket and this count drops below two.
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok_count, 2, "both concurrent atomic binds must succeed");
+
+        // The canonical path always resolves to a live 0o600 socket —
+        // never absent, never a regular file, never world-open.
+        let metadata = fs::symlink_metadata(&socket_path).expect("canonical path must exist");
+        assert!(
+            metadata.file_type().is_socket(),
+            "canonical path must be a socket after a concurrent-bind race",
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "canonical socket must be 0o600 after a concurrent-bind race",
+        );
+
+        // The losing bind's listener is orphaned: the winner's `rename`
+        // replaced the canonical path, so the loser's accept loop can no
+        // longer be woken (shutdown wakes by connecting to the canonical
+        // name, which now points at the winner). Joining it would
+        // deadlock, so we intentionally leak both handles and let the
+        // tempdir reap the socket file. The leak is bounded to this test
+        // process.
+        for result in results {
+            if let Ok(handle) = result {
+                std::mem::forget(handle);
+            }
+        }
+    }
+
+    /// Regression test for bd-wj6v9. A second `shutdown()` call (the
+    /// explicit-then-`Drop` pattern, or any repeated invocation) must
+    /// be a clean `Ok(())` no-op rather than surfacing a misleading
+    /// `ENOENT` from re-unlinking an already-removed socket. The
+    /// once-guard short-circuits the second pass; the idempotent
+    /// `remove_file` (NotFound-tolerant) backstops the case where the
+    /// socket vanished out from under the first pass.
+    #[test]
+    fn shutdown_is_idempotent_across_repeated_calls() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-idempotent.sock");
+        let mut handle = start_server(&socket_path).expect("server must start");
+        thread::sleep(Duration::from_millis(50));
+
+        handle.shutdown().expect("first shutdown must succeed");
+        assert!(
+            !socket_path.exists(),
+            "socket file must be unlinked after the first shutdown"
+        );
+        // Second explicit call: pre-bd-wj6v9 this re-entered the
+        // teardown; it must now be a guarded no-op returning Ok.
+        handle
+            .shutdown()
+            .expect("second shutdown must be an idempotent no-op, not ENOENT");
+        // A third call (mirroring the implicit `Drop`-after-explicit
+        // path) must also be Ok; `Drop` itself runs at end of scope.
+        handle
+            .shutdown()
+            .expect("third shutdown must also be a no-op");
     }
 }

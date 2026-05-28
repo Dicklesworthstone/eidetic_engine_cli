@@ -186,7 +186,12 @@ _epic_create_workspace_with_timeout() {
         local meta_root
         meta_root="${EE_E2E_SETUP_META_DIR:-/tmp}"
         mkdir -p "$meta_root"
-        EPIC_WORKSPACE_META="$meta_root/ee-e2e-${EPIC_NAME}-workspace-create-${EPIC_SETUP_BASHPID:-$$}.json"
+        # Predictable PID-suffixed meta path is a symlink-attack surface on
+        # a shared /tmp: an attacker who pre-stages a symlink at the
+        # guessable name redirects the python setup child's write. Mint an
+        # unguessable real file with mktemp (0600) so the write target is
+        # never an attacker-controlled link. bd-25lyv.
+        EPIC_WORKSPACE_META="$(mktemp "${meta_root%/}/ee-e2e-${EPIC_NAME}-workspace-create-XXXXXX")"
         export EPIC_WORKSPACE_META
     fi
 

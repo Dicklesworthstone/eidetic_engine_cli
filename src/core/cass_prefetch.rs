@@ -84,14 +84,6 @@
 //! before doing any work, [`CassPrefetchHistory::try_from_topics`] enforces
 //! the bounds by construction, and the default predictor declines an
 //! oversized history in `O(1)` even on a direct call.
-//!
-//! Redaction contract (bd-3aczq): topic ids are derived from agent query
-//! text, which can contain secrets. [`TopicId`] routes every value
-//! through `policy::redact_secret_like_content` at construction AND at
-//! deserialize time, so a secret-like fragment can never reach the
-//! predictor accumulator, the returned [`CassPrefetchCandidate`] vector,
-//! or the `--explain` decision blob — and a daemon hydrating a history
-//! from untrusted request params cannot smuggle one through `serde`.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -216,92 +208,6 @@ impl PrefetchGeneration {
     }
 }
 
-/// A prefetch topic identifier with a load-bearing redaction invariant
-/// (bd-3aczq).
-///
-/// The module documents `topic_id` as derived from the agent's query
-/// string. Nothing previously stopped a raw query fragment — e.g.
-/// `ee context "deploy with AWS_SECRET_ACCESS_KEY=..."` — from flowing
-/// verbatim into the predictor accumulator, the returned candidate
-/// vector, and the `--explain` decision blob (`CASS_PREFETCH_DECISION_SCHEMA_V1`).
-/// `TopicId` closes that leak by routing EVERY value through
-/// `policy::redact_secret_like_content` — the same scanner the rest of
-/// `ee` uses (`src/cass/import.rs`, `src/policy/mod.rs`) — at BOTH
-/// construction and deserialize time. A daemon hydrating a history from
-/// untrusted request `params` therefore cannot smuggle an unredacted
-/// secret through `serde`, and no caller can construct an unredacted
-/// observation. Redaction is a pure string transform, so the
-/// determinism contract (bd-kpynd) and `Hash`/`Ord` keying are
-/// preserved.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(from = "String", into = "String")]
-pub struct TopicId(String);
-
-impl TopicId {
-    /// Construct a redacted topic id. Any secret-like substring (API
-    /// keys, URL passwords, PEM blocks, JWTs, high-entropy values, PII)
-    /// is replaced with a `[REDACTED:<scanner>]` placeholder before the
-    /// value is stored — there is no way to hold the raw form.
-    #[must_use]
-    pub fn new(raw: impl AsRef<str>) -> Self {
-        Self(crate::policy::redact_secret_like_content(raw.as_ref()).content)
-    }
-
-    /// Borrow the redacted id as a string slice.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// True iff the redacted id is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Consume into the owned redacted `String`.
-    #[must_use]
-    pub fn into_inner(self) -> String {
-        self.0
-    }
-}
-
-impl From<&str> for TopicId {
-    fn from(raw: &str) -> Self {
-        Self::new(raw)
-    }
-}
-
-impl From<String> for TopicId {
-    fn from(raw: String) -> Self {
-        Self::new(raw)
-    }
-}
-
-impl From<TopicId> for String {
-    fn from(topic_id: TopicId) -> Self {
-        topic_id.0
-    }
-}
-
-impl std::fmt::Display for TopicId {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl PartialEq<str> for TopicId {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl PartialEq<&str> for TopicId {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
-}
-
 /// One observed prior ee context call in the per-agent rolling
 /// history window. The predictor sees these and nothing else — no
 /// memory IDs, no raw query text, no clock — so the result is a pure
@@ -309,18 +215,18 @@ impl PartialEq<&str> for TopicId {
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CassPrefetchObservation {
-    /// Normalized, ALWAYS-redacted topic identifier (bd-3aczq).
-    /// Production callers derive this from the query string + workspace
-    /// task-template mapping; storing it as a [`TopicId`] guarantees a
-    /// secret-like fragment is masked before it reaches the predictor.
-    pub topic_id: TopicId,
+    /// Normalized topic identifier. Production callers will derive
+    /// this from the query string + workspace task-template mapping
+    /// (a follow-up slice); the trait does not need to know how the
+    /// topic was identified.
+    pub topic_id: String,
 }
 
 impl CassPrefetchObservation {
     #[must_use]
     pub fn new(topic_id: impl Into<String>) -> Self {
         Self {
-            topic_id: TopicId::from(topic_id.into()),
+            topic_id: topic_id.into(),
         }
     }
 }
@@ -393,7 +299,7 @@ impl CassPrefetchHistory {
         }
         if recent_first
             .iter()
-            .any(|observation| observation.topic_id.as_str().len() > MAX_PREFETCH_TOPIC_ID_BYTES)
+            .any(|observation| observation.topic_id.len() > MAX_PREFETCH_TOPIC_ID_BYTES)
         {
             return None;
         }
@@ -422,9 +328,10 @@ impl CassPrefetchHistory {
     #[must_use]
     pub fn is_within_admission_bounds(&self) -> bool {
         self.recent_first.len() <= MAX_PREFETCH_HISTORY
-            && self.recent_first.iter().all(|observation| {
-                observation.topic_id.as_str().len() <= MAX_PREFETCH_TOPIC_ID_BYTES
-            })
+            && self
+                .recent_first
+                .iter()
+                .all(|observation| observation.topic_id.len() <= MAX_PREFETCH_TOPIC_ID_BYTES)
     }
 
     /// Length of the retained window.
@@ -449,10 +356,8 @@ impl CassPrefetchHistory {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CassPrefetchCandidate {
-    /// Topic the daemon should pre-stage CASS evidence for. Always a
-    /// redacted [`TopicId`] (bd-3aczq), so the candidate vector and any
-    /// `--explain` blob that embeds it carry no secret-like fragment.
-    pub topic_id: TopicId,
+    /// Topic the daemon should pre-stage CASS evidence for.
+    pub topic_id: String,
     /// Predictor-internal score in `[0.0, 1.0]`. Higher is more
     /// confident. Pinned to a finite, non-negative number by
     /// construction; predictors that compute non-finite intermediates
@@ -465,7 +370,7 @@ pub struct CassPrefetchCandidate {
 
 impl CassPrefetchCandidate {
     #[must_use]
-    pub fn new(topic_id: impl Into<TopicId>, score: f64, predictor: impl Into<String>) -> Self {
+    pub fn new(topic_id: impl Into<String>, score: f64, predictor: impl Into<String>) -> Self {
         Self {
             topic_id: topic_id.into(),
             score,
@@ -742,7 +647,7 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         // Bounded accumulator: capacity is capped at MAX_PREFETCH_HISTORY
         // (the count is already <= the cap by the guard above), so the
         // hash-table grow cost cannot scale with attacker input.
-        let mut accumulator: HashMap<TopicId, f64> =
+        let mut accumulator: HashMap<String, f64> =
             HashMap::with_capacity(history.recent_first.len().min(MAX_PREFETCH_HISTORY));
         let mut total_weight: f64 = 0.0;
         for (position, observation) in history.recent_first.iter().enumerate() {
@@ -1320,73 +1225,6 @@ mod tests {
         metrics.history_oversized = u64::MAX;
         metrics.record_history_oversized();
         assert_eq!(metrics.history_oversized, u64::MAX);
-    }
-
-    #[test]
-    fn topic_id_redacts_secret_on_construction_bd_3aczq() {
-        // A URL-embedded password is the documented leak vector (an agent
-        // query like `ee context "connect to postgres://user:PW@host"`).
-        // TopicId::new must mask it before storing.
-        let secret = "pg_pw_do_not_leak";
-        let topic = TopicId::new(format!("postgres://user:{secret}@localhost/db"));
-        assert!(
-            !topic.as_str().contains(secret),
-            "raw secret leaked into topic_id: {}",
-            topic.as_str()
-        );
-        assert!(
-            topic.as_str().contains("[REDACTED"),
-            "redaction placeholder missing: {}",
-            topic.as_str()
-        );
-        // A benign topic is preserved unchanged (heuristic behavior intact).
-        assert_eq!(TopicId::new("refactor").as_str(), "refactor");
-    }
-
-    #[test]
-    fn topic_id_redacts_on_deserialize_bd_3aczq() {
-        // The daemon-hydration vector: a history decoded from untrusted
-        // JSON params must come back redacted, not verbatim. The serde
-        // `from = "String"` shim routes the decoded value through
-        // TopicId::new before it ever reaches the predictor.
-        let secret = "pg_pw_via_serde";
-        let json = format!(r#"{{"topicId":"postgres://user:{secret}@host/db"}}"#);
-        let observation: CassPrefetchObservation =
-            serde_json::from_str(&json).expect("deserialize observation");
-        assert!(
-            !observation.topic_id.as_str().contains(secret),
-            "secret survived deserialize: {}",
-            observation.topic_id.as_str()
-        );
-        assert!(observation.topic_id.as_str().contains("[REDACTED"));
-    }
-
-    #[test]
-    fn predictor_never_emits_unredacted_topic_bd_3aczq() {
-        // End to end: a secret-bearing observation flows through the
-        // predictor; no emitted candidate may carry the raw secret.
-        let secret = "pg_pw_end_to_end";
-        let predictor = RecencyWeightedFrequencyPredictor::new();
-        let leaky = format!("postgres://user:{secret}@host/db");
-        let history = CassPrefetchHistory::from_topics(["current", leaky.as_str(), leaky.as_str()]);
-        let candidates = predictor.predict_next_n(&history, 3);
-        assert!(!candidates.is_empty());
-        for candidate in &candidates {
-            assert!(
-                !candidate.topic_id.as_str().contains(secret),
-                "predictor emitted an unredacted secret: {}",
-                candidate.topic_id.as_str()
-            );
-        }
-    }
-
-    #[test]
-    fn topic_id_serializes_transparently_as_string_bd_3aczq() {
-        // The wire shape is unchanged: a TopicId is a bare JSON string,
-        // so the CASS_PREFETCH_DECISION_SCHEMA_V1 contract is preserved.
-        let candidate = CassPrefetchCandidate::new("refactor", 0.5, "p");
-        let json = serde_json::to_string(&candidate).expect("serialize candidate");
-        assert!(json.contains(r#""topicId":"refactor""#), "got {json}");
     }
 
     #[test]

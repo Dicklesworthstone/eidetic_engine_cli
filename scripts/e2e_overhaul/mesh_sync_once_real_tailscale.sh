@@ -25,11 +25,26 @@ EXIT_CLEANUP_FAILURE=79
 SCENARIO="mesh_sync_once_real_tailscale"
 BEAD_ID="bd-36bbk.2"
 
-EVENT_DIR="${EE_TEST_EVENT_DIR:-${TMPDIR:-/tmp}/ee-${SCENARIO}.$$}"
-mkdir -p "$EVENT_DIR"
+# Predictable PID-suffixed /tmp paths are a symlink-attack surface and,
+# with the default umask, leave tailnet-topology artifacts world-readable
+# on a shared host. Mint the event dir with `mktemp -d` (unguessable
+# name, mode 0700) when the caller did not pin one, and `chmod 0700`
+# defensively in both branches. bd-25lyv.
+if [ -n "${EE_TEST_EVENT_DIR:-}" ]; then
+    EVENT_DIR="$EE_TEST_EVENT_DIR"
+    mkdir -p "$EVENT_DIR"
+else
+    EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ee-${SCENARIO}.XXXXXX")"
+fi
+chmod 0700 "$EVENT_DIR"
 EVENT_FILE="$EVENT_DIR/events.jsonl"
-ARTIFACT_DIR="${EE_E2E_ARTIFACT_DIR:-$EVENT_DIR/artifacts}"
+if [ -n "${EE_E2E_ARTIFACT_DIR:-}" ]; then
+    ARTIFACT_DIR="$EE_E2E_ARTIFACT_DIR"
+else
+    ARTIFACT_DIR="$EVENT_DIR/artifacts"
+fi
 mkdir -p "$ARTIFACT_DIR"
+chmod 0700 "$ARTIFACT_DIR"
 
 # Track workspace + cleanup state so the bash EXIT trap can disable mesh
 # even when an intermediate scenario fails partway through. WORKSPACE stays
