@@ -3,7 +3,8 @@
 #
 # Enforces the honesty-only vs implements-surface bead taxonomy:
 # - implements-surface:* beads cannot close with abstention language
-# - implements-surface:* beads cannot close while *_UNAVAILABLE_CODE exists
+# - implements-surface:* beads cannot close while a sentinel-family code
+#   (*_UNAVAILABLE_CODE / *_NOT_IMPLEMENTED_CODE / *_NOT_YET_IMPLEMENTED_CODE) exists
 # - implements-surface:* beads must have a golden snapshot
 # - math-ambition beads cannot close without explicit rejection-threshold evidence
 # - *_unimplemented failure-mode fixtures must be marked honesty_only:true
@@ -27,6 +28,17 @@ BEADS_WRITE_LOCK="$BEADS_DIR/.write.lock"
 BEADS_SYNC_LOCK="$BEADS_DIR/.sync.lock"
 BEADS_LOCK_WAIT_SECONDS="${EE_BEADS_LOCK_WAIT_SECONDS:-30}"
 CLI_MOD="src/cli/mod.rs"
+# Sentinel degraded-code family (bd-mtbjh / bd-3fl1p). The original probe
+# only recognized the `*_UNAVAILABLE_CODE` suffix, so closures whose only
+# behavior on the production target was emitting a `*_NOT_IMPLEMENTED_CODE`
+# / `*_NOT_YET_IMPLEMENTED_CODE` sentinel slipped past Rule 2 and the
+# close-reason abstention scrub. Recognize all three suffixes.
+SENTINEL_CODE_SUFFIX_REGEX='_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE'
+# Source files that may DECLARE a sentinel constant for an
+# implements-surface. The `*_UNAVAILABLE_CODE` family historically lived in
+# src/cli/mod.rs, but the `*_NOT_(YET_)?IMPLEMENTED_CODE` family lives in
+# the owning subsystem module, so Rule 2 must scan those too.
+SENTINEL_SRC_FILES="src/cli/mod.rs src/daemon/mod.rs src/graph/numa_pin.rs src/search/lexical_ram_tier.rs"
 REPORT_FILE=".closure-lint-report.json"
 QUALITY_REPORT_FILE=".closure-quality-report.json"
 GOLDEN_DIR="tests/golden"
@@ -346,11 +358,33 @@ surface_unavailable_constant() {
     echo "$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')_UNAVAILABLE_CODE"
 }
 
-surface_has_unavailable_constant() {
+# Regex matching the full sentinel-code family for a surface (bd-mtbjh):
+# <SURFACE>_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE.
+surface_sentinel_regex() {
     local surface="$1"
-    local constant
-    constant=$(surface_unavailable_constant "$surface")
-    [ -f "$CLI_MOD" ] && grep -q "$constant" "$CLI_MOD" 2>/dev/null
+    echo "$(echo "$surface" | tr '[:lower:]-' '[:upper:]_')${SENTINEL_CODE_SUFFIX_REGEX}"
+}
+
+# Print "<CONST> (<file>)" and return 0 if any sentinel-family constant for
+# the surface is still declared in a sentinel source file; return 1 if none.
+surface_matched_sentinel() {
+    local surface="$1"
+    local regex
+    regex=$(surface_sentinel_regex "$surface")
+    local file hit
+    for file in $SENTINEL_SRC_FILES; do
+        [ -f "$file" ] || continue
+        hit=$(grep -oE "$regex" "$file" 2>/dev/null | head -n1)
+        if [ -n "$hit" ]; then
+            printf '%s (%s)' "$hit" "$file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+surface_has_unavailable_constant() {
+    surface_matched_sentinel "$1" >/dev/null 2>&1
 }
 
 surface_has_open_implementation() {
@@ -871,14 +905,14 @@ close_reason_contains_abstention() {
 
     scrubbed=$(
         printf "%s\n" "$close_reason" |
-            sed -E 's/[A-Z0-9_]+_UNAVAILABLE_CODE[[:space:]]+(deleted|removed)//Ig' |
-            sed -E 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_UNAVAILABLE_CODE//Ig' |
+            sed -E 's/[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE[[:space:]]+(deleted|removed)//Ig' |
+            sed -E 's/(deleted|removed)[[:space:]]+[A-Z0-9_]+_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//Ig' |
             sed -E 's/unavailable stubs removed//Ig' |
             sed -E 's/instead of degraded-mode errors//Ig' |
             # bd-37u08 false-positive scrubs: explicit negation, fixture/code
             # name conventions, and references to the failure-mode taxonomy.
             sed -E 's/non-abstention//Ig' |
-            sed -E 's/\*_UNAVAILABLE_CODE//g' |
+            sed -E 's/\*_(UNAVAILABLE|NOT_YET_IMPLEMENTED|NOT_IMPLEMENTED)_CODE//g' |
             sed -E 's/docs\/degraded_code(s|_taxonomy)\.md//Ig' |
             sed -E 's/degraded[[:space:]]+(case|code|mode|entry)s?//Ig' |
             sed -E 's/degraded_codes?(:?[[:space:]]+(none|\[\]|empty))?//Ig' |
@@ -1241,10 +1275,12 @@ for bead_id in $BEAD_IDS; do
         fi
 
         for surface in $implementation_surfaces; do
-            # Rule 2: Check if UNAVAILABLE_CODE constant still exists
+            # Rule 2: Check if a sentinel-family constant
+            # (*_UNAVAILABLE_CODE / *_NOT_(YET_)?IMPLEMENTED_CODE) still
+            # exists for this surface in any sentinel source module.
             if surface_has_unavailable_constant "$surface"; then
-                constant=$(surface_unavailable_constant "$surface")
-                add_violation "$bead_id" "implements-surface" "$surface" "${constant} still exists in src/cli/mod.rs"
+                constant=$(surface_matched_sentinel "$surface")
+                add_violation "$bead_id" "implements-surface" "$surface" "${constant} sentinel still exists"
             fi
 
             # Rule 3: Implements-surface closures need a public golden snapshot.
