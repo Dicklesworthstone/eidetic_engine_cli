@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_shutting_down",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-36dp2",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "medium",
+  "repair_present": false,
+  "trigger": {
+    "description": "A client connection is accepted while the daemon is already shutting down — the shutdown latch flipped between accept() returning and the accept loop noticing (the shutdown wake connects to unblock accept, and a legitimate client can race in the same window). Instead of dropping the stream silently (which the client observes as a bare connection reset), run_accept_loop writes a framed daemon_shutting_down envelope before stopping so the client can fall back to the in-process path or retry against a fresh daemon.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "Internal — exercised by write_shutting_down_response_emits_framed_daemon_shutting_down_envelope; the live path is the run_accept_loop shutdown branch."
+  },
+  "expected_emission": {
+    "code": "daemon_shutting_down",
+    "severity": "medium",
+    "message_contains": [
+      "daemon is shutting down"
+    ]
+  }
+}

@@ -416,6 +416,19 @@ fn run_accept_loop(
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
 ) {
+            // We've been signalled to stop, but `incoming` may still be
+            // a freshly accepted connection: the shutdown wake itself
+            // connects to unblock `accept`, and a legitimate client can
+            // race in between the shutdown signal and the listener
+            // teardown. Hand that peer a framed `daemon_shutting_down`
+            // envelope before we stop, rather than dropping the stream
+            // and leaving the client to interpret a bare connection
+            // reset. The wake connection (which drops its end without
+            // reading) just sees the best-effort write fail, harmlessly.
+            // bd-36dp2.
+            if let Ok(mut stream) = incoming {
+                write_shutting_down_response(&mut stream);
+            }
     let _ = socket_path; // reserved for future tracing.
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -502,6 +515,25 @@ fn elapsed_ms_since(started: std::time::Instant) -> u64 {
 }
 
 /// Classify a dispatch [`DaemonResponse`] into the observability tuple
+/// Write a framed `daemon_shutting_down` response on a connection that
+/// was accepted after the shutdown latch flipped, then let the caller
+/// drop it. Mirrors [`write_overloaded_response`]: a tight write
+/// timeout keeps a dead peer from stalling the (single-threaded) accept
+/// loop on its way out, and we never learned the client's `request_id`
+/// (we never read a request frame), so it is set to `"<shutdown>"`.
+/// bd-36dp2.
+fn write_shutting_down_response(stream: &mut UnixStream) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let response = DaemonResponse::err(
+        "<shutdown>",
+        super::DAEMON_SHUTTING_DOWN_CODE,
+        "daemon is shutting down and is no longer accepting connections; retry against a \
+         fresh daemon or fall back to the in-process CLI path.",
+    )
+    .with_degraded(super::DAEMON_SHUTTING_DOWN_CODE);
+    let _ = write_response(stream, &response);
+}
+
 /// bd-qwlzu records: the outcome code (`"ok"` or the wire error code)
 /// plus the `schema_mismatch` / `unknown_method` protocol-shape booleans
 /// the audit stream branches on. Pure so the per-method attribution
@@ -1480,6 +1512,41 @@ mod tests {
             "canonical socket must be 0o600 after a concurrent-bind race",
         );
 
+
+    /// Regression test for bd-36dp2. A connection accepted while the
+    /// daemon is shutting down must receive a framed
+    /// `daemon_shutting_down` envelope rather than being dropped
+    /// silently (which the client would observe as a bare connection
+    /// reset). We exercise the envelope writer directly over a
+    /// `UnixStream` pair — deterministic, no race against the accept
+    /// loop — and assert the wire frame parses to the expected code.
+    #[test]
+    fn write_shutting_down_response_emits_framed_daemon_shutting_down_envelope() {
+        use std::io::Read;
+        let (mut server_side, mut client_side) = UnixStream::pair().expect("socketpair");
+        write_shutting_down_response(&mut server_side);
+        drop(server_side);
+
+        let mut prefix = [0_u8; 4];
+        client_side
+            .read_exact(&mut prefix)
+            .expect("length prefix must arrive");
+        let announced = u32::from_be_bytes(prefix) as usize;
+        let mut body = vec![0_u8; announced];
+        client_side
+            .read_exact(&mut body)
+            .expect("framed body must arrive");
+        let response: DaemonResponse =
+            serde_json::from_slice(&body).expect("frame must parse as DaemonResponse");
+        let error = response.error.as_ref().expect("must carry an error");
+        assert_eq!(error.code, super::DAEMON_SHUTTING_DOWN_CODE);
+        assert!(
+            response
+                .degraded_codes
+                .contains(&super::DAEMON_SHUTTING_DOWN_CODE.to_owned()),
+            "shutdown envelope must surface the code in degraded[]"
+        );
+    }
         // The losing bind's listener is orphaned: the winner's `rename`
         // replaced the canonical path, so the loser's accept loop can no
         // longer be woken (shutdown wakes by connecting to the canonical

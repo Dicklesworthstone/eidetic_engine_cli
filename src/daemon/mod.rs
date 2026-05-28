@@ -129,6 +129,20 @@ pub const DAEMON_PEER_UNAUTHORIZED_CODE: &str = "daemon_peer_unauthorized";
 /// with severity `high` per `docs/degraded_code_taxonomy.md`. bd-3pnno.
 pub const DAEMON_SETSOCKOPT_FAILED_CODE: &str = "daemon_setsockopt_failed";
 
+/// Degraded code written to a peer whose connection was accepted while
+/// the daemon was already shutting down. The accept loop checks the
+/// shutdown latch after each `accept`; if it is set, a connection may
+/// still have been established (the shutdown wake itself connects, and
+/// a legitimate client can race in between the shutdown signal and the
+/// listener teardown). Rather than dropping that stream silently —
+/// which the client observes as an inscrutable connection reset — the
+/// daemon writes a framed envelope carrying this code so the client can
+/// cleanly fall back to the in-process path or retry against a fresh
+/// daemon. The CLI client maps it onto the canonical envelope's
+/// `degraded[]` array with severity `medium` per
+/// `docs/degraded_code_taxonomy.md`. bd-36dp2.
+pub const DAEMON_SHUTTING_DOWN_CODE: &str = "daemon_shutting_down";
+
 /// Compute the canonical daemon socket path for the current platform.
 /// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` (the
 /// runtime dir is already mode 0700 per the systemd-user contract);
