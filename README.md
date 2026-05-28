@@ -7,20 +7,22 @@
 **Durable, local-first, explainable memory for coding agents.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Dicklesworthstone/eidetic_engine_cli/ci.yml?branch=main&label=CI)](https://github.com/Dicklesworthstone/eidetic_engine_cli/actions)
+[![Latest release](https://img.shields.io/github/v/release/Dicklesworthstone/eidetic_engine_cli?label=release)](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
 [![License: MIT+Rider](https://img.shields.io/badge/License-MIT%2BOpenAI%2FAnthropic%20Rider-yellow.svg)](./LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](rust-toolchain.toml)
 [![No Tokio](https://img.shields.io/badge/runtime-Asupersync-blueviolet.svg)](#hard-requirements)
 
-**Install (from source — pre-release)**
+**Install**
 
 ```bash
-git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
-cd eidetic_engine_cli && cargo build --release
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
 ```
 
-Signed release binaries with a `curl | bash` installer (checksums, shell
-completions, and auto-configured Claude Code / Codex / Gemini hooks) are
-planned but not yet published.
+Verifies the Sigstore-signed binary against its checksum, drops `ee` into
+`~/.local/bin`, installs shell completions, and auto-configures the Claude Code /
+Codex / Gemini agent hooks if those harnesses are detected. Pass `--help`
+(e.g. `bash install.sh --help`) for offline tarballs, proxy options, `--no-gum`,
+and `--force` reinstall.
 
 </div>
 
@@ -283,8 +285,24 @@ Hard constraints. CI fails if any of them break.
 
 ## Installation
 
-`ee` is pre-release. Building from source with a nightly Rust toolchain is the
-live install path today:
+**Recommended — release installer:**
+
+```bash
+curl -fsSL https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest/download/install.sh | bash
+```
+
+This downloads the signed binary for your platform, verifies it against its
+SHA-256 checksum and Sigstore bundle, drops `ee` into `~/.local/bin`, installs
+shell completions, and auto-configures the Claude Code / Codex / Gemini agent
+hooks when those harnesses are detected. Pass `--require-provenance` to also
+verify the SLSA provenance attestation.
+
+[Signed binaries](https://github.com/Dicklesworthstone/eidetic_engine_cli/releases/latest)
+are published for every release across macOS (`aarch64`, `x86_64`), Linux
+(`aarch64`, `x86_64` gnu + musl), and Windows (`x86_64`). Windows users can run
+`install.ps1` from the same release.
+
+**From source** (nightly Rust toolchain):
 
 ```bash
 git clone https://github.com/Dicklesworthstone/eidetic_engine_cli
@@ -292,10 +310,6 @@ cd eidetic_engine_cli
 cargo build --release
 ./target/release/ee --version
 ```
-
-Signed GitHub-release binaries (with a `curl | bash` installer and Sigstore
-provenance), a Homebrew tap, and a `cargo install eidetic-engine` path are
-planned but not yet published.
 
 ### Verify
 
@@ -1761,7 +1775,7 @@ Boundaries to know:
 | Retention model | Forgetting and decay are product features. Export JSONL into git when you need sealed long-term records. |
 | Model choice | Embeddings are delegated to Frankensearch. Semantic quality follows the model and index Frankensearch is configured to use. |
 | MCP | MCP sits above the CLI. The CLI has the richest contract surface. |
-| Release distribution | Source builds are live. GitHub Release assets, Homebrew, and crates.io publication are planned. |
+| Release distribution | Signed multi-platform release binaries ship on every GitHub release (macOS, Linux gnu+musl, Windows) via the `curl | bash` installer; Homebrew and crates.io publication are still planned. |
 | Mesh | Mesh exchanges redaction-safe rows and posture under policy. FrankenSQLite remains the local source of truth. |
 | Reserved adapters | `serve` and `science-analytics` report capability gaps until their adapters mature. |
 | Doctor repairs | Start with `ee doctor --fix-plan --json`; use `--fix` only after reviewing the run summary and undo path. |
@@ -1804,9 +1818,11 @@ Paths follow platform conventions (`%APPDATA%`, `%LOCALAPPDATA%`).
 Yes. Reads are concurrent. Writes serialize through a job lock. For heavy
 multi-writer swarms, run `ee daemon` and let the daemon own the write side.
 
-**Should I use the curl installer today?**
-Not yet. The curl installer is documented as the planned release path. Build
-from source until release assets are published.
+**Should I use the curl installer?**
+Yes — it's the recommended install. It fetches the signed binary for your
+platform from the latest GitHub release, verifies the checksum and Sigstore
+bundle, and wires up shell completions and agent hooks. Building from source is
+the alternative if you want a local debug build or are hacking on `ee` itself.
 
 **Should I enable mesh?**
 Usually no. Mesh helps trusted peers exchange redaction-safe posture and memory
