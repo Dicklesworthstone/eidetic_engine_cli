@@ -163,6 +163,14 @@ pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
+    /// Once-guard for [`DaemonServerHandle::shutdown`]. The first call
+    /// performs the real teardown; any later call — typically the
+    /// `Drop` impl running after an explicit `shutdown()` — observes
+    /// this latch and returns `Ok(())` without re-touching the socket
+    /// file. Distinct from the `shutdown` signal field above, which
+    /// tells the accept loop to stop; this tracks whether the teardown
+    /// *body* has already run. bd-wj6v9.
+    shutdown_done: AtomicBool,
 }
 
 impl DaemonServerHandle {
@@ -177,6 +185,16 @@ impl DaemonServerHandle {
     /// `start_server` call against the same path does not need a
     /// manual cleanup step.
     pub fn shutdown(&mut self) -> io::Result<()> {
+        // Once-guard (bd-wj6v9): the first call performs the real
+        // teardown; a second call — typically `Drop` running after an
+        // explicit `shutdown()` — observes the latch and returns Ok
+        // without re-entering the teardown. Before this guard, the
+        // second pass relied on `accept_thread.take()` already being
+        // `None` and the socket already gone, and any residual
+        // `remove_file` could surface a misleading ENOENT.
+        if self.shutdown_done.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
         self.shutdown.store(true, Ordering::SeqCst);
         // Wake the accept loop by connecting to the socket from the
         // current process; the loop checks the shutdown flag between
@@ -188,10 +206,20 @@ impl DaemonServerHandle {
                 .join()
                 .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
         }
-        if self.socket_path.exists() {
-            fs::remove_file(&self.socket_path)?;
+        // Idempotent unlink (bd-wj6v9): drop the prior
+        // `exists()`-then-`remove_file` check-then-act, which had a
+        // TOCTOU window — an external unlinker (a peer `ee daemon
+        // stop`, an operator, or a tmpreaper) removing the socket
+        // between the `exists()` probe and the `remove_file` call
+        // turned a successful shutdown into a spurious `io::Error`
+        // with `NotFound`. Unconditionally unlink and treat NotFound
+        // as success: the post-condition we care about ("the socket
+        // file is gone") already holds.
+        match fs::remove_file(&self.socket_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         }
-        Ok(())
     }
 }
 
@@ -354,6 +382,7 @@ pub fn start_server(
         socket_path,
         shutdown,
         accept_thread: Some(accept_thread),
+        shutdown_done: AtomicBool::new(false),
     })
 }
 
@@ -1194,5 +1223,36 @@ mod tests {
                 std::mem::forget(handle);
             }
         }
+    }
+
+    /// Regression test for bd-wj6v9. A second `shutdown()` call (the
+    /// explicit-then-`Drop` pattern, or any repeated invocation) must
+    /// be a clean `Ok(())` no-op rather than surfacing a misleading
+    /// `ENOENT` from re-unlinking an already-removed socket. The
+    /// once-guard short-circuits the second pass; the idempotent
+    /// `remove_file` (NotFound-tolerant) backstops the case where the
+    /// socket vanished out from under the first pass.
+    #[test]
+    fn shutdown_is_idempotent_across_repeated_calls() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-idempotent.sock");
+        let mut handle = start_server(&socket_path).expect("server must start");
+        thread::sleep(Duration::from_millis(50));
+
+        handle.shutdown().expect("first shutdown must succeed");
+        assert!(
+            !socket_path.exists(),
+            "socket file must be unlinked after the first shutdown"
+        );
+        // Second explicit call: pre-bd-wj6v9 this re-entered the
+        // teardown; it must now be a guarded no-op returning Ok.
+        handle
+            .shutdown()
+            .expect("second shutdown must be an idempotent no-op, not ENOENT");
+        // A third call (mirroring the implicit `Drop`-after-explicit
+        // path) must also be Ok; `Drop` itself runs at end of scope.
+        handle
+            .shutdown()
+            .expect("third shutdown must also be a no-op");
     }
 }
