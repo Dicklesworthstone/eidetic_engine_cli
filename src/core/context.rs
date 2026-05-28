@@ -810,6 +810,19 @@ struct CandidateResolutionMetrics {
     tier_required_cold_candidates: usize,
     converted_candidates: usize,
     skipped_candidates: usize,
+    subspans: CandidateResolutionSubspans,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct CandidateResolutionSubspans {
+    hit_id_resolution: Duration,
+    memory_id_dedupe: Duration,
+    memory_tag_batch_load: Duration,
+    filtering: Duration,
+    freshness_provenance: Duration,
+    candidate_construction: Duration,
+    graph_hints: Duration,
+    scoring_ordering: Duration,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -904,6 +917,35 @@ impl ContextPerformanceTrace {
             self.record_duration(name, elapsed);
         }
         self.search = search;
+    }
+
+    fn record_candidate_resolution_subspans(&mut self, subspans: &CandidateResolutionSubspans) {
+        self.record_duration(
+            "candidateResolution::hitIdResolution",
+            subspans.hit_id_resolution,
+        );
+        self.record_duration(
+            "candidateResolution::memoryIdDedupe",
+            subspans.memory_id_dedupe,
+        );
+        self.record_duration(
+            "candidateResolution::memoryTagBatchLoad",
+            subspans.memory_tag_batch_load,
+        );
+        self.record_duration("candidateResolution::filtering", subspans.filtering);
+        self.record_duration(
+            "candidateResolution::freshnessProvenance",
+            subspans.freshness_provenance,
+        );
+        self.record_duration(
+            "candidateResolution::candidateConstruction",
+            subspans.candidate_construction,
+        );
+        self.record_duration("candidateResolution::graphHints", subspans.graph_hints);
+        self.record_duration(
+            "candidateResolution::scoringOrdering",
+            subspans.scoring_ordering,
+        );
     }
 
     fn record_read_snapshot(
@@ -1765,6 +1807,7 @@ fn run_context_pack_with_performance_inner(
         );
     }
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
+    let graph_hint_start = Instant::now();
     let graph_metrics = apply_graph_hints(
         read_connection,
         &options.workspace_path,
@@ -1773,6 +1816,7 @@ fn run_context_pack_with_performance_inner(
         &mut candidates,
         &mut degraded,
     );
+    candidate_metrics.subspans.graph_hints = graph_hint_start.elapsed();
     candidate_metrics.graph_boosted_candidates = graph_metrics.boosted_candidates;
     candidate_metrics.graph_expanded_candidates = graph_metrics.expanded_candidates;
     candidate_metrics.graph_filtered_candidates = graph_metrics.filtered_candidates;
@@ -1946,8 +1990,8 @@ fn run_context_pack_with_performance_inner(
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut agent_profile =
         apply_agent_context_profile_bias(read_connection, &options.workspace_path, &mut candidates);
-    trace.candidate_resolution = candidate_metrics;
 
+    let scoring_ordering_start = Instant::now();
     sort_context_candidates(&mut candidates);
 
     if let Some(max_results) = request.max_results {
@@ -1974,6 +2018,9 @@ fn run_context_pack_with_performance_inner(
     }
 
     let _pagination_info = apply_pagination(&mut candidates, &options.pagination, &mut degraded);
+    candidate_metrics.subspans.scoring_ordering = scoring_ordering_start.elapsed();
+    trace.record_candidate_resolution_subspans(&candidate_metrics.subspans);
+    trace.candidate_resolution = candidate_metrics;
 
     let pack_slot_acquisition = try_acquire_pack_slot(
         &options.workspace_path,
@@ -2576,6 +2623,20 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
         "filterInputCount": trace.filter_input_count,
         "focusStateHits": trace.focus_state_hits,
         "focusCandidateCount": trace.focus_candidate_count,
+        "subspans": candidate_resolution_subspans_json(&metrics.subspans),
+    })
+}
+
+fn candidate_resolution_subspans_json(subspans: &CandidateResolutionSubspans) -> serde_json::Value {
+    serde_json::json!({
+        "hitIdResolution": duration_timing_json(subspans.hit_id_resolution),
+        "memoryIdDedupe": duration_timing_json(subspans.memory_id_dedupe),
+        "memoryTagBatchLoad": duration_timing_json(subspans.memory_tag_batch_load),
+        "filtering": duration_timing_json(subspans.filtering),
+        "freshnessProvenance": duration_timing_json(subspans.freshness_provenance),
+        "candidateConstruction": duration_timing_json(subspans.candidate_construction),
+        "graphHints": duration_timing_json(subspans.graph_hints),
+        "scoringOrdering": duration_timing_json(subspans.scoring_ordering),
     })
 }
 
@@ -5039,6 +5100,7 @@ fn candidates_from_search_with_metrics(
 
     // Phase 1: Resolve all memory IDs from hits (including artifact links).
     // This still does per-hit artifact link lookups but avoids O(k) memory/tag lookups.
+    let hit_resolution_start = Instant::now();
     let mut mesh_blocked_hits = 0usize;
     let mut hit_resolutions: Vec<(
         &crate::core::search::SearchHit,
@@ -5067,6 +5129,7 @@ fn candidates_from_search_with_metrics(
         }
         hit_resolutions.push((hit, resolution, mesh_provenance));
     }
+    metrics.subspans.hit_id_resolution = hit_resolution_start.elapsed();
     if mesh_blocked_hits > 0 {
         push_degradation(
             degraded,
@@ -5084,6 +5147,7 @@ fn candidates_from_search_with_metrics(
     }
 
     // Collect unique memory IDs for batch loading.
+    let memory_id_dedupe_start = Instant::now();
     let memory_ids: Vec<String> = hit_resolutions
         .iter()
         .filter_map(|(_, res, _)| res.as_ref().map(|(mid, _)| mid.to_string()))
@@ -5093,14 +5157,17 @@ fn candidates_from_search_with_metrics(
         .collect::<std::collections::BTreeSet<_>>()
         .len();
     let memory_ids_refs: Vec<&str> = memory_ids.iter().map(|s| s.as_str()).collect();
+    metrics.subspans.memory_id_dedupe = memory_id_dedupe_start.elapsed();
 
     // Phase 2: Batch load all memories and tags.
+    let batch_load_start = Instant::now();
     let (memories, tags_map, used_preloaded_memories) = load_candidate_batch_maps_with_preloaded(
         connection,
         &memory_ids_refs,
         preloaded_memories,
         degraded,
     );
+    metrics.subspans.memory_tag_batch_load = batch_load_start.elapsed();
     metrics.memory_batch_reads =
         usize::from(!memory_ids_refs.is_empty() && !used_preloaded_memories);
     metrics.tag_batch_reads = usize::from(!memory_ids_refs.is_empty());
@@ -5112,6 +5179,7 @@ fn candidates_from_search_with_metrics(
         match resolution {
             Some((memory_id, artifact_id)) => {
                 let memory_key = memory_id.to_string();
+                let filtering_start = Instant::now();
                 if let Some(mesh_provenance) = mesh_provenance.as_ref()
                     && let Some(memory) = memories.get(&memory_key)
                     && memory.trust_class == TrustClass::HumanExplicit.as_str()
@@ -5122,6 +5190,7 @@ fn candidates_from_search_with_metrics(
                         memory,
                         mesh_provenance,
                     );
+                    metrics.subspans.filtering += filtering_start.elapsed();
                     continue;
                 }
                 if !filters.tags.is_empty() {
@@ -5129,6 +5198,7 @@ fn candidates_from_search_with_metrics(
                     if !filters.matches_tags(&tags) {
                         metrics.tag_filtered_candidates =
                             metrics.tag_filtered_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     }
                 }
@@ -5145,6 +5215,7 @@ fn candidates_from_search_with_metrics(
                             ),
                             Some("ee index rebuild --workspace .".to_string()),
                         );
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     };
                     if memory.tombstoned_at.is_some() && !include_tombstoned {
@@ -5159,6 +5230,7 @@ fn candidates_from_search_with_metrics(
                             ),
                             Some("ee index rebuild --workspace .".to_string()),
                         );
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     }
                     match temporal_memory_outcome(memory, &filters.temporal) {
@@ -5166,6 +5238,7 @@ fn candidates_from_search_with_metrics(
                         TemporalCandidateOutcome::Exclude => {
                             metrics.temporal_filtered_candidates =
                                 metrics.temporal_filtered_candidates.saturating_add(1);
+                            metrics.subspans.filtering += filtering_start.elapsed();
                             continue;
                         }
                         TemporalCandidateOutcome::IncludeRelaxedInvalid => {
@@ -5177,26 +5250,31 @@ fn candidates_from_search_with_metrics(
                 if !filters.trust.is_empty() {
                     let Some(memory) = memories.get(&memory_key) else {
                         metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     };
                     let posture = posture_for_trust_class(&memory.trust_class);
                     if !filters.trust.matches(&memory.trust_class, posture) {
                         metrics.trust_filtered_candidates =
                             metrics.trust_filtered_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     }
                 }
                 if !filters.redaction.allow_categories.is_empty() {
                     let Some(memory) = memories.get(&memory_key) else {
                         metrics.skipped_candidates = metrics.skipped_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     };
                     if !redaction_allow_categories(&memory.content, &filters.redaction) {
                         metrics.redaction_filtered_candidates =
                             metrics.redaction_filtered_candidates.saturating_add(1);
+                        metrics.subspans.filtering += filtering_start.elapsed();
                         continue;
                     }
                 }
+                metrics.subspans.filtering += filtering_start.elapsed();
                 let preloaded = PreloadedCandidateSource {
                     memories: &memories,
                     tags_map: &tags_map,
@@ -5211,8 +5289,14 @@ fn candidates_from_search_with_metrics(
                     include_tombstoned,
                     freshness_file_cache: &mut freshness_file_cache,
                 };
-                match candidate_from_hit_preloaded(preloaded, hit, memory_id, artifact_id, degraded)
-                {
+                match candidate_from_hit_preloaded(
+                    preloaded,
+                    hit,
+                    memory_id,
+                    artifact_id,
+                    degraded,
+                    &mut metrics.subspans,
+                ) {
                     Some(candidate) => {
                         metrics.converted_candidates =
                             metrics.converted_candidates.saturating_add(1);
@@ -7750,6 +7834,7 @@ fn candidate_from_hit_preloaded(
     memory_id: MemoryId,
     artifact_id: Option<String>,
     degraded: &mut Vec<ContextResponseDegradation>,
+    subspans: &mut CandidateResolutionSubspans,
 ) -> Option<PackCandidate> {
     let memory = match source.memories.get(&memory_id.to_string()) {
         Some(memory) if memory.tombstoned_at.is_none() => memory,
@@ -7757,15 +7842,25 @@ fn candidate_from_hit_preloaded(
         _ => return None,
     };
     let tags = source.tags_map.get(&memory.id).cloned().unwrap_or_default();
+    let provenance_start = Instant::now();
     let provenance = provenance_for_memory_cached(
         memory,
         memory_id,
         source.workspace_path,
         degraded,
         source.freshness_file_cache,
-    )?;
-    let relevance = unit_score(hit.score)?;
-    let utility = unit_score(memory.utility)?;
+    );
+    subspans.freshness_provenance += provenance_start.elapsed();
+    let provenance = provenance?;
+    let construction_start = Instant::now();
+    let Some(relevance) = unit_score(hit.score) else {
+        subspans.candidate_construction += construction_start.elapsed();
+        return None;
+    };
+    let Some(utility) = unit_score(memory.utility) else {
+        subspans.candidate_construction += construction_start.elapsed();
+        return None;
+    };
     let content = memory.content.clone();
     let why = candidate_selection_why(
         source.query,
@@ -7774,7 +7869,7 @@ fn candidate_from_hit_preloaded(
         memory.utility,
         artifact_id.as_deref(),
     );
-    let candidate = PackCandidate::new(PackCandidateInput {
+    let candidate = match PackCandidate::new(PackCandidateInput {
         memory_id,
         section: section_for_memory(memory),
         content,
@@ -7783,8 +7878,13 @@ fn candidate_from_hit_preloaded(
         utility,
         provenance: vec![provenance],
         why,
-    })
-    .ok()?;
+    }) {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            subspans.candidate_construction += construction_start.elapsed();
+            return None;
+        }
+    };
 
     let candidate = candidate
         .with_diversity_key(diversity_key_for_memory(memory, &tags))
@@ -7797,6 +7897,7 @@ fn candidate_from_hit_preloaded(
         Some(tombstoned_at) => candidate.with_tombstoned_at(tombstoned_at.clone()),
         None => candidate,
     };
+    subspans.candidate_construction += construction_start.elapsed();
     Some(candidate)
 }
 
