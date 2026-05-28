@@ -56,6 +56,7 @@ pub enum SchemaCategory {
     Backup,
     Hooks,
     Eval,
+    Daemon,
 }
 
 impl SchemaCategory {
@@ -84,6 +85,7 @@ impl SchemaCategory {
             Self::Backup => "backup",
             Self::Hooks => "hooks",
             Self::Eval => "eval",
+            Self::Daemon => "daemon",
         }
     }
 }
@@ -519,6 +521,26 @@ pub const BACKUP_SCHEMAS: &[SchemaEntry] = &[
     ),
 ];
 
+/// Daemon UDS RPC schemas (bd-oja31 SRR1 hot-mode skeleton + bd-2oxdj / bd-3q19d
+/// registration). Covers both the wire-framing envelopes spoken on the UDS
+/// (`ee.daemon.request.v1`, `ee.daemon.response.v1`) and the CLI `data` payload
+/// envelopes returned by `ee daemon start` / `ee daemon stop`
+/// (`ee.daemon.start.v1`, `ee.daemon.stop.v1`).
+pub const DAEMON_SCHEMAS: &[SchemaEntry] = &[
+    SchemaEntry::new(
+        "daemon_request",
+        "ee.daemon.request.v1",
+        SchemaCategory::Daemon,
+    ),
+    SchemaEntry::new(
+        "daemon_response",
+        "ee.daemon.response.v1",
+        SchemaCategory::Daemon,
+    ),
+    SchemaEntry::new("daemon_start", "ee.daemon.start.v1", SchemaCategory::Daemon),
+    SchemaEntry::new("daemon_stop", "ee.daemon.stop.v1", SchemaCategory::Daemon),
+];
+
 /// All registered schemas.
 pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     let mut schemas = Vec::new();
@@ -539,6 +561,7 @@ pub fn all_schemas() -> Vec<&'static SchemaEntry> {
     schemas.extend(AUDIT_SCHEMAS.iter());
     schemas.extend(EVAL_SCHEMAS.iter());
     schemas.extend(BACKUP_SCHEMAS.iter());
+    schemas.extend(DAEMON_SCHEMAS.iter());
     schemas
 }
 

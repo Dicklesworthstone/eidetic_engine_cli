@@ -111,6 +111,58 @@
       "forbiddenCurrentClaims": []
     },
     {
+      "schemaId": "ee.daemon.request.v1",
+      "status": "experimental",
+      "surface": "daemon_uds_rpc_request_envelope",
+      "owner": "src/daemon/mod.rs::DAEMON_REQUEST_SCHEMA_V1",
+      "schemaFile": "docs/schemas/ee.daemon.request.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.request.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.response.v1",
+      "status": "experimental",
+      "surface": "daemon_uds_rpc_response_envelope",
+      "owner": "src/daemon/mod.rs::DAEMON_RESPONSE_SCHEMA_V1",
+      "schemaFile": "docs/schemas/ee.daemon.response.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.response.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.start.v1",
+      "status": "experimental",
+      "surface": "daemon_start_payload",
+      "owner": "src/cli/mod.rs::handle_daemon_hot_mode_start",
+      "schemaFile": "docs/schemas/ee.daemon.start.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.start.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
+      "schemaId": "ee.daemon.stop.v1",
+      "status": "experimental",
+      "surface": "daemon_stop_payload",
+      "owner": "src/cli/mod.rs::handle_daemon_hot_mode_stop",
+      "schemaFile": "docs/schemas/ee.daemon.stop.v1.json",
+      "canonicalDocs": [
+        "docs/schemas/ee.daemon.stop.v1.json"
+      ],
+      "currentFacingContexts": [],
+      "allowedHistoricalContexts": [],
+      "forbiddenCurrentClaims": []
+    },
+    {
       "schemaId": "ee.response.v1",
       "status": "legacy",
       "surface": "response_success_envelope",

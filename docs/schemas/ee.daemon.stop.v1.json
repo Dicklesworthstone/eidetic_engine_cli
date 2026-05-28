@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.stop.v1.json",
+  "title": "ee.daemon.stop.v1",
+  "description": "Payload schema for the `data` object emitted by `ee daemon stop` (see src/cli/mod.rs::handle_daemon_hot_mode_stop). The outer envelope is the canonical `ee.response.v2` success envelope; this schema describes the inner `data` object only. The SRR1 skeleton (bd-oja31) implements stop as a best-effort unlink of the UDS file; a follow-up slice will add a real shutdown RPC that drains in-flight requests before unlink. The schema is intentionally narrow so future lifecycle fields (e.g. pid, drained_request_count) can be added under a `v2` schema rather than mutating `v1`.",
+  "type": "object",
+  "required": [
+    "schema",
+    "socketPath",
+    "removed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.daemon.stop.v1"
+    },
+    "socketPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the Unix-domain socket the stop attempt targeted. Defaults match `ee daemon start` (`${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux, `/tmp/ee-daemon.sock` on macOS) and may be overridden via `--socket`. Rendered via `Path::display()`; Unix-only at this revision."
+    },
+    "removed": {
+      "type": "boolean",
+      "description": "`true` when the socket file existed and `fs::remove_file` succeeded; `false` when the socket file did not exist at call time (idempotent no-op). A failed `fs::remove_file` does not emit this envelope at all — the handler returns a `DomainError::Configuration` instead, which surfaces via the canonical `ee.error.v2` envelope. Multi-agent harnesses can therefore treat any successfully emitted `ee.daemon.stop.v1` envelope as 'socket is now absent', regardless of `removed`."
+    }
+  }
+}

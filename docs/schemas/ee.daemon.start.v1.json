@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.daemon.start.v1.json",
+  "title": "ee.daemon.start.v1",
+  "description": "Payload schema for the `data` object emitted by `ee daemon start` (see src/cli/mod.rs::handle_daemon_hot_mode_start). The outer envelope is the canonical `ee.response.v2` success envelope; this schema describes the inner `data` object only. The handler binds the Unix-domain socket and either reports the socket path and detaches (default) or blocks until terminated (`--foreground`). The schema is intentionally narrow because the SRR1 skeleton (bd-oja31) makes a small set of declarations; future slices (true daemonize, readiness poll, lifecycle PID file) may add fields under a `v2` schema rather than mutating `v1`. The skeleton's `std::mem::forget(handle)` leak (tracked in bd-37o8k) does NOT change the wire shape — the envelope still describes what the CLI claimed at emission time.",
+  "type": "object",
+  "required": [
+    "schema",
+    "socketPath",
+    "foreground"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.daemon.start.v1"
+    },
+    "socketPath": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Absolute path to the Unix-domain socket the daemon bound. On Linux this defaults to `${XDG_RUNTIME_DIR}/ee/daemon.sock`; on macOS it defaults to `/tmp/ee-daemon.sock` (XDG_RUNTIME_DIR is not standard on Darwin). May be overridden via the `--socket` flag. Rendered via `Path::display()`, so on Windows targets the value would use backslashes — but `ee daemon start` is currently Unix-only and emits a `DomainError::Configuration` on Windows, so consumers can treat this as a POSIX path."
+    },
+    "foreground": {
+      "type": "boolean",
+      "description": "Echo of the `--foreground` flag. When `true` the CLI process blocks after emitting this envelope and the accept loop runs in the same process; when `false` the handle is leaked so the accept thread outlives the call but the parent CLI process returns. The bd-37o8k follow-up replaces the detached path with a real daemonize step (fork + setsid) and a readiness probe."
+    }
+  }
+}
