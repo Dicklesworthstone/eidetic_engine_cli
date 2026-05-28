@@ -5292,6 +5292,7 @@ fn candidates_from_search_with_metrics(
                 match candidate_from_hit_preloaded(
                     preloaded,
                     hit,
+                    &memory_key,
                     memory_id,
                     artifact_id,
                     degraded,
@@ -7831,12 +7832,13 @@ struct FocusCandidateSource<'a> {
 fn candidate_from_hit_preloaded(
     source: PreloadedCandidateSource<'_>,
     hit: &crate::core::search::SearchHit,
+    memory_key: &str,
     memory_id: MemoryId,
     artifact_id: Option<String>,
     degraded: &mut Vec<ContextResponseDegradation>,
     subspans: &mut CandidateResolutionSubspans,
 ) -> Option<PackCandidate> {
-    let memory = match source.memories.get(&memory_id.to_string()) {
+    let memory = match source.memories.get(memory_key) {
         Some(memory) if memory.tombstoned_at.is_none() => memory,
         Some(memory) if source.include_tombstoned => memory,
         _ => return None,
