@@ -725,10 +725,17 @@ fn handle_connection(mut stream: UnixStream) {
         Err(FrameReadError::Eof) => return,
         Err(other) => {
             let kind = frame_error_kind(&other);
+            // bd-3uev6: the wire message is a FIXED string. `other.to_string()`
+            // for `FrameReadError::Decode` embeds an attacker-controlled snippet
+            // of the input near the parse failure — a log-injection vector once
+            // these envelopes reach the flight recorder / obs pipeline. The full
+            // diagnostic stays server-side in the structured `frame_error_kind`
+            // tracing event below; the peer sent the bytes and does not need them
+            // reflected.
             let response = DaemonResponse::err(
                 "<unknown>",
                 DAEMON_REQUEST_DECODE_FAILED_CODE,
-                other.to_string(),
+                "request body failed to decode",
             );
             trace_daemon_rpc_decode_failure(peer, elapsed_ms_since(started), kind);
             let _ = write_response(&mut stream, &response);
@@ -934,7 +941,17 @@ pub fn dispatch(request: &DaemonRequest) -> DaemonResponse {
     }
 
     match request.method.as_str() {
-        METHOD_ECHO => DaemonResponse::ok(request.request_id.clone(), request.params.clone()),
+        // bd-3uev6: echo is the one public dispatch method that returns
+        // caller-supplied content, so it MUST route through the same
+        // canonical redaction pipeline every other content-bearing
+        // surface uses (core::outcome, support_bundle, mcp). Reflecting
+        // `params` verbatim would make the socket a redaction-bypassing
+        // round-trip oracle. The integrity contract becomes "echo returns
+        // the redaction-stable form of what you sent".
+        METHOD_ECHO => DaemonResponse::ok(
+            request.request_id.clone(),
+            crate::core::support_bundle::redact_json_value(&request.params),
+        ),
         METHOD_CONTEXT => DaemonResponse::err(
             request.request_id.clone(),
             DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
@@ -1051,6 +1068,34 @@ mod tests {
         assert_eq!(response.result, Some(params));
         assert!(response.error.is_none());
         assert!(response.degraded_codes.is_empty());
+    }
+
+    // bd-3uev6: echo must route params through the canonical redaction
+    // pipeline (core::support_bundle::redact_json_value) so the dispatch
+    // table is not a reflection oracle that bypasses every other
+    // content-bearing surface's redaction. Benign params round-trip
+    // unchanged (pinned above); secret-shaped values must NOT.
+    #[test]
+    fn dispatch_echo_redacts_secret_shaped_params() {
+        let secret = "sk_live_abcdefghijklmnopqrstuvwxyz0123456789";
+        let request = DaemonRequest::new(
+            "req-echo-redact-001",
+            METHOD_ECHO,
+            serde_json::json!({"token": secret, "note": "hello"}),
+        );
+        let response = dispatch(&request);
+        assert!(response.error.is_none());
+        let result = response.result.expect("echo returns a result");
+        let serialized = result.to_string();
+        assert!(
+            !serialized.contains("sk_live_abcdefghijklmnopqrstuvwxyz"),
+            "echo must redact secret-shaped params via redact_json_value; leaked: {serialized}"
+        );
+        assert_eq!(
+            result.get("note").and_then(serde_json::Value::as_str),
+            Some("hello"),
+            "non-secret fields must round-trip unchanged"
+        );
     }
 
     #[test]

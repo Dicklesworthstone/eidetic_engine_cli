@@ -2622,7 +2622,14 @@ fn summarize_swarm_report(workspace: &Path, path: &Path) -> Option<Value> {
     }))
 }
 
-fn redact_json_value(value: &Value) -> Value {
+/// Recursively route every string in a JSON value through the canonical
+/// support-diagnostic redaction (secrets, PII, tailscale metadata,
+/// path-like segments). Numbers, bools, and null pass through unchanged.
+/// Exposed to the crate so content-bearing surfaces outside the support
+/// bundle — e.g. the daemon RPC dispatch echo path (bd-3uev6) — can reuse
+/// the single canonical redaction implementation rather than reflecting
+/// raw bytes.
+pub(crate) fn redact_json_value(value: &Value) -> Value {
     match value {
         Value::String(text) => Value::String(redact_support_diagnostic_text(text)),
         Value::Array(items) => Value::Array(items.iter().map(redact_json_value).collect()),
