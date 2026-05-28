@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -15335,6 +15335,17 @@ const PACK_OMISSION_INSERT_BATCH_ROWS: usize =
 const PACK_REPLAY_LEDGER_COMPRESSION_LEVEL: i32 = 3;
 const PACK_REPLAY_LEDGER_COMPRESSION_MIN_BYTES: usize = 4 * 1024;
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackRecordInsertTimings {
+    pub ledger_serialization: Duration,
+    pub transaction: Duration,
+    pub record_write: Duration,
+    pub item_writes: Duration,
+    pub omission_writes: Duration,
+    pub item_write_batches: usize,
+    pub omission_write_batches: usize,
+}
+
 impl DbConnection {
     /// Insert a pack record with its items and omissions.
     pub fn insert_pack_record(
@@ -15344,15 +15355,46 @@ impl DbConnection {
         items: &[CreatePackItemInput],
         omissions: &[CreatePackOmissionInput],
     ) -> Result<()> {
+        self.insert_pack_record_with_timings(id, input, items, omissions)
+            .map(|_| ())
+    }
+
+    /// Insert a pack record with its items and omissions, returning diagnostic timings.
+    pub fn insert_pack_record_with_timings(
+        &self,
+        id: &str,
+        input: &CreatePackRecordInput,
+        items: &[CreatePackItemInput],
+        omissions: &[CreatePackOmissionInput],
+    ) -> Result<PackRecordInsertTimings> {
+        let mut timings = PackRecordInsertTimings::default();
         let now = Utc::now().to_rfc3339();
+        let ledger_start = Instant::now();
         let (ledger_json, ledger_hash) =
             build_pack_selection_ledger(id, input, items, omissions, &now)?;
+        timings.ledger_serialization = ledger_start.elapsed();
+        timings.item_write_batches =
+            pack_insert_batch_count(items.len(), PACK_ITEM_INSERT_BATCH_ROWS);
+        timings.omission_write_batches =
+            pack_insert_batch_count(omissions.len(), PACK_OMISSION_INSERT_BATCH_ROWS);
 
+        let transaction_start = Instant::now();
         self.with_transaction(|| {
+            let record_start = Instant::now();
             self.insert_pack_record_row(id, input, &now, &ledger_json, &ledger_hash)?;
+            timings.record_write = record_start.elapsed();
+
+            let item_start = Instant::now();
             self.insert_pack_items(items)?;
-            self.insert_pack_omissions(omissions)
-        })
+            timings.item_writes = item_start.elapsed();
+
+            let omission_start = Instant::now();
+            self.insert_pack_omissions(omissions).map(|()| {
+                timings.omission_writes = omission_start.elapsed();
+            })
+        })?;
+        timings.transaction = transaction_start.elapsed();
+        Ok(timings)
     }
 
     fn insert_pack_record_row(
@@ -16116,15 +16158,18 @@ fn append_multi_row_placeholders(sql: &mut String, row_count: usize, values_per_
     }
 }
 
-#[cfg(test)]
-fn pack_record_insert_statement_count(item_count: usize, omission_count: usize) -> usize {
-    1 + pack_insert_chunk_count(item_count, PACK_ITEM_INSERT_BATCH_ROWS)
-        + pack_insert_chunk_count(omission_count, PACK_OMISSION_INSERT_BATCH_ROWS)
+fn pack_insert_batch_count(row_count: usize, batch_rows: usize) -> usize {
+    if row_count == 0 {
+        0
+    } else {
+        row_count.div_ceil(batch_rows)
+    }
 }
 
 #[cfg(test)]
-fn pack_insert_chunk_count(row_count: usize, chunk_size: usize) -> usize {
-    row_count.div_ceil(chunk_size)
+fn pack_record_insert_statement_count(item_count: usize, omission_count: usize) -> usize {
+    1 + pack_insert_batch_count(item_count, PACK_ITEM_INSERT_BATCH_ROWS)
+        + pack_insert_batch_count(omission_count, PACK_OMISSION_INSERT_BATCH_ROWS)
 }
 
 fn stored_pack_record_from_row(row: &Row) -> Result<StoredPackRecord> {

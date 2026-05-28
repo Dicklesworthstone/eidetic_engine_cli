@@ -1398,6 +1398,28 @@ pub struct EvidenceFreshness {
     pub repair: Option<String>,
 }
 
+/// Per-command cache for provenance file contents used by freshness checks.
+#[derive(Debug, Default)]
+pub struct EvidenceFreshnessFileCache {
+    files: BTreeMap<PathBuf, Result<Option<String>, String>>,
+}
+
+impl EvidenceFreshnessFileCache {
+    #[must_use]
+    pub fn cached_file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    fn read_file_text(&mut self, source_path: &Path) -> Result<Option<String>, String> {
+        if let Some(cached) = self.files.get(source_path) {
+            return cached.clone();
+        }
+        let result = read_provenance_file_text(source_path);
+        self.files.insert(source_path.to_path_buf(), result.clone());
+        result
+    }
+}
+
 /// Compute stable display metadata for stored validity timestamps.
 #[must_use]
 pub fn memory_validity(valid_from: &Option<String>, valid_to: &Option<String>) -> MemoryValidity {
@@ -1433,6 +1455,24 @@ pub fn assess_memory_evidence_freshness(
     memory: &StoredMemory,
     workspace_path: Option<&Path>,
 ) -> EvidenceFreshness {
+    assess_memory_evidence_freshness_inner(memory, workspace_path, None)
+}
+
+/// Check evidence freshness while reusing file reads within one command.
+#[must_use]
+pub fn assess_memory_evidence_freshness_with_cache(
+    memory: &StoredMemory,
+    workspace_path: Option<&Path>,
+    file_cache: &mut EvidenceFreshnessFileCache,
+) -> EvidenceFreshness {
+    assess_memory_evidence_freshness_inner(memory, workspace_path, Some(file_cache))
+}
+
+fn assess_memory_evidence_freshness_inner(
+    memory: &StoredMemory,
+    workspace_path: Option<&Path>,
+    mut file_cache: Option<&mut EvidenceFreshnessFileCache>,
+) -> EvidenceFreshness {
     let Some(raw_provenance) = memory.provenance_uri.as_deref() else {
         return EvidenceFreshness {
             status: EvidenceFreshnessStatus::Unknown,
@@ -1458,7 +1498,12 @@ pub fn assess_memory_evidence_freshness(
         ProvenanceUri::File { path, span } => {
             let source_path = resolve_provenance_file_path(path, workspace_path);
             let canonical_uri = provenance.to_string();
-            let source_text = match read_provenance_file_text(&source_path) {
+            let read_result = if let Some(cache) = file_cache.as_deref_mut() {
+                cache.read_file_text(&source_path)
+            } else {
+                read_provenance_file_text(&source_path)
+            };
+            let source_text = match read_result {
                 Ok(Some(contents)) => match span {
                     Some(_) => extract_line_span(&contents, *span).unwrap_or_default(),
                     None => contents,
@@ -7707,6 +7752,38 @@ mod tests {
         let unknown =
             assess_memory_evidence_freshness(&freshness_memory("No explicit source.", None), None);
         ensure(unknown.status, EvidenceFreshnessStatus::Unknown, "unknown")
+    }
+
+    #[test]
+    fn assess_memory_evidence_freshness_cache_reuses_file_reads() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(
+            temp.path().join("source.md"),
+            "first cached evidence line\nsecond cached evidence line\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let mut cache = EvidenceFreshnessFileCache::default();
+        let first = assess_memory_evidence_freshness_with_cache(
+            &freshness_memory(
+                "first cached evidence line",
+                Some("file://source.md#L1".to_owned()),
+            ),
+            Some(temp.path()),
+            &mut cache,
+        );
+        let second = assess_memory_evidence_freshness_with_cache(
+            &freshness_memory(
+                "second cached evidence line",
+                Some("file://source.md#L2".to_owned()),
+            ),
+            Some(temp.path()),
+            &mut cache,
+        );
+
+        ensure(first.status, EvidenceFreshnessStatus::Fresh, "first span")?;
+        ensure(second.status, EvidenceFreshnessStatus::Fresh, "second span")?;
+        ensure(cache.cached_file_count(), 1_usize, "cached file count")
     }
 
     #[cfg(unix)]

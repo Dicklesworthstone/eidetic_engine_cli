@@ -74,7 +74,7 @@ use crate::db::read_pool::{
 };
 use crate::db::{
     CreatePackItemInput, CreatePackOmissionInput, CreatePackRecordInput, DatabaseConfig,
-    DbConnection, StoredAgentContextProfileForPack, StoredMemory,
+    DbConnection, PackRecordInsertTimings, StoredAgentContextProfileForPack, StoredMemory,
 };
 use crate::models::degradation::{
     GRAPH_PACK_DNA_TIMEOUT_CODE, GRAPH_PPR_EMPTY_SEED_SET_CODE, GRAPH_PPR_SNAPSHOT_STALE_CODE,
@@ -770,6 +770,7 @@ struct ContextPerformanceTrace {
     focus_state_hits: usize,
     focus_candidate_count: usize,
     candidate_resolution: CandidateResolutionMetrics,
+    pack_persistence: PackPersistenceSubspans,
     timings: Vec<PerformanceTiming>,
 }
 
@@ -809,6 +810,46 @@ struct CandidateResolutionMetrics {
     skipped_candidates: usize,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PackPersistenceSubspans {
+    attempted: bool,
+    succeeded: bool,
+    item_count: usize,
+    omission_count: usize,
+    item_write_batches: usize,
+    omission_write_batches: usize,
+    connection_open: Duration,
+    workspace_lookup: Duration,
+    pack_hash: Duration,
+    degraded_serialization: Duration,
+    item_input_build: Duration,
+    omission_input_build: Duration,
+    ledger_serialization: Duration,
+    transaction: Duration,
+    record_write: Duration,
+    item_writes: Duration,
+    omission_writes: Duration,
+    audit: Duration,
+}
+
+impl PackPersistenceSubspans {
+    fn apply_insert_timings(&mut self, timings: &PackRecordInsertTimings) {
+        self.ledger_serialization = timings.ledger_serialization;
+        self.transaction = timings.transaction;
+        self.record_write = timings.record_write;
+        self.item_writes = timings.item_writes;
+        self.omission_writes = timings.omission_writes;
+        self.item_write_batches = timings.item_write_batches;
+        self.omission_write_batches = timings.omission_write_batches;
+    }
+
+    fn transaction_overhead(&self) -> Duration {
+        self.transaction
+            .checked_sub(self.record_write + self.item_writes + self.omission_writes)
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PerformanceTiming {
     name: &'static str,
@@ -817,10 +858,43 @@ struct PerformanceTiming {
 
 impl ContextPerformanceTrace {
     fn record_elapsed(&mut self, name: &'static str, start: Instant) {
-        self.timings.push(PerformanceTiming {
-            name,
-            elapsed: start.elapsed(),
-        });
+        self.record_duration(name, start.elapsed());
+    }
+
+    fn record_duration(&mut self, name: &'static str, elapsed: Duration) {
+        self.timings.push(PerformanceTiming { name, elapsed });
+    }
+
+    fn record_pack_persistence_subspans(&mut self) {
+        if !self.pack_persistence.attempted {
+            return;
+        }
+        let spans = self.pack_persistence.clone();
+        self.record_duration("packPersistence::connectionOpen", spans.connection_open);
+        self.record_duration("packPersistence::workspaceLookup", spans.workspace_lookup);
+        self.record_duration("packPersistence::packHash", spans.pack_hash);
+        self.record_duration(
+            "packPersistence::degradedSerialization",
+            spans.degraded_serialization,
+        );
+        self.record_duration("packPersistence::itemInputBuild", spans.item_input_build);
+        self.record_duration(
+            "packPersistence::omissionInputBuild",
+            spans.omission_input_build,
+        );
+        self.record_duration(
+            "packPersistence::ledgerSerialization",
+            spans.ledger_serialization,
+        );
+        self.record_duration("packPersistence::recordWrite", spans.record_write);
+        self.record_duration("packPersistence::itemWrites", spans.item_writes);
+        self.record_duration("packPersistence::omissionWrites", spans.omission_writes);
+        self.record_duration("packPersistence::transaction", spans.transaction);
+        self.record_duration(
+            "packPersistence::transactionOverhead",
+            spans.transaction_overhead(),
+        );
+        self.record_duration("packPersistence::audit", spans.audit);
     }
 
     fn record_read_snapshot(
@@ -2066,25 +2140,28 @@ fn run_context_pack_with_performance_inner(
 
     let persist_start = Instant::now();
     trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
+    let mut pack_persistence = PackPersistenceSubspans::default();
     let mut persist_connection = None;
     let persist_result = match context_write_connection.take() {
         Some(connection) => {
             let result = match pack_record_persistence {
-                PackRecordPersistence::Ambient => persist_pack_record(
+                PackRecordPersistence::Ambient => persist_pack_record_measured(
                     &connection,
                     &options.workspace_path,
                     &request,
                     &draft,
                     &degraded,
+                    &mut pack_persistence,
                 )
                 .map_err(|error| error.to_string()),
-                PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
+                PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded_measured(
                     &connection,
                     &options.workspace_path,
                     &request,
                     &draft,
                     &degraded,
                     pack_id_seed,
+                    &mut pack_persistence,
                 )
                 .map(|_| ())
                 .map_err(|error| error.to_string()),
@@ -2092,35 +2169,48 @@ fn run_context_pack_with_performance_inner(
             persist_connection = Some(connection);
             result
         }
-        None => match DbConnection::open_file(&database_path) {
-            Ok(connection) => {
-                let result = match pack_record_persistence {
-                    PackRecordPersistence::Ambient => persist_pack_record(
-                        &connection,
-                        &options.workspace_path,
-                        &request,
-                        &draft,
-                        &degraded,
-                    )
-                    .map_err(|error| error.to_string()),
-                    PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded(
-                        &connection,
-                        &options.workspace_path,
-                        &request,
-                        &draft,
-                        &degraded,
-                        pack_id_seed,
-                    )
-                    .map(|_| ())
-                    .map_err(|error| error.to_string()),
-                };
-                persist_connection = Some(connection);
-                result
+        None => {
+            let connection_open_start = Instant::now();
+            match DbConnection::open_file(&database_path) {
+                Ok(connection) => {
+                    pack_persistence.connection_open = connection_open_start.elapsed();
+                    let result = match pack_record_persistence {
+                        PackRecordPersistence::Ambient => persist_pack_record_measured(
+                            &connection,
+                            &options.workspace_path,
+                            &request,
+                            &draft,
+                            &degraded,
+                            &mut pack_persistence,
+                        )
+                        .map_err(|error| error.to_string()),
+                        PackRecordPersistence::Seeded(pack_id_seed) => {
+                            persist_pack_record_seeded_measured(
+                                &connection,
+                                &options.workspace_path,
+                                &request,
+                                &draft,
+                                &degraded,
+                                pack_id_seed,
+                                &mut pack_persistence,
+                            )
+                            .map(|_| ())
+                            .map_err(|error| error.to_string())
+                        }
+                    };
+                    persist_connection = Some(connection);
+                    result
+                }
+                Err(error) => {
+                    pack_persistence.attempted = true;
+                    pack_persistence.connection_open = connection_open_start.elapsed();
+                    Err(error.to_string())
+                }
             }
-            Err(error) => Err(error.to_string()),
-        },
+        }
     };
     let persist_succeeded = persist_result.is_ok();
+    pack_persistence.succeeded = persist_succeeded;
     if let Err(persist_error) = persist_result {
         push_degradation(
             &mut response_degraded,
@@ -2130,8 +2220,8 @@ fn run_context_pack_with_performance_inner(
             Some("ee status --json".to_string()),
         );
     }
+    trace.pack_persistence = pack_persistence;
     trace.record_elapsed("packPersistence", persist_start);
-    trace.record_elapsed("total", total_start);
     trace.record_read_snapshot(&read_snapshot, read_snapshot_generation);
 
     let consensus_conflicts = crate::pack::analyze_pack_consensus_conflicts(&draft);
@@ -2139,16 +2229,6 @@ fn run_context_pack_with_performance_inner(
         &mut response_degraded,
         &consensus_conflicts,
         draft.items.len(),
-    );
-    let performance = context_performance_json(
-        command,
-        options,
-        &request,
-        &search_report,
-        &draft,
-        &response_degraded,
-        &trace,
-        &slo,
     );
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
@@ -2169,6 +2249,7 @@ fn run_context_pack_with_performance_inner(
     // `pack.included_mem` row per selected item. Privacy: only the
     // BLAKE3 prefix of the query reaches the audit log. Failures are
     // swallowed so an audit append never blocks a successful pack.
+    let audit_start = Instant::now();
     if persist_succeeded {
         if let Some(connection) = persist_connection.as_ref() {
             audit_context_pack_assembly_with_connection(
@@ -2182,6 +2263,24 @@ fn run_context_pack_with_performance_inner(
     } else {
         audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
     }
+    trace.pack_persistence.audit = audit_start.elapsed();
+    trace.record_pack_persistence_subspans();
+    trace.record_elapsed("total", total_start);
+
+    let performance = context_performance_json(
+        command,
+        options,
+        &response.data.request,
+        &search_report,
+        &response.data.pack,
+        &response.data.degraded,
+        &trace,
+        response
+            .data
+            .slo
+            .as_ref()
+            .expect("context response carries pack SLO before performance JSON"),
+    );
 
     Ok(ContextPackPerformanceRun {
         response,
@@ -2345,7 +2444,7 @@ fn context_performance_json(
             "dbReads": context_db_reads_json(trace),
             "search": context_search_json(search_report, options.speed),
             "candidates": candidate_resolution_json(trace),
-            "pack": context_pack_json(draft, slo),
+            "pack": context_pack_json(draft, slo, trace),
             "cache": {
                 "status": "fallback",
                 "reason": "pack_cache_governor_not_enabled_for_context_command",
@@ -2468,7 +2567,11 @@ fn candidate_resolution_json(trace: &ContextPerformanceTrace) -> serde_json::Val
     })
 }
 
-fn context_pack_json(draft: &crate::pack::PackDraft, slo: &PackAssemblySlo) -> serde_json::Value {
+fn context_pack_json(
+    draft: &crate::pack::PackDraft,
+    slo: &PackAssemblySlo,
+    trace: &ContextPerformanceTrace,
+) -> serde_json::Value {
     let quality = draft.quality_metrics();
     let producer = crate::models::ProducerMetadata::context_pack(None, None);
     serde_json::json!({
@@ -2492,7 +2595,36 @@ fn context_pack_json(draft: &crate::pack::PackDraft, slo: &PackAssemblySlo) -> s
             "redundantCandidates": quality.omissions.redundant_candidates,
         },
         "slo": pack_assembly_slo_json(slo),
+        "persistence": pack_persistence_json(trace),
         "hashPresent": draft.hash.is_some(),
+    })
+}
+
+fn pack_persistence_json(trace: &ContextPerformanceTrace) -> serde_json::Value {
+    let subspans = &trace.pack_persistence;
+    serde_json::json!({
+        "attempted": subspans.attempted,
+        "succeeded": subspans.succeeded,
+        "packRecordWrites": trace.pack_record_writes,
+        "itemCount": subspans.item_count,
+        "omissionCount": subspans.omission_count,
+        "itemWriteBatches": subspans.item_write_batches,
+        "omissionWriteBatches": subspans.omission_write_batches,
+        "subspans": {
+            "connectionOpen": duration_timing_json(subspans.connection_open),
+            "workspaceLookup": duration_timing_json(subspans.workspace_lookup),
+            "packHash": duration_timing_json(subspans.pack_hash),
+            "degradedSerialization": duration_timing_json(subspans.degraded_serialization),
+            "itemInputBuild": duration_timing_json(subspans.item_input_build),
+            "omissionInputBuild": duration_timing_json(subspans.omission_input_build),
+            "ledgerSerialization": duration_timing_json(subspans.ledger_serialization),
+            "recordWrite": duration_timing_json(subspans.record_write),
+            "itemWrites": duration_timing_json(subspans.item_writes),
+            "omissionWrites": duration_timing_json(subspans.omission_writes),
+            "transaction": duration_timing_json(subspans.transaction),
+            "transactionOverhead": duration_timing_json(subspans.transaction_overhead()),
+            "audit": duration_timing_json(subspans.audit),
+        },
     })
 }
 
@@ -2539,7 +2671,7 @@ fn pack_assembly_slo_json(slo: &PackAssemblySlo) -> serde_json::Value {
 }
 
 fn performance_timing_json(timing: &PerformanceTiming) -> serde_json::Value {
-    elapsed_timing_json(timing.elapsed.as_secs_f64() * 1000.0)
+    duration_timing_json(timing.elapsed)
         .as_object()
         .map(|elapsed| {
             let mut object = serde_json::Map::new();
@@ -2560,6 +2692,10 @@ fn performance_timing_json(timing: &PerformanceTiming) -> serde_json::Value {
                 "nondeterministic": true,
             })
         })
+}
+
+fn duration_timing_json(duration: Duration) -> serde_json::Value {
+    elapsed_timing_json(duration.as_secs_f64() * 1000.0)
 }
 
 fn context_degradation_json(degraded: &ContextResponseDegradation) -> serde_json::Value {
@@ -3472,6 +3608,25 @@ fn persist_pack_record(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
 ) -> Result<(), String> {
+    let mut subspans = PackPersistenceSubspans::default();
+    persist_pack_record_measured(
+        connection,
+        workspace_path,
+        request,
+        draft,
+        degraded,
+        &mut subspans,
+    )
+}
+
+fn persist_pack_record_measured(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    subspans: &mut PackPersistenceSubspans,
+) -> Result<(), String> {
     persist_pack_record_with_pack_id(
         connection,
         workspace_path,
@@ -3479,6 +3634,7 @@ fn persist_pack_record(
         draft,
         degraded,
         PackId::now(),
+        subspans,
     )
     .map(|_| ())
 }
@@ -3492,6 +3648,27 @@ fn persist_pack_record_seeded(
     degraded: &[ContextResponseDegradation],
     determinism: &Deterministic<Seed>,
 ) -> Result<String, String> {
+    let mut subspans = PackPersistenceSubspans::default();
+    persist_pack_record_seeded_measured(
+        connection,
+        workspace_path,
+        request,
+        draft,
+        degraded,
+        determinism,
+        &mut subspans,
+    )
+}
+
+fn persist_pack_record_seeded_measured(
+    connection: &DbConnection,
+    workspace_path: &Path,
+    request: &ContextRequest,
+    draft: &crate::pack::PackDraft,
+    degraded: &[ContextResponseDegradation],
+    determinism: &Deterministic<Seed>,
+    subspans: &mut PackPersistenceSubspans,
+) -> Result<String, String> {
     let mut pack_id_token = determinism.shared_child("ulid.pack");
     persist_pack_record_with_pack_id(
         connection,
@@ -3500,6 +3677,7 @@ fn persist_pack_record_seeded(
         draft,
         degraded,
         PackId::now_seeded(&mut pack_id_token),
+        subspans,
     )
 }
 
@@ -3510,7 +3688,12 @@ fn persist_pack_record_with_pack_id(
     draft: &crate::pack::PackDraft,
     degraded: &[ContextResponseDegradation],
     pack_id: PackId,
+    subspans: &mut PackPersistenceSubspans,
 ) -> Result<String, String> {
+    subspans.attempted = true;
+    subspans.item_count = draft.items.len();
+    subspans.omission_count = draft.omitted.len();
+
     // Bead bd-17c65.1.9 (A9). Pre-overhaul this surface emitted
     // `context_pack_persist_failed: workspace not found` on every call
     // because the lookup used the raw path. `ee init` / `ee remember`
@@ -3519,6 +3702,7 @@ fn persist_pack_record_with_pack_id(
     // first (for tests / pre-registered raw paths), then the canonical
     // (symlink-resolved) form. Matches the pattern in G1's
     // resolve_workspace_id_with_fallback.
+    let workspace_lookup_start = Instant::now();
     let raw = workspace_path.display().to_string();
     let workspace = match connection
         .get_workspace_by_path(&raw)
@@ -3542,12 +3726,16 @@ fn persist_pack_record_with_pack_id(
             }
         }
     };
+    subspans.workspace_lookup = workspace_lookup_start.elapsed();
 
+    let pack_hash_start = Instant::now();
     let pack_hash = draft
         .hash
         .clone()
         .unwrap_or_else(|| compute_pack_hash(request, draft, degraded));
+    subspans.pack_hash = pack_hash_start.elapsed();
 
+    let degraded_serialization_start = Instant::now();
     let degraded_json = if degraded.is_empty() {
         None
     } else {
@@ -3566,6 +3754,7 @@ fn persist_pack_record_with_pack_id(
         )
         .ok()
     };
+    subspans.degraded_serialization = degraded_serialization_start.elapsed();
 
     let input = CreatePackRecordInput {
         workspace_id: workspace.id.clone(),
@@ -3580,6 +3769,7 @@ fn persist_pack_record_with_pack_id(
         created_by: Some("ee context".to_string()),
     };
 
+    let item_input_start = Instant::now();
     let items: Vec<CreatePackItemInput> = draft
         .items
         .iter()
@@ -3598,7 +3788,9 @@ fn persist_pack_record_with_pack_id(
             trust_subclass: item.trust.subclass.clone(),
         })
         .collect();
+    subspans.item_input_build = item_input_start.elapsed();
 
+    let omission_input_start = Instant::now();
     let omissions: Vec<CreatePackOmissionInput> = draft
         .omitted
         .iter()
@@ -3609,9 +3801,11 @@ fn persist_pack_record_with_pack_id(
             reason: omission.reason.as_str().to_string(),
         })
         .collect();
+    subspans.omission_input_build = omission_input_start.elapsed();
 
     connection
-        .insert_pack_record(&pack_id.to_string(), &input, &items, &omissions)
+        .insert_pack_record_with_timings(&pack_id.to_string(), &input, &items, &omissions)
+        .map(|timings| subspans.apply_insert_timings(&timings))
         .map_err(|e| format!("insert failed: {e}"))?;
     Ok(pack_id.to_string())
 }
@@ -4901,6 +5095,7 @@ fn candidates_from_search_with_metrics(
 
     // Phase 3: Build candidates from preloaded data.
     let mut candidates = Vec::new();
+    let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
     for (hit, resolution, mesh_provenance) in hit_resolutions {
         match resolution {
             Some((memory_id, artifact_id)) => {
@@ -5002,6 +5197,7 @@ fn candidates_from_search_with_metrics(
                         .and_then(|validity| validity.reference_time)
                         .or(filters.temporal.as_of),
                     include_tombstoned,
+                    freshness_file_cache: &mut freshness_file_cache,
                 };
                 match candidate_from_hit_preloaded(preloaded, hit, memory_id, artifact_id, degraded)
                 {
@@ -7524,6 +7720,7 @@ struct PreloadedCandidateSource<'a> {
     query: &'a str,
     validity_reference_time: Option<DateTime<Utc>>,
     include_tombstoned: bool,
+    freshness_file_cache: &'a mut crate::core::memory::EvidenceFreshnessFileCache,
 }
 
 struct FocusCandidateSource<'a> {
@@ -7548,7 +7745,13 @@ fn candidate_from_hit_preloaded(
         _ => return None,
     };
     let tags = source.tags_map.get(&memory.id).cloned().unwrap_or_default();
-    let provenance = provenance_for_memory(memory, memory_id, source.workspace_path, degraded)?;
+    let provenance = provenance_for_memory_cached(
+        memory,
+        memory_id,
+        source.workspace_path,
+        degraded,
+        source.freshness_file_cache,
+    )?;
     let relevance = unit_score(hit.score)?;
     let utility = unit_score(memory.utility)?;
     let content = memory.content.clone();
@@ -7926,6 +8129,23 @@ fn provenance_for_memory(
     workspace_path: &Path,
     degraded: &mut Vec<ContextResponseDegradation>,
 ) -> Option<PackProvenance> {
+    let mut freshness_file_cache = crate::core::memory::EvidenceFreshnessFileCache::default();
+    provenance_for_memory_cached(
+        memory,
+        memory_id,
+        workspace_path,
+        degraded,
+        &mut freshness_file_cache,
+    )
+}
+
+fn provenance_for_memory_cached(
+    memory: &StoredMemory,
+    memory_id: MemoryId,
+    workspace_path: &Path,
+    degraded: &mut Vec<ContextResponseDegradation>,
+    freshness_file_cache: &mut crate::core::memory::EvidenceFreshnessFileCache,
+) -> Option<PackProvenance> {
     let uri = match memory.provenance_uri.as_deref() {
         Some(raw) => match ProvenanceUri::from_str(raw) {
             Ok(uri) => uri,
@@ -7942,8 +8162,11 @@ fn provenance_for_memory(
         },
         None => ProvenanceUri::EeMemory(memory_id),
     };
-    let freshness =
-        crate::core::memory::assess_memory_evidence_freshness(memory, Some(workspace_path));
+    let freshness = crate::core::memory::assess_memory_evidence_freshness_with_cache(
+        memory,
+        Some(workspace_path),
+        freshness_file_cache,
+    );
     if freshness.status.should_report() {
         push_evidence_freshness_degradation(memory, &freshness, degraded);
     }
@@ -8135,9 +8358,9 @@ mod tests {
 
     use super::{
         AccessLevel, CandidateResolutionMetrics, CapabilitySet, CommandContext,
-        ContextPerformanceTrace, PackSlotAcquisition, PerformanceTiming, ReadSnapshotTrace,
-        candidate_selection_why, context_performance_json, focus_candidate_why, focus_relevance,
-        open_pack_slot_lock_file, pack_assembly_slo_for_run,
+        ContextPerformanceTrace, PackPersistenceSubspans, PackSlotAcquisition, PerformanceTiming,
+        ReadSnapshotTrace, candidate_selection_why, context_performance_json, focus_candidate_why,
+        focus_relevance, open_pack_slot_lock_file, pack_assembly_slo_for_run,
         push_pack_budget_too_small_degradation, try_acquire_pack_slot, unit_score,
     };
     use crate::config::{ReadPoolConfig, WorkspaceLocation};
@@ -11046,6 +11269,21 @@ pub fn unrelated_context() -> u64 {
                 converted_candidates: 2,
                 ..CandidateResolutionMetrics::default()
             },
+            pack_persistence: PackPersistenceSubspans {
+                attempted: true,
+                succeeded: true,
+                item_count: 2,
+                omission_count: 2,
+                item_write_batches: 1,
+                omission_write_batches: 1,
+                ledger_serialization: Duration::from_millis(4),
+                record_write: Duration::from_millis(5),
+                item_writes: Duration::from_millis(6),
+                omission_writes: Duration::from_millis(7),
+                transaction: Duration::from_millis(21),
+                audit: Duration::from_millis(2),
+                ..PackPersistenceSubspans::default()
+            },
             timings: vec![
                 PerformanceTiming {
                     name: "pprRerank",
@@ -11094,6 +11332,19 @@ pub fn unrelated_context() -> u64 {
         assert_eq!(json["data"]["dbReads"]["readSnapshot"]["leaseHeldMs"], 12);
         assert_eq!(json["data"]["candidates"]["convertedCandidates"], 2);
         assert_eq!(json["data"]["pack"]["pruning"]["tokenBudgetExceeded"], 2);
+        assert_eq!(json["data"]["pack"]["persistence"]["attempted"], true);
+        assert_eq!(
+            json["data"]["pack"]["persistence"]["subspans"]["ledgerSerialization"]["elapsedMs"],
+            4.0
+        );
+        assert_eq!(
+            json["data"]["pack"]["persistence"]["subspans"]["itemWrites"]["elapsedMs"],
+            6.0
+        );
+        assert_eq!(
+            json["data"]["pack"]["persistence"]["subspans"]["transactionOverhead"]["elapsedMs"],
+            3.0
+        );
         assert_eq!(json["data"]["cache"]["status"], "fallback");
         assert!(
             json["data"]["timings"]
