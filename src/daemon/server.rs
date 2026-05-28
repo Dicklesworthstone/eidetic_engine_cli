@@ -494,6 +494,128 @@ fn write_overloaded_response(stream: &mut UnixStream) {
     let _ = write_response(stream, &response);
 }
 
+/// Wall-clock milliseconds since `started`, saturating at `u64::MAX`
+/// per the tracing-field convention
+/// (docs/observability/tracing_field_convention.md).
+fn elapsed_ms_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Classify a dispatch [`DaemonResponse`] into the observability tuple
+/// bd-qwlzu records: the outcome code (`"ok"` or the wire error code)
+/// plus the `schema_mismatch` / `unknown_method` protocol-shape booleans
+/// the audit stream branches on. Pure so the per-method attribution
+/// mapping is unit-testable without a live socket. The `result` /
+/// `params` payload is deliberately NOT inspected — payload redaction is
+/// bd-3uev6's surface; this reads only the stable error code.
+#[must_use]
+fn classify_dispatch_response(response: &DaemonResponse) -> (&str, bool, bool) {
+    match response.error.as_ref() {
+        None => ("ok", false, false),
+        Some(error) => (
+            error.code.as_str(),
+            error.code == DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
+            error.code == DAEMON_UNKNOWN_METHOD_CODE,
+        ),
+    }
+}
+
+/// Stable, leak-free category for a frame read failure. Returns a fixed
+/// discriminant string rather than the error `Display` so a decode
+/// failure can be recorded in the audit stream WITHOUT echoing any
+/// attacker-controlled frame bytes into the log (orthogonal to the
+/// wire-side reflection tracked by bd-3uev6).
+#[must_use]
+fn frame_error_kind(error: &FrameReadError) -> &'static str {
+    match error {
+        FrameReadError::Eof => "eof",
+        FrameReadError::TooLarge { .. } => "too_large",
+        FrameReadError::Truncated { .. } => "truncated",
+        FrameReadError::Io(_) => "io",
+        FrameReadError::Decode(_) => "decode",
+    }
+}
+
+/// Emit one structured `ee.daemon.rpc` tracing event for a completed
+/// dispatch (bd-qwlzu). Fields follow the canonical tracing-field
+/// convention (workspace_id / request_id / bead_id / surface / phase /
+/// elapsed_ms / degraded_codes) plus daemon-specific `method` + `peer_uid`
+/// attribution and the `schema_mismatch` / `unknown_method` booleans.
+/// This is the per-RPC audit trail the daemon dispatch path previously
+/// lacked entirely.
+fn trace_daemon_rpc_dispatch(
+    request_id: &str,
+    method: &str,
+    peer: u32,
+    elapsed_ms: u64,
+    code: &str,
+    degraded_codes: &[&str],
+    schema_mismatch: bool,
+    unknown_method: bool,
+) {
+    tracing::info!(
+        workspace_id = "daemon-rpc",
+        request_id,
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "dispatch",
+        elapsed_ms,
+        method,
+        peer_uid = peer,
+        code,
+        degraded_codes = ?degraded_codes,
+        schema_mismatch,
+        unknown_method,
+        "ee.daemon.rpc dispatch outcome"
+    );
+}
+
+/// Emit a `warn`-level `ee.daemon.rpc` event for a peer-credential
+/// refusal (bd-qwlzu × bd-3j0td). The `SO_PEERCRED` / `getpeereid` gate
+/// writes a refusal envelope on the wire but, before this, left no
+/// server-side record — cross-UID probing was invisible to operators.
+/// `peer` is `-1` when the credential lookup itself failed (the UID
+/// could not be verified).
+fn trace_daemon_rpc_unauthorized(peer: i64, elapsed_ms: u64, reason: &str) {
+    let degraded = [DAEMON_PEER_UNAUTHORIZED_CODE];
+    tracing::warn!(
+        workspace_id = "daemon-rpc",
+        request_id = "<unauthorized>",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "dependency_check",
+        elapsed_ms,
+        method = "<unauthenticated>",
+        peer_uid = peer,
+        code = DAEMON_PEER_UNAUTHORIZED_CODE,
+        degraded_codes = ?degraded,
+        reason,
+        "ee.daemon.rpc peer authorization refused"
+    );
+}
+
+/// Emit a `warn`-level `ee.daemon.rpc` event for a frame that failed to
+/// decode (bd-qwlzu). Carries only the stable `frame_error_kind`
+/// category — never the raw bytes — so the audit stream cannot itself
+/// become the leak channel bd-3uev6 warns about.
+fn trace_daemon_rpc_decode_failure(peer: u32, elapsed_ms: u64, kind: &str) {
+    let degraded = [DAEMON_REQUEST_DECODE_FAILED_CODE];
+    tracing::warn!(
+        workspace_id = "daemon-rpc",
+        request_id = "<undecoded>",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-qwlzu"),
+        surface = "daemon_rpc",
+        phase = "input",
+        elapsed_ms,
+        method = "<undecoded>",
+        peer_uid = peer,
+        code = DAEMON_REQUEST_DECODE_FAILED_CODE,
+        degraded_codes = ?degraded,
+        frame_error_kind = kind,
+        "ee.daemon.rpc request decode failed"
+    );
+}
+
 fn handle_connection(mut stream: UnixStream) {
     // Install the per-connection deadlines BEFORE any read. The read
     // timeout is the only backstop that stops a half-open peer from
@@ -535,6 +657,8 @@ fn handle_connection(mut stream: UnixStream) {
         return;
     }
 
+    let started = std::time::Instant::now();
+
     // Peer-credential gate (bd-3j0td). Even with the socket file
     // tightened to 0o600 — and the per-UID parent dir at 0o700 — the
     // accept side validates the peer's effective UID against the
@@ -545,7 +669,7 @@ fn handle_connection(mut stream: UnixStream) {
     // We do not read the request frame on refusal because doing so
     // would leak the request body's framed length back to a peer the
     // daemon is intentionally refusing. Sentinel: bd-3j0td getpeereid.
-    match peer_uid(&stream) {
+    let peer = match peer_uid(&stream) {
         Ok(peer) => {
             let own = current_euid();
             if peer != own {
@@ -558,9 +682,15 @@ fn handle_connection(mut stream: UnixStream) {
                     ),
                 )
                 .with_degraded(DAEMON_PEER_UNAUTHORIZED_CODE);
+                trace_daemon_rpc_unauthorized(
+                    i64::from(peer),
+                    elapsed_ms_since(started),
+                    "peer uid does not match daemon owner uid",
+                );
                 let _ = write_response(&mut stream, &response);
                 return;
             }
+            peer
         }
         Err(error) => {
             // getpeereid/SO_PEERCRED itself failed — treat this as a
@@ -576,10 +706,15 @@ fn handle_connection(mut stream: UnixStream) {
                 format!("daemon could not verify peer credential: {error}"),
             )
             .with_degraded(DAEMON_PEER_UNAUTHORIZED_CODE);
+            trace_daemon_rpc_unauthorized(
+                -1,
+                elapsed_ms_since(started),
+                "peer credential lookup failed",
+            );
             let _ = write_response(&mut stream, &response);
             return;
         }
-    }
+    };
 
     // Skeleton: one request per accepted connection. A follow-up
     // multiplexing slice will loop here so a single client can run
@@ -589,11 +724,13 @@ fn handle_connection(mut stream: UnixStream) {
         Ok(request) => request,
         Err(FrameReadError::Eof) => return,
         Err(other) => {
+            let kind = frame_error_kind(&other);
             let response = DaemonResponse::err(
                 "<unknown>",
                 DAEMON_REQUEST_DECODE_FAILED_CODE,
                 other.to_string(),
             );
+            trace_daemon_rpc_decode_failure(peer, elapsed_ms_since(started), kind);
             let _ = write_response(&mut stream, &response);
             return;
         }
@@ -620,6 +757,18 @@ fn handle_connection(mut stream: UnixStream) {
         Ok(response) => response,
         Err(payload) => build_panic_response(&request_id, payload.as_ref()),
     };
+    let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+    let degraded: Vec<&str> = response.degraded_codes.iter().map(String::as_str).collect();
+    trace_daemon_rpc_dispatch(
+        &request_id,
+        &request.method,
+        peer,
+        elapsed_ms_since(started),
+        code,
+        &degraded,
+        schema_mismatch,
+        unknown_method,
+    );
     let _ = write_response(&mut stream, &response);
 }
 
@@ -915,6 +1064,68 @@ mod tests {
         let response = dispatch(&request);
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_UNKNOWN_METHOD_CODE);
+    }
+
+    // bd-qwlzu: the dispatch-observability classifiers feed the
+    // `ee.daemon.rpc` audit event. Pin the code+boolean mapping so the
+    // per-method attribution cannot silently drift.
+    #[test]
+    fn classify_dispatch_response_ok_has_no_error_flags() {
+        let response = DaemonResponse::ok("r", serde_json::json!({"x": 1}));
+        assert_eq!(classify_dispatch_response(&response), ("ok", false, false));
+    }
+
+    #[test]
+    fn classify_dispatch_response_schema_mismatch_sets_only_schema_flag() {
+        let bogus = DaemonRequest {
+            schema: "ee.daemon.request.v0_wrong".to_owned(),
+            request_id: "r".to_owned(),
+            method: METHOD_ECHO.to_owned(),
+            params: serde_json::Value::Null,
+        };
+        let response = dispatch(&bogus);
+        let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+        assert_eq!(code, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE);
+        assert!(schema_mismatch);
+        assert!(!unknown_method);
+    }
+
+    #[test]
+    fn classify_dispatch_response_unknown_method_sets_only_unknown_flag() {
+        let request = DaemonRequest::new("r", "ee.daemon.nope", serde_json::Value::Null);
+        let response = dispatch(&request);
+        let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
+        assert_eq!(code, DAEMON_UNKNOWN_METHOD_CODE);
+        assert!(!schema_mismatch);
+        assert!(unknown_method);
+    }
+
+    #[test]
+    fn frame_error_kind_categories_are_stable_and_leak_free() {
+        assert_eq!(frame_error_kind(&FrameReadError::Eof), "eof");
+        assert_eq!(
+            frame_error_kind(&FrameReadError::TooLarge {
+                announced: 9,
+                max: 4
+            }),
+            "too_large"
+        );
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Truncated {
+                expected: 9,
+                got: 2
+            }),
+            "truncated"
+        );
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Io(std::io::Error::other("boom"))),
+            "io"
+        );
+        let decode_err = serde_json::from_str::<DaemonRequest>("{").unwrap_err();
+        assert_eq!(
+            frame_error_kind(&FrameReadError::Decode(decode_err)),
+            "decode"
+        );
     }
 
     #[test]
