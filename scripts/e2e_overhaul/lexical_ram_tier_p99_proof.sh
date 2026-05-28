@@ -33,11 +33,29 @@ EXIT_CLEANUP_FAILURE=79
 SCENARIO="lexical_ram_tier_p99_proof"
 BEAD_ID="bd-21xbi.3"
 
-EVENT_DIR="${EE_TEST_EVENT_DIR:-${TMPDIR:-/tmp}/ee-${SCENARIO}.$$}"
-mkdir -p "$EVENT_DIR"
+# Predictable PID-suffixed /tmp paths are a symlink-attack surface, and
+# with the default umask they leave artifacts world-readable on the
+# shared 256GB+ fleet host class this scenario targets. Mint the event
+# dir with `mktemp -d` (unguessable name, mode 0700) when the caller did
+# not pin one, and `chmod 0700` defensively in both branches so an
+# operator-supplied EE_TEST_EVENT_DIR / EE_E2E_ARTIFACT_DIR is tightened
+# too. bd-25lyv (symlink surface) + bd-1cxyq / bd-1sjyn (world-readable
+# seed manifest + ee-search stderr).
+if [ -n "${EE_TEST_EVENT_DIR:-}" ]; then
+    EVENT_DIR="$EE_TEST_EVENT_DIR"
+    mkdir -p "$EVENT_DIR"
+else
+    EVENT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ee-${SCENARIO}.XXXXXX")"
+fi
+chmod 0700 "$EVENT_DIR"
 EVENT_FILE="$EVENT_DIR/events.jsonl"
-ARTIFACT_DIR="${EE_E2E_ARTIFACT_DIR:-$EVENT_DIR/artifacts}"
+if [ -n "${EE_E2E_ARTIFACT_DIR:-}" ]; then
+    ARTIFACT_DIR="$EE_E2E_ARTIFACT_DIR"
+else
+    ARTIFACT_DIR="$EVENT_DIR/artifacts"
+fi
 mkdir -p "$ARTIFACT_DIR"
+chmod 0700 "$ARTIFACT_DIR"
 
 # Track workspace + binary so cleanup can run on exit. WORKSPACE empty
 # until setup runs so the EXIT trap can no-op on early precondition
@@ -267,8 +285,14 @@ run_bench() {
         fi
         end_ms="$(date +%s%N)"
         elapsed_ms="$(awk -v s="$start_ns" -v e="$end_ms" 'BEGIN {printf "%.3f", (e - s) / 1000000}')"
-        jq -cn --arg mode "$mode" --arg query "$query" --argjson run "$i" --argjson elapsedMs "$elapsed_ms" \
-            '{mode: $mode, run: $run, queryHash: ($query | @sha256[0:16]), elapsedMs: $elapsedMs}' >>"$out"
+        # Hash the query with the local json_hash helper (shasum) rather
+        # than jq's `@sha256` format, which exists only in a niche
+        # third-party jq fork. On stock jq (Homebrew, Debian/Ubuntu) the
+        # `@sha256` expression errors and, under `set -euo pipefail`,
+        # aborts the bench loop on its first iteration. bd-3ughd / bd-16xes.
+        query_hash="$(json_hash "$query")"
+        jq -cn --arg mode "$mode" --arg queryHash "$query_hash" --argjson run "$i" --argjson elapsedMs "$elapsed_ms" \
+            '{mode: $mode, run: $run, queryHash: $queryHash, elapsedMs: $elapsedMs}' >>"$out"
     done
     printf '%s\n' "$out"
 }
