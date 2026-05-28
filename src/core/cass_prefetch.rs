@@ -61,6 +61,18 @@
 //! replaces `powf` with a range-reduction + degree-10 polynomial that
 //! uses only correctly-rounded IEEE ops, restoring byte-identical output
 //! across targets.
+//!
+//! Cache-coherence contract (bd-qud3c): a [`CassPrefetchHistory`] carries
+//! the [`PrefetchGeneration`] `(workspace_generation, index_generation)`
+//! it was built against, mirroring the gate `src/cache/hotset.rs` admits
+//! cache entries on. [`SpeculativePrefetch::predict_next_n_gated`] drops a
+//! prediction (returning [`CASS_PREFETCH_STALE_GENERATION_CODE`]) the
+//! instant a reindex or workspace switch bumps the live generation, so the
+//! daemon never warms slots from a stale topic distribution the hotset
+//! gate would only reject downstream — and `hit_rate()` cannot silently
+//! collapse across a reindex boundary. The daemon-wiring slice MUST call
+//! the gated method and feed the live gate from the same source the hotset
+//! reads.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -107,6 +119,59 @@ pub const DEFAULT_PREFETCH_MIN_SCORE: f64 = 0.10;
 /// `~50ms`; we expose it for daemon-side tuning.
 pub const DEFAULT_PREFETCH_BUDGET: Duration = Duration::from_millis(50);
 
+/// Degraded code emitted when a generation-gated prediction is skipped
+/// because the history's [`PrefetchGeneration`] no longer matches the
+/// live gate — i.e. a reindex (index_generation bump) or workspace
+/// switch (workspace_generation bump) invalidated the topic
+/// distribution the history was built against (bd-qud3c). Surfacing it
+/// on the `--explain` `degraded[]` array (and landing its failure-mode
+/// fixture + taxonomy row) is deferred to the daemon-wiring slice, same
+/// as `cass_prefetch_budget_exceeded`.
+pub const CASS_PREFETCH_STALE_GENERATION_CODE: &str = "cass_prefetch_stale_generation";
+
+/// Cache-coherence generation tag (bd-qud3c).
+///
+/// Mirrors the `(workspace_generation, index_generation)` pair that
+/// `src/cache/hotset.rs`'s `GenerationGate` admits cache entries on. The
+/// prefetch layer was previously a pure function of topic history with
+/// NO generation awareness: after a background reindex bumped
+/// `index_generation`, the predictor kept emitting topics from the
+/// stale-index distribution, the hotset admission gate rejected every
+/// resulting entry, and `hit_rate()` silently collapsed toward zero with
+/// no diagnostic. Tagging the history with the generation it was built
+/// against lets [`SpeculativePrefetch::predict_next_n_gated`] drop stale
+/// predictions BEFORE the daemon spends its per-slot budget warming them.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrefetchGeneration {
+    /// Bumped on workspace switch.
+    pub workspace_generation: u64,
+    /// Bumped on index regeneration (reindex) — the dominant
+    /// invalidation event on a hot, frequently-reindexed host.
+    pub index_generation: u64,
+}
+
+impl PrefetchGeneration {
+    #[must_use]
+    pub const fn new(workspace_generation: u64, index_generation: u64) -> Self {
+        Self {
+            workspace_generation,
+            index_generation,
+        }
+    }
+
+    /// True iff a prediction built at `self` is still coherent with the
+    /// live gate `current`. Coherence requires an EXACT match on both
+    /// generations: any bump (reindex or workspace switch) makes the
+    /// prior topic distribution stale, so the predictor must drop rather
+    /// than warm slots the hotset gate would only reject downstream.
+    #[must_use]
+    pub const fn is_coherent_with(self, current: Self) -> bool {
+        self.workspace_generation == current.workspace_generation
+            && self.index_generation == current.index_generation
+    }
+}
+
 /// One observed prior ee context call in the per-agent rolling
 /// history window. The predictor sees these and nothing else — no
 /// memory IDs, no raw query text, no clock — so the result is a pure
@@ -136,6 +201,13 @@ impl CassPrefetchObservation {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CassPrefetchHistory {
+    /// Cache-coherence tag the history was built against (bd-qud3c).
+    /// `#[serde(default)]` keeps histories serialized before the
+    /// coherence contract (no generation field) decodable; they default
+    /// to `(0, 0)` and a generation-aware caller treats `(0, 0)` like
+    /// any other generation when gating.
+    #[serde(default)]
+    pub generation: PrefetchGeneration,
     /// Most-recent-first. Pre-fetch math is easier when the array is
     /// ordered consistently and the producer owns the trimming.
     pub recent_first: Vec<CassPrefetchObservation>,
@@ -144,7 +216,10 @@ pub struct CassPrefetchHistory {
 impl CassPrefetchHistory {
     #[must_use]
     pub fn new(recent_first: Vec<CassPrefetchObservation>) -> Self {
-        Self { recent_first }
+        Self {
+            generation: PrefetchGeneration::default(),
+            recent_first,
+        }
     }
 
     /// Construct a history from an iterator of topic IDs in
@@ -157,11 +232,22 @@ impl CassPrefetchHistory {
         S: Into<String>,
     {
         Self {
+            generation: PrefetchGeneration::default(),
             recent_first: recent_first_topics
                 .into_iter()
                 .map(CassPrefetchObservation::new)
                 .collect(),
         }
+    }
+
+    /// Stamp the history with the generation it was built against
+    /// (bd-qud3c). Builder-style so callers can chain it onto
+    /// [`from_topics`]/[`new`]: `CassPrefetchHistory::from_topics(..)
+    /// .with_generation(PrefetchGeneration::new(ws, idx))`.
+    #[must_use]
+    pub fn with_generation(mut self, generation: PrefetchGeneration) -> Self {
+        self.generation = generation;
+        self
     }
 
     /// Length of the retained window.
@@ -209,6 +295,18 @@ impl CassPrefetchCandidate {
     }
 }
 
+/// Result of a generation-gated prediction
+/// ([`SpeculativePrefetch::predict_next_n_gated`], bd-qud3c).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GatedPrediction {
+    /// Candidates to warm. Empty when `degraded` is set.
+    pub candidates: Vec<CassPrefetchCandidate>,
+    /// `Some(`[`CASS_PREFETCH_STALE_GENERATION_CODE`]`)` when the
+    /// prediction was dropped because the history's generation tag no
+    /// longer matched the live gate; `None` on a coherent prediction.
+    pub degraded: Option<&'static str>,
+}
+
 /// Predictor trait. Implementations are pure functions of the input
 /// history — see the module-level determinism contract.
 pub trait SpeculativePrefetch {
@@ -231,6 +329,39 @@ pub trait SpeculativePrefetch {
         history: &CassPrefetchHistory,
         top_k: usize,
     ) -> Vec<CassPrefetchCandidate>;
+
+    /// Generation-gated prediction (bd-qud3c). Guards [`predict_next_n`]
+    /// with a cache-coherence check: if the history's
+    /// [`PrefetchGeneration`] is not coherent with `current_generation`
+    /// (a reindex or workspace switch has bumped a generation), returns
+    /// no candidates and [`CASS_PREFETCH_STALE_GENERATION_CODE`] WITHOUT
+    /// invoking the predictor — so the daemon never spends its per-slot
+    /// budget warming evidence the hotset admission gate
+    /// (`src/cache/hotset.rs`) would only reject downstream, and
+    /// `hit_rate()` cannot silently collapse across a reindex boundary.
+    /// On a coherent gate it delegates to [`predict_next_n`].
+    ///
+    /// Default-implemented so every predictor gains the gate for free;
+    /// the daemon-wiring slice calls THIS method (not the bare
+    /// [`predict_next_n`]) and feeds the live `(workspace_generation,
+    /// index_generation)` from the same source the hotset gate reads.
+    fn predict_next_n_gated(
+        &self,
+        history: &CassPrefetchHistory,
+        current_generation: PrefetchGeneration,
+        top_k: usize,
+    ) -> GatedPrediction {
+        if !history.generation.is_coherent_with(current_generation) {
+            return GatedPrediction {
+                candidates: Vec::new(),
+                degraded: Some(CASS_PREFETCH_STALE_GENERATION_CODE),
+            };
+        }
+        GatedPrediction {
+            candidates: self.predict_next_n(history, top_k),
+            degraded: None,
+        }
+    }
 }
 
 /// Default heuristic — recency-weighted frequency. For each topic in
@@ -472,6 +603,15 @@ pub struct CassPrefetchMetrics {
     pub candidates_emitted: u64,
     pub budget_exceeded: u64,
     pub history_too_short: u64,
+    /// Predictions dropped because the history's generation tag no
+    /// longer matched the live gate (bd-qud3c). Distinct from
+    /// `history_too_short`: this counts STALE-but-present history, the
+    /// dominant invalidation event across a reindex, so an operator can
+    /// tell "predictor is stuck on a stale generation" apart from
+    /// "predictor has not seen enough queries yet." `#[serde(default)]`
+    /// keeps metrics serialized before the coherence contract decodable.
+    #[serde(default)]
+    pub stale_generation_drop: u64,
 }
 
 impl CassPrefetchMetrics {
@@ -483,6 +623,7 @@ impl CassPrefetchMetrics {
             candidates_emitted: 0,
             budget_exceeded: 0,
             history_too_short: 0,
+            stale_generation_drop: 0,
         }
     }
 
@@ -504,6 +645,14 @@ impl CassPrefetchMetrics {
 
     pub fn record_history_too_short(&mut self) {
         self.history_too_short = self.history_too_short.saturating_add(1);
+    }
+
+    /// Record a prediction dropped for cache-coherence reasons — the
+    /// daemon-wiring slice calls this whenever
+    /// [`SpeculativePrefetch::predict_next_n_gated`] returns
+    /// [`CASS_PREFETCH_STALE_GENERATION_CODE`] (bd-qud3c).
+    pub fn record_stale_generation_drop(&mut self) {
+        self.stale_generation_drop = self.stale_generation_drop.saturating_add(1);
     }
 
     /// Hit rate as a fraction in `[0.0, 1.0]`. Returns 0.0 when no
@@ -790,6 +939,85 @@ mod tests {
         let second =
             serde_json::to_string(&predictor.predict_next_n(&h, 3)).expect("serialize second");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn generation_coherence_is_exact_match_bd_qud3c() {
+        let tag = PrefetchGeneration::new(7, 42);
+        assert!(tag.is_coherent_with(PrefetchGeneration::new(7, 42)));
+        // Index regen (idx bump) -> incoherent.
+        assert!(!tag.is_coherent_with(PrefetchGeneration::new(7, 43)));
+        // Workspace switch (ws bump) -> incoherent.
+        assert!(!tag.is_coherent_with(PrefetchGeneration::new(8, 42)));
+        // Default is (0, 0) and coherent only with itself.
+        assert!(PrefetchGeneration::default().is_coherent_with(PrefetchGeneration::new(0, 0)));
+        assert!(!PrefetchGeneration::default().is_coherent_with(PrefetchGeneration::new(0, 1)));
+    }
+
+    #[test]
+    fn history_constructors_default_generation_to_zero_bd_qud3c() {
+        // Back-compat: the pre-coherence constructors stamp (0, 0).
+        assert_eq!(
+            CassPrefetchHistory::from_topics(["a", "b"]).generation,
+            PrefetchGeneration::new(0, 0)
+        );
+        assert_eq!(
+            CassPrefetchHistory::new(vec![CassPrefetchObservation::new("a")]).generation,
+            PrefetchGeneration::default()
+        );
+        // with_generation stamps without disturbing the observations.
+        let stamped = CassPrefetchHistory::from_topics(["a", "b"])
+            .with_generation(PrefetchGeneration::new(1, 9));
+        assert_eq!(stamped.generation, PrefetchGeneration::new(1, 9));
+        assert_eq!(stamped.len(), 2);
+    }
+
+    #[test]
+    fn gated_prediction_drops_stale_generation_bd_qud3c() {
+        // History was built at index_generation 5; a reindex has since
+        // bumped the live gate to 6. The gated predictor MUST return no
+        // candidates and the stale-generation code WITHOUT warming any
+        // slot from the now-stale topic distribution.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let stale = history(&["current", "alpha", "alpha", "bravo"])
+            .with_generation(PrefetchGeneration::new(1, 5));
+        let outcome = predictor.predict_next_n_gated(&stale, PrefetchGeneration::new(1, 6), 3);
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(outcome.degraded, Some(CASS_PREFETCH_STALE_GENERATION_CODE));
+
+        // A workspace switch (ws bump) is equally stale.
+        let outcome_ws = predictor.predict_next_n_gated(&stale, PrefetchGeneration::new(2, 5), 3);
+        assert!(outcome_ws.candidates.is_empty());
+        assert_eq!(
+            outcome_ws.degraded,
+            Some(CASS_PREFETCH_STALE_GENERATION_CODE)
+        );
+    }
+
+    #[test]
+    fn gated_prediction_passes_on_coherent_generation_bd_qud3c() {
+        // Same generation on both sides -> delegate to predict_next_n,
+        // no degraded code, identical candidates to the ungated call.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let fresh = history(&["current", "alpha", "alpha", "bravo"])
+            .with_generation(PrefetchGeneration::new(1, 5));
+        let outcome = predictor.predict_next_n_gated(&fresh, PrefetchGeneration::new(1, 5), 3);
+        assert_eq!(outcome.degraded, None);
+        assert!(!outcome.candidates.is_empty());
+        assert_eq!(outcome.candidates, predictor.predict_next_n(&fresh, 3));
+    }
+
+    #[test]
+    fn metrics_record_stale_generation_drop_bd_qud3c() {
+        let mut metrics = CassPrefetchMetrics::new();
+        assert_eq!(metrics.stale_generation_drop, 0);
+        metrics.record_stale_generation_drop();
+        metrics.record_stale_generation_drop();
+        assert_eq!(metrics.stale_generation_drop, 2);
+        // Saturates rather than panicking.
+        metrics.stale_generation_drop = u64::MAX;
+        metrics.record_stale_generation_drop();
+        assert_eq!(metrics.stale_generation_drop, u64::MAX);
     }
 
     #[test]
