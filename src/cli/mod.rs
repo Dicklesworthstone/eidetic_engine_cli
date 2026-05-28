@@ -211,8 +211,8 @@ use crate::core::rule::{
 };
 use crate::core::search::{
     SearchDedupMode, SearchDegradation, SearchOptions, SearchReport,
-    SearchScoreRecalibrationReport, SearchSourceMode, recalibrate_search_score_calibration,
-    run_diag_search, run_search,
+    SearchScoreRecalibrationReport, SearchSourceMode, elapsed_timing_json,
+    recalibrate_search_score_calibration, run_diag_search, run_search, run_search_with_performance,
 };
 use crate::core::status::{
     StatusOptions, StatusReport, StatusSkylineReport, WalStatusReport,
@@ -34028,6 +34028,17 @@ fn format_review_session_human(report: &ReviewSessionReport) -> String {
     output
 }
 
+fn cli_performance_timing_json(name: &'static str, elapsed: Duration) -> serde_json::Value {
+    let mut value = elapsed_timing_json(elapsed.as_secs_f64() * 1000.0);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "name".to_string(),
+            serde_json::Value::String(name.to_owned()),
+        );
+    }
+    value
+}
+
 fn handle_search<W, E>(
     cli: &Cli,
     args: &SearchArgs,
@@ -34042,7 +34053,15 @@ where
         return exit_code;
     }
 
+    let handler_start = Instant::now();
+    let mut command_timings = Vec::new();
+    let workspace_start = Instant::now();
     let workspace_path = cli.resolve_workspace();
+    command_timings.push(cli_performance_timing_json(
+        "command::workspaceResolve",
+        workspace_start.elapsed(),
+    ));
+    let recalibration_start = Instant::now();
     let recalibration = if args.recalibrate_now {
         match recalibrate_search_score_calibration(&workspace_path, args.database.as_deref()) {
             Ok(report) => Some(report),
@@ -34062,6 +34081,11 @@ where
     } else {
         None
     };
+    command_timings.push(cli_performance_timing_json(
+        "command::recalibration",
+        recalibration_start.elapsed(),
+    ));
+    let options_start = Instant::now();
     let options = SearchOptions {
         workspace_path,
         database_path: args.database.clone(),
@@ -34082,15 +34106,55 @@ where
         memory_scope: args.memory_scope,
         strict_scope: args.strict_scope,
     };
+    command_timings.push(cli_performance_timing_json(
+        "command::optionsBuild",
+        options_start.elapsed(),
+    ));
+
+    if args.explain_performance {
+        let core_search_start = Instant::now();
+        return match run_search_with_performance(&options) {
+            Ok(run) => {
+                command_timings.push(cli_performance_timing_json(
+                    "command::coreSearch",
+                    core_search_start.elapsed(),
+                ));
+                let payload_start = Instant::now();
+                let mut payload = run.report.performance_explain_json_with_trace(
+                    args.speed,
+                    args.explain,
+                    &run.performance,
+                );
+                command_timings.push(cli_performance_timing_json(
+                    "command::performancePayloadBuild",
+                    payload_start.elapsed(),
+                ));
+                command_timings.push(cli_performance_timing_json(
+                    "command::handlerBeforeWrite",
+                    handler_start.elapsed(),
+                ));
+                if let Some(data) = payload
+                    .get_mut("data")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    data.insert(
+                        "commandTimings".to_string(),
+                        serde_json::Value::Array(command_timings),
+                    );
+                }
+                write_stdout(stdout, &(payload.to_string() + "\n"))
+            }
+            Err(error) => {
+                let domain_error = DomainError::SearchIndex {
+                    message: error.to_string(),
+                    repair: error.repair_hint().map(str::to_string),
+                };
+                write_domain_error(&domain_error, true, stdout, stderr)
+            }
+        };
+    }
 
     match run_search(&options) {
-        Ok(report) if args.explain_performance => write_stdout(
-            stdout,
-            &(report
-                .performance_explain_json(args.speed, args.explain)
-                .to_string()
-                + "\n"),
-        ),
         Ok(report) => match cli.renderer() {
             output::Renderer::Human | output::Renderer::Markdown => {
                 write_stdout(stdout, &report.human_summary())

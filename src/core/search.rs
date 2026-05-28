@@ -317,9 +317,51 @@ pub struct SearchReport {
 }
 
 #[derive(Clone, Debug)]
+pub struct SearchPerformanceRun {
+    pub report: SearchReport,
+    pub performance: SearchPerformanceTrace,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchPerformanceTrace {
+    timings: Vec<SearchPerformanceTiming>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SearchPerformanceTiming {
+    name: &'static str,
+    elapsed: Duration,
+}
+
+impl SearchPerformanceTrace {
+    fn record_elapsed(&mut self, name: &'static str, start: Instant) {
+        self.record_duration(name, start.elapsed());
+    }
+
+    fn record_duration(&mut self, name: &'static str, elapsed: Duration) {
+        self.timings.push(SearchPerformanceTiming { name, elapsed });
+    }
+
+    pub(crate) fn timings(&self) -> impl Iterator<Item = (&'static str, Duration)> + '_ {
+        self.timings
+            .iter()
+            .map(|timing| (timing.name, timing.elapsed))
+    }
+
+    #[must_use]
+    pub(crate) fn timings_json(&self) -> Vec<serde_json::Value> {
+        self.timings
+            .iter()
+            .map(search_performance_timing_json)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct ContextSearchReport {
     pub report: SearchReport,
     pub preloaded_memories: BTreeMap<String, StoredMemory>,
+    pub performance: SearchPerformanceTrace,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1544,10 +1586,28 @@ impl SearchReport {
         speed: SpeedMode,
         score_explanations_requested: bool,
     ) -> serde_json::Value {
+        self.performance_explain_json_with_trace(
+            speed,
+            score_explanations_requested,
+            &SearchPerformanceTrace::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn performance_explain_json_with_trace(
+        &self,
+        speed: SpeedMode,
+        score_explanations_requested: bool,
+        performance: &SearchPerformanceTrace,
+    ) -> serde_json::Value {
         serde_json::json!({
             "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
             "success": true,
-            "data": self.performance_explain_data_json(speed, score_explanations_requested),
+            "data": self.performance_explain_data_json_with_trace(
+                speed,
+                score_explanations_requested,
+                performance,
+            ),
         })
     }
 
@@ -1556,6 +1616,20 @@ impl SearchReport {
         &self,
         speed: SpeedMode,
         score_explanations_requested: bool,
+    ) -> serde_json::Value {
+        self.performance_explain_data_json_with_trace(
+            speed,
+            score_explanations_requested,
+            &SearchPerformanceTrace::default(),
+        )
+    }
+
+    #[must_use]
+    pub fn performance_explain_data_json_with_trace(
+        &self,
+        speed: SpeedMode,
+        score_explanations_requested: bool,
+        performance: &SearchPerformanceTrace,
     ) -> serde_json::Value {
         let metrics = self.retrieval_metrics();
         serde_json::json!({
@@ -1589,7 +1663,9 @@ impl SearchReport {
                 "fieldCoverage": retrieval_field_coverage_json(metrics.field_coverage),
                 "errors": self.errors,
                 "elapsed": elapsed_timing_json(self.elapsed_ms),
+                "timings": performance.timings_json(),
             },
+            "timings": performance.timings_json(),
             "pack": {
                 "status": "not_used",
                 "reason": "search_command_does_not_assemble_context_pack",
@@ -3538,6 +3614,17 @@ pub fn elapsed_timing_json(elapsed_ms: f64) -> serde_json::Value {
     })
 }
 
+fn search_performance_timing_json(timing: &SearchPerformanceTiming) -> serde_json::Value {
+    let mut value = elapsed_timing_json(timing.elapsed.as_secs_f64() * 1000.0);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "name".to_string(),
+            serde_json::Value::String(timing.name.to_string()),
+        );
+    }
+    value
+}
+
 #[must_use]
 pub fn performance_redaction_json() -> serde_json::Value {
     serde_json::json!({
@@ -4243,9 +4330,15 @@ fn search_audit_workspace_persisted(conn: Option<&DbConnection>, workspace_id: &
 }
 
 pub fn run_search(options: &SearchOptions) -> Result<SearchReport, SearchError> {
+    run_search_with_performance(options).map(|run| run.report)
+}
+
+pub fn run_search_with_performance(
+    options: &SearchOptions,
+) -> Result<SearchPerformanceRun, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
-    run_search_inner(
+    run_search_inner_with_performance(
         options,
         None,
         &determinism,
@@ -4347,7 +4440,7 @@ pub fn run_context_search_with_preloaded_memories(
     // swarm/workspace scopes do not need search-analysis metadata on every hit.
     let mut audit_ids = SearchAuditIdSource::Ambient;
     let mut preloaded_memories = BTreeMap::new();
-    let report = run_search_inner(
+    let run = run_search_inner_with_performance(
         options,
         Some(read_connection),
         determinism,
@@ -4357,8 +4450,9 @@ pub fn run_context_search_with_preloaded_memories(
         Some(&mut preloaded_memories),
     )?;
     Ok(ContextSearchReport {
-        report,
+        report: run.report,
         preloaded_memories,
+        performance: run.performance,
     })
 }
 
@@ -4369,17 +4463,45 @@ fn run_search_inner(
     audit_ids: &mut SearchAuditIdSource,
     audit_connection: Option<&DbConnection>,
     include_passthrough_scope_analysis_metadata: bool,
-    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+    preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
 ) -> Result<SearchReport, SearchError> {
+    run_search_inner_with_performance(
+        options,
+        read_connection,
+        determinism,
+        audit_ids,
+        audit_connection,
+        include_passthrough_scope_analysis_metadata,
+        preloaded_memories,
+    )
+    .map(|run| run.report)
+}
+
+fn run_search_inner_with_performance(
+    options: &SearchOptions,
+    read_connection: Option<&DbConnection>,
+    determinism: &Deterministic<Seed>,
+    audit_ids: &mut SearchAuditIdSource,
+    audit_connection: Option<&DbConnection>,
+    include_passthrough_scope_analysis_metadata: bool,
+    mut preloaded_memories: Option<&mut BTreeMap<String, StoredMemory>>,
+) -> Result<SearchPerformanceRun, SearchError> {
     let start = Instant::now();
+    let mut trace = SearchPerformanceTrace::default();
+    let setup_start = Instant::now();
     let index_dir = options.resolve_index_dir();
     let runtime_profile = runtime_profile_for_workspace(&options.workspace_path);
     let (effective_limit, limit_capped) = runtime_profile.cap_search_limit(options.limit);
+    trace.record_elapsed("search::setup", setup_start);
 
+    let index_exists_start = Instant::now();
     if !index_dir.exists() {
+        trace.record_elapsed("search::indexExists", index_exists_start);
         return Err(SearchError::NoIndex);
     }
+    trace.record_elapsed("search::indexExists", index_exists_start);
 
+    let degradation_start = Instant::now();
     let output_redaction_enabled =
         crate::config::workspace_output_redaction_enabled(&options.workspace_path);
     let mut degraded = search_degradations(options, &index_dir);
@@ -4395,36 +4517,44 @@ fn run_search_inner(
             runtime_profile.active_profile.as_str(),
         ));
     }
+    trace.record_elapsed("search::degradationSetup", degradation_start);
 
+    let source_mode_start = Instant::now();
     let source_mode = resolve_source_mode(options, &index_dir, &mut degraded)?;
+    trace.record_elapsed("search::sourceModeResolve", source_mode_start);
     if source_mode.unavailable_no_results {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-        return Ok(SearchReport {
-            status: SearchStatus::NoResults,
-            query: options.query.clone(),
-            requested_limit: options.limit,
-            results: Vec::new(),
-            elapsed_ms,
-            errors: Vec::new(),
-            degraded,
-            runtime_profile,
-            relevance_floor_applied: None,
-            candidates_below_floor: 0,
-            source_mode_requested: options.source_mode,
-            source_mode_applied: source_mode.applied,
-            source_mode_fallback: source_mode.fallback_applied,
-            strict_source_mode: options.strict_source_mode,
-            memory_scope: options.memory_scope,
-            strict_scope: options.strict_scope,
-            scope_stats: MemoryScopeContext::for_workspace(
-                &options.workspace_path,
-                options.memory_scope,
-                options.strict_scope,
-            )
-            .stats(),
+        trace.record_elapsed("search::total", start);
+        return Ok(SearchPerformanceRun {
+            report: SearchReport {
+                status: SearchStatus::NoResults,
+                query: options.query.clone(),
+                requested_limit: options.limit,
+                results: Vec::new(),
+                elapsed_ms,
+                errors: Vec::new(),
+                degraded,
+                runtime_profile,
+                relevance_floor_applied: None,
+                candidates_below_floor: 0,
+                source_mode_requested: options.source_mode,
+                source_mode_applied: source_mode.applied,
+                source_mode_fallback: source_mode.fallback_applied,
+                strict_source_mode: options.strict_source_mode,
+                memory_scope: options.memory_scope,
+                strict_scope: options.strict_scope,
+                scope_stats: MemoryScopeContext::for_workspace(
+                    &options.workspace_path,
+                    options.memory_scope,
+                    options.strict_scope,
+                )
+                .stats(),
+            },
+            performance: trace,
         });
     }
-    let search_result = search_sync(
+    let retrieve_start = Instant::now();
+    let search_result = search_sync_with_performance(
         &index_dir,
         &options.query,
         effective_limit as usize,
@@ -4432,7 +4562,9 @@ fn run_search_inner(
         options.explain,
         source_mode.applied,
         determinism,
+        &mut trace,
     );
+    trace.record_elapsed("search::retrieve", retrieve_start);
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -4445,13 +4577,17 @@ fn run_search_inner(
             // candidates, etc.). Keep the highest-scoring occurrence
             // and discard the rest. Stable ordering is preserved (first
             // occurrence's position wins among ties).
+            let dedupe_doc_id_start = Instant::now();
             let (raw_hits, duplicates_collapsed) = dedupe_hits_on_doc_id(raw_hits);
+            trace.record_elapsed("search::dedupeDocId", dedupe_doc_id_start);
+            let dedupe_mi_start = Instant::now();
             let (raw_hits, mi_duplicates_collapsed, mi_eligible_count) =
                 if options.dedup_mode == SearchDedupMode::MutualInformation {
                     dedupe_hits_on_mutual_information(raw_hits, options, read_connection)
                 } else {
                     (raw_hits, 0, 0)
                 };
+            trace.record_elapsed("search::dedupeMutualInformation", dedupe_mi_start);
 
             // Bead bd-17c65.2.1 (B1): apply relevance floor.
             // Bead bd-n22a4 (B2-followup): when the caller does not pass an
@@ -4469,6 +4605,7 @@ fn run_search_inner(
             // Partition into above-floor (kept) and below-floor (dropped).
             // Floor of 0.0 is "disabled" — keep everything. NaN scores are
             // always dropped because NaN >= per_hit_floor is false.
+            let relevance_floor_start = Instant::now();
             let (above_floor, below_floor): (Vec<_>, Vec<_>) =
                 raw_hits.into_iter().partition(|hit| {
                     let per_hit_floor =
@@ -4476,6 +4613,8 @@ fn run_search_inner(
                     hit.score.is_finite() && hit.score >= per_hit_floor
                 });
             let dropped = below_floor.len();
+            trace.record_elapsed("search::relevanceFloor", relevance_floor_start);
+            let tombstone_start = Instant::now();
             let above_floor = apply_tombstone_visibility_collecting(
                 options,
                 above_floor,
@@ -4483,6 +4622,8 @@ fn run_search_inner(
                 read_connection,
                 preloaded_memories.as_deref_mut(),
             );
+            trace.record_elapsed("search::tombstoneVisibility", tombstone_start);
+            let scope_start = Instant::now();
             let (above_floor, scope_stats) =
                 apply_memory_scope_visibility_with_metadata_mode_collecting(
                     options,
@@ -4492,7 +4633,11 @@ fn run_search_inner(
                     include_passthrough_scope_analysis_metadata,
                     preloaded_memories.as_deref_mut(),
                 );
+            trace.record_elapsed("search::scopeVisibility", scope_start);
+            let mesh_start = Instant::now();
             let mut above_floor = apply_mesh_query_visibility(above_floor, &mut degraded);
+            trace.record_elapsed("search::meshVisibility", mesh_start);
+            let calibration_start = Instant::now();
             annotate_hits_with_score_calibration(
                 &options.workspace_path,
                 options.database_path.as_deref(),
@@ -4500,6 +4645,7 @@ fn run_search_inner(
                 &mut above_floor,
                 &mut degraded,
             );
+            trace.record_elapsed("search::scoreCalibration", calibration_start);
             let kept = above_floor.len();
 
             // Representative floor for degradation reporting + metrics:
@@ -4577,6 +4723,7 @@ fn run_search_inner(
                 SearchStatus::Success
             };
 
+            let audit_workspace_start = Instant::now();
             // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation.
             // One `search.executed` row per call + one `search.returned_mem`
             // row per memory hit so L3 has a `last_accessed` signal and
@@ -4594,8 +4741,13 @@ fn run_search_inner(
                 .canonicalize()
                 .unwrap_or_else(|_| options.workspace_path.clone());
             let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
-            if search_audit_workspace_persisted(audit_connection.or(read_connection), &workspace_id)
-            {
+            let audit_workspace_persisted = search_audit_workspace_persisted(
+                audit_connection.or(read_connection),
+                &workspace_id,
+            );
+            trace.record_elapsed("search::auditWorkspaceCheck", audit_workspace_start);
+            if audit_workspace_persisted {
+                let audit_payload_start = Instant::now();
                 let q_hash = audit_query_hash(&options.query);
                 let source_arms: Vec<&str> = above_floor
                     .iter()
@@ -4662,31 +4814,38 @@ fn run_search_inner(
                         }
                     }
                 }
+                trace.record_elapsed("search::auditPayloadBuild", audit_payload_start);
+                let audit_flush_start = Instant::now();
                 if let Some(conn) = audit_connection {
                     audit_batch.flush_best_effort_with_connection(conn);
                 } else {
                     audit_batch.flush_best_effort(&database_path);
                 }
+                trace.record_elapsed("search::auditFlush", audit_flush_start);
             }
 
-            Ok(SearchReport {
-                status,
-                query: options.query.clone(),
-                requested_limit: options.limit,
-                results: above_floor,
-                elapsed_ms,
-                errors,
-                degraded,
-                runtime_profile,
-                relevance_floor_applied: Some(floor),
-                candidates_below_floor: dropped,
-                source_mode_requested: options.source_mode,
-                source_mode_applied: source_mode.applied,
-                source_mode_fallback: source_mode.fallback_applied,
-                strict_source_mode: options.strict_source_mode,
-                memory_scope: options.memory_scope,
-                strict_scope: options.strict_scope,
-                scope_stats,
+            trace.record_elapsed("search::total", start);
+            Ok(SearchPerformanceRun {
+                report: SearchReport {
+                    status,
+                    query: options.query.clone(),
+                    requested_limit: options.limit,
+                    results: above_floor,
+                    elapsed_ms,
+                    errors,
+                    degraded,
+                    runtime_profile,
+                    relevance_floor_applied: Some(floor),
+                    candidates_below_floor: dropped,
+                    source_mode_requested: options.source_mode,
+                    source_mode_applied: source_mode.applied,
+                    source_mode_fallback: source_mode.fallback_applied,
+                    strict_source_mode: options.strict_source_mode,
+                    memory_scope: options.memory_scope,
+                    strict_scope: options.strict_scope,
+                    scope_stats,
+                },
+                performance: trace,
             })
         }
         Err(e) => {
@@ -4698,29 +4857,33 @@ fn run_search_inner(
                 degraded.push(SearchDegradation::corrupt_index(Some(&e)));
             }
 
-            Ok(SearchReport {
-                status: SearchStatus::IndexError,
-                query: options.query.clone(),
-                requested_limit: options.limit,
-                results: Vec::new(),
-                elapsed_ms,
-                errors: vec![e],
-                degraded,
-                runtime_profile,
-                relevance_floor_applied: None,
-                candidates_below_floor: 0,
-                source_mode_requested: options.source_mode,
-                source_mode_applied: source_mode.applied,
-                source_mode_fallback: source_mode.fallback_applied,
-                strict_source_mode: options.strict_source_mode,
-                memory_scope: options.memory_scope,
-                strict_scope: options.strict_scope,
-                scope_stats: MemoryScopeContext::for_workspace(
-                    &options.workspace_path,
-                    options.memory_scope,
-                    options.strict_scope,
-                )
-                .stats(),
+            trace.record_elapsed("search::total", start);
+            Ok(SearchPerformanceRun {
+                report: SearchReport {
+                    status: SearchStatus::IndexError,
+                    query: options.query.clone(),
+                    requested_limit: options.limit,
+                    results: Vec::new(),
+                    elapsed_ms,
+                    errors: vec![e],
+                    degraded,
+                    runtime_profile,
+                    relevance_floor_applied: None,
+                    candidates_below_floor: 0,
+                    source_mode_requested: options.source_mode,
+                    source_mode_applied: source_mode.applied,
+                    source_mode_fallback: source_mode.fallback_applied,
+                    strict_source_mode: options.strict_source_mode,
+                    memory_scope: options.memory_scope,
+                    strict_scope: options.strict_scope,
+                    scope_stats: MemoryScopeContext::for_workspace(
+                        &options.workspace_path,
+                        options.memory_scope,
+                        options.strict_scope,
+                    )
+                    .stats(),
+                },
+                performance: trace,
             })
         }
     }
@@ -5804,6 +5967,7 @@ fn trace_query_plan_cache_lookup(
     );
 }
 
+#[cfg(test)]
 fn search_sync(
     index_dir: &Path,
     query: &str,
@@ -5812,6 +5976,30 @@ fn search_sync(
     explain: bool,
     source_mode: SearchSourceMode,
     determinism: &Deterministic<Seed>,
+) -> Result<(Vec<SearchHit>, Vec<String>), String> {
+    let mut trace = SearchPerformanceTrace::default();
+    search_sync_with_performance(
+        index_dir,
+        query,
+        limit,
+        config,
+        explain,
+        source_mode,
+        determinism,
+        &mut trace,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_sync_with_performance(
+    index_dir: &Path,
+    query: &str,
+    limit: usize,
+    config: TwoTierConfig,
+    explain: bool,
+    source_mode: SearchSourceMode,
+    determinism: &Deterministic<Seed>,
+    trace: &mut SearchPerformanceTrace,
 ) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     let plan_cache_key =
         search_plan_cache_key(index_dir, query, limit, &config, explain, source_mode);
@@ -5828,6 +6016,7 @@ fn search_sync(
         plan_cache_start.elapsed(),
         source_mode,
     );
+    trace.record_duration("searchSync::planCache", plan_cache_start.elapsed());
 
     let index_dir_owned = index_dir.to_path_buf();
     let query_owned = plan_lookup.plan.parsed_query.q.clone();
@@ -5843,20 +6032,41 @@ fn search_sync(
         Arc::new(Mutex::new(None));
     let task_result = Arc::clone(&result_holder);
     let runtime_error_result = Arc::clone(&result_holder);
+    let sync_timings: Arc<Mutex<Vec<SearchPerformanceTiming>>> = Arc::new(Mutex::new(Vec::new()));
+    let async_timings = Arc::clone(&sync_timings);
 
+    let runtime_start = Instant::now();
     let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime_result = crate::core::run_cli_future(async move {
             let cx = asupersync::Cx::for_testing();
             if source_mode == SearchSourceMode::LexicalOnly {
+                let lexical_open_start = Instant::now();
                 let lexical = match open_lexical_searcher(&index_dir_owned) {
-                    Ok(Some(lexical)) => lexical,
+                    Ok(Some(lexical)) => {
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::lexicalOpen",
+                            lexical_open_start.elapsed(),
+                        );
+                        lexical
+                    }
                     Ok(None) => {
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::lexicalOpen",
+                            lexical_open_start.elapsed(),
+                        );
                         if let Ok(mut guard) = task_result.lock() {
                             *guard = Some(Err("Lexical index not found".to_string()));
                         }
                         return;
                     }
                     Err(error) => {
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::lexicalOpen",
+                            lexical_open_start.elapsed(),
+                        );
                         if let Ok(mut guard) = task_result.lock() {
                             *guard = Some(Err(error));
                         }
@@ -5864,7 +6074,14 @@ fn search_sync(
                     }
                 };
 
+                let lexical_search_start = Instant::now();
                 let search_result = lexical.search(&cx, &query_owned, limit).await;
+                push_search_performance_timing(
+                    &async_timings,
+                    "searchSync::lexicalSearch",
+                    lexical_search_start.elapsed(),
+                );
+                let convert_start = Instant::now();
                 let converted = match search_result {
                     Ok(results) => {
                         let mut hits: Vec<SearchHit> = results
@@ -5877,6 +6094,11 @@ fn search_sync(
                     }
                     Err(error) => Err(format!("Lexical search failed: {error}")),
                 };
+                push_search_performance_timing(
+                    &async_timings,
+                    "searchSync::hitConversion",
+                    convert_start.elapsed(),
+                );
 
                 if let Ok(mut guard) = task_result.lock() {
                     *guard = Some(converted);
@@ -5884,9 +6106,22 @@ fn search_sync(
                 return;
             }
 
+            let two_tier_open_start = Instant::now();
             let index = match TwoTierIndex::open(&index_dir_owned, config.clone()) {
-                Ok(idx) => Arc::new(idx),
+                Ok(idx) => {
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::twoTierOpen",
+                        two_tier_open_start.elapsed(),
+                    );
+                    Arc::new(idx)
+                }
                 Err(e) => {
+                    push_search_performance_timing(
+                        &async_timings,
+                        "searchSync::twoTierOpen",
+                        two_tier_open_start.elapsed(),
+                    );
                     if let Ok(mut guard) = task_result.lock() {
                         *guard = Some(Err(format!("Failed to open index: {e}")));
                     }
@@ -5894,12 +6129,37 @@ fn search_sync(
                 }
             };
 
+            let embedder_start = Instant::now();
             let fast_embedder = Arc::new(HashEmbedder::default_256()) as Arc<dyn Embedder>;
+            push_search_performance_timing(
+                &async_timings,
+                "searchSync::embedderInit",
+                embedder_start.elapsed(),
+            );
+            let searcher_build_start = Instant::now();
             let searcher = TwoTierSearcher::new(index, fast_embedder, config);
+            push_search_performance_timing(
+                &async_timings,
+                "searchSync::searcherBuild",
+                searcher_build_start.elapsed(),
+            );
             let searcher = if source_mode == SearchSourceMode::Hybrid {
+                let attach_start = Instant::now();
                 match attach_lexical_searcher(searcher, &index_dir_owned) {
-                    Ok(searcher) => searcher,
+                    Ok(searcher) => {
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::attachLexical",
+                            attach_start.elapsed(),
+                        );
+                        searcher
+                    }
                     Err(error) => {
+                        push_search_performance_timing(
+                            &async_timings,
+                            "searchSync::attachLexical",
+                            attach_start.elapsed(),
+                        );
                         if let Ok(mut guard) = task_result.lock() {
                             *guard = Some(Err(error));
                         }
@@ -5910,8 +6170,15 @@ fn search_sync(
                 searcher
             };
 
+            let collect_start = Instant::now();
             let search_result = searcher.search_collect(&cx, &query_owned, limit).await;
+            push_search_performance_timing(
+                &async_timings,
+                "searchSync::searchCollect",
+                collect_start.elapsed(),
+            );
 
+            let convert_start = Instant::now();
             let converted = match search_result {
                 Ok((results, _metrics)) => {
                     let mut hits: Vec<SearchHit> = results
@@ -5924,6 +6191,11 @@ fn search_sync(
                 }
                 Err(e) => Err(format!("Search failed: {e}")),
             };
+            push_search_performance_timing(
+                &async_timings,
+                "searchSync::hitConversion",
+                convert_start.elapsed(),
+            );
 
             if let Ok(mut guard) = task_result.lock() {
                 *guard = Some(converted);
@@ -5936,6 +6208,12 @@ fn search_sync(
             *guard = Some(Err(format!("Runtime failed: {e}")));
         }
     }));
+    trace.record_duration("searchSync::runtime", runtime_start.elapsed());
+    if let Ok(mut guard) = sync_timings.lock() {
+        for timing in guard.drain(..) {
+            trace.record_duration(timing.name, timing.elapsed);
+        }
+    }
 
     match panic_result {
         Ok(()) => result_holder
@@ -5944,6 +6222,16 @@ fn search_sync(
             .and_then(|mut guard| guard.take())
             .unwrap_or_else(|| Err("Search result not captured".to_string())),
         Err(_) => Err("Search panicked".to_string()),
+    }
+}
+
+fn push_search_performance_timing(
+    timings: &Arc<Mutex<Vec<SearchPerformanceTiming>>>,
+    name: &'static str,
+    elapsed: Duration,
+) {
+    if let Ok(mut guard) = timings.lock() {
+        guard.push(SearchPerformanceTiming { name, elapsed });
     }
 }
 

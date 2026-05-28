@@ -64,8 +64,9 @@ use crate::core::memory_scope::{
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
-    SearchOptions, SearchReport, SearchStatus, elapsed_timing_json, performance_redaction_json,
-    query_observation_json, run_context_search_with_preloaded_memories, search_degraded_data_json,
+    SearchOptions, SearchPerformanceTrace, SearchReport, SearchStatus, elapsed_timing_json,
+    performance_redaction_json, query_observation_json, run_context_search_with_preloaded_memories,
+    search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -769,6 +770,7 @@ struct ContextPerformanceTrace {
     focus_state_read_attempts: usize,
     focus_state_hits: usize,
     focus_candidate_count: usize,
+    search: SearchPerformanceTrace,
     candidate_resolution: CandidateResolutionMetrics,
     pack_persistence: PackPersistenceSubspans,
     timings: Vec<PerformanceTiming>,
@@ -895,6 +897,13 @@ impl ContextPerformanceTrace {
             spans.transaction_overhead(),
         );
         self.record_duration("packPersistence::audit", spans.audit);
+    }
+
+    fn record_search_subspans(&mut self, search: SearchPerformanceTrace) {
+        for (name, elapsed) in search.timings() {
+            self.record_duration(name, elapsed);
+        }
+        self.search = search;
     }
 
     fn record_read_snapshot(
@@ -1564,6 +1573,7 @@ fn run_context_pack_with_performance_inner(
     ) {
         Ok(context_search) => {
             search_preloaded_memories = context_search.preloaded_memories;
+            trace.record_search_subspans(context_search.performance);
             context_search.report
         }
         Err(SearchError::NoIndex) => missing_index_search_report(
@@ -2442,7 +2452,7 @@ fn context_performance_json(
             },
             "profileRuntime": search_report.runtime_profile.data_json(),
             "dbReads": context_db_reads_json(trace),
-            "search": context_search_json(search_report, options.speed),
+            "search": context_search_json(search_report, options.speed, &trace.search),
             "candidates": candidate_resolution_json(trace),
             "pack": context_pack_json(draft, slo, trace),
             "cache": {
@@ -2524,6 +2534,7 @@ fn context_read_snapshot_json(snapshot: Option<&ReadSnapshotTrace>) -> serde_jso
 fn context_search_json(
     search_report: &SearchReport,
     speed: crate::search::SpeedMode,
+    performance: &SearchPerformanceTrace,
 ) -> serde_json::Value {
     let metrics = search_report.retrieval_metrics();
     serde_json::json!({
@@ -2535,6 +2546,7 @@ fn context_search_json(
         "metrics": metrics.data_json(),
         "degraded": search_degraded_data_json("search", &search_report.degraded),
         "elapsed": elapsed_timing_json(search_report.elapsed_ms),
+        "timings": performance.timings_json(),
     })
 }
 
