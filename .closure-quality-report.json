@@ -1,13 +1,13 @@
 {
   "schema": "ee.closure_quality_report.v1",
-  "generatedAt": "2026-05-23T22:24:06Z",
+  "generatedAt": "2026-05-26T19:20:03Z",
   "advisory": true,
   "thresholds": {
     "prematureClosureDays": 14,
     "trendWindowDays": 90
   },
   "summary": {
-    "closedBeadsAudited": 2776,
+    "closedBeadsAudited": 2979,
     "reopenedBeads": 34,
     "prematureClosures": 34,
     "recentPrematureClosures": 34
@@ -26,7 +26,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24383,
+      "reopen_comment_id": 71,
       "reopen_reason": "Reopened: Reopened by LavenderGate on 2026-05-07: RCH artifact retrieval still stalls after successful remote cargo work. Repro command: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_eidetic_preflight_core cargo test -p ee --test contracts preflight_tripwires. Remote test reported 9/9 passed and began retrieving .rch-target artifacts, then produced no output for several minutes. This contradicts the closeout claim that retrieval stalls were resolved and remains relevant to eidetic_engine_cli-6wj5 full verification. I terminated the stuck local wrapper/rsync PIDs after recording the remote success; future attempts should prefer rch queue/cancel per the 15po guidance."
     },
     {
@@ -37,7 +37,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24573,
+      "reopen_comment_id": 922,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -48,7 +48,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24478,
+      "reopen_comment_id": 1058,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -59,7 +59,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 22831,
+      "reopen_comment_id": 1098,
       "reopen_reason": "Reopened: Refresh close reason after follow-up removed stale dead_code allow and added explicit test-allow justifications."
     },
     {
@@ -70,7 +70,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23471,
+      "reopen_comment_id": 1621,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -81,7 +81,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23741,
+      "reopen_comment_id": 1629,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -92,7 +92,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 21996,
+      "reopen_comment_id": 1977,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -103,7 +103,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 21416,
+      "reopen_comment_id": 2113,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -114,7 +114,7 @@
       "time_to_reopen_days": 1,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 21093,
+      "reopen_comment_id": 2118,
       "reopen_reason": "Reopened: Reopened because bd-2xdom.5 was created and claimed after the parent closeout; parent should remain open while that child is active."
     },
     {
@@ -125,7 +125,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23643,
+      "reopen_comment_id": 2121,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -136,7 +136,7 @@
       "time_to_reopen_days": 1,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 22843,
+      "reopen_comment_id": 2219,
       "reopen_reason": "Reopened: Closure-lint violation: implements-surface labels cannot close with abstention language. Stubs returning UnsatisfiedDegradedMode do not qualify as implementation."
     },
     {
@@ -147,7 +147,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24468,
+      "reopen_comment_id": 2221,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -158,7 +158,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 22954,
+      "reopen_comment_id": 2849,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -169,7 +169,7 @@
       "time_to_reopen_days": 2,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24528,
+      "reopen_comment_id": 3006,
       "reopen_reason": "Reopened: Reopening because the first real CI matrix run invalidated the closed acceptance claim. GitHub Actions run 25978847032 for head 2514045f failed job 76363843896 (cross-platform-determinism aarch64-unknown-linux-gnu) in current_target_matches_pinned_graph_algorithm_hashes: target=aarch64-unknown-linux-gnu algorithm=personalized_pagerank seed=weighted-cycle-v1 expected blake3:01255168f7add48cf43e7a296eff360a5d3248a7e315ceea60985c3410a1e2f0 observed blake3:1276ce069f06fcc068f86047817c26fd42ef93c9b24d7781d5f9d33fb0f06365. This is exactly the matrix-drift class the bead was meant to catch. Do not re-close until the team either canonicalizes PPR output across architectures and gets matrix evidence, or records an explicit reviewed divergence in tests/cross_platform_determinism/divergences.toml with rationale."
     },
     {
@@ -180,7 +180,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24744,
+      "reopen_comment_id": 3248,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -191,7 +191,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24405,
+      "reopen_comment_id": 3287,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -202,7 +202,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23415,
+      "reopen_comment_id": 3743,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -213,7 +213,7 @@
       "time_to_reopen_days": 1,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23306,
+      "reopen_comment_id": 3792,
       "reopen_reason": "Reopened: Closure-lint violation: implements-surface labels cannot close with abstention language. Stubs returning UnsatisfiedDegradedMode do not qualify as implementation."
     },
     {
@@ -224,7 +224,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24629,
+      "reopen_comment_id": 3865,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -235,7 +235,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 20874,
+      "reopen_comment_id": 3867,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -246,7 +246,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23694,
+      "reopen_comment_id": 3884,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -257,7 +257,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 22928,
+      "reopen_comment_id": 3889,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -268,7 +268,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23366,
+      "reopen_comment_id": 3898,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -279,7 +279,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24836,
+      "reopen_comment_id": 3942,
       "reopen_reason": "Reopened: Refresh close reason after follow-up removed stale dead_code allow and added explicit test-allow justifications."
     },
     {
@@ -290,7 +290,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 21528,
+      "reopen_comment_id": 3948,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -301,7 +301,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24561,
+      "reopen_comment_id": 3955,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -312,7 +312,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 21007,
+      "reopen_comment_id": 4111,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -323,7 +323,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24792,
+      "reopen_comment_id": 4292,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -334,7 +334,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23787,
+      "reopen_comment_id": 4377,
       "reopen_reason": "Reopened: Reopened by LavenderGate on 2026-05-07: RCH artifact retrieval still stalls after successful remote cargo work. Repro command: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_eidetic_preflight_core cargo test -p ee --test contracts preflight_tripwires. Remote test reported 9/9 passed and began retrieving .rch-target artifacts, then produced no output for several minutes. This contradicts the closeout claim that retrieval stalls were resolved and remains relevant to eidetic_engine_cli-6wj5 full verification. I terminated the stuck local wrapper/rsync PIDs after recording the remote success; future attempts should prefer rch queue/cancel per the 15po guidance."
     },
     {
@@ -345,7 +345,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24591,
+      "reopen_comment_id": 4400,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -356,7 +356,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24308,
+      "reopen_comment_id": 4438,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -367,7 +367,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 24440,
+      "reopen_comment_id": 4553,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -378,7 +378,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 22884,
+      "reopen_comment_id": 4662,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     },
     {
@@ -389,7 +389,7 @@
       "time_to_reopen_days": 0,
       "quality_signal": "premature_closure",
       "time_basis": "created_at_fallback",
-      "reopen_comment_id": 23644,
+      "reopen_comment_id": 4712,
       "reopen_reason": "Reopened: Reopened by eidetic_engine_cli-4q03: closure-lint audit mode reports this closed implements-surface bead is not closeable yet (remaining unavailable sentinel, missing golden snapshot, or abstention-language closure)."
     }
   ]

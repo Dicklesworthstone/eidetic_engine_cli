@@ -1,6 +1,12 @@
 {
   "violations": [
     {
+      "bead": "bd-17bob",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
       "bead": "bd-1prrl.2",
       "label": "implements-surface",
       "surface": "agent_context_profile",
@@ -241,10 +247,28 @@
       "reason": "referenced test path missing: tests/mesh_auto_enroll_rollback_audit.rs"
     },
     {
+      "bead": "bd-3dfzy",
+      "label": "honesty-only",
+      "surface": "unknown",
+      "reason": "no implements-surface sibling matches this bead's surface labels"
+    },
+    {
+      "bead": "bd-3juno",
+      "label": "implements-surface",
+      "surface": "external_derivation_candidates",
+      "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
       "bead": "bd-3rs00",
       "label": "implements-surface",
       "surface": "external_derivation_candidates",
       "reason": "missing tests/golden/external_derivation_candidates.snap"
+    },
+    {
+      "bead": "bd-3usjw.13",
+      "label": "implements-surface",
+      "surface": "homebrew_tap",
+      "reason": "missing tests/golden/homebrew_tap.snap"
     },
     {
       "bead": "bd-3usjw.14",
@@ -257,6 +281,12 @@
       "label": "implements-surface",
       "surface": "plan_doc_rename",
       "reason": "missing tests/golden/plan_doc_rename.snap"
+    },
+    {
+      "bead": "bd-3usjw.17",
+      "label": "implements-surface",
+      "surface": "close_the_gap_archive",
+      "reason": "missing tests/golden/close_the_gap_archive.snap"
     },
     {
       "bead": "bd-3usjw.25",
@@ -427,6 +457,6 @@
       "reason": "missing tests/golden/external_derivation_candidates.snap"
     }
   ],
-  "count": 71,
+  "count": 76,
   "status": "fail"
 }

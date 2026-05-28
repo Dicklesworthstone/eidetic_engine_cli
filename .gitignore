@@ -282,3 +282,17 @@ tests/audit_artifacts/install_pipeline_*.json
 /diff.txt
 /diff_*.txt
 /diff-*.txt
+
+# --- repo-janitor 2026-05-28: regenerable CI-gate report artifacts ---
+/.closure-lint-report.json
+/.closure-quality-report.json
+/.vision-coverage-report.json
+/.bead-obsolescence-report.json
+/.bridge-staleness-report.json
+/.tracing-field-report.json
+/.verification-drift-report.json
+# --- repo-janitor: skill/session leak + scratch ---
+/.skill-loop-progress.md
+/ee_illustration.png
+/.beads.snapshot_*/
+/tests/artifacts/
