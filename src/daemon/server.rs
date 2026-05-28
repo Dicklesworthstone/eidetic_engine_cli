@@ -42,7 +42,8 @@ use super::protocol::{
 };
 use super::{
     DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT,
-    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DaemonStartError, current_euid,
+    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DAEMON_SETSOCKOPT_FAILED_CODE,
+    DaemonStartError, current_euid,
 };
 
 /// Method dispatch name for the round-trip integrity check.
@@ -406,8 +407,45 @@ fn write_overloaded_response(stream: &mut UnixStream) {
 }
 
 fn handle_connection(mut stream: UnixStream) {
-    let _ = stream.set_read_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT));
-    let _ = stream.set_write_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT));
+    // Install the per-connection deadlines BEFORE any read. The read
+    // timeout is the only backstop that stops a half-open peer from
+    // pinning this worker thread forever; if `setsockopt` fails (low
+    // memory, a seccomp filter that blocks SO_RCVTIMEO/SO_SNDTIMEO,
+    // certain BSD kernel modes) we MUST NOT fall through into a
+    // deadline-less `read_request`. The pre-fix code discarded these
+    // errors with `let _ =`, leaving exactly that permanent-hang path.
+    // Set the write deadline first so the refusal envelope below cannot
+    // itself block on a wedged client. Sentinel: bd-3pnno setsockopt.
+    if let Err(error) = stream.set_write_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT)) {
+        // No write deadline could be installed. We still attempt a
+        // best-effort framed refusal — a freshly accepted UDS send
+        // buffer almost always accepts a small envelope without
+        // blocking — then drop. `write_response`'s own error is
+        // swallowed; the connection closes either way and the worker
+        // exits instead of hanging.
+        let response = DaemonResponse::err(
+            "<setsockopt>",
+            DAEMON_SETSOCKOPT_FAILED_CODE,
+            format!("daemon could not set the connection write timeout: {error}"),
+        )
+        .with_degraded(DAEMON_SETSOCKOPT_FAILED_CODE);
+        let _ = write_response(&mut stream, &response);
+        return;
+    }
+    if let Err(error) = stream.set_read_timeout(Some(DAEMON_DEFAULT_RPC_TIMEOUT)) {
+        // The critical case: without a read deadline, `read_request`
+        // could block forever on a peer that opened the connection and
+        // stopped sending. Refuse with a framed envelope and drop so
+        // the worker thread is reclaimed.
+        let response = DaemonResponse::err(
+            "<setsockopt>",
+            DAEMON_SETSOCKOPT_FAILED_CODE,
+            format!("daemon could not set the connection read timeout: {error}"),
+        )
+        .with_degraded(DAEMON_SETSOCKOPT_FAILED_CODE);
+        let _ = write_response(&mut stream, &response);
+        return;
+    }
 
     // Peer-credential gate (bd-3j0td). Even with the socket file
     // tightened to 0o600 — and the per-UID parent dir at 0o700 — the
