@@ -28,6 +28,8 @@ pub enum EnvVar {
     CurationAutoPromoteMaxPerRun,
     /// `EE_CURATION_DERIVED_PREVIEW_LIMIT`
     CurationDerivedPreviewLimit,
+    /// `EE_DAEMON_MAX_INFLIGHT`
+    DaemonMaxInflight,
     /// `EE_DATABASE_PATH`
     DatabasePath,
     /// `EE_DEMO_EVIDENCE_ROOT`
@@ -222,6 +224,7 @@ impl EnvVar {
             Self::CurationAutoPromoteConfidenceFloor,
             Self::CurationAutoPromoteMaxPerRun,
             Self::CurationDerivedPreviewLimit,
+            Self::DaemonMaxInflight,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
             Self::DiagForceCapabilityGap,
@@ -327,6 +330,7 @@ impl EnvVar {
             Self::CurationAutoPromoteConfidenceFloor => "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
             Self::CurationAutoPromoteMaxPerRun => "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
             Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
+            Self::DaemonMaxInflight => "EE_DAEMON_MAX_INFLIGHT",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
@@ -448,6 +452,9 @@ impl EnvVar {
             }
             Self::CurationDerivedPreviewLimit => {
                 "Override the derived-candidate preview/reject listing limit."
+            }
+            Self::DaemonMaxInflight => {
+                "Override the cap on in-flight `ee daemon` worker threads; saturated accepts emit `daemon_overloaded`."
             }
             Self::DatabasePath => "Override the configured storage database path.",
             Self::DemoEvidenceRoot => "Override the demo evidence storage root.",
@@ -703,6 +710,7 @@ impl EnvVar {
             Self::ReflectionSourceBudgetBytes => Some("65536"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             Self::McpMaxRequestBytes => Some("16777216"),
+            Self::DaemonMaxInflight => Some("32"),
             _ => None,
         }
     }
@@ -785,6 +793,7 @@ impl EnvVar {
             | Self::AuditLaneBatchMax
             | Self::AuditLaneCapacity
             | Self::AuditLaneFlushMs
+            | Self::DaemonMaxInflight
             | Self::GraphMemoryDegradedBelowPct
             | Self::GraphMemoryGrowthMultiplierBasisPoints
             | Self::GraphMemoryPerAlgorithmCapMb

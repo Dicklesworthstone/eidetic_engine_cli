@@ -2,8 +2,12 @@
 //!
 //! The daemon is opt-in: every CLI command continues to work without it.
 //! When started, it binds a UDS at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on
-//! Linux, falling back to `/tmp/ee-daemon.sock` on platforms (macOS) that
-//! do not standardize `XDG_RUNTIME_DIR`. The wire framing is a
+//! Linux, falling back to `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` on
+//! platforms (macOS) that do not standardize `XDG_RUNTIME_DIR`. The
+//! socket file is chmodded to 0o600 and the parent directory to 0o700
+//! immediately after bind; the accept loop also gates every connection
+//! through a `getpeereid` / `SO_PEERCRED` check (bd-3j0td). The wire
+//! framing is a
 //! length-prefixed JSON message pair (`ee.daemon.request.v1` →
 //! `ee.daemon.response.v1`); see `docs/schemas/ee.daemon.request.v1.json`
 //! and `docs/schemas/ee.daemon.response.v1.json` for the canonical
@@ -75,22 +79,48 @@ pub const DAEMON_DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE: &str =
     "daemon_ann_warmload_not_yet_implemented";
 
-/// Degraded code emitted when `start_daemon` is called on a non-Unix
-/// platform. UDS bind is intentionally Unix-only; Windows ships the
-/// in-process CLI path with no daemon-mode acceleration today.
-pub const DAEMON_RAM_PINNING_UNAVAILABLE_ON_MACOS_CODE: &str =
-    "daemon_ram_pinning_unavailable_on_macos";
-
-/// Degraded code emitted when the daemon socket cannot be reached by
-/// the CLI client. The CLI fallback path remains in-process execution;
-/// this code is informational so the operator can re-run
-/// `ee daemon start` if they expected hot-mode acceleration.
+/// Degraded code emitted by `ee daemon stop` when no daemon socket is
+/// present at the resolved path (the operator stopped a daemon that
+/// was not running). Informational so an operator who expected
+/// hot-mode acceleration knows the daemon was not up and can re-run
+/// `ee daemon start`. The macOS RAM-pinning concern that a sibling
+/// dead constant once tried to express is already covered by the
+/// properly-scoped `lexical_ram_unavailable_on_macos` /
+/// `numa_pin_unsupported_platform` codes (see bd-2prjb).
 pub const DAEMON_SOCKET_UNAVAILABLE_CODE: &str = "daemon_socket_unavailable";
 
+/// Degraded code emitted when the daemon accept loop refuses a new
+/// connection because the bounded worker pool is saturated. The CLI
+/// client must fall back to in-process execution and may retry after a
+/// brief backoff once existing workers drain. See bd-jnyui.
+pub const DAEMON_OVERLOADED_CODE: &str = "daemon_overloaded";
+
+/// Hard upper bound on the number of in-flight per-connection worker
+/// threads the daemon will spawn. Defaults to 32 and is overridable via
+/// `EE_DAEMON_MAX_INFLIGHT` for stress harnesses; saturated accepts are
+/// answered with a framed `daemon_overloaded` response and the
+/// connection closed rather than queued. See bd-jnyui (P1 — unbounded
+/// thread spawn was a local DoS vector before this cap shipped).
+pub const DAEMON_MAX_INFLIGHT: usize = 32;
+
+/// Degraded code emitted on the daemon's accept side when a peer's
+/// effective UID does not match the daemon process's effective UID.
+/// The daemon refuses to dispatch the request and returns a framed
+/// error response carrying this code; the CLI client maps it onto the
+/// canonical envelope's `degraded[]` array with severity `high` per
+/// `docs/degraded_code_taxonomy.md`. Pins the bd-3j0td (P0 UDS
+/// world-connectable) fix surface: the chmod-0600 + getpeereid gate
+/// IS the cross-tenant exfil defense.
+pub const DAEMON_PEER_UNAUTHORIZED_CODE: &str = "daemon_peer_unauthorized";
+
 /// Compute the canonical daemon socket path for the current platform.
-/// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock`; on macOS
-/// (and any other Unix-y platform where `XDG_RUNTIME_DIR` is unset) the
-/// fallback is `${TMPDIR:-/tmp}/ee-daemon.sock`.
+/// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` (the
+/// runtime dir is already mode 0700 per the systemd-user contract);
+/// on macOS (and any other Unix-y platform where `XDG_RUNTIME_DIR` is
+/// unset) the fallback is `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` so
+/// the per-UID parent directory partitions the socket across local
+/// tenants. The bare `/tmp/ee-daemon.sock` shape collided across
+/// every local UID and is a documented attack surface (bd-3j0td).
 #[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
@@ -100,7 +130,28 @@ pub fn default_daemon_socket_path() -> PathBuf {
         }
     }
     let tmp = std::env::var_os("TMPDIR").unwrap_or_else(|| "/tmp".into());
-    Path::new(&tmp).join("ee-daemon.sock")
+    let uid = current_euid();
+    Path::new(&tmp)
+        .join(format!("ee-{uid}"))
+        .join("daemon.sock")
+}
+
+/// Return the effective UID of the calling process. Used by
+/// [`default_daemon_socket_path`] to partition the macOS / TMPDIR
+/// fallback per-tenant and by the daemon accept loop to compare
+/// against the peer credential.
+#[cfg(unix)]
+#[must_use]
+pub fn current_euid() -> u32 {
+    // SAFETY: `geteuid(2)` is async-signal-safe, has no preconditions,
+    // and cannot fail. It does not touch errno.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn current_euid() -> u32 {
+    0
 }
 
 /// Errors that can be reported by [`start_daemon`] before the accept
@@ -180,13 +231,20 @@ mod tests {
     }
 
     #[test]
-    fn default_socket_path_falls_back_to_tmpdir_on_darwin() {
-        // The fallback shape: `${TMPDIR:-/tmp}/ee-daemon.sock`. On a
-        // host without XDG_RUNTIME_DIR set this is the canonical path
-        // the CLI client uses; pin the construction so a future
-        // refactor cannot quietly change it.
+    fn default_socket_path_falls_back_to_per_uid_tmpdir_on_darwin() {
+        // Post-bd-3j0td: the fallback shape is
+        // `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock`. The per-UID parent
+        // partitions the socket across local tenants so the shared
+        // `/tmp/ee-daemon.sock` collision (the pre-fix attack surface)
+        // is gone. Pin the construction; a future refactor that
+        // collapses this back to the world-shared bare path is a
+        // regression of the P0 fix.
         let tmp = Path::new("/tmp");
-        assert_eq!(tmp.join("ee-daemon.sock"), Path::new("/tmp/ee-daemon.sock"),);
+        let uid: u32 = 1000;
+        assert_eq!(
+            tmp.join(format!("ee-{uid}")).join("daemon.sock"),
+            Path::new("/tmp/ee-1000/daemon.sock"),
+        );
     }
 
     #[test]

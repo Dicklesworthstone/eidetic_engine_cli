@@ -115,6 +115,10 @@ fnx-runtime = { version = "0.1.0", path = "../franken_networkx/crates/fnx-runtim
 frankensearch = { version = "0.3.0", path = "../frankensearch/frankensearch", default-features = false, features = ["hash", "storage"] }
 getrandom = { version = "0.3.4" }
 regex-lite = { version = "0.1" }
+# Direct dep for `libc::getpeereid` / `libc::ucred` / `libc::geteuid`,
+# used by the daemon UDS RPC peer-credential gate in `src/daemon/server.rs`
+# (bd-3j0td). Already transitively present via rustix, sqlmodel, etc.
+libc = { version = "0.2" }
 ring = { version = "0.17" }
 roaring = { version = "0.11.4" }
 rustix = { version = "1.1.4", features = ["fs", "process"] }
@@ -294,7 +298,7 @@ name = "witness_retention_e2e"
 path = "tests/contracts/witness_retention_e2e.rs"
 
 [patch.crates-io]
-asupersync = { path = "../asupersync" }
+asupersync = { path = "/data/projects/asupersync" }
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
 fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }
