@@ -1,0 +1,28 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "daemon_handler_panic",
+  "honesty_only": true,
+  "introduced_by": {
+    "bead": "bd-b82q4",
+    "epic_letter": "SRR1"
+  },
+  "surfaces": [
+    "daemon"
+  ],
+  "severity": "high",
+  "repair_present": false,
+  "trigger": {
+    "description": "A daemon connection-handler panics inside dispatch (e.g. a future warm-load method hits a bounds-check failure on a corrupt mmap, an integer overflow in a scoring path, or an allocation failure under pressure). The accept loop wraps handle_connection in std::panic::catch_unwind, emits a sanitized daemon_handler_panic envelope to the client, logs the panic to stderr, and keeps serving subsequent connections rather than tearing down the accept loop.",
+    "setup_commands": [
+      "ee daemon start --json"
+    ],
+    "invocation": "Internal — exercised by handle_connection_panicking_method_returns_structured_envelope_not_connection_reset"
+  },
+  "expected_emission": {
+    "code": "daemon_handler_panic",
+    "severity": "high",
+    "message_contains": [
+      "daemon handler panicked"
+    ]
+  }
+}
