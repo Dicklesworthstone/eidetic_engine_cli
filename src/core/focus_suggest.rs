@@ -458,6 +458,7 @@ fn compute_pagerank_scores(
     BTreeMap::new()
 }
 
+#[derive(Clone)]
 struct TopicCluster {
     topic_label: String,
     member_ids: Vec<String>,

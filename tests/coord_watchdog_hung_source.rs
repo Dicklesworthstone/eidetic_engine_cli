@@ -127,7 +127,7 @@ fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
     );
     assert_eq!(
         evidence.timing.timeout_ms,
-        Some(HUNG_SOURCE_TIMEOUT.as_millis() as u64),
+        HUNG_SOURCE_TIMEOUT.as_millis() as u64,
         "evidence timing must echo the configured timeout budget"
     );
     let elapsed_ms = evidence

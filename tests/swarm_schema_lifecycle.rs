@@ -1476,7 +1476,7 @@ fn work_packet_candidate_decision_vocabulary_is_contractual() -> TestResult {
     }
 
     let candidate_decision_ref = string_field(
-        schema,
+        &schema,
         "/definitions/candidate/properties/decision/$ref",
         "ee.swarm.work_packet.v1 candidate decision",
     )?;

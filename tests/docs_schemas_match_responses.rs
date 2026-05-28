@@ -1101,6 +1101,7 @@ fn reflection_propose_report_matches_schema_and_v2_envelope() -> TestResult {
         workspace_path: "/tmp/schema".to_owned(),
         database_path: "/tmp/schema/.ee/ee.db".to_owned(),
         reflection_kind: "gaps".to_owned(),
+        gaps_only: true,
         request_id: request.request_id.clone(),
         request_hash: request.request_hash.clone(),
         source_package_hash: request.source_package_hash.clone(),

@@ -370,7 +370,7 @@ fn ingest_remote_success_then_topology_returns_active_blocker() -> TestResult {
         ));
     }
 
-    let blockers = list_rch_verify_blockers(&connection, TEST_WORKSPACE_ID, T_NOW)
+    let blockers = list_rch_verify_blockers(&connection, TEST_WORKSPACE_ID, None, T_NOW)
         .map_err(|error| format!("list blockers: {error}"))?;
     if blockers.schema != RCH_VERIFY_LEDGER_BLOCKERS_REPORT_SCHEMA_V1 {
         return Err(format!("blockers schema drifted: {}", blockers.schema));
@@ -511,7 +511,7 @@ fn full_lifecycle_orders_runs_deterministically() -> TestResult {
         ));
     }
 
-    let blockers = list_rch_verify_blockers(&connection, TEST_WORKSPACE_ID, T_NOW)
+    let blockers = list_rch_verify_blockers(&connection, TEST_WORKSPACE_ID, None, T_NOW)
         .map_err(|error| format!("list blockers: {error}"))?;
     for blocker in &blockers.blockers {
         if blocker.status != "blocked" {

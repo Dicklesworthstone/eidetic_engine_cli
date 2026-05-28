@@ -41957,8 +41957,7 @@ where
                     },
                     "degraded": []
                 });
-                let rendered =
-                    serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
+                let rendered = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
                 write_stdout(stdout, &(rendered + "\n"));
                 if args.foreground {
                     // Block indefinitely so an operator running this

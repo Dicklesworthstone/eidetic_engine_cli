@@ -708,8 +708,6 @@ mod tests {
     use std::collections::HashMap;
     use std::path::Path;
 
-    #[cfg(target_os = "linux")]
-    use super::NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE;
     #[cfg(not(target_os = "linux"))]
     use super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE;
     use super::{

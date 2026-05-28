@@ -830,7 +830,7 @@ fn insights_knowledge_gaps_cli_freezes_graph_fixture_recommendations() -> TestRe
         .ok_or_else(|| "knowledgeGaps recommendations must be an array".to_owned())?;
     if items.len() != 4 {
         return Err(format!(
-            "knowledgeGaps fixture should emit four representative gaps, got {}: {items}",
+            "knowledgeGaps fixture should emit four representative gaps, got {}: {items:?}",
             items.len()
         ));
     }

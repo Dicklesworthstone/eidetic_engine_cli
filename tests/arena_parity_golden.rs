@@ -799,7 +799,7 @@ fn arena_parity_context_response_hash_and_json_provenance_heavy() -> TestResult 
         "show evidence for arena policy decisions",
         6_000,
         &candidates,
-        0xc0_d3_8k_08,
+        0xc0_d3_8e08,
     )
 }
 
@@ -816,7 +816,7 @@ fn arena_parity_context_response_hash_and_json_budget_pressured() -> TestResult 
         "summarize prior arena-mode decisions and failures",
         500,
         &candidates,
-        0xc0_d3_8k_09,
+        0xc0_d3_8e09,
     )
 }
 

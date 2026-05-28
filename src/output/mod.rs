@@ -19061,7 +19061,7 @@ mod tests {
             &Some("ee status --workspace . --json"),
             "reflection recovery command",
         )?;
-        ensure!(
+        ensure(
             recovery
                 .iter()
                 .any(|action| action["envName"].as_str() == Some("EE_REFLECTION_HMAC_KEY")),

@@ -2,6 +2,16 @@ mod models {
     pub use ee::models::*;
 }
 
+/// Sibling helper required by `src/core/proof_verify.rs`, which is included
+/// here via `#[path]` and references `super::duration_millis_saturating`.
+/// Mirrors the implementation in `src/core/mod.rs` so the test crate root
+/// satisfies the `super::` lookup without exposing additional crate-private
+/// symbols. Keep the body in sync if the production helper evolves.
+#[must_use]
+pub(crate) fn duration_millis_saturating(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[path = "../src/core/proof_verify.rs"]
 mod proof_verify;
 
