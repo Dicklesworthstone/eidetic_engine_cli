@@ -16,6 +16,8 @@ const MANIFEST_ONLY_OPTION_MODE_COMMANDS: &[&str] = &[
     "daemon background",
     "daemon foreground decay_sweep",
     "daemon foreground non-decay",
+    "daemon start",
+    "daemon stop",
     "review session --propose",
 ];
 

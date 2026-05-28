@@ -142,6 +142,9 @@ mod cass_contracts;
 #[path = "contracts/integration_foundation.rs"]
 mod integration_foundation;
 
+#[path = "contracts/effect_manifest_completeness.rs"]
+mod effect_manifest_completeness;
+
 #[path = "contracts/sqlmodel_frankensqlite.rs"]
 mod sqlmodel_frankensqlite;
 

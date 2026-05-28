@@ -1589,6 +1589,16 @@ impl EffectManifest {
                 "Plan causal promotion and persist reviewed curation candidates when evidence clears thresholds",
             ),
             CommandEffect::durable_write(
+                "daemon start",
+                Vec::new(),
+                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or $TMPDIR/ee-daemon.sock); creates the parent directory and writes a UDS file outside the workspace",
+            ),
+            CommandEffect::durable_write(
+                "daemon stop",
+                Vec::new(),
+                "Remove the UDS RPC socket file (best-effort); subsequent CLI invocations stop dialing the daemon",
+            ),
+            CommandEffect::durable_write(
                 "curate accept",
                 vec!["curation_candidates", "procedural_rules", "audit_log"],
                 "Accept a curation candidate",
