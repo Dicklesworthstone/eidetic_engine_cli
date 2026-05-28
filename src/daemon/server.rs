@@ -28,7 +28,7 @@ use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -242,10 +242,21 @@ pub fn start_server(
             })?;
     }
 
+    // Refuse to clobber a non-socket file already occupying the
+    // canonical path, but do NOT pre-`remove_file` it. The former
+    // stat → remove_file → bind sequence had two TOCTOU windows: an
+    // attacker with write access to the parent directory could swap
+    // the socket for a regular file between the `is_socket()` check
+    // and the `remove_file` (falsifying the daemon's "this is my
+    // stale socket" belief), or recreate the path between
+    // `remove_file` and `bind`. We instead bind a per-attempt temp
+    // path and `rename(2)` it onto the canonical name atomically
+    // (below); `rename` replaces any existing socket cleanly with no
+    // unlink step, collapsing both windows into one operation. The
+    // parent directory is per-UID 0o700 (bd-3j0td), so no other UID
+    // can race us inside it. Sentinel: bd-3ik2d atomic-rename.
     match fs::symlink_metadata(&socket_path) {
         Ok(metadata) => {
-            // The path exists. Only proceed if it is itself a socket
-            // (a stale daemon left it behind); refuse anything else.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileTypeExt;
@@ -258,11 +269,8 @@ pub fn start_server(
                 let _ = metadata;
                 return Err(DaemonStartError::PlatformUnsupported);
             }
-            // Stale socket: unlink so bind succeeds.
-            fs::remove_file(&socket_path).map_err(|source| DaemonStartError::Bind {
-                path: socket_path.clone(),
-                source,
-            })?;
+            // A stale socket from a prior daemon: the `rename` below
+            // atomically replaces it, so there is nothing to unlink.
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(source) => {
@@ -273,32 +281,59 @@ pub fn start_server(
         }
     }
 
-    let listener = UnixListener::bind(&socket_path).map_err(|source| DaemonStartError::Bind {
+    // Bind a per-attempt temporary path inside the same (per-UID
+    // 0o700) parent directory, tighten its mode to 0o600 BEFORE it is
+    // ever visible at the canonical name, then `rename(2)` it into
+    // place. Because the chmod happens on the temp path, the canonical
+    // path never exists in a world-connectable (0o755) state for even
+    // an instant — a strict improvement over chmod-after-bind. The
+    // temp name carries the pid plus a process-global counter so two
+    // concurrent binds (same process or across processes) never
+    // collide on the temp path and each `rename` is a clean atomic
+    // publish. Sentinel: bd-3ik2d atomic-rename.
+    let tmp_path = temp_bind_path(&socket_path);
+    // Clear any temp left by a crashed prior attempt that happened to
+    // reuse this pid+counter; best-effort, the bind below is the
+    // authoritative step.
+    let _ = fs::remove_file(&tmp_path);
+
+    let listener = UnixListener::bind(&tmp_path).map_err(|source| DaemonStartError::Bind {
         path: socket_path.clone(),
         source,
     })?;
 
-    // Tighten the socket file to mode 0o600 immediately after bind.
-    // `UnixListener::bind` honours the process umask, which is
-    // typically 0o022 → mode 0o755 on the resulting socket: world-
-    // connectable on every Unix host. Without this chmod, any local
-    // UID can `connect(2)` and reach the dispatch table — the
-    // pre-fix attack surface documented in bd-3j0td. The chmod is
-    // best-effort but failures are surfaced so an operator running
-    // on a filesystem that rejects `chmod` (rare, but possible on
-    // certain network mounts) sees the bind step error rather than
-    // a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).map_err(|source| {
-        // The socket is bound but world-open at this instant; remove
-        // it before returning so a half-secured artifact does not
-        // linger. The remove is best-effort — the chmod failure is
-        // the actionable error.
-        let _ = fs::remove_file(&socket_path);
-        DaemonStartError::Bind {
-            path: socket_path.clone(),
+    // Tighten the temp socket to mode 0o600 before it is published.
+    // `UnixListener::bind` honours the process umask (typically 0o022
+    // → mode 0o755): world-connectable on every Unix host. Without
+    // this chmod, any local UID could `connect(2)` and reach the
+    // dispatch table — the attack surface documented in bd-3j0td. The
+    // chmod failure is surfaced (not swallowed) so an operator on a
+    // filesystem that rejects `chmod` sees the bind step error rather
+    // than a silently world-open socket. Sentinel: bd-3j0td chmod-0600.
+    if let Err(source) = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600)) {
+        // The temp socket is bound but world-open at this instant;
+        // remove it before returning so a half-secured artifact does
+        // not linger under the temp name.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(DaemonStartError::Bind {
+            path: socket_path,
             source,
-        }
-    })?;
+        });
+    }
+
+    // Atomically publish the secured socket at the canonical path.
+    // `rename(2)` is atomic and replaces a stale socket left by a
+    // prior daemon in a single step.
+    if let Err(source) = fs::rename(&tmp_path, &socket_path) {
+        // Publish failed (e.g. cross-device move, or the parent dir
+        // was removed underneath us). Drop the temp socket so it does
+        // not linger, then surface the failure.
+        let _ = fs::remove_file(&tmp_path);
+        return Err(DaemonStartError::Bind {
+            path: socket_path,
+            source,
+        });
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_in_thread = Arc::clone(&shutdown);
@@ -320,6 +355,30 @@ pub fn start_server(
         shutdown,
         accept_thread: Some(accept_thread),
     })
+}
+
+/// Construct a per-attempt temporary socket path next to `socket_path`,
+/// of the form `<socket>.tmp.<pid>.<counter>`. The pid plus a
+/// process-global monotonic counter guarantees the path is unique to
+/// this bind attempt, so two concurrent [`start_server`] calls — in the
+/// same process or across processes — never collide on the temp name
+/// and the subsequent `rename(2)` is always a clean atomic publish.
+/// Sentinel: bd-3ik2d atomic-rename.
+fn temp_bind_path(socket_path: &Path) -> PathBuf {
+    static TEMP_BIND_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let suffix = format!(
+        ".tmp.{}.{}",
+        std::process::id(),
+        TEMP_BIND_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut file_name = socket_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    file_name.push(&suffix);
+    let mut tmp_path = socket_path.to_path_buf();
+    tmp_path.set_file_name(file_name);
+    tmp_path
 }
 
 fn run_accept_loop(
@@ -1020,5 +1079,120 @@ mod tests {
         assert_eq!(response.result, Some(serde_json::json!({"peer": "self"})));
 
         handle.shutdown().expect("shutdown");
+    }
+
+    /// bd-3ik2d: a stale socket left by a crashed prior daemon must be
+    /// replaced atomically. The fix binds a temp path and `rename(2)`s
+    /// it over the stale socket — there is no `remove_file` step that a
+    /// racing attacker could exploit (the former TOCTOU window). Here we
+    /// leave a dead socket file behind (bind, then drop the listener
+    /// without unlinking) and assert the next `start_server` publishes a
+    /// fresh, live, 0o600 socket over it.
+    #[test]
+    fn start_server_replaces_stale_socket_atomically() {
+        use std::os::unix::fs::FileTypeExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-stale.sock");
+
+        // Simulate a crashed daemon: bind then drop the listener WITHOUT
+        // unlinking, leaving a dead socket file on disk.
+        {
+            let stale = UnixListener::bind(&socket_path).expect("stale bind");
+            drop(stale);
+        }
+        assert!(
+            fs::symlink_metadata(&socket_path)
+                .expect("stale socket must remain on disk")
+                .file_type()
+                .is_socket(),
+            "precondition: a stale socket file occupies the path",
+        );
+
+        let mut handle = start_server(&socket_path).expect("server must replace stale socket");
+        thread::sleep(Duration::from_millis(50));
+
+        let metadata = fs::symlink_metadata(handle.socket_path()).expect("socket metadata");
+        assert!(
+            metadata.file_type().is_socket(),
+            "published path must be a socket"
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "replaced socket must be 0o600 (bd-3j0td invariant preserved across rename)",
+        );
+        let request =
+            DaemonRequest::new("req-stale-001", METHOD_ECHO, serde_json::json!({"ping": 1}));
+        let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
+        assert_eq!(response.result, Some(serde_json::json!({"ping": 1})));
+
+        handle.shutdown().expect("shutdown");
+    }
+
+    /// bd-3ik2d: two concurrent `start_server` calls on the same path
+    /// must never leave the canonical path in a corrupt state. The old
+    /// stat → remove_file → bind sequence could unlink a peer's fresh
+    /// socket or leave the path momentarily absent / a regular file (the
+    /// TOCTOU window). The atomic bind-temp → chmod → rename path
+    /// guarantees the canonical name always resolves to a valid 0o600
+    /// socket regardless of who wins the race, and neither bind errors.
+    #[test]
+    fn start_server_concurrent_binds_no_toctou() {
+        use std::os::unix::fs::FileTypeExt;
+        use std::sync::Barrier;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-race.sock");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let path = socket_path.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    start_server(&path)
+                })
+            })
+            .collect();
+
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|t| t.join().expect("bind thread must not panic"))
+            .collect();
+
+        // The atomic rename replaces rather than racing on remove_file,
+        // so both concurrent binds succeed. If someone reintroduces the
+        // stat → remove → bind window, one bind will observe EADDRINUSE
+        // or unlink the other's socket and this count drops below two.
+        let ok_count = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok_count, 2, "both concurrent atomic binds must succeed");
+
+        // The canonical path always resolves to a live 0o600 socket —
+        // never absent, never a regular file, never world-open.
+        let metadata = fs::symlink_metadata(&socket_path).expect("canonical path must exist");
+        assert!(
+            metadata.file_type().is_socket(),
+            "canonical path must be a socket after a concurrent-bind race",
+        );
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o600,
+            "canonical socket must be 0o600 after a concurrent-bind race",
+        );
+
+        // The losing bind's listener is orphaned: the winner's `rename`
+        // replaced the canonical path, so the loser's accept loop can no
+        // longer be woken (shutdown wakes by connecting to the canonical
+        // name, which now points at the winner). Joining it would
+        // deadlock, so we intentionally leak both handles and let the
+        // tempdir reap the socket file. The leak is bounded to this test
+        // process.
+        for result in results {
+            if let Ok(handle) = result {
+                std::mem::forget(handle);
+            }
+        }
     }
 }
