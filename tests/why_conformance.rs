@@ -123,7 +123,7 @@ fn why_response_schema_is_ee_response_v1() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "schema test",
         "--max-tokens",
         "4000",
@@ -317,7 +317,7 @@ fn why_storage_section_is_complete() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "storage test",
         "--max-tokens",
         "4000",
@@ -437,7 +437,7 @@ fn why_retrieval_section_exposes_numeric_scores() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "retrieval test",
         "--max-tokens",
         "4000",
@@ -608,7 +608,7 @@ fn why_selection_section_exposes_score_formula() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "selection test",
         "--max-tokens",
         "4000",
@@ -671,7 +671,7 @@ fn why_latest_pack_selection_references_context_pack() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "pack reference test",
         "--max-tokens",
         "4000",
@@ -841,7 +841,7 @@ fn why_explanation_covers_all_memory_levels() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "completeness test",
         "--max-tokens",
         "8000",
@@ -914,7 +914,7 @@ fn why_explanation_covers_all_memory_kinds() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "kinds test",
         "--max-tokens",
         "8000",
@@ -983,7 +983,7 @@ fn why_json_output_is_stdout_only() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "output test",
         "--max-tokens",
         "4000",
@@ -1037,7 +1037,7 @@ fn why_human_mode_uses_stderr_for_diagnostics() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "human mode test",
         "--max-tokens",
         "4000",

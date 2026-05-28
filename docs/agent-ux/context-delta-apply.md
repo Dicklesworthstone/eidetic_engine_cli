@@ -2,14 +2,14 @@
 
 Delta payloads add to your prompt; they do not replace the base pack.
 
-`ee context --since <pack-hash> --json` is a JSON-only transport optimization
+`ee pack --since <pack-hash> --json` is a JSON-only transport optimization
 for long agent sessions. The normal context pack is still the canonical state.
 The delta envelope describes how to update a pack that the agent already has in
 memory.
 
 ## Base Hash
 
-Pass a hash from a prior `ee context --json` response's `data.pack.hash`.
+Pass a hash from a prior `ee pack --json` response's `data.pack.hash`.
 The server verifies that the hash names a pack record emitted by `ee` for the
 same workspace. Locally computed hashes, hashes from another workspace, and
 evicted records are rejected as delta bases. In those cases the command returns
@@ -96,10 +96,10 @@ unsupported renderer, the command should return the full renderer output with
 
 ## No Apply Command
 
-`ee` should not add `ee context apply-delta --base <hash> --delta-stdin` for
+`ee` should not add `ee pack apply-delta --base <hash> --delta-stdin` for
 v1. Sending the base and delta back to the server defeats the byte-saving goal
 and creates a second state-management surface. Agents can always re-run
-`ee context "<task>" --json` without `--since` to recover the canonical full
+`ee pack "<task>" --json` without `--since` to recover the canonical full
 pack.
 
 ## Retention

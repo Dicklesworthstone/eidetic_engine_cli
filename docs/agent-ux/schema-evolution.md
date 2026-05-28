@@ -28,7 +28,7 @@ boundary.
 - Ignore an unknown schema ID unless the task explicitly requires that surface.
 - Treat unknown optional fields on a known schema as unavailable unless a newer
   migration document says how to consume them.
-- Do not infer schema version from command flags. `ee context --explain` can
+- Do not infer schema version from command flags. `ee pack --explain` can
   contain multiple nested schemas.
 - Do not store or compare volatile fields as semantic evidence. Use the
   volatile-field registry before hashing graph output.

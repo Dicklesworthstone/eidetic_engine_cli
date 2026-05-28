@@ -537,7 +537,7 @@ fn context_without_database_uses_honest_error_envelope_and_e2e_log() -> TestResu
             "--workspace".to_owned(),
             workspace_arg,
             "--json".to_owned(),
-            "context".to_owned(),
+            "pack".to_owned(),
             "prepare release".to_owned(),
         ],
     )?;

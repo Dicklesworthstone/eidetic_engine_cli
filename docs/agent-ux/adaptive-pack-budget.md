@@ -1,6 +1,6 @@
 # Agent Guide: Adaptive Pack Budgets
 
-Adaptive pack budgets let `ee context` choose a smaller or larger token budget
+Adaptive pack budgets let `ee pack` choose a smaller or larger token budget
 from deterministic task signals instead of using one fixed default for every
 query. The feature is opt-in, and an explicit `--max-tokens` value remains
 authoritative.
@@ -23,7 +23,7 @@ computed budget.
 
 Current implementation note: core context assembly applies adaptive budgets
 only when the caller passes no explicit/request token budget
-(`ContextPackOptions.max_tokens = None`). The `ee context` and
+(`ContextPackOptions.max_tokens = None`). The `ee pack` and
 `ee pack "<task>"` command paths preserve an omitted `--max-tokens` as
 implicit, so the opt-in can affect those paths. Passing `--max-tokens` still
 bypasses adaptive computation.

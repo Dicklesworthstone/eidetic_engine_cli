@@ -153,11 +153,10 @@ fn context_json(workspace: &str, agent_name: &str) -> Result<Value, String> {
     let output = run_ee(
         workspace,
         &[
-            "context",
+            "pack",
             QUERY,
             "--max-tokens",
             "1000",
-            "--explain",
             "--json",
         ],
         Some(agent_name),

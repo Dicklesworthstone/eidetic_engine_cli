@@ -245,14 +245,16 @@ fn context_cli_args(
     profile: ContextPackProfile,
     max_tokens: u32,
     candidate_pool: u32,
-    redaction: RedactionLevel,
     no_coverage_fill: bool,
     no_rendered_text: bool,
     no_skipped: bool,
     no_meta: bool,
 ) -> Vec<String> {
+    // `ee pack` (the surface that replaced the removed `ee context` command)
+    // does not expose a `--redaction` flag, so the redaction axis is no longer
+    // varied through the CLI here.
     let mut args = vec![
-        "context".to_string(),
+        "pack".to_string(),
         query.to_string(),
         "--max-tokens".to_string(),
         max_tokens.to_string(),
@@ -260,8 +262,6 @@ fn context_cli_args(
         candidate_pool.to_string(),
         "--profile".to_string(),
         profile.as_str().to_string(),
-        "--redaction".to_string(),
-        redaction.as_str().to_string(),
         "--json".to_string(),
     ];
     if no_coverage_fill {
@@ -2579,7 +2579,6 @@ proptest! {
         profile_raw in any::<u8>(),
         max_tokens in 64_u32..=512,
         candidate_pool in 1_u32..=16,
-        redaction_raw in 0_usize..RedactionLevel::all().len(),
         read_pool_size in 1_u64..=2,
         pin_snapshot in any::<bool>(),
         no_coverage_fill in any::<bool>(),
@@ -2598,13 +2597,11 @@ proptest! {
 
         let query = context_query_for(query_raw);
         let profile = profile_for(profile_raw);
-        let redaction = redaction_level_for(redaction_raw);
         let args = context_cli_args(
             query,
             profile,
             max_tokens,
             candidate_pool,
-            redaction,
             no_coverage_fill,
             no_rendered_text,
             no_skipped,

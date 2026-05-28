@@ -95,7 +95,6 @@ in the same commit, keeping the catalog complete by construction.
 | `harmful_burst_quarantine` | outcome | warning | bd-3qs2i.3.1 (F3) |
 | `anti_pattern_proposed` | outcome | info | bd-17c65.14.12 (N12) |
 | `feedback_protected_rules_unavailable` | status | medium | bd-17c65.10.6 (J6) |
-| `deprecated_alias` | context | info | bd-17c65.10.6 (J6) |
 | `usage_unknown_field` | global fields | low | bd-17c65.4.5 (D5) |
 | `usage_conflicting_presets` | global fields | low | bd-17c65.4.5 (D5) |
 | `auto_propose_skipped_too_few_neighbors` | remember | info | bd-17c65.7.3 (G3) |

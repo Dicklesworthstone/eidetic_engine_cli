@@ -185,7 +185,7 @@ fn current_surface(name: &str, fixture: &Fixture) -> Result<Value, String> {
             "--json".to_owned(),
             "--workspace".to_owned(),
             workspace,
-            "context".to_owned(),
+            "pack".to_owned(),
             QUERY.to_owned(),
             "--database".to_owned(),
             database,

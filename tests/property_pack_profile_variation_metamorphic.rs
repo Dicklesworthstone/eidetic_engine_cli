@@ -156,7 +156,7 @@ fn context_json(
     resource_profile: Option<&str>,
 ) -> Result<JsonValue, String> {
     let mut args: Vec<&str> = vec![
-        "context",
+        "pack",
         query,
         "--profile",
         profile,

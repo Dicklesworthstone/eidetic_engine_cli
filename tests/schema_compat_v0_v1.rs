@@ -179,7 +179,7 @@ fn context_supports_explicit_v0_response_envelope() -> TestResult {
             "--schema-version",
             "v0",
             "--json",
-            "context",
+            "pack",
             "format before release",
             "--profile",
             "compact",
@@ -195,7 +195,7 @@ fn context_supports_explicit_v0_response_envelope() -> TestResult {
     if context.get("result").is_none() || context.get("data").is_some() {
         return Err("context v0 response should use result and not data".to_string());
     }
-    ensure_string(&context, &["result", "command"], "context")?;
+    ensure_string(&context, &["result", "command"], "pack")?;
     ensure_string(
         &context,
         &["result", "request", "query"],

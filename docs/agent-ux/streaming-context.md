@@ -1,8 +1,8 @@
 # Agent Guide: Streaming Context Packs
 
-`ee context --stream --format json` emits newline-delimited JSON frames using
+`ee pack --stream --format json` emits newline-delimited JSON frames using
 the `ee.pack.stream.v1` schema. The stream is an agent-facing transport for the
-same deterministic pack that `ee context --json` returns in one batch.
+same deterministic pack that `ee pack --json` returns in one batch.
 
 Use streaming when first-use latency matters more than waiting for the complete
 pack envelope. Do not use it as a different ranking mode. The item order,
@@ -44,7 +44,7 @@ quality, selection audit, and optional Pack DNA.
 ## Minimal Consumer
 
 ```bash
-ee context "prepare release" --workspace . --stream --format json |
+ee pack "prepare release" --workspace . --stream --format json |
   while IFS= read -r line; do
     kind=$(printf '%s\n' "$line" | jq -r '.kind')
     case "$kind" in

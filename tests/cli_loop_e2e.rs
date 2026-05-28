@@ -273,11 +273,11 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
         )?;
     }
 
-    // Step 6: ee context
+    // Step 6: ee pack
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "prepare for push to main",
         "--max-tokens",
         "4000",
@@ -391,7 +391,7 @@ fn cli_loop_init_remember_search_context_why_full_cycle() -> TestResult {
     let context_replay = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "prepare for push to main",
         "--max-tokens",
         "4000",
@@ -466,7 +466,7 @@ fn cli_loop_context_empty_workspace_degrades_gracefully() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "anything",
         "--max-tokens",
         "4000",

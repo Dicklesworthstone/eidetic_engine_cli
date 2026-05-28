@@ -305,12 +305,11 @@ const HELP_PRELUDE: &str = concat!(
     "  init          Initialize an ee workspace\n",
     "  remember      Capture an explicit memory\n",
     "  search        Fine-grained memory retrieval\n",
-    "  context       Assemble a task-specific context pack\n",
+    "  pack          Assemble a task-specific context pack\n",
     "  why           Explain why a memory was stored or selected\n",
     "\n",
     "Agent shortcuts:\n",
     "  note          Capture a memory with agent-friendly level/kind inference\n",
-    "  pack          Build or replay context packs with explicit pack controls\n",
     "\n",
     "Quick categories (the full alphabetical list is below):\n",
     "\n",
@@ -681,14 +680,12 @@ pub enum Command {
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
-    /// Assemble a task-specific context pack from relevant memories.
-    Context(ContextArgs),
     /// Retrieve a previously persisted context pack by ID.
     ///
     /// Persisted packs are immutable artifacts created during a prior
-    /// `ee context` invocation. `ee context-show <pack_id>` looks up
+    /// `ee pack` invocation. `ee context-show <pack_id>` looks up
     /// the pack record from the workspace database and renders it in
-    /// the same canonical shape as a fresh `ee context` response.
+    /// the same canonical shape as a fresh `ee pack` response.
     /// Bead bd-17c65.1.10 (A11).
     #[command(name = "context-show")]
     ContextShow(ContextShowArgs),
@@ -9898,7 +9895,6 @@ where
             }
             MaintenanceCommand::Status(args) => handle_maintenance_status(&cli, args, stdout),
         },
-        Some(Command::Context(ref args)) => handle_context(&cli, args, stdout, stderr),
         Some(Command::ContextShow(ref args)) => handle_context_show(&cli, args, stdout, stderr),
         Some(Command::Completion(ref args)) => handle_completion(&cli, args, stdout),
         Some(Command::Config(ref config_cmd)) => {
@@ -28913,25 +28909,11 @@ where
     ProcessExitCode::Success
 }
 
-fn handle_context<W, E>(
+fn handle_context_pack_query<W, E>(
     cli: &Cli,
     args: &ContextArgs,
     stdout: &mut W,
     stderr: &mut E,
-) -> ProcessExitCode
-where
-    W: Write,
-    E: Write,
-{
-    handle_context_with_alias_notice(cli, args, stdout, stderr, true)
-}
-
-fn handle_context_with_alias_notice<W, E>(
-    cli: &Cli,
-    args: &ContextArgs,
-    stdout: &mut W,
-    stderr: &mut E,
-    include_deprecated_alias: bool,
 ) -> ProcessExitCode
 where
     W: Write,
@@ -28942,7 +28924,7 @@ where
         Err(message) => {
             let domain_error = DomainError::Usage {
                 message,
-                repair: Some("ee context --help".to_string()),
+                repair: Some("ee pack --help".to_string()),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
@@ -28968,7 +28950,6 @@ where
             && !args.explain
             && !args.explain_performance
             && !args.stream
-            && !include_deprecated_alias
             && args.mesh_mode == MeshCommandMode::Off
             && args.changed_symbols.is_empty()
             && !args.changed_symbols_from_git,
@@ -29014,7 +28995,7 @@ where
     };
 
     if args.explain_performance {
-        return match run_context_pack_with_performance(&options, "context") {
+        return match run_context_pack_with_performance(&options, "pack") {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
             Err(error) => {
                 let domain_error = context_error_to_domain(&error);
@@ -29028,13 +29009,7 @@ where
             if args.explain && !args.no_pack_dna {
                 attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
             }
-            if include_deprecated_alias {
-                response
-                    .data
-                    .degraded
-                    .push(deprecated_context_alias_degradation());
-            }
-            attach_revisable_pack_metadata(&mut response, args.mesh_mode, "context");
+            attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
             let render_options = output::ContextJsonRenderOptions::from(output_options);
             if let Some(exit) = maybe_write_context_delta(
                 cli.context_renderer(),
@@ -29119,11 +29094,11 @@ where
             CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE,
             ContextResponseSeverity::Info,
             format!(
-                "`ee context --since` format {format} does not support context deltas; emitting \
+                "`ee pack --since` format {format} does not support context deltas; emitting \
                  the full pack instead."
             ),
             Some(
-                "Use `ee context \"<task>\" --since <pack-hash> --json` for JSON context deltas, or omit --since."
+                "Use `ee pack \"<task>\" --since <pack-hash> --json` for JSON context deltas, or omit --since."
                     .to_string(),
             ),
         );
@@ -29204,13 +29179,12 @@ where
         return None;
     }
 
-    // bd-270ep: project response-side degradations (the `deprecated_alias`
-    // every `ee context` invocation carries, plus any pack-assembly
+    // bd-270ep: project response-side degradations (the pack-assembly
     // degradations attached upstream by run_context_pack) onto the
     // agent-visible delta envelope. The kernel envelope's `degraded[]`
     // only carries kernel-internal entries (oversized fallback, etc.), so
     // without this merge the happy-path silently drops every
-    // pack-pipeline signal an agent would normally see on `ee context`.
+    // pack-pipeline signal an agent would normally see on `ee pack`.
     for entry in &response.data.degraded {
         delta.append_response_degradation(
             entry.code.clone(),
@@ -29224,7 +29198,7 @@ where
     // reports the bytes the agent actually receives AND so max_delta_bytes
     // is enforced against the post-merge size. Without this step the
     // kernel's pre-merge measurement leaked through and the configured
-    // byte budget could be silently exceeded by deprecated_alias +
+    // byte budget could be silently exceeded by the merged
     // pack-pipeline degradations.
     // bd-2pgex: the CLI appends `\n` to the rendered envelope below, so
     // declare a 1-byte transport overhead. Without this the boundary
@@ -29441,24 +29415,6 @@ fn context_delta_severity(severity: &str) -> ContextResponseSeverity {
         "medium" => ContextResponseSeverity::Medium,
         "high" => ContextResponseSeverity::High,
         _ => ContextResponseSeverity::Info,
-    }
-}
-
-fn deprecated_context_alias_degradation() -> ContextResponseDegradation {
-    match ContextResponseDegradation::new(
-        "deprecated_alias",
-        ContextResponseSeverity::Info,
-        "`ee context` is a compatibility alias for the promoted triad command.",
-        Some("Use `ee pack \"<task>\"`.".to_string()),
-    ) {
-        Ok(entry) => entry,
-        Err(_) => ContextResponseDegradation {
-            code: "deprecated_alias".to_string(),
-            severity: ContextResponseSeverity::Info,
-            message: "`ee context` is a compatibility alias for the promoted triad command."
-                .to_string(),
-            repair: Some("Use `ee pack \"<task>\"`.".to_string()),
-        },
     }
 }
 
@@ -31957,7 +31913,7 @@ where
             since: None,
             max_delta_bytes: None,
         };
-        return handle_context_with_alias_notice(cli, &context_args, stdout, stderr, false);
+        return handle_context_pack_query(cli, &context_args, stdout, stderr);
     }
 
     match &args.command {
@@ -45884,7 +45840,6 @@ const COMMAND_NAMES: &[&str] = &[
     "claim",
     "config",
     "coordination",
-    "context",
     "curate",
     "daemon",
     "diag",
@@ -46215,7 +46170,6 @@ impl NormalizedInvocation {
                     MaintenanceCommand::Status(_) => "maintenance status".to_string(),
                 },
                 Command::Note(_) => "note".to_string(),
-                Command::Context(_) => "context".to_string(),
                 Command::ContextShow(_) => "context-show".to_string(),
                 Command::Completion(_) => "completion".to_string(),
                 Command::Config(config) => match config {
@@ -48902,17 +48856,17 @@ mod tests {
 
     #[test]
     fn parser_accepts_explain_performance_on_context_pack_and_search() -> TestResult {
-        let context = Cli::try_parse_from(["ee", "context", "release", "--explain-performance"])
-            .map_err(|error| format!("context flag parse failed: {:?}", error.kind()))?;
-        match context.command {
-            Some(Command::Context(args)) => {
+        let pack_query = Cli::try_parse_from(["ee", "pack", "release", "--explain-performance"])
+            .map_err(|error| format!("pack query flag parse failed: {:?}", error.kind()))?;
+        match pack_query.command {
+            Some(Command::Pack(args)) => {
                 ensure_equal(
                     &args.explain_performance,
                     &true,
-                    "context explain performance",
+                    "pack query explain performance",
                 )?;
             }
-            other => return Err(format!("expected context command, got {other:?}")),
+            other => return Err(format!("expected pack command, got {other:?}")),
         }
 
         let pack = Cli::try_parse_from([
@@ -50177,30 +50131,6 @@ mod tests {
     }
 
     #[test]
-    fn parser_accepts_context_redaction_level_and_leaves_default_to_config() -> TestResult {
-        let default_parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
-            .map_err(|error| format!("failed to parse default context: {:?}", error.kind()))?;
-        match default_parsed.command {
-            Some(Command::Context(args)) => {
-                ensure_equal(&args.redaction, &None, "default redaction")?;
-            }
-            other => return Err(format!("expected context command, got {other:?}")),
-        }
-
-        let parsed =
-            Cli::try_parse_from(["ee", "context", "prepare release", "--redaction", "strict"])
-                .map_err(|error| {
-                    format!("failed to parse context redaction: {:?}", error.kind())
-                })?;
-        match parsed.command {
-            Some(Command::Context(args)) => {
-                ensure_equal(&args.redaction, &Some(BackupRedaction::Strict), "redaction")
-            }
-            other => Err(format!("expected context command, got {other:?}")),
-        }
-    }
-
-    #[test]
     fn parser_accepts_support_bundle_redaction_level_and_leaves_default_to_config() -> TestResult {
         let default_parsed = Cli::try_parse_from(["ee", "support", "bundle", "--dry-run"])
             .map_err(|error| {
@@ -51151,25 +51081,19 @@ mod tests {
             let cli_profile = profile.trim().to_ascii_lowercase();
             let parsed = Cli::try_parse_from([
                 "ee",
-                "context",
+                "pack",
                 "map release evidence",
                 "--profile",
                 cli_profile.as_str(),
                 "--json",
             ])
             .map(|cli| cli.command)
-            .map_err(|error| {
-                format!(
-                    "failed to parse context {}: {:?}",
-                    cli_profile,
-                    error.kind()
-                )
-            })?;
+            .map_err(|error| format!("failed to parse pack {}: {:?}", cli_profile, error.kind()))?;
             match parsed {
-                Some(Command::Context(args)) => {
-                    ensure_equal(&args.profile, &cli_profile, "raw profile")
+                Some(Command::Pack(args)) => {
+                    ensure_equal(&args.profile, &Some(cli_profile), "raw profile")
                 }
-                other => Err(format!("expected context command, got {other:?}")),
+                other => Err(format!("expected pack command, got {other:?}")),
             }?;
         }
         Ok(())
@@ -53374,7 +53298,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help exit")?;
         ensure_contains(&stdout, "Usage:", "help usage line")?;
         ensure_contains(&stdout, "Most-used commands (start here)", "help prelude")?;
-        for command in ["init", "remember", "search", "context", "why"] {
+        for command in ["init", "remember", "search", "pack", "why"] {
             ensure_contains(
                 &stdout,
                 &format!("  {command} "),
@@ -53786,16 +53710,15 @@ mod tests {
 
     #[test]
     fn help_json_advertises_most_used_commands() -> TestResult {
-        // The `ee --help` prelude advertises six "Most-used commands" as the
-        // primary agent workflow path. Each one MUST appear in the machine
-        // manifest so an agent discovering capabilities through `--help-json`
-        // / MCP / `ee introspect` sees the same surface as a human.
+        // The `ee --help` prelude advertises the "Most-used commands" plus the
+        // `note` agent shortcut as the primary agent workflow path. Each one
+        // MUST appear in the machine manifest so an agent discovering
+        // capabilities through `--help-json` / MCP / `ee introspect` sees the
+        // same surface as a human.
         let (exit, stdout, stderr) = invoke(&["ee", "--help-json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
         ensure(stderr.is_empty(), "help-json stderr must be empty")?;
-        for cmd in &[
-            "init", "note", "pack", "why", "search", "remember", "context",
-        ] {
+        for cmd in &["init", "note", "pack", "why", "search", "remember"] {
             ensure_contains(
                 &stdout,
                 &format!("\"name\":\"{cmd}\""),
@@ -55443,33 +55366,29 @@ mod tests {
     }
 
     #[test]
-    fn context_command_rejects_invalid_ppr_weight() -> TestResult {
+    fn ppr_weight_arg_parser_rejects_out_of_range_values() -> TestResult {
         for raw in ["-0.01", "1.01", "NaN", "inf"] {
-            let flag = format!("--ppr-weight={raw}");
-            let error = Cli::try_parse_from(["ee", "context", "test", flag.as_str()])
-                .expect_err("invalid ppr-weight should fail clap parsing");
-            ensure_equal(
-                &error.kind(),
-                &clap::error::ErrorKind::ValueValidation,
-                "invalid ppr-weight error kind",
+            ensure(
+                super::parse_ppr_weight_arg(raw).is_err(),
+                format!("ppr-weight {raw} should be rejected by the value parser"),
             )?;
         }
+        ensure(
+            super::parse_ppr_weight_arg("0.5").is_ok(),
+            "ppr-weight 0.5 should be accepted by the value parser",
+        )?;
         Ok(())
     }
 
     #[test]
     fn mesh_command_mode_flags_parse_on_agent_facing_surfaces() -> TestResult {
-        let context = Cli::try_parse_from(["ee", "context", "test", "--mesh", "cache"])
-            .map_err(|e| format!("failed to parse context mesh mode: {:?}", e.kind()))?;
-        match context.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(
-                    &args.mesh_mode,
-                    &MeshCommandMode::Cache,
-                    "context mesh mode",
-                )?;
+        let pack_cache = Cli::try_parse_from(["ee", "pack", "test", "--mesh", "cache"])
+            .map_err(|e| format!("failed to parse pack mesh mode: {:?}", e.kind()))?;
+        match pack_cache.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.mesh_mode, &MeshCommandMode::Cache, "pack mesh mode")?;
             }
-            _ => return Err("expected Context command".to_string()),
+            _ => return Err("expected Pack command".to_string()),
         }
 
         let pack = Cli::try_parse_from(["ee", "pack", "test", "--mesh", "revisable"])
@@ -55600,30 +55519,23 @@ mod tests {
     }
 
     #[test]
-    fn context_command_accepts_no_rendered_text() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "context", "test", "--no-rendered-text"]).map_err(|e| {
-                format!(
-                    "failed to parse context with no-rendered-text: {:?}",
-                    e.kind()
-                )
-            })?;
+    fn pack_command_accepts_no_rendered_text() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "pack", "test", "--no-rendered-text"])
+            .map_err(|e| format!("failed to parse pack with no-rendered-text: {:?}", e.kind()))?;
 
         match parsed.command {
-            Some(Command::Context(ref args)) => ensure_equal(
-                &args.no_rendered_text,
-                &Some(true),
-                "context no_rendered_text",
-            ),
-            _ => Err("expected Context command".to_string()),
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.no_rendered_text, &Some(true), "pack no_rendered_text")
+            }
+            _ => Err("expected Pack command".to_string()),
         }
     }
 
     #[test]
-    fn context_command_accepts_pack_profile_and_boolean_opt_out_override() -> TestResult {
+    fn pack_command_accepts_pack_profile_and_boolean_opt_out_override() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
-            "context",
+            "pack",
             "test",
             "--pack-profile",
             "lean",
@@ -55632,30 +55544,30 @@ mod tests {
             "--no-skipped=false",
             "--no-meta",
         ])
-        .map_err(|e| format!("failed to parse context pack profile flags: {:?}", e.kind()))?;
+        .map_err(|e| format!("failed to parse pack profile flags: {:?}", e.kind()))?;
 
         match parsed.command {
-            Some(Command::Context(ref args)) => {
+            Some(Command::Pack(ref args)) => {
                 ensure_equal(
                     &args.pack_profile,
-                    &PackOutputProfileArg::Lean,
-                    "context pack profile",
+                    &Some(PackOutputProfileArg::Lean),
+                    "pack profile",
                 )?;
                 ensure_equal(
                     &args.resource_profile,
-                    &PackResourceProfile::SwarmHeavy,
-                    "context resource profile",
+                    &Some(PackResourceProfile::SwarmHeavy),
+                    "pack resource profile",
                 )?;
-                ensure_equal(&args.no_skipped, &Some(false), "context no_skipped")?;
-                ensure_equal(&args.no_meta, &Some(true), "context no_meta")
+                ensure_equal(&args.no_skipped, &Some(false), "pack no_skipped")?;
+                ensure_equal(&args.no_meta, &Some(true), "pack no_meta")
             }
-            _ => Err("expected Context command".to_string()),
+            _ => Err("expected Pack command".to_string()),
         }
     }
 
     #[test]
     fn context_renderer_defaults_to_markdown() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55666,7 +55578,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_human() -> TestResult {
-        let mut cli = Cli::try_parse_from(["ee", "--format", "human", "context", "test"])
+        let mut cli = Cli::try_parse_from(["ee", "--format", "human", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         cli.format_explicit = true;
         ensure_equal(
@@ -55678,7 +55590,7 @@ mod tests {
 
     #[test]
     fn context_renderer_returns_json_when_json_flag_set() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--json", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--json", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55689,7 +55601,7 @@ mod tests {
 
     #[test]
     fn context_renderer_returns_json_when_robot_flag_set() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--robot", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--robot", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55700,7 +55612,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_json() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "json", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "json", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55711,7 +55623,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_toon() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "toon", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "toon", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55722,7 +55634,7 @@ mod tests {
 
     #[test]
     fn context_renderer_explicit_format_markdown_returns_markdown() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "markdown", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "markdown", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55733,7 +55645,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_jsonl() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "jsonl", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "jsonl", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55743,170 +55655,8 @@ mod tests {
     }
 
     #[test]
-    fn context_stream_request_allows_json_and_jsonl_renderers() -> TestResult {
-        for args in [
-            ["ee", "--json", "context", "test", "--stream"].as_slice(),
-            ["ee", "--robot", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "json", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "jsonl", "context", "test", "--stream"].as_slice(),
-        ] {
-            let cli = Cli::try_parse_from(args).map_err(|error| {
-                format!("failed to parse stream args {args:?}: {:?}", error.kind())
-            })?;
-            match &cli.command {
-                Some(Command::Context(context_args)) => {
-                    super::validate_context_stream_request(&cli, context_args)
-                        .map_err(|error| error.message())?;
-                }
-                _ => return Err("expected Context command".to_string()),
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn context_stream_request_rejects_batch_only_renderers() -> TestResult {
-        for args in [
-            ["ee", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "human", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "markdown", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "toon", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "compact", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "hook", "context", "test", "--stream"].as_slice(),
-            ["ee", "--format", "binary", "context", "test", "--stream"].as_slice(),
-        ] {
-            let mut cli = Cli::try_parse_from(args).map_err(|error| {
-                format!("failed to parse stream args {args:?}: {:?}", error.kind())
-            })?;
-            if args.contains(&"human") {
-                cli.format_explicit = true;
-            }
-            match &cli.command {
-                Some(Command::Context(context_args)) => {
-                    let error = super::validate_context_stream_request(&cli, context_args)
-                        .expect_err("batch-only renderer should be rejected");
-                    ensure_contains(
-                        &error.message(),
-                        "`ee context --stream` requires",
-                        "stream format error",
-                    )?;
-                }
-                _ => return Err("expected Context command".to_string()),
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn context_stream_request_rejects_explain_performance() -> TestResult {
-        let cli = Cli::try_parse_from([
-            "ee",
-            "--format",
-            "json",
-            "context",
-            "test",
-            "--stream",
-            "--explain-performance",
-        ])
-        .map_err(|error| format!("failed to parse stream explain args: {:?}", error.kind()))?;
-        match &cli.command {
-            Some(Command::Context(context_args)) => {
-                let error = super::validate_context_stream_request(&cli, context_args)
-                    .expect_err("stream explain-performance should be rejected");
-                ensure_contains(
-                    &error.message(),
-                    "cannot be combined",
-                    "stream explain-performance error",
-                )
-            }
-            _ => Err("expected Context command".to_string()),
-        }
-    }
-
-    #[test]
-    fn context_command_accepts_delta_since_flags() -> TestResult {
-        let parsed = Cli::try_parse_from([
-            "ee",
-            "--json",
-            "context",
-            "test",
-            "--since",
-            "blake3:prior-pack",
-            "--max-delta-bytes",
-            "512",
-        ])
-        .map_err(|error| format!("failed to parse context delta args: {:?}", error.kind()))?;
-
-        match parsed.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(
-                    &args.since,
-                    &Some("blake3:prior-pack".to_string()),
-                    "context since",
-                )?;
-                ensure_equal(&args.max_delta_bytes, &Some(512), "context max delta bytes")
-            }
-            _ => Err("expected Context command".to_string()),
-        }
-    }
-
-    #[test]
-    fn context_delta_transport_is_batch_json_only() -> TestResult {
-        for args in [
-            ["ee", "--json", "context", "test", "--since", "hash"].as_slice(),
-            [
-                "ee", "--format", "json", "context", "test", "--since", "hash",
-            ]
-            .as_slice(),
-        ] {
-            let cli = Cli::try_parse_from(args).map_err(|error| {
-                format!("failed to parse delta args {args:?}: {:?}", error.kind())
-            })?;
-            match &cli.command {
-                Some(Command::Context(context_args)) => ensure(
-                    super::context_delta_json_supported(
-                        cli.context_renderer(),
-                        cli.format,
-                        context_args,
-                    ),
-                    "json context delta transport should be supported",
-                )?,
-                _ => return Err("expected Context command".to_string()),
-            }
-        }
-
-        for args in [
-            ["ee", "context", "test", "--since", "hash"].as_slice(),
-            [
-                "ee", "--format", "markdown", "context", "test", "--since", "hash",
-            ]
-            .as_slice(),
-            [
-                "ee", "--format", "json", "context", "test", "--since", "hash", "--stream",
-            ]
-            .as_slice(),
-        ] {
-            let cli = Cli::try_parse_from(args).map_err(|error| {
-                format!("failed to parse delta args {args:?}: {:?}", error.kind())
-            })?;
-            match &cli.command {
-                Some(Command::Context(context_args)) => ensure(
-                    !super::context_delta_json_supported(
-                        cli.context_renderer(),
-                        cli.format,
-                        context_args,
-                    ),
-                    "non-json or streaming context delta transport should fall back",
-                )?,
-                _ => return Err("expected Context command".to_string()),
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
     fn context_renderer_respects_explicit_format_compact() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "compact", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "compact", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55917,7 +55667,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_hook() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "hook", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "hook", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55928,7 +55678,7 @@ mod tests {
 
     #[test]
     fn context_renderer_respects_explicit_format_binary() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "binary", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "binary", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55939,7 +55689,7 @@ mod tests {
 
     #[test]
     fn context_renderer_explicit_format_mermaid_uses_markdown_channel() -> TestResult {
-        let cli = Cli::try_parse_from(["ee", "--format", "mermaid", "context", "test"])
+        let cli = Cli::try_parse_from(["ee", "--format", "mermaid", "pack", "test"])
             .map_err(|e| format!("failed to parse: {:?}", e.kind()))?;
         ensure_equal(
             &cli.context_renderer(),
@@ -55954,7 +55704,7 @@ mod tests {
             OsString::from("ee"),
             OsString::from("--format"),
             OsString::from("human"),
-            OsString::from("context"),
+            OsString::from("pack"),
             OsString::from("test"),
         ];
         ensure(
@@ -55964,7 +55714,7 @@ mod tests {
 
         let equals = [
             OsString::from("ee"),
-            OsString::from("context"),
+            OsString::from("pack"),
             OsString::from("test"),
             OsString::from("--format=human"),
         ];
@@ -55975,7 +55725,7 @@ mod tests {
 
         let separator = [
             OsString::from("ee"),
-            OsString::from("context"),
+            OsString::from("pack"),
             OsString::from("--"),
             OsString::from("--format"),
         ];
@@ -55986,29 +55736,28 @@ mod tests {
     }
 
     #[test]
-    fn context_command_preserves_omitted_max_tokens_for_adaptive_budget() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "context", "prepare release"])
-            .map_err(|error| format!("failed to parse context: {:?}", error.kind()))?;
+    fn pack_command_preserves_omitted_max_tokens_for_adaptive_budget() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "pack", "prepare release"])
+            .map_err(|error| format!("failed to parse pack: {:?}", error.kind()))?;
 
         match parsed.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(&args.max_tokens, &None, "omitted context max tokens")
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.max_tokens, &None, "omitted pack max tokens")
             }
-            _ => Err("expected Context command".to_string()),
+            _ => Err("expected Pack command".to_string()),
         }
     }
 
     #[test]
-    fn context_command_parses_explicit_max_tokens() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "context", "prepare release", "--max-tokens", "3000"])
-                .map_err(|error| format!("failed to parse context: {:?}", error.kind()))?;
+    fn pack_command_parses_explicit_max_tokens() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "pack", "prepare release", "--max-tokens", "3000"])
+            .map_err(|error| format!("failed to parse pack: {:?}", error.kind()))?;
 
         match parsed.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(&args.max_tokens, &Some(3000), "explicit context max tokens")
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.max_tokens, &Some(3000), "explicit pack max tokens")
             }
-            _ => Err("expected Context command".to_string()),
+            _ => Err("expected Pack command".to_string()),
         }
     }
 
@@ -56249,86 +55998,6 @@ mod tests {
             }
             _ => Err("expected Note command".to_string()),
         }
-    }
-
-    #[test]
-    fn remember_json_output_omits_deprecated_alias_noise() -> TestResult {
-        let cli = Cli::try_parse_from([
-            "ee",
-            "--json",
-            "remember",
-            "Run cargo fmt before release.",
-            "--level",
-            "procedural",
-            "--kind",
-            "rule",
-        ])
-        .map_err(|error| format!("failed to parse remember command: {:?}", error.kind()))?;
-        let report = crate::core::memory::RememberMemoryReport {
-            version: env!("CARGO_PKG_VERSION"),
-            memory_id: MemoryId::from_uuid(uuid::Uuid::from_u128(1)),
-            workspace_id: "wsp_remember_alias_test".to_owned(),
-            workspace_path: PathBuf::from("/tmp/ee-remember-alias-test"),
-            database_path: PathBuf::from("/tmp/ee-remember-alias-test/.ee/ee.db"),
-            content: "Run cargo fmt before release.".to_owned(),
-            workflow_id: None,
-            level: crate::models::MemoryLevel::Procedural,
-            kind: crate::models::MemoryKind::Rule,
-            confidence: 0.9,
-            tags: Vec::new(),
-            source: None,
-            producer: crate::models::ProducerMetadata::manual_remember(None, None),
-            valid_from: None,
-            valid_to: None,
-            validity_status: "unknown".to_owned(),
-            validity_window_kind: "unbounded".to_owned(),
-            dry_run: false,
-            persisted: true,
-            revision_number: 1,
-            revision_group_id: None,
-            audit_id: Some("audit_remember_alias_test".to_owned()),
-            index_job_id: Some("sidx_remember_alias_test".to_owned()),
-            index_status: "indexed".to_owned(),
-            effect_ids: Vec::new(),
-            suggested_links: Vec::new(),
-            suggested_link_status: "no_candidates".to_owned(),
-            suggested_link_degradations: Vec::new(),
-            redaction_status: "checked".to_owned(),
-            policy_bypass: None,
-            auto_links: Vec::new(),
-            auto_link_status: "disabled".to_owned(),
-            auto_link_degradations: Vec::new(),
-            curation_candidate: None,
-            curation_candidate_status: "disabled".to_owned(),
-            curation_candidate_degradations: Vec::new(),
-        };
-        let mut stdout = Vec::new();
-        let exit = super::write_remember_report(&cli, &report, &mut stdout);
-        ensure_equal(&exit, &ProcessExitCode::Success, "remember write exit")?;
-        let value: serde_json::Value = serde_json::from_slice(&stdout)
-            .map_err(|error| format!("remember output parses as JSON: {error}"))?;
-        ensure_equal(
-            &value.pointer("/data/memoryId"),
-            &value.pointer("/data/memory_id"),
-            "remember JSON canonical memoryId alias",
-        )?;
-        ensure_equal(
-            &value
-                .pointer("/data/memoryId")
-                .and_then(serde_json::Value::as_str),
-            &Some("mem_00000000000000000000000001"),
-            "remember JSON memoryId value",
-        )?;
-        let degraded = value
-            .pointer("/data/degraded")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| format!("remember output missing degraded array: {value}"))?;
-        ensure(
-            degraded.iter().all(|entry| {
-                entry.get("code").and_then(serde_json::Value::as_str) != Some("deprecated_alias")
-            }),
-            format!("remember output still emits deprecated_alias: {value}"),
-        )
     }
 
     #[test]
@@ -56690,75 +56359,6 @@ mod tests {
             &degraded[1]["code"],
             &serde_json::json!("db_wal_stale"),
             "wal code",
-        )
-    }
-
-    #[test]
-    fn context_deprecated_alias_points_to_pack() -> TestResult {
-        let entry = super::deprecated_context_alias_degradation();
-        ensure_equal(
-            &entry.code.as_str(),
-            &"deprecated_alias",
-            "context alias code",
-        )?;
-        ensure_contains(&entry.message, "ee context", "context alias message")?;
-        let repair = entry.repair.as_deref().unwrap_or_default();
-        ensure_contains(repair, "ee pack", "context alias repair")
-    }
-
-    // bd-1es1m: --since and --max-delta-bytes must round-trip through clap so
-    // `ee context "task" --since <pack-hash> --max-delta-bytes 4096 --json`
-    // no longer fails with an unknown-flag usage error.
-    #[test]
-    fn context_args_accept_since_and_max_delta_bytes() -> TestResult {
-        let parsed = Cli::try_parse_from([
-            "ee",
-            "context",
-            "delta plumbing smoke",
-            "--since",
-            "deadbeef",
-            "--max-delta-bytes",
-            "4096",
-            "--json",
-        ])
-        .map_err(|error| {
-            format!(
-                "clap rejected --since/--max-delta-bytes: {:?}",
-                error.kind()
-            )
-        })?;
-        let Some(Command::Context(args)) = parsed.command else {
-            return Err("expected Command::Context".into());
-        };
-        ensure_equal(
-            &args.since,
-            &Some("deadbeef".to_string()),
-            "since round-trip",
-        )?;
-        ensure_equal(
-            &args.max_delta_bytes,
-            &Some(4096_u64),
-            "max-delta-bytes round-trip",
-        )?;
-        ensure_equal(&parsed.json, &true, "--json honored alongside --since")
-    }
-
-    // bd-1es1m: omitting both flags must leave them as None — they are pure
-    // opt-in extensions to the context surface.
-    #[test]
-    fn context_args_default_to_no_delta_request() -> TestResult {
-        let parsed =
-            Cli::try_parse_from(["ee", "context", "no delta requested"]).map_err(|error| {
-                format!("clap rejected base context invocation: {:?}", error.kind())
-            })?;
-        let Some(Command::Context(args)) = parsed.command else {
-            return Err("expected Command::Context".into());
-        };
-        ensure_equal(&args.since, &None, "since defaults to None")?;
-        ensure_equal(
-            &args.max_delta_bytes,
-            &None,
-            "max-delta-bytes defaults to None",
         )
     }
 
@@ -57164,7 +56764,7 @@ mod tests {
             "--workspace",
             "/tmp/ee-cli-context-missing-workspace",
             "--json",
-            "context",
+            "pack",
             "test query",
         ]);
         ensure_equal(&exit, &ProcessExitCode::Storage, "context json exit")?;
@@ -57185,8 +56785,7 @@ mod tests {
 
     #[test]
     fn context_json_rejects_invalid_profile() -> TestResult {
-        let (exit, stdout, stderr) =
-            invoke(&["ee", "context", "test", "--profile", "wide", "--json"]);
+        let (exit, stdout, stderr) = invoke(&["ee", "pack", "test", "--profile", "wide", "--json"]);
         ensure_equal(
             &exit,
             &ProcessExitCode::Usage,
@@ -57210,41 +56809,12 @@ mod tests {
     }
 
     #[test]
-    fn context_stream_invalid_format_writes_json_error_before_database_work() -> TestResult {
-        let (exit, stdout, stderr) = invoke(&["ee", "context", "test query", "--stream"]);
-        ensure_equal(
-            &exit,
-            &ProcessExitCode::Usage,
-            "context stream invalid format exit",
-        )?;
-        ensure_starts_with(
-            &stdout,
-            "{\"schema\":\"ee.error.v2\"",
-            "context stream invalid format schema",
-        )?;
-        ensure_contains(&stdout, "\"code\":\"usage\"", "context stream usage code")?;
-        ensure_contains(
-            &stdout,
-            "`ee context --stream` requires",
-            "context stream invalid format message",
-        )?;
-        ensure(
-            !stdout.contains("Database not found"),
-            "stream format validation must run before database access",
-        )?;
-        ensure(
-            stderr.is_empty(),
-            "context stream invalid stderr must be empty",
-        )
-    }
-
-    #[test]
     fn context_human_missing_database_writes_diagnostic_to_stderr() -> TestResult {
         let (exit, stdout, stderr) = invoke(&[
             "ee",
             "--workspace",
             "/tmp/ee-cli-context-missing-workspace",
-            "context",
+            "pack",
             "test query",
         ]);
         ensure_equal(&exit, &ProcessExitCode::Storage, "context human exit")?;
@@ -57408,46 +56978,30 @@ mod tests {
     }
 
     #[test]
-    fn context_command_accepts_include_tombstoned() -> TestResult {
-        let parsed = Cli::try_parse_from(["ee", "context", "test", "--include-tombstoned"])
-            .map_err(|e| format!("failed to parse context with tombstones: {:?}", e.kind()))?;
-
-        match parsed.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(&args.include_tombstoned, &true, "include tombstoned")
-            }
-            _ => Err("expected Context command".to_string()),
-        }
-    }
-
-    #[test]
-    fn context_command_accepts_validity_window_flags() -> TestResult {
+    fn pack_command_accepts_validity_window_flags() -> TestResult {
         let parsed = Cli::try_parse_from([
             "ee",
-            "context",
+            "pack",
             "test",
             "--as-of",
             "2026-05-13T00:00:00Z",
             "--include-expired",
             "--include-future",
             "--include-stale",
-            "--relevance-floor",
-            "1.0",
         ])
-        .map_err(|e| format!("failed to parse context validity flags: {:?}", e.kind()))?;
+        .map_err(|e| format!("failed to parse pack validity flags: {:?}", e.kind()))?;
 
         let expected_as_of = chrono::DateTime::parse_from_rfc3339("2026-05-13T00:00:00Z")
             .expect("test timestamp")
             .with_timezone(&chrono::Utc);
         match parsed.command {
-            Some(Command::Context(ref args)) => {
-                ensure_equal(&args.as_of, &Some(expected_as_of), "context as_of")?;
-                ensure_equal(&args.include_expired, &true, "context include expired")?;
-                ensure_equal(&args.include_future, &true, "context include future")?;
-                ensure_equal(&args.include_stale, &true, "context include stale")?;
-                ensure_equal(&args.relevance_floor, &Some(1.0), "context relevance floor")
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(&args.as_of, &Some(expected_as_of), "pack as_of")?;
+                ensure_equal(&args.include_expired, &true, "pack include expired")?;
+                ensure_equal(&args.include_future, &true, "pack include future")?;
+                ensure_equal(&args.include_stale, &true, "pack include stale")
             }
-            _ => Err("expected Context command".to_string()),
+            _ => Err("expected Pack command".to_string()),
         }
     }
 

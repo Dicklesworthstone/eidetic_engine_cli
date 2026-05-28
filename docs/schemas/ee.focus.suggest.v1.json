@@ -53,7 +53,7 @@
           },
           "suggestedQuery": {
             "type": "string",
-            "description": "Concrete ee command (typically `ee pack` or `ee search`) the agent can run to act on the recommendation. New recommendations emit `ee pack` (the canonical post-triad-promotion surface); the soft-deprecated `ee context` alias is intentionally avoided so agents acting on a recommendation do not immediately trip the `deprecated_alias` degraded entry."
+            "description": "Concrete ee command (typically `ee pack` or `ee search`) the agent can run to act on the recommendation. Recommendations emit `ee pack`, the canonical context-pack surface."
           }
         }
       }

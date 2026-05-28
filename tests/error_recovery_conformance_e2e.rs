@@ -76,7 +76,7 @@ fn storage_error_cases(workspace: &str) -> Vec<ConformanceCase> {
             args: vec![
                 "--workspace".to_owned(),
                 workspace.to_owned(),
-                "context".to_owned(),
+                "pack".to_owned(),
                 "missing database recovery conformance".to_owned(),
                 "--json".to_owned(),
             ],

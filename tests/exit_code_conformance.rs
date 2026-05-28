@@ -353,11 +353,11 @@ fn exit_4_search_index_on_stale_or_missing_index() -> TestResult {
     let init = run_ee(&["--workspace", &workspace, "init", "--json"])?;
     ensure_equal(&init.status.code(), &Some(EXIT_SUCCESS), "init exit")?;
 
-    // Context on empty/unindexed workspace may return search/index error
+    // Pack on empty/unindexed workspace may return search/index error
     let output = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "test query",
         "--max-tokens",
         "4000",

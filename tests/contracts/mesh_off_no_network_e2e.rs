@@ -143,7 +143,7 @@ fn mesh_off_script_defines_required_assertion_helpers() -> TestResult {
 #[test]
 fn mesh_off_script_exercises_three_observable_surfaces() -> TestResult {
     let body = script_body()?;
-    for surface in ["status --json", "why", "context"] {
+    for surface in ["status --json", "why", "pack"] {
         ensure(
             body.contains(surface),
             format!(

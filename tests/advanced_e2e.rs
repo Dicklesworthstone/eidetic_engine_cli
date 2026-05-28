@@ -1555,7 +1555,7 @@ fn release_brief_search_context_why_and_doctor_fix_plan_are_machine_clean() -> T
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "prepare release",
         "--max-tokens",
         "4000",

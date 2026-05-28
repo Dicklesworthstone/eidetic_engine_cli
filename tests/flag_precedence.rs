@@ -5,7 +5,6 @@
 //! workspace database or executing command handlers.
 
 use clap::Parser;
-use clap::error::ErrorKind;
 use ee::cli::{
     Cli, Command, CurateCommand, GraphCommand, MaintenanceCommand, OutputFormat, PackCommand,
 };
@@ -71,78 +70,37 @@ fn robot_global_forces_json_without_changing_command_shape() -> TestResult {
 }
 
 #[test]
-fn context_disable_pack_dna_wins_over_explain_output_flag() -> TestResult {
+fn pack_profile_and_candidate_pool_compose() -> TestResult {
     let cli = parse([
         "ee",
-        "context",
-        "prepare release",
-        "--profile",
-        "balanced",
-        "--ppr-weight",
-        "0",
-        "--explain",
-        "--no-pack-dna",
-    ])?;
-
-    match cli.command {
-        Some(Command::Context(args)) => {
-            ensure_equal(&args.profile, &"balanced".to_owned(), "context profile")?;
-            ensure_equal(&args.ppr_weight, &Some(0.0), "ppr zero weight")?;
-            ensure(args.explain, "explain flag parsed")?;
-            ensure(args.no_pack_dna, "no-pack-dna suppresses pack DNA output")
-        }
-        other => Err(format!("expected context command, got {other:?}")),
-    }
-}
-
-#[test]
-fn context_profile_and_positive_ppr_weight_compose() -> TestResult {
-    let cli = parse([
-        "ee",
-        "context",
+        "pack",
         "prepare release",
         "--profile",
         "thorough",
-        "--ppr-weight",
-        "0.7",
         "--candidate-pool",
         "150",
     ])?;
 
     match cli.command {
-        Some(Command::Context(args)) => {
-            ensure_equal(&args.profile, &"thorough".to_owned(), "context profile")?;
-            ensure_equal(&args.ppr_weight, &Some(0.7), "ppr blend weight")?;
-            ensure_equal(&args.candidate_pool, &150, "candidate pool")
+        Some(Command::Pack(args)) => {
+            ensure_equal(&args.profile, &Some("thorough".to_owned()), "pack profile")?;
+            ensure_equal(&args.candidate_pool, &Some(150), "candidate pool")
         }
-        other => Err(format!("expected context command, got {other:?}")),
+        other => Err(format!("expected pack command, got {other:?}")),
     }
 }
 
 #[test]
-fn invalid_ppr_weight_is_rejected_before_command_execution() {
-    let error = Cli::try_parse_from(["ee", "context", "prepare release", "--ppr-weight", "1.5"])
-        .expect_err("out-of-range ppr-weight should fail");
-
-    assert_eq!(error.kind(), ErrorKind::ValueValidation);
-}
-
-#[test]
-fn optional_boolean_disable_can_be_explicitly_false_for_context() -> TestResult {
-    let cli = parse([
-        "ee",
-        "context",
-        "prepare release",
-        "--no-coverage-fill=false",
-    ])?;
+fn optional_boolean_disable_can_be_explicitly_false_for_pack() -> TestResult {
+    let cli = parse(["ee", "pack", "prepare release", "--no-coverage-fill=false"])?;
 
     match cli.command {
-        Some(Command::Context(args)) => ensure_equal(
+        Some(Command::Pack(args)) => ensure_equal(
             &args.no_coverage_fill,
             &Some(false),
-            "context no-coverage-fill=false",
+            "pack no-coverage-fill=false",
         ),
-        other => Err(format!("expected context command, got {other:?}")),
+        other => Err(format!("expected pack command, got {other:?}")),
     }
 }
 

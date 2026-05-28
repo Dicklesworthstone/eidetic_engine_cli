@@ -162,28 +162,12 @@ fn split_shell_words(command: &str) -> Result<Vec<String>, String> {
 
 #[test]
 fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
-    let context_help = help_for(&["ee", "context", "--help"])?;
-    assert_contains_all(
-        &context_help,
-        &[
-            "--profile",
-            "--ppr-weight",
-            "--pack-profile",
-            "--resource-profile",
-            "--explain-performance",
-            "--explain",
-            "--no-pack-dna",
-            "--stream",
-            "--no-coverage-fill",
-            "--no-rendered-text",
-            "--no-skipped",
-            "--no-meta",
-            "--include-tombstoned",
-            "--relevance-floor",
-        ],
-        "ee context --help",
-    )?;
-
+    // The `ee context --help` checks were removed with the deprecated
+    // `ee context` command. Context-only flags (`--ppr-weight`, `--explain`,
+    // `--no-pack-dna`, `--stream`, `--include-tombstoned`, `--relevance-floor`)
+    // are not part of the `ee pack` surface that replaced it, so they are no
+    // longer help-discoverable. The `ee pack --help` coverage below pins the
+    // flags that remain on the canonical context-pack surface.
     let pack_help = help_for(&["ee", "pack", "--help"])?;
     assert_contains_all(
         &pack_help,
@@ -916,37 +900,12 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "ee", "--fields", "standard", "--cards", "summary", "--meta", "graph", "pagerank",
             "--limit", "5", "--json",
         ][..],
-        &[
-            "ee",
-            "context",
-            "prepare release",
-            "--profile",
-            "thorough",
-            "--ppr-weight",
-            "0.5",
-            "--explain",
-            "--explain-performance",
-            "--no-pack-dna",
-            "--json",
-        ][..],
-        &[
-            "ee",
-            "context",
-            "prepare release",
-            "--stream",
-            "--format",
-            "json",
-        ][..],
-        &[
-            "ee",
-            "context",
-            "prepare release",
-            "--ppr-weight",
-            "0.4",
-            "--include-tombstoned",
-            "--explain",
-            "--json",
-        ][..],
+        // The `ee context ...` documented examples were removed with the
+        // deprecated command. Their context-only flags (`--ppr-weight`,
+        // `--explain`, `--no-pack-dna`, `--stream`, `--include-tombstoned`) are
+        // not part of `ee pack`, so they cannot be re-expressed against the
+        // replacement surface. The `ee pack build` examples below pin the
+        // documented context-pack invocations that still parse.
         &[
             "ee",
             "pack",

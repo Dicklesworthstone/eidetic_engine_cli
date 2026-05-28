@@ -101,8 +101,8 @@ mod windows {
         run_success(&workspace, &["search", "Windows release fmt"], "search")?;
         run_success(
             &workspace,
-            &["context", "prepare Windows release"],
-            "context",
+            &["pack", "prepare Windows release"],
+            "pack",
         )?;
         run_success(&workspace, &["why", &memory_id], "why")?;
         run_success(&workspace, &["status"], "status")?;

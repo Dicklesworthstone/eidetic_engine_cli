@@ -259,9 +259,9 @@ run_json_surface_3x required "insights_section_contradiction_clusters" "bd-t6wd.
 run_json_surface_3x required "insights_section_knowledge_skyline" "bd-t6wd.1" \
     "ee insights --section knowledgeSkyline JSON surface should be deterministic." \
     insights --section knowledgeSkyline --json
-run_json_surface_3x required "context_explain" "bd-t6wd.2" \
-    "ee context --explain JSON surface should be deterministic." \
-    context "graph determinism harness" --max-tokens 1000 --json --explain
+# The `context_explain` surface was removed with the deprecated `ee context`
+# command: `ee pack` (its replacement) does not expose `--explain` / Pack DNA,
+# so there is no CLI surface left to exercise that determinism contract.
 run_json_surface_3x required "status_skyline" "bd-t6wd.2" \
     "ee status --skyline JSON surface should be deterministic." \
     status --skyline --json
@@ -271,8 +271,8 @@ run_json_surface_3x required "health_robot_insights" "bd-zx2v.4" \
 
 # Shipped graph-adjacent surfaces that give the harness real coverage today.
 run_json_surface_3x required "context_explain_performance" "bd-17c65" \
-    "ee context --explain-performance JSON surface should be present." \
-    context "graph determinism harness" --max-tokens 1000 --json --explain-performance
+    "ee pack --explain-performance JSON surface should be present." \
+    pack "graph determinism harness" --max-tokens 1000 --json --explain-performance
 if [ -n "${ANY_MEM:-}" ]; then
     run_json_surface_3x required "why_graph_badges" "bd-t6wd.2" \
         "ee why JSON output should be deterministic and ready for graph badges." \

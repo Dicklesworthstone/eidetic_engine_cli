@@ -621,16 +621,9 @@ fn score_and_emit_topics(
                 cluster.span_ids.len(),
                 recency_str,
             );
-            // Emit `ee pack` (not `ee context`). Per AGENTS.md line 544,
-            // "`ee pack "<task>"` is the canonical post-triad-promotion
-            // surface; `ee context "<task>"` is retained as a
-            // soft-deprecated alias that runs the same code path and
-            // emits `deprecated_alias` (severity `info`) in its
-            // `degraded[]`. Prefer `ee pack` in new agent harnesses,
-            // scripts, and docs." Phase 2 of focus_suggest is brand-new
-            // post-promotion code; suggesting the deprecated alias would
-            // make every agent that acts on a recommendation trip the
-            // `deprecated_alias` warning on its very next command.
+            // Emit `ee pack`, the canonical context-pack surface. Per
+            // AGENTS.md, `ee pack "<task>"` is the post-triad-promotion
+            // command an agent should run to act on a recommendation.
             let suggested_query = format!(
                 "ee pack \"{}\" --workspace . --max-tokens 4000 --json",
                 escape_topic_for_query(&cluster.topic_label),

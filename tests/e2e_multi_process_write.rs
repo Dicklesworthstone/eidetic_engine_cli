@@ -359,14 +359,14 @@ fn spawn_context_process(
             .arg("--workspace")
             .arg(workspace)
             .arg("--json")
-            .arg("context")
+            .arg("pack")
             .arg(query)
             .args(["--max-tokens", "2000"])
             .env_remove("EE_WORKSPACE")
             .env_remove("EE_WORKSPACE_REGISTRY")
             .env("NO_COLOR", "1")
             .output()
-            .map_err(|error| format!("failed to run ee context: {error}"))
+            .map_err(|error| format!("failed to run ee pack: {error}"))
     })
 }
 

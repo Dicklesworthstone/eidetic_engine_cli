@@ -10,7 +10,6 @@ type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
 const PACK_BUDGET_TOO_SMALL: &str = "pack_budget_too_small";
-const NO_RELEVANT_RESULTS: &str = "no_relevant_results";
 
 fn run_ee(args: &[&str]) -> Result<Output, String> {
     Command::new(env!("CARGO_BIN_EXE_ee"))
@@ -76,7 +75,7 @@ fn context_json_with_extra_args(
     let mut args = vec![
         "--workspace",
         workspace,
-        "context",
+        "pack",
         query,
         "--max-tokens",
         max_tokens,
@@ -88,20 +87,6 @@ fn context_json_with_extra_args(
     assert_success(&output, &format!("context {max_tokens}"))?;
     assert_stderr_empty(&output, &format!("context {max_tokens}"))?;
     stdout_json(&output)
-}
-
-fn context_json_with_relevance_floor(
-    workspace: &str,
-    query: &str,
-    max_tokens: &str,
-    relevance_floor: &str,
-) -> Result<serde_json::Value, String> {
-    context_json_with_extra_args(
-        workspace,
-        query,
-        max_tokens,
-        &["--relevance-floor", relevance_floor],
-    )
 }
 
 fn degraded_entries(value: &serde_json::Value) -> Result<&[serde_json::Value], String> {
@@ -281,19 +266,8 @@ fn recovery_actions_machine_readable() -> TestResult {
     )
 }
 
-#[test]
-fn no_relevant_results_and_pack_budget_too_small_are_mutually_exclusive() -> TestResult {
-    let (_tempdir, workspace) = setup_release_workspace()?;
-
-    let value = context_json_with_relevance_floor(&workspace, "release ritual", "1", "1.0")?;
-    let codes = degraded_codes(&value)?;
-
-    ensure(
-        codes.contains(&NO_RELEVANT_RESULTS),
-        format!("below-floor candidates should emit {NO_RELEVANT_RESULTS}: {codes:?}"),
-    )?;
-    ensure(
-        !codes.contains(&PACK_BUDGET_TOO_SMALL),
-        format!("below-floor candidates should not emit {PACK_BUDGET_TOO_SMALL}: {codes:?}"),
-    )
-}
+// The `no_relevant_results_and_pack_budget_too_small_are_mutually_exclusive`
+// test was removed together with the deprecated `ee context` command: it
+// relied on `--relevance-floor`, a context-only flag that `ee pack` does not
+// expose, to force every candidate below the floor. `ee pack` has no surface
+// to reproduce that below-floor condition from the CLI.

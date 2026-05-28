@@ -237,7 +237,7 @@ fn core_workflow_init_remember_search_context_why() -> TestResult {
     let context_output = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "release preparation",
         "--max-tokens",
         "2000",
@@ -329,7 +329,7 @@ fn context_and_why_report_changed_file_provenance() -> TestResult {
     let context = run_ee(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "freshness source release",
         "--max-tokens",
         "2000",
@@ -509,7 +509,7 @@ fn context_pack_includes_relevant_memories() -> TestResult {
         let context = run_ee(&[
             "--workspace",
             &workspace,
-            "context",
+            "pack",
             "testing release readiness provenance",
             "--max-tokens",
             max_tokens,

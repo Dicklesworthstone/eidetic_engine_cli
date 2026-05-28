@@ -16,9 +16,7 @@ No command is removed in the promotion milestone. The triad becomes the preferre
 - `ee pack "<task>"` for common retrieval plus context packing.
 - `ee why <id>` for storage, retrieval, history, and link explanation.
 
-Verbose commands stay available for explicit workflows, debugging, audit, and human operation. Commands marked `aliased` should emit a `degraded.deprecated_alias` entry in JSON responses after triad promotion. The degraded entry must include the replacement command and a repair hint, but the command must still execute its current behavior during the soft-deprecation period.
-
-Deprecation window: keep aliases for at least two minor milestones after triad promotion. Re-evaluate before any removal.
+Verbose commands stay available for explicit workflows, debugging, audit, and human operation. The soft-deprecation period for the `ee context` alias has ended: it has been removed, and `ee pack "<task>"` is the sole canonical context-pack surface (both routed through the same `run_context_pack` engine).
 
 ## Disposition Table
 
@@ -35,7 +33,7 @@ Deprecation window: keep aliases for at least two minor milestones after triad p
 | `ee certificate` | kept | Certificate inspection remains explicit. |
 | `ee causal` | kept | Causal tracing remains an advanced surface. |
 | `ee claim` | kept | Executable claim management remains explicit. |
-| `ee context "<task>"` | aliased | Continue current behavior, emit `degraded.deprecated_alias` with replacement `ee pack "<task>"`. |
+| `ee context "<task>"` | removed | Deleted after the soft-deprecation window. Use `ee pack "<task>"`, which runs the identical `run_context_pack` engine. |
 | `ee completion` | kept | Shell completion generation remains explicit. |
 | `ee curate` | kept | Curation review and apply workflows remain explicit. |
 | `ee diag` | kept | Diagnostics remain explicit. |
@@ -117,25 +115,19 @@ These subcommands stay because they expose detail that the triad intentionally s
 | `ee memory expire <id>` | kept | Explicit lifecycle mutation. |
 | `ee memory revise <id>` | kept | Immutable revision workflow. |
 
-## Deprecated Alias Envelope
+## Alias Removal
 
-When an aliased command returns JSON, append a degraded entry:
+The `ee context` compatibility alias has been removed. There is no longer a
+`deprecated_alias` degraded entry; `ee pack "<task>"` is the canonical surface
+and emits the same response envelope the alias used to (minus the now-gone
+alias notice).
 
-```json
-{
-  "code": "deprecated_alias",
-  "severity": "low",
-  "message": "`ee context` is a compatibility alias for the promoted triad command.",
-  "repair": "Use `ee pack \"<task>\"`."
-}
-```
-
-The alias must not change the command's existing semantic contract. For example, `ee remember` remains explicit: provided `--level`, `--kind`, and `--tags` values are honored exactly, and `ee note` inference is not applied behind the user's back.
+Other explicit commands keep their existing semantic contract. For example, `ee remember` remains explicit: provided `--level`, `--kind`, and `--tags` values are honored exactly, and `ee note` inference is not applied behind the user's back.
 
 ## Promotion Checklist
 
 1. Implemented in `bd-17c65.15`: remove the hidden gating behavior from `--experimental-triad`; keep the flag as a no-op compatibility flag for one milestone.
-2. Implemented in `bd-17c65.15`, revised by `bd-2xdom.2`: add `deprecated_alias` emission to `ee context`; keep `ee remember` quiet because canonical docs still present it as explicit capture.
+2. Implemented in `bd-17c65.15`, revised by `bd-2xdom.2`, then retired: the `deprecated_alias` emission and the `ee context` alias itself have been removed; keep `ee remember` quiet because canonical docs still present it as explicit capture.
 3. Keep `ee search` and all detail/debug surfaces because they serve workflows outside the common agent path.
 4. Implemented in `bd-17c65.15`: update `ee --help` so `note`, `pack`, and `why` are the first agent-facing commands.
 5. Re-run `scripts/e2e_overhaul/agent_triad.sh`; promotion remains blocked if `pack_hash_parity` or any promote condition fails.

@@ -1,6 +1,5 @@
-//! bd-270ep: lock the contract that the `ee context --since` happy-path
-//! merges response-side degradations (the `deprecated_alias` every
-//! `ee context` invocation carries, plus pack-assembly degradations
+//! bd-270ep: lock the contract that the `ee pack --since` happy-path
+//! merges response-side degradations (pack-assembly degradations
 //! attached upstream by `run_context_pack`) onto the agent-visible
 //! `ContextDeltaEnvelope.degraded[]` before serialization.
 //!
@@ -74,10 +73,10 @@ fn append_response_degradation_lands_in_envelope_degraded_array() -> TestResult 
     let mut envelope = happy_path_envelope_with_one_modified_item()?;
 
     envelope.append_response_degradation(
-        "deprecated_alias",
+        "semantic_disabled",
         "info",
-        "`ee context` is a compatibility alias for the promoted triad command.",
-        Some("Use `ee pack \"<task>\"`.".to_string()),
+        "Semantic retrieval is disabled; ranking used the lexical tier only.",
+        Some("Run `ee doctor --json` to inspect the embedding tier.".to_string()),
     );
     envelope.append_response_degradation(
         "pack_assembly_slow",
@@ -100,26 +99,23 @@ fn append_response_degradation_lands_in_envelope_degraded_array() -> TestResult 
         .map(|entry| entry.code.as_str())
         .collect();
     assert!(
-        codes.contains(&"deprecated_alias"),
-        "deprecated_alias must appear in delta.degraded; got {codes:?}"
+        codes.contains(&"semantic_disabled"),
+        "semantic_disabled must appear in delta.degraded; got {codes:?}"
     );
     assert!(
         codes.contains(&"pack_assembly_slow"),
         "pack_assembly_slow must appear in delta.degraded; got {codes:?}"
     );
 
-    let deprecated = envelope
+    let semantic = envelope
         .degraded
         .iter()
-        .find(|entry| entry.code == "deprecated_alias")
-        .ok_or_else(|| "deprecated_alias entry vanished".to_string())?;
+        .find(|entry| entry.code == "semantic_disabled")
+        .ok_or_else(|| "semantic_disabled entry vanished".to_string())?;
+    assert_eq!(semantic.severity, "info", "severity round-trips as string");
     assert_eq!(
-        deprecated.severity, "info",
-        "severity round-trips as string"
-    );
-    assert_eq!(
-        deprecated.repair.as_deref(),
-        Some("Use `ee pack \"<task>\"`."),
+        semantic.repair.as_deref(),
+        Some("Run `ee doctor --json` to inspect the embedding tier."),
         "repair text round-trips",
     );
 
@@ -136,10 +132,10 @@ fn append_response_degradation_lands_in_envelope_degraded_array() -> TestResult 
 fn merged_degradations_serialize_as_top_level_degraded_array_per_schema() -> TestResult {
     let mut envelope = happy_path_envelope_with_one_modified_item()?;
     envelope.append_response_degradation(
-        "deprecated_alias",
+        "semantic_disabled",
         "info",
-        "`ee context` is a compatibility alias for the promoted triad command.",
-        Some("Use `ee pack \"<task>\"`.".to_string()),
+        "Semantic retrieval is disabled; ranking used the lexical tier only.",
+        Some("Run `ee doctor --json` to inspect the embedding tier.".to_string()),
     );
     envelope.append_response_degradation(
         "pack_assembly_slow",
@@ -168,7 +164,7 @@ fn merged_degradations_serialize_as_top_level_degraded_array_per_schema() -> Tes
         .filter_map(|entry| entry["code"].as_str())
         .collect();
     assert!(
-        codes.contains(&"deprecated_alias") && codes.contains(&"pack_assembly_slow"),
+        codes.contains(&"semantic_disabled") && codes.contains(&"pack_assembly_slow"),
         "serialized degraded[] must contain both codes; got {codes:?}",
     );
 
@@ -203,14 +199,14 @@ fn append_response_degradation_preserves_existing_kernel_degraded_entries() -> T
     };
     envelope.degraded.push(kernel_entry);
     envelope.append_response_degradation(
-        "deprecated_alias",
+        "semantic_disabled",
         "info",
-        "`ee context` is a compatibility alias for the promoted triad command.",
-        Some("Use `ee pack \"<task>\"`.".to_string()),
+        "Semantic retrieval is disabled; ranking used the lexical tier only.",
+        Some("Run `ee doctor --json` to inspect the embedding tier.".to_string()),
     );
     assert_eq!(envelope.degraded.len(), 2);
     assert_eq!(envelope.degraded[0].code, "kernel_synthetic");
-    assert_eq!(envelope.degraded[1].code, "deprecated_alias");
+    assert_eq!(envelope.degraded[1].code, "semantic_disabled");
     Ok(())
 }
 
@@ -223,15 +219,15 @@ const CONTEXT_DELTA_OVERSIZED_CODE: &str = "context_delta_larger_than_full";
 fn merge_realistic_response_degradations(
     envelope: &mut ee::core::context_delta::ContextDeltaEnvelope,
 ) {
-    // Three entries roughly mirror the worst common case: deprecated_alias
-    // every `ee context` carries plus two pack-pipeline signals
-    // (BM25-only fallback, slow pack assembly) that run_context_pack
-    // routinely attaches when search or assembly degrades.
+    // Three entries roughly mirror the worst common case: three
+    // pack-pipeline signals (semantic disabled, BM25-only fallback, slow
+    // pack assembly) that run_context_pack routinely attaches when search
+    // or assembly degrades.
     envelope.append_response_degradation(
-        "deprecated_alias",
+        "semantic_disabled",
         "info",
-        "`ee context` is a compatibility alias for the promoted triad command.",
-        Some("Use `ee pack \"<task>\"`.".to_string()),
+        "Semantic retrieval is disabled; ranking used the lexical tier only.",
+        Some("Run `ee doctor --json` to inspect the embedding tier.".to_string()),
     );
     envelope.append_response_degradation(
         "search_lexical_only",

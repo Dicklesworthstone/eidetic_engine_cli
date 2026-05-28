@@ -129,7 +129,7 @@ fn run_ee_context(workspace: &Path, query: &str) -> Result<JsonValue, String> {
     run_ee_json(
         workspace,
         &[
-            "context",
+            "pack",
             query,
             "--max-tokens",
             "4000",
@@ -139,7 +139,7 @@ fn run_ee_context(workspace: &Path, query: &str) -> Result<JsonValue, String> {
             "thorough",
             "--json",
         ],
-        &format!("ee context {query:?}"),
+        &format!("ee pack {query:?}"),
     )
 }
 

@@ -14,7 +14,7 @@ too broad.
 Use explicit selectors when you know the function, type, or schema constant:
 
 ```bash
-ee context "review changed context scoring" \
+ee pack "review changed context scoring" \
   --workspace . \
   --changed-symbol apply_changed_symbol_context_boost \
   --json
@@ -24,7 +24,7 @@ Use git-derived selectors when the working tree already contains the relevant
 Rust edits:
 
 ```bash
-ee context "find memories related to my current Rust edits" \
+ee pack "find memories related to my current Rust edits" \
   --workspace . \
   --changed-symbols-from-git \
   --json
@@ -55,7 +55,7 @@ as `exact_symbol`, `containing_symbol`, `renamed_symbol`, `stale_span`, or
 
 ## Operator Notes
 
-Current `ee context --changed-symbol` behavior builds the needed Rust symbol
+Current `ee pack --changed-symbol` behavior builds the needed Rust symbol
 snapshot from referenced source files on demand. There is no required daemon,
 watcher, or editor service.
 
@@ -73,7 +73,7 @@ source tree and file-span provenance readable, then rerun the context command
 with the same selector:
 
 ```bash
-ee context "review changed context scoring" \
+ee pack "review changed context scoring" \
   --workspace . \
   --changed-symbol apply_changed_symbol_context_boost \
   --json

@@ -1,11 +1,11 @@
 # Agent Guide: Per-Agent Context Profiles
 
-Per-agent context profiles let `ee context` apply a small, deterministic bias
+Per-agent context profiles let `ee pack` apply a small, deterministic bias
 from an agent's own outcome history. The feature is additive: it does not
 change global memory confidence, and it cannot let one agent dominate another
 agent's retrieval results.
 
-When enabled, `ee context --explain --json` may include an `agentProfile` block
+When enabled, `ee pack --explain --json` may include an `agentProfile` block
 using schema `ee.context.agent_profile.v1`.
 
 ## What To Read

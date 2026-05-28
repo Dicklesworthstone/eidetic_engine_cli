@@ -242,18 +242,6 @@ fn mesh_command_modes_preserve_local_first_results_without_network() -> TestResu
 
         for (label, args) in [
             (
-                "context",
-                vec![
-                    "context",
-                    "mesh command-mode e2e fixture",
-                    "--max-tokens",
-                    "500",
-                    "--mesh",
-                    mode,
-                    "--json",
-                ],
-            ),
-            (
                 "pack",
                 vec![
                     "pack",

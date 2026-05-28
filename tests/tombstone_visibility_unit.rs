@@ -209,31 +209,18 @@ fn tombstone_visibility_surfaces_are_explicit_and_roundtrip_safe() -> TestResult
         "include-tombstoned search should emit tombstoned_in_results",
     )?;
 
-    let context_default = run_ee(&source_workspace, &["context", query])?;
+    let context_default = run_ee(&source_workspace, &["pack", query])?;
     ensure(
         !json_array(&context_default["data"]["pack"]["items"])
             .iter()
             .any(|item| item["memoryId"].as_str() == Some(tombstoned_id)),
-        "default context should exclude tombstoned memory",
+        "default pack should exclude tombstoned memory",
     )?;
-    let context_include = run_ee(
-        &source_workspace,
-        &["context", query, "--include-tombstoned"],
-    )?;
-    ensure(
-        json_array(&context_include["data"]["pack"]["items"])
-            .iter()
-            .any(|item| {
-                item["memoryId"].as_str() == Some(tombstoned_id)
-                    && item["lifecycle"]["status"].as_str() == Some("tombstoned")
-                    && item["lifecycle"]["tombstonedAt"].as_str().is_some()
-            }),
-        "include-tombstoned context should include lifecycle metadata",
-    )?;
-    ensure(
-        degraded_codes(&context_include).contains(&"tombstoned_in_results"),
-        "include-tombstoned context should emit tombstoned_in_results",
-    )?;
+    // The `--include-tombstoned` context-pack assertions were removed with the
+    // deprecated `ee context` command: `ee pack` does not expose
+    // `--include-tombstoned`, so the CLI cannot surface tombstoned memories
+    // into a context pack. Tombstone visibility through `--include-tombstoned`
+    // remains covered above for `ee search`.
 
     let why = run_ee(&source_workspace, &["why", tombstoned_id])?;
     ensure(

@@ -270,7 +270,7 @@ fn pack_hash_is_deterministic_across_runs() -> TestResult {
     let query_args = [
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "code review and testing",
         "--max-tokens",
         "2000",
@@ -362,7 +362,7 @@ fn pack_item_ordering_is_deterministic() -> TestResult {
     let query_args = [
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "testing rules",
         "--max-tokens",
         "4000",
@@ -671,7 +671,7 @@ fn low_match_pack_is_deterministic() -> TestResult {
     let query_args = [
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "quantum physics formulas xyz123",
         "--json",
     ];

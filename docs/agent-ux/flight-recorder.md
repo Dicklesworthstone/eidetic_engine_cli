@@ -101,7 +101,7 @@ The contract is:
 
 ```bash
 # Per-invocation override
-EE_FLIGHT_RECORDER=1 ee context "prepare release" --json
+EE_FLIGHT_RECORDER=1 ee pack "prepare release" --json
 
 # Persistent (for ee daemon / ee serve)
 ee config set obs.flight_recorder.enabled true
@@ -144,7 +144,7 @@ in `src/obs/flight_recorder.rs` is the substrate they all share.
 All three are advisory; the recorder never blocks the foreground
 command path. A failure to append a trace row is logged via the
 existing `tracing` surface and surfaces in `ee status`, but the
-underlying `ee context` / `ee search` / `ee why` call returns its
+underlying `ee pack` / `ee search` / `ee why` call returns its
 normal response unchanged.
 
 ## Privacy and retention

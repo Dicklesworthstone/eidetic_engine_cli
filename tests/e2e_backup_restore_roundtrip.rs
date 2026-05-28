@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ee::db::{
-    CreateGraphAlgorithmResultInput, CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput,
-    DbConnection, GraphSnapshotType, StoredMemory,
+    CreateGraphAlgorithmWitnessInput, CreateGraphSnapshotInput, DbConnection, GraphSnapshotType,
+    StoredMemory,
 };
 use serde_json::Value as JsonValue;
 
@@ -222,36 +222,6 @@ fn json_u64(value: &JsonValue, pointer: &str, context: &str) -> Result<u64, Stri
         .ok_or_else(|| format!("{context}: missing integer at {pointer}"))
 }
 
-fn json_f64(value: &JsonValue, pointer: &str, context: &str) -> Result<f64, String> {
-    value
-        .pointer(pointer)
-        .and_then(JsonValue::as_f64)
-        .ok_or_else(|| format!("{context}: missing number at {pointer}"))
-}
-
-fn ensure_float_close(actual: f64, expected: f64, context: &str) -> TestResult {
-    let delta = (actual - expected).abs();
-    if delta <= 0.000_001 {
-        Ok(())
-    } else {
-        Err(format!("{context}: expected {expected}, got {actual}"))
-    }
-}
-
-fn context_item_by_memory<'a>(
-    report: &'a JsonValue,
-    memory_id: &str,
-    context: &str,
-) -> Result<&'a JsonValue, String> {
-    report
-        .pointer("/data/pack/items")
-        .and_then(JsonValue::as_array)
-        .ok_or_else(|| format!("{context}: missing context pack items"))?
-        .iter()
-        .find(|item| item.pointer("/memoryId").and_then(JsonValue::as_str) == Some(memory_id))
-        .ok_or_else(|| format!("{context}: missing context item for {memory_id}"))
-}
-
 fn context_item_contents(report: &JsonValue, context: &str) -> Result<Vec<String>, String> {
     report
         .pointer("/data/pack/items")
@@ -276,80 +246,6 @@ fn enable_ppr_context_feature(workspace_path: &Path) -> TestResult {
         "[graph.feature.ppr]\nenabled = true\n",
     )
     .map_err(|error| format!("write PPR fixture config: {error}"))
-}
-
-fn seed_context_ppr_cache_score(
-    database_path: &Path,
-    workspace_id: &str,
-    snapshot_id: &str,
-    memory_id: &str,
-    score: f64,
-    context: &str,
-) -> TestResult {
-    let connection = DbConnection::open_file(database_path)
-        .map_err(|error| format!("{context}: open db for PPR cache fixture: {error}"))?;
-    let rows = connection
-        .list_graph_algorithm_results(workspace_id, snapshot_id, Some("personalized_pagerank"))
-        .map_err(|error| format!("{context}: list PPR cache rows: {error}"))?;
-    ensure_equal(
-        &rows.len(),
-        &1,
-        &format!("{context}: discovered exactly one live PPR cache params hash"),
-    )?;
-    connection
-        .upsert_graph_algorithm_result(&CreateGraphAlgorithmResultInput {
-            workspace_id: workspace_id.to_owned(),
-            snapshot_id: snapshot_id.to_owned(),
-            algorithm: "personalized_pagerank".to_owned(),
-            params_hash: rows[0].params_hash.clone(),
-            result_json: serde_json::json!({
-                "scores": [
-                    {
-                        "node": memory_id,
-                        "score": score,
-                    }
-                ],
-                "converged": true,
-                "witness": {
-                    "algorithm": "personalized_pagerank_cache_fixture",
-                    "complexity_claim": "cache fixture",
-                    "nodes_touched": 1,
-                    "edges_scanned": 0,
-                    "queue_peak": 0,
-                }
-            })
-            .to_string(),
-            ttl_seconds: 3600,
-        })
-        .map_err(|error| format!("{context}: seed PPR cache fixture: {error}"))?;
-    connection
-        .close()
-        .map_err(|error| format!("{context}: close PPR cache fixture db: {error}"))
-}
-
-fn ensure_context_uses_ppr_cache_score(
-    report: &JsonValue,
-    memory_id: &str,
-    expected_score: f64,
-    context: &str,
-) -> TestResult {
-    let item = context_item_by_memory(report, memory_id, context)?;
-    let ppr_score = json_f64(
-        item,
-        "/selection/scoreBreakdown/pprScore",
-        &format!("{context} ppr score"),
-    )?;
-    let combined_score = json_f64(
-        item,
-        "/selection/scoreBreakdown/combinedScore",
-        &format!("{context} combined score"),
-    )?;
-    ensure_float_close(ppr_score, expected_score, &format!("{context} ppr score"))?;
-    ensure_float_close(
-        combined_score,
-        expected_score,
-        &format!("{context} combined score"),
-    )
 }
 
 fn artifact_dir() -> PathBuf {
@@ -676,7 +572,6 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     let ppr_cache_memory_id = seeded_memory_ids
         .first()
         .ok_or_else(|| "missing memory id for ppr cache fixture".to_owned())?;
-    let ppr_cache_score = 0.875_f64;
     // Backup restore transits through records.jsonl and currently restores
     // native memories with the JSONL import provenance marker. Align the source
     // fixture before taking the context snapshot so the byte-identity assertion
@@ -714,34 +609,18 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
     // Let the current context pipeline derive the seed-aware PPR params hash;
     // Frankensearch scores are part of the seed weights and should not be
     // guessed by this backup fixture.
-    let (_probe_context, _probe_context_stdout) = run_ee_raw(&[
-        "--workspace",
-        &workspace_arg,
-        "--json",
-        "context",
-        CONTEXT_QUERY,
-        "--database",
-        &src_db_arg,
-        "--index-dir",
-        &source_context_index_arg,
-        "--candidate-pool",
-        "1",
-        "--ppr-weight",
-        "1.0",
-    ])?;
-    seed_context_ppr_cache_score(
-        &src_db,
-        &src_workspace_id,
-        graph_snapshot_id,
-        ppr_cache_memory_id,
-        ppr_cache_score,
-        "source context PPR probe",
-    )?;
+    // The former `--ppr-weight` source/restored context probes (and the
+    // `pprScore` cache-restoration assertions) were removed with the deprecated
+    // `ee context` command: `ee pack`, the replacement surface, does not expose
+    // `--ppr-weight` and hardcodes the PPR blend to disabled. The graph-cache
+    // restoration is still verified directly against the SQLite store below;
+    // here we keep a byte-identity check that the same `ee pack` query produces
+    // identical output before and after the backup/restore round-trip.
     let (source_context, _source_context_stdout) = run_ee_raw(&[
         "--workspace",
         &workspace_arg,
         "--json",
-        "context",
+        "pack",
         CONTEXT_QUERY,
         "--database",
         &src_db_arg,
@@ -749,16 +628,8 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &source_context_index_arg,
         "--candidate-pool",
         "1",
-        "--ppr-weight",
-        "1.0",
     ])?;
     let source_context_stdout = canonical_context_stdout(source_context.clone())?;
-    ensure_context_uses_ppr_cache_score(
-        &source_context,
-        ppr_cache_memory_id,
-        ppr_cache_score,
-        "source context uses seeded graph cache",
-    )?;
 
     // 4. Create the backup with redaction = none so content survives intact.
     let backup = run_ee(&[
@@ -967,7 +838,7 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         "--workspace",
         &side_path_arg,
         "--json",
-        "context",
+        "pack",
         CONTEXT_QUERY,
         "--database",
         &restored_db_path_arg,
@@ -975,16 +846,8 @@ fn backup_then_restore_preserves_every_memory_and_tag() -> TestResult {
         &restored_context_index_arg,
         "--candidate-pool",
         "1",
-        "--ppr-weight",
-        "1.0",
     ])?;
     let restored_context_stdout = canonical_context_stdout(restored_context.clone())?;
-    ensure_context_uses_ppr_cache_score(
-        &restored_context,
-        ppr_cache_memory_id,
-        ppr_cache_score,
-        "restored context uses restored graph cache",
-    )?;
     ensure_context_json_bytes_equal(
         &restored_context,
         &source_context,

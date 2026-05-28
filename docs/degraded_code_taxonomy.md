@@ -463,10 +463,9 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `quarantine_database_missing` | medium | bd-17c65.10.6 (J6) |
 | `quarantine_workspace_unavailable` | medium | bd-17c65.10.6 (J6) |
 
-#### Discoverability + usage (3)
+#### Discoverability + usage (2)
 | Code | Severity | Bead |
 |------|----------|------|
-| `deprecated_alias` | info | bd-17c65.6.7 (F7) |
 | `usage_conflicting_presets` | low | bd-17c65.4.5 (D5) |
 | `usage_unknown_field` | low | bd-17c65.4.5 (D5) |
 

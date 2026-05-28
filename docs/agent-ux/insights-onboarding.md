@@ -3,7 +3,7 @@
 This guide is for coding agents that need to use graph-derived `ee` surfaces
 without reading implementation code. Treat the JSON schemas as the contract and
 the commands below as inspection tools. These surfaces explain graph posture;
-they do not replace `ee context`, `ee search`, or `ee why`.
+they do not replace `ee pack`, `ee search`, or `ee why`.
 
 ## First Probe
 
@@ -100,7 +100,7 @@ ee proximity mem_a mem_b --workspace . --json
 Use Pack DNA when a context pack seems surprising:
 
 ```bash
-ee context "prepare release" --workspace . --explain --json
+ee pack "prepare release" --workspace . --explain --json
 ```
 
 The graph block uses `ee.context.pack_dna.v1` and may contain:
@@ -206,9 +206,9 @@ favor authoritative memories, `orientation` when it should favor hub memories,
 and `balanced` when neither direction should dominate:
 
 ```bash
-ee context "ground release evidence" --profile grounding --workspace . --json
-ee context "map release dependencies" --profile orientation --workspace . --json
-ee context "prepare release" --profile balanced --workspace . --json
+ee pack "ground release evidence" --profile grounding --workspace . --json
+ee pack "map release dependencies" --profile orientation --workspace . --json
+ee pack "prepare release" --profile balanced --workspace . --json
 ```
 
 ## Load-Bearing Memories

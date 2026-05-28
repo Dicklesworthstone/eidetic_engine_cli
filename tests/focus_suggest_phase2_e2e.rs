@@ -163,17 +163,15 @@ fn focus_suggest_phase2_non_empty_recommendations() -> TestResult {
         let query = rec["suggestedQuery"].as_str().ok_or_else(|| {
             format!("recommendations[{idx}].suggestedQuery must be a string; got {rec:?}")
         })?;
-        // Per AGENTS.md line 544, `ee pack` is the canonical
-        // post-triad-promotion surface and `ee context` is the
-        // soft-deprecated alias. Phase 2 of focus_suggest should
-        // emit `ee pack` so agents acting on a recommendation do not
-        // immediately trip the `deprecated_alias` info-severity
-        // degraded entry. `ee search` is also acceptable for queries
-        // that want the raw retrieval rather than a packed surface.
+        // Per AGENTS.md, `ee pack` is the canonical context-pack
+        // surface, so Phase 2 of focus_suggest emits `ee pack` for an
+        // agent acting on a recommendation. `ee search` is also
+        // acceptable for queries that want the raw retrieval rather
+        // than a packed surface.
         ensure(
             query.contains("ee pack") || query.contains("ee search"),
             format!(
-                "recommendations[{idx}].suggestedQuery must reference `ee pack` or `ee search` (NOT the deprecated `ee context` alias); got {query:?}"
+                "recommendations[{idx}].suggestedQuery must reference `ee pack` or `ee search`; got {query:?}"
             ),
         )?;
     }

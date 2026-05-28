@@ -102,7 +102,7 @@ spawn_context_reader() {
     (
         started="$(python3 -c 'import time; print(time.monotonic_ns())')"
         set +e
-        "$EE_BINARY" context \
+        "$EE_BINARY" pack \
             "read pool concurrency fixture $RUN_ID stable pack" \
             --workspace "$EPIC_WORKSPACE" \
             --candidate-pool 80 \

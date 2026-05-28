@@ -111,8 +111,7 @@ impl ContextDeltaEnvelope {
     /// agent-visible delta envelope. The kernel constructs `degraded[]`
     /// from its own oversized/fallback bookkeeping only and has no view of
     /// the surrounding `ContextResponse`, so without this projection the
-    /// `--since` happy-path silently drops the `deprecated_alias` every
-    /// `ee context` invocation carries plus any pack-assembly
+    /// `--since` happy-path silently drops any pack-assembly
     /// degradations (BM25-only fallback, scope-strict miss, slow pack
     /// assembly, RPC fallback, …) that `run_context_pack` attached
     /// upstream. This is the symmetric counterpart of
@@ -141,7 +140,7 @@ impl ContextDeltaEnvelope {
     ///
     /// Without this step, `compute_context_delta` measured the envelope
     /// with `degraded[]` still empty and the CLI then appended
-    /// `deprecated_alias` plus any pack-pipeline degradations directly
+    /// pack-pipeline degradations directly
     /// into `degraded[]` — so two contracts broke at once: the
     /// configured byte budget could be silently exceeded, and
     /// `tokenSavings.deltaBytes` (used by agents to budget the

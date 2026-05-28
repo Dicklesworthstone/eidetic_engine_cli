@@ -177,7 +177,7 @@ fn run_ee_context_json(
     run_ee_json(
         workspace,
         &[
-            "context",
+            "pack",
             query,
             "--max-tokens",
             max_tokens,
@@ -199,7 +199,7 @@ fn run_ee_context_stdout(
     run_ee_stdout(
         workspace,
         &[
-            "context",
+            "pack",
             query,
             "--max-tokens",
             max_tokens,
@@ -271,7 +271,7 @@ fn pack_hash_invariant_under_relative_vs_absolute_workspace_alias() -> TestResul
         .arg("--workspace")
         .arg(".")
         .args([
-            "context",
+            "pack",
             "prepare release",
             "--max-tokens",
             "1000",

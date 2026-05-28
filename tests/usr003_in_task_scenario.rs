@@ -432,7 +432,7 @@ fn in_task_recovery_scenario_explains_selection_repair_and_tripwires() -> TestRe
             "--workspace",
             workspace_arg.as_str(),
             "--json",
-            "context",
+            "pack",
             "recover from clippy regression in release",
             "--max-tokens",
             "4000",

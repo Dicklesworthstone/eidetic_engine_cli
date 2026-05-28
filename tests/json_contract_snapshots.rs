@@ -481,7 +481,7 @@ fn fixture_backed_agent_json_contracts_match_snapshots() -> TestResult {
             "--json".to_string(),
             "--workspace".to_string(),
             workspace,
-            "context".to_string(),
+            "pack".to_string(),
             QUERY.to_string(),
             "--database".to_string(),
             database,

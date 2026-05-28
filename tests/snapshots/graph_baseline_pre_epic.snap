@@ -17,7 +17,7 @@ expression: graph_baseline_pre_epic
     },
     {
       "name": "context",
-      "command": "ee context <query> --workspace <fixture> --json",
+      "command": "ee pack <query> --workspace <fixture> --json",
       "snapshot": "json_contract_snapshots__context_json_contract.snap"
     },
     {

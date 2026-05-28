@@ -48,7 +48,7 @@ MEMORY_ID="$(printf '%s' "$MEMORY_JSON" | jq -r '.data.memory_id // empty' 2>/de
 symbol_phase_log "linking" "symbol evidence links" "memoryId=${MEMORY_ID:-missing} expectedSchema=ee.symbol_evidence_links.v1"
 todo_assert "symbol_graph_linking_logged" "bd-2xuu7.2" "ee symbol link should map memory and CASS evidence to redaction-safe symbol ids."
 
-CONTEXT_JSON="$(ee_workspace context \
+CONTEXT_JSON="$(ee_workspace pack \
     "render_context_boost changed symbol" \
     --max-tokens 700 \
     --json 2>/dev/null || true)"

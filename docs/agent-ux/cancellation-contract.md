@@ -36,7 +36,7 @@ sampling decisions are part of the answer:
 - `ee insights --json` is the broadest graph inspection surface.
 - `ee insights --section <name> --json` narrows the budget to one section.
 - `ee insights --explain <memory-id> --json` narrows the budget to one memory.
-- `ee context --explain --json` may include Pack DNA, but ordinary context
+- `ee pack --explain --json` may include Pack DNA, but ordinary context
   selection still remains useful if Pack DNA degrades.
 
 Worked example:
@@ -80,7 +80,7 @@ context. Synchronous convenience wrappers fall back to `Cx::current()` and then
 
 ## Context Pack Degradation
 
-For `ee context --explain --json`, graph explanation failures must not poison
+For `ee pack --explain --json`, graph explanation failures must not poison
 the base pack. A Pack DNA timeout means the graph explanation is incomplete; it
 does not mean the selected pack items are invalid.
 
@@ -133,7 +133,7 @@ Use these narrower retries:
 ```bash
 ee insights --section topMemories --workspace . --json
 ee insights --section bridges --workspace . --json
-ee context "prepare release" --workspace . --explain --max-tokens 2000 --json
+ee pack "prepare release" --workspace . --explain --max-tokens 2000 --json
 ee proximity mem_a mem_b --workspace . --json
 ```
 

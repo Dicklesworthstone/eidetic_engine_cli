@@ -436,9 +436,9 @@ fn mesh_off_status_reports_capability_without_polluting_ordinary_json() -> TestR
             vec!["search", "mesh-off ordinary command fixture", "--json"],
         ),
         (
-            "context",
+            "pack",
             vec![
-                "context",
+                "pack",
                 "mesh-off ordinary command fixture",
                 "--max-tokens",
                 "500",

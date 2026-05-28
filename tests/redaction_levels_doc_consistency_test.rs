@@ -160,7 +160,9 @@ fn redaction_flags_are_help_discoverable_on_current_surfaces() -> TestResult {
             &["ee", "backup", "create", "--help"][..],
             "ee backup create --help",
         ),
-        (&["ee", "context", "--help"][..], "ee context --help"),
+        // `ee context --help` was dropped with the deprecated command. The
+        // replacement `ee pack` surface does not expose `--redaction`, so it is
+        // intentionally absent from this redaction-discoverability matrix.
         (
             &["ee", "handoff", "create", "--help"][..],
             "ee handoff create --help",
@@ -208,16 +210,9 @@ fn documented_redaction_cli_examples_parse() -> TestResult {
             "--dry-run",
             "--json",
         ][..],
-        &[
-            "ee",
-            "context",
-            "prepare release handoff",
-            "--workspace",
-            ".",
-            "--redaction",
-            "minimal",
-            "--json",
-        ][..],
+        // The `ee context ... --redaction minimal` example was removed with the
+        // deprecated command; `ee pack` has no `--redaction` flag, so there is
+        // no equivalent context-pack invocation to keep documented here.
         &[
             "ee",
             "handoff",

@@ -3086,7 +3086,7 @@ mod tests {
             "data": {"ok": true},
             "degraded": [
                 {"code": "pack_assembly_slow", "severity": "low", "message": "synthetic"},
-                {"code": "deprecated_alias", "severity": "info", "message": "synthetic"}
+                {"code": "semantic_disabled", "severity": "info", "message": "synthetic"}
             ]
         });
         let frame = render_serve_sse_event("trailer", true, &inner);
@@ -3109,9 +3109,9 @@ mod tests {
             "pack_assembly_slow mirrored",
         )?;
         ensure(
-            codes.contains(&"deprecated_alias"),
+            codes.contains(&"semantic_disabled"),
             true,
-            "deprecated_alias mirrored",
+            "semantic_disabled mirrored",
         )?;
         // Statuscode stays 200 because the inner envelope is not an error.
         ensure(

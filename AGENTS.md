@@ -403,7 +403,7 @@ Agents push evidence and lessons in; agents pull context out. `ee` should not re
 The most important workflow is:
 
 ```bash
-ee context "fix failing release workflow" --workspace . --max-tokens 4000 --json
+ee pack "fix failing release workflow" --workspace . --max-tokens 4000 --json
 ```
 
 ### High-Level Architecture

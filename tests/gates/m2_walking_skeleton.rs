@@ -165,10 +165,10 @@ fn m2_walking_skeleton_keeps_public_json_and_markdown_contracts() -> TestResult 
             "--workspace",
             &workspace_arg,
             "--json",
-            "context",
+            "pack",
             "prepare release",
         ])?,
-        "ee context --json",
+        "ee pack --json",
     )?;
     ensure(
         context.pointer("/data/provenance").is_some()
@@ -182,7 +182,7 @@ fn m2_walking_skeleton_keeps_public_json_and_markdown_contracts() -> TestResult 
         &workspace_arg,
         "--format",
         "markdown",
-        "context",
+        "pack",
         "prepare release",
     ])?;
     let markdown_stdout = str::from_utf8(&markdown.stdout)

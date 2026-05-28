@@ -832,7 +832,7 @@ fn appendix_c_agent_flow_parity_scenario() -> TestResult {
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
                 "--json".to_owned(),
-                "context".to_owned(),
+                "pack".to_owned(),
                 "add concurrent rate limiting to the API gateway".to_owned(),
                 "--max-tokens".to_owned(),
                 "4000".to_owned(),

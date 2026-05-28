@@ -180,7 +180,7 @@ A_SEARCH_JSON="$(run_workspace_json "$WORKSPACE_A" search "$QUERY_TEXT" --mesh c
 assert_json_success "$A_SEARCH_JSON" "mesh_scope_workspace_a_search_success"
 assert_contains_text "$A_SEARCH_JSON" "$A_BODY_MARKER" "mesh_scope_workspace_a_search_sees_authorized_body"
 
-A_CONTEXT_JSON="$(run_workspace_json "$WORKSPACE_A" context "$QUERY_TEXT" --max-tokens 700 --mesh cache)"
+A_CONTEXT_JSON="$(run_workspace_json "$WORKSPACE_A" pack "$QUERY_TEXT" --max-tokens 700 --mesh cache)"
 assert_json_success "$A_CONTEXT_JSON" "mesh_scope_workspace_a_context_success"
 assert_contains_text "$A_CONTEXT_JSON" "$A_BODY_MARKER" "mesh_scope_workspace_a_context_sees_authorized_body"
 
@@ -189,7 +189,7 @@ B_SEARCH_JSON="$(run_workspace_json "$WORKSPACE_B" search "$QUERY_TEXT" --mesh c
 assert_json_success "$B_SEARCH_JSON" "mesh_scope_workspace_b_search_success"
 assert_no_a_leak "$B_SEARCH_JSON" "mesh_scope_workspace_b_search"
 
-B_CONTEXT_JSON="$(run_workspace_json "$WORKSPACE_B" context "$QUERY_TEXT" --max-tokens 700 --mesh cache)"
+B_CONTEXT_JSON="$(run_workspace_json "$WORKSPACE_B" pack "$QUERY_TEXT" --max-tokens 700 --mesh cache)"
 assert_json_success "$B_CONTEXT_JSON" "mesh_scope_workspace_b_context_success"
 assert_no_a_leak "$B_CONTEXT_JSON" "mesh_scope_workspace_b_context"
 

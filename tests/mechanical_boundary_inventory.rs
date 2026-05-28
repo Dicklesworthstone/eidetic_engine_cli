@@ -73,7 +73,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "init",
             "remember",
             "import cass",
-            "context",
+            "pack build",
             "why",
             "outcome",
             "search",
@@ -86,7 +86,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         &[
             "init",
             "import cass",
-            "context",
+            "pack build",
             "remember",
             "review session",
             "curate candidates",
@@ -102,7 +102,6 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
             "init",
             "status",
             "doctor",
-            "context",
             "search",
             "remember",
             "outcome",
@@ -240,7 +239,6 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "## Configuration",
         "Configuration and Context Profiles",
         &[
-            "context",
             "pack build",
             "status",
             "workspace resolve",
@@ -259,7 +257,7 @@ const README_WORKFLOW_ROWS: &[(&str, &str, &str, &[&str])] = &[
         "## Agent Harness Integration",
         "Agent Harness Integration",
         &[
-            "context",
+            "pack build",
             "remember",
             "outcome",
             "curate candidates",

@@ -157,7 +157,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     let context = run_ee(
         &workspace,
         &[
-            "context",
+            "pack",
             "prepare release",
             "--max-tokens",
             "2000",

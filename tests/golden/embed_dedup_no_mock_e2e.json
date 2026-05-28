@@ -13,9 +13,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
-        "degradedCodes": [
-          "deprecated_alias"
-        ]
+        "degradedCodes": []
       },
       {
         "schema": "ee.response.v2",
@@ -24,9 +22,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
-        "degradedCodes": [
-          "deprecated_alias"
-        ]
+        "degradedCodes": []
       }
     ],
     "contentSimhashCandidates": 0,
@@ -46,9 +42,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
-        "degradedCodes": [
-          "deprecated_alias"
-        ]
+        "degradedCodes": []
       },
       {
         "schema": "ee.response.v2",
@@ -57,9 +51,7 @@
         "memoryId": "<MEMORY_ID>",
         "persisted": true,
         "indexStatus": "pending",
-        "degradedCodes": [
-          "deprecated_alias"
-        ]
+        "degradedCodes": []
       }
     ],
     "contentSimhashCandidatesAtHammingZero": 2,
@@ -97,9 +89,7 @@
       "memoryId": "<MEMORY_ID>",
       "persisted": true,
       "indexStatus": "pending",
-      "degradedCodes": [
-        "deprecated_alias"
-      ]
+      "degradedCodes": []
     },
     "dedupLinks": []
   },

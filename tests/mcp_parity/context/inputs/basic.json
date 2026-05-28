@@ -5,7 +5,7 @@
   "seedMemoryContent": "Run cargo fmt --check before committing.",
   "cliArgs": [
     "ee",
-    "context",
+    "pack",
     "prepare a release",
     "--workspace",
     "__WORKSPACE__",

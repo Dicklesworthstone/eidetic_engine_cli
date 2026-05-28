@@ -618,7 +618,7 @@ fn real_binary_search_context_pipeline_narrows_and_preserves_explanations() -> T
     let context = run_ee_json(&[
         "--workspace",
         &workspace,
-        "context",
+        "pack",
         "cargo fmt release",
         "--candidate-pool",
         "2",

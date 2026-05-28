@@ -204,7 +204,7 @@ fn context_pack_hash_reproduces_across_three_invocations() -> TestResult {
         let output = run_ee(&[
             "--workspace",
             workspace.to_str().unwrap(),
-            "context",
+            "pack",
             "prepare release",
             "--max-tokens",
             "1000",

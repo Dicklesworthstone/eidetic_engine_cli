@@ -2072,7 +2072,7 @@ mod tests {
             .arg("--json")
             .arg("--workspace")
             .arg(&workspace)
-            .arg("context")
+            .arg("pack")
             .arg("format before release")
             .arg("--database")
             .arg(&database)
@@ -2123,7 +2123,7 @@ mod tests {
         )?;
         ensure_equal(
             &value["data"]["command"],
-            &serde_json::json!("context"),
+            &serde_json::json!("pack"),
             "context command",
         )?;
         ensure_equal(
@@ -2445,7 +2445,7 @@ mod tests {
             .arg("markdown")
             .arg("--workspace")
             .arg(&workspace)
-            .arg("context")
+            .arg("pack")
             .arg("format before release")
             .arg("--database")
             .arg(&database)
@@ -2505,7 +2505,7 @@ mod tests {
                 .arg("--json")
                 .arg("--workspace")
                 .arg(&workspace)
-                .arg("context")
+                .arg("pack")
                 .arg("format before release")
                 .arg("--database")
                 .arg(&database)
@@ -2566,7 +2566,7 @@ mod tests {
             .arg("markdown")
             .arg("--workspace")
             .arg(&workspace)
-            .arg("context")
+            .arg("pack")
             .arg("format before release")
             .arg("--database")
             .arg(&database)
@@ -3767,7 +3767,7 @@ mod tests {
                 "--json",
                 "--workspace",
                 "tests/fixtures/missing-ee-workspace",
-                "context",
+                "pack",
                 "prepare-release",
             ],
             "context_unavailable.json",

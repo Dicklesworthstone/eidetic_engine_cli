@@ -234,7 +234,7 @@ fn north_star_1_release_context_includes_verification_rules() -> TestResult {
     seed_release_memories(&dir)?;
 
     let output = run_ee(&[
-        "context",
+        "pack",
         "what should I know before releasing this project?",
         "--workspace",
         dir.to_str().unwrap(),
@@ -266,7 +266,7 @@ fn north_star_2_async_migration_context_is_json_and_mentions_cx() -> TestResult 
     seed_async_migration_memories(&dir)?;
 
     let output = run_ee(&[
-        "context",
+        "pack",
         "replace a tokio service with asupersync",
         "--workspace",
         dir.to_str().unwrap(),
@@ -300,7 +300,7 @@ fn north_star_4_onboarding_context_includes_conventions() -> TestResult {
     seed_onboarding_memories(&dir)?;
 
     let output = run_ee(&[
-        "context",
+        "pack",
         "start working in this repository",
         "--workspace",
         dir.to_str().unwrap(),
@@ -334,7 +334,7 @@ fn north_star_5_cleanup_context_warns_about_dangers() -> TestResult {
     seed_cleanup_memories(&dir)?;
 
     let output = run_ee(&[
-        "context",
+        "pack",
         "clean up generated files and reset the repo state",
         "--workspace",
         dir.to_str().unwrap(),
@@ -374,7 +374,7 @@ fn north_star_6_degraded_mode_uses_lexical_fallback() -> TestResult {
     ensure(output.status.success(), "seed memory failed")?;
 
     let output = run_ee(&[
-        "context",
+        "pack",
         "run tests before release",
         "--workspace",
         dir.to_str().unwrap(),

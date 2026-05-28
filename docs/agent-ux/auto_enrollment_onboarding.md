@@ -4,7 +4,7 @@ This guide is for coding agents that consume the `ee mesh` surface after
 `ee mesh auto-enroll` has materialized a peer-group binding. Treat the JSON
 schemas as the contract; the commands below are the inspection and repair
 surfaces. These tools coordinate access to remote ee memory; they do not
-replace `ee context`, `ee search`, or `ee why` — those still drive the
+replace `ee pack`, `ee search`, or `ee why` — those still drive the
 local-first retrieval that mesh accelerates.
 
 ## Agent Use/No-Use Checklist
@@ -17,7 +17,7 @@ Before running mutating mesh commands, check the decision lane:
 
 | Situation | Agent action | Why |
 |---|---|---|
-| Single-machine work, CI, or ordinary `ee context` / `ee search` | Do not enroll mesh; keep `--mesh off` or the default mode. | Local Tier 1 is the source of truth and remains deterministic. |
+| Single-machine work, CI, or ordinary `ee pack` / `ee search` | Do not enroll mesh; keep `--mesh off` or the default mode. | Local Tier 1 is the source of truth and remains deterministic. |
 | User asks whether mesh is available | Run read-only status/doctor commands only. | Availability diagnosis should not create peer bindings or grants. |
 | Two operator-owned machines need shared hints | Start with status, dry-run auto-enroll, then metadata/revision preview. | Metadata-only keeps bodies, embeddings, and graph lanes denied by default. |
 | A pack should stay usable now but report fresher peer material later | Use revisable mode and inspect the revision token. | The local pack must not be silently rewritten after emission. |
@@ -31,7 +31,7 @@ ee status --workspace . --json
 ee mesh status --workspace . --json
 ee mesh auto-enroll --workspace . --dry-run --json
 ee mesh preview-grant <node-key> --lane metadata --workspace . --json
-ee context "audit release readiness" --workspace . --mesh revisable --json
+ee pack "audit release readiness" --workspace . --mesh revisable --json
 ```
 
 Stop before the mutating `ee mesh auto-enroll --json`, `ee mesh disable`,
@@ -428,7 +428,7 @@ ee audit timeline \
 - It does **not** treat tailscale reachability as authorization. A peer is
   on the tailnet AND ee-capable AND in the materialized peer-group AND
   granted the relevant lane before they can read body/embedding data.
-- It does **not** mutate retrieval semantics. `ee context`, `ee search`,
+- It does **not** mutate retrieval semantics. `ee pack`, `ee search`,
   `ee why` continue to return local-first results. Mesh peers' data
   appears as imported evidence with provenance, not as local truth.
 
