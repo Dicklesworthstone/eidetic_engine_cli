@@ -19,6 +19,18 @@ fn pad_id(id: &str, prefix: &str) -> String {
     pad_id_to(id, prefix, 30)
 }
 
+/// Mirror of `crate::core::causal::stable_workspace_id` (which is `pub(crate)`
+/// and so not reachable from integration tests). Produces the same `wsp_*`
+/// id the production CLI computes from a workspace path, so the test fixture
+/// can pre-insert workspace+memory rows whose ids match the ones the CLI
+/// resolves at runtime via `ensure_workspace`.
+fn stable_workspace_id_for_test(path: &std::path::Path) -> String {
+    let hash = blake3::hash(format!("workspace:{}", path.to_string_lossy()).as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&hash.as_bytes()[..16]);
+    ee::models::WorkspaceId::from_uuid(uuid::Uuid::from_bytes(bytes)).to_string()
+}
+
 /// Pads or truncates a short identifier to exactly `width` chars while
 /// preserving the canonical prefix. Used by both memory/workspace ids
 /// (length=30) and memory link ids (length=31).
@@ -1609,13 +1621,13 @@ impl KnowledgeGapsFixture {
         fs::create_dir_all(&database_dir)
             .map_err(|error| format!("create {}: {error}", database_dir.display()))?;
         let database_path = database_dir.join("ee.db");
-        // Workspace ids must satisfy the DB CHECK constraint:
-        //   id GLOB 'wsp_*' AND length(id) = 30
-        // We synthesize a 30-char id from `label` by replacing dashes with
-        // underscores, then padding or truncating to fit the 26-char tail.
-        let sanitized = label.replace('-', "_");
-        let tail: String = sanitized.chars().chain(std::iter::repeat('0')).take(26).collect();
-        let workspace_id = format!("wsp_{tail}");
+        // Use the same workspace-id derivation the production CLI uses
+        // (`crate::core::causal::stable_workspace_id`) so that when the test
+        // pre-seeds memories under this id and then invokes `ee
+        // --workspace <tempdir>`, the CLI's `ensure_workspace` lookup-by-path
+        // returns the same row. A path-stable id also satisfies the DB CHECK
+        // constraint `id GLOB 'wsp_*' AND length(id) = 30`.
+        let workspace_id = stable_workspace_id_for_test(&workspace);
         let fixture = Self {
             _tempdir: tempdir,
             workspace,

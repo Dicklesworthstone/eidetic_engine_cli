@@ -223,9 +223,9 @@ ee insights --section loadBearingMemories --workspace . --json \
 
 Items expose `loadBearingScore`, `citingRuleCount`, `interpretation`, and
 `evidence.algorithm`. `interpretation` is `"load_bearing"` and
-`evidence.algorithm` is `"bipartite_hits"`. The evidence is a rule-to-source
-provenance projection: memory nodes score as authorities when many rule nodes
-cite them.
+`evidence.algorithm` is `"bipartite_hits"`. The evidence is a
+rule-to-source provenance projection: memory nodes score as authorities
+when many rule nodes cite them.
 
 Follow with `ee why` before changing a listed memory:
 

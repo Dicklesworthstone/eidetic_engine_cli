@@ -38,6 +38,7 @@
   },
   "field_presets": {
     "minimal": ["schema", "algorithm", "requestId", "requestHash", "keyId"],
+    "summary": ["schema", "algorithm", "requestId", "requestHash", "keyId", "expiresAt", "reflectionKind"],
     "standard": ["schema", "algorithm", "requestId", "requestHash", "workspaceId", "reflectionKind", "sourcePackageHash", "sourceContentHashes", "responseSchemaHash", "expiresAt", "keyId"],
     "full": ["*"]
   },

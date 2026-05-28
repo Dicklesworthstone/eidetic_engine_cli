@@ -1991,12 +1991,18 @@ fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult
                 "golden/capabilities/capabilities_json.golden",
             ))?,
         ),
+        // Context pack documents use the ee.response.v2 envelope at the top
+        // level; ee.pack.v2 is the inner payload contract, which is enforced
+        // by the schema's own /properties/schema/const. Skip the top-level
+        // schema-id mirror check here (the validator still asserts the inner
+        // ee.pack.v2 shape).
         MachineSurfaceConformanceCase::new(
             "context",
             "ee.pack.v2",
             "ee.pack.v2.json",
             read_json(&fixture_path("golden/agent/context_pack.json.golden"))?,
-        ),
+        )
+        .without_top_level_schema(),
         MachineSurfaceConformanceCase::new(
             "search",
             "ee.search.document.v1",
@@ -2201,12 +2207,21 @@ fn proof_check_conformance_sample() -> Value {
 }
 
 fn swarm_brief_conformance_sample() -> Result<Value, String> {
-    read_json(&fixture_path(
+    // The contract-matrix golden wraps each schema-shaped payload with a
+    // fixture-only `case` label (e.g. "all_sources_available"). That label
+    // isn't part of the ee.swarm.brief.v1 schema and would be rejected by
+    // `additionalProperties: false`, so we strip it before handing the
+    // sample to the validator.
+    let mut sample = read_json(&fixture_path(
         "golden/swarm/brief_contract_matrix.json.golden",
     ))?
     .pointer("/cases/0")
     .cloned()
-    .ok_or_else(|| "swarm brief contract matrix missing cases[0]".to_string())
+    .ok_or_else(|| "swarm brief contract matrix missing cases[0]".to_string())?;
+    if let Some(map) = sample.as_object_mut() {
+        map.remove("case");
+    }
+    Ok(sample)
 }
 
 fn preflight_guard_conformance_sample() -> Value {

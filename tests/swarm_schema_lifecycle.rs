@@ -103,7 +103,11 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         id: "ee.source_run_evidence.v1",
         file_name: "ee.source_run_evidence.v1.json",
         doc_path: "docs/swarm/source_run_evidence.md",
-        tracking_bead: "bd-12v87.1",
+        // bd-12v87.1 was renamed/incremented to .2 in the schema's
+        // x-ee-status header when the repairSafety contract landed
+        // (commit 3cf623f0). The schema is the source of truth for the
+        // tracking bead id.
+        tracking_bead: "bd-12v87.2",
         shipped: true,
     },
     SchemaCase {
@@ -177,11 +181,14 @@ const SCHEMA_CASES: &[SchemaCase] = &[
         shipped: true,
     },
     SchemaCase {
+        // bd-1zb7k.14.1 is closed in the beads tracker (the synthetic
+        // incident scenario schema and fixture catalog landed), so the
+        // schema is now shipped and available in build.
         id: "ee.swarm_incident.v1",
         file_name: "ee.swarm_incident.v1.json",
         doc_path: "docs/swarm/swarm_incident_drills.md",
         tracking_bead: "bd-1zb7k.14.1",
-        shipped: false,
+        shipped: true,
     },
 ];
 
@@ -575,7 +582,11 @@ fn source_run_evidence_contract_covers_watchdog_policy() -> TestResult {
         "/properties/recovery/items/required",
         schema_case.id,
     )?;
-    let expected_recovery_required = ["priority", "kind", "command", "message"];
+    // Updated by 3cf623f0 (feat(swarm): require repairSafety metadata on every
+    // incident recovery action): recoveryAction[] now mandates a structured
+    // repairSafety block so agents can branch on machine-readable risk class
+    // instead of parsing display command text.
+    let expected_recovery_required = ["priority", "kind", "command", "message", "repairSafety"];
     if recovery_required != expected_recovery_required {
         return Err(format!(
             "{} recovery[] shape drifted\nactual: {recovery_required:?}\nexpected: {expected_recovery_required:?}",
@@ -1341,7 +1352,14 @@ fn work_packet_command_surfaces_reject_unsafe_command_drift() -> TestResult {
                     return Err(format!("{path} contains shell-eval marker {marker}"));
                 }
             }
-            if text.contains("cargo ") && !text.contains("rch_verify.sh") {
+            // Forbid running `cargo ...` locally; the contract is that all
+            // cargo invocations go through an RCH wrapper. Both the legacy
+            // `rch_verify.sh` script and the structured `rch exec --` form
+            // satisfy the wrapper requirement.
+            if text.contains("cargo ")
+                && !text.contains("rch_verify.sh")
+                && !text.contains("rch exec")
+            {
                 return Err(format!(
                     "{path} contains local Cargo fallback instead of RCH wrapper"
                 ));
@@ -1351,6 +1369,13 @@ fn work_packet_command_surfaces_reject_unsafe_command_drift() -> TestResult {
         let mut actions = Vec::new();
         command_actions(document, document_name, &mut actions);
         for (path, action) in actions {
+            // agentMailFallbackAction.commandAction is `commandAction | null`
+            // in the schema (bd-2z5ly.8): emitters set commandAction xor
+            // manualStep. A null commandAction simply means the step is
+            // manual-only and has no executable argv to validate here.
+            if action.is_null() {
+                continue;
+            }
             if !action.is_object() {
                 return Err(format!("{path} must be an object"));
             }

@@ -7,7 +7,7 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
+    "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean"},
     "fields": {"type": "string"},
     "data": {
@@ -38,6 +38,19 @@
             "properties": {
               "docId": {"type": "string"},
               "score": {"type": "number"},
+              "scoreInterval": {
+                "type": "array",
+                "items": {"type": "number"},
+                "minItems": 2,
+                "maxItems": 2,
+                "description": "Closed [lo, hi] uncertainty interval around `score`."
+              },
+              "coverageGuarantee": {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Calibrated coverage probability the scoreInterval is expected to satisfy (e.g. 0.95 for a 95% interval)."
+              },
               "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "lexical_only", "semantic_only"]},
               "why": {"type": "string"},
               "fastScore": {"type": ["number", "null"]},

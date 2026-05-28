@@ -177,6 +177,12 @@
       }
     }
   },
+  "field_presets": {
+    "minimal": ["command", "version", "candidateId"],
+    "summary": ["command", "version", "candidateId", "candidate", "durableMutation", "nextAction"],
+    "standard": ["command", "version", "workspaceId", "candidateId", "candidate", "plannedApplication", "durableMutation", "nextAction", "nextCommands"],
+    "full": ["*"]
+  },
   "$defs": {
     "jsonValue": {
       "oneOf": [

@@ -55,6 +55,12 @@
     }
   },
   "additionalProperties": false,
+  "field_presets": {
+    "minimal": ["schema", "objectiveHash"],
+    "summary": ["schema", "source", "objectiveHash", "summary"],
+    "standard": ["schema", "source", "objectiveHash", "objectiveText", "requirements", "unknownClauses", "summary"],
+    "full": ["*"]
+  },
   "$defs": {
     "requirementKind": {
       "type": "string",

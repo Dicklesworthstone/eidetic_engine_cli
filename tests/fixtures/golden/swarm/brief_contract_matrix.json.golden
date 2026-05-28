@@ -12,72 +12,114 @@
         {
           "source": "agent_inventory",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "agent_mail",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "beads",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": "br ready --json",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "bv",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": "bv --robot-triage --robot-triage-by-track",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "git",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": "git status --short --branch --untracked-files=all",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "host_profile",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         },
         {
           "source": "rch",
           "status": "ready",
-          "freshness": "current",
+          "freshness": {
+            "state": "current",
+            "observedAt": null,
+            "ageSeconds": null,
+            "staleAfterSeconds": null
+          },
           "itemCount": 1,
           "command": "rch status --json",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": []
+          "degradedCodes": [],
+          "degraded": []
         }
       ],
       "degraded": [],
@@ -163,7 +205,21 @@
             "Do not run local cargo verification; use rch for build and test gates."
           ]
         }
-      ]
+      ],
+      "dirtyFiles": [],
+      "recentCommits": [],
+      "beads": {
+        "ready": [],
+        "blocked": [],
+        "inProgress": [],
+        "deferred": []
+      },
+      "fileReservations": [],
+      "inbox": [],
+      "threads": [],
+      "resourcePressure": [],
+      "hostProfile": null,
+      "agentInventory": null
     },
     {
       "case": "no_ready_work",

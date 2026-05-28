@@ -8506,6 +8506,20 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: curate_auto_promote_schema_definition,
         },
         SchemaEntry {
+            id: crate::core::curate::CURATE_SHOW_SCHEMA_V1,
+            version: "1",
+            description: "Read-only inspect/preview surface for a single curation candidate emitted by `ee curate show` (bd-3080b).",
+            category: "curate",
+            definition: curate_show_schema_definition,
+        },
+        SchemaEntry {
+            id: "ee.diag.incident.replay.v1",
+            version: "1",
+            description: "Deterministic swarm-incident replay envelope emitted by `ee diag incident --fixture ... --json` (bd-3tend).",
+            category: "ops",
+            definition: diag_incident_replay_schema_definition,
+        },
+        SchemaEntry {
             id: crate::curate::REFLECTION_SOURCE_PACKAGE_SCHEMA,
             version: "1",
             description: "Redacted and bounded source package for reflection request artifacts",
@@ -9447,6 +9461,14 @@ fn curate_candidates_response_schema_definition() -> String {
 
 fn curate_auto_promote_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.curate.auto_promote.v1.json").to_string()
+}
+
+fn curate_show_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.curate.show.v1.json").to_string()
+}
+
+fn diag_incident_replay_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.diag.incident.replay.v1.json").to_string()
 }
 
 fn reflection_source_package_schema_definition() -> String {

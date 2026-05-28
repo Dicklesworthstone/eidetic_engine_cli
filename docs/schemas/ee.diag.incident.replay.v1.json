@@ -138,6 +138,12 @@
       }
     }
   },
+  "field_presets": {
+    "minimal": ["command", "version", "posture", "dominantStatus"],
+    "summary": ["command", "version", "fixture", "posture", "dominantStatus", "statusCounts", "substrates", "sideEffectFree"],
+    "standard": ["command", "version", "fixture", "sideEffectFree", "mutationPolicy", "posture", "dominantStatus", "substratePosture", "statusCounts", "substrates", "degraded", "recoveryActions", "assertions"],
+    "full": ["*"]
+  },
   "$defs": {
     "recoveryAction": {
       "type": "object",

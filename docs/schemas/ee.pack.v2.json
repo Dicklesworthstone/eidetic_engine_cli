@@ -131,7 +131,7 @@
       "additionalProperties": false,
       "properties": {
         "code": {"type": "string"},
-        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "severity": {"type": "string", "enum": ["info", "low", "warning", "medium", "high", "critical"]},
         "message": {"type": "string"},
         "repair": {"type": ["string", "null"]}
       }

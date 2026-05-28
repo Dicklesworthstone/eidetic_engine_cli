@@ -120,7 +120,7 @@
       {
         "order": 1,
         "kind": "record_blocker",
-        "command": "br comments add bd-proof --message '<exact RCH blocker>' --json",
+        "command": "br comments add bd-proof --message 'exact RCH blocker placeholder' --json",
         "why": "The packet cannot prove Cargo work while remote-only verification is blocked."
       }
     ],
