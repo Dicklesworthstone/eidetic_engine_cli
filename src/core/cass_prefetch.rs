@@ -52,6 +52,15 @@
 //! lets the v1 ship without affecting the existing pack-hash
 //! determinism gate — the speculative pre-fetch is a CACHE
 //! population, never a retrieval-policy mutation.
+//!
+//! Cross-platform determinism (bd-kpynd): the recency-decay weight is
+//! `2^(-position / half_life)`. `f64::powf` is only specified to ~1 ulp
+//! and is NOT bit-identical across libm implementations, so the same
+//! history could yield different last-bit scores — and thus a different
+//! `top_k` candidate set — on x86_64 vs aarch64. [`deterministic_pow_half`]
+//! replaces `powf` with a range-reduction + degree-10 polynomial that
+//! uses only correctly-rounded IEEE ops, restoring byte-identical output
+//! across targets.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -274,10 +283,103 @@ impl RecencyWeightedFrequencyPredictor {
     }
 
     /// Recency weight at a 0-indexed position (0 = most recent).
+    ///
+    /// `weight(position) = 2^(-position / half_life)`, evaluated through
+    /// [`deterministic_pow_half`] rather than `0.5_f64.powf(..)` so the
+    /// result is byte-identical across libm implementations (bd-kpynd).
     fn recency_weight(&self, position: usize) -> f64 {
         let exponent = position as f64 / self.half_life;
-        0.5_f64.powf(exponent)
+        deterministic_pow_half(exponent)
     }
+}
+
+/// Cross-platform-deterministic `2^(-x)` for `x >= 0` (bd-kpynd).
+///
+/// `f64::powf` / `f64::exp2` route through the platform libm, whose
+/// transcendental approximations differ in the last ulp across targets
+/// (x86_64 glibc vs aarch64 glibc vs macOS Accelerate vs musl vs MSVC).
+/// That last-bit drift can flip the `total_cmp` sort order in
+/// [`RecencyWeightedFrequencyPredictor::predict_next_n`] and change which
+/// candidates survive the `top_k` truncation, violating the module's
+/// load-bearing byte-identical determinism contract (and any `--explain`
+/// artifact that embeds the prefetch decision blob).
+///
+/// This shim uses ONLY IEEE-754 operations specified to be correctly
+/// rounded — and therefore bit-identical on every conforming target:
+/// `+`, `-`, `*`, `/`, and `floor` (roundToIntegral). It deliberately
+/// avoids `f64::mul_add`/FMA: Rust does not contract `a * b + c` into a
+/// fused op without an explicit `mul_add` call or fast-math, so the
+/// plain Horner form in [`exp2_neg_unit_interval`] is reproducible.
+///
+/// Range reduction `2^(-x) = 2^(-k) * 2^(-f)` (with `k = floor(x)`,
+/// `f = x - k`) keeps the polynomial argument in `[0, 1)` where the
+/// degree-10 Maclaurin truncation is accurate to < 1e-9, and makes
+/// integer exponents collapse to EXACT powers of two on every platform.
+fn deterministic_pow_half(exponent: f64) -> f64 {
+    // Total + defensive over the whole domain so a future caller cannot
+    // route a NaN/inf into a platform transcendental by accident. The
+    // production caller already feeds a finite, non-negative
+    // `position / half_life`.
+    if exponent.is_nan() {
+        return 0.0;
+    }
+    if exponent <= 0.0 {
+        // Position 0 (and the clamped negative domain) has full weight.
+        return 1.0;
+    }
+    if exponent >= 64.0 {
+        // 2^-64 already underflows the heuristic to a weight the
+        // min_score gate always drops; saturate so the halving loop
+        // below stays bounded for a pathological half_life.
+        return 0.0;
+    }
+    // 2^(-x) = 2^(-k) * 2^(-f), k = floor(x), f in [0, 1).
+    let k = exponent.floor();
+    let frac = exponent - k;
+    // 2^(-k) is exact in f64 via repeated halving (k <= 63 here): each
+    // `* 0.5` only decrements the binary exponent, no rounding.
+    let mut pow2_neg_k = 1.0_f64;
+    let mut steps = k as u32;
+    while steps > 0 {
+        pow2_neg_k *= 0.5;
+        steps -= 1;
+    }
+    pow2_neg_k * exp2_neg_unit_interval(frac)
+}
+
+/// Polynomial approximation of `2^(-t)` for `t` in `[0, 1)`, evaluated in
+/// Horner form with correctly-rounded ops only (bit-reproducible across
+/// targets). Degree-10 truncation of the Maclaurin series
+/// `2^(-t) = sum_n (-t * ln2)^n / n!`; max abs error < 1e-9 on the unit
+/// interval. `poly(0.0) == 1.0` exactly (every `* t` term vanishes), so
+/// integer exponents in [`deterministic_pow_half`] are exact.
+fn exp2_neg_unit_interval(t: f64) -> f64 {
+    // c_n = (-ln2)^n / n!, ln2 = 0.6931471805599453.
+    const C0: f64 = 1.0;
+    const C1: f64 = -0.6931471805599453;
+    const C2: f64 = 0.2402265069591007;
+    const C3: f64 = -0.055504108664821576;
+    const C4: f64 = 0.009618129107628477;
+    const C5: f64 = -0.0013333558146428441;
+    const C6: f64 = 0.00015403530393381606;
+    const C7: f64 = -1.5252733804059838e-05;
+    const C8: f64 = 1.3215486790144305e-06;
+    const C9: f64 = -1.0178086009239696e-07;
+    const C10: f64 = 7.054911620801121e-09;
+    // Horner, ascending-degree fold. Explicit `* t` + `+ c` (never
+    // `mul_add`) keeps the evaluation bit-identical across platforms.
+    let mut acc = C10;
+    acc = acc * t + C9;
+    acc = acc * t + C8;
+    acc = acc * t + C7;
+    acc = acc * t + C6;
+    acc = acc * t + C5;
+    acc = acc * t + C4;
+    acc = acc * t + C3;
+    acc = acc * t + C2;
+    acc = acc * t + C1;
+    acc = acc * t + C0;
+    acc
 }
 
 impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
@@ -611,6 +713,83 @@ mod tests {
         assert!(!h.is_empty());
         let observed: Vec<&str> = h.iter().map(|o| o.topic_id.as_str()).collect();
         assert_eq!(observed, vec!["recent", "older", "oldest"]);
+    }
+
+    #[test]
+    fn recency_weight_is_cross_platform_deterministic_bd_kpynd() {
+        // bd-kpynd: the recency weight must be byte-identical across
+        // libm implementations. deterministic_pow_half uses only
+        // correctly-rounded IEEE ops (+, -, *, /, floor), so these
+        // assertions hold bit-for-bit on x86_64 AND aarch64 — unlike
+        // 0.5_f64.powf(..), whose last bit is platform-dependent.
+        let predictor = RecencyWeightedFrequencyPredictor::new(); // half_life = 3.0
+
+        // Integer exponents (position / 3.0 == 1, 2, 3) range-reduce to
+        // EXACT powers of two: no transcendental is evaluated, so the
+        // result is identical on every target. Asserted with `==`.
+        assert_eq!(predictor.recency_weight(0), 1.0);
+        assert_eq!(predictor.recency_weight(3), 0.5);
+        assert_eq!(predictor.recency_weight(6), 0.25);
+        assert_eq!(predictor.recency_weight(9), 0.125);
+
+        // Fractional exponents track true 2^(-x) to < 1e-9 (the
+        // degree-10 polynomial), so the heuristic's behavior is
+        // preserved relative to the old powf path.
+        for position in [1_usize, 2, 4, 5, 7, 8] {
+            let got = predictor.recency_weight(position);
+            let want = 2.0_f64.powf(-(position as f64) / 3.0);
+            assert!(
+                (got - want).abs() < 1e-9,
+                "position {position}: deterministic weight {got} diverged from 2^(-x) {want}"
+            );
+        }
+
+        // Strictly decreasing in position (recency decays monotonically)
+        // and never produces a non-finite or out-of-range weight.
+        for position in 0..16 {
+            let weight = predictor.recency_weight(position);
+            assert!(weight.is_finite() && (0.0..=1.0).contains(&weight));
+            assert!(
+                predictor.recency_weight(position) > predictor.recency_weight(position + 1),
+                "weight must strictly decrease at position {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn deterministic_pow_half_total_over_domain_bd_kpynd() {
+        // The shim must be closed over its whole domain so no input can
+        // route into a platform transcendental: NaN -> 0.0, the
+        // non-positive domain -> 1.0, and the saturating tail -> 0.0.
+        assert_eq!(deterministic_pow_half(f64::NAN), 0.0);
+        assert_eq!(deterministic_pow_half(0.0), 1.0);
+        assert_eq!(deterministic_pow_half(-1.0), 1.0);
+        assert_eq!(deterministic_pow_half(f64::NEG_INFINITY), 1.0);
+        assert_eq!(deterministic_pow_half(64.0), 0.0);
+        assert_eq!(deterministic_pow_half(f64::INFINITY), 0.0);
+        // poly(0) == 1.0 keeps integer exponents exact.
+        assert_eq!(exp2_neg_unit_interval(0.0), 1.0);
+    }
+
+    #[test]
+    fn predict_next_n_emits_byte_identical_json_across_calls_bd_kpynd() {
+        // The bead's verification target: the same history must serialize
+        // to byte-identical JSON. With the deterministic weight this is
+        // now a cross-platform guarantee, not just an intra-run one.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let h = history(&[
+            "current",
+            "refactor",
+            "debug",
+            "refactor",
+            "doc_update",
+            "debug",
+        ]);
+        let first =
+            serde_json::to_string(&predictor.predict_next_n(&h, 3)).expect("serialize first");
+        let second =
+            serde_json::to_string(&predictor.predict_next_n(&h, 3)).expect("serialize second");
+        assert_eq!(first, second);
     }
 
     #[test]
