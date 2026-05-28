@@ -21,7 +21,17 @@ epic_setup "epic_I_agent_triad"
 
 seed_corpus
 
-OUTCOME_DIR="$REPO_ROOT/tests/logs/active"
+# Write the per-run outcome artifact under the unique, TMPDIR-based
+# EPIC_WORKSPACE (populated by epic_setup above) rather than a fixed
+# in-repo path. The old $REPO_ROOT/tests/logs/active/triad_spike_outcome.json
+# was (a) raced by parallel cc+cod / multi-shard invocations — the later
+# writer silently won — and (b) a TRACKED in-repo file, so a partial write
+# during a swarm run surfaced in `git status` and tripped the auto-staging
+# pre-commit hook (sweeping the half-written artifact into an unrelated
+# agent's commit). The committed tests/logs/active/triad_spike_outcome.json
+# is left untouched as the frozen compatibility-planning reference cited by
+# docs/triad_compat_plan.md. bd-2sgs9.
+OUTCOME_DIR="${EPIC_WORKSPACE:?epic_setup must populate EPIC_WORKSPACE before the outcome path is derived}/triad_outcome"
 OUTCOME_PATH="$OUTCOME_DIR/triad_spike_outcome.json"
 mkdir -p "$OUTCOME_DIR"
 
