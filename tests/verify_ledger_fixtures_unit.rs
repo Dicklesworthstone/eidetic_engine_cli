@@ -46,7 +46,7 @@ const FIXTURE_WRONG_SCHEMA: &str =
 const FIXTURE_DUPLICATE_SOURCE: &str =
     include_str!("fixtures/verify_ledger/duplicate_ingest_source.json");
 
-const TEST_WORKSPACE_ID: &str = "wsp_verify_ledger_fixtures_unit";
+const TEST_WORKSPACE_ID: &str = "wsp_verify_ledger_fixtures_30c";
 const T_SUCCESS: &str = "2026-05-23T05:00:00Z";
 const T_TOPOLOGY: &str = "2026-05-23T05:10:00Z";
 const T_CAPACITY: &str = "2026-05-23T05:20:00Z";

@@ -12,6 +12,32 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+/// Pads or truncates a short identifier to exactly 30 chars while preserving
+/// the canonical prefix (e.g. `mem_`, `wsp_`). Required because the database
+/// CHECK constraints enforce `length(id) = 30` for memory/workspace ids.
+fn pad_id(id: &str, prefix: &str) -> String {
+    pad_id_to(id, prefix, 30)
+}
+
+/// Pads or truncates a short identifier to exactly `width` chars while
+/// preserving the canonical prefix. Used by both memory/workspace ids
+/// (length=30) and memory link ids (length=31).
+fn pad_id_to(id: &str, prefix: &str, width: usize) -> String {
+    debug_assert!(id.starts_with(prefix), "id {id} must start with {prefix}");
+    if id.len() == width {
+        return id.to_owned();
+    }
+    if id.len() > width {
+        return id.chars().take(width).collect();
+    }
+    let mut padded = String::with_capacity(width);
+    padded.push_str(id);
+    while padded.len() < width {
+        padded.push('0');
+    }
+    padded
+}
+
 const GRAPH_SCHEMA_IDS: &[&str] = &[
     "ee.insights.v1",
     "ee.context.pack_dna.v1",
@@ -129,9 +155,16 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         .get("data")
         .ok_or_else(|| "insights response missing data".to_owned())?;
 
+    // NOTE: Production `ee insights` still emits the legacy `ee.response.v1`
+    // outer envelope (see src/cli/insights/mod.rs::render_insights_json which
+    // imports RESPONSE_SCHEMA_V1). A prior commit aspirationally updated this
+    // assertion to `ee.response.v2` ahead of the production migration; until
+    // the insights pipeline is upgraded to v2, the test must reflect what the
+    // CLI actually emits. The data-level `ee.insights.v1` schema id is the
+    // stable payload contract.
     ensure_eq(
         json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v2"),
+        Some("ee.response.v1"),
         "ee insights envelope",
         "schema",
     )?;
@@ -1576,7 +1609,13 @@ impl KnowledgeGapsFixture {
         fs::create_dir_all(&database_dir)
             .map_err(|error| format!("create {}: {error}", database_dir.display()))?;
         let database_path = database_dir.join("ee.db");
-        let workspace_id = format!("wsp_{}", label.replace('-', "_"));
+        // Workspace ids must satisfy the DB CHECK constraint:
+        //   id GLOB 'wsp_*' AND length(id) = 30
+        // We synthesize a 30-char id from `label` by replacing dashes with
+        // underscores, then padding or truncating to fit the 26-char tail.
+        let sanitized = label.replace('-', "_");
+        let tail: String = sanitized.chars().chain(std::iter::repeat('0')).take(26).collect();
+        let workspace_id = format!("wsp_{tail}");
         let fixture = Self {
             _tempdir: tempdir,
             workspace,
@@ -1795,9 +1834,10 @@ impl KnowledgeGapsFixture {
         content: &str,
         confidence: f32,
     ) -> Result<(), String> {
+        let id = pad_id(id, "mem_");
         connection
             .insert_memory(
-                id,
+                &id,
                 &CreateMemoryInput {
                     workspace_id: self.workspace_id.clone(),
                     level: level.to_owned(),
@@ -1828,12 +1868,16 @@ impl KnowledgeGapsFixture {
         evidence_count: u32,
         confidence: f32,
     ) -> Result<(), String> {
+        // memory_link ids have their own CHECK constraint (31 chars), and the
+        // src/dst memory ids must round-trip the 30-char `mem_*` shape we used
+        // at insertion time.
+        let link_id = pad_id_to(id, "link_", 31);
         connection
             .insert_memory_link(
-                id,
+                &link_id,
                 &CreateMemoryLinkInput {
-                    src_memory_id: source.to_owned(),
-                    dst_memory_id: target.to_owned(),
+                    src_memory_id: pad_id(source, "mem_"),
+                    dst_memory_id: pad_id(target, "mem_"),
                     relation,
                     weight: 1.0,
                     confidence,
