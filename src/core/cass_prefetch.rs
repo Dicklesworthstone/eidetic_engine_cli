@@ -73,6 +73,17 @@
 //! collapse across a reindex boundary. The daemon-wiring slice MUST call
 //! the gated method and feed the live gate from the same source the hotset
 //! reads.
+//!
+//! Resource-amplification bound (bd-1suaa): `predict_next_n` is `O(N)` in
+//! history length, and a daemon dispatch method that hydrates a
+//! [`CassPrefetchHistory`] from a 4 MiB request envelope would otherwise
+//! let an attacker drive that loop with `N ≈ 10^5`. [`MAX_PREFETCH_HISTORY`]
+//! (64) and [`MAX_PREFETCH_TOPIC_ID_BYTES`] (256) cap the work at a
+//! constant: [`SpeculativePrefetch::predict_next_n_gated`] refuses an
+//! out-of-bounds history with [`CASS_PREFETCH_HISTORY_OVERSIZED_CODE`]
+//! before doing any work, [`CassPrefetchHistory::try_from_topics`] enforces
+//! the bounds by construction, and the default predictor declines an
+//! oversized history in `O(1)` even on a direct call.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -118,6 +129,31 @@ pub const DEFAULT_PREFETCH_MIN_SCORE: f64 = 0.10;
 /// Default soft budget for a single prefetch slot. The bead specifies
 /// `~50ms`; we expose it for daemon-side tuning.
 pub const DEFAULT_PREFETCH_BUDGET: Duration = Duration::from_millis(50);
+
+/// Hard upper bound on the number of observations a prefetch history may
+/// carry before the predictor refuses it (bd-1suaa). The default rolling
+/// window is [`DEFAULT_PREFETCH_HISTORY_WINDOW`] (10); 64 is generous
+/// headroom while still capping the work at a constant. `predict_next_n`
+/// is `O(N)` in history length (a `powf`-class weight + a `String` clone
+/// per observation), so an unbounded `N` is a CPU/RAM amplification
+/// vector the instant the daemon wires a dispatch method that
+/// deserializes a `CassPrefetchHistory` from a (4 MiB) request envelope.
+pub const MAX_PREFETCH_HISTORY: usize = 64;
+
+/// Hard upper bound on the byte length of a single observation's
+/// `topic_id` (bd-1suaa). ULID/UUID-shaped IDs are well under this; a
+/// multi-KiB `topic_id` is an amplification attempt (the accumulator
+/// clones each id into a `HashMap`, doubling RAM cost, and the final
+/// sort compares them with `O(len)` `String::cmp`).
+pub const MAX_PREFETCH_TOPIC_ID_BYTES: usize = 256;
+
+/// Degraded code emitted when a prefetch history is refused for
+/// exceeding [`MAX_PREFETCH_HISTORY`] observations or carrying a
+/// `topic_id` longer than [`MAX_PREFETCH_TOPIC_ID_BYTES`] (bd-1suaa).
+/// Surfacing it on the `--explain` `degraded[]` array (and landing its
+/// failure-mode fixture + taxonomy row) is deferred to the daemon-wiring
+/// slice, same as `cass_prefetch_budget_exceeded`.
+pub const CASS_PREFETCH_HISTORY_OVERSIZED_CODE: &str = "cass_prefetch_history_oversized";
 
 /// Degraded code emitted when a generation-gated prediction is skipped
 /// because the history's [`PrefetchGeneration`] no longer matches the
@@ -240,6 +276,39 @@ impl CassPrefetchHistory {
         }
     }
 
+    /// Fallible constructor that enforces the bd-1suaa admission bounds
+    /// BY CONSTRUCTION: returns `None` if more than
+    /// [`MAX_PREFETCH_HISTORY`] topics are supplied, or if any `topic_id`
+    /// exceeds [`MAX_PREFETCH_TOPIC_ID_BYTES`] bytes. Trusted in-process
+    /// callers may still use [`from_topics`]; the daemon dispatch slice
+    /// that hydrates a history from UNTRUSTED request params MUST use
+    /// this (or check the bounds itself) so attacker-controlled input
+    /// cannot drive the `O(N)` predictor with an unbounded `N`.
+    #[must_use]
+    pub fn try_from_topics<I, S>(recent_first_topics: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let recent_first: Vec<CassPrefetchObservation> = recent_first_topics
+            .into_iter()
+            .map(CassPrefetchObservation::new)
+            .collect();
+        if recent_first.len() > MAX_PREFETCH_HISTORY {
+            return None;
+        }
+        if recent_first
+            .iter()
+            .any(|observation| observation.topic_id.len() > MAX_PREFETCH_TOPIC_ID_BYTES)
+        {
+            return None;
+        }
+        Some(Self {
+            generation: PrefetchGeneration::default(),
+            recent_first,
+        })
+    }
+
     /// Stamp the history with the generation it was built against
     /// (bd-qud3c). Builder-style so callers can chain it onto
     /// [`from_topics`]/[`new`]: `CassPrefetchHistory::from_topics(..)
@@ -248,6 +317,21 @@ impl CassPrefetchHistory {
     pub fn with_generation(mut self, generation: PrefetchGeneration) -> Self {
         self.generation = generation;
         self
+    }
+
+    /// True iff this history is within the bd-1suaa admission bounds:
+    /// at most [`MAX_PREFETCH_HISTORY`] observations, each with a
+    /// `topic_id` no longer than [`MAX_PREFETCH_TOPIC_ID_BYTES`] bytes.
+    /// The length predicate is checked first and short-circuits the
+    /// `topic_id` scan, so an oversized-count history is rejected in
+    /// `O(1)` without walking attacker-controlled observations.
+    #[must_use]
+    pub fn is_within_admission_bounds(&self) -> bool {
+        self.recent_first.len() <= MAX_PREFETCH_HISTORY
+            && self
+                .recent_first
+                .iter()
+                .all(|observation| observation.topic_id.len() <= MAX_PREFETCH_TOPIC_ID_BYTES)
     }
 
     /// Length of the retained window.
@@ -309,6 +393,15 @@ pub struct GatedPrediction {
 
 /// Predictor trait. Implementations are pure functions of the input
 /// history — see the module-level determinism contract.
+///
+/// Implementer contract (bd-1suaa): `predict_next_n` is `O(N)` in
+/// history length, so a daemon dispatch site that hydrates a
+/// [`CassPrefetchHistory`] from untrusted request params MUST cap
+/// `recent_first.len()` (and reject oversized `topic_id`s) BEFORE
+/// calling the predictor — either by constructing the history through
+/// [`CassPrefetchHistory::try_from_topics`] or by routing through
+/// [`predict_next_n_gated`], which refuses an out-of-bounds history with
+/// [`CASS_PREFETCH_HISTORY_OVERSIZED_CODE`] without doing `O(N)` work.
 pub trait SpeculativePrefetch {
     /// Stable predictor name surfaced in audit + explain blobs.
     fn name(&self) -> &'static str;
@@ -351,6 +444,16 @@ pub trait SpeculativePrefetch {
         current_generation: PrefetchGeneration,
         top_k: usize,
     ) -> GatedPrediction {
+        // Resource-amplification admission FIRST (bd-1suaa): refuse an
+        // oversized history in O(1)/O(N<=cap) before any predictor work,
+        // so an attacker-controlled length cannot drive the O(N) loop.
+        if !history.is_within_admission_bounds() {
+            return GatedPrediction {
+                candidates: Vec::new(),
+                degraded: Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE),
+            };
+        }
+        // Cache-coherence gate (bd-qud3c): drop a stale-generation history.
         if !history.generation.is_coherent_with(current_generation) {
             return GatedPrediction {
                 candidates: Vec::new(),
@@ -523,7 +626,12 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         history: &CassPrefetchHistory,
         top_k: usize,
     ) -> Vec<CassPrefetchCandidate> {
-        if top_k == 0 || history.is_empty() {
+        // Defense in depth (bd-1suaa): an oversized history is refused in
+        // O(1) here too, so a DIRECT (ungated) caller cannot drive the
+        // O(N) loop below with an attacker-controlled length. The gated
+        // entry point reports CASS_PREFETCH_HISTORY_OVERSIZED_CODE; the
+        // bare trait method has no degraded channel, so it just declines.
+        if top_k == 0 || history.is_empty() || history.recent_first.len() > MAX_PREFETCH_HISTORY {
             return Vec::new();
         }
 
@@ -536,7 +644,11 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             .first()
             .map(|obs| obs.topic_id.as_str());
 
-        let mut accumulator: HashMap<String, f64> = HashMap::new();
+        // Bounded accumulator: capacity is capped at MAX_PREFETCH_HISTORY
+        // (the count is already <= the cap by the guard above), so the
+        // hash-table grow cost cannot scale with attacker input.
+        let mut accumulator: HashMap<String, f64> =
+            HashMap::with_capacity(history.recent_first.len().min(MAX_PREFETCH_HISTORY));
         let mut total_weight: f64 = 0.0;
         for (position, observation) in history.recent_first.iter().enumerate() {
             let weight = self.recency_weight(position);
@@ -612,6 +724,12 @@ pub struct CassPrefetchMetrics {
     /// keeps metrics serialized before the coherence contract decodable.
     #[serde(default)]
     pub stale_generation_drop: u64,
+    /// Predictions refused because the history exceeded the bd-1suaa
+    /// admission bounds (`> MAX_PREFETCH_HISTORY` observations, or a
+    /// `topic_id > MAX_PREFETCH_TOPIC_ID_BYTES`). A nonzero value on a
+    /// daemon-wired host is an amplification-probe signal.
+    #[serde(default)]
+    pub history_oversized: u64,
 }
 
 impl CassPrefetchMetrics {
@@ -624,6 +742,7 @@ impl CassPrefetchMetrics {
             budget_exceeded: 0,
             history_too_short: 0,
             stale_generation_drop: 0,
+            history_oversized: 0,
         }
     }
 
@@ -653,6 +772,14 @@ impl CassPrefetchMetrics {
     /// [`CASS_PREFETCH_STALE_GENERATION_CODE`] (bd-qud3c).
     pub fn record_stale_generation_drop(&mut self) {
         self.stale_generation_drop = self.stale_generation_drop.saturating_add(1);
+    }
+
+    /// Record a prediction refused for exceeding the admission bounds —
+    /// the daemon-wiring slice calls this whenever
+    /// [`SpeculativePrefetch::predict_next_n_gated`] returns
+    /// [`CASS_PREFETCH_HISTORY_OVERSIZED_CODE`] (bd-1suaa).
+    pub fn record_history_oversized(&mut self) {
+        self.history_oversized = self.history_oversized.saturating_add(1);
     }
 
     /// Hit rate as a fraction in `[0.0, 1.0]`. Returns 0.0 when no
@@ -1018,6 +1145,86 @@ mod tests {
         metrics.stale_generation_drop = u64::MAX;
         metrics.record_stale_generation_drop();
         assert_eq!(metrics.stale_generation_drop, u64::MAX);
+    }
+
+    #[test]
+    fn oversized_history_is_refused_in_constant_time_bd_1suaa() {
+        // A history far beyond MAX_PREFETCH_HISTORY must be refused: the
+        // gated method returns the oversized degraded code, and the bare
+        // predictor declines (empty) — neither does the O(N) loop.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let mut topics: Vec<String> = Vec::with_capacity(MAX_PREFETCH_HISTORY + 50);
+        topics.push("current".to_owned());
+        for i in 0..(MAX_PREFETCH_HISTORY + 49) {
+            topics.push(format!("topic_{i}"));
+        }
+        let oversized = CassPrefetchHistory::from_topics(topics);
+        assert!(oversized.recent_first.len() > MAX_PREFETCH_HISTORY);
+        assert!(!oversized.is_within_admission_bounds());
+
+        assert!(predictor.predict_next_n(&oversized, 3).is_empty());
+        let gated = predictor.predict_next_n_gated(&oversized, PrefetchGeneration::default(), 3);
+        assert!(gated.candidates.is_empty());
+        assert_eq!(gated.degraded, Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE));
+    }
+
+    #[test]
+    fn at_bound_history_is_admitted_bd_1suaa() {
+        // Exactly MAX_PREFETCH_HISTORY observations is within bounds and
+        // still yields a capped, non-empty candidate set.
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let mut topics: Vec<String> = Vec::with_capacity(MAX_PREFETCH_HISTORY);
+        topics.push("current".to_owned());
+        // Repeat one topic so a candidate clears the min_score gate.
+        for _ in 1..MAX_PREFETCH_HISTORY {
+            topics.push("alpha".to_owned());
+        }
+        let at_bound = CassPrefetchHistory::from_topics(topics);
+        assert_eq!(at_bound.recent_first.len(), MAX_PREFETCH_HISTORY);
+        assert!(at_bound.is_within_admission_bounds());
+        let gated = predictor.predict_next_n_gated(&at_bound, PrefetchGeneration::default(), 3);
+        assert_eq!(gated.degraded, None);
+        assert!(!gated.candidates.is_empty());
+        assert!(gated.candidates.len() <= 3);
+    }
+
+    #[test]
+    fn oversized_topic_id_is_refused_bd_1suaa() {
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let huge_topic = "x".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1);
+        let history = CassPrefetchHistory::from_topics(["current".to_owned(), huge_topic]);
+        assert!(!history.is_within_admission_bounds());
+        let gated = predictor.predict_next_n_gated(&history, PrefetchGeneration::default(), 3);
+        assert!(gated.candidates.is_empty());
+        assert_eq!(gated.degraded, Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE));
+    }
+
+    #[test]
+    fn try_from_topics_enforces_bounds_by_construction_bd_1suaa() {
+        // Within bounds -> Some.
+        assert!(CassPrefetchHistory::try_from_topics(["a", "b", "c"]).is_some());
+        // Too many topics -> None.
+        let too_many: Vec<String> = (0..=MAX_PREFETCH_HISTORY)
+            .map(|i| format!("t{i}"))
+            .collect();
+        assert!(CassPrefetchHistory::try_from_topics(too_many).is_none());
+        // Oversized topic_id -> None.
+        let huge = "y".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1);
+        assert!(CassPrefetchHistory::try_from_topics([huge]).is_none());
+        // Exactly at the byte cap -> Some.
+        let at_cap = "z".repeat(MAX_PREFETCH_TOPIC_ID_BYTES);
+        assert!(CassPrefetchHistory::try_from_topics([at_cap]).is_some());
+    }
+
+    #[test]
+    fn metrics_record_history_oversized_bd_1suaa() {
+        let mut metrics = CassPrefetchMetrics::new();
+        assert_eq!(metrics.history_oversized, 0);
+        metrics.record_history_oversized();
+        assert_eq!(metrics.history_oversized, 1);
+        metrics.history_oversized = u64::MAX;
+        metrics.record_history_oversized();
+        assert_eq!(metrics.history_oversized, u64::MAX);
     }
 
     #[test]
