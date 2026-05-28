@@ -19,7 +19,7 @@
 
 use std::io::{self, Read, Write};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 use super::{
@@ -32,12 +32,17 @@ use super::{
 /// to the v1 constant, `request_id` is caller-chosen (ULID/UUIDv7
 /// recommended), `method` is one of the dispatch names, and `params`
 /// is a method-specific JSON object.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
     pub schema: String,
     pub request_id: String,
     pub method: String,
-    #[serde(default)]
+    // `params` is `type: object` in ee.daemon.request.v1 and optional
+    // (not in the schema's `required`). Skip serializing a null so the
+    // emitted envelope never carries the schema-invalid `"params":
+    // null`; an absent params round-trips back to `Value::Null` via the
+    // custom `Deserialize` below.
+    #[serde(default, skip_serializing_if = "Value::is_null")]
     pub params: Value,
 }
 
@@ -55,8 +60,55 @@ impl DaemonRequest {
     }
 }
 
+// Hand-written `Deserialize` so the wire boundary enforces the
+// ee.daemon.request.v1 contract that the derived deserializer ignored:
+// the derive accepted unknown envelope fields and a non-object
+// `params`, letting a malformed or hostile peer smuggle a shape the
+// JSON Schema would reject straight into a typed `DaemonRequest`
+// (bd-17g8u). The shadow `Wire` struct applies `deny_unknown_fields`
+// (mirroring the schema's `additionalProperties: false`), then we
+// reject a present-but-non-object `params`.
+impl<'de> Deserialize<'de> for DaemonRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            request_id: String,
+            method: String,
+            #[serde(default)]
+            params: Option<Value>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        // Absent `params` (schema-optional) becomes `Value::Null`,
+        // preserving the prior `#[serde(default)]` behaviour. A present
+        // value MUST be an object: `null` / string / number / array all
+        // violate `"params": { "type": "object" }`.
+        let params = match wire.params {
+            None => Value::Null,
+            Some(value) if value.is_object() => value,
+            Some(_) => {
+                return Err(serde::de::Error::custom(
+                    "ee.daemon.request.v1: `params` must be a JSON object",
+                ));
+            }
+        };
+        Ok(DaemonRequest {
+            schema: wire.schema,
+            request_id: wire.request_id,
+            method: wire.method,
+            params,
+        })
+    }
+}
+
 /// Wire-level error envelope inside [`DaemonResponse`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DaemonResponseError {
     pub code: String,
     pub message: String,
@@ -66,7 +118,7 @@ pub struct DaemonResponseError {
 /// populated per response; the other field is serialized as `null`
 /// (via `Option<...>` defaulting to `None`, then `skip_serializing_if =
 /// "Option::is_none"`).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DaemonResponse {
     pub schema: String,
     pub request_id: String,
@@ -76,6 +128,59 @@ pub struct DaemonResponse {
     pub error: Option<DaemonResponseError>,
     #[serde(default)]
     pub degraded_codes: Vec<String>,
+}
+
+// Hand-written `Deserialize` so the read side enforces the
+// ee.daemon.response.v1 "exactly one of `result` or `error`" invariant
+// that the schema documents in prose but does not structurally gate,
+// and that the derived deserializer ignored entirely (bd-3a0zx). A
+// hostile daemon-impersonator could otherwise wire-send BOTH a crafted
+// `result` and a plausible `error`; a CLI client that branches on
+// `error.is_some()` would take the safe fallback while any path that
+// consumed `result` first would act on attacker-controlled JSON — a
+// confused-deputy at the response layer. The shadow `Wire` struct also
+// applies `deny_unknown_fields` (mirroring `additionalProperties:
+// false`).
+impl<'de> Deserialize<'de> for DaemonResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            request_id: String,
+            #[serde(default)]
+            result: Option<Value>,
+            #[serde(default)]
+            error: Option<DaemonResponseError>,
+            #[serde(default)]
+            degraded_codes: Vec<String>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        match (wire.result.is_some(), wire.error.is_some()) {
+            (true, true) => {
+                return Err(serde::de::Error::custom(
+                    "ee.daemon.response.v1: exactly one of `result` or `error` may be set, not both",
+                ));
+            }
+            (false, false) => {
+                return Err(serde::de::Error::custom(
+                    "ee.daemon.response.v1: exactly one of `result` or `error` must be set",
+                ));
+            }
+            _ => {}
+        }
+        Ok(DaemonResponse {
+            schema: wire.schema,
+            request_id: wire.request_id,
+            result: wire.result,
+            error: wire.error,
+            degraded_codes: wire.degraded_codes,
+        })
+    }
 }
 
 impl DaemonResponse {
@@ -416,5 +521,88 @@ mod tests {
             err_serialized.get("result").is_none(),
             "got {err_serialized:?}"
         );
+    }
+
+    // ---- bd-17g8u: DaemonRequest deserialize-boundary contract ----
+
+    #[test]
+    fn daemon_request_rejects_non_object_params() {
+        // ee.daemon.request.v1 declares `params` as type:object. A
+        // present null / string / number / array must be refused at the
+        // deserialize boundary rather than silently accepted and
+        // dispatched. bd-17g8u.
+        let cases = [
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":null}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":"x"}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":[1,2]}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":7}"#,
+        ];
+        for bad in cases {
+            assert!(
+                serde_json::from_str::<DaemonRequest>(bad).is_err(),
+                "non-object params must be rejected: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_request_accepts_object_and_absent_params() {
+        // A present object is accepted unchanged; absent params is
+        // schema-valid (params is optional) and defaults to Value::Null,
+        // preserving the prior behaviour.
+        let with_obj = r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":{"k":1}}"#;
+        let parsed = serde_json::from_str::<DaemonRequest>(with_obj).expect("object params ok");
+        assert_eq!(parsed.params, serde_json::json!({"k": 1}));
+
+        let no_params =
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo"}"#;
+        let parsed = serde_json::from_str::<DaemonRequest>(no_params).expect("absent params ok");
+        assert_eq!(parsed.params, Value::Null);
+    }
+
+    #[test]
+    fn daemon_request_rejects_unknown_envelope_field() {
+        // additionalProperties:false — an unknown envelope field (e.g. a
+        // spoofed agent_id) must be refused, not silently dropped.
+        let bad = r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":{},"agent_id":"spoof"}"#;
+        assert!(serde_json::from_str::<DaemonRequest>(bad).is_err());
+    }
+
+    // ---- bd-3a0zx: DaemonResponse deserialize-boundary contract ----
+
+    #[test]
+    fn daemon_response_rejects_both_result_and_error() {
+        // The schema's "exactly one of result or error" invariant must
+        // be enforced on the READ side: a both-populated response is a
+        // confused-deputy / client-trust hazard. bd-3a0zx.
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":1,"error":{"code":"x","message":"y"}}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
+    }
+
+    #[test]
+    fn daemon_response_rejects_neither_result_nor_error() {
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r"}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
+    }
+
+    #[test]
+    fn daemon_response_accepts_exactly_one_populated() {
+        let ok = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":{"k":1}}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(ok).is_ok());
+        let err = r#"{"schema":"ee.daemon.response.v1","request_id":"r","error":{"code":"c","message":"m"}}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(err).is_ok());
+    }
+
+    #[test]
+    fn daemon_response_rejects_unknown_envelope_field() {
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":1,"workspace_id":"leak"}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
+    }
+
+    #[test]
+    fn daemon_response_error_rejects_unknown_field() {
+        // The nested error object is additionalProperties:false too.
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","error":{"code":"x","message":"y","extra":1}}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
     }
 }
