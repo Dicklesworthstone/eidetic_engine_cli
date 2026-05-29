@@ -7,7 +7,7 @@
   "required": ["schema", "success", "data", "degraded"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
+    "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean", "const": true},
     "data": {
       "type": "object",

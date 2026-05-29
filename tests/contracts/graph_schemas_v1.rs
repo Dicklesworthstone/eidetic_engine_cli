@@ -167,16 +167,16 @@ fn insights_empty_workspace_cli_shape_matches_contract() -> TestResult {
         .get("data")
         .ok_or_else(|| "insights response missing data".to_owned())?;
 
-    // NOTE: Production `ee insights` still emits the legacy `ee.response.v1`
-    // outer envelope (see src/cli/insights/mod.rs::render_insights_json which
-    // imports RESPONSE_SCHEMA_V1). A prior commit aspirationally updated this
-    // assertion to `ee.response.v2` ahead of the production migration; until
-    // the insights pipeline is upgraded to v2, the test must reflect what the
-    // CLI actually emits. The data-level `ee.insights.v1` schema id is the
-    // stable payload contract.
+    // G2 (docs-schemas drift): `ee insights` was the last v1 envelope holdout.
+    // src/cli/insights/mod.rs::render_insights_json now emits
+    // RESPONSE_SCHEMA_V2 to match the rest of the CLI surface. v2 is a
+    // pure-superset of v1's degraded[] shape, so consumers that only branched
+    // on `schema` const get the same payload they always did. The data-level
+    // `ee.insights.v1` schema id is the stable payload contract — only the
+    // outer envelope version changes.
     ensure_eq(
         json.get("schema").and_then(Value::as_str),
-        Some("ee.response.v1"),
+        Some("ee.response.v2"),
         "ee insights envelope",
         "schema",
     )?;

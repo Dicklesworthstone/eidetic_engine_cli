@@ -7,7 +7,7 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
+    "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean", "const": true},
     "data": {
       "type": "object",
@@ -78,6 +78,7 @@
           }
         },
         "tools": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
+        "subcommandTools": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "schemas": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}},
         "degraded": {"type": "array", "items": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}}}
       }

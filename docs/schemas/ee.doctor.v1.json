@@ -7,7 +7,7 @@
   "required": ["schema", "success", "data"],
   "additionalProperties": false,
   "properties": {
-    "schema": {"type": "string", "const": "ee.response.v1"},
+    "schema": {"type": "string", "const": "ee.response.v2"},
     "success": {"type": "boolean"},
     "fields": {"type": "string"},
     "data": {
@@ -25,7 +25,7 @@
         "rchWorkerPressure": {"$ref": "#/$defs/rchWorkerPressure"},
         "verificationPosture": {"$ref": "#/$defs/verificationPosture"},
         "verificationLedger": {"$ref": "#/$defs/verificationLedger"},
-        "hostCalibration": {"$ref": "ee.host_calibration.posture.v1.json"},
+        "hostCalibration": {"type": "object", "additionalProperties": true},
         "meshAutoEnrollment": {"$ref": "#/$defs/meshAutoEnrollment"},
         "checks": {
           "type": "array",

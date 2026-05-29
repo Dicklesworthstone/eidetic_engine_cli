@@ -30,7 +30,7 @@ use crate::graph::skyline::{
     KNOWLEDGE_SKYLINE_SCHEMA_V1, KnowledgeSkyline, KnowledgeSkylineInput, KnowledgeSkylineMemory,
     compute_knowledge_skyline,
 };
-use crate::models::{DomainError, RESPONSE_SCHEMA_V1};
+use crate::models::{DomainError, RESPONSE_SCHEMA_V2};
 use crate::output::render_toon_from_json;
 
 pub const INSIGHTS_SCHEMA_V1: &str = "ee.insights.v1";
@@ -1417,8 +1417,17 @@ fn paginate_section(
 
 #[must_use]
 pub fn render_insights_json(report: &InsightsReport) -> String {
+    // Migrated from RESPONSE_SCHEMA_V1 to V2 (G2 / docs-schemas drift work):
+    // every other top-level CLI surface (status, doctor, capabilities, why,
+    // context, search…) now emits the ee.response.v2 envelope. v2 is a
+    // pure-superset of v1's shape (extends the degraded[] severity enum and
+    // adds optional `repairKind`/`sources`/`details` fields), so consumers
+    // that branched on `schema` const get the same fields they always did.
+    // Insights was the last v1 holdout — leaving it on v1 caused
+    // `render_serve_sse_event` (src/serve.rs) to double-wrap insights
+    // payloads under a fresh v2 envelope when streaming over SSE.
     serde_json::json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
     })
@@ -2492,7 +2501,7 @@ mod tests {
             })?;
         let data = &json["data"];
 
-        assert_eq!(json["schema"], RESPONSE_SCHEMA_V1);
+        assert_eq!(json["schema"], RESPONSE_SCHEMA_V2);
         assert_eq!(json["success"], true);
         assert_eq!(data["schema"], INSIGHTS_SCHEMA_V1);
         assert_eq!(data["command"], "insights");
