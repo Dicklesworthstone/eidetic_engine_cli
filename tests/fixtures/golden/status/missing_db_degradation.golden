@@ -7,6 +7,7 @@
       "runtime": "ready",
       "storage": "pending",
       "search": "pending",
+      "mesh": "pending",
       "output": {
         "toon": "ready"
       },
@@ -30,7 +31,20 @@
         "sourceHighWatermark": null,
         "assetHighWatermark": null,
         "highWatermarkLag": null,
-        "path": ".ee/index"
+        "path": ".ee/index",
+        "freshness": {
+          "schema": "ee.derived_asset_freshness.v1",
+          "verdict": "missing",
+          "dependencyHash": "blake3:2803f90f0bce036e45d44817938da43ba0ba584b0d3765a147588aa99c80b3ff",
+          "sourceDependencyHash": "blake3:d511baf112ef8cf11e1e6e3f0a056ba7897f313546996c15c33a95d474fb3875",
+          "configHash": "blake3:883539a4046448d67c21aa9bcb5587c364b9a487e200f04e26da348713cac183",
+          "featureFlagsHash": "blake3:9a9610fcb79f8696e3cf7c6112733e681a029d945f9b9e0872276fc5ab0b5bc4",
+          "inputManifestHash": null,
+          "invalidates": [
+            "search_index"
+          ],
+          "repairAction": "Inspect derived asset status."
+        }
       },
       {
         "name": "graph_snapshot_artifact",
@@ -40,6 +54,19 @@
         "assetHighWatermark": null,
         "highWatermarkLag": 0,
         "path": ".ee/graph",
+        "freshness": {
+          "schema": "ee.derived_asset_freshness.v1",
+          "verdict": "missing",
+          "dependencyHash": "blake3:982a1d75b530e71125d08b948b54a35b28f533cea93c4418a7c34439cc3c9cb3",
+          "sourceDependencyHash": "blake3:002dc6c96c6fe99b6b630622be4855ed95e0569e2848e92bea74796e5f965efd",
+          "configHash": "blake3:f8683d52e3f251d64f4c20192d6227d15e4f23cffe22861550ac8206c015a4c3",
+          "featureFlagsHash": "blake3:2a5ed65ad4f349a30395a192e329a365016a42c771b9d044b465e6ffb3c41203",
+          "inputManifestHash": null,
+          "invalidates": [
+            "graph_snapshot_artifact"
+          ],
+          "repairAction": "ee graph centrality-refresh --workspace ."
+        },
         "lastBuiltAt": null,
         "memoryGraph": {
           "nodeCount": 0,
@@ -53,22 +80,34 @@
     ],
     "degraded": [
       {
-        "code": "storage_not_initialized",
-        "severity": "medium",
-        "message": "Workspace storage is unavailable because .ee/ee.db is missing.",
-        "repair": "Run `ee init --workspace .`."
-      },
-      {
         "code": "search_waiting_for_storage",
         "severity": "medium",
         "message": "Search readiness is pending until workspace storage is initialized.",
-        "repair": "Run `ee init --workspace .`."
+        "repair": "Run `ee init --workspace .`.",
+        "repairKind": "unknown",
+        "sources": [
+          "status"
+        ]
+      },
+      {
+        "code": "storage_not_initialized",
+        "severity": "medium",
+        "message": "Workspace storage is unavailable because .ee/ee.db is missing.",
+        "repair": "Run `ee init --workspace .`.",
+        "repairKind": "unknown",
+        "sources": [
+          "status"
+        ]
       },
       {
         "code": "memory_health_unavailable",
         "severity": "low",
         "message": "Memory health is unavailable because the workspace database is missing.",
-        "repair": "Run `ee init --workspace .` before inspecting memory health."
+        "repair": "Run `ee init --workspace .` before inspecting memory health.",
+        "repairKind": "unknown",
+        "sources": [
+          "status"
+        ]
       }
     ]
   }

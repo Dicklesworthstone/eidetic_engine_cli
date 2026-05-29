@@ -2,7 +2,7 @@ schema: ee.response.v2
 success: false
 data:
   command: check
-  version: 0.1.0
+  version: 0.3.3
   posture: needs_attention
   workspaceInitialized: false
   databaseReady: false

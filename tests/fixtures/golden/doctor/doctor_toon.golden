@@ -2,10 +2,286 @@ schema: ee.response.v2
 success: true
 data:
   command: doctor
-  version: 0.1.0
+  version: 0.3.3
   posture: degraded_recoverable
   healthy: false
-  checks[5]:
+  singleFlight:
+    schema: ee.singleflight.posture.v1
+    status: idle
+    configuredSurfaceCount: 1
+    activeLeaderCount: 0
+    leaderStartCount: 0
+    followerWaitCount: 0
+    followerTimeoutCount: 0
+    leaderFailureCount: 0
+    reusedResultCount: 0
+    surfaces[1]{surface,status,configured,activeLeaderCount,leaderStartCount,completedLeaderCount,followerJoinCount,followerTimeoutCount,leaderFailureCount,reusedResultCount,statePoisonedCount,followerTimeoutMs,lastKey,suggestedAction}:
+      graph_feature_enrichment,idle,true,0,0,0,0,0,0,0,0,30000,null,no action; single-flight is available for duplicate read-heavy work
+  flightRecorder:
+    schema: ee.flight_recorder.status.v1
+    status: disabled
+    enabled: false
+    writing: false
+    directory: tests/fixtures/obs/flight_recorder
+    retentionDays: 7
+    maxBytes: 268435456
+    redactionLevel: strict
+    reason: null
+    repair: null
+  qos:
+    schema: ee.qos.active_lane_summary.v1
+    workspaceHash: "sha256:9177c318b801cd8bc1426ac8344295eb8a9b5cb45bb40ee465bd13e01a109502"
+    foregroundActiveCount: 0
+    backgroundActiveCount: 0
+    verificationActiveCount: 0
+    maintenanceActiveCount: 0
+    staleIgnoredCount: 0
+    foregroundPressure: false
+    backgroundWorkActive: false
+    registryHealthy: true
+    degraded[0]:
+  rchWorkerPressure:
+    schema: ee.rch.worker_pressure.v1
+    status: pressure_clear
+    workerCount: 9
+    usableWorkerCount: 7
+    blockedWorkerCount: 0
+    staleWorkerCount: 0
+    unknownWorkerCount: 1
+    workers[9]{workerId,pressureState,confidence,reasonCode,freeGb,freeRatioBps,telemetryFreshness,admissionImpact}:
+      ts2,warning,high,disk_pressure_warning,null,null,unknown,degraded
+      vmi1149989,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1152480,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1153651,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1156319,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1167313,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1227854,unknown,high,no_pressure_telemetry,null,null,unknown,unknown
+      vmi1264463,clear,high,pressure_clear,null,null,unknown,usable
+      vmi1293453,clear,high,pressure_clear,null,null,unknown,usable
+  verificationPosture:
+    schema: ee.verification.posture.v1
+    status: not_initialized
+    windowHours: 24
+    recordCount: 0
+    recentRunCount: 0
+    staleRunCount: 0
+    unknownAgeCount: 0
+    recentReusableRunCount: 0
+    inFlightEquivalentCommandCount: 0
+    advisoryCounts:
+      remoteSuccess: 0
+      remoteFailed: 0
+      remoteInFlight: 0
+      localDisallowed: 0
+      topologyBlocked: 0
+      missingArtifactManifest: 0
+    evidenceHealth:
+      ledgerAvailable: false
+      status: unavailable
+      malformedTimestampCount: 0
+      missingArtifactManifestCount: 0
+      localDisallowedCount: 0
+      topologyBlockedCount: 0
+      issueCount: 1
+      reason: verification_ledger_missing
+    recoveryActions[1]{priority,kind,command,message,relatedBeadId}:
+      1,initialize_or_inspect_ledger,ee init --workspace .,Verification evidence posture could not inspect the workspace ledger.,null
+  verificationLedger:
+    schema: ee.rch.verify.ledger_status.v1
+    status: not_initialized
+    ledgerAvailable: false
+    activeBlockerCount: 0
+    localFallbackRefused: false
+    localFallbackRefusedCount: 0
+    oldestRetryAfter: null
+    newestRetryAfter: null
+    blockerRefs[0]:
+    recoveryActions[1]{priority,kind,command,message}:
+      1,inspect_verification_ledger,ee init --workspace .,Initialize the workspace before relying on durable RCH verifier blockers.
+  hostCalibration:
+    schema: ee.host_calibration.posture.v1
+    redactionStatus: label_only_paths_presence_only_env_no_raw_values
+    hostProfileSchema: ee.host_profile.v1
+    hostClass: workstation
+    calibrationFreshness: missing
+    confidence: low
+    profileCeiling: workstation
+    configuredProfile: swarm
+    recommendedProfile: portable
+    effectiveProfile: portable
+    targetDirPosture: external
+    topologyWarnings[0]:
+    reasonCodes[7]: calibration_missing,conservative_calibration_missing,cpu_logical_cores_swarm,disk_capacity_swarm_ready,memory_available_swarm,rch_topology_available,target_dir_external
+    repairActions[1]{priority,kind,command,message}:
+      20,calibration,rch exec -- scripts/e2e_overhaul/host_calibration.sh,Collect host calibration evidence before enabling higher-resource classes.
+    budgetDeltas[5]{surface,unit,configuredProfile,recommendedProfile,effectiveProfile,configuredValue,recommendedValue,effectiveValue,reasonCode}:
+      context_pack,tokens,swarm,portable,portable,32000,8000,8000,lower_to_recommended_profile
+      cache,bytes,swarm,portable,portable,4294967296,268435456,268435456,lower_to_recommended_profile
+      graph_snapshot,bytes,swarm,portable,portable,8589934592,536870912,536870912,lower_to_recommended_profile
+      index_rebuild,concurrent_jobs,swarm,portable,portable,16,2,2,lower_to_recommended_profile
+      burst_admission,queued_admissions,swarm,portable,portable,64,8,8,lower_to_recommended_profile
+    degraded[1]{code,severity,message,repair}:
+      host_calibration_missing,warning,"Host calibration evidence is missing, so high-resource recommendations are capped conservatively.",Run `rch exec -- scripts/e2e_overhaul/host_calibration.sh`.
+  meshAutoEnrollment:
+    schema: ee.doctor.mesh_auto_enrollment.v1
+    enabled: false
+    posture: skipped
+    workspacePath: /data/projects/eidetic_engine_cli
+    tailscale:
+      schema: ee.tailscale.local.v1
+      installed: null
+      daemonRunning: null
+      authenticated: null
+      binaryAuthentic: null
+      shieldsUp: null
+      peerCount: 0
+      probeMethod: skipped
+      platform: other
+    helloResponder:
+      schema: ee.mesh.hello_responder.status.v1
+      running: null
+      crashLoopDetected: null
+      listenAddress: null
+      crashCount24h: null
+    discoveryCache:
+      schema: ee.mesh.discovery_cache.status.v1
+      status: skipped
+      ttlSeconds: 30
+      staleBeyondWorkspace: null
+      hit: null
+      refreshedAt: null
+    materializedConfig:
+      present: false
+      peerGroupCount: 0
+      peerCount: 0
+      consistent: null
+    driftPosture:
+      status: skipped
+      newPeerCount: 0
+      stalePeerCount: 0
+      tailnetChanged: null
+      nodeKeyChanged: null
+      manualConflictPresent: null
+    checks[15]:
+      - name: mesh_enabled
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: tailscale_installed
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: tailscale_daemon_running
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: tailscale_authenticated
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: tailscale_binary_authentic
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: tailscale_shields_not_up
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: hello_responder_running
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: hello_responder_no_crash_loop
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: discovery_returns_at_least_one_peer
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: auto_enrollment_audit_chain_intact
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: auto_enrollment_no_consecutive_failures
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: steward_state_file_readable
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: discovery_cache_not_stale_beyond_workspace
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: materialized_peer_group_consistent
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+      - name: mcp_parity_present
+        status: skipped
+        message: Mesh auto-enrollment is disabled; readiness check skipped.
+        evidence[2]{key,value}:
+          source,default
+          enabled,"false"
+        fixActionId: null
+    categorizedSummary:
+      ok: 0
+      warning: 0
+      fail: 0
+      skipped: 15
+      total: 15
+    actionGraph:
+      schema: ee.repair_action_graph.v1
+      actions[0]:
+      topologicallyOrderedExecution[0]:
+      parallelizableGroups[0]:
+      estimatedTotalDurationSeconds: 0
+    degraded[0]:
+  checks[9]:
     - name: runtime
       severity: ok
       message: Asupersync runtime initialized successfully.
@@ -19,11 +295,23 @@ data:
       message: Database file not found at tests/fixtures/.ee/ee.db.
       errorCode: EE-E200
       repair: ee init --workspace .
+    - name: shard_fanout
+      severity: ok
+      message: Shard fan-out is disabled; legacy workspace database routing remains authoritative.
+    - name: flight_recorder
+      severity: ok
+      message: Flight recorder is disabled by default; posture=disabled; retentionDays=7; maxBytes=268435456; redaction=strict; directory=tests/fixtures/obs/flight_recorder.
     - name: search_index
       severity: warning
       message: Search index is missing for the current workspace.
       errorCode: EE-E300
       repair: ee index rebuild
+    - name: rch_worker_pressure
+      severity: ok
+      message: RCH worker pressure is clear; 7 of 9 worker(s) usable.
+    - name: verification_ledger
+      severity: ok
+      message: RCH verifier ledger is not initialized for this workspace.
     - name: cass
       severity: warning
       message: CASS binary not found in trusted locations.

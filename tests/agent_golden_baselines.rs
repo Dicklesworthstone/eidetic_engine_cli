@@ -103,9 +103,180 @@ fn pretty_json(value: &Value) -> Result<String, String> {
     Ok(rendered)
 }
 
-/// Normalize JSON for comparison by removing volatile fields like timestamps and UUIDs.
-fn normalize_json_for_golden(json: &str) -> String {
-    json.trim().to_string()
+/// Normalize JSON for comparison by masking volatile sub-trees that capture
+/// live host telemetry rather than reproducible command output.
+///
+/// Two sources of intrinsic non-determinism are scrubbed:
+///
+/// 1. `rchWorkerPressure` worker-pressure telemetry reads runtime RCH worker
+///    state. The set of workers and their `pressureState` / `reasonCode` /
+///    `admissionImpact` fields fluctuate between runs even seconds apart, as
+///    do the aggregate `usableWorkerCount` / `unknownWorkerCount` /
+///    `blockedWorkerCount` / `staleWorkerCount` counts. Mask the entire
+///    `rchWorkerPressure` sub-tree wherever it appears.
+/// 2. `sizeDiagnostics` measures the byte/token counts of representative
+///    rendered reports (status, health). Because those upstream reports
+///    themselves include live host telemetry, the diagnostic byte counts
+///    drift even between consecutive runs. Mask whole `sizeDiagnostics`
+///    array entries.
+///
+/// Non-JSON content (e.g. TOON or plain text) gets a line-based scrub of the
+/// same volatile fields so TOON-format goldens are stable too.
+fn normalize_json_for_golden(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Ok(mut value) = serde_json::from_str::<Value>(trimmed) {
+        scrub_volatile_fields(&mut value);
+        return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_string());
+    }
+    scrub_volatile_text(trimmed)
+}
+
+/// Replace `N of M worker(s) usable` with sentinels so the live RCH count
+/// inside doctor `checks` messages does not gate golden equality.
+fn mask_worker_counts(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c.is_ascii_digit() {
+            let start = i;
+            let mut end = i + c.len_utf8();
+            while let Some(&(_, nc)) = chars.peek() {
+                if nc.is_ascii_digit() {
+                    let (j, _) = chars.next().expect("peeked");
+                    end = j + nc.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let tail = &s[end..];
+            if tail.starts_with(" of ") || tail.starts_with(" worker(s)") {
+                result.push_str("<n>");
+                continue;
+            }
+            result.push_str(&s[start..end]);
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Mask volatile numeric fields in non-JSON (TOON / human) golden text.
+/// TOON renders sizeDiagnostics and rchWorkerPressure inline as `bytes: N`,
+/// `estimatedTokens: N`, `compressionRatio: F`, `workerCount: N`, etc. and
+/// also renders per-worker rows whose `pressureState` / `reasonCode` /
+/// `admissionImpact` columns reflect live RCH telemetry. Without scrubbing,
+/// the goldens drift with live host state. Strategy:
+///   * mask trailing numeric values for known volatile keys,
+///   * drop everything below an indented `rchWorkerPressure:` line up to
+///     the next sibling field at the same indent or shallower,
+///   * mask `N of M worker(s) usable` in human-readable check messages.
+fn scrub_volatile_text(text: &str) -> String {
+    const VOLATILE_KEYS: &[&str] = &[
+        "bytes",
+        "estimatedTokens",
+        "compressionRatio",
+        "tokens",
+        "workerCount",
+        "usableWorkerCount",
+        "blockedWorkerCount",
+        "staleWorkerCount",
+        "unknownWorkerCount",
+    ];
+
+    let mut out: Vec<String> = Vec::with_capacity(text.lines().count());
+    let mut skip_indent: Option<usize> = None;
+    for line in text.lines() {
+        let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+        // If we are inside a scrubbed rchWorkerPressure block, drop lines
+        // until we see a sibling-or-shallower line.
+        if let Some(block_indent) = skip_indent {
+            let stripped = line.trim_start();
+            if stripped.is_empty() || indent > block_indent {
+                continue;
+            }
+            skip_indent = None;
+        }
+        let stripped = line.trim_start();
+        if stripped.starts_with("rchWorkerPressure:") {
+            out.push(format!(
+                "{}rchWorkerPressure: <scrubbed:rchWorkerPressure>",
+                &line[..indent]
+            ));
+            skip_indent = Some(indent);
+            continue;
+        }
+
+        let mut rewritten = line.to_string();
+
+        // Mask numeric values for known volatile `key: N` patterns.
+        for key in VOLATILE_KEYS {
+            if let Some(idx) = rewritten.find(key) {
+                let after = &rewritten[idx + key.len()..];
+                let trimmed = after.trim_start();
+                let after_offset = after.len() - trimmed.len();
+                if let Some(rest) = trimmed.strip_prefix(':') {
+                    let rest_trim = rest.trim_start();
+                    let rest_offset = rest.len() - rest_trim.len();
+                    let first_non_value = rest_trim
+                        .find(|c: char| {
+                            !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == 'E')
+                        })
+                        .unwrap_or(rest_trim.len());
+                    if first_non_value > 0 {
+                        let prefix_end = idx + key.len() + after_offset + 1 + rest_offset;
+                        let suffix_start = prefix_end + first_non_value;
+                        rewritten = format!(
+                            "{}<scrubbed>{}",
+                            &rewritten[..prefix_end],
+                            &rewritten[suffix_start..]
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Mask `N of M worker(s) usable` patterns inside check messages.
+        if rewritten.contains("worker(s) usable") {
+            rewritten = mask_worker_counts(&rewritten);
+        }
+
+        out.push(rewritten);
+    }
+    out.join("\n")
+}
+
+/// Recursively mask known-volatile sub-trees to a sentinel so structural
+/// drift is still detected but live-telemetry churn is ignored.
+fn scrub_volatile_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for key in ["rchWorkerPressure", "sizeDiagnostics"] {
+                if let Some(entry) = map.get_mut(key) {
+                    *entry = Value::String(format!("<scrubbed:{key}>"));
+                }
+            }
+            for child in map.values_mut() {
+                scrub_volatile_fields(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items.iter_mut() {
+                scrub_volatile_fields(child);
+            }
+        }
+        Value::String(s) => {
+            // The doctor `checks` array renders worker-pressure usability
+            // counts inline (`"RCH worker pressure is clear; N of M worker(s)
+            // usable."`). Mask the counts which fluctuate with live RCH
+            // state.
+            if s.contains("worker(s) usable") {
+                *s = mask_worker_counts(s);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Assert that the actual output matches the golden file, or update the golden if UPDATE_GOLDEN=1.
@@ -272,7 +443,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
     &[
         ContractCase {
             name: "check_json",
-            args: &["check", "--json"],
+            args: &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "check", "--json"],
             category: "check",
             golden_name: "check_json",
             format: ContractFormat::Json,
@@ -282,7 +453,13 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "check_toon",
-            args: &["check", "--format", "toon"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "check",
+                "--format",
+                "toon",
+            ],
             category: "check",
             golden_name: "check_toon",
             format: ContractFormat::Toon,
@@ -354,7 +531,12 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "capabilities_json",
-            args: &["capabilities", "--json"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "capabilities",
+                "--json",
+            ],
             category: "capabilities",
             golden_name: "capabilities_json",
             format: ContractFormat::Json,
@@ -364,7 +546,13 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "capabilities_toon",
-            args: &["capabilities", "--format", "toon"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "capabilities",
+                "--format",
+                "toon",
+            ],
             category: "capabilities",
             golden_name: "capabilities_toon",
             format: ContractFormat::Toon,
@@ -374,7 +562,7 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "status_json",
-            args: &["status", "--json"],
+            args: &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"],
             category: "status",
             golden_name: "status_json",
             format: ContractFormat::Json,
@@ -709,11 +897,40 @@ fn first_value_diff_pointer(expected: &Value, actual: &Value) -> &'static str {
 }
 
 fn contains_unredacted_secret(output: &str) -> bool {
+    // Match concrete secret prefixes/markers rather than generic substrings.
+    // History:
+    //   * The earlier `("token") && ('=')` form false-positived on legitimate
+    //     emissions like `"unit":"tokens"` combined with diagnostic key=value
+    //     strings (e.g. `posture=disabled; retentionDays=7`).
+    //   * The bare `sk-` substring false-positived on kebab-case words like
+    //     `disk-pressure` that contain the literal `sk-` substring.
+    // Tighten to boundary-anchored matches: a real OpenAI-style secret starts
+    // with `sk-` at a non-alphabetic boundary (start of input, whitespace,
+    // quote, etc.), not as the suffix of a normal word.
     output.contains("BEGIN PRIVATE KEY")
-        || output.contains("sk-")
+        || contains_secret_prefix_at_boundary(output, "sk-")
         || output.contains("ghp_")
-        || (output.contains("token") && output.contains('='))
+        || output.contains("token=")
         || output.contains("api_key")
+}
+
+/// Returns true when `needle` appears in `haystack` at a position that is
+/// either the start of the string or immediately preceded by a non-ASCII-
+/// alphabetic byte. This avoids matching `sk-` inside `disk-pressure` while
+/// still catching `sk-abcdef...`, `"sk-abcdef..."`, `: sk-...`, etc.
+fn contains_secret_prefix_at_boundary(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut start = 0;
+    while let Some(offset) = haystack[start..].find(needle) {
+        let abs = start + offset;
+        let preceded_by_alpha = abs > 0 && bytes[abs - 1].is_ascii_alphabetic();
+        if !preceded_by_alpha {
+            return true;
+        }
+        start = abs + needle_bytes.len();
+    }
+    false
 }
 
 fn read_golden_json(category: &str, name: &str) -> Result<Value, String> {
@@ -836,7 +1053,7 @@ fn singleflight_posture_goldens_are_redaction_safe() -> TestResult {
 
 #[test]
 fn check_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["check", "--json"])?;
+    let output = run_ee(&["--workspace", DOCTOR_GOLDEN_WORKSPACE, "check", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -857,7 +1074,13 @@ fn check_json_output_matches_golden() -> TestResult {
 
 #[test]
 fn check_toon_output_matches_golden() -> TestResult {
-    let output = run_ee(&["check", "--format", "toon"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "check",
+        "--format",
+        "toon",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -1047,7 +1270,12 @@ fn diag_integrity_json_matches_golden() -> TestResult {
 
 #[test]
 fn capabilities_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["capabilities", "--json"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "capabilities",
+        "--json",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -1089,7 +1317,13 @@ fn capabilities_json_output_matches_golden() -> TestResult {
 
 #[test]
 fn capabilities_toon_output_matches_golden() -> TestResult {
-    let output = run_ee(&["capabilities", "--format", "toon"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "capabilities",
+        "--format",
+        "toon",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -1782,7 +2016,7 @@ fn doctor_degradation_projection(report: &DoctorReport) -> Result<String, String
 
 #[test]
 fn status_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    let output = run_ee(&["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
