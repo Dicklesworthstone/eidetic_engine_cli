@@ -11295,7 +11295,7 @@ where
         }
         output::Renderer::Toon => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11309,7 +11309,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11424,7 +11424,7 @@ where
         }
         output::Renderer::Toon => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11438,7 +11438,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11841,7 +11841,7 @@ where
         ),
         output::Renderer::Toon => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11855,7 +11855,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });
@@ -11921,7 +11921,7 @@ where
         Ok(entries) => {
             if cli.wants_json() {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": {
                         "command": "eval list",
@@ -12031,7 +12031,7 @@ where
     if cli.wants_json() {
         let json = if reports.len() == 1 {
             serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "command": "eval run",
@@ -12040,7 +12040,7 @@ where
             })
         } else {
             serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "command": "eval run",
@@ -12126,7 +12126,7 @@ where
 
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": {
                 "command": "eval report",
@@ -12440,7 +12440,7 @@ where
             })
         };
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": passed,
             "data": data
         });
@@ -13388,7 +13388,7 @@ where
 
 fn task_frame_response_json(report: &TaskFrameReport) -> String {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
     })
@@ -13547,7 +13547,7 @@ where
             stdout,
             &(output::render_toon_from_json(
                 &serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data,
                 })
@@ -13560,7 +13560,7 @@ where
         | output::Renderer::Hook => write_stdout(
             stdout,
             &(serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             })
@@ -13813,7 +13813,7 @@ where
                 stdout,
                 &(output::render_toon_from_json(
                     &serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": success,
                         "data": data,
                     })
@@ -13829,7 +13829,7 @@ where
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": data,
                     })
@@ -13841,7 +13841,7 @@ where
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": false,
                         "data": data,
                         "degraded": degraded,
@@ -13888,7 +13888,7 @@ where
                 stdout,
                 &(output::render_toon_from_json(
                     &serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": success,
                         "data": data,
                     })
@@ -13904,7 +13904,7 @@ where
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": true,
                         "data": data,
                     })
@@ -13916,7 +13916,7 @@ where
                 write_stdout(
                     stdout,
                     &(serde_json::json!({
-                        "schema": crate::models::RESPONSE_SCHEMA_V1,
+                        "schema": crate::models::RESPONSE_SCHEMA_V2,
                         "success": false,
                         "data": data,
                         "degraded": degraded,
@@ -13980,7 +13980,7 @@ where
                     backup_redaction_patterns(&report),
                 );
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": data,
                 });
@@ -14063,7 +14063,7 @@ where
                 backup_redaction_patterns(report),
             );
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             });
@@ -14138,7 +14138,7 @@ where
     match list_backups(&options) {
         Ok(report) => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14189,7 +14189,7 @@ where
     match inspect_backup(&options) {
         Ok(report) => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14258,7 +14258,7 @@ where
     match verify_backup(&options) {
         Ok(report) => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14329,7 +14329,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -14580,7 +14580,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let response = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             });
@@ -14661,7 +14661,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14695,7 +14695,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14728,7 +14728,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -14887,7 +14887,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             });
@@ -15196,7 +15196,7 @@ where
     T: serde::Serialize,
 {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
     })
@@ -16358,7 +16358,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16426,7 +16426,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16482,7 +16482,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16576,7 +16576,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16625,7 +16625,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16673,7 +16673,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -16727,7 +16727,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -18150,7 +18150,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "command": command,
@@ -19061,7 +19061,7 @@ where
     T: serde::Serialize,
 {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": command_path,
@@ -19476,7 +19476,7 @@ where
     W: Write,
 {
     let rendered = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -19642,7 +19642,7 @@ where
                 object.insert("degraded".to_string(), serde_json::json!(degraded.clone()));
             }
             let mut rendered = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": !report.has_conflicts(),
                 "data": data,
             });
@@ -20855,7 +20855,7 @@ where
     T: serde::Serialize,
 {
     let json = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": command,
@@ -21147,7 +21147,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report.data_json(),
             });
@@ -21278,7 +21278,7 @@ fn recorder_events_list_response_json(
     report: &crate::core::recorder::RecorderEventsListReport,
 ) -> String {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
     })
@@ -21380,7 +21380,7 @@ where
 
     if args.dry_run {
         let output = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "dryRun": true,
             "data": {
@@ -21431,7 +21431,7 @@ where
     }
 
     let output = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "traceId": trace_id,
@@ -21483,7 +21483,7 @@ where
     match conn.get_rationale_trace(&args.trace_id) {
         Ok(Some(stored)) => {
             let output = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "traceId": stored.trace.trace_id,
@@ -21578,7 +21578,7 @@ where
                 .collect();
 
             let output = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "targetType": args.target_type,
@@ -22105,7 +22105,7 @@ where
         "degraded": degraded,
     });
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -22215,7 +22215,7 @@ where
         "degraded": degraded,
     });
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -22490,7 +22490,7 @@ fn diag_incident_response(fixture_path: &Path, fixture: &serde_json::Value) -> s
     let posture = incident_global_posture(dominant_status);
 
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": "ee.diag.incident.replay.v1",
@@ -22810,7 +22810,7 @@ where
     };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag advisory-lock",
@@ -22937,7 +22937,7 @@ where
     }
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag causal-edge",
@@ -23161,7 +23161,7 @@ where
     }
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag database-skew",
@@ -23318,7 +23318,7 @@ where
     }
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag graph-snapshot",
@@ -23463,7 +23463,7 @@ where
     let seed_status = if changed { "updated" } else { "unchanged" };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag memory-validity",
@@ -23680,7 +23680,7 @@ where
     };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag model-registry",
@@ -23849,7 +23849,7 @@ where
     };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag tripwire",
@@ -23957,7 +23957,7 @@ where
     };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag pack-latest",
@@ -24115,7 +24115,7 @@ where
     };
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag pack-record",
@@ -24400,7 +24400,7 @@ where
     }
 
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "command": "diag curation-candidate",
@@ -25792,7 +25792,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             });
@@ -25844,7 +25844,7 @@ fn graph_surface_human_output(data: &serde_json::Value) -> String {
 fn graph_surface_toon_output(data: &serde_json::Value) -> String {
     format!(
         "schema: {}\nsuccess: true\ndata:\n  command: {}\n  status: {}\n  nodeCount: {}\n  edgeCount: {}",
-        crate::models::RESPONSE_SCHEMA_V1,
+        crate::models::RESPONSE_SCHEMA_V2,
         data["command"].as_str().unwrap_or("graph"),
         data["status"].as_str().unwrap_or("unknown"),
         data["graph"]["nodeCount"].as_u64().unwrap_or(0),
@@ -26141,7 +26141,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": report.degraded.iter().all(|entry| entry.severity != "medium")
                     || report.status == "available",
                 "data": report.data_json(),
@@ -26533,7 +26533,7 @@ fn graph_centrality_read_human_output(report: &GraphCentralityReadReport) -> Str
 
 fn graph_centrality_read_toon_output(report: &GraphCentralityReadReport) -> String {
     format!(
-        "schema: ee.response.v1\nsuccess: {}\ndata:\n  command: graph centrality\n  status: {}\n  algorithm: {}\n  rows: {}\n  degradedCount: {}",
+        "schema: ee.response.v2\nsuccess: {}\ndata:\n  command: graph centrality\n  status: {}\n  algorithm: {}\n  rows: {}\n  degradedCount: {}",
         report.status == "available",
         report.status,
         report.algorithm.as_str(),
@@ -26661,7 +26661,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": report.passed,
                     "data": report.data_json(),
                 });
@@ -26776,7 +26776,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": graph_feature_enrichment_data_json(&report),
             });
@@ -26814,7 +26814,7 @@ fn graph_feature_enrichment_burst_toon_output(
 ) -> String {
     format!(
         "schema: {}\nsuccess: {}\ndata:\n  command: graph feature-enrichment --singleflight-burst\n  passed: {}\n  identicalLeaderCount: {}\n  identicalFollowerCount: {}\n  distinctLeaderCount: {}\n  distinctFollowerCount: {}\n  executionCount: {}",
-        crate::models::RESPONSE_SCHEMA_V1,
+        crate::models::RESPONSE_SCHEMA_V2,
         report.passed,
         report.passed,
         report.identical_leader_count,
@@ -26907,7 +26907,7 @@ fn graph_feature_enrichment_toon_output(
 ) -> String {
     format!(
         "schema: {}\nsuccess: true\ndata:\n  command: graph feature-enrichment\n  status: {}\n  sourceStatus: {}\n  featureCount: {}\n  degradedCount: {}\n  maxFeatures: {}\n  limited: {}",
-        crate::models::RESPONSE_SCHEMA_V1,
+        crate::models::RESPONSE_SCHEMA_V2,
         report.status.as_str(),
         report.source_status.as_str(),
         report.features.len(),
@@ -27070,7 +27070,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": graph_export_data_json(report),
             });
@@ -27082,7 +27082,7 @@ where
 fn graph_export_toon_output(report: &crate::graph::GraphExportReport) -> String {
     format!(
         "schema: {}\nsuccess: true\ndata:\n  command: graph export\n  status: {}\n  format: {}\n  workspaceId: {}\n  graphType: {}\n  nodeCount: {}\n  edgeCount: {}",
-        crate::models::RESPONSE_SCHEMA_V1,
+        crate::models::RESPONSE_SCHEMA_V2,
         report.status.as_str(),
         report.format.as_str(),
         report.workspace_id,
@@ -28751,7 +28751,7 @@ fn context_error_to_domain(error: &ContextPackError) -> DomainError {
 /// pack by ID and render it. Bead bd-17c65.1.10 (A11).
 ///
 /// Loads the StoredPackRecord + StoredPackItems from the workspace
-/// database and renders a compact ee.response.v1 envelope mirroring
+/// database and renders a compact ee.response.v2 envelope mirroring
 /// the canonical pack shape. Persisted packs are immutable artifacts,
 /// so the response surface is read-only — no re-computation of
 /// scores, no re-walk of memory state. The pack hash returned by the
@@ -30937,7 +30937,7 @@ where
 //
 // Thin orchestrator over the existing DbConnection migration framework
 // (migrate() / needs_migration() / schema_version()). Each handler emits an
-// ee.response.v1 envelope and uses the standard exit codes:
+// ee.response.v2 envelope and uses the standard exit codes:
 //   - Success when up-to-date (status) or applied (run)
 //   - DegradedRequired (8) when status reports pending migrations
 //   - Storage on DB open / mutation errors
@@ -33947,7 +33947,7 @@ where
 
 fn format_review_session_json(report: &ReviewSessionReport) -> String {
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
     })
@@ -34253,7 +34253,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let json = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -39328,7 +39328,7 @@ where
     let report = crate::core::situation::compare_situations(&options);
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": report.data_json()
         });
@@ -39382,7 +39382,7 @@ where
     let report = crate::core::situation::plan_situation_link_dry_run(&options);
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": report.data_json()
         });
@@ -40129,7 +40129,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let response = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": data,
             });
@@ -41203,7 +41203,7 @@ where
             data["runLedgerError"] = serde_json::json!(error);
         }
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": data
         });
@@ -41255,7 +41255,7 @@ where
 
         if cli.wants_json() {
             let json = serde_json::json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": {
                     "schema": DEMO_RUN_PLAN_SCHEMA_V1,
@@ -41381,7 +41381,7 @@ where
     let completed_at = chrono::Utc::now().to_rfc3339();
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": {
                 "schema": DEMO_RUN_RESULT_SCHEMA_V1,
@@ -41485,7 +41485,7 @@ where
 
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": true,
             "data": {
                 "schema": DEMO_SHOW_SCHEMA_V1,
@@ -41608,7 +41608,7 @@ where
     let success = !demo_results.is_empty() && failed_artifacts == 0 && failed_demos == 0;
     if cli.wants_json() {
         let json = serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": {
                 "schema": DEMO_VERIFY_SCHEMA_V1,
@@ -42476,7 +42476,7 @@ where
         }
     };
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -43912,13 +43912,13 @@ where
     let degraded = maintenance_response_degraded(success, &data);
     let response = if degraded.is_empty() {
         serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
         })
     } else {
         serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
             "degraded": degraded,
@@ -43965,13 +43965,13 @@ where
     }
     let response = if degraded.is_empty() {
         serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
         })
     } else {
         serde_json::json!({
-            "schema": crate::models::RESPONSE_SCHEMA_V1,
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
             "success": success,
             "data": data,
             "degraded": degraded,
@@ -44277,7 +44277,7 @@ where
     W: Write,
 {
     let response = serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -44347,7 +44347,7 @@ where
             | output::Renderer::Compact
             | output::Renderer::Hook => {
                 let response = serde_json::json!({
-                    "schema": crate::models::RESPONSE_SCHEMA_V1,
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
                     "success": true,
                     "data": report.data_json(),
                 });
@@ -45777,7 +45777,7 @@ where
     );
 
     serde_json::json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     })

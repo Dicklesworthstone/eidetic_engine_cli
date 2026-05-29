@@ -13,7 +13,8 @@ use crate::core::degraded_aggregation::{
 };
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RedactionLevel,
+    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2,
+    RedactionLevel,
     TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
@@ -634,10 +635,11 @@ fn aggregate_pack_coordination_degraded(
 }
 
 fn coordination_payload_value(root: &serde_json::Value) -> &serde_json::Value {
-    if root.get("schema").and_then(serde_json::Value::as_str) == Some(RESPONSE_SCHEMA_V1) {
-        root.get("data").unwrap_or(root)
-    } else {
-        root
+    match root.get("schema").and_then(serde_json::Value::as_str) {
+        Some(schema) if schema == RESPONSE_SCHEMA_V1 || schema == RESPONSE_SCHEMA_V2 => {
+            root.get("data").unwrap_or(root)
+        }
+        _ => root,
     }
 }
 
@@ -3551,7 +3553,7 @@ impl ContextResponse {
             });
         }
         Ok(Self {
-            schema: RESPONSE_SCHEMA_V1,
+            schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: None,
             data: ContextResponseData {
@@ -3575,7 +3577,7 @@ impl ContextResponse {
     #[must_use]
     pub fn from_cached_json(request: ContextRequest, cached_json: String) -> Self {
         Self {
-            schema: RESPONSE_SCHEMA_V1,
+            schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: Some(cached_json),
             data: ContextResponseData {
@@ -3664,7 +3666,7 @@ pub fn render_context_response_markdown(response: &ContextResponse) -> String {
     // Two fields, one per line, on consecutive trailing lines so grep
     // tooling can parse with a fixed-prefix regex:
     //   <!-- pack.hash: blake3:... -->
-    //   <!-- pack.schema: ee.response.v1 -->
+    //   <!-- pack.schema: ee.response.v2 -->
     //
     // The `pack.hash` value is whatever the pack record carries (None
     // -> the literal string "absent" so the line is always present and

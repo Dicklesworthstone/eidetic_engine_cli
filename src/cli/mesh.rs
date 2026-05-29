@@ -1128,7 +1128,7 @@ fn write_mesh_status_json_with_autodiscovery<W: Write>(
         *discovery_slot = serde_json::to_value(autodiscovery).unwrap_or(serde_json::Value::Null);
     }
     let json = json!({
-        "schema": crate::models::RESPONSE_SCHEMA_V1,
+        "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": data,
     });
@@ -3267,7 +3267,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": report,
             });

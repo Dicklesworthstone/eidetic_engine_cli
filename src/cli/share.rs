@@ -332,7 +332,7 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => {
             let json = json!({
-                "schema": crate::models::RESPONSE_SCHEMA_V1,
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
                 "success": true,
                 "data": share_preview_data_json(input),
             });
