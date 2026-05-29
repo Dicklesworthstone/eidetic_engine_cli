@@ -31,7 +31,7 @@
   },
   "examples": [
     {
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "success": true,
       "data": {
         "command": "db status",
@@ -59,7 +59,7 @@
       "degraded": []
     },
     {
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "success": true,
       "data": {
         "command": "db inspect",
@@ -87,7 +87,7 @@
       "degraded": []
     },
     {
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "success": true,
       "data": {
         "command": "db check-integrity",
@@ -105,7 +105,7 @@
       "degraded": []
     },
     {
-      "schema": "ee.response.v1",
+      "schema": "ee.response.v2",
       "success": true,
       "data": {
         "command": "db reindex",

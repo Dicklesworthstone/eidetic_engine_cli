@@ -2037,9 +2037,7 @@ fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult
             "eval",
             "ee.eval.report.v1",
             "ee.eval.report.v1.json",
-            read_json(&fixture_path(
-                "golden/eval/fx.release_failure.v1/report.json.golden",
-            ))?,
+            eval_report_conformance_sample()?,
         ),
         MachineSurfaceConformanceCase::new(
             "perf",
@@ -2203,6 +2201,24 @@ fn proof_check_conformance_sample() -> Value {
         ],
         "degraded": ["degraded.proof_tool_missing"]
     })
+}
+
+fn eval_report_conformance_sample() -> Result<Value, String> {
+    // The eval-report golden uses the string sentinel `"[duration_ms]"` for
+    // duration_ms because production duration is wall-clock and the golden
+    // would otherwise drift every run. The ee.eval.report.v1 schema requires
+    // duration_ms to be a number (production emits a JSON number via
+    // EvalRunReport::duration_ms: f64), so substitute a representative
+    // numeric value before validating shape conformance. The other
+    // eval-report test files in tests/eval_run_*.rs assert the placeholder
+    // shape; this test asserts the schema shape.
+    let mut sample = read_json(&fixture_path(
+        "golden/eval/fx.release_failure.v1/report.json.golden",
+    ))?;
+    if let Some(map) = sample.as_object_mut() {
+        map.insert("duration_ms".to_owned(), json!(0));
+    }
+    Ok(sample)
 }
 
 fn swarm_brief_conformance_sample() -> Result<Value, String> {
