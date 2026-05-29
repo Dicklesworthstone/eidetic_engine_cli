@@ -216,7 +216,7 @@ fn toon_format_uses_colon_key_value_syntax() -> TestResult {
     )?;
     ensure_contains(
         &stdout,
-        "schema: ee.response.v1",
+        "schema: ee.response.v2",
         "schema uses colon syntax",
     )?;
     ensure_contains(&stdout, "success: true", "success uses colon syntax")
@@ -355,7 +355,7 @@ fn doctor_toon_has_expected_structure() -> TestResult {
         output.status.success(),
         "ee doctor --format toon should succeed",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "response schema")?;
     ensure_contains(&stdout, "command: doctor", "command field")?;
     ensure_contains(&stdout, "healthy:", "healthy field")
 }
@@ -369,7 +369,7 @@ fn check_toon_has_expected_structure() -> TestResult {
         output.status.success(),
         "ee check --format toon should succeed",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "response schema")?;
     ensure_contains(&stdout, "command: check", "command field")?;
     ensure_contains(&stdout, "posture:", "posture field")
 }
@@ -383,7 +383,7 @@ fn health_toon_has_expected_structure() -> TestResult {
         output.status.success(),
         "ee health --format toon should succeed",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "response schema")?;
     ensure_contains(&stdout, "command: health", "command field")
 }
 
@@ -396,7 +396,7 @@ fn capabilities_toon_has_expected_structure() -> TestResult {
         output.status.success(),
         "ee capabilities --format toon should succeed",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "response schema")?;
     ensure_contains(&stdout, "command: capabilities", "command field")?;
     ensure_contains(&stdout, "subsystems", "subsystems field")?;
     ensure_contains(&stdout, "output:", "output metadata section")?;
@@ -459,7 +459,7 @@ fn introspect_toon_has_expected_structure() -> TestResult {
         output.status.success(),
         "ee introspect --format toon should succeed",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "response schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "response schema")?;
     ensure_contains(&stdout, "commands", "commands field")
 }
 
@@ -559,7 +559,7 @@ fn toon_default_format_does_not_override_json_flag_machine_contract() -> TestRes
     )?;
     ensure(
         schema == "ee.response.v2",
-        format!("expected ee.response.v1 schema, got {schema}"),
+        format!("expected ee.response.v2 schema, got {schema}"),
     )
 }
 
@@ -579,7 +579,7 @@ fn toon_default_format_does_not_override_hook_mode_machine_contract() -> TestRes
     )?;
     ensure(
         schema == "ee.response.v2",
-        format!("expected ee.response.v1 schema in hook mode, got {schema}"),
+        format!("expected ee.response.v2 schema in hook mode, got {schema}"),
     )
 }
 
@@ -599,7 +599,7 @@ fn toon_default_format_does_not_override_mcp_mode_machine_contract() -> TestResu
     )?;
     ensure(
         schema == "ee.response.v2",
-        format!("expected ee.response.v1 schema in agent mode, got {schema}"),
+        format!("expected ee.response.v2 schema in agent mode, got {schema}"),
     )
 }
 
@@ -686,7 +686,7 @@ mod unit_tests {
         let json = r#"{"schema": "ee.response.v2", "success": true, "data": {"command": "test"}}"#;
         let toon = render_toon_from_json(json);
 
-        ensure_contains(&toon, "schema: ee.response.v1", "TOON preserves schema")?;
+        ensure_contains(&toon, "schema: ee.response.v2", "TOON preserves schema")?;
         ensure_contains(&toon, "success: true", "TOON preserves success")?;
         ensure_contains(&toon, "command: test", "TOON preserves nested data")
     }

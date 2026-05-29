@@ -305,8 +305,8 @@ fn graph_articulation_returns_empty_points_on_fresh_workspace() -> TestResult {
         ),
     )?;
     ensure(
-        parsed["schema"].as_str() == Some("ee.response.v1"),
-        format!("envelope schema must be ee.response.v1; got {parsed}"),
+        parsed["schema"].as_str() == Some("ee.response.v2"),
+        format!("envelope schema must be ee.response.v2; got {parsed}"),
     )?;
     ensure(
         parsed["success"] == Value::Bool(true),

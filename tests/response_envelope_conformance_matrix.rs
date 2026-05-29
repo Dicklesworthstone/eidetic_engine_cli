@@ -302,7 +302,7 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
 
 fn context_pack_sample() -> Value {
     json!({
-        "schema": "ee.response.v1",
+        "schema": "ee.response.v2",
         "success": true,
         "data": {
             "command": "context",

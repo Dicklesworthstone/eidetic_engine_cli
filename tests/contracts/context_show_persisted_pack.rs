@@ -3,7 +3,7 @@
 //! Asserts the persisted-pack retrieval surface added in A11:
 //!
 //! - `ee context-show <pack_id>` reads a persisted pack record from
-//!   the workspace database and returns an `ee.response.v1` envelope
+//!   the workspace database and returns an `ee.response.v2` envelope
 //!   with the canonical pack shape: id, query, profile, maxTokens,
 //!   usedTokens, itemCount, hash, items[], degraded[], etc.
 //! - The pack hash returned by `ee context-show` matches the pack

@@ -208,7 +208,7 @@ fn json_builder_empty_produces_empty_object() {
 fn response_envelope_success_emits_stable_prefix() {
     let output = ResponseEnvelope::success().finish();
     assert!(
-        output.starts_with("{\"schema\":\"ee.response.v1\",\"success\":true"),
+        output.starts_with("{\"schema\":\"ee.response.v2\",\"success\":true"),
         "unexpected envelope prefix: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");
@@ -222,7 +222,7 @@ fn response_envelope_success_emits_stable_prefix() {
 fn response_envelope_failure_emits_stable_prefix() {
     let output = ResponseEnvelope::failure().finish();
     assert!(
-        output.starts_with("{\"schema\":\"ee.response.v1\",\"success\":false"),
+        output.starts_with("{\"schema\":\"ee.response.v2\",\"success\":false"),
         "unexpected envelope prefix: {output}"
     );
     let parsed: Value = serde_json::from_str(&output).expect("valid JSON");

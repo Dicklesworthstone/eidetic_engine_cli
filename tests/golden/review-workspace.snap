@@ -2,14 +2,14 @@
 source: src/cli/mod.rs
 assertion: review workspace scopes evidence to workspace path with determinism
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   review: ee.review.workspace.v1
 contracts:
   - workspace scope filters evidence to path or current directory
   - include-cass flag controls CASS-derived evidence inclusion
   - propose flag generates curation candidates from workspace evidence
   - dry-run preview without writing candidate records
-  - JSON stdout is ee.response.v1 envelope
+  - JSON stdout is ee.response.v2 envelope
   - degrades honestly when CASS evidence unavailable
 evidence:
   - ReviewWorkspaceArgs.scope

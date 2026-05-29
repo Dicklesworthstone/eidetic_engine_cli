@@ -113,7 +113,7 @@ fn pack_quality_report_has_stable_field_names() -> TestResult {
         .and_then(Value::as_str)
         .ok_or("missing /schema")?;
     if schema != "ee.response.v2" {
-        return Err(format!("expected ee.response.v1, got {schema}"));
+        return Err(format!("expected ee.response.v2, got {schema}"));
     }
 
     let report_schema = value

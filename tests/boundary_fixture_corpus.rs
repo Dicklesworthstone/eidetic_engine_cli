@@ -185,7 +185,7 @@ fn boundary_fixture_corpus_smoke_summary_logs_required_e2e_fields() -> TestResul
         .map_err(|error| format!("failed to create smoke workspace: {error}"))?;
     write_text(
         &stdout_path,
-        "{\"schema\":\"ee.response.v1\",\"mode\":\"fixture\",\"records\":[]}\n",
+        "{\"schema\":\"ee.response.v2\",\"mode\":\"fixture\",\"records\":[]}\n",
     )?;
     write_text(&stderr_path, "fixture smoke completed\n")?;
 

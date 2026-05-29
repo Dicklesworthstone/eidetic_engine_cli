@@ -67,7 +67,7 @@ fn m1_init_creates_workspace_database() -> TestResult {
 
     ensure(
         json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
-        "init response must use ee.response.v1 schema",
+        "init response must use ee.response.v2 schema",
     )?;
 
     let db_path = workspace.join(".ee").join("ee.db");
@@ -96,7 +96,7 @@ fn m1_status_reports_workspace_state() -> TestResult {
 
     ensure(
         json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
-        "status response must use ee.response.v1 schema",
+        "status response must use ee.response.v2 schema",
     )?;
 
     let data = json.get("data").ok_or("status must have data field")?;
@@ -129,7 +129,7 @@ fn m1_health_returns_overall_verdict() -> TestResult {
 
     ensure(
         json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
-        "health response must use ee.response.v1 schema",
+        "health response must use ee.response.v2 schema",
     )?;
 
     let data = json.get("data").ok_or("health must have data field")?;
@@ -148,7 +148,7 @@ fn m1_capabilities_reports_feature_availability() -> TestResult {
 
     ensure(
         json.get("schema") == Some(&JsonValue::String("ee.response.v2".to_owned())),
-        "capabilities response must use ee.response.v1 schema",
+        "capabilities response must use ee.response.v2 schema",
     )?;
 
     let data = json

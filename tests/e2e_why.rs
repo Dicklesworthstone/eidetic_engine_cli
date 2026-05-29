@@ -15,7 +15,7 @@
 //! * Non-existent memory id -> NotFound `"memory"` with repair
 //!   `"ee memory list"`
 //! * Happy path on a real memory -> stable envelope shape
-//!   (schema=ee.response.v1, data.command="why", data.found=true,
+//!   (schema=ee.response.v2, data.command="why", data.found=true,
 //!   data.memoryId echoes the requested id)
 //! * `--format mermaid` on a real memory -> a Mermaid diagram on
 //!   stdout containing the memory id (separate render path at
@@ -285,8 +285,8 @@ fn why_returns_stable_envelope_for_existing_memory() -> TestResult {
         ),
     )?;
     ensure(
-        parsed["schema"].as_str() == Some("ee.response.v1"),
-        format!("envelope schema must be ee.response.v1; got {parsed}"),
+        parsed["schema"].as_str() == Some("ee.response.v2"),
+        format!("envelope schema must be ee.response.v2; got {parsed}"),
     )?;
     ensure(
         parsed["success"] == Value::Bool(true),

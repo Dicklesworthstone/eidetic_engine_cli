@@ -104,6 +104,6 @@ fn m0_agent_native_envelope_in_source() -> TestResult {
 
     ensure(
         output.status.success() && !output.stdout.is_empty(),
-        "Agent-native envelope (ee.response.v1) must be defined in source",
+        "Agent-native envelope (ee.response.v2) must be defined in source",
     )
 }

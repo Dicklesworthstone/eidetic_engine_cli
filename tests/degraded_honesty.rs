@@ -2452,7 +2452,7 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         }
         other => {
             return Err(format!(
-                "economy response schema must be ee.error.v2 or ee.response.v1, got {other}"
+                "economy response schema must be ee.error.v2 or ee.response.v2, got {other}"
             ));
         }
     }

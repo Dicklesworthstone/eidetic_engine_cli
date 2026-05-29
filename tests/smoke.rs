@@ -1084,7 +1084,7 @@ fn status_json_stdout_is_stable_machine_data() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "status JSON schema",
     )?;
     ensure_contains(&stdout, "\"success\":true", "status JSON success flag")?;
@@ -1144,7 +1144,7 @@ fn status_skyline_json_stdout_is_stable_machine_data() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "status skyline JSON response schema",
     )?;
     ensure_contains(
@@ -3791,7 +3791,7 @@ fn format_json_global_selects_machine_output() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "format JSON schema",
     )
 }
@@ -3813,7 +3813,7 @@ fn robot_global_selects_machine_output() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "robot JSON schema",
     )
 }
@@ -6356,7 +6356,7 @@ fn remember_persists_and_feeds_search_context_flow() -> TestResult {
     ensure_no_ansi(&toon_stdout, "pack query-file toon stdout")?;
     ensure_contains(
         &toon_stdout,
-        "schema: ee.response.v1",
+        "schema: ee.response.v2",
         "query-file toon schema",
     )?;
     ensure_contains(
@@ -7818,7 +7818,7 @@ fn learn_experiment_propose_json_reads_empty_persisted_ledger() -> TestResult {
 // Integration Foundation Smoke Tests (EE-313)
 //
 // These tests verify that the foundational integrations are working:
-// - Response envelope schema (ee.response.v1)
+// - Response envelope schema (ee.response.v2)
 // - Asupersync runtime bootstrap
 // - SQLModel/FrankenSQLite repository shape (reports degraded until wired)
 // - Frankensearch persistent index (reports degraded until wired)
@@ -7841,7 +7841,7 @@ fn integration_foundation_response_envelope_schema() -> TestResult {
     ensure_equal(
         &json["schema"],
         &serde_json::json!("ee.response.v2"),
-        "response envelope schema must be ee.response.v1",
+        "response envelope schema must be ee.response.v2",
     )?;
     ensure(
         json["success"].as_bool().unwrap_or(false),
@@ -8113,7 +8113,7 @@ fn contract_drift_response_schema_is_used() -> TestResult {
     ensure(
         schema == Some("ee.response.v2"),
         format!(
-            "successful command must use ee.response.v1, got {:?}",
+            "successful command must use ee.response.v2, got {:?}",
             schema
         ),
     )

@@ -3,7 +3,7 @@ source: tests/renderer_parity_matrix.rs
 expression: "render_context_response_for_format(&response, case.format)"
 ---
 %% pack.hash: blake3:renderer-parity
-%% pack.schema: ee.response.v1
+%% pack.schema: ee.response.v2
 graph TD
   pack["context pack: renderer parity release"]
   mem_mem_00000000000000000000000001["1: mem_00000000000000000000000001"]

@@ -2,7 +2,7 @@
 source: src/cli/mod.rs, src/output/mod.rs
 assertion: MCP adapter manifest exposes CLI commands as tools without separate business logic
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   manifest: ee.mcp.manifest.v1
 contracts:
   - mcp manifest lists all public CLI commands as MCP tools

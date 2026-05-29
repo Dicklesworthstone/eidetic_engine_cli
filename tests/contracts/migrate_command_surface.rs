@@ -2,7 +2,7 @@
 //!
 //! Documents the top-level `ee migrate` surface added in this bead:
 //!
-//! - `ee migrate status` emits an ee.response.v1 envelope with
+//! - `ee migrate status` emits an ee.response.v2 envelope with
 //!   schemaVersion / latestCompiledSchemaVersion / pendingCount /
 //!   needsMigration / upToDate. Exit code is 0 when up-to-date and
 //!   8 (MigrationRequired) when pending migrations exist.

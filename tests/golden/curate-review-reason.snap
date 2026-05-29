@@ -2,7 +2,7 @@
 source: src/cli/mod.rs
 assertion: curate accept/reject --reason persists details.reason on the curation transition audit row
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   audit_row: ee.curate.transition.audit_row.v1
 contracts:
   - "ee curate accept <id> --reason <TEXT> --actor <ACTOR> --json exits 0 and writes an audit row whose details.reason equals <TEXT>"

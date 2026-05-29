@@ -359,7 +359,7 @@ mod enabled_mcp {
         for uri in [
             "ee://agent-docs",
             "ee://schemas",
-            "ee://schemas/ee.response.v1",
+            "ee://schemas/ee.response.v2",
             "ee://workspace/status",
         ] {
             find_item(resources, "uri", uri, "resources/list resources")?;

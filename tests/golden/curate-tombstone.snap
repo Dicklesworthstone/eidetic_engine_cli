@@ -2,7 +2,7 @@
 source: src/cli/mod.rs
 assertion: curate tombstone writes audit record without deleting memory row
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   tombstone: ee.curate.tombstone.v1
 contracts:
   - tombstone writes an audited record without deleting the memory
@@ -10,7 +10,7 @@ contracts:
   - missing memory returns NotFound with repair hint
   - actor recorded in audit metadata when provided
   - reason recorded in audit trail
-  - JSON stdout is ee.response.v1 envelope
+  - JSON stdout is ee.response.v2 envelope
 evidence:
   - CurateTombstoneArgs.memory_id
   - CurateTombstoneArgs.dry_run

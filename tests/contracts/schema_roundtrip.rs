@@ -25,7 +25,7 @@
 //! Where a renderer requires a workspace on disk, that schema is left
 //! to the existing JSON snapshot tests in tests/json_contract_snapshots.rs
 //! — this contract focuses on the schemas we can stand up purely in
-//! memory: context pack response (ee.response.v1 with command=context),
+//! memory: context pack response (ee.response.v2 with command=context),
 //! `ee why` response, and `ee health` response.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -133,7 +133,7 @@ fn context_response_fixture() -> ContextResponse {
 }
 
 // ============================================================================
-// Context pack response (ee.response.v1, command=context)
+// Context pack response (ee.response.v2, command=context)
 // ============================================================================
 
 #[test]
@@ -152,7 +152,7 @@ fn context_response_json_is_deterministic() -> TestResult {
 }
 
 // ============================================================================
-// Health response (ee.response.v1, command=health)
+// Health response (ee.response.v2, command=health)
 // ============================================================================
 //
 // HealthReport::gather() probes the live host. The probe results vary by
@@ -229,7 +229,7 @@ fn every_response_envelope_has_top_level_schema_field() -> TestResult {
                 "{label}: response envelope is missing required top-level `schema` field"
             ));
         }
-        // The `success` field is part of ee.response.v1's envelope contract.
+        // The `success` field is part of ee.response.v2's envelope contract.
         if parsed.get("success").and_then(Value::as_bool).is_none() {
             return Err(format!(
                 "{label}: response envelope is missing required top-level `success` field"

@@ -2,7 +2,7 @@
 //!
 //! These tests keep `ee agent detect` as a thin, local-first detector wrapper:
 //! no connector-backed history readers by default, deterministic root override
-//! fixtures, stable aliases, and `ee.response.v1` JSON envelopes.
+//! fixtures, stable aliases, and `ee.response.v2` JSON envelopes.
 
 use ee::core::agent_detect::{
     AgentDetectOptions, AgentDetectRootOverride, AgentSourcesOptions, build_agent_sources_report,

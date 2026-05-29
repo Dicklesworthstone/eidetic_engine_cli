@@ -106,7 +106,7 @@ demos:
       - gate14
     commands:
       - command: 'ee context \"prepare release\" --workspace . --json'
-        expected_stdout_schema: ee.response.v1
+        expected_stdout_schema: ee.response.v2
         expected_stdout_contains:
           - '\"command\":\"context\"'
         artifact_outputs:

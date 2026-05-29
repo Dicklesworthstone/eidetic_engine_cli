@@ -2,7 +2,7 @@
 source: src/cli/mod.rs
 assertion: curate retire writes audited retirement record without deletion
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   retire: ee.curate.retire.v1
 contracts:
   - retire writes an audited state transition without deleting the candidate
@@ -10,7 +10,7 @@ contracts:
   - missing candidate returns NotFound with repair hint
   - actor recorded in audit metadata when provided
   - reason recorded in audit trail
-  - JSON stdout is ee.response.v1 envelope
+  - JSON stdout is ee.response.v2 envelope
 evidence:
   - CurateRetireArgs.candidate_id
   - CurateRetireArgs.dry_run

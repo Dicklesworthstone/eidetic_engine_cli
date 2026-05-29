@@ -710,7 +710,7 @@ fn markdown_render_appends_pack_metadata_html_comments() -> TestResult {
     let response = multi_section_fixture();
     let markdown = render_context_response_markdown(&response);
 
-    for needle in ["<!-- pack.hash:", "<!-- pack.schema: ee.response.v1 -->"] {
+    for needle in ["<!-- pack.hash:", "<!-- pack.schema: ee.response.v2 -->"] {
         if !markdown.contains(needle) {
             return Err(format!(
                 "rendered markdown is missing `{needle}` trailing comment (D3 contract)"

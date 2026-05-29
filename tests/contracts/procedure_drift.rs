@@ -154,7 +154,7 @@ fn procedure_drift_detects_failed_stale_and_dependency_signals() -> TestResult {
 
     ensure_json_equal(
         value.get("schema"),
-        serde_json::json!(ee::models::RESPONSE_SCHEMA_V1),
+        serde_json::json!(ee::models::RESPONSE_SCHEMA_V2),
         "response schema",
     )?;
     ensure_json_equal(

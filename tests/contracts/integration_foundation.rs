@@ -7,7 +7,7 @@
 //! - SQLModel opens a temporary FrankenSQLite database and writes memory rows
 //! - Frankensearch indexes and retrieves documents
 //! - A 1000-row load smoke retrieves a known target within budget
-//! - Response is wrapped in `ee.response.v1`
+//! - Response is wrapped in `ee.response.v2`
 //! - No Tokio, rusqlite, SQLx, Diesel, SeaORM, or petgraph
 
 use std::process::Command;

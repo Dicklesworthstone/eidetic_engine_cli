@@ -1,6 +1,6 @@
 use ee::models::trust::{LOCAL_SIGNING_KEY_POLICY_SCHEMA_V1, LocalSigningKeyPosture};
 use ee::models::{
-    ContextProfileName, ERROR_SCHEMA_V2, LifecycleEvent, RESPONSE_SCHEMA_V1, RuleLifecycleAction,
+    ContextProfileName, ERROR_SCHEMA_V2, LifecycleEvent, RESPONSE_SCHEMA_V2, RuleLifecycleAction,
     RuleLifecycleTrigger, RuleMaturity, TrustClass,
 };
 
@@ -187,7 +187,7 @@ fn trust_model_mentions_lifecycle_events_and_machine_schemas() -> TestResult {
             "trust model lifecycle event coverage",
         )?;
     }
-    ensure_contains(TRUST_MODEL, RESPONSE_SCHEMA_V1, "response schema coverage")?;
+    ensure_contains(TRUST_MODEL, RESPONSE_SCHEMA_V2, "response schema coverage")?;
     ensure_contains(TRUST_MODEL, ERROR_SCHEMA_V2, "error schema coverage")?;
     ensure_contains(TRUST_MODEL, "ee.memory.v1", "memory schema coverage")
 }

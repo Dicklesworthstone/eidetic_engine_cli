@@ -847,7 +847,7 @@ fn check_json_output_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "check --json stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "check JSON schema",
     )?;
     ensure_contains(&stdout, "\"command\":\"check\"", "check JSON command")?;
@@ -869,7 +869,7 @@ fn check_toon_output_matches_golden() -> TestResult {
         stderr.is_empty(),
         "check --format toon stderr must be empty",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "check TOON schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "check TOON schema")?;
 
     assert_golden("check", "check_toon", &stdout)
 }
@@ -891,7 +891,7 @@ fn doctor_json_output_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "doctor --json stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "doctor JSON schema",
     )?;
     ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
@@ -920,7 +920,7 @@ fn doctor_toon_output_matches_golden() -> TestResult {
         stderr.is_empty(),
         "doctor --format toon stderr must be empty",
     )?;
-    ensure_contains(&stdout, "schema: ee.response.v1", "doctor TOON schema")?;
+    ensure_contains(&stdout, "schema: ee.response.v2", "doctor TOON schema")?;
 
     assert_golden("doctor", "doctor_toon", &stdout)
 }
@@ -941,7 +941,7 @@ fn doctor_franken_health_json_matches_golden() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "franken health JSON schema",
     )?;
     ensure_contains(&stdout, "\"command\":\"doctor\"", "doctor JSON command")?;
@@ -975,7 +975,7 @@ fn diag_dependencies_json_matches_golden() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "dependency diagnostics JSON schema",
     )?;
     ensure_contains(
@@ -1019,7 +1019,7 @@ fn diag_integrity_json_matches_golden() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "integrity diagnostics JSON schema",
     )?;
     ensure_contains(
@@ -1061,7 +1061,7 @@ fn capabilities_json_output_matches_golden() -> TestResult {
     )?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "capabilities JSON schema",
     )?;
     ensure_contains(
@@ -1103,7 +1103,7 @@ fn capabilities_toon_output_matches_golden() -> TestResult {
     )?;
     ensure_contains(
         &stdout,
-        "schema: ee.response.v1",
+        "schema: ee.response.v2",
         "capabilities TOON schema",
     )?;
     ensure_contains(&stdout, "output:", "capabilities TOON output metadata")?;
@@ -1793,7 +1793,7 @@ fn status_json_output_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "status --json stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "status JSON schema",
     )?;
     ensure_contains(&stdout, "\"command\":\"status\"", "status JSON command")?;
@@ -1872,7 +1872,7 @@ fn version_json_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "version --json stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "version JSON schema",
     )?;
     ensure_contains(&stdout, "\"command\":\"version\"", "version JSON command")?;
@@ -1956,7 +1956,7 @@ fn agent_docs_flag_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "--agent-docs stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "agent-docs JSON schema",
     )?;
     ensure_contains(
@@ -1990,7 +1990,7 @@ fn agent_docs_recipes_topic_exposes_machine_readable_branches() -> TestResult {
     ensure(stderr.is_empty(), "agent-docs recipes stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "agent-docs recipes JSON schema",
     )?;
     ensure_contains(&stdout, "\"topic\":\"recipes\"", "recipes topic")?;
@@ -2044,7 +2044,7 @@ fn schema_flag_matches_golden() -> TestResult {
     ensure(stderr.is_empty(), "--schema stderr must be empty")?;
     ensure_starts_with(
         &stdout,
-        "{\"schema\":\"ee.response.v1\"",
+        "{\"schema\":\"ee.response.v2\"",
         "schema JSON envelope",
     )?;
     ensure_contains(&stdout, "\"command\":\"schema\"", "schema JSON command")?;
@@ -2085,7 +2085,7 @@ fn all_json_commands_have_schema_envelope() -> TestResult {
         )?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             &format!("{} JSON schema envelope", args.join(" ")),
         )?;
     }
@@ -2145,7 +2145,7 @@ fn contract_failure_report_includes_debugging_context() -> TestResult {
     ensure_contains(&report, "class: schema_mismatch", "failure class")?;
     ensure_contains(&report, "command: ee status --json", "command")?;
     ensure_contains(&report, "exit_code: Some(0)", "exit code")?;
-    ensure_contains(&report, "schema: ee.response.v1", "schema")?;
+    ensure_contains(&report, "schema: ee.response.v2", "schema")?;
     ensure_contains(&report, "json_pointer: /data/command", "pointer")?;
     ensure_contains(
         &report,

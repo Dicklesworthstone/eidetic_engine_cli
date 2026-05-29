@@ -2,14 +2,14 @@
 source: src/cli/mod.rs
 assertion: workflow create is local-first and idempotent
 schema:
-  response: ee.response.v1
+  response: ee.response.v2
   workflow: ee.workflow.create.v1
 contracts:
   - create workflow lifecycle group with name
   - optional description for workflow metadata
   - dry-run preview without creating record
   - idempotent by workflow name
-  - JSON stdout is ee.response.v1 envelope
+  - JSON stdout is ee.response.v2 envelope
 evidence:
   - WorkflowCreateArgs.name
   - WorkflowCreateArgs.description

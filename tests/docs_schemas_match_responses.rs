@@ -45,8 +45,7 @@ use ee::curate::{
 use ee::db::{GraphSnapshotType, StoredMemory};
 use ee::graph::{GRAPH_EXPORT_SCHEMA_V1, GraphExportFormat, GraphExportReport, GraphExportStatus};
 use ee::models::{
-    DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V1,
-    RESPONSE_SCHEMA_V2,
+    DomainError, IMPORT_CASS_SCHEMA_V1, ProducerMetadata, QUERY_SCHEMA_V1, RESPONSE_SCHEMA_V2,
 };
 use ee::output::{
     error_response_json, render_curate_candidates_json, render_mcp_manifest_json,
@@ -442,7 +441,7 @@ fn db_inspect_schema_documents_read_only_database_surfaces() -> TestResult {
     ensure_json_str(&schema, "/title", schema_id)?;
     ensure_json_bool(&schema, "/additionalProperties", false)?;
     ensure_field_presets(schema_id, &schema)?;
-    ensure_json_str(&schema, "/properties/schema/const", RESPONSE_SCHEMA_V1)?;
+    ensure_json_str(&schema, "/properties/schema/const", RESPONSE_SCHEMA_V2)?;
     ensure_json_str(
         &schema,
         "/properties/data/properties/command/type",
@@ -2502,7 +2501,7 @@ fn import_cass_sample() -> Value {
         }],
     };
     json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
     })
@@ -2510,7 +2509,7 @@ fn import_cass_sample() -> Value {
 
 fn export_sample() -> Value {
     json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": {
             "schema": "ee.export.report.v1",
@@ -2590,7 +2589,7 @@ fn graph_export_sample() -> Value {
         degraded: Vec::new(),
     };
     json!({
-        "schema": RESPONSE_SCHEMA_V1,
+        "schema": RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report.data_json(),
     })

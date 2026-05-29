@@ -709,7 +709,7 @@ fn graph_centrality_read_json_toon_and_golden_are_stable() -> TestResult {
     )?;
     let toon_stdout = String::from_utf8_lossy(&toon.stdout);
     ensure(
-        toon_stdout.contains("schema: ee.response.v1"),
+        toon_stdout.contains("schema: ee.response.v2"),
         "TOON output should identify the response schema",
     )?;
     ensure(

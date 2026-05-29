@@ -47521,7 +47521,7 @@ mod tests {
             serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
         ensure_equal(
             &value["schema"],
-            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
             "recorder events list response schema",
         )?;
         ensure_equal(
@@ -48487,7 +48487,7 @@ mod tests {
                 serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
             ensure_equal(
                 &value["schema"],
-                &serde_json::json!(crate::models::RESPONSE_SCHEMA_V1),
+                &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
                 &format!("{scenario} response schema"),
             )?;
             ensure_equal(
@@ -52715,7 +52715,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "status JSON exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             "status JSON schema",
         )?;
         ensure_ends_with(&stdout, '\n', "status JSON trailing newline")?;
@@ -52728,7 +52728,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "status format JSON exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             "status format JSON schema",
         )?;
         ensure(stderr.is_empty(), "status format JSON stderr must be empty")
@@ -53240,7 +53240,7 @@ mod tests {
     fn status_format_toon_writes_toon_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "status", "--format", "toon"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status format TOON exit")?;
-        ensure_starts_with(&stdout, "schema: ee.response.v1", "status TOON schema")?;
+        ensure_starts_with(&stdout, "schema: ee.response.v2", "status TOON schema")?;
         ensure_contains(&stdout, "command: status", "status TOON command")?;
         // After fix: gather() inspects current workspace, degradation count varies
         ensure_contains(&stdout, "degraded[", "status TOON degradation section")?;
@@ -53690,7 +53690,7 @@ mod tests {
     fn schema_flag_outputs_json_schema_info() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "--schema"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "schema exit")?;
-        ensure_starts_with(&stdout, "{\"schema\":\"ee.response.v1\"", "schema envelope")?;
+        ensure_starts_with(&stdout, "{\"schema\":\"ee.response.v2\"", "schema envelope")?;
         ensure_contains(&stdout, "\"command\":\"schema\"", "schema command field")?;
         ensure(stderr.is_empty(), "schema stderr must be empty")
     }
@@ -53701,7 +53701,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "help-json exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             "help-json envelope",
         )?;
         ensure_contains(&stdout, "\"command\":\"help\"", "help-json command field")?;
@@ -53734,7 +53734,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             "agent-docs envelope",
         )?;
         ensure_contains(
@@ -54098,7 +54098,7 @@ mod tests {
                 ensure_equal(&exit, &ProcessExitCode::Success, &format!("{flag} exit"))?;
                 ensure_starts_with(
                     &stdout,
-                    "{\"schema\":\"ee.response.v1\"",
+                    "{\"schema\":\"ee.response.v2\"",
                     &format!("{flag} envelope"),
                 )?;
                 ensure(stderr.is_empty(), &format!("{flag} stderr must be empty"))?;
@@ -54112,7 +54112,7 @@ mod tests {
         // This test documents the stream isolation contract for agent consumers.
         //
         // stdout receives:
-        // - JSON responses (ee.response.v1 envelope) in machine mode
+        // - JSON responses (ee.response.v2 envelope) in machine mode
         // - JSON errors (ee.error.v2 envelope) when --json/--robot/--format=json is set
         // - Human-readable output (help, status, version) in human mode
         //
@@ -59200,7 +59200,7 @@ mod tests {
         ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs json exit")?;
         ensure_starts_with(
             &stdout,
-            "{\"schema\":\"ee.response.v1\"",
+            "{\"schema\":\"ee.response.v2\"",
             "agent-docs json schema",
         )?;
         ensure_contains(&stdout, "\"command\":\"agent-docs\"", "agent-docs command")?;
@@ -59268,7 +59268,7 @@ mod tests {
     fn agent_docs_toon_writes_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "agent-docs", "--format", "toon"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "agent-docs toon exit")?;
-        ensure_contains(&stdout, "schema: ee.response.v1", "agent-docs toon schema")?;
+        ensure_contains(&stdout, "schema: ee.response.v2", "agent-docs toon schema")?;
         ensure_contains(&stdout, "command: agent-docs", "agent-docs toon command")?;
         ensure(stderr.is_empty(), "agent-docs toon stderr must be empty")
     }

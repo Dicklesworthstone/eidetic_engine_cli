@@ -8,7 +8,7 @@
 
 use clap::Parser;
 use ee::cli::Cli;
-use ee::models::{DomainError, ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V1};
+use ee::models::{DomainError, ERROR_SCHEMA_V2, RESPONSE_SCHEMA_V2};
 use ee::output::{
     DegradationSeverity, FieldProfile, OutputContext, Renderer, ResponseEnvelope,
     error_response_json, error_response_toon, render_toon_from_json,
@@ -698,7 +698,7 @@ fn response_envelope_success_has_correct_structure() -> TestResult {
 
     ensure_starts_with(
         &json,
-        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""),
+        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V2}\""),
         "schema first",
     )?;
     ensure_contains(&json, "\"success\":true", "success flag")?;
@@ -715,7 +715,7 @@ fn response_envelope_failure_has_correct_structure() -> TestResult {
 
     ensure_starts_with(
         &json,
-        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V1}\""),
+        &format!("{{\"schema\":\"{RESPONSE_SCHEMA_V2}\""),
         "schema first",
     )?;
     ensure_contains(&json, "\"success\":false", "success flag")?;

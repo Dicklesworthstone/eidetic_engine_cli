@@ -284,7 +284,7 @@ fn gate18_procedure_export_skill_capsule_matches_golden() -> TestResult {
 
     ensure_json_equal(
         value.get("schema"),
-        serde_json::json!(ee::models::RESPONSE_SCHEMA_V1),
+        serde_json::json!(ee::models::RESPONSE_SCHEMA_V2),
         "export response schema",
     )?;
     ensure_json_equal(
