@@ -1387,10 +1387,29 @@ pub fn apply_field_selector_to_json(
         return Ok(json.to_owned());
     };
 
-    let command = data
+    // The response carries the command name in `data.command` for most surfaces,
+    // but newer schema-first responses (e.g. swarm brief/next-action/work-packet)
+    // emit only `data.schema = "ee.swarm.brief.v1"` without a duplicate `command`
+    // field. Fall back to deriving the command from the schema so the preset
+    // dispatch finds the right per-command field list. Without this fallback,
+    // preset_fields_for_command would hit the default arm whose summary preset
+    // is `["command", "version", "status", "summary", "count", "schema"]` —
+    // none of which exist at the top level of a swarm brief response.
+    let command_owned;
+    let command = match data
         .get("command")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    {
+        Some(name) => name,
+        None => {
+            command_owned = data
+                .get("schema")
+                .and_then(serde_json::Value::as_str)
+                .map(command_name_from_schema)
+                .unwrap_or_default();
+            command_owned.as_str()
+        }
+    };
     let requested_fields = requested_fields_for_selector(command, selector);
     if requested_fields.is_empty() {
         return Ok(json.to_owned());
@@ -1483,6 +1502,32 @@ pub fn field_preset_names_for_command(
     preset: FieldProfile,
 ) -> &'static [&'static str] {
     preset_fields_for_command(command, preset)
+}
+
+/// Derive a `preset_fields_for_command` lookup key from a response's data
+/// schema constant. Used when the response doesn't carry a `data.command`
+/// field (e.g. swarm surfaces). Returns the empty string when the schema
+/// doesn't map to a known command — the caller then falls through to the
+/// default preset arm.
+fn command_name_from_schema(schema: &str) -> String {
+    // Map known data-schema constants → preset_fields_for_command key.
+    // Conservative: only known mappings are handled; unknown schemas fall
+    // through to the empty-string default-arm path. Add new entries as new
+    // schema-first response shapes are introduced.
+    // Schema naming is inconsistent across surfaces — `ee.swarm.brief.v1` uses
+    // dots while `ee.swarm_next_action.v1` and `ee.swarm_work_packet.v1` use
+    // underscores. Accept both forms; the production emit values are what
+    // matters.
+    match schema {
+        "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
+        "ee.swarm.next_action.v1"
+        | "ee.swarm.next-action.v1"
+        | "ee.swarm_next_action.v1" => "swarm next-action".to_string(),
+        "ee.swarm.work_packet.v1"
+        | "ee.swarm.work-packet.v1"
+        | "ee.swarm_work_packet.v1" => "swarm work-packet".to_string(),
+        _ => String::new(),
+    }
 }
 
 fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&'static str] {
@@ -1737,6 +1782,48 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "degraded",
             ],
             FieldProfile::Full => &["*"],
+        },
+        // Swarm surfaces (brief, next-action, work-packet) don't carry a top-level
+        // `command`/`version`/`status` envelope — their data field is a structured
+        // swarm report keyed by `workspace`, `sources`, etc. The default preset arm
+        // would reject `command` as unknown for these commands; provide explicit
+        // preset field lists derived from the actual response shape.
+        // Swarm presets reference ONLY always-present fields — the strict
+        // `accepted_fields` validator rejects any requested field not found in
+        // the actual response, and many swarm fields (`recommendations`, `bv`,
+        // `gitAhead`, ...) are absent when their underlying source is filtered
+        // out (e.g. `--sources host-profile`). Standard/Full fall back to `*`
+        // for "no filtering" semantics; the operator gets the full envelope.
+        "swarm brief" => match preset {
+            FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspace",
+                "redactionStatus",
+                "sources",
+                "degraded",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "swarm next-action" => match preset {
+            FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspace",
+                "redactionStatus",
+                "degraded",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        "swarm work-packet" => match preset {
+            FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
+            FieldProfile::Summary => &[
+                "schema",
+                "workspace",
+                "redactionStatus",
+                "degraded",
+            ],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         _ => match preset {
             FieldProfile::Minimal => &["command", "version", "status", "id", "schema"],
