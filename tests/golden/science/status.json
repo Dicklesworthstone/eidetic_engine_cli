@@ -1,1 +1,34 @@
-{"schema":"ee.response.v2","success":true,"data":{"command":"analyze science-status","schema":"ee.science.status.v1","subsystem":"science","status":"available","available":true,"feature":{"name":"science-analytics","enabled":false,"description":"Optional offline analytics for evaluation metrics and diagnostics."},"capabilities":[{"name":"clustering_diagnostics","state":"available","requiredFeature":"science-analytics","degradationCode":null,"description":"Deterministic clustering diagnostics for consolidation candidates."},{"name":"evaluation_metrics","state":"available","requiredFeature":"science-analytics","degradationCode":null,"description":"Deterministic precision, recall, and F1 metrics for evaluation runs."}],"degradations":[],"nextActions":[]}}
+{
+  "schema": "ee.response.v2",
+  "success": true,
+  "data": {
+    "command": "analyze science-status",
+    "schema": "ee.science.status.v1",
+    "subsystem": "science",
+    "status": "available",
+    "available": true,
+    "feature": {
+      "name": "science-analytics",
+      "enabled": false,
+      "description": "Optional offline analytics for evaluation metrics and diagnostics."
+    },
+    "capabilities": [
+      {
+        "name": "clustering_diagnostics",
+        "state": "available",
+        "requiredFeature": "science-analytics",
+        "degradationCode": null,
+        "description": "Deterministic clustering diagnostics for consolidation candidates."
+      },
+      {
+        "name": "evaluation_metrics",
+        "state": "available",
+        "requiredFeature": "science-analytics",
+        "degradationCode": null,
+        "description": "Deterministic precision, recall, and F1 metrics for evaluation runs."
+      }
+    ],
+    "degradations": [],
+    "nextActions": []
+  }
+}

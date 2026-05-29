@@ -119,6 +119,25 @@ fn perf_live_v1_surfaces_cover_five_instrumented_command_families() -> TestResul
     Ok(())
 }
 
+/// Resolve a JSON-schema `$ref` (e.g. `#/$defs/surface`) against the
+/// root schema. The surface schema was refactored to share a single
+/// `$defs/surface` definition via `$ref`, so per-surface required
+/// fields and observability sub-surface required arrays no longer live
+/// inline. Tests must dereference before inspecting `required`.
+fn resolve_ref<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+        // Strip the leading `#/` and split on `/` to walk the pointer.
+        let mut current = root;
+        if let Some(path) = reference.strip_prefix("#/") {
+            for segment in path.split('/') {
+                current = &current[segment];
+            }
+            return current;
+        }
+    }
+    node
+}
+
 #[test]
 fn perf_live_v1_each_surface_carries_latency_percentiles_and_qps() -> TestResult {
     let schema = load_schema()?;
@@ -130,8 +149,9 @@ fn perf_live_v1_each_surface_carries_latency_percentiles_and_qps() -> TestResult
         let surface_schema = surfaces
             .get(*surface)
             .ok_or_else(|| format!("surface `{surface}` not present"))?;
+        let resolved = resolve_ref(&schema, surface_schema);
         let surface_required = collect_strings(
-            &surface_schema["required"],
+            &resolved["required"],
             &format!("surfaces.{surface}.required"),
         )?;
         for field in &required_fields {
@@ -161,7 +181,16 @@ fn perf_live_v1_observability_subsurfaces_are_present() -> TestResult {
         ),
         (
             "l2Cache",
-            &["hits", "misses", "hitRate", "byteSize", "evictions"][..],
+            // `hitRate` was renamed to `hitRateBasisPoints` (integer
+            // representation of the ratio, 0..=10_000) to avoid
+            // floating-point drift across runs.
+            &[
+                "hits",
+                "misses",
+                "hitRateBasisPoints",
+                "byteSize",
+                "evictions",
+            ][..],
         ),
         (
             "rch",
@@ -176,8 +205,9 @@ fn perf_live_v1_observability_subsurfaces_are_present() -> TestResult {
     ];
     for (block, required_fields) in observability {
         let block_schema = &schema["properties"][block];
+        let resolved = resolve_ref(&schema, block_schema);
         let block_required = collect_strings(
-            &block_schema["required"],
+            &resolved["required"],
             &format!("properties.{block}.required"),
         )?;
         for field in required_fields {

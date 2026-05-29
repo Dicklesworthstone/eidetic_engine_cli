@@ -63,7 +63,10 @@
     {
       "code": "causal_sample_underpowered",
       "message": "causal promote-plan has sample size 0 with no observed baseline/outcome ledger; no causal effect is actionable.",
-      "severity": "warning"
+      "severity": "warning",
+      "sources": [
+        "causal_promote_plan"
+      ]
     }
   ],
   "dryRun": true

@@ -3,13 +3,15 @@
 //!
 //! Pinned contract surfaces:
 //!
-//! 1. **Schema identity.** The emitted JSON's top-level `schema` field
-//!    equals the canonical `ee.swarm.brief.v1` value (the value of
-//!    `SWARM_BRIEF_SCHEMA_V1` at `src/core/swarm_brief.rs:32`). The
-//!    output is the schema directly — NOT the `ee.response.v2`
-//!    wrapper used by other agent-facing surfaces — because swarm
-//!    brief is documented as a read-only coordination report, not a
-//!    response envelope.
+//! 1. **Schema identity.** Per commit 5ac28857 ("swarm next-action
+//!    emits ee.response.v2 envelope ... to match swarm brief and
+//!    swarm work-packet"), swarm brief was retroactively wrapped in
+//!    the canonical `ee.response.v2` envelope: top-level `schema`
+//!    equals `ee.response.v2`, and the brief-specific schema
+//!    (`ee.swarm.brief.v1`, the value of `SWARM_BRIEF_SCHEMA_V1` at
+//!    `src/core/swarm_brief.rs:32`) lives under `data.schema`. The
+//!    redaction invariant and the `--fields` / `--require-sources`
+//!    semantics below all read from the inner `data` payload.
 //!
 //! 2. **Redaction invariant.** `redactionStatus` is a JSON-schema
 //!    `const` field set to `paths_counts_subjects_only_no_content`
@@ -184,27 +186,34 @@ fn swarm_brief_emits_schema_and_redaction_invariant() -> TestResult {
     )?;
     let envelope = parse_json_stdout(&output, "ee swarm brief --sources host-profile")?;
 
-    let schema = envelope
+    // Post-G8 the CLI wraps every response in the canonical
+    // `ee.response.v2` envelope; the swarm-brief payload moved under
+    // `data`, so brief-specific assertions read from there.
+    let payload = envelope
+        .get("data")
+        .ok_or_else(|| format!("data payload missing from envelope: {envelope}"))?;
+
+    let schema = payload
         .get("schema")
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("schema field missing from envelope: {envelope}"))?;
+        .ok_or_else(|| format!("schema field missing from data payload: {payload}"))?;
     if schema != SWARM_BRIEF_SCHEMA_V1 {
         return Err(format!(
             "schema must be {SWARM_BRIEF_SCHEMA_V1}; got {schema:?}",
         ));
     }
 
-    let redaction = envelope
+    let redaction = payload
         .get("redactionStatus")
         .and_then(JsonValue::as_str)
-        .ok_or_else(|| format!("redactionStatus missing from envelope: {envelope}"))?;
+        .ok_or_else(|| format!("redactionStatus missing from data payload: {payload}"))?;
     if redaction != SWARM_BRIEF_REDACTION_STATUS_CONST {
         return Err(format!(
             "redactionStatus must be the privacy invariant {SWARM_BRIEF_REDACTION_STATUS_CONST:?}; got {redaction:?} (this is a privacy regression — brief output is not allowed to carry memory content, file content, or other privileged surface state)",
         ));
     }
 
-    assert_required_keys_present(&envelope, "default summary projection")?;
+    assert_required_keys_present(payload, "default summary projection")?;
     Ok(())
 }
 
@@ -224,8 +233,11 @@ fn swarm_brief_required_keys_present_under_summary_and_full_projections() -> Tes
             "host-profile",
         ],
     )?;
-    let summary = parse_json_stdout(&summary_output, "ee --fields summary swarm brief")?;
-    assert_required_keys_present(&summary, "--fields summary")?;
+    let summary_envelope = parse_json_stdout(&summary_output, "ee --fields summary swarm brief")?;
+    let summary = summary_envelope.get("data").ok_or_else(|| {
+        format!("--fields summary: data payload missing from envelope: {summary_envelope}")
+    })?;
+    assert_required_keys_present(summary, "--fields summary")?;
 
     let full_output = run_ee(
         &workspace,
@@ -239,13 +251,16 @@ fn swarm_brief_required_keys_present_under_summary_and_full_projections() -> Tes
             "host-profile",
         ],
     )?;
-    let full = parse_json_stdout(&full_output, "ee --fields full swarm brief")?;
-    assert_required_keys_present(&full, "--fields full")?;
+    let full_envelope = parse_json_stdout(&full_output, "ee --fields full swarm brief")?;
+    let full = full_envelope.get("data").ok_or_else(|| {
+        format!("--fields full: data payload missing from envelope: {full_envelope}")
+    })?;
+    assert_required_keys_present(full, "--fields full")?;
 
-    // Both projections must keep the schema identity and the
-    // redaction invariant.
-    for (envelope, label) in [(&summary, "summary"), (&full, "full")] {
-        let schema = envelope
+    // Both projections must keep the brief-specific schema identity
+    // and the redaction invariant on the inner `data` payload.
+    for (payload, label) in [(summary, "summary"), (full, "full")] {
+        let schema = payload
             .get("schema")
             .and_then(JsonValue::as_str)
             .ok_or_else(|| format!("{label}: schema field missing"))?;
@@ -254,7 +269,7 @@ fn swarm_brief_required_keys_present_under_summary_and_full_projections() -> Tes
                 "{label}: schema must be {SWARM_BRIEF_SCHEMA_V1}; got {schema:?}",
             ));
         }
-        let redaction = envelope
+        let redaction = payload
             .get("redactionStatus")
             .and_then(JsonValue::as_str)
             .ok_or_else(|| format!("{label}: redactionStatus field missing"))?;
@@ -348,13 +363,16 @@ fn swarm_brief_require_sources_fails_when_source_unavailable() -> TestResult {
         ));
     }
     let envelope = parse_json_stdout(&lenient, "lenient brief")?;
-    let degraded = envelope
+    let payload = envelope
+        .get("data")
+        .ok_or_else(|| format!("lenient brief: data payload missing from envelope: {envelope}"))?;
+    let degraded = payload
         .get("degraded")
         .and_then(JsonValue::as_array)
-        .ok_or_else(|| format!("lenient brief: degraded array missing: {envelope}"))?;
+        .ok_or_else(|| format!("lenient brief: degraded array missing: {payload}"))?;
     if degraded.is_empty() {
         return Err(format!(
-            "lenient brief over an unavailable source must populate `degraded`; got empty array: {envelope}",
+            "lenient brief over an unavailable source must populate `degraded`; got empty array: {payload}",
         ));
     }
     Ok(())

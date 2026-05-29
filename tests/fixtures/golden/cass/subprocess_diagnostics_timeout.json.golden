@@ -10,8 +10,8 @@
   "reapUnavailableReason": null,
   "schema": "ee.cass.subprocess_diagnostics.v1",
   "stderrCapture": {
-    "capturedBytes": 27,
     "captureCapExceeded": false,
+    "capturedBytes": 28,
     "truncated": false
   },
   "stdoutLineCount": 7,

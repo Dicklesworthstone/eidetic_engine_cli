@@ -112,16 +112,24 @@ fn ensure_last_key_schema_is_redaction_safe(schema: &Value) -> TestResult {
         .pointer("/$defs/lastKey/properties")
         .and_then(Value::as_object)
         .ok_or_else(|| "single-flight posture lastKey properties missing object".to_owned())?;
-    let actual = last_key_properties.keys().cloned().collect::<Vec<_>>();
-    let expected = [
+    // Compare as sorted sets — serde-json preserves insertion order
+    // for the underlying BTreeMap implementation but the schema author
+    // can list properties in any order without changing the contract.
+    let mut actual: Vec<String> = last_key_properties.keys().cloned().collect();
+    actual.sort();
+    let mut expected: Vec<String> = [
         "graphGeneration",
         "indexGeneration",
         "keyHash",
         "workspaceGeneration",
-    ];
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    expected.sort();
     if actual != expected {
         return Err(format!(
-            "single-flight posture lastKey properties must stay redaction-safe; expected {:?}, got {:?}",
+            "single-flight posture lastKey properties must stay redaction-safe; expected (sorted) {:?}, got (sorted) {:?}",
             expected, actual
         ));
     }

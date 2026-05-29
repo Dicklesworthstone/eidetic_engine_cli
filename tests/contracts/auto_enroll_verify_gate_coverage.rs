@@ -70,6 +70,18 @@ const PENDING_SRR6_46_SCRIPTS: &[&str] = &[
     "scripts/e2e_overhaul/auto_enroll_perf_gate.sh",
     "scripts/e2e_overhaul/auto_enroll_idle_24h.sh",
     "scripts/e2e_overhaul/peer_discovery_policy.sh",
+    // bd-36bbk.1.11 — opt-in real-Tailscale smoke, gated on
+    // EE_E2E_REAL_TAILSCALE=1; exits 78 without the opt-in flag and
+    // is deliberately outside normal CI per the script header.
+    "scripts/e2e_overhaul/auto_enroll_real_tailscale.sh",
+    // bd-21xbi.3 — host-class p99 benchmark gate for the lexical
+    // RAM-tier optimization, gated on EE_HUGE_HOST=1 (only meaningful
+    // on 256GB+ / 64-core hosts); exits 78 otherwise.
+    "scripts/e2e_overhaul/lexical_ram_tier_p99_proof.sh",
+    // bd-36bbk.2 — opt-in real-Tailscale `ee mesh sync --once` smoke,
+    // gated on EE_E2E_REAL_TAILSCALE=1; exits 78 otherwise. Parallels
+    // auto_enroll_real_tailscale.sh on the mesh-sync surface.
+    "scripts/e2e_overhaul/mesh_sync_once_real_tailscale.sh",
 ];
 
 fn repo_root() -> PathBuf {
@@ -99,12 +111,18 @@ fn verify_script_exists_at_canonical_path() -> TestResult {
 fn every_wired_srr6_46_stage_appears_exactly_once_in_verify_sh() -> TestResult {
     let body = verify_body()?;
     for stage in WIRED_SRR6_46_STAGES {
-        let label_hits = body.matches(stage.label).count();
+        // Count only invocations of `run_stage "<label>"`. Bare label
+        // mentions inside ci-smoke `SKIP ...` echos (e.g.
+        // `"${STAGE_RESULTS}SKIP Fake Tailscale Harness E2E
+        // (SRR6.46.10) (ci-smoke)\n"`) advertise that the stage was
+        // skipped — they are not duplicate wirings.
+        let label_needle = format!("run_stage \"{}\"", stage.label);
+        let label_hits = body.matches(label_needle.as_str()).count();
         let script_hits = body.matches(stage.script_rel).count();
         ensure(
             label_hits == 1,
             format!(
-                "expected exactly one run_stage label {:?} in verify.sh; found {label_hits}",
+                "expected exactly one `run_stage` invocation with label {:?} in verify.sh; found {label_hits}",
                 stage.label
             ),
         )?;

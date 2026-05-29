@@ -299,6 +299,10 @@ fn parse_cass_line_fragment(
     let (start, end) = rest
         .split_once('-')
         .map_or((rest, rest), |(start, end)| (start, end));
+    // Range fragments may include a leading `L` on the end side
+    // (e.g. `L10-L20`); strip it before parsing so both endpoints share
+    // the same digit-only form.
+    let end = end.strip_prefix('L').unwrap_or(end);
     let start = parse_positive_cass_line(start)?;
     let end = parse_positive_cass_line(end)?;
     if end < start {

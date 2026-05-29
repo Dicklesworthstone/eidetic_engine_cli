@@ -32,14 +32,20 @@
   ],
   "degradations": [
     {
-      "code": "causal_sample_underpowered",
-      "message": "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.",
-      "severity": "warning"
-    },
-    {
       "code": "causal_confounders_unavailable",
       "message": "No explicit confounder ledger rows were supplied; refusing to fabricate confounders.",
-      "severity": "warning"
+      "severity": "warning",
+      "sources": [
+        "causal_estimate"
+      ]
+    },
+    {
+      "code": "causal_sample_underpowered",
+      "message": "Sample size 0 with no observed baseline/outcome ledger; no causal estimate is actionable.",
+      "severity": "warning",
+      "sources": [
+        "causal_estimate"
+      ]
     }
   ],
   "dryRun": false

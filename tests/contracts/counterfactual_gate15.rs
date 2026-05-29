@@ -1413,14 +1413,16 @@ fn reconstruct_full_matches_golden() -> TestResult {
 fn normalize_for_golden(json: &str) -> String {
     let mut normalized = json.to_string();
 
+    // generate_id() returns uuid_v7 with hyphens (e.g. ep_019e722f-dc75-70a1-...);
+    // accept both hyphenated UUID strings and legacy hex-only IDs.
     normalized = regex_replace(
         &normalized,
-        r#""episode_id"\s*:\s*"ep_[a-f0-9]+""#,
+        r#""episode_id"\s*:\s*"ep_[a-f0-9-]+""#,
         r#""episode_id": "ep_NORMALIZED""#,
     );
     normalized = regex_replace(
         &normalized,
-        r#""run_id"\s*:\s*"cfr_[a-f0-9]+""#,
+        r#""run_id"\s*:\s*"cfr_[a-f0-9-]+""#,
         r#""run_id": "cfr_NORMALIZED""#,
     );
     normalized = regex_replace(
@@ -1430,17 +1432,17 @@ fn normalize_for_golden(json: &str) -> String {
     );
     normalized = regex_replace(
         &normalized,
-        r#""replay_id"\s*:\s*"rpl_[a-f0-9]+""#,
+        r#""replay_id"\s*:\s*"rpl_[a-f0-9-]+""#,
         r#""replay_id": "rpl_NORMALIZED""#,
     );
     normalized = regex_replace(
         &normalized,
-        r#""id"\s*:\s*"hyprec_[a-f0-9_]+""#,
+        r#""id"\s*:\s*"hyprec_[a-f0-9_-]+""#,
         r#""id": "hyprec_NORMALIZED""#,
     );
     normalized = regex_replace(
         &normalized,
-        r#""candidate_id"\s*:\s*"cand_[a-f0-9_]+""#,
+        r#""candidate_id"\s*:\s*"cand_[a-f0-9_-]+""#,
         r#""candidate_id": "cand_NORMALIZED""#,
     );
     normalized = regex_replace(

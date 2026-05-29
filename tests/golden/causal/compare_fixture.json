@@ -20,7 +20,10 @@
     {
       "code": "causal_comparison_evidence_unavailable",
       "message": "No persisted comparison evidence ledger rows are available; refusing to synthesize baseline/candidate comparisons from source IDs.",
-      "severity": "warning"
+      "severity": "warning",
+      "sources": [
+        "causal_compare"
+      ]
     }
   ],
   "dryRun": false

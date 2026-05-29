@@ -10,8 +10,8 @@
   "reapUnavailableReason": "subprocess exited before adapter cleanup was required",
   "schema": "ee.cass.subprocess_diagnostics.v1",
   "stderrCapture": {
-    "capturedBytes": 35,
     "captureCapExceeded": false,
+    "capturedBytes": 35,
     "truncated": true
   },
   "stdoutLineCount": 3,

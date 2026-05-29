@@ -20,7 +20,10 @@
     {
       "code": "causal_evidence_unavailable",
       "message": "No persisted causal evidence ledger rows are available for causal trace; refusing to infer exposures, decisions, outcomes, or uplift from IDs.",
-      "severity": "warning"
+      "severity": "warning",
+      "sources": [
+        "causal_trace"
+      ]
     }
   ],
   "dryRun": false

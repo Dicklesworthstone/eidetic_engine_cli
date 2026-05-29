@@ -568,6 +568,13 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `auto_enrollment_tailnet_changed` | medium | bd-36bbk.1.3 |
 | `auto_enrollment_manual_config_present` | medium | bd-36bbk.1.3 |
 | `auto_enrollment_manual_migration_unmatched_peer_set` | info | bd-36bbk.1.3 |
+| `auto_enrollment_blocked_by_policy` | medium | bd-36bbk.1 |
+| `auto_enrollment_already_complete` | info | bd-36bbk.1 |
+| `auto_enrollment_concurrent_attempt` | warning | bd-36bbk.1 |
+| `auto_enrollment_audit_failed` | high | bd-36bbk.1 |
+| `auto_enrollment_sync_once_failed` | warning | bd-36bbk.1 |
+| `auto_enrollment_invalid_override_node_key` | warning | bd-36bbk.1 |
+| `auto_enrollment_node_key_changed` | medium | bd-36bbk.1 (SRR6.46.3/.4/.14) |
 | `mesh_peer_policy_denied` | high | (TBD) |
 | `mesh_body_fetch_denied_by_policy` | medium | bd-nw0v3.1 (SRR6.16) |
 | `mesh_remote_body_unavailable` | medium | bd-nw0v3.2 (SRR6.16) |
