@@ -5282,6 +5282,18 @@ pub struct PreflightGuardArgs {
     #[arg(long = "cmd", value_name = "COMMAND")]
     pub cmd: Option<String>,
 
+    /// Base64-encoded (standard alphabet) command string to check. Keeps the raw
+    /// command off argv so an outer shell guard (e.g. dcg) cannot false-match a
+    /// destructive substring before `ee` runs.
+    #[arg(long = "cmd-base64", value_name = "BASE64")]
+    pub cmd_base64: Option<String>,
+
+    /// Read the command string to check from stdin (single command; one trailing
+    /// newline is trimmed). Keeps the raw command off argv so an outer shell guard
+    /// (e.g. dcg) cannot false-match a destructive substring before `ee` runs.
+    #[arg(long = "stdin")]
+    pub stdin: bool,
+
     /// Workspace path for workspace-specific rules.
     #[arg(long, value_name = "PATH")]
     pub workspace: Option<PathBuf>,
@@ -18385,19 +18397,51 @@ fn record_preflight_halt_audit_if_available(
 }
 
 fn preflight_guard_command(args: &PreflightGuardArgs) -> Result<String, DomainError> {
-    match (args.command.as_ref(), args.cmd.as_ref()) {
-        (Some(_), Some(_)) => Err(DomainError::Usage {
-            message: "pass either positional COMMAND or --cmd, not both".to_owned(),
-            repair: Some("ee preflight check --cmd '<command>' --json".to_owned()),
-        }),
-        (Some(command), None) | (None, Some(command)) if !command.trim().is_empty() => {
-            Ok(command.clone())
-        }
-        _ => Err(DomainError::Usage {
-            message: "preflight guard requires a command string".to_owned(),
-            repair: Some("ee preflight check --cmd '<command>' --json".to_owned()),
-        }),
+    use base64::Engine as _;
+
+    let usage = |message: String| DomainError::Usage {
+        message,
+        repair: Some("ee preflight check --cmd '<command>' --json".to_owned()),
+    };
+
+    // Exactly one input channel may be used. The base64 and stdin channels exist so the
+    // raw command never lands on argv, where an outer shell guard (e.g. dcg) could
+    // false-match a destructive substring and block `ee` before it can vet the command.
+    let provided = usize::from(args.command.is_some())
+        + usize::from(args.cmd.is_some())
+        + usize::from(args.cmd_base64.is_some())
+        + usize::from(args.stdin);
+    if provided > 1 {
+        return Err(usage(
+            "pass exactly one of positional COMMAND, --cmd, --cmd-base64, or --stdin".to_owned(),
+        ));
     }
+
+    let command = if args.stdin {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf)
+            .map_err(|error| usage(format!("failed to read command from stdin: {error}")))?;
+        buf.trim_end_matches(['\n', '\r']).to_owned()
+    } else if let Some(encoded) = args.cmd_base64.as_ref() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .map_err(|error| usage(format!("invalid --cmd-base64 value: {error}")))?;
+        String::from_utf8(bytes)
+            .map_err(|error| usage(format!("--cmd-base64 did not decode to UTF-8: {error}")))?
+    } else if let Some(command) = args.command.as_ref().or(args.cmd.as_ref()) {
+        command.clone()
+    } else {
+        return Err(usage(
+            "preflight guard requires a command string".to_owned(),
+        ));
+    };
+
+    if command.trim().is_empty() {
+        return Err(usage(
+            "preflight guard requires a non-empty command string".to_owned(),
+        ));
+    }
+    Ok(command)
 }
 
 fn write_preflight_guard_report<W>(
