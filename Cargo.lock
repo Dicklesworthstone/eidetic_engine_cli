@@ -1117,7 +1117,7 @@ dependencies = [
 
 [[package]]
 name = "eidetic-engine"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "arc-swap",
  "asupersync",

@@ -13,9 +13,8 @@ use crate::core::degraded_aggregation::{
 };
 use crate::models::{
     ContextProfile, ContextProfileName, ContextProfileSection, ContextProfileSectionMix,
-    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1, RESPONSE_SCHEMA_V2,
-    RedactionLevel,
-    TrustClass, UnitScore,
+    ERROR_SCHEMA_V2, MemoryId, MemoryScopeStats, ProvenanceUri, RESPONSE_SCHEMA_V1,
+    RESPONSE_SCHEMA_V2, RedactionLevel, TrustClass, UnitScore,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;

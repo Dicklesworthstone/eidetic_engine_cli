@@ -156,13 +156,7 @@ fn walking_skeleton_acceptance_gate() -> TestResult {
     // ---- Criterion 5: context pack includes provenance ----
     let context = run_ee(
         &workspace,
-        &[
-            "pack",
-            "prepare release",
-            "--max-tokens",
-            "2000",
-            "--json",
-        ],
+        &["pack", "prepare release", "--max-tokens", "2000", "--json"],
     )?;
     require_ok(&context, "context")?;
     let context_json = stdout_json(&context, "context")?;

@@ -1396,10 +1396,7 @@ pub fn apply_field_selector_to_json(
     // is `["command", "version", "status", "summary", "count", "schema"]` —
     // none of which exist at the top level of a swarm brief response.
     let command_owned;
-    let command = match data
-        .get("command")
-        .and_then(serde_json::Value::as_str)
-    {
+    let command = match data.get("command").and_then(serde_json::Value::as_str) {
         Some(name) => name,
         None => {
             command_owned = data
@@ -1520,12 +1517,12 @@ fn command_name_from_schema(schema: &str) -> String {
     // matters.
     match schema {
         "ee.swarm.brief.v1" | "ee.swarm_brief.v1" => "swarm brief".to_string(),
-        "ee.swarm.next_action.v1"
-        | "ee.swarm.next-action.v1"
-        | "ee.swarm_next_action.v1" => "swarm next-action".to_string(),
-        "ee.swarm.work_packet.v1"
-        | "ee.swarm.work-packet.v1"
-        | "ee.swarm_work_packet.v1" => "swarm work-packet".to_string(),
+        "ee.swarm.next_action.v1" | "ee.swarm.next-action.v1" | "ee.swarm_next_action.v1" => {
+            "swarm next-action".to_string()
+        }
+        "ee.swarm.work_packet.v1" | "ee.swarm.work-packet.v1" | "ee.swarm_work_packet.v1" => {
+            "swarm work-packet".to_string()
+        }
         _ => String::new(),
     }
 }
@@ -1807,22 +1804,12 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         },
         "swarm next-action" => match preset {
             FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
-            FieldProfile::Summary => &[
-                "schema",
-                "workspace",
-                "redactionStatus",
-                "degraded",
-            ],
+            FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         "swarm work-packet" => match preset {
             FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
-            FieldProfile::Summary => &[
-                "schema",
-                "workspace",
-                "redactionStatus",
-                "degraded",
-            ],
+            FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         _ => match preset {
