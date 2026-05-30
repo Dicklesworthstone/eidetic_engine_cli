@@ -4338,6 +4338,24 @@ pub fn run_search_with_performance(
 ) -> Result<SearchPerformanceRun, SearchError> {
     let determinism = Deterministic::from_seed(0);
     let mut audit_ids = SearchAuditIdSource::Ambient;
+
+    let database_path = options.resolve_database_path();
+    if database_path.exists()
+        && let Ok(connection) = DbConnection::open_file(&database_path)
+    {
+        let result = run_search_inner_with_performance(
+            options,
+            Some(&connection),
+            &determinism,
+            &mut audit_ids,
+            Some(&connection),
+            true,
+            None,
+        );
+        let _ = connection.close();
+        return result;
+    }
+
     run_search_inner_with_performance(
         options,
         None,
