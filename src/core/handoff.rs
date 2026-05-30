@@ -2269,13 +2269,29 @@ fn reject_existing_symlink_component(path: &Path, label: &str) -> Result<(), Dom
         }
         match fs::symlink_metadata(candidate) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
+                // A symlink component is rejected to stop an attacker from planting a
+                // symlink that redirects the capsule (or 0o600 HMAC key) write to an
+                // unexpected location. A ROOT-OWNED symlink (e.g. macOS `/tmp ->
+                // /private/tmp`) cannot be repointed by an unprivileged attacker, so
+                // following it is safe; only user-writable symlinks are a real threat.
+                // This lets the documented `--out /tmp/...` workflow succeed on macOS
+                // while still rejecting attacker-plantable symlinks (and the final
+                // capsule/key target is still checked separately).
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    if metadata.uid() == 0 {
+                        continue;
+                    }
+                }
                 return Err(DomainError::Storage {
                     message: format!(
-                        "{label} path contains a symlink component: {}",
+                        "{label} path contains a user-owned symlink component: {} (refusing to follow it)",
                         candidate.display()
                     ),
                     repair: Some(
-                        "Use a regular file path for handoff capsules and key material.".to_owned(),
+                        "Use a path without a user-owned symlink (resolve it to the real location, e.g. /private/tmp instead of a symlink you created) for handoff capsules and key material."
+                            .to_owned(),
                     ),
                 });
             }
