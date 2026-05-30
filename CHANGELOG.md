@@ -24,6 +24,38 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-05-30
+
+Release-pipeline timeout fix. v0.3.5's gates job (run 26674710915) was
+cancelled when its 60-minute timeout fired while the "Performance
+benchmarks (advisory)" step was mid-compile of the franken-stack
+path-deps (fsqlite-error compilation visible at +58min). The vision
+coverage advisory fix from v0.3.5 worked correctly — the gate ran,
+emitted ::warning, and the workflow continued — but the next heavy
+compile blew the gates job's own wall-clock budget.
+
+### Changed
+
+- **`gates` job `timeout-minutes` bumped from 60 → 120**
+  (`.github/workflows/release.yml`). The gates job's "Performance
+  benchmarks (advisory)" step needs to compile the full franken-stack
+  via path-deps (asupersync, frankensearch, frankensqlite, fnx-*),
+  which from a cold cache can alone take 50-60 minutes. The advisory
+  step is correctly non-blocking on benchmark OUTPUT
+  (`|| { ::warning ... }`), but the job's wall-clock timeout still
+  applies to the compile time itself. 120 minutes gives comfortable
+  headroom on cold-cache runs.
+
+### Notes
+
+- Ships the same fixes/feature work as v0.3.5 (which never produced a
+  GitHub Release page due to the timeout cancellation). See the v0.3.5
+  CHANGELOG entry below for the full list.
+- A future deeper improvement: skip "Performance benchmarks" entirely
+  on release-tag commits (the artifact is for downstream perf
+  dashboards, not release gating — and dashboards don't need every
+  release-tag run to produce an artifact).
+
 ## [0.3.5] - 2026-05-30
 
 Release-pipeline-hardening cluster. The v0.3.4 tag was pushed but its

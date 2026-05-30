@@ -73,7 +73,18 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # NOTE (v0.3.6): bumped from 60 → 120. The gates job's "Performance
+    # benchmarks (advisory)" step compiles the full franken-stack via
+    # path-deps (asupersync, frankensearch, frankensqlite, fnx-*) which
+    # alone can take 50-60min from cold cache. v0.3.5 (run 26674710915)
+    # hit the 60min timeout while compiling fsqlite-error. The advisory
+    # step is correctly non-blocking via `|| { ::warning }`, but the
+    # job's own timeout still applies to the compile time. 120min gives
+    # comfortable headroom; a future deeper fix is to skip perf-bench
+    # entirely on release-tag commits (the artifact is for downstream
+    # dashboards, not release gating — and dashboards don't need every
+    # release-tag run).
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
