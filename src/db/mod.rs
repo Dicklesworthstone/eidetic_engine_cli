@@ -23598,6 +23598,101 @@ mod tests {
     }
 
     #[test]
+    fn list_evidence_spans_for_workspace_filters_sorts_and_isolates() -> TestResult {
+        // Coverage for the workspace-scoped evidence-span query: filtering to a
+        // workspace, deterministic ordering (session_id ASC, start_line ASC),
+        // cross-workspace isolation, count parity, and the empty case. The
+        // sibling `_for_session` test only covers a single session; this guards
+        // the workspace fan-in path used by focus suggestion and curation.
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        // Workspace A is created by the shared helper; add workspace B (to prove
+        // isolation) and an empty workspace C.
+        setup_workspace(&connection)?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_91234567890123456789012345', '/tmp/test-b', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+        connection.execute_raw(
+            "INSERT INTO workspaces (id, path, created_at, updated_at) VALUES ('wsp_81234567890123456789012345', '/tmp/test-empty', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        )?;
+
+        // Two sessions in workspace A (A1 sorts before A2 by session id).
+        connection.insert_session(
+            "sess_41234567890123456789012345",
+            &session_input("cass-session-ws-a1"),
+        )?;
+        connection.insert_session(
+            "sess_51234567890123456789012345",
+            &session_input("cass-session-ws-a2"),
+        )?;
+        // One session in workspace B.
+        let mut session_b = session_input("cass-session-ws-b");
+        session_b.workspace_id = "wsp_91234567890123456789012345".to_string();
+        connection.insert_session("sess_61234567890123456789012345", &session_b)?;
+
+        // Workspace A spans, inserted out of order to prove deterministic sort.
+        connection.insert_evidence_span(
+            "ev_91234567890123456789012345",
+            &evidence_span_input("sess_51234567890123456789012345", "a2-line20", 20),
+        )?;
+        connection.insert_evidence_span(
+            "ev_81234567890123456789012345",
+            &evidence_span_input("sess_41234567890123456789012345", "a1-line30", 30),
+        )?;
+        connection.insert_evidence_span(
+            "ev_71234567890123456789012345",
+            &evidence_span_input("sess_41234567890123456789012345", "a1-line10", 10),
+        )?;
+        // Workspace B span, which must NOT appear in workspace A results.
+        let mut span_b = evidence_span_input("sess_61234567890123456789012345", "b1-line5", 5);
+        span_b.workspace_id = "wsp_91234567890123456789012345".to_string();
+        connection.insert_evidence_span("ev_01234567890123456789012345", &span_b)?;
+
+        // Workspace A: filtered + ordered by (session_id ASC, start_line ASC),
+        // with workspace B's span excluded.
+        let spans_a =
+            connection.list_evidence_spans_for_workspace("wsp_01234567890123456789012345")?;
+        let cass_a: Vec<&str> = spans_a.iter().map(|s| s.cass_span_id.as_str()).collect();
+        ensure_equal(
+            &cass_a,
+            &vec!["a1-line10", "a1-line30", "a2-line20"],
+            "workspace A spans filtered + sorted by session then start_line, B excluded",
+        )?;
+        ensure_equal(
+            &connection.count_evidence_spans_for_workspace("wsp_01234567890123456789012345")?,
+            &3_usize,
+            "workspace A span count parity",
+        )?;
+
+        // Workspace B: only its own span (isolation in the other direction).
+        let spans_b =
+            connection.list_evidence_spans_for_workspace("wsp_91234567890123456789012345")?;
+        let cass_b: Vec<&str> = spans_b.iter().map(|s| s.cass_span_id.as_str()).collect();
+        ensure_equal(&cass_b, &vec!["b1-line5"], "workspace B isolated to its own span")?;
+        ensure_equal(
+            &connection.count_evidence_spans_for_workspace("wsp_91234567890123456789012345")?,
+            &1_usize,
+            "workspace B span count parity",
+        )?;
+
+        // Empty workspace: no spans, zero count.
+        let spans_empty =
+            connection.list_evidence_spans_for_workspace("wsp_81234567890123456789012345")?;
+        ensure(
+            spans_empty.is_empty(),
+            "empty workspace returns no evidence spans",
+        )?;
+        ensure_equal(
+            &connection.count_evidence_spans_for_workspace("wsp_81234567890123456789012345")?,
+            &0_usize,
+            "empty workspace span count is zero",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
     fn evidence_spans_enforce_unique_upstream_id_bounds_and_json() -> TestResult {
         let connection = DbConnection::open_memory()?;
         connection.migrate()?;
