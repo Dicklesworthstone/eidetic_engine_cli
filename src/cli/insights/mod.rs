@@ -358,7 +358,12 @@ pub fn build_insights_report_with_options(
         .as_ref()
         .map(|memory_id| format!("ee why {memory_id} --json"));
     let raw_degraded_signals = if gated_degraded_signals.is_empty() {
-        degraded_signals_for_sections(&sections)
+        // Load the workspace graph counts so an all-empty bundle can explain *why* it is
+        // empty (no memories vs. memories-but-no-links) instead of returning silent success.
+        let insights_graph_data = load_workspace_insights_graph_data(options.workspace)
+            .ok()
+            .flatten();
+        degraded_signals_for_sections(&sections, insights_graph_data.as_ref())
     } else {
         gated_degraded_signals
     };
@@ -536,7 +541,10 @@ fn runtime_graph_feature_enabled(
         })
 }
 
-fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDegradedInput> {
+fn degraded_signals_for_sections(
+    sections: &[InsightsSection],
+    graph_data: Option<&WorkspaceInsightsGraphData>,
+) -> Vec<InsightsDegradedInput> {
     let mut degraded = sections
         .iter()
         .filter(|section| section.items.is_empty())
@@ -544,15 +552,29 @@ fn degraded_signals_for_sections(sections: &[InsightsSection]) -> Vec<InsightsDe
         .collect::<Vec<_>>();
 
     if sections.iter().all(|section| section.items.is_empty()) {
-        degraded.push((
-            "insights",
+        // Distinguish "no memories at all" from "memories exist but the link graph is
+        // empty". The latter is the common silent-empty case: graph insights (PageRank,
+        // HITS, bridges, proximity) need edges, and remember-time auto-linking only
+        // connects memories within the same explicit workflow — so a hand-built corpus
+        // of unrelated `ee remember` calls leaves every section empty with no hint why.
+        let has_memories_without_links =
+            graph_data.is_some_and(|data| !data.memories.is_empty() && data.links.is_empty());
+        let signal = if has_memories_without_links {
+            DegradationReport {
+                code: "graph.no_links",
+                severity: "low",
+                message: "Graph insights are empty: this workspace has memories but no links between them, so PageRank, HITS, bridges, and proximity have nothing to analyze. Remember-time auto-linking only connects memories in the same explicit workflow.",
+                repair: "populate the link graph: `ee import cass --workspace . --json` or `ee link <id-a> <id-b> --relation related --workspace .`",
+            }
+        } else {
             DegradationReport {
                 code: "graph.workspace_empty",
                 severity: "info",
                 message: "No graph memories are available for insights yet.",
                 repair: "run: ee remember --workspace . \"<memory>\" --json",
-            },
-        ));
+            }
+        };
+        degraded.push(("insights", signal));
     }
 
     degraded
