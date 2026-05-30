@@ -5288,8 +5288,8 @@ pub struct PreflightGuardArgs {
     #[arg(long = "cmd-base64", value_name = "BASE64")]
     pub cmd_base64: Option<String>,
 
-    /// Read the command string to check from stdin (single command; one trailing
-    /// newline is trimmed). Keeps the raw command off argv so an outer shell guard
+    /// Read the command string to check from stdin (single command; trailing
+    /// newlines are trimmed). Keeps the raw command off argv so an outer shell guard
     /// (e.g. dcg) cannot false-match a destructive substring before `ee` runs.
     #[arg(long = "stdin")]
     pub stdin: bool,
@@ -18418,13 +18418,24 @@ fn preflight_guard_command(args: &PreflightGuardArgs) -> Result<String, DomainEr
     }
 
     let command = if args.stdin {
+        // Reading stdin would block forever if no input is piped, which would hang an
+        // agent that passed --stdin but forgot the pipe. Refuse on an interactive TTY.
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return Err(usage(
+                "--stdin was given but stdin is a terminal; pipe the command, e.g. `printf '%s' \"$cmd\" | ee preflight check --stdin`".to_owned(),
+            ));
+        }
         let mut buf = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf)
             .map_err(|error| usage(format!("failed to read command from stdin: {error}")))?;
         buf.trim_end_matches(['\n', '\r']).to_owned()
     } else if let Some(encoded) = args.cmd_base64.as_ref() {
+        // Tolerate whitespace anywhere in the encoded value: GNU `base64` wraps output at
+        // 76 columns by default, so a piped `echo "$cmd" | base64` can contain interior
+        // newlines that the strict STANDARD decoder would otherwise reject.
+        let cleaned: String = encoded.chars().filter(|c| !c.is_whitespace()).collect();
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
+            .decode(&cleaned)
             .map_err(|error| usage(format!("invalid --cmd-base64 value: {error}")))?;
         String::from_utf8(bytes)
             .map_err(|error| usage(format!("--cmd-base64 did not decode to UTF-8: {error}")))?
@@ -51807,6 +51818,85 @@ mod tests {
             &shown["data"]["tripwires"][0]["source_id"],
             &serde_json::json!("preflight_guard:builtin:rm_rf_root"),
             "persisted guard tripwire source id",
+        )
+    }
+
+    #[test]
+    fn preflight_guard_command_resolves_input_channels() -> TestResult {
+        use base64::Engine as _;
+
+        let blank = || super::PreflightGuardArgs {
+            command: None,
+            cmd: None,
+            cmd_base64: None,
+            stdin: false,
+            workspace: None,
+            bypass: Vec::new(),
+            override_token: None,
+            database: None,
+        };
+
+        // Positional and --cmd both resolve to the verbatim command.
+        let mut positional = blank();
+        positional.command = Some("git status".to_owned());
+        ensure_equal(
+            &super::preflight_guard_command(&positional).ok(),
+            &Some("git status".to_owned()),
+            "positional command resolves",
+        )?;
+        let mut flag = blank();
+        flag.cmd = Some("ls -la".to_owned());
+        ensure_equal(
+            &super::preflight_guard_command(&flag).ok(),
+            &Some("ls -la".to_owned()),
+            "--cmd resolves",
+        )?;
+
+        // --cmd-base64 round-trips, including GNU `base64`'s 76-column wrapping
+        // (interior whitespace must be tolerated, not rejected).
+        let plain = "rm -fr /tmp/scratch";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(plain);
+        let mut b64 = blank();
+        b64.cmd_base64 = Some(encoded.clone());
+        ensure_equal(
+            &super::preflight_guard_command(&b64).ok(),
+            &Some(plain.to_owned()),
+            "--cmd-base64 round-trips",
+        )?;
+        let wrapped = format!("{}\n  {}\n", &encoded[..4], &encoded[4..]);
+        let mut b64_wrapped = blank();
+        b64_wrapped.cmd_base64 = Some(wrapped);
+        ensure_equal(
+            &super::preflight_guard_command(&b64_wrapped).ok(),
+            &Some(plain.to_owned()),
+            "--cmd-base64 tolerates interior whitespace from line-wrapping",
+        )?;
+
+        // Exactly one channel may be supplied.
+        let mut both = blank();
+        both.cmd = Some("ls".to_owned());
+        both.cmd_base64 = Some(base64::engine::general_purpose::STANDARD.encode("ls"));
+        ensure(
+            super::preflight_guard_command(&both).is_err(),
+            "supplying two channels is a usage error",
+        )?;
+
+        // No channel, whitespace-only, and undecodable base64 are all rejected.
+        ensure(
+            super::preflight_guard_command(&blank()).is_err(),
+            "no channel is a usage error",
+        )?;
+        let mut empty = blank();
+        empty.cmd = Some("   ".to_owned());
+        ensure(
+            super::preflight_guard_command(&empty).is_err(),
+            "whitespace-only command is rejected",
+        )?;
+        let mut bad = blank();
+        bad.cmd_base64 = Some("!!! not base64 !!!".to_owned());
+        ensure(
+            super::preflight_guard_command(&bad).is_err(),
+            "undecodable base64 is rejected",
         )
     }
 
