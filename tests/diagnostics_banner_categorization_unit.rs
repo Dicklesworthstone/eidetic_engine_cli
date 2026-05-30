@@ -113,6 +113,11 @@ const KNOWN_CODE_EXPECTATIONS: &[(&str, DegradedCategory, &str)] = &[
         "graph subsystem not initialized",
     ),
     (
+        "graph_feature_disabled",
+        DegradedCategory::WorkspaceStateNotPerResponse,
+        "proximity/PPR graph feature off by default config — workspace state, not per-response",
+    ),
+    (
         "agent_detection_unavailable",
         DegradedCategory::WorkspaceStateNotPerResponse,
         "agent-detection probe failed — workspace-wide state",

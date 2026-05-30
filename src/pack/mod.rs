@@ -4360,6 +4360,12 @@ pub const fn category_for_code(code: &str) -> DegradedCategory {
         | b"graph_snapshot_topology_unavailable"
         | b"graph_snapshot_unusable"
         | b"graph_unavailable"
+        // A graph feature (proximity-to-seed, PPR rerank) being disabled by config is a
+        // workspace-config state, observable via `ee config`/`ee capabilities`, not a
+        // per-response content degradation. It is OFF BY DEFAULT, so emitting it as an
+        // AffectsThisResponse degradation falsely flips the pack advisory banner on every
+        // healthy pack. (Fix: false "degraded" banner on healthy packs.)
+        | b"graph_feature_disabled"
         | b"agent_detection_unavailable"
         | b"model_registry_empty"
         | b"model_registry_no_available_entry"

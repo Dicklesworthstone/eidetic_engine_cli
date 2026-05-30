@@ -1539,18 +1539,11 @@ fn run_context_pack_with_performance_inner(
             Some("Set policy.output_redaction.enabled = true in .ee/config.toml.".to_string()),
         );
     }
-    if tokens_capped || candidate_pool_capped {
-        push_degradation(
-            &mut degraded,
-            "context_profile_budget_capped",
-            ContextResponseSeverity::Low,
-            format!(
-                "Context request budget was capped by the active {} operating profile.",
-                runtime_profile.active_profile.as_str()
-            ),
-            Some("ee profile config plan --json".to_string()),
-        );
-    }
+    // NOTE: the `context_profile_budget_capped` degradation is emitted later, after the
+    // pack draft is assembled, so it only fires when the cap was actually *binding*
+    // (content was omitted or the capped budget was filled). Emitting it here — whenever
+    // a profile lowers the configured ceiling — falsely flags healthy packs that used a
+    // tiny fraction of the budget as degraded. See the post-assembly emission below.
 
     let l2_cache_context = if options.output_options.cache_json_response {
         let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
@@ -2113,6 +2106,26 @@ fn run_context_pack_with_performance_inner(
         draft.budget.max_tokens(),
         candidate_token_costs_min,
     );
+    // Only report that the operating profile capped the budget when the cap was actually
+    // binding on this pack: either the (capped) token budget was filled, or the (capped)
+    // candidate pool was the limiting factor. A profile lowering a ceiling that the pack
+    // never came close to using is not a per-response degradation and must not flip the
+    // advisory banner. (Fix: false "degraded" banner on healthy packs.)
+    let budget_cap_was_binding = (tokens_capped && draft.used_tokens >= effective_max_tokens)
+        || (candidate_pool_capped
+            && draft.selection_audit.candidate_count >= effective_candidate_pool as usize);
+    if (tokens_capped || candidate_pool_capped) && budget_cap_was_binding {
+        push_degradation(
+            &mut degraded,
+            "context_profile_budget_capped",
+            ContextResponseSeverity::Low,
+            format!(
+                "Context request budget was capped by the active {} operating profile and the cap limited this pack (the capped budget was filled or candidates were dropped).",
+                runtime_profile.active_profile.as_str()
+            ),
+            Some("ee profile config plan --json".to_string()),
+        );
+    }
     let tombstoned_item_count = draft
         .items
         .iter()
