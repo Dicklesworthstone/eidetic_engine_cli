@@ -24,6 +24,40 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.3.7] - 2026-05-30
+
+Release-pipeline fix #3 — same shape as v0.3.2 perf-bench (#5), v0.3.4
+cargo-deny (#7), v0.3.5 vision-coverage advisory, v0.3.6 gates timeout
+bump. v0.3.5 was cancelled at 60min, v0.3.6 was cancelled at 120min,
+both because the Performance benchmarks step compiles the full
+franken-stack via path-deps (asupersync, frankensearch, frankensqlite,
+fnx-*) which takes 60-90min from cold cache.
+
+### Changed
+
+- **Performance benchmarks step now skipped on release-tag runs**
+  (`.github/workflows/release.yml`). The advisory bench is for
+  downstream perf dashboards, not release gating — running it on
+  every release-tag push is pure overhead that has now cancelled
+  three releases in a row. The branch-push path of THIS workflow
+  (`on: push: branches: main`) still runs the perf-bench so the
+  artifact stays available for dashboards. Condition added:
+  `if: ${{ !startsWith(github.ref, 'refs/tags/') }}`.
+
+### Fixed
+
+- **`.beads/.sync.lock` and `.beads/.write.lock` removed from
+  tracking** (gitignored in `.beads/.gitignore`). 0-byte runtime
+  files accidentally committed in 8a6b4a24 during the v0.3.4
+  fmt-cleanup commit's `git add -A`. Doesn't fix a user-facing
+  bug; just hygiene cleanup.
+
+### Notes
+
+- Ships the same fixes/feature work as v0.3.5 and v0.3.6 (both
+  workflow-cancelled before producing GitHub Release pages). See the
+  v0.3.5 CHANGELOG entry below for the full ledger.
+
 ## [0.3.6] - 2026-05-30
 
 Release-pipeline timeout fix. v0.3.5's gates job (run 26674710915) was
