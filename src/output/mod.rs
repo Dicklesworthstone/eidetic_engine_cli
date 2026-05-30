@@ -11918,11 +11918,11 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             );
             d.field_str(
                 "primaryWorkflow",
-                "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+                "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
             );
             d.field_array_of_strs(
                 "coreCommands",
-                &["init", "remember", "search", "context", "why", "status"],
+                &["init", "remember", "search", "pack", "why", "status"],
             );
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
             d.field_raw("recipeCount", &AGENT_DOC_RECIPES.len().to_string());
@@ -12089,7 +12089,7 @@ pub fn render_agent_docs_human(report: &AgentDocsReport) -> String {
     } else {
         output.push_str("\nDurable, local-first, explainable memory for coding agents.\n\n");
         output.push_str(
-            "Primary workflow:\n  ee context \"<task>\" --workspace . --max-tokens 4000 --json\n\n",
+            "Primary workflow:\n  ee pack \"<task>\" --workspace . --max-tokens 4000 --json\n\n",
         );
         output.push_str("Recipe catalog:\n  ee agent-docs recipes --json\n\n");
         output.push_str("Available topics:\n");

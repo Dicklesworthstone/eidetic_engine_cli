@@ -154,7 +154,7 @@ pub const GUIDE_SECTIONS: &[GuideSection] = &[
     },
     GuideSection {
         title: "Primary Workflow",
-        content: "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+        content: "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
     },
     GuideSection {
         title: "Machine Output",
@@ -849,7 +849,7 @@ pub const EXAMPLES: &[ExampleEntry] = &[
     ExampleEntry {
         title: "Pre-task context",
         description: "Get relevant context before starting a task",
-        command: "ee context \"fix failing CI tests\" --workspace . --max-tokens 4000 --json",
+        command: "ee pack \"fix failing CI tests\" --workspace . --max-tokens 4000 --json",
         category: "context",
     },
     ExampleEntry {
@@ -909,7 +909,7 @@ pub const EXAMPLES: &[ExampleEntry] = &[
     ExampleEntry {
         title: "TOON context pack",
         description: "Get context with 20-40% fewer tokens than JSON",
-        command: "ee context \"task\" --workspace . --format toon",
+        command: "ee pack \"task\" --workspace . --format toon",
         category: "formats",
     },
 ];
@@ -1080,7 +1080,7 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         title: "Fetch task context before editing",
         description: "Retrieve a compact, provenance-bearing context pack for the current task.",
         category: "context",
-        command: "ee context \"<task>\" --workspace . --max-tokens 4000 --json",
+        command: "ee pack \"<task>\" --workspace . --max-tokens 4000 --json",
         jq: r#".data.pack.items[]? | {memoryId, section, why}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: CONTEXT_RECIPE_FAILURES,
