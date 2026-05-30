@@ -597,29 +597,29 @@ jobs:
               --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
               "$provenance"
             python3 - "$artifact" "$provenance" "${GITHUB_SHA}" <<'PY'
-            import hashlib
-            import json
-            import pathlib
-            import sys
+          import hashlib
+          import json
+          import pathlib
+          import sys
 
-            artifact = pathlib.Path(sys.argv[1])
-            provenance = pathlib.Path(sys.argv[2])
-            expected_commit = sys.argv[3]
-            actual_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
-            data = json.loads(provenance.read_text(encoding="utf-8"))
-            subject = data.get("subject", [{}])[0]
-            if data.get("predicateType") != "https://slsa.dev/provenance/v1":
-                sys.exit(f"{provenance}: unexpected predicateType")
-            if subject.get("name") != artifact.name:
-                sys.exit(f"{provenance}: subject name does not match {artifact.name}")
-            if subject.get("digest", {}).get("sha256") != actual_sha256:
-                sys.exit(f"{provenance}: subject digest does not match artifact")
-            dependencies = data.get("predicate", {}).get("buildDefinition", {}).get("resolvedDependencies", [])
-            if not any(dep.get("digest", {}).get("gitCommit") == expected_commit for dep in dependencies):
-                sys.exit(f"{provenance}: missing source commit dependency")
-            if not any(dep.get("uri") == "file://Cargo.lock" and dep.get("digest", {}).get("blake3") for dep in dependencies):
-                sys.exit(f"{provenance}: missing Cargo.lock blake3 dependency")
-            PY
+          artifact = pathlib.Path(sys.argv[1])
+          provenance = pathlib.Path(sys.argv[2])
+          expected_commit = sys.argv[3]
+          actual_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          data = json.loads(provenance.read_text(encoding="utf-8"))
+          subject = data.get("subject", [{}])[0]
+          if data.get("predicateType") != "https://slsa.dev/provenance/v1":
+              sys.exit(f"{provenance}: unexpected predicateType")
+          if subject.get("name") != artifact.name:
+              sys.exit(f"{provenance}: subject name does not match {artifact.name}")
+          if subject.get("digest", {}).get("sha256") != actual_sha256:
+              sys.exit(f"{provenance}: subject digest does not match artifact")
+          dependencies = data.get("predicate", {}).get("buildDefinition", {}).get("resolvedDependencies", [])
+          if not any(dep.get("digest", {}).get("gitCommit") == expected_commit for dep in dependencies):
+              sys.exit(f"{provenance}: missing source commit dependency")
+          if not any(dep.get("uri") == "file://Cargo.lock" and dep.get("digest", {}).get("blake3") for dep in dependencies):
+              sys.exit(f"{provenance}: missing Cargo.lock blake3 dependency")
+          PY
           done
 
       - name: Generate release notes

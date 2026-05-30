@@ -24,6 +24,43 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-05-30
+
+Release-pipeline fix #4 (the final whack-a-mole in this series — gates
+job now succeeds AND release job's Python provenance-verification step
+no longer dies on a heredoc EOF error).
+
+### Fixed
+
+- **Release job: Python heredoc end-marker no longer leaves leading
+  whitespace after YAML indent strip** (`.github/workflows/release.yml`).
+  The `python3 - <<'PY' ... PY` block in "Verify Sigstore bundles and
+  provenance" had `PY` indented 12 spaces while the surrounding `python3`
+  invocation was at 10 spaces. Bash heredoc end-markers MUST be at
+  column 0 of the script content (or use `<<-` with tabs only). After
+  YAML stripped 10 spaces of indentation, `PY` ended up with 2 leading
+  spaces — bash didn't recognize it as the terminator, read to EOF,
+  emitted "syntax error: unexpected end of file" at line 56. Fix:
+  dedent the heredoc content + `PY` end-marker so they land at column
+  0 after YAML strip. Caught by v0.3.7's release job failure (gates
+  succeeded for the first time, build succeeded, release step then
+  blew up).
+
+### Notes
+
+- Ships the same fixes/feature work as v0.3.5/v0.3.6/v0.3.7. The
+  pipeline has now been broken FOUR releases in a row at different
+  stages:
+  - v0.3.4: Vision coverage gate (made advisory in v0.3.5)
+  - v0.3.5: gates timeout 60min (bumped to 120 in v0.3.6)
+  - v0.3.6: gates timeout 120min (perf-bench skipped on tags in v0.3.7)
+  - v0.3.7: release step Python heredoc EOF (fixed here in v0.3.8)
+- Once v0.3.8 ships successfully, the structural recommendation is to
+  add per-job timeouts on EVERY job (not just gates), drop perf-bench
+  from the release workflow entirely (it has its own CI workflow), and
+  perhaps add a workflow-level YAML linter to the pre-merge CI to catch
+  heredoc-indentation-class issues before they ship.
+
 ## [0.3.7] - 2026-05-30
 
 Release-pipeline fix #3 — same shape as v0.3.2 perf-bench (#5), v0.3.4
