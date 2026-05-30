@@ -534,7 +534,7 @@ Common red flags:
 | Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
 | Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
 | Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
-| Output format | `--format markdown\|json\|toon`, `--stream --json` | Prompt text, parser output, token-tight TOON, or NDJSON frames |
+| Output format | `--format markdown\|json\|toon`, `--stream --json` | Token-tight prompt text (markdown), parser output (json), stable-field structured output (toon — not smaller than json for packs), or NDJSON frames |
 | JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
 | Coordination | `--coordination-snapshot <path>`, `--coordination-stale-after-ms N` | Embed a redacted coordination snapshot |
 | Code-change hints | `--changed-symbol <selector>`, `--changed-symbols-from-git` | Bias toward memories linked to changed symbols |
@@ -1295,10 +1295,17 @@ Output formats:
 
 | Format | Use |
 |---|---|
-| `markdown` | Prompt-prepend text for agents and humans |
+| `markdown` | **The token-tight prompt format for packs** — prepend text for agents and humans (smallest output) |
 | `json` | Full structured contract for parsers |
-| `toon` | Token-tight prompt material with stable field order |
+| `toon` | Structured output with stable field order for parsers; **not** smaller than JSON for packs |
 | `jsonl` with `--stream` | Incremental `ee.pack.stream.v1` frames |
+
+For a context pack, prefer `markdown` when you want the most token-efficient
+prompt material: a pack is a deeply nested structure, and TOON only compresses
+uniform tabular arrays, so `--format toon` is typically *larger* than `--format
+json` for packs and several times larger than `--format markdown`. TOON's token
+savings apply to flat/tabular command outputs (e.g. `ee status`, `ee health`),
+not to packs.
 
 Stream consumers should read until a terminal frame. `kind: "cancelled"` can
 still carry emitted items; `kind: "error"` is the hard failure path.

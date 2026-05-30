@@ -1,10 +1,12 @@
 # TOON Output Format
 
-TOON (Terse Object Output Notation) is a token-efficient output format for `ee` commands. It is a **renderer over canonical JSON**, not a storage or audit format.
+TOON (Terse Object Output Notation) is a stable-field structured output format for `ee` commands. It is a **renderer over canonical JSON**, not a storage or audit format. TOON compresses *uniform tabular arrays*, so its token savings apply to flat/tabular command outputs (e.g. `ee status`, `ee health`, `ee capabilities`) — **not** to deeply nested structures like context packs, where `--format toon` is typically *larger* than `--format json`.
+
+> **For context packs, use `--format markdown`.** Markdown is the token-tight prompt format for packs (often several times smaller than `json`/`toon`). Reserve `--format toon` for flat/tabular outputs and parsers that want stable field order.
 
 ## When to Use TOON
 
-- LLM context windows where token efficiency matters
+- Flat/tabular `ee` command output (status, health, capabilities) in LLM context windows where token efficiency matters
 - Human scanning of structured output
 - Quick visual inspection of nested data
 
