@@ -152,13 +152,7 @@ fn record_outcomes(
 fn context_json(workspace: &str, agent_name: &str) -> Result<Value, String> {
     let output = run_ee(
         workspace,
-        &[
-            "pack",
-            QUERY,
-            "--max-tokens",
-            "1000",
-            "--json",
-        ],
+        &["pack", QUERY, "--max-tokens", "1000", "--json"],
         Some(agent_name),
     )?;
     ensure_success(&output, &format!("context {agent_name}"))?;

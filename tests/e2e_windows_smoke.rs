@@ -99,11 +99,7 @@ mod windows {
             .to_owned();
 
         run_success(&workspace, &["search", "Windows release fmt"], "search")?;
-        run_success(
-            &workspace,
-            &["pack", "prepare Windows release"],
-            "pack",
-        )?;
+        run_success(&workspace, &["pack", "prepare Windows release"], "pack")?;
         run_success(&workspace, &["why", &memory_id], "why")?;
         run_success(&workspace, &["status"], "status")?;
         run_success(&workspace, &["doctor"], "doctor")?;
