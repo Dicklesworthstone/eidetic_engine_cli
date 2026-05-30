@@ -8,6 +8,13 @@
 # Daemon runtime files
 daemon.lock
 daemon.log
+
+# Concurrent-write/sync lock files (br/beads runtime). These 0-byte files
+# are touched by `br sync` and shouldn't be tracked; they were
+# accidentally committed in 8a6b4a24 during the v0.3.4 fmt-cleanup
+# commit when `git add -A` swept them in.
+.sync.lock
+.write.lock
 daemon.pid
 bd.sock
 

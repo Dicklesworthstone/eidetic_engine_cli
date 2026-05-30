@@ -179,6 +179,19 @@ jobs:
           fi
 
       - name: Performance benchmarks (advisory)
+        # NOTE (v0.3.7): on release-tag runs, skip the perf-bench
+        # step entirely. It alone compiles the full franken-stack
+        # via path-deps (asupersync, frankensearch, frankensqlite,
+        # fnx-*) which takes 60-90min from cold cache and has
+        # already cancelled v0.3.5 (60min timeout) and v0.3.6
+        # (120min timeout). The perf artifact is for downstream
+        # dashboards, not release gating — running it on every
+        # release tag is purely overhead and the dashboards can
+        # pick it up from the parallel main-branch CI runs. The
+        # branch-push path of THIS workflow (`on: push: branches:
+        # main`) still runs the perf-bench so the artifact stays
+        # available.
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         # NOTE (issue #5): the perf benchmark is intentionally ADVISORY for
         # release gating. It pulls in the full franken-stack via path-deps
         # and historically fails on transient external drift (e.g. new enum
