@@ -11931,8 +11931,20 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
                 &[
                     ".data.topics[] | {name, description}",
                     ".data.recipes[] | {id, command, jq}",
+                    ".data.results[] | {memoryId, score}",
+                    ".data.pack.items[] | {memoryId, section, why}",
                 ],
             );
+            // bd-13h5k: one authoritative place for agents to learn WHERE each
+            // command's results live. The result arrays use command-specific keys
+            // (not a universal `hits`), so spell them out explicitly.
+            d.field_object("responseFieldMap", |m| {
+                m.field_str("search", "data.results (count: data.resultCount)");
+                m.field_str("pack", "data.pack.items (omitted: data.pack.omitted)");
+                m.field_str("insights", "data.sections");
+                m.field_str("swarm brief", "data.recommendations");
+                m.field_str("memory list", "data.memories");
+            });
             d.field_array_of_objects("topics", AgentDocsTopic::all(), |obj, topic| {
                 obj.field_str("name", topic.as_str());
                 obj.field_str("description", topic.description());
