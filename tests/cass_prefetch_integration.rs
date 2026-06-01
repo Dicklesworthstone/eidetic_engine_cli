@@ -37,6 +37,8 @@ use ee::core::cass_prefetch::{
 
 type TestResult = Result<(), String>;
 
+const TEST_AGENT_SCOPE: &str = "integration-agent";
+
 /// Stub predictor used by the trait-pluggability test. Returns a
 /// fixed list regardless of history, so we can assert the trait seam
 /// works even when the implementation has no internal heuristic.
@@ -71,16 +73,19 @@ fn synthetic_task_template_history() -> CassPrefetchHistory {
     // touched "doc-update" three times further back. The predictor
     // should rank refactor highest (it dominates recent positions),
     // then debug, then doc-update.
-    CassPrefetchHistory::from_topics([
-        "refactor",   // position 0 — current; excluded as candidate
-        "debug",      // position 1
-        "refactor",   // position 2
-        "refactor",   // position 3
-        "doc-update", // position 4
-        "doc-update", // position 5
-        "doc-update", // position 6
-        "debug",      // position 7
-    ])
+    CassPrefetchHistory::from_topics(
+        TEST_AGENT_SCOPE,
+        [
+            "refactor",   // position 0 — current; excluded as candidate
+            "debug",      // position 1
+            "refactor",   // position 2
+            "refactor",   // position 3
+            "doc-update", // position 4
+            "doc-update", // position 5
+            "doc-update", // position 6
+            "debug",      // position 7
+        ],
+    )
 }
 
 #[test]
@@ -188,7 +193,8 @@ fn predictor_is_deterministic_across_repeated_calls() -> TestResult {
 #[test]
 fn all_same_topic_history_predicts_nothing() -> TestResult {
     let predictor = RecencyWeightedFrequencyPredictor::new();
-    let history = CassPrefetchHistory::from_topics(["refactor", "refactor", "refactor"]);
+    let history =
+        CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["refactor", "refactor", "refactor"]);
     let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
     if !predictions.is_empty() {
         return Err(format!(
@@ -201,7 +207,7 @@ fn all_same_topic_history_predicts_nothing() -> TestResult {
 #[test]
 fn single_element_history_predicts_nothing() -> TestResult {
     let predictor = RecencyWeightedFrequencyPredictor::new();
-    let history = CassPrefetchHistory::from_topics(["only_topic"]);
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["only_topic"]);
     let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
     if !predictions.is_empty() {
         return Err(format!(
@@ -214,7 +220,7 @@ fn single_element_history_predicts_nothing() -> TestResult {
 #[test]
 fn empty_topic_ids_are_never_emitted() -> TestResult {
     let predictor = RecencyWeightedFrequencyPredictor::new();
-    let history = CassPrefetchHistory::from_topics(["current", "", "alpha", ""]);
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["current", "", "alpha", ""]);
     let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
     if predictions
         .iter()
@@ -238,9 +244,13 @@ fn empty_topic_ids_are_never_emitted() -> TestResult {
 #[test]
 fn default_window_boundary_emits_finite_normalized_candidates() -> TestResult {
     let predictor = RecencyWeightedFrequencyPredictor::new();
-    let history = CassPrefetchHistory::from_topics([
-        "current", "alpha", "bravo", "alpha", "charlie", "bravo", "delta", "alpha", "echo", "bravo",
-    ]);
+    let history = CassPrefetchHistory::from_topics(
+        TEST_AGENT_SCOPE,
+        [
+            "current", "alpha", "bravo", "alpha", "charlie", "bravo", "delta", "alpha", "echo",
+            "bravo",
+        ],
+    );
     if history.len() != DEFAULT_PREFETCH_HISTORY_WINDOW {
         return Err(format!(
             "test fixture must have DEFAULT_PREFETCH_HISTORY_WINDOW ({DEFAULT_PREFETCH_HISTORY_WINDOW}) entries; got {}",
@@ -263,7 +273,7 @@ fn history_exceeding_default_window_still_emits_finite_normalized_scores() -> Te
             _ => "charlie".to_string(),
         })
         .collect();
-    let history = CassPrefetchHistory::from_topics(topics);
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, topics);
     if history.len() <= DEFAULT_PREFETCH_HISTORY_WINDOW {
         return Err(format!(
             "test fixture must exceed DEFAULT_PREFETCH_HISTORY_WINDOW ({DEFAULT_PREFETCH_HISTORY_WINDOW}); got {}",
@@ -278,7 +288,7 @@ fn history_exceeding_default_window_still_emits_finite_normalized_scores() -> Te
 #[test]
 fn tied_score_predictions_use_lex_tie_break_at_integration_boundary() -> TestResult {
     let predictor = RecencyWeightedFrequencyPredictor::new();
-    let history = CassPrefetchHistory::from_topics(["current", "zeta", "alpha"]);
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["current", "zeta", "alpha"]);
     let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
     if predictions.len() != 2 {
         return Err(format!(
@@ -436,6 +446,12 @@ fn assert_finite_normalized_predictions(
 #[test]
 fn history_iterator_preserves_most_recent_first_order() -> TestResult {
     let history = synthetic_task_template_history();
+    if history.agent_scope != TEST_AGENT_SCOPE {
+        return Err(format!(
+            "synthetic history must carry TEST_AGENT_SCOPE; got {}",
+            history.agent_scope
+        ));
+    }
     if history.is_empty() {
         return Err("synthetic history must not be empty".to_string());
     }

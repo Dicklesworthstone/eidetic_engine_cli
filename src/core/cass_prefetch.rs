@@ -53,6 +53,12 @@
 //! determinism gate — the speculative pre-fetch is a CACHE
 //! population, never a retrieval-policy mutation.
 //!
+//! Agent-isolation contract (bd-298n0): every [`CassPrefetchHistory`] carries
+//! an [`AgentScope`]. The predictor intentionally ignores the scope while
+//! scoring topics, but the history value itself cannot be constructed without
+//! naming an owner, so daemon wiring cannot flatten all agents into one shared
+//! rolling accumulator by accident.
+//!
 //! Cross-platform determinism (bd-kpynd): the recency-decay weight is
 //! `2^(-position / half_life)`. `f64::powf` is only specified to ~1 ulp
 //! and is NOT bit-identical across libm implementations, so the same
@@ -325,12 +331,77 @@ impl CassPrefetchObservation {
     }
 }
 
+/// Opaque owner of a CASS prefetch history (bd-298n0).
+///
+/// The daemon-side wiring keeps one rolling history per agent. Carrying the
+/// scope on the history itself makes that isolation invariant type-visible:
+/// a caller cannot build a history without naming the owning agent, and two
+/// histories with identical topics but different owners are distinct values.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub struct AgentScope(String);
+
+impl AgentScope {
+    /// Construct an agent scope from the stable agent identity used by the
+    /// caller. The value is not interpreted by the predictor; it exists to keep
+    /// the per-agent ownership boundary attached to the history.
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for AgentScope {
+    fn from(raw: &str) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<String> for AgentScope {
+    fn from(raw: String) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<AgentScope> for String {
+    fn from(scope: AgentScope) -> Self {
+        scope.0
+    }
+}
+
+impl std::fmt::Display for AgentScope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for AgentScope {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for AgentScope {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
 /// Per-agent rolling history of recent ee context queries. Position 0
 /// is the most recent call; position `len()-1` is the oldest in the
 /// retained window.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CassPrefetchHistory {
+    /// Stable owner of this rolling history. It is deliberately not used in the
+    /// scoring loop; it exists so daemon wiring cannot accidentally flatten all
+    /// agents into one shared accumulator.
+    pub agent_scope: AgentScope,
     /// Cache-coherence tag the history was built against (bd-qud3c).
     /// `#[serde(default)]` keeps histories serialized before the
     /// coherence contract (no generation field) decodable; they default
@@ -345,8 +416,12 @@ pub struct CassPrefetchHistory {
 
 impl CassPrefetchHistory {
     #[must_use]
-    pub fn new(recent_first: Vec<CassPrefetchObservation>) -> Self {
+    pub fn new(
+        agent_scope: impl Into<AgentScope>,
+        recent_first: Vec<CassPrefetchObservation>,
+    ) -> Self {
         Self {
+            agent_scope: agent_scope.into(),
             generation: PrefetchGeneration::default(),
             recent_first,
         }
@@ -356,12 +431,13 @@ impl CassPrefetchHistory {
     /// most-recent-first order. Helper for the tests + the daemon's
     /// rolling-window adapter.
     #[must_use]
-    pub fn from_topics<I, S>(recent_first_topics: I) -> Self
+    pub fn from_topics<I, S>(agent_scope: impl Into<AgentScope>, recent_first_topics: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
         Self {
+            agent_scope: agent_scope.into(),
             generation: PrefetchGeneration::default(),
             recent_first: recent_first_topics
                 .into_iter()
@@ -379,7 +455,10 @@ impl CassPrefetchHistory {
     /// this (or check the bounds itself) so attacker-controlled input
     /// cannot drive the `O(N)` predictor with an unbounded `N`.
     #[must_use]
-    pub fn try_from_topics<I, S>(recent_first_topics: I) -> Option<Self>
+    pub fn try_from_topics<I, S>(
+        agent_scope: impl Into<AgentScope>,
+        recent_first_topics: I,
+    ) -> Option<Self>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -398,6 +477,7 @@ impl CassPrefetchHistory {
             return None;
         }
         Some(Self {
+            agent_scope: agent_scope.into(),
             generation: PrefetchGeneration::default(),
             recent_first,
         })
@@ -405,7 +485,7 @@ impl CassPrefetchHistory {
 
     /// Stamp the history with the generation it was built against
     /// (bd-qud3c). Builder-style so callers can chain it onto
-    /// [`from_topics`]/[`new`]: `CassPrefetchHistory::from_topics(..)
+    /// [`from_topics`]/[`new`]: `CassPrefetchHistory::from_topics(scope, ..)
     /// .with_generation(PrefetchGeneration::new(ws, idx))`.
     #[must_use]
     pub fn with_generation(mut self, generation: PrefetchGeneration) -> Self {
@@ -906,14 +986,21 @@ impl CassPrefetchMetrics {
 mod tests {
     use super::*;
 
+    const TEST_AGENT_SCOPE: &str = "agent:test";
+
+    fn test_agent_scope() -> AgentScope {
+        AgentScope::new(TEST_AGENT_SCOPE)
+    }
+
     fn history(topics_recent_first: &[&str]) -> CassPrefetchHistory {
-        CassPrefetchHistory::from_topics(topics_recent_first.iter().copied())
+        CassPrefetchHistory::from_topics(test_agent_scope(), topics_recent_first.iter().copied())
     }
 
     #[test]
     fn empty_history_predicts_nothing() {
         let predictor = RecencyWeightedFrequencyPredictor::new();
-        let predictions = predictor.predict_next_n(&CassPrefetchHistory::default(), 3);
+        let h = history(&[]);
+        let predictions = predictor.predict_next_n(&h, 3);
         assert!(predictions.is_empty());
     }
 
@@ -1083,11 +1170,26 @@ mod tests {
     #[test]
     fn history_helpers_match_iteration_order() {
         let topics = ["recent", "older", "oldest"];
-        let h = CassPrefetchHistory::from_topics(topics.iter().copied());
+        let h = CassPrefetchHistory::from_topics(test_agent_scope(), topics.iter().copied());
+        assert_eq!(h.agent_scope, TEST_AGENT_SCOPE);
         assert_eq!(h.len(), 3);
         assert!(!h.is_empty());
         let observed: Vec<&str> = h.iter().map(|o| o.topic_id.as_str()).collect();
         assert_eq!(observed, vec!["recent", "older", "oldest"]);
+    }
+
+    #[test]
+    fn history_scope_is_part_of_identity_bd_298n0() {
+        let agent_a = CassPrefetchHistory::from_topics("agent:a", ["current", "alpha"]);
+        let agent_b = CassPrefetchHistory::from_topics("agent:b", ["current", "alpha"]);
+
+        assert_eq!(agent_a.agent_scope, "agent:a");
+        assert_eq!(agent_b.agent_scope, "agent:b");
+        assert_eq!(agent_a.recent_first, agent_b.recent_first);
+        assert_ne!(
+            agent_a, agent_b,
+            "identical topic windows from different agents must stay distinct"
+        );
     }
 
     #[test]
@@ -1184,15 +1286,16 @@ mod tests {
     fn history_constructors_default_generation_to_zero_bd_qud3c() {
         // Back-compat: the pre-coherence constructors stamp (0, 0).
         assert_eq!(
-            CassPrefetchHistory::from_topics(["a", "b"]).generation,
+            CassPrefetchHistory::from_topics(test_agent_scope(), ["a", "b"]).generation,
             PrefetchGeneration::new(0, 0)
         );
         assert_eq!(
-            CassPrefetchHistory::new(vec![CassPrefetchObservation::new("a")]).generation,
+            CassPrefetchHistory::new(test_agent_scope(), vec![CassPrefetchObservation::new("a")])
+                .generation,
             PrefetchGeneration::default()
         );
         // with_generation stamps without disturbing the observations.
-        let stamped = CassPrefetchHistory::from_topics(["a", "b"])
+        let stamped = CassPrefetchHistory::from_topics(test_agent_scope(), ["a", "b"])
             .with_generation(PrefetchGeneration::new(1, 9));
         assert_eq!(stamped.generation, PrefetchGeneration::new(1, 9));
         assert_eq!(stamped.len(), 2);
@@ -1257,7 +1360,7 @@ mod tests {
         for i in 0..(MAX_PREFETCH_HISTORY + 49) {
             topics.push(format!("topic_{i}"));
         }
-        let oversized = CassPrefetchHistory::from_topics(topics);
+        let oversized = CassPrefetchHistory::from_topics(test_agent_scope(), topics);
         assert!(oversized.recent_first.len() > MAX_PREFETCH_HISTORY);
         assert!(!oversized.is_within_admission_bounds());
 
@@ -1278,7 +1381,7 @@ mod tests {
         for _ in 1..MAX_PREFETCH_HISTORY {
             topics.push("alpha".to_owned());
         }
-        let at_bound = CassPrefetchHistory::from_topics(topics);
+        let at_bound = CassPrefetchHistory::from_topics(test_agent_scope(), topics);
         assert_eq!(at_bound.recent_first.len(), MAX_PREFETCH_HISTORY);
         assert!(at_bound.is_within_admission_bounds());
         let gated = predictor.predict_next_n_gated(&at_bound, PrefetchGeneration::default(), 3);
@@ -1291,7 +1394,10 @@ mod tests {
     fn oversized_topic_id_is_refused_bd_1suaa() {
         let predictor = RecencyWeightedFrequencyPredictor::new();
         let huge_topic = "x".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1);
-        let history = CassPrefetchHistory::from_topics(["current".to_owned(), huge_topic]);
+        let history = CassPrefetchHistory::from_topics(
+            test_agent_scope(),
+            ["current".to_owned(), huge_topic],
+        );
         assert!(!history.is_within_admission_bounds());
         let gated = predictor.predict_next_n_gated(&history, PrefetchGeneration::default(), 3);
         assert!(gated.candidates.is_empty());
@@ -1301,18 +1407,20 @@ mod tests {
     #[test]
     fn try_from_topics_enforces_bounds_by_construction_bd_1suaa() {
         // Within bounds -> Some.
-        assert!(CassPrefetchHistory::try_from_topics(["a", "b", "c"]).is_some());
+        assert!(
+            CassPrefetchHistory::try_from_topics(test_agent_scope(), ["a", "b", "c"]).is_some()
+        );
         // Too many topics -> None.
         let too_many: Vec<String> = (0..=MAX_PREFETCH_HISTORY)
             .map(|i| format!("t{i}"))
             .collect();
-        assert!(CassPrefetchHistory::try_from_topics(too_many).is_none());
+        assert!(CassPrefetchHistory::try_from_topics(test_agent_scope(), too_many).is_none());
         // Oversized topic_id -> None.
         let huge = "y".repeat(MAX_PREFETCH_TOPIC_ID_BYTES + 1);
-        assert!(CassPrefetchHistory::try_from_topics([huge]).is_none());
+        assert!(CassPrefetchHistory::try_from_topics(test_agent_scope(), [huge]).is_none());
         // Exactly at the byte cap -> Some.
         let at_cap = "z".repeat(MAX_PREFETCH_TOPIC_ID_BYTES);
-        assert!(CassPrefetchHistory::try_from_topics([at_cap]).is_some());
+        assert!(CassPrefetchHistory::try_from_topics(test_agent_scope(), [at_cap]).is_some());
     }
 
     #[test]
@@ -1372,7 +1480,10 @@ mod tests {
         let secret = "pg_pw_end_to_end";
         let predictor = RecencyWeightedFrequencyPredictor::new();
         let leaky = format!("postgres://user:{secret}@host/db");
-        let history = CassPrefetchHistory::from_topics(["current", leaky.as_str(), leaky.as_str()]);
+        let history = CassPrefetchHistory::from_topics(
+            test_agent_scope(),
+            ["current", leaky.as_str(), leaky.as_str()],
+        );
         let candidates = predictor.predict_next_n(&history, 3);
         assert!(!candidates.is_empty());
         for candidate in &candidates {
