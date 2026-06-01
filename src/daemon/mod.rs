@@ -153,7 +153,7 @@ pub const DAEMON_SHUTTING_DOWN_CODE: &str = "daemon_shutting_down";
 /// every local UID and is a documented attack surface (bd-3j0td).
 #[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
-    default_daemon_socket_path_with(std::env::var_os, current_euid())
+    default_daemon_socket_path_with(|key| std::env::var_os(key), current_euid())
 }
 
 fn default_daemon_socket_path_with(
