@@ -131,7 +131,7 @@ impl CassError {
             }
             Self::BinaryNotFound { .. } => Some("install cass or set [cass.binary] in config"),
             Self::FoundButUntrusted { .. } => Some(
-                "cass is installed but outside ee's trusted allowlist; set EE_CASS_BINARY to its absolute path (or install cass into a system bin such as /usr/local/bin) to let ee use it",
+                "cass is already installed but outside ee's trusted allowlist; set EE_CASS_BINARY to its absolute path (or move the cass binary into a system bin such as /usr/local/bin) to let ee use it",
             ),
             Self::ContractMismatch { .. } => Some("upgrade cass to a compatible contract version"),
             Self::Degraded { repair_hint, .. } => Some(repair_hint.as_str()),

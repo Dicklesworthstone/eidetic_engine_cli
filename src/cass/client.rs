@@ -1098,25 +1098,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn import_discovery_ignores_inherited_path_only_cass() -> TestResult {
+    fn import_discovery_inherited_path_cass_is_detected_but_never_executed() -> TestResult {
+        // bd-3twa9: a cass found only on the inherited `$PATH` (untrusted
+        // location) must NEVER be returned as a usable import binary — that
+        // security property (EE-3qgw) is unchanged. What changed: instead of a
+        // misleading `BinaryNotFound`, discovery now reports `FoundButUntrusted`
+        // so the agent is not told to install already-installed cass. We use
+        // the injectable probe so the result does not depend on the host's real
+        // `$PATH`.
         let dir = unique_test_dir("path-ignored")?;
         let fake_dir = dir.join("fake-path");
         fs::create_dir_all(&fake_dir).map_err(|error| error.to_string())?;
         write_test_cass_binary(&fake_dir.join(DEFAULT_BINARY), 0o755)?;
 
-        let result = discover_import_binary_from_sources(None, None, &[]);
-        let error = match result {
-            Ok(discovered) => {
-                return Err(format!(
-                    "inherited PATH must not produce import binary; got {}",
-                    discovered.path.display()
-                ));
+        let result = discover_import_binary_from_sources_with_probe(
+            None,
+            None,
+            &[],
+            Some(fake_dir.as_os_str()),
+        );
+        match result {
+            Ok(discovered) => Err(format!(
+                "inherited PATH must not produce a usable import binary; got {}",
+                discovered.path.display()
+            )),
+            // Detected-but-refused: an error, never an executable binary.
+            Err(CassError::FoundButUntrusted { found_at }) => {
+                assert_eq!(found_at.file_name(), Some(OsStr::new(DEFAULT_BINARY)));
+                Ok(())
             }
-            Err(error) => error,
-        };
-
-        assert_eq!(error.kind_str(), "binary_not_found");
-        Ok(())
+            Err(other) => Err(format!(
+                "expected FoundButUntrusted for inherited-PATH cass, got {other:?}"
+            )),
+        }
     }
 
     #[cfg(unix)]
