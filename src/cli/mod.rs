@@ -42236,6 +42236,195 @@ where
     }
 }
 
+#[cfg(unix)]
+const DAEMON_STOP_LIVENESS_TIMEOUT: Duration = Duration::from_millis(1_000);
+
+#[cfg(unix)]
+fn daemon_stop_refusal(socket_path: &Path, reason: impl std::fmt::Display) -> DomainError {
+    DomainError::Configuration {
+        message: format!(
+            "Refusing to remove daemon socket {}: {reason}",
+            socket_path.display()
+        ),
+        repair: Some(
+            "Run `ee daemon status --json` to inspect the daemon socket, or remove a confirmed \
+             stale socket manually."
+                .to_owned(),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn verify_daemon_stop_target(socket_path: &Path) -> Result<bool, DomainError> {
+    let metadata = match fs::symlink_metadata(socket_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(DomainError::Configuration {
+                message: format!(
+                    "Failed to inspect daemon socket {}: {error}",
+                    socket_path.display()
+                ),
+                repair: Some(
+                    "Verify the --socket path and its permissions, then retry.".to_owned(),
+                ),
+            });
+        }
+    };
+
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    if !metadata.file_type().is_socket() {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            "path is not a socket file",
+        ));
+    }
+    let euid = crate::daemon::current_euid();
+    if metadata.uid() != euid {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            format!(
+                "socket file is owned by uid {}, not the current uid {euid}",
+                metadata.uid()
+            ),
+        ));
+    }
+
+    probe_daemon_stop_liveness(socket_path)?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn verify_daemon_stop_peer_uid(
+    stream: &std::os::unix::net::UnixStream,
+    socket_path: &Path,
+) -> Result<(), DomainError> {
+    #[cfg(target_os = "linux")]
+    {
+        let peer_uid = rustix::net::sockopt::socket_peercred(stream)
+            .map_err(|error| {
+                daemon_stop_refusal(
+                    socket_path,
+                    format!("could not verify daemon peer credentials: {error}"),
+                )
+            })?
+            .uid
+            .as_raw();
+        let euid = crate::daemon::current_euid();
+        if peer_uid != euid {
+            return Err(daemon_stop_refusal(
+                socket_path,
+                format!("daemon peer uid {peer_uid} does not match current uid {euid}"),
+            ));
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = stream;
+        let _ = socket_path;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn probe_daemon_stop_liveness(socket_path: &Path) -> Result<(), DomainError> {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket_path).map_err(|error| {
+        daemon_stop_refusal(
+            socket_path,
+            format!("no live daemon accepted the liveness probe: {error}"),
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(DAEMON_STOP_LIVENESS_TIMEOUT))
+        .map_err(|error| {
+            daemon_stop_refusal(
+                socket_path,
+                format!("could not set liveness-probe read timeout: {error}"),
+            )
+        })?;
+    stream
+        .set_write_timeout(Some(DAEMON_STOP_LIVENESS_TIMEOUT))
+        .map_err(|error| {
+            daemon_stop_refusal(
+                socket_path,
+                format!("could not set liveness-probe write timeout: {error}"),
+            )
+        })?;
+    verify_daemon_stop_peer_uid(&stream, socket_path)?;
+
+    let request = crate::daemon::protocol::DaemonRequest::new(
+        "daemon-stop-liveness-probe",
+        crate::daemon::server::METHOD_ECHO,
+        serde_json::json!({}),
+    );
+    let body = serde_json::to_vec(&request).map_err(|error| {
+        daemon_stop_refusal(
+            socket_path,
+            format!("could not encode liveness probe: {error}"),
+        )
+    })?;
+    let length = u32::try_from(body.len()).map_err(|error| {
+        daemon_stop_refusal(
+            socket_path,
+            format!("liveness probe frame length did not fit u32: {error}"),
+        )
+    })?;
+    stream.write_all(&length.to_be_bytes()).map_err(|error| {
+        daemon_stop_refusal(socket_path, format!("probe write failed: {error}"))
+    })?;
+    stream.write_all(&body).map_err(|error| {
+        daemon_stop_refusal(socket_path, format!("probe write failed: {error}"))
+    })?;
+    stream.flush().map_err(|error| {
+        daemon_stop_refusal(socket_path, format!("probe flush failed: {error}"))
+    })?;
+
+    let mut response_prefix = [0_u8; 4];
+    stream.read_exact(&mut response_prefix).map_err(|error| {
+        daemon_stop_refusal(socket_path, format!("probe response read failed: {error}"))
+    })?;
+    let announced = u32::from_be_bytes(response_prefix);
+    let announced_usize = usize::try_from(announced).map_err(|error| {
+        daemon_stop_refusal(
+            socket_path,
+            format!("probe response length conversion failed: {error}"),
+        )
+    })?;
+    if announced_usize > crate::daemon::DAEMON_RESPONSE_MAX_BYTES {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            format!(
+                "probe response announced {announced_usize} bytes above cap {}",
+                crate::daemon::DAEMON_RESPONSE_MAX_BYTES
+            ),
+        ));
+    }
+    let mut response_body = vec![0_u8; announced_usize];
+    stream.read_exact(&mut response_body).map_err(|error| {
+        daemon_stop_refusal(socket_path, format!("probe response read failed: {error}"))
+    })?;
+    let response: crate::daemon::protocol::DaemonResponse = serde_json::from_slice(&response_body)
+        .map_err(|error| {
+            daemon_stop_refusal(
+                socket_path,
+                format!("probe response was not an ee daemon envelope: {error}"),
+            )
+        })?;
+    if response.schema != crate::daemon::DAEMON_RESPONSE_SCHEMA_V1 {
+        return Err(daemon_stop_refusal(
+            socket_path,
+            format!(
+                "probe response schema was {}, not {}",
+                response.schema,
+                crate::daemon::DAEMON_RESPONSE_SCHEMA_V1
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Skeleton handler for `ee daemon stop`. Best-effort: removes the
 /// UDS file so subsequent CLI invocations stop trying to dial it. A
 /// follow-up daemonization slice will add a proper shutdown RPC.
@@ -42255,66 +42444,19 @@ where
             .socket
             .clone()
             .unwrap_or_else(crate::daemon::default_daemon_socket_path);
-        // Refuse to unlink anything that is not a socket owned by the
-        // current uid. `ee daemon stop` must never delete an arbitrary
-        // file named via `--socket`, nor a socket bound by a different
-        // local uid that happens to share the default path — a
-        // confused-deputy DoS on shared-TMPDIR / `TMPDIR=/tmp` hosts
-        // (CI runners, containers). Mirrors the start-side
-        // `is_socket()` guard in `src/daemon/server.rs`. The check uses
-        // `symlink_metadata` so a symlink at the path is inspected as
-        // the link itself, not its target. bd-34t04 / bd-2z3e8.
-        match fs::symlink_metadata(&socket_path) {
-            Ok(metadata) => {
-                use std::os::unix::fs::{FileTypeExt, MetadataExt};
-                if !metadata.file_type().is_socket() {
-                    let domain_error = DomainError::Configuration {
-                        message: format!(
-                            "Refusing to remove {}: not a socket file.",
-                            socket_path.display()
-                        ),
-                        repair: Some(
-                            "ee daemon stop only removes UDS sockets; check the --socket path."
-                                .to_owned(),
-                        ),
-                    };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-                }
-                let euid = crate::daemon::current_euid();
-                if metadata.uid() != euid {
-                    let domain_error = DomainError::Configuration {
-                        message: format!(
-                            "Refusing to remove {}: socket is owned by uid {}, not the current uid {euid}.",
-                            socket_path.display(),
-                            metadata.uid()
-                        ),
-                        repair: Some(
-                            "Only the owning user can stop this daemon; run as that user."
-                                .to_owned(),
-                        ),
-                    };
-                    return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-                }
-            }
-            // Absent path: fall through to the existing not-running
-            // branch below, which reports `daemon_socket_unavailable`.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                let domain_error = DomainError::Configuration {
-                    message: format!(
-                        "Failed to inspect daemon socket {}: {error}",
-                        socket_path.display()
-                    ),
-                    repair: Some(
-                        "Verify the --socket path and its permissions, then retry.".to_owned(),
-                    ),
-                };
-                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
-            }
-        }
-        let removed = if socket_path.exists() {
+        // Refuse to unlink anything that is not a same-uid socket
+        // answering the daemon protocol. The file-type and owner gates
+        // stop arbitrary path deletion; the liveness probe stops
+        // `ee daemon stop` from being a stale-socket cleanup primitive
+        // that can also unlink a peer's live daemon endpoint.
+        let should_remove = match verify_daemon_stop_target(&socket_path) {
+            Ok(should_remove) => should_remove,
+            Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+        };
+        let removed = if should_remove {
             match fs::remove_file(&socket_path) {
                 Ok(()) => true,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                 Err(error) => {
                     let domain_error = DomainError::Configuration {
                         message: format!(
@@ -47550,6 +47692,89 @@ mod tests {
             degraded[0]["repair"].as_str().unwrap_or_default(),
             "realpath",
             "init symlink degraded repair",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_stop_refuses_regular_file_socket_path() -> TestResult {
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp_dir.path().join("not-a-socket");
+        fs::write(&socket_path, b"not a socket").map_err(|error| error.to_string())?;
+        let socket = socket_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "daemon", "stop", "--socket", &socket]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Configuration,
+            "daemon stop regular-file refusal exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "daemon stop regular-file refusal stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "daemon stop regular-file refusal schema",
+        )?;
+        ensure_contains(
+            value["error"]["message"].as_str().unwrap_or_default(),
+            "not a socket",
+            "daemon stop regular-file refusal message",
+        )?;
+        ensure(
+            socket_path.exists(),
+            "daemon stop must not remove regular files passed via --socket",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_stop_refuses_stale_socket_without_listener() -> TestResult {
+        use std::os::unix::net::UnixListener;
+
+        let temp_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp_dir.path().join("stale-daemon.sock");
+        let listener = UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
+        drop(listener);
+        ensure(
+            socket_path.exists(),
+            "dropped UnixListener should leave a stale socket file for the test",
+        )?;
+        let socket = socket_path.to_string_lossy().into_owned();
+
+        let (exit, stdout, stderr) =
+            invoke(&["ee", "--json", "daemon", "stop", "--socket", &socket]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Configuration,
+            "daemon stop stale-socket refusal exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "daemon stop stale-socket refusal stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!("ee.error.v2"),
+            "daemon stop stale-socket refusal schema",
+        )?;
+        ensure_contains(
+            value["error"]["message"].as_str().unwrap_or_default(),
+            "liveness probe",
+            "daemon stop stale-socket refusal message",
+        )?;
+        ensure(
+            socket_path.exists(),
+            "daemon stop must not unlink a socket unless an ee daemon answers",
         )
     }
 
