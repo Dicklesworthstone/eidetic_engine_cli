@@ -1,5 +1,5 @@
-//! bd-ppbue.1: contract coverage for redaction-safe swarm replay inputs and
-//! result ledgers.
+//! bd-ppbue.1 / bd-ppbue.2: contract coverage for redaction-safe swarm replay
+//! inputs, deterministic generated fixtures, and result ledgers.
 //!
 //! This pins `ee.swarm_workload.v1` and `ee.swarm_replay_result.v1` before a
 //! runner exists. The schemas are orchestration metadata plus compact result
@@ -18,9 +18,10 @@ use ee::core::lab::{
     SwarmReplayArtifactRef, SwarmReplayCommandRedactionStatus, SwarmReplayCommandResult,
     SwarmReplayFailure, SwarmReplayRchStatus, SwarmReplayRedactionStatus, SwarmReplayResourceUsage,
     SwarmReplayResult, SwarmReplayStatus, SwarmReplayVerification, SwarmWorkloadCommandShape,
-    SwarmWorkloadCommandStep, SwarmWorkloadPathPolicy, SwarmWorkloadProvenance,
-    SwarmWorkloadProvenanceKind, SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe,
-    SwarmWorkloadResourceProfileHints, SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape,
+    SwarmWorkloadCommandStep, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile,
+    SwarmWorkloadPathPolicy, SwarmWorkloadProvenance, SwarmWorkloadProvenanceKind,
+    SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe, SwarmWorkloadResourceProfileHints,
+    SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape, generate_swarm_workload_fixture,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +31,10 @@ type TestResult = Result<(), String>;
 const WORKLOAD_SCHEMA_PATH: &str = "docs/schemas/ee.swarm_workload.v1.json";
 const RESULT_SCHEMA_PATH: &str = "docs/schemas/ee.swarm_replay_result.v1.json";
 const DOC_PATH: &str = "docs/agent-ux/swarm-replay-contracts.md";
+const SMALL_GENERATED_WORKLOAD_GOLDEN_PATH: &str =
+    "tests/fixtures/golden/lab/swarm_workload_small.json.golden";
+const MEDIUM_GENERATED_WORKLOAD_GOLDEN_PATH: &str =
+    "tests/fixtures/golden/lab/swarm_workload_medium.json.golden";
 const WORKLOAD_SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.swarm_workload.v1.json";
 const RESULT_SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.swarm_replay_result.v1.json";
 
@@ -66,6 +71,12 @@ fn read_text(path: &str) -> Result<String, String> {
 
 fn to_value<T: Serialize>(value: &T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|error| error.to_string())
+}
+
+fn to_pretty_json<T: Serialize>(value: &T) -> Result<String, String> {
+    let mut rendered = serde_json::to_string_pretty(value).map_err(|error| error.to_string())?;
+    rendered.push('\n');
+    Ok(rendered)
 }
 
 fn collect_strings(value: &Value, ctx: &str) -> Result<Vec<String>, String> {
@@ -111,6 +122,17 @@ fn assert_no_raw_payload(rendered: &str) -> TestResult {
         )?;
     }
     Ok(())
+}
+
+fn command_verbs_match(step: &SwarmWorkloadCommandStep, expected: &[&str]) -> bool {
+    step.command.verbs.len() == expected.len()
+        && step
+            .command
+            .verbs
+            .iter()
+            .map(String::as_str)
+            .zip(expected.iter().copied())
+            .all(|(actual, expected)| actual == expected)
 }
 
 fn minimal_workload() -> SwarmWorkloadTrace {
@@ -493,6 +515,110 @@ fn minimal_and_full_workload_traces_serialize_to_schema_shape() -> TestResult {
                 && value.get("createdAt").is_none()
                 && value.get("runAt").is_none(),
             format!("workload must not carry wall-clock timestamp fields: {value}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn generated_swarm_workload_fixtures_are_seed_stable_and_redaction_safe() -> TestResult {
+    let small_options = SwarmWorkloadFixtureOptions::small("stable_small_seed_001");
+    let first = generate_swarm_workload_fixture(&small_options);
+    let second = generate_swarm_workload_fixture(&small_options);
+    ensure(
+        first == second,
+        "same seed/profile must generate equal traces",
+    )?;
+    ensure(
+        to_pretty_json(&first)? == to_pretty_json(&second)?,
+        "same seed/profile must generate byte-identical JSON",
+    )?;
+    ensure(
+        first.workspace_shape.fixture_profile == "swarm_small_fixture",
+        "small profile should identify the fixture profile",
+    )?;
+    ensure(
+        first.command_sequence.len() == 6,
+        format!(
+            "small profile should cover the core agent command path; got {} commands",
+            first.command_sequence.len()
+        ),
+    )?;
+    ensure(
+        first.redaction_probes.len() == 1,
+        "small profile should still carry a redaction probe",
+    )?;
+    assert_no_raw_payload(&to_pretty_json(&first)?)?;
+
+    let medium = generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::medium(
+        "stable_medium_seed_001",
+    ));
+    ensure(
+        medium.workload_id != first.workload_id,
+        "profile/seed changes must alter the workload id",
+    )?;
+    ensure(
+        medium.command_sequence.len() > first.command_sequence.len(),
+        "medium profile should add daemon/support/doctor coverage",
+    )?;
+    ensure(
+        medium
+            .command_sequence
+            .iter()
+            .any(|step| command_verbs_match(step, &["support", "bundle"])),
+        "medium profile should include support bundle dry-run coverage",
+    )?;
+    ensure(
+        medium.redaction_probes.len() >= 5,
+        "medium profile should probe query, memory, path, and secret redaction",
+    )?;
+    assert_no_raw_payload(&to_pretty_json(&medium)?)?;
+
+    let large = generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::new(
+        SwarmWorkloadFixtureProfile::Large,
+        "stable_large_seed_001",
+    ));
+    ensure(
+        large.agent_count == 128,
+        "large profile should model many agents",
+    )?;
+    ensure(
+        large.resource_profile_hints.profile == "stress_256gb_host",
+        "large profile should request the large-host admission bucket",
+    )?;
+    ensure(
+        large
+            .command_sequence
+            .iter()
+            .any(|step| command_verbs_match(step, &["graph", "communities"])),
+        "large profile should include graph read-path coverage",
+    )?;
+    assert_no_raw_payload(&to_pretty_json(&large)?)
+}
+
+#[test]
+fn generated_swarm_workload_golden_fixtures_match_contract() -> TestResult {
+    let cases = [
+        (
+            SwarmWorkloadFixtureOptions::small("stable_small_seed_001"),
+            SMALL_GENERATED_WORKLOAD_GOLDEN_PATH,
+        ),
+        (
+            SwarmWorkloadFixtureOptions::medium("stable_medium_seed_001"),
+            MEDIUM_GENERATED_WORKLOAD_GOLDEN_PATH,
+        ),
+    ];
+
+    for (options, golden_path) in cases {
+        let workload = generate_swarm_workload_fixture(&options);
+        let actual = to_pretty_json(&workload)?;
+        let expected = read_text(golden_path)?;
+        ensure(
+            actual == expected,
+            format!(
+                "{golden_path} mismatch for generated {} profile fixture\nexpected:\n{expected}\nactual:\n{actual}",
+                options.profile.as_str()
+            ),
         )?;
     }
     Ok(())

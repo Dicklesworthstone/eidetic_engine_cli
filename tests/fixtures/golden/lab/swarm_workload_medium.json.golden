@@ -1,0 +1,262 @@
+{
+  "schema": "ee.swarm_workload.v1",
+  "workloadId": "swarmwl_c22cb606884f214f",
+  "fixtureSeed": "stable_medium_seed_001",
+  "sideEffectFree": true,
+  "redactionLevel": "audit",
+  "workspaceShape": {
+    "fixtureProfile": "swarm_medium_fixture",
+    "workspaceFingerprint": "blake3:16d1667cbea5aebfeea3c3eb494d2b6dc3078b055c3fb021ccef15c5f1b3f716",
+    "pathPolicy": "relative_fixture_paths",
+    "pathTailHash": "blake3:3a2dc7a3116fd9d5",
+    "repoState": "dirty_fixture"
+  },
+  "agentCount": 24,
+  "commandSequence": [
+    {
+      "stepId": "step_001",
+      "agentSlot": 0,
+      "command": {
+        "verbs": [
+          "init"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:cfa74681697698a57032a54d1948642b90aee0e29487688498d639e63673d869"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": []
+    },
+    {
+      "stepId": "step_002",
+      "agentSlot": 1,
+      "command": {
+        "verbs": [
+          "remember"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--level",
+          "--kind",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:b4901b3f077a8cd6abe8bfb760bb97b5cc8144010179a012df969340d011336d"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 2500,
+      "dependsOn": [
+        "step_001"
+      ]
+    },
+    {
+      "stepId": "step_003",
+      "agentSlot": 2,
+      "command": {
+        "verbs": [
+          "search"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:1d5b591123c8e7c6b08bf0b82cea53bbc1c7b935c8fbb2935eb8747e02097b12"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 2000,
+      "dependsOn": [
+        "step_002"
+      ]
+    },
+    {
+      "stepId": "step_004",
+      "agentSlot": 3,
+      "command": {
+        "verbs": [
+          "pack"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--max-tokens",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:0cc0b80de0db32c21cf0c437d402aaa6a916128f84abfc6c992507f7877071e2"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 3000,
+      "dependsOn": [
+        "step_003"
+      ]
+    },
+    {
+      "stepId": "step_005",
+      "agentSlot": 4,
+      "command": {
+        "verbs": [
+          "why"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:6cf934500569776c7ecd001bd0485567182987434a415d9ebcf93de418207dd9"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": [
+        "step_004"
+      ]
+    },
+    {
+      "stepId": "step_006",
+      "agentSlot": 5,
+      "command": {
+        "verbs": [
+          "status"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:621492be712ced746d5a7689951ae509756c9755e81fe78a3a8998f27e8f7700"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": []
+    },
+    {
+      "stepId": "step_007",
+      "agentSlot": 6,
+      "command": {
+        "verbs": [
+          "doctor"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:5538e088b454521cb00c719ba19703712a7aaaea276206e856067ba84987732d"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 2000,
+      "dependsOn": []
+    },
+    {
+      "stepId": "step_008",
+      "agentSlot": 7,
+      "command": {
+        "verbs": [
+          "daemon",
+          "status"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:a9e4a5eba11f81c4aae4966f9e24ad5fa5d557c0ad534cffdf25ea22691c8456"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": []
+    },
+    {
+      "stepId": "step_009",
+      "agentSlot": 8,
+      "command": {
+        "verbs": [
+          "support",
+          "bundle"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--dry-run",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:3c679d6b8580ed8134b82787f0aa0e449f4ac09594f091f258e265f9751d532e"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 4000,
+      "dependsOn": [
+        "step_008"
+      ]
+    }
+  ],
+  "expectedDegradedPosture": "recoverable",
+  "redactionProbes": [
+    {
+      "probeId": "probe_001",
+      "class": "raw_task_string",
+      "valueHash": "blake3:96b5c48b5a22d7c806801caaa62db7cd719a56c4087de1a41a69d5f8184a1a44",
+      "expectedStatus": "absent"
+    },
+    {
+      "probeId": "probe_002",
+      "class": "raw_query_text",
+      "valueHash": "blake3:e7c33366de3f5e1a34fba9a92fcf8a94ad6dd20f40a4d48ec52a1d620770ca54",
+      "expectedStatus": "redacted"
+    },
+    {
+      "probeId": "probe_003",
+      "class": "raw_memory_body",
+      "valueHash": "blake3:8418bfb1b8d0a42bc1821ac24b950715ba5c65775e6065bdf200063291f2cd7a",
+      "expectedStatus": "redacted"
+    },
+    {
+      "probeId": "probe_004",
+      "class": "absolute_host_path",
+      "valueHash": "blake3:f15c9fd6658838a1781c88811576635b55bfb7de28fe75d49ecf9fffa5cb5425",
+      "expectedStatus": "blocked"
+    },
+    {
+      "probeId": "probe_005",
+      "class": "secret",
+      "valueHash": "blake3:7f410de49832730c04a7cbf1b0d6b007a2d27e0a0f3fe4e01eddad8325384ef8",
+      "expectedStatus": "blocked"
+    }
+  ],
+  "resourceProfileHints": {
+    "profile": "developer_crowded_checkout",
+    "requestedParallelAgents": 24,
+    "maxParallelAgents": 12,
+    "memoryBudgetMb": 16384,
+    "cpuBudgetMs": 45000,
+    "rchRequired": true
+  },
+  "provenance": {
+    "kind": "synthetic",
+    "sourceTraceHashes": [],
+    "derivedFromSchemas": [
+      "ee.agent_workload_trace.v1",
+      "ee.swarm_workload.v1"
+    ],
+    "fixtureAuthorHash": "blake3:b55a7ad47e9268a9"
+  }
+}

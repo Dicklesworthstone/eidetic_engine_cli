@@ -1,0 +1,174 @@
+{
+  "schema": "ee.swarm_workload.v1",
+  "workloadId": "swarmwl_640e67ebea078f39",
+  "fixtureSeed": "stable_small_seed_001",
+  "sideEffectFree": true,
+  "redactionLevel": "strict",
+  "workspaceShape": {
+    "fixtureProfile": "swarm_small_fixture",
+    "workspaceFingerprint": "blake3:1c3ca6d450615f70250b6207f7133810783300dc93ebcd6e12cd7e5a9e11dba1",
+    "pathPolicy": "no_absolute_paths",
+    "pathTailHash": null,
+    "repoState": "clean_fixture"
+  },
+  "agentCount": 4,
+  "commandSequence": [
+    {
+      "stepId": "step_001",
+      "agentSlot": 0,
+      "command": {
+        "verbs": [
+          "init"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:23bc273c1d129b724915bb97e64ebded7b1512647c4c80e6bbb9ec671120d696"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": []
+    },
+    {
+      "stepId": "step_002",
+      "agentSlot": 1,
+      "command": {
+        "verbs": [
+          "remember"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--level",
+          "--kind",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:5bca763be7a33df925a8acbd8189e4b22a3ee4568ef4930a0d0c10ae037bb3e9"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 2500,
+      "dependsOn": [
+        "step_001"
+      ]
+    },
+    {
+      "stepId": "step_003",
+      "agentSlot": 2,
+      "command": {
+        "verbs": [
+          "search"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:0157993e7a79f3c1997101c6ddda6a65430727581784860a907e2f17127e0bfe"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 2000,
+      "dependsOn": [
+        "step_002"
+      ]
+    },
+    {
+      "stepId": "step_004",
+      "agentSlot": 3,
+      "command": {
+        "verbs": [
+          "pack"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--max-tokens",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:320cf12aad2035ec9d5f0d894387819a1381290218d9316d8bf9446f4dbb9700"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 3000,
+      "dependsOn": [
+        "step_003"
+      ]
+    },
+    {
+      "stepId": "step_005",
+      "agentSlot": 0,
+      "command": {
+        "verbs": [
+          "why"
+        ],
+        "positionalArity": 1,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:beb2ee640a38fd95c7aae79c56adc78c7342dec7a59164b1420b87f7cc319ed3"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": [
+        "step_004"
+      ]
+    },
+    {
+      "stepId": "step_006",
+      "agentSlot": 1,
+      "command": {
+        "verbs": [
+          "status"
+        ],
+        "positionalArity": 0,
+        "flagNames": [
+          "--workspace",
+          "--json"
+        ],
+        "outputFormat": "json",
+        "commandHash": "blake3:72da305dbade0dfbe7e06669ef81b3a508cb8c6e4f92c82bdad954133c525619"
+      },
+      "expectedSchema": "ee.response.v2",
+      "expectedExitCode": 0,
+      "timeoutMs": 1500,
+      "dependsOn": []
+    }
+  ],
+  "expectedDegradedPosture": "none",
+  "redactionProbes": [
+    {
+      "probeId": "probe_001",
+      "class": "raw_task_string",
+      "valueHash": "blake3:6c6b2fbcf76cc7186fae12fc86a9a54fe95c72391175b8a5589ea4632a8b92e7",
+      "expectedStatus": "absent"
+    }
+  ],
+  "resourceProfileHints": {
+    "profile": "ci_smoke",
+    "requestedParallelAgents": 4,
+    "maxParallelAgents": 4,
+    "memoryBudgetMb": 2048,
+    "cpuBudgetMs": 10000,
+    "rchRequired": true
+  },
+  "provenance": {
+    "kind": "synthetic",
+    "sourceTraceHashes": [],
+    "derivedFromSchemas": [
+      "ee.agent_workload_trace.v1",
+      "ee.swarm_workload.v1"
+    ],
+    "fixtureAuthorHash": "blake3:499ba128d1c15ab8"
+  }
+}

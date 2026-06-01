@@ -323,6 +323,188 @@ impl SwarmWorkloadTrace {
     }
 }
 
+/// Built-in deterministic profiles for synthetic swarm workload fixtures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SwarmWorkloadFixtureProfile {
+    Small,
+    Medium,
+    Large,
+}
+
+impl Default for SwarmWorkloadFixtureProfile {
+    fn default() -> Self {
+        Self::Small
+    }
+}
+
+impl SwarmWorkloadFixtureProfile {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+
+    const fn fixture_profile(self) -> &'static str {
+        match self {
+            Self::Small => "swarm_small_fixture",
+            Self::Medium => "swarm_medium_fixture",
+            Self::Large => "swarm_large_fixture",
+        }
+    }
+
+    const fn resource_profile(self) -> &'static str {
+        match self {
+            Self::Small => "ci_smoke",
+            Self::Medium => "developer_crowded_checkout",
+            Self::Large => "stress_256gb_host",
+        }
+    }
+
+    const fn repo_state(self) -> &'static str {
+        match self {
+            Self::Small => "clean_fixture",
+            Self::Medium => "dirty_fixture",
+            Self::Large => "crowded_checkout",
+        }
+    }
+
+    const fn agent_count(self) -> u16 {
+        match self {
+            Self::Small => 4,
+            Self::Medium => 24,
+            Self::Large => 128,
+        }
+    }
+
+    const fn max_parallel_agents(self) -> u16 {
+        match self {
+            Self::Small => 4,
+            Self::Medium => 12,
+            Self::Large => 64,
+        }
+    }
+
+    const fn memory_budget_mb(self) -> Option<u64> {
+        match self {
+            Self::Small => Some(2_048),
+            Self::Medium => Some(16_384),
+            Self::Large => Some(262_144),
+        }
+    }
+
+    const fn cpu_budget_ms(self) -> Option<u64> {
+        match self {
+            Self::Small => Some(10_000),
+            Self::Medium => Some(45_000),
+            Self::Large => Some(240_000),
+        }
+    }
+
+    const fn redaction_level(self) -> SwarmWorkloadRedactionLevel {
+        match self {
+            Self::Small => SwarmWorkloadRedactionLevel::Strict,
+            Self::Medium | Self::Large => SwarmWorkloadRedactionLevel::Audit,
+        }
+    }
+
+    const fn path_policy(self) -> SwarmWorkloadPathPolicy {
+        match self {
+            Self::Small => SwarmWorkloadPathPolicy::NoAbsolutePaths,
+            Self::Medium => SwarmWorkloadPathPolicy::RelativeFixturePaths,
+            Self::Large => SwarmWorkloadPathPolicy::HashedPathTails,
+        }
+    }
+
+    const fn expected_degraded_posture(self) -> SwarmExpectedDegradedPosture {
+        match self {
+            Self::Small => SwarmExpectedDegradedPosture::NoneExpected,
+            Self::Medium => SwarmExpectedDegradedPosture::Recoverable,
+            Self::Large => SwarmExpectedDegradedPosture::Required,
+        }
+    }
+}
+
+/// Inputs for redaction-safe synthetic swarm workload generation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwarmWorkloadFixtureOptions {
+    pub fixture_seed: String,
+    pub profile: SwarmWorkloadFixtureProfile,
+}
+
+impl SwarmWorkloadFixtureOptions {
+    #[must_use]
+    pub fn new(profile: SwarmWorkloadFixtureProfile, fixture_seed: impl Into<String>) -> Self {
+        Self {
+            fixture_seed: fixture_seed.into(),
+            profile,
+        }
+    }
+
+    #[must_use]
+    pub fn small(fixture_seed: impl Into<String>) -> Self {
+        Self::new(SwarmWorkloadFixtureProfile::Small, fixture_seed)
+    }
+
+    #[must_use]
+    pub fn medium(fixture_seed: impl Into<String>) -> Self {
+        Self::new(SwarmWorkloadFixtureProfile::Medium, fixture_seed)
+    }
+
+    #[must_use]
+    pub fn large(fixture_seed: impl Into<String>) -> Self {
+        Self::new(SwarmWorkloadFixtureProfile::Large, fixture_seed)
+    }
+}
+
+/// Generate a deterministic, redaction-safe swarm workload trace from a seed.
+#[must_use]
+pub fn generate_swarm_workload_fixture(
+    options: &SwarmWorkloadFixtureOptions,
+) -> SwarmWorkloadTrace {
+    let profile = options.profile;
+    let seed = options.fixture_seed.as_str();
+    let workload_hash = stable_swarm_fixture_hex(profile, seed, "workload-id");
+
+    SwarmWorkloadTrace {
+        schema: SWARM_WORKLOAD_SCHEMA_V1.to_owned(),
+        workload_id: format!("swarmwl_{}", &workload_hash[..16]),
+        fixture_seed: options.fixture_seed.clone(),
+        side_effect_free: true,
+        redaction_level: profile.redaction_level(),
+        workspace_shape: SwarmWorkloadWorkspaceShape {
+            fixture_profile: profile.fixture_profile().to_owned(),
+            workspace_fingerprint: stable_swarm_fixture_hash(profile, seed, "workspace"),
+            path_policy: profile.path_policy(),
+            path_tail_hash: swarm_fixture_path_tail_hash(profile, seed),
+            repo_state: profile.repo_state().to_owned(),
+        },
+        agent_count: profile.agent_count(),
+        command_sequence: swarm_fixture_commands(profile, seed),
+        expected_degraded_posture: profile.expected_degraded_posture(),
+        redaction_probes: swarm_fixture_redaction_probes(profile, seed),
+        resource_profile_hints: SwarmWorkloadResourceProfileHints {
+            profile: profile.resource_profile().to_owned(),
+            requested_parallel_agents: profile.agent_count(),
+            max_parallel_agents: profile.max_parallel_agents(),
+            memory_budget_mb: profile.memory_budget_mb(),
+            cpu_budget_ms: profile.cpu_budget_ms(),
+            rch_required: true,
+        },
+        provenance: SwarmWorkloadProvenance {
+            kind: SwarmWorkloadProvenanceKind::Synthetic,
+            source_trace_hashes: Vec::new(),
+            derived_from_schemas: vec![
+                AGENT_WORKLOAD_TRACE_SCHEMA_V1.to_owned(),
+                SWARM_WORKLOAD_SCHEMA_V1.to_owned(),
+            ],
+            fixture_author_hash: Some(stable_swarm_fixture_short_hash(profile, seed, "author")),
+        },
+    }
+}
+
 /// Trace redaction posture.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -448,6 +630,297 @@ pub enum SwarmWorkloadProvenanceKind {
     Synthetic,
     Recorded,
     Mixed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwarmFixtureCommandTemplate {
+    verbs: &'static [&'static str],
+    positional_arity: u16,
+    flag_names: &'static [&'static str],
+    output_format: Option<&'static str>,
+    timeout_ms: u64,
+    depends_on_previous: bool,
+}
+
+fn swarm_fixture_commands(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+) -> Vec<SwarmWorkloadCommandStep> {
+    swarm_fixture_command_templates(profile)
+        .into_iter()
+        .enumerate()
+        .map(|(index, template)| {
+            let step_id = format!("step_{:03}", index + 1);
+            let depends_on = if template.depends_on_previous && index > 0 {
+                vec![format!("step_{index:03}")]
+            } else {
+                Vec::new()
+            };
+            SwarmWorkloadCommandStep {
+                step_id: step_id.clone(),
+                agent_slot: (index as u16) % profile.agent_count(),
+                command: SwarmWorkloadCommandShape {
+                    verbs: template
+                        .verbs
+                        .iter()
+                        .map(|verb| (*verb).to_owned())
+                        .collect(),
+                    positional_arity: template.positional_arity,
+                    flag_names: template
+                        .flag_names
+                        .iter()
+                        .map(|flag| (*flag).to_owned())
+                        .collect(),
+                    output_format: template.output_format.map(str::to_owned),
+                    command_hash: swarm_fixture_command_hash(profile, seed, &step_id, &template),
+                },
+                expected_schema: Some("ee.response.v2".to_owned()),
+                expected_exit_code: Some(0),
+                timeout_ms: Some(template.timeout_ms),
+                depends_on,
+            }
+        })
+        .collect()
+}
+
+fn swarm_fixture_command_templates(
+    profile: SwarmWorkloadFixtureProfile,
+) -> Vec<SwarmFixtureCommandTemplate> {
+    let mut templates = vec![
+        SwarmFixtureCommandTemplate {
+            verbs: &["init"],
+            positional_arity: 0,
+            flag_names: &["--workspace", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 1_500,
+            depends_on_previous: false,
+        },
+        SwarmFixtureCommandTemplate {
+            verbs: &["remember"],
+            positional_arity: 1,
+            flag_names: &["--workspace", "--level", "--kind", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 2_500,
+            depends_on_previous: true,
+        },
+        SwarmFixtureCommandTemplate {
+            verbs: &["search"],
+            positional_arity: 1,
+            flag_names: &["--workspace", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 2_000,
+            depends_on_previous: true,
+        },
+        SwarmFixtureCommandTemplate {
+            verbs: &["pack"],
+            positional_arity: 1,
+            flag_names: &["--workspace", "--max-tokens", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 3_000,
+            depends_on_previous: true,
+        },
+        SwarmFixtureCommandTemplate {
+            verbs: &["why"],
+            positional_arity: 1,
+            flag_names: &["--workspace", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 1_500,
+            depends_on_previous: true,
+        },
+        SwarmFixtureCommandTemplate {
+            verbs: &["status"],
+            positional_arity: 0,
+            flag_names: &["--workspace", "--json"],
+            output_format: Some("json"),
+            timeout_ms: 1_500,
+            depends_on_previous: false,
+        },
+    ];
+
+    if matches!(
+        profile,
+        SwarmWorkloadFixtureProfile::Medium | SwarmWorkloadFixtureProfile::Large
+    ) {
+        templates.extend([
+            SwarmFixtureCommandTemplate {
+                verbs: &["doctor"],
+                positional_arity: 0,
+                flag_names: &["--workspace", "--json"],
+                output_format: Some("json"),
+                timeout_ms: 2_000,
+                depends_on_previous: false,
+            },
+            SwarmFixtureCommandTemplate {
+                verbs: &["daemon", "status"],
+                positional_arity: 0,
+                flag_names: &["--json"],
+                output_format: Some("json"),
+                timeout_ms: 1_500,
+                depends_on_previous: false,
+            },
+            SwarmFixtureCommandTemplate {
+                verbs: &["support", "bundle"],
+                positional_arity: 0,
+                flag_names: &["--workspace", "--dry-run", "--json"],
+                output_format: Some("json"),
+                timeout_ms: 4_000,
+                depends_on_previous: true,
+            },
+        ]);
+    }
+
+    if profile == SwarmWorkloadFixtureProfile::Large {
+        templates.extend([
+            SwarmFixtureCommandTemplate {
+                verbs: &["health"],
+                positional_arity: 0,
+                flag_names: &["--workspace", "--json"],
+                output_format: Some("json"),
+                timeout_ms: 2_000,
+                depends_on_previous: false,
+            },
+            SwarmFixtureCommandTemplate {
+                verbs: &["graph", "communities"],
+                positional_arity: 0,
+                flag_names: &["--workspace", "--limit", "--json"],
+                output_format: Some("json"),
+                timeout_ms: 4_000,
+                depends_on_previous: false,
+            },
+            SwarmFixtureCommandTemplate {
+                verbs: &["migrate", "status"],
+                positional_arity: 0,
+                flag_names: &["--workspace", "--json"],
+                output_format: Some("json"),
+                timeout_ms: 2_000,
+                depends_on_previous: false,
+            },
+        ]);
+    }
+
+    templates
+}
+
+fn swarm_fixture_redaction_probes(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+) -> Vec<SwarmWorkloadRedactionProbe> {
+    let mut probes = vec![(
+        SwarmRedactionProbeClass::RawTaskString,
+        SwarmRedactionProbeStatus::Absent,
+    )];
+
+    if matches!(
+        profile,
+        SwarmWorkloadFixtureProfile::Medium | SwarmWorkloadFixtureProfile::Large
+    ) {
+        probes.extend([
+            (
+                SwarmRedactionProbeClass::RawQueryText,
+                SwarmRedactionProbeStatus::Redacted,
+            ),
+            (
+                SwarmRedactionProbeClass::RawMemoryBody,
+                SwarmRedactionProbeStatus::Redacted,
+            ),
+            (
+                SwarmRedactionProbeClass::AbsoluteHostPath,
+                SwarmRedactionProbeStatus::Blocked,
+            ),
+            (
+                SwarmRedactionProbeClass::Secret,
+                SwarmRedactionProbeStatus::Blocked,
+            ),
+        ]);
+    }
+
+    if profile == SwarmWorkloadFixtureProfile::Large {
+        probes.extend([
+            (
+                SwarmRedactionProbeClass::EnvironmentDump,
+                SwarmRedactionProbeStatus::Blocked,
+            ),
+            (
+                SwarmRedactionProbeClass::FullFileListing,
+                SwarmRedactionProbeStatus::Blocked,
+            ),
+        ]);
+    }
+
+    probes
+        .into_iter()
+        .enumerate()
+        .map(|(index, (class, expected_status))| {
+            let probe_id = format!("probe_{:03}", index + 1);
+            SwarmWorkloadRedactionProbe {
+                probe_id: probe_id.clone(),
+                class,
+                value_hash: stable_swarm_fixture_hash(
+                    profile,
+                    seed,
+                    &format!("redaction-probe:{probe_id}"),
+                ),
+                expected_status,
+            }
+        })
+        .collect()
+}
+
+fn swarm_fixture_path_tail_hash(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+) -> Option<String> {
+    if profile == SwarmWorkloadFixtureProfile::Small {
+        None
+    } else {
+        Some(stable_swarm_fixture_short_hash(profile, seed, "path-tail"))
+    }
+}
+
+fn swarm_fixture_command_hash(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+    step_id: &str,
+    template: &SwarmFixtureCommandTemplate,
+) -> String {
+    let verbs = template.verbs.join("/");
+    let flags = template.flag_names.join(",");
+    let output_format = template.output_format.unwrap_or("none");
+    stable_swarm_fixture_hash(
+        profile,
+        seed,
+        &format!(
+            "command:{step_id}:{verbs}:{}:{flags}:{output_format}",
+            template.positional_arity
+        ),
+    )
+}
+
+fn stable_swarm_fixture_hash(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+    suffix: &str,
+) -> String {
+    format!("blake3:{}", stable_swarm_fixture_hex(profile, seed, suffix))
+}
+
+fn stable_swarm_fixture_short_hash(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+    suffix: &str,
+) -> String {
+    let hex = stable_swarm_fixture_hex(profile, seed, suffix);
+    format!("blake3:{}", &hex[..16])
+}
+
+fn stable_swarm_fixture_hex(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+    suffix: &str,
+) -> String {
+    blake3::hash(format!("ee.swarm.fixture.v1:{}:{seed}:{suffix}", profile.as_str()).as_bytes())
+        .to_hex()
+        .to_string()
 }
 
 /// Compact deterministic ledger emitted by a future swarm replay runner.
