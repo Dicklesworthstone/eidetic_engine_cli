@@ -70,6 +70,12 @@ pub enum EnvVar {
     GraphMemoryPerAlgorithmCapMb,
     /// `EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB`
     GraphMemorySnapshotCapMb,
+    /// `EE_GRAPH_NUMA_PIN_DISABLE`
+    GraphNumaPinDisable,
+    /// `EE_GRAPH_NUMA_PIN_NODE`
+    GraphNumaPinNode,
+    /// `EE_GRAPH_NUMA_PIN_POPULATE`
+    GraphNumaPinPopulate,
     /// `EE_GRAPH_WITNESSES_RETENTION_DAYS`
     GraphWitnessesRetentionDays,
     /// `EE_HARMFUL_BURST_WINDOW_SECONDS`
@@ -247,6 +253,9 @@ impl EnvVar {
             Self::GraphMemoryGrowthMultiplierBasisPoints,
             Self::GraphMemoryPerAlgorithmCapMb,
             Self::GraphMemorySnapshotCapMb,
+            Self::GraphNumaPinDisable,
+            Self::GraphNumaPinNode,
+            Self::GraphNumaPinPopulate,
             Self::GraphWitnessesRetentionDays,
             Self::HarmfulBurstWindowSeconds,
             Self::HarmfulPerSourcePerHour,
@@ -356,6 +365,9 @@ impl EnvVar {
             }
             Self::GraphMemoryPerAlgorithmCapMb => "EE_GRAPH_MEMORY_PER_ALGORITHM_CAP_MB",
             Self::GraphMemorySnapshotCapMb => "EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB",
+            Self::GraphNumaPinDisable => "EE_GRAPH_NUMA_PIN_DISABLE",
+            Self::GraphNumaPinNode => "EE_GRAPH_NUMA_PIN_NODE",
+            Self::GraphNumaPinPopulate => "EE_GRAPH_NUMA_PIN_POPULATE",
             Self::GraphWitnessesRetentionDays => "EE_GRAPH_WITNESSES_RETENTION_DAYS",
             Self::HarmfulBurstWindowSeconds => "EE_HARMFUL_BURST_WINDOW_SECONDS",
             Self::HarmfulPerSourcePerHour => "EE_HARMFUL_PER_SOURCE_PER_HOUR",
@@ -508,6 +520,15 @@ impl EnvVar {
                 "Override the per-algorithm graph working-set cap in MiB."
             }
             Self::GraphMemorySnapshotCapMb => "Override the graph snapshot admission cap in MiB.",
+            Self::GraphNumaPinDisable => {
+                "Disable graph snapshot NUMA pinning without editing config."
+            }
+            Self::GraphNumaPinNode => {
+                "Select auto NUMA placement or an explicit non-negative NUMA node for graph snapshot pinning."
+            }
+            Self::GraphNumaPinPopulate => {
+                "Control whether graph snapshot loading pre-faults pages during NUMA pinning."
+            }
             Self::GraphWitnessesRetentionDays => {
                 "Override the default graph algorithm witness retention window in days."
             }
@@ -697,6 +718,9 @@ impl EnvVar {
             Self::GraphMemoryGrowthMultiplierBasisPoints => Some("15000"),
             Self::GraphMemoryPerAlgorithmCapMb => Some("100"),
             Self::GraphMemorySnapshotCapMb => Some("250"),
+            Self::GraphNumaPinDisable => Some("false"),
+            Self::GraphNumaPinNode => Some("auto"),
+            Self::GraphNumaPinPopulate => Some("true"),
             Self::GraphWitnessesRetentionDays => Some("30"),
             Self::ReadPoolAcquireTimeoutMs => Some("5000"),
             Self::ReadPoolMaxPinSeconds => Some("30"),
@@ -804,6 +828,9 @@ impl EnvVar {
             | Self::GraphMemoryGrowthMultiplierBasisPoints
             | Self::GraphMemoryPerAlgorithmCapMb
             | Self::GraphMemorySnapshotCapMb
+            | Self::GraphNumaPinDisable
+            | Self::GraphNumaPinNode
+            | Self::GraphNumaPinPopulate
             | Self::GraphWitnessesRetentionDays
             | Self::HarmfulPerSourcePerHour
             | Self::L2PackCacheBytes
@@ -991,6 +1018,39 @@ mod tests {
             }
             if var.category() != "curation" {
                 return Err(format!("{name} must be categorized as curation"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn graph_numa_pin_env_vars_are_registered_with_defaults() -> TestResult {
+        let expected = [
+            (
+                EnvVar::GraphNumaPinDisable,
+                "EE_GRAPH_NUMA_PIN_DISABLE",
+                "false",
+            ),
+            (EnvVar::GraphNumaPinNode, "EE_GRAPH_NUMA_PIN_NODE", "auto"),
+            (
+                EnvVar::GraphNumaPinPopulate,
+                "EE_GRAPH_NUMA_PIN_POPULATE",
+                "true",
+            ),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "tuning" {
+                return Err(format!("{name} must be categorized as tuning"));
             }
         }
         Ok(())
