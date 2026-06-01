@@ -2450,7 +2450,10 @@ impl From<CompletionShell> for Shell {
 
 /// Arguments for `ee pack`.
 #[derive(Clone, Debug, Parser, PartialEq)]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    after_help = "With --json, selected memories live at data.pack.items; omitted memories live at data.pack.omitted."
+)]
 pub struct PackArgs {
     /// Optional pack subcommand. Omit it to build from `--query-file`.
     #[command(subcommand)]
@@ -6608,6 +6611,9 @@ pub struct RehearsePromotePlanArgs {
 /// it. PartialEq is preserved — sufficient for clap derive needs and
 /// existing tests that compare arg structs.
 #[derive(Clone, Debug, Parser, PartialEq)]
+#[command(
+    after_help = "With --json, search documents live at data.results; result count lives at data.resultCount."
+)]
 pub struct SearchArgs {
     /// Query string to search for.
     #[arg(value_name = "QUERY")]

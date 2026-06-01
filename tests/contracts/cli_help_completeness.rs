@@ -172,6 +172,8 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
     assert_contains_all(
         &pack_help,
         &[
+            "data.pack.items",
+            "data.pack.omitted",
             "--candidate-pool",
             "--speed",
             "--profile",
@@ -233,7 +235,11 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
     )?;
 
     let search_help = help_for(&["ee", "search", "--help"])?;
-    assert_contains_all(&search_help, &["--explain-performance"], "ee search --help")?;
+    assert_contains_all(
+        &search_help,
+        &["--explain-performance", "data.results", "data.resultCount"],
+        "ee search --help",
+    )?;
 
     let insights_help = help_for(&["ee", "insights", "--help"])?;
     assert_contains_all(
