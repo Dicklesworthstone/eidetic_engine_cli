@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          project_root="$RUNNER_TEMP/franken-stack/projects"
+          project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
           mkdir -p "$project_root"
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
           git clone --depth 1 https://github.com/Dicklesworthstone/franken_agent_detection.git "$project_root/franken_agent_detection"
@@ -44,11 +44,12 @@ jobs:
           git clone --depth 1 https://github.com/Dicklesworthstone/toon_rust.git "$project_root/toon_rust"
           # Cargo.toml uses ../<sibling-repo>/... paths to match the local
           # Mac/Linux dev checkout layout where ee lives next to the franken
-          # sibling crates. CI clones the siblings into $RUNNER_TEMP and
-          # rewrites the Cargo.toml prefix so cargo metadata resolves them.
-          # Both spellings are accepted so a future revert to the historical
-          # /data/projects/... prefix would still build here.
-          CARGO_PATH_ROOT="$project_root" perl -0pi -e '
+          # sibling crates. CI clones the siblings under the workspace and
+          # rewrites Cargo.toml to workspace-relative paths so both normal cargo
+          # steps and Dockerized actions that mount only $GITHUB_WORKSPACE see
+          # the same dependency tree. Both spellings are accepted so a future
+          # revert to the historical /data/projects/... prefix would still build.
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
             s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
             s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
           ' Cargo.toml
@@ -73,19 +74,7 @@ jobs:
       # stack checkout; splitting it cleanly is a follow-up once that checkout
       # is factored into a reusable composite action.
       #
-      # ADVISORY (issue #7): `EmbarkStudios/cargo-deny-action@v2` runs in a
-      # docker container that mounts only `$GITHUB_WORKSPACE` at
-      # `/github/workspace` and `$RUNNER_TEMP` at `/github/runner_temp`. The
-      # Cargo.toml path-rewrite step above bakes host-absolute paths
-      # (`/home/runner/work/_temp/franken-stack/...`) into the manifest, which
-      # the containerized cargo cannot resolve — it sees the path at
-      # `/github/runner_temp/...`. That mismatch is a tooling/infra failure,
-      # not a real RustSec advisory hit. Mirrors the release.yml decision in
-      # #7; revisit if cargo-deny-action gains a non-docker mode or the
-      # franken-stack checkout is refactored into a composite action that
-      # respects the docker mount layout.
-      - name: RustSec advisory audit (cargo-deny, advisory)
-        continue-on-error: true
+      - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories

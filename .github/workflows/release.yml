@@ -95,11 +95,12 @@ jobs:
           set -euo pipefail
           # ee's Cargo.toml uses ../<sibling-repo>/... paths to match the
           # local dev checkout where ee sits next to its franken siblings.
-          # CI clones the siblings under the workspace and rewrites the
-          # prefix so cargo metadata resolves them on a clean runner.
-          # Mirrors the verify job in .github/workflows/ci.yml. Cloning
-          # inside $GITHUB_WORKSPACE keeps the siblings visible to cross
-          # (which only mounts the workspace into its build container).
+          # CI clones the siblings under the workspace and rewrites the prefix
+          # to workspace-relative paths so cargo metadata and Dockerized
+          # cargo-deny both resolve them on a clean runner. Mirrors the verify
+          # job in .github/workflows/ci.yml. Cloning inside $GITHUB_WORKSPACE
+          # keeps the siblings visible to cross, which only mounts the
+          # workspace into its build container.
           project_root="$GITHUB_WORKSPACE/.ci/franken-stack/projects"
           mkdir -p "$project_root"
           git clone --depth 1 https://github.com/Dicklesworthstone/asupersync.git "$project_root/asupersync"
@@ -112,7 +113,7 @@ jobs:
           # Accept both ../<sibling> (current) and /data/projects/<sibling>
           # (legacy) so the workflow keeps working through revert/rewrite
           # of the canonical local checkout convention.
-          CARGO_PATH_ROOT="$project_root" perl -0pi -e '
+          CARGO_PATH_ROOT=".ci/franken-stack/projects" perl -0pi -e '
             s{/data/projects/(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
             s{\.\./(asupersync|franken_agent_detection|franken_networkx|frankensearch|frankensqlite|sqlmodel_rust|toon_rust)}{$ENV{CARGO_PATH_ROOT}/$1}g;
           ' Cargo.toml
@@ -134,23 +135,7 @@ jobs:
       # version=2 gate mode. Closes the "signed but unscanned" false-assurance
       # gap: provenance != freedom from known CVEs.
       #
-      # ADVISORY (issue #7, same rationale as the perf-bench step below from #5):
-      # `EmbarkStudios/cargo-deny-action@v2` runs in a docker container with
-      # only `$GITHUB_WORKSPACE` mounted at `/github/workspace`. The Cargo.toml
-      # path-rewrite step above bakes host-absolute paths (`/home/runner/...`)
-      # into the manifest, which the containerized cargo cannot resolve for the
-      # franken-stack sibling crates (`fnx-algorithms`, etc.). This is a
-      # tooling/infra failure mode — NOT a real RustSec advisory hit — and
-      # blocking releases on it produces the exact "release-workflow-failed-but-
-      # assets-published-via-manual-path" provenance gap reported in #7. Mark
-      # the gate advisory so an external-tooling failure cannot block a clean
-      # tagged release; real CVE scanning happens locally via `cargo deny check
-      # advisories` in dev and via the standalone advisory dashboard. Revisit
-      # if cargo-deny-action gains a non-docker mode or if the path-dep
-      # checkout is refactored into a composite action that runs inside the
-      # docker mount layout.
-      - name: RustSec advisory audit (cargo-deny, advisory)
-        continue-on-error: true
+      - name: RustSec advisory audit (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories
