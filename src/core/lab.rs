@@ -932,6 +932,7 @@ pub struct SwarmReplayResult {
     pub run_id: String,
     pub side_effect_free: bool,
     pub status: SwarmReplayStatus,
+    pub host_profile_admission: SwarmReplayHostProfileReport,
     pub command_results: Vec<SwarmReplayCommandResult>,
     pub aggregate: SwarmReplayAggregate,
     pub redaction_status: SwarmReplayRedactionStatus,
@@ -956,6 +957,249 @@ pub enum SwarmReplayStatus {
     Fail,
     Blocked,
     Degraded,
+}
+
+/// Redaction-safe admission report for the host that ran a swarm replay.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayHostProfileReport {
+    pub declared_profile: String,
+    pub requested_parallel_agents: u16,
+    pub required_class: SwarmReplayHostProfileClass,
+    pub observed_class: SwarmReplayHostProfileClass,
+    pub status: SwarmReplayHostAdmissionStatus,
+    pub logical_cpu_count: Option<u16>,
+    pub available_memory_mb: Option<u64>,
+    pub target_dir_posture: SwarmReplayHostPathPosture,
+    pub tmpdir_posture: SwarmReplayHostPathPosture,
+    pub rch_available: Option<bool>,
+    pub numa_available: Option<bool>,
+    pub lexical_ram_tier_available: Option<bool>,
+    pub path_tail_hashes: Vec<String>,
+    pub degraded_codes: Vec<String>,
+    pub refusal_reasons: Vec<String>,
+}
+
+impl SwarmReplayHostProfileReport {
+    #[must_use]
+    pub fn admitted(
+        declared_profile: impl Into<String>,
+        requested_parallel_agents: u16,
+        class: SwarmReplayHostProfileClass,
+    ) -> Self {
+        Self {
+            declared_profile: declared_profile.into(),
+            requested_parallel_agents,
+            required_class: class,
+            observed_class: class,
+            status: SwarmReplayHostAdmissionStatus::Admitted,
+            logical_cpu_count: None,
+            available_memory_mb: None,
+            target_dir_posture: SwarmReplayHostPathPosture::Unknown,
+            tmpdir_posture: SwarmReplayHostPathPosture::Unknown,
+            rch_available: None,
+            numa_available: None,
+            lexical_ram_tier_available: None,
+            path_tail_hashes: Vec::new(),
+            degraded_codes: Vec::new(),
+            refusal_reasons: Vec::new(),
+        }
+    }
+}
+
+/// Replay host class admitted for interpreting performance evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SwarmReplayHostProfileClass {
+    Smoke,
+    Standard,
+    LargeHost,
+}
+
+/// Whether replay evidence can be trusted for the declared host profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayHostAdmissionStatus {
+    Admitted,
+    Degraded,
+    Refused,
+}
+
+/// Coarse path posture; raw host paths remain outside the replay ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayHostPathPosture {
+    External,
+    Local,
+    Unknown,
+}
+
+/// Redaction-safe observed host posture supplied by the replay runner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwarmReplayHostProfileObservation {
+    pub logical_cpu_count: Option<u16>,
+    pub available_memory_mb: Option<u64>,
+    pub target_dir_posture: SwarmReplayHostPathPosture,
+    pub tmpdir_posture: SwarmReplayHostPathPosture,
+    pub rch_available: Option<bool>,
+    pub numa_available: Option<bool>,
+    pub lexical_ram_tier_available: Option<bool>,
+    pub path_tail_hashes: Vec<String>,
+}
+
+impl Default for SwarmReplayHostProfileObservation {
+    fn default() -> Self {
+        Self {
+            logical_cpu_count: None,
+            available_memory_mb: None,
+            target_dir_posture: SwarmReplayHostPathPosture::Unknown,
+            tmpdir_posture: SwarmReplayHostPathPosture::Unknown,
+            rch_available: None,
+            numa_available: None,
+            lexical_ram_tier_available: None,
+            path_tail_hashes: Vec::new(),
+        }
+    }
+}
+
+/// Classify whether an observed host can admit a declared swarm replay trace.
+#[must_use]
+pub fn classify_swarm_replay_host_profile(
+    hints: &SwarmWorkloadResourceProfileHints,
+    observation: SwarmReplayHostProfileObservation,
+) -> SwarmReplayHostProfileReport {
+    let required_class = required_swarm_replay_host_class(hints);
+    let observed_class = observed_swarm_replay_host_class(&observation);
+    let mut degraded_codes = Vec::new();
+    let mut refusal_reasons = Vec::new();
+
+    if hints.rch_required && observation.rch_available != Some(true) {
+        degraded_codes.push("swarm_replay_rch_unavailable".to_owned());
+        refusal_reasons.push("rch_required_but_unavailable".to_owned());
+    }
+
+    if observation.logical_cpu_count.is_none() {
+        degraded_codes.push("swarm_replay_cpu_count_unknown".to_owned());
+    }
+    if observation.available_memory_mb.is_none() {
+        degraded_codes.push("swarm_replay_memory_unknown".to_owned());
+    }
+
+    if observed_class < required_class {
+        degraded_codes.push("swarm_replay_host_profile_too_small".to_owned());
+        refusal_reasons.push(format!(
+            "required_{}_but_observed_{}",
+            required_class.reason_token(),
+            observed_class.reason_token()
+        ));
+    }
+
+    if matches!(required_class, SwarmReplayHostProfileClass::LargeHost)
+        && !matches!(
+            observation.target_dir_posture,
+            SwarmReplayHostPathPosture::External
+        )
+    {
+        degraded_codes.push("swarm_replay_target_dir_not_external".to_owned());
+        refusal_reasons.push("large_host_requires_external_target_dir".to_owned());
+    }
+
+    if matches!(required_class, SwarmReplayHostProfileClass::LargeHost)
+        && !matches!(
+            observation.tmpdir_posture,
+            SwarmReplayHostPathPosture::External
+        )
+    {
+        degraded_codes.push("swarm_replay_tmpdir_not_external".to_owned());
+        refusal_reasons.push("large_host_requires_external_tmpdir".to_owned());
+    }
+
+    dedup_stable_strings(&mut degraded_codes);
+    dedup_stable_strings(&mut refusal_reasons);
+
+    let status = if !refusal_reasons.is_empty() {
+        SwarmReplayHostAdmissionStatus::Refused
+    } else if !degraded_codes.is_empty() {
+        SwarmReplayHostAdmissionStatus::Degraded
+    } else {
+        SwarmReplayHostAdmissionStatus::Admitted
+    };
+
+    SwarmReplayHostProfileReport {
+        declared_profile: hints.profile.clone(),
+        requested_parallel_agents: hints.requested_parallel_agents,
+        required_class,
+        observed_class,
+        status,
+        logical_cpu_count: observation.logical_cpu_count,
+        available_memory_mb: observation.available_memory_mb,
+        target_dir_posture: observation.target_dir_posture,
+        tmpdir_posture: observation.tmpdir_posture,
+        rch_available: observation.rch_available,
+        numa_available: observation.numa_available,
+        lexical_ram_tier_available: observation.lexical_ram_tier_available,
+        path_tail_hashes: observation.path_tail_hashes,
+        degraded_codes,
+        refusal_reasons,
+    }
+}
+
+fn required_swarm_replay_host_class(
+    hints: &SwarmWorkloadResourceProfileHints,
+) -> SwarmReplayHostProfileClass {
+    let profile = hints.profile.as_str();
+    if hints.requested_parallel_agents >= 64
+        || hints.max_parallel_agents >= 64
+        || hints
+            .memory_budget_mb
+            .is_some_and(|memory_mb| memory_mb >= 131_072)
+        || profile.contains("256gb")
+        || profile.contains("large")
+        || profile.contains("stress")
+    {
+        SwarmReplayHostProfileClass::LargeHost
+    } else if hints.requested_parallel_agents >= 8
+        || hints.max_parallel_agents >= 8
+        || hints
+            .memory_budget_mb
+            .is_some_and(|memory_mb| memory_mb >= 8_192)
+        || profile.contains("developer")
+        || profile.contains("standard")
+    {
+        SwarmReplayHostProfileClass::Standard
+    } else {
+        SwarmReplayHostProfileClass::Smoke
+    }
+}
+
+fn observed_swarm_replay_host_class(
+    observation: &SwarmReplayHostProfileObservation,
+) -> SwarmReplayHostProfileClass {
+    let cpu_count = observation.logical_cpu_count.unwrap_or_default();
+    let memory_mb = observation.available_memory_mb.unwrap_or_default();
+
+    if cpu_count >= 64 && memory_mb >= 262_144 {
+        SwarmReplayHostProfileClass::LargeHost
+    } else if cpu_count >= 8 && memory_mb >= 16_384 {
+        SwarmReplayHostProfileClass::Standard
+    } else {
+        SwarmReplayHostProfileClass::Smoke
+    }
+}
+
+impl SwarmReplayHostProfileClass {
+    const fn reason_token(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Standard => "standard",
+            Self::LargeHost => "large_host",
+        }
+    }
+}
+
+fn dedup_stable_strings(values: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 /// One command outcome in a swarm replay ledger.
@@ -3603,6 +3847,146 @@ mod tests {
 
     const REDACTED_WORKLOAD_TRACE: &str =
         include_str!("../../tests/fixtures/agent_workloads/redacted_trace_minimal.jsonl");
+
+    fn large_swarm_hints() -> SwarmWorkloadResourceProfileHints {
+        SwarmWorkloadResourceProfileHints {
+            profile: "stress_256gb_host".to_owned(),
+            requested_parallel_agents: 128,
+            max_parallel_agents: 64,
+            memory_budget_mb: Some(262_144),
+            cpu_budget_ms: Some(240_000),
+            rch_required: true,
+        }
+    }
+
+    #[test]
+    fn swarm_replay_host_profile_admits_large_host_evidence() -> TestResult {
+        let report = classify_swarm_replay_host_profile(
+            &large_swarm_hints(),
+            SwarmReplayHostProfileObservation {
+                logical_cpu_count: Some(96),
+                available_memory_mb: Some(300_000),
+                target_dir_posture: SwarmReplayHostPathPosture::External,
+                tmpdir_posture: SwarmReplayHostPathPosture::External,
+                rch_available: Some(true),
+                numa_available: Some(true),
+                lexical_ram_tier_available: Some(true),
+                path_tail_hashes: vec!["blake3:aaaaaaaaaaaaaaaa".to_owned()],
+            },
+        );
+
+        ensure(
+            report.status,
+            SwarmReplayHostAdmissionStatus::Admitted,
+            "status",
+        )?;
+        ensure(
+            report.required_class,
+            SwarmReplayHostProfileClass::LargeHost,
+            "required class",
+        )?;
+        ensure(
+            report.observed_class,
+            SwarmReplayHostProfileClass::LargeHost,
+            "observed class",
+        )?;
+        ensure(report.degraded_codes.is_empty(), true, "degraded codes")?;
+        ensure(report.refusal_reasons.is_empty(), true, "refusal reasons")?;
+        ensure(
+            serde_json::to_string(&report)
+                .map_err(|error| error.to_string())?
+                .contains("large-host"),
+            true,
+            "serialized class uses contract spelling",
+        )
+    }
+
+    #[test]
+    fn swarm_replay_host_profile_refuses_large_trace_on_small_host() -> TestResult {
+        let report = classify_swarm_replay_host_profile(
+            &large_swarm_hints(),
+            SwarmReplayHostProfileObservation {
+                logical_cpu_count: Some(16),
+                available_memory_mb: Some(32_768),
+                target_dir_posture: SwarmReplayHostPathPosture::Local,
+                tmpdir_posture: SwarmReplayHostPathPosture::Unknown,
+                rch_available: Some(false),
+                numa_available: Some(false),
+                lexical_ram_tier_available: Some(false),
+                path_tail_hashes: vec!["blake3:bbbbbbbbbbbbbbbb".to_owned()],
+            },
+        );
+
+        ensure(
+            report.status,
+            SwarmReplayHostAdmissionStatus::Refused,
+            "status",
+        )?;
+        ensure(
+            report.observed_class,
+            SwarmReplayHostProfileClass::Standard,
+            "observed class",
+        )?;
+        for expected in [
+            "swarm_replay_rch_unavailable",
+            "swarm_replay_host_profile_too_small",
+            "swarm_replay_target_dir_not_external",
+            "swarm_replay_tmpdir_not_external",
+        ] {
+            ensure(
+                report.degraded_codes.iter().any(|code| code == expected),
+                true,
+                expected,
+            )?;
+        }
+        ensure(
+            serde_json::to_string(&report)
+                .map_err(|error| error.to_string())?
+                .contains("/Users/"),
+            false,
+            "report does not serialize raw paths",
+        )
+    }
+
+    #[test]
+    fn swarm_replay_host_profile_degrades_when_smoke_probe_is_incomplete() -> TestResult {
+        let hints = SwarmWorkloadResourceProfileHints {
+            profile: "ci_smoke".to_owned(),
+            requested_parallel_agents: 1,
+            max_parallel_agents: 1,
+            memory_budget_mb: None,
+            cpu_budget_ms: None,
+            rch_required: false,
+        };
+        let report = classify_swarm_replay_host_profile(
+            &hints,
+            SwarmReplayHostProfileObservation::default(),
+        );
+
+        ensure(
+            report.status,
+            SwarmReplayHostAdmissionStatus::Degraded,
+            "status",
+        )?;
+        ensure(
+            report.required_class,
+            SwarmReplayHostProfileClass::Smoke,
+            "required class",
+        )?;
+        ensure(
+            report.refusal_reasons.is_empty(),
+            true,
+            "no refusal reasons",
+        )?;
+        ensure(
+            report
+                .degraded_codes
+                .iter()
+                .any(|code| code == "swarm_replay_cpu_count_unknown"),
+            true,
+            "cpu degraded code",
+        )
+    }
 
     #[test]
     fn workload_replay_counts_redacted_trace_shapes() -> TestResult {

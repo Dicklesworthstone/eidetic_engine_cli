@@ -16,12 +16,15 @@ use ee::core::lab::{
     SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1, SwarmExpectedDegradedPosture,
     SwarmRedactionProbeClass, SwarmRedactionProbeStatus, SwarmReplayAggregate,
     SwarmReplayArtifactRef, SwarmReplayCommandRedactionStatus, SwarmReplayCommandResult,
-    SwarmReplayFailure, SwarmReplayRchStatus, SwarmReplayRedactionStatus, SwarmReplayResourceUsage,
-    SwarmReplayResult, SwarmReplayStatus, SwarmReplayVerification, SwarmWorkloadCommandShape,
+    SwarmReplayFailure, SwarmReplayHostAdmissionStatus, SwarmReplayHostPathPosture,
+    SwarmReplayHostProfileClass, SwarmReplayHostProfileObservation, SwarmReplayHostProfileReport,
+    SwarmReplayRchStatus, SwarmReplayRedactionStatus, SwarmReplayResourceUsage, SwarmReplayResult,
+    SwarmReplayStatus, SwarmReplayVerification, SwarmWorkloadCommandShape,
     SwarmWorkloadCommandStep, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile,
     SwarmWorkloadPathPolicy, SwarmWorkloadProvenance, SwarmWorkloadProvenanceKind,
     SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe, SwarmWorkloadResourceProfileHints,
-    SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape, generate_swarm_workload_fixture,
+    SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape, classify_swarm_replay_host_profile,
+    generate_swarm_workload_fixture,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -287,6 +290,52 @@ fn clean_redaction_status(redaction_probes_passed: bool) -> SwarmReplayRedaction
     }
 }
 
+fn admitted_host_profile() -> SwarmReplayHostProfileReport {
+    classify_swarm_replay_host_profile(
+        &SwarmWorkloadResourceProfileHints {
+            profile: "ci_smoke".to_owned(),
+            requested_parallel_agents: 1,
+            max_parallel_agents: 1,
+            memory_budget_mb: None,
+            cpu_budget_ms: None,
+            rch_required: true,
+        },
+        SwarmReplayHostProfileObservation {
+            logical_cpu_count: Some(16),
+            available_memory_mb: Some(32_768),
+            target_dir_posture: SwarmReplayHostPathPosture::External,
+            tmpdir_posture: SwarmReplayHostPathPosture::External,
+            rch_available: Some(true),
+            numa_available: Some(false),
+            lexical_ram_tier_available: Some(true),
+            path_tail_hashes: vec![HASH_16_A.to_owned()],
+        },
+    )
+}
+
+fn refused_large_host_profile() -> SwarmReplayHostProfileReport {
+    classify_swarm_replay_host_profile(
+        &SwarmWorkloadResourceProfileHints {
+            profile: "stress_256gb_host".to_owned(),
+            requested_parallel_agents: 128,
+            max_parallel_agents: 64,
+            memory_budget_mb: Some(262_144),
+            cpu_budget_ms: Some(240_000),
+            rch_required: true,
+        },
+        SwarmReplayHostProfileObservation {
+            logical_cpu_count: Some(16),
+            available_memory_mb: Some(32_768),
+            target_dir_posture: SwarmReplayHostPathPosture::Local,
+            tmpdir_posture: SwarmReplayHostPathPosture::Unknown,
+            rch_available: Some(false),
+            numa_available: Some(false),
+            lexical_ram_tier_available: Some(false),
+            path_tail_hashes: vec![HASH_16_B.to_owned()],
+        },
+    )
+}
+
 fn result_base(status: SwarmReplayStatus) -> SwarmReplayResult {
     SwarmReplayResult {
         schema: SWARM_REPLAY_RESULT_SCHEMA_V1.to_owned(),
@@ -294,6 +343,7 @@ fn result_base(status: SwarmReplayStatus) -> SwarmReplayResult {
         run_id: "swarmrun_1111111111111111".to_owned(),
         side_effect_free: true,
         status,
+        host_profile_admission: admitted_host_profile(),
         command_results: vec![command_result(
             "step_001",
             0,
@@ -359,6 +409,7 @@ fn failure_result() -> SwarmReplayResult {
         diagnosis: "RCH blocked before Cargo; no local fallback proof recorded.".to_owned(),
         repair_hint: Some("Fix remote dependency topology before rerunning replay.".to_owned()),
     });
+    result.host_profile_admission = refused_large_host_profile();
     result.verification.rch_status = SwarmReplayRchStatus::BlockedBeforeCargo;
     result.warnings = vec!["RCH did not reach Cargo.".to_owned()];
     result
@@ -492,6 +543,17 @@ fn swarm_replay_result_schema_structurally_forbids_raw_content() -> TestResult {
     ensure(
         schema["$defs"]["artifactRef"]["properties"]["pathTail"]["not"].is_object(),
         "artifact pathTail must structurally reject absolute host paths",
+    )?;
+    ensure(
+        collect_strings(&schema["required"], "result.required")?
+            .iter()
+            .any(|entry| entry == "hostProfileAdmission"),
+        "result schema must require hostProfileAdmission",
+    )?;
+    ensure(
+        schema["$defs"]["hostProfileAdmission"]["properties"]["pathTailHashes"]["items"]["$ref"]
+            == "#/$defs/blake3Hash",
+        "hostProfileAdmission.pathTailHashes must be hash-only",
     )
 }
 
@@ -630,6 +692,11 @@ fn failure_and_redaction_probe_results_serialize_to_schema_shape() -> TestResult
     for result in [failure_result(), redaction_probe_result()] {
         let value = to_value(&result)?;
         assert_required_fields(&schema, &value, "replay result")?;
+        assert_required_fields(
+            &schema["$defs"]["hostProfileAdmission"],
+            &value["hostProfileAdmission"],
+            "hostProfileAdmission",
+        )?;
         ensure(
             value["schema"] == SWARM_REPLAY_RESULT_SCHEMA_V1,
             "serialized replay result schema mismatch",
@@ -659,6 +726,46 @@ fn failure_and_redaction_probe_results_serialize_to_schema_shape() -> TestResult
 }
 
 #[test]
+fn host_profile_admission_reports_pin_admitted_and_refused_profiles() -> TestResult {
+    let admitted = admitted_host_profile();
+    ensure(
+        admitted.required_class == SwarmReplayHostProfileClass::Smoke,
+        format!("admitted required class mismatch: {admitted:?}"),
+    )?;
+    ensure(
+        admitted.status == SwarmReplayHostAdmissionStatus::Admitted,
+        format!("admitted status mismatch: {admitted:?}"),
+    )?;
+
+    let refused = refused_large_host_profile();
+    ensure(
+        refused.required_class == SwarmReplayHostProfileClass::LargeHost,
+        format!("refused required class mismatch: {refused:?}"),
+    )?;
+    ensure(
+        refused.status == SwarmReplayHostAdmissionStatus::Refused,
+        format!("refused status mismatch: {refused:?}"),
+    )?;
+    ensure(
+        refused
+            .degraded_codes
+            .iter()
+            .any(|code| code == "swarm_replay_host_profile_too_small"),
+        format!("refused report missing host-size degraded code: {refused:?}"),
+    )?;
+
+    for report in [admitted, refused] {
+        let rendered = to_pretty_json(&report)?;
+        assert_no_raw_payload(&rendered)?;
+        ensure(
+            rendered.contains("targetDirPosture") && rendered.contains("tmpdirPosture"),
+            format!("host report missing path-posture fields: {rendered}"),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn swarm_replay_contract_docs_pin_security_and_rch_posture() -> TestResult {
     let doc = read_text(DOC_PATH)?;
     for expected in [
@@ -667,6 +774,8 @@ fn swarm_replay_contract_docs_pin_security_and_rch_posture() -> TestResult {
         "absolute host paths",
         "commandHash",
         "RCH was required",
+        "host-profile admission",
+        "large-host",
         "local Cargo fallback",
         "do not include timestamps",
     ] {

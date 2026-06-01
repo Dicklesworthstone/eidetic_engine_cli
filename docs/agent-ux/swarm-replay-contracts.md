@@ -15,10 +15,18 @@ names, output format, and a `commandHash`. Workspace identity is a
 `fixtureSeed` is deterministic fixture identity, not wall-clock time.
 
 `ee.swarm_replay_result.v1` is the compact result ledger future replay runners
-emit. It records per-command exit code, normalized `elapsedMs`, stdout/stderr
-byte counts, degraded codes, command hash, redacted artifact path tails,
-optional RSS/CPU measurements, aggregate latency percentiles, first-failure
-diagnosis, redaction posture, and verification posture.
+emit. It records host-profile admission, per-command exit code, normalized
+`elapsedMs`, stdout/stderr byte counts, degraded codes, command hash, redacted
+artifact path tails, optional RSS/CPU measurements, aggregate latency
+percentiles, first-failure diagnosis, redaction posture, and verification
+posture.
+
+The host-profile admission block classifies replay evidence as `smoke`,
+`standard`, or `large-host` from declared workload requirements and observed
+host posture. It may include CPU count, available memory, target/TMPDIR posture,
+RCH availability, NUMA availability, lexical RAM-tier availability, and hashed
+path-tail references. It must not include absolute target paths, raw `TMPDIR`
+values, environment dumps, or local machine-specific drive paths.
 
 Result ledgers remain side-effect-free. They can record that RCH was required,
 passed, failed, or blocked before Cargo, but a `local Cargo fallback` is not
