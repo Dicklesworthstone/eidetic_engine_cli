@@ -1196,6 +1196,22 @@ impl EffectManifest {
             CommandEffect::read_only("eval report", "Summarize evaluation fixture reports"),
             CommandEffect::read_only("eval run", "Run evaluation (reads fixtures)"),
             CommandEffect::read_only_db(
+                "economy report",
+                "Report DB-backed memory economy metrics without mutation",
+            ),
+            CommandEffect::read_only_db(
+                "economy score",
+                "Score one persisted memory economy artifact without mutation",
+            ),
+            CommandEffect::read_only_db(
+                "economy simulate",
+                "Simulate attention budgets from persisted economy metrics without mutation",
+            ),
+            CommandEffect::read_only_db(
+                "economy prune-plan",
+                "Plan report-only memory economy pruning without mutation",
+            ),
+            CommandEffect::read_only_db(
                 "focus explain",
                 "Explain passive active-memory focus state",
             ),
@@ -1406,26 +1422,6 @@ impl EffectManifest {
                 "Non-decay foreground daemon jobs abstain until real steward handlers are wired",
             )
             .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
-            CommandEffect::degraded_unavailable(
-                "economy report",
-                "economy_metrics_unavailable",
-                "Economy reporting abstains until persisted workspace metrics exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "economy score",
-                "economy_metrics_unavailable",
-                "Economy scoring abstains until persisted workspace metrics exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "economy simulate",
-                "economy_metrics_unavailable",
-                "Economy simulation abstains until persisted workspace metrics exist",
-            ),
-            CommandEffect::degraded_unavailable(
-                "economy prune-plan",
-                "economy_metrics_unavailable",
-                "Economy prune planning abstains until persisted workspace metrics exist",
-            ),
             CommandEffect::workspace_file_write(
                 "lab capture",
                 vec![".ee/lab/episodes"],

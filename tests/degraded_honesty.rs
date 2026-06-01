@@ -2397,65 +2397,24 @@ fn economy_report_degrades_instead_of_reporting_seed_metrics() -> TestResult {
         "economy JSON degraded response must keep stderr empty",
     )?;
     ensure_no_ansi(&result.stdout, "economy degraded stdout")?;
-    let schema = result
-        .parsed
-        .pointer("/schema")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "economy response missing schema".to_owned())?;
-    match schema {
-        "ee.error.v2" => {
-            ensure_json_pointer(
-                &result.parsed,
-                "/error/code",
-                json!("unsatisfied_degraded_mode"),
-                "economy missing-database degraded code",
-            )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/error/repair",
-                json!("ee init --workspace ."),
-                "economy missing-database repair command",
-            )?;
-        }
-        "ee.response.v2" => {
-            ensure_json_pointer(&result.parsed, "/success", json!(false), "success flag")?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/data/code",
-                json!("economy_metrics_unavailable"),
-                "economy degraded code",
-            )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/data/degraded/0/code",
-                json!("economy_metrics_unavailable"),
-                "economy degraded array code",
-            )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/data/followUpBead",
-                json!("eidetic_engine_cli-ve0w"),
-                "economy follow-up bead",
-            )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/data/evidenceIds",
-                json!([]),
-                "economy evidence ids",
-            )?;
-            ensure_json_pointer(
-                &result.parsed,
-                "/data/sourceIds",
-                json!([]),
-                "economy source ids",
-            )?;
-        }
-        other => {
-            return Err(format!(
-                "economy response schema must be ee.error.v2 or ee.response.v2, got {other}"
-            ));
-        }
-    }
+    ensure_json_pointer(
+        &result.parsed,
+        "/schema",
+        json!("ee.error.v2"),
+        "economy missing-database error schema",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/error/code",
+        json!("unsatisfied_degraded_mode"),
+        "economy missing-database degraded code",
+    )?;
+    ensure_json_pointer(
+        &result.parsed,
+        "/error/repair",
+        json!("ee init --workspace ."),
+        "economy missing-database repair command",
+    )?;
 
     let fake_success =
         validate_no_fake_success_output("economy report", false, false, &result.stdout);

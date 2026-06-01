@@ -540,11 +540,14 @@ fn effect_manifest_tracks_degraded_unavailable_paths_as_non_mutating() -> TestRe
 
     let manifest = EffectManifest::build();
 
-    // N15 retired `revision_write_unavailable` from `memory revise` and the
-    // lab replay/counterfactual command-effect paths now describe real
+    // Economy report/score/simulate/prune-plan now describe real DB-backed
     // read-only implementations. The entries here are still in their
     // honesty-only abstention state.
-    for (command, code) in [("economy report", "economy_metrics_unavailable")] {
+    for (command, code) in [
+        ("daemon", "daemon_jobs_unavailable"),
+        ("daemon background", "daemon_jobs_unavailable"),
+        ("daemon foreground non-decay", "daemon_jobs_unavailable"),
+    ] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;
@@ -593,6 +596,10 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
         "causal trace",
         "causal compare",
         "causal estimate",
+        "economy report",
+        "economy score",
+        "economy simulate",
+        "economy prune-plan",
     ] {
         let effect = manifest
             .get(command)
@@ -614,7 +621,15 @@ fn effect_manifest_tracks_implemented_surfaces() -> TestResult {
         )?;
     }
 
-    for command in ["causal trace", "causal compare", "causal estimate"] {
+    for command in [
+        "causal trace",
+        "causal compare",
+        "causal estimate",
+        "economy report",
+        "economy score",
+        "economy simulate",
+        "economy prune-plan",
+    ] {
         let effect = manifest
             .get(command)
             .ok_or_else(|| format!("{command} not in manifest"))?;

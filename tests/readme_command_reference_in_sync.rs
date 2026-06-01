@@ -156,10 +156,6 @@ const INTERNAL_ONLY_COMMANDS: &[(&str, &str)] = &[
         "Degraded surface (causal_evidence_unavailable); README mention added when bd-17c65.14.3 (N3) closes.",
     ),
     (
-        "economy",
-        "Degraded surface (economy_metrics_unavailable); awaits a future K-series doc when economy/* surfaces ship.",
-    ),
-    (
         "lab",
         "Degraded surface (lab_replay_unavailable); README mention added when bd-17c65.14.15.4/.5/.6 close.",
     ),
