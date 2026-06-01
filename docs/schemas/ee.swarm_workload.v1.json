@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.swarm_workload.v1.json",
   "title": "ee.swarm_workload.v1",
-  "description": "Redaction-safe orchestration metadata for a multi-agent replay workload. It describes fixture identity, workspace shape, agent count, redacted command sequence, expected degraded posture, redaction probes, resource-profile hints, and provenance without raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
+  "description": "Redaction-safe orchestration metadata for a multi-agent replay workload. It describes fixture identity, workspace shape, agent count, redacted command sequence, expected degraded posture, redaction probes, resource-profile hints, deterministic generator evidence, and provenance without raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -17,6 +17,7 @@
     "expectedDegradedPosture",
     "redactionProbes",
     "resourceProfileHints",
+    "generatorEvidence",
     "provenance"
   ],
   "properties": {
@@ -68,6 +69,9 @@
     "resourceProfileHints": {
       "$ref": "#/$defs/resourceProfileHints"
     },
+    "generatorEvidence": {
+      "$ref": "#/$defs/generatorEvidence"
+    },
     "provenance": {
       "$ref": "#/$defs/provenance"
     }
@@ -85,6 +89,7 @@
       "expectedDegradedPosture",
       "redactionProbes",
       "resourceProfileHints",
+      "generatorEvidence",
       "provenance"
     ],
     "summary": [
@@ -94,6 +99,7 @@
       "commandSequence",
       "expectedDegradedPosture",
       "resourceProfileHints",
+      "generatorEvidence",
       "provenance"
     ],
     "standard": ["*"],
@@ -140,6 +146,17 @@
         "memoryBudgetMb": 2048,
         "cpuBudgetMs": 10000,
         "rchRequired": true
+      },
+      "generatorEvidence": {
+        "schema": "ee.swarm_workload.generator_evidence.v1",
+        "fixtureSeed": "healthy_small_seed_001",
+        "profile": "small",
+        "workspacePathHash": "blake3:7777777777777777777777777777777777777777777777777777777777777777",
+        "commandCount": 1,
+        "generatedMemoryCount": 0,
+        "redactionProbeCount": 0,
+        "schemaId": "https://eidetic-engine/schemas/ee.swarm_workload.v1.json",
+        "fixtureHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555"
       },
       "provenance": {
         "kind": "synthetic",
@@ -355,6 +372,59 @@
         },
         "rchRequired": {
           "type": "boolean"
+        }
+      }
+    },
+    "generatorEvidence": {
+      "description": "Support-bundle-safe evidence emitted by deterministic fixture generation. Counts must be derived from the generated trace and hashes must not expose raw workspace paths or probe strings.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "fixtureSeed",
+        "profile",
+        "workspacePathHash",
+        "commandCount",
+        "generatedMemoryCount",
+        "redactionProbeCount",
+        "schemaId",
+        "fixtureHash"
+      ],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.swarm_workload.generator_evidence.v1"
+        },
+        "fixtureSeed": {
+          "description": "The deterministic seed used by the generator. This is copied from the parent workload fixtureSeed and must not embed raw prompt text.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,96}$"
+        },
+        "profile": {
+          "type": "string",
+          "enum": ["small", "medium", "large"]
+        },
+        "workspacePathHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "commandCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "generatedMemoryCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "redactionProbeCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schemaId": {
+          "type": "string",
+          "const": "https://eidetic-engine/schemas/ee.swarm_workload.v1.json"
+        },
+        "fixtureHash": {
+          "$ref": "#/$defs/blake3Hash"
         }
       }
     },

@@ -122,6 +122,47 @@ fn lab_generate_workload_emits_all_profiles_as_redaction_safe_json() -> TestResu
             value["resourceProfileHints"]["profile"] == resource_profile,
             format!("resource profile mismatch for {profile}: {value}"),
         )?;
+        ensure(
+            value["generatorEvidence"]["schema"] == "ee.swarm_workload.generator_evidence.v1",
+            format!("generator evidence schema mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["fixtureSeed"] == fixture_seed,
+            format!("generator evidence seed mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["profile"] == profile,
+            format!("generator evidence profile mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["commandCount"].as_u64() == Some(command_count),
+            format!("generator evidence command count mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["generatedMemoryCount"].as_u64() == Some(1),
+            format!("generator evidence memory count mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["redactionProbeCount"].as_u64()
+                == value["redactionProbes"]
+                    .as_array()
+                    .map(|probes| probes.len() as u64),
+            format!("generator evidence redaction count mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["schemaId"]
+                == "https://eidetic-engine/schemas/ee.swarm_workload.v1.json",
+            format!("generator evidence schema id mismatch for {profile}: {value}"),
+        )?;
+        ensure(
+            value["generatorEvidence"]["workspacePathHash"]
+                .as_str()
+                .is_some_and(|hash| hash.starts_with("blake3:"))
+                && value["generatorEvidence"]["fixtureHash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.starts_with("blake3:")),
+            format!("generator evidence hashes are not redaction-safe for {profile}: {value}"),
+        )?;
 
         for forbidden in [
             workspace.display().to_string(),

@@ -13,7 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use ee::core::lab::{
-    SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_SCHEMA_V1, SwarmExpectedDegradedPosture,
+    SWARM_REPLAY_RESULT_SCHEMA_V1, SWARM_WORKLOAD_GENERATOR_EVIDENCE_SCHEMA_V1,
+    SWARM_WORKLOAD_SCHEMA_ID_V1, SWARM_WORKLOAD_SCHEMA_V1, SwarmExpectedDegradedPosture,
     SwarmRedactionProbeClass, SwarmRedactionProbeStatus, SwarmReplayAggregate,
     SwarmReplayArtifactRef, SwarmReplayCommandRedactionStatus, SwarmReplayCommandResult,
     SwarmReplayFailure, SwarmReplayHostAdmissionStatus, SwarmReplayHostPathPosture,
@@ -21,10 +22,10 @@ use ee::core::lab::{
     SwarmReplayRchStatus, SwarmReplayRedactionStatus, SwarmReplayResourceUsage, SwarmReplayResult,
     SwarmReplayStatus, SwarmReplayVerification, SwarmWorkloadCommandShape,
     SwarmWorkloadCommandStep, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile,
-    SwarmWorkloadPathPolicy, SwarmWorkloadProvenance, SwarmWorkloadProvenanceKind,
-    SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe, SwarmWorkloadResourceProfileHints,
-    SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape, classify_swarm_replay_host_profile,
-    generate_swarm_workload_fixture,
+    SwarmWorkloadGeneratorEvidence, SwarmWorkloadPathPolicy, SwarmWorkloadProvenance,
+    SwarmWorkloadProvenanceKind, SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe,
+    SwarmWorkloadResourceProfileHints, SwarmWorkloadTrace, SwarmWorkloadWorkspaceShape,
+    classify_swarm_replay_host_profile, generate_swarm_workload_fixture,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -178,6 +179,17 @@ fn minimal_workload() -> SwarmWorkloadTrace {
             cpu_budget_ms: None,
             rch_required: true,
         },
+        generator_evidence: SwarmWorkloadGeneratorEvidence {
+            schema: SWARM_WORKLOAD_GENERATOR_EVIDENCE_SCHEMA_V1.to_owned(),
+            fixture_seed: "healthy_small_seed_001".to_owned(),
+            profile: "small".to_owned(),
+            workspace_path_hash: HASH_64_C.to_owned(),
+            command_count: 1,
+            generated_memory_count: 0,
+            redaction_probe_count: 0,
+            schema_id: SWARM_WORKLOAD_SCHEMA_ID_V1.to_owned(),
+            fixture_hash: HASH_64_D.to_owned(),
+        },
         provenance: SwarmWorkloadProvenance {
             kind: SwarmWorkloadProvenanceKind::Synthetic,
             source_trace_hashes: Vec::new(),
@@ -234,6 +246,8 @@ fn full_workload() -> SwarmWorkloadTrace {
         cpu_budget_ms: Some(120_000),
         rch_required: true,
     };
+    workload.generator_evidence.command_count = 2;
+    workload.generator_evidence.redaction_probe_count = 2;
     workload.provenance = SwarmWorkloadProvenance {
         kind: SwarmWorkloadProvenanceKind::Mixed,
         source_trace_hashes: vec![HASH_64_B.to_owned()],
@@ -466,6 +480,7 @@ fn swarm_workload_schema_pins_redacted_orchestration_shape() -> TestResult {
         "expectedDegradedPosture",
         "redactionProbes",
         "resourceProfileHints",
+        "generatorEvidence",
         "provenance",
     ] {
         ensure(
@@ -473,6 +488,26 @@ fn swarm_workload_schema_pins_redacted_orchestration_shape() -> TestResult {
                 .iter()
                 .any(|entry| entry == field),
             format!("workload schema missing required field `{field}`"),
+        )?;
+    }
+
+    let generator_props = schema["$defs"]["generatorEvidence"]["properties"]
+        .as_object()
+        .ok_or_else(|| "generatorEvidence.properties must be an object".to_owned())?;
+    for field in [
+        "schema",
+        "fixtureSeed",
+        "profile",
+        "workspacePathHash",
+        "commandCount",
+        "generatedMemoryCount",
+        "redactionProbeCount",
+        "schemaId",
+        "fixtureHash",
+    ] {
+        ensure(
+            generator_props.contains_key(field),
+            format!("generatorEvidence missing field `{field}`"),
         )?;
     }
 
@@ -610,6 +645,42 @@ fn generated_swarm_workload_fixtures_are_seed_stable_and_redaction_safe() -> Tes
         first.redaction_probes.len() == 1,
         "small profile should still carry a redaction probe",
     )?;
+    ensure(
+        first.generator_evidence.schema == SWARM_WORKLOAD_GENERATOR_EVIDENCE_SCHEMA_V1,
+        "small generator evidence schema mismatch",
+    )?;
+    ensure(
+        first.generator_evidence.fixture_seed == first.fixture_seed,
+        "small generator evidence should echo the fixture seed",
+    )?;
+    ensure(
+        first.generator_evidence.profile == "small",
+        "small generator evidence profile mismatch",
+    )?;
+    ensure(
+        first.generator_evidence.command_count == first.command_sequence.len() as u16,
+        "small generator evidence command count must match the trace",
+    )?;
+    ensure(
+        first.generator_evidence.generated_memory_count == 1,
+        "small generator evidence should count one generated memory command",
+    )?;
+    ensure(
+        first.generator_evidence.redaction_probe_count == first.redaction_probes.len() as u16,
+        "small generator evidence redaction probe count must match the trace",
+    )?;
+    ensure(
+        first.generator_evidence.schema_id == SWARM_WORKLOAD_SCHEMA_ID_V1,
+        "small generator evidence schema id mismatch",
+    )?;
+    ensure(
+        first
+            .generator_evidence
+            .workspace_path_hash
+            .starts_with("blake3:")
+            && first.generator_evidence.fixture_hash.starts_with("blake3:"),
+        "small generator evidence hashes must be redaction-safe BLAKE3 values",
+    )?;
     assert_no_raw_payload(&to_pretty_json(&first)?)?;
 
     let medium = generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::medium(
@@ -634,6 +705,13 @@ fn generated_swarm_workload_fixtures_are_seed_stable_and_redaction_safe() -> Tes
         medium.redaction_probes.len() >= 5,
         "medium profile should probe query, memory, path, and secret redaction",
     )?;
+    ensure(
+        medium.generator_evidence.command_count == medium.command_sequence.len() as u16
+            && medium.generator_evidence.generated_memory_count == 1
+            && medium.generator_evidence.redaction_probe_count
+                == medium.redaction_probes.len() as u16,
+        "medium generator evidence counts must match generated trace fields",
+    )?;
     assert_no_raw_payload(&to_pretty_json(&medium)?)?;
 
     let large = generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::new(
@@ -654,6 +732,12 @@ fn generated_swarm_workload_fixtures_are_seed_stable_and_redaction_safe() -> Tes
             .iter()
             .any(|step| command_verbs_match(step, &["graph", "communities"])),
         "large profile should include graph read-path coverage",
+    )?;
+    ensure(
+        large.generator_evidence.command_count == 12
+            && large.generator_evidence.generated_memory_count == 1
+            && large.generator_evidence.redaction_probe_count == 7,
+        "large generator evidence should pin stress fixture counts",
     )?;
     assert_no_raw_payload(&to_pretty_json(&large)?)
 }

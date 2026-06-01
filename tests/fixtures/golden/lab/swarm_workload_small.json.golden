@@ -162,6 +162,17 @@
     "cpuBudgetMs": 10000,
     "rchRequired": true
   },
+  "generatorEvidence": {
+    "schema": "ee.swarm_workload.generator_evidence.v1",
+    "fixtureSeed": "stable_small_seed_001",
+    "profile": "small",
+    "workspacePathHash": "blake3:fa75724b0e53efd0d2c02c17cad5f5a261e975ec195809d41336bda788564579",
+    "commandCount": 6,
+    "generatedMemoryCount": 1,
+    "redactionProbeCount": 1,
+    "schemaId": "https://eidetic-engine/schemas/ee.swarm_workload.v1.json",
+    "fixtureHash": "blake3:451389f271729ee5cbf1bd35aea446235fa39ccde99cfab878f6b8247e145963"
+  },
   "provenance": {
     "kind": "synthetic",
     "sourceTraceHashes": [],

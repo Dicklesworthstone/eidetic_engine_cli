@@ -33,6 +33,14 @@ pub const AGENT_WORKLOAD_REPLAY_SCHEMA_V1: &str = "ee.agent_workload_replay.v1";
 /// Schema for swarm workload replay inputs.
 pub const SWARM_WORKLOAD_SCHEMA_V1: &str = "ee.swarm_workload.v1";
 
+/// JSON Schema URI for swarm workload replay inputs.
+pub const SWARM_WORKLOAD_SCHEMA_ID_V1: &str =
+    "https://eidetic-engine/schemas/ee.swarm_workload.v1.json";
+
+/// Schema tag for deterministic swarm workload generator evidence.
+pub const SWARM_WORKLOAD_GENERATOR_EVIDENCE_SCHEMA_V1: &str =
+    "ee.swarm_workload.generator_evidence.v1";
+
 /// Schema for swarm replay result ledgers.
 pub const SWARM_REPLAY_RESULT_SCHEMA_V1: &str = "ee.swarm_replay_result.v1";
 
@@ -313,6 +321,7 @@ pub struct SwarmWorkloadTrace {
     pub expected_degraded_posture: SwarmExpectedDegradedPosture,
     pub redaction_probes: Vec<SwarmWorkloadRedactionProbe>,
     pub resource_profile_hints: SwarmWorkloadResourceProfileHints,
+    pub generator_evidence: SwarmWorkloadGeneratorEvidence,
     pub provenance: SwarmWorkloadProvenance,
 }
 
@@ -467,6 +476,10 @@ pub fn generate_swarm_workload_fixture(
     let profile = options.profile;
     let seed = options.fixture_seed.as_str();
     let workload_hash = stable_swarm_fixture_hex(profile, seed, "workload-id");
+    let command_sequence = swarm_fixture_commands(profile, seed);
+    let redaction_probes = swarm_fixture_redaction_probes(profile, seed);
+    let generator_evidence =
+        swarm_workload_generator_evidence(profile, seed, &command_sequence, &redaction_probes);
 
     SwarmWorkloadTrace {
         schema: SWARM_WORKLOAD_SCHEMA_V1.to_owned(),
@@ -482,9 +495,9 @@ pub fn generate_swarm_workload_fixture(
             repo_state: profile.repo_state().to_owned(),
         },
         agent_count: profile.agent_count(),
-        command_sequence: swarm_fixture_commands(profile, seed),
+        command_sequence,
         expected_degraded_posture: profile.expected_degraded_posture(),
-        redaction_probes: swarm_fixture_redaction_probes(profile, seed),
+        redaction_probes,
         resource_profile_hints: SwarmWorkloadResourceProfileHints {
             profile: profile.resource_profile().to_owned(),
             requested_parallel_agents: profile.agent_count(),
@@ -493,6 +506,7 @@ pub fn generate_swarm_workload_fixture(
             cpu_budget_ms: profile.cpu_budget_ms(),
             rch_required: true,
         },
+        generator_evidence,
         provenance: SwarmWorkloadProvenance {
             kind: SwarmWorkloadProvenanceKind::Synthetic,
             source_trace_hashes: Vec::new(),
@@ -611,6 +625,21 @@ pub struct SwarmWorkloadResourceProfileHints {
     pub memory_budget_mb: Option<u64>,
     pub cpu_budget_ms: Option<u64>,
     pub rch_required: bool,
+}
+
+/// Deterministic generator evidence for support-bundle-safe fixture auditing.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadGeneratorEvidence {
+    pub schema: String,
+    pub fixture_seed: String,
+    pub profile: String,
+    pub workspace_path_hash: String,
+    pub command_count: u16,
+    pub generated_memory_count: u16,
+    pub redaction_probe_count: u16,
+    pub schema_id: String,
+    pub fixture_hash: String,
 }
 
 /// Provenance for a swarm workload fixture.
@@ -874,6 +903,35 @@ fn swarm_fixture_path_tail_hash(
         None
     } else {
         Some(stable_swarm_fixture_short_hash(profile, seed, "path-tail"))
+    }
+}
+
+fn swarm_workload_generator_evidence(
+    profile: SwarmWorkloadFixtureProfile,
+    seed: &str,
+    command_sequence: &[SwarmWorkloadCommandStep],
+    redaction_probes: &[SwarmWorkloadRedactionProbe],
+) -> SwarmWorkloadGeneratorEvidence {
+    let generated_memory_count = command_sequence
+        .iter()
+        .filter(|step| {
+            step.command
+                .verbs
+                .first()
+                .is_some_and(|verb| verb == "remember")
+        })
+        .count() as u16;
+
+    SwarmWorkloadGeneratorEvidence {
+        schema: SWARM_WORKLOAD_GENERATOR_EVIDENCE_SCHEMA_V1.to_owned(),
+        fixture_seed: seed.to_owned(),
+        profile: profile.as_str().to_owned(),
+        workspace_path_hash: stable_swarm_fixture_hash(profile, seed, "workspace-path"),
+        command_count: command_sequence.len() as u16,
+        generated_memory_count,
+        redaction_probe_count: redaction_probes.len() as u16,
+        schema_id: SWARM_WORKLOAD_SCHEMA_ID_V1.to_owned(),
+        fixture_hash: stable_swarm_fixture_hash(profile, seed, "fixture"),
     }
 }
 
