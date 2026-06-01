@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.response.v1.json",
   "title": "ee.daemon.response.v1",
-  "description": "Length-prefixed JSON response envelope returned by the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). The wire framing matches `ee.daemon.request.v1`: 4-byte big-endian unsigned length followed by exactly that many bytes of UTF-8 JSON. `request_id` echoes the request envelope's id so clients can multiplex if/when they reuse a connection (the skeleton handles one request per accept; multiplexing is a follow-up). Exactly one of `result` or `error` is populated per response; the other MUST be absent. `degraded_codes[]` is structurally similar to the canonical `ee.response.v2` envelope's `degraded[]` array but reduced to bare code strings because the daemon RPC is local-first and intentionally does not duplicate the per-entry severity/repair fields the CLI envelope carries — the CLI client that consumes the daemon response maps the codes back onto the canonical envelope before returning to the user.",
+  "description": "Length-prefixed JSON response envelope returned by the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). The wire framing matches `ee.daemon.request.v1`: 4-byte big-endian unsigned length followed by exactly that many bytes of UTF-8 JSON. `request_id` and `agent_id` echo the request envelope's ids so clients can multiplex if/when they reuse a connection and so daemon audit rows can attribute calls. `workspace_id` is echoed when the request carried it. The skeleton handles one request per accept; multiplexing is a follow-up. Exactly one of `result` or `error` is populated per response; the other MUST be absent. `degraded_codes[]` is structurally similar to the canonical `ee.response.v2` envelope's `degraded[]` array but reduced to bare code strings because the daemon RPC is local-first and intentionally does not duplicate the per-entry severity/repair fields the CLI envelope carries — the CLI client that consumes the daemon response maps the codes back onto the canonical envelope before returning to the user.",
   "type": "object",
   "required": [
     "schema",
-    "request_id"
+    "request_id",
+    "agent_id"
   ],
   "additionalProperties": false,
   "properties": {
@@ -19,6 +20,18 @@
       "minLength": 1,
       "maxLength": 128,
       "description": "Echo of the request envelope's request_id. A response whose request_id does not match the most recent request on the same connection MUST be treated as a framing error and the connection torn down."
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Echo of the request envelope's agent_id. Pre-parse refusal responses use a sentinel such as `<unknown>` because the daemon could not safely read the caller's envelope."
+    },
+    "workspace_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Echo of the request envelope's optional workspace_id when present. Absent when the request omitted it or when the daemon refused before parsing the request envelope."
     },
     "result": {
       "description": "Method-specific success payload. For `ee.daemon.echo` this is the request envelope's `params` value, returned unchanged. For `ee.daemon.context` this field is absent in the current skeleton (the method always returns `error.code = daemon_ann_warmload_not_yet_implemented`). The exact JSON value is method-specific; clients MUST NOT assume it is an object."

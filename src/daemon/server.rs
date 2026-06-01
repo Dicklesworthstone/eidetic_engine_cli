@@ -542,7 +542,8 @@ fn run_accept_loop(
 /// The response uses the canonical envelope shape so consumers parse
 /// it through the same `read_response` path as any other daemon
 /// reply; we do not yet know the client's `request_id` (we never
-/// read the request frame), so it is set to `"<overloaded>"`.
+/// read the request frame), so it is set to `"<overloaded>"`. The
+/// caller's `agent_id` is likewise unknown at this refusal point.
 fn write_overloaded_response(stream: &mut UnixStream) {
     // Use a tight write timeout so a dead client cannot block the
     // accept loop. The accept loop is single-threaded; a slow client
@@ -551,6 +552,8 @@ fn write_overloaded_response(stream: &mut UnixStream) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let response = DaemonResponse::err(
         "<overloaded>",
+        "<unknown>",
+        None,
         DAEMON_OVERLOADED_CODE,
         "daemon worker pool saturated; retry after existing connections drain or fall back \
          to the in-process CLI path.",
@@ -564,12 +567,15 @@ fn write_overloaded_response(stream: &mut UnixStream) {
 /// drop it. Mirrors [`write_overloaded_response`]: a tight write
 /// timeout keeps a dead peer from stalling the (single-threaded) accept
 /// loop on its way out, and we never learned the client's `request_id`
-/// (we never read a request frame), so it is set to `"<shutdown>"`.
+/// or `agent_id` (we never read a request frame), so they are set to
+/// sentinels.
 /// bd-36dp2.
 fn write_shutting_down_response(stream: &mut UnixStream) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let response = DaemonResponse::err(
         "<shutdown>",
+        "<unknown>",
+        None,
         super::DAEMON_SHUTTING_DOWN_CODE,
         "daemon is shutting down and is no longer accepting connections; retry against a \
          fresh daemon or fall back to the in-process CLI path.",
@@ -719,6 +725,8 @@ fn handle_connection(mut stream: UnixStream) {
         // exits instead of hanging.
         let response = DaemonResponse::err(
             "<setsockopt>",
+            "<unknown>",
+            None,
             DAEMON_SETSOCKOPT_FAILED_CODE,
             format!("daemon could not set the connection write timeout: {error}"),
         )
@@ -733,6 +741,8 @@ fn handle_connection(mut stream: UnixStream) {
         // the worker thread is reclaimed.
         let response = DaemonResponse::err(
             "<setsockopt>",
+            "<unknown>",
+            None,
             DAEMON_SETSOCKOPT_FAILED_CODE,
             format!("daemon could not set the connection read timeout: {error}"),
         )
@@ -759,6 +769,8 @@ fn handle_connection(mut stream: UnixStream) {
             if peer != own {
                 let response = DaemonResponse::err(
                     "<unauthorized>",
+                    "<unknown>",
+                    None,
                     DAEMON_PEER_UNAUTHORIZED_CODE,
                     format!(
                         "daemon refuses peer uid {peer}; only uid {own} (the daemon owner) \
@@ -786,6 +798,8 @@ fn handle_connection(mut stream: UnixStream) {
             // ambiguity.
             let response = DaemonResponse::err(
                 "<unauthorized>",
+                "<unknown>",
+                None,
                 DAEMON_PEER_UNAUTHORIZED_CODE,
                 format!("daemon could not verify peer credential: {error}"),
             )
@@ -818,6 +832,8 @@ fn handle_connection(mut stream: UnixStream) {
             // reflected.
             let response = DaemonResponse::err(
                 "<unknown>",
+                "<unknown>",
+                None,
                 DAEMON_REQUEST_DECODE_FAILED_CODE,
                 "request body failed to decode",
             );
@@ -859,7 +875,7 @@ fn handle_connection(mut stream: UnixStream) {
     }));
     let response = match dispatched {
         Ok(response) => response,
-        Err(payload) => build_panic_response(&request_id, payload.as_ref()),
+        Err(payload) => build_panic_response(&request, payload.as_ref()),
     };
     let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
     let degraded: Vec<&str> = response.degraded_codes.iter().map(String::as_str).collect();
@@ -882,14 +898,19 @@ fn handle_connection(mut stream: UnixStream) {
 /// fixed generic message — never the raw panic payload — so a panic
 /// inside a `Display` impl that touched a memory body cannot leak
 /// that content to the client. bd-b82q4.
-fn build_panic_response(request_id: &str, payload: &(dyn std::any::Any + Send)) -> DaemonResponse {
+fn build_panic_response(
+    request: &DaemonRequest,
+    payload: &(dyn std::any::Any + Send),
+) -> DaemonResponse {
     let raw = extract_panic_payload_str(payload);
     let sanitized = sanitize_panic_message(&raw);
     // Single-line stderr log, capped, so a hostile panic payload
     // cannot blow out the journal nor inject log-forging characters.
     eprintln!("ee daemon handler panicked: {sanitized}");
     DaemonResponse::err(
-        request_id.to_owned(),
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
         DAEMON_HANDLER_PANIC_CODE,
         "daemon handler panicked; the accept loop is intact, retry the request or fall back \
          to the in-process CLI path.",
@@ -967,6 +988,8 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
             request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
             DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
             format!(
                 "expected schema `{}`, got `{}`",
@@ -987,15 +1010,21 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
         // diagnostic method is explicitly enabled for the local daemon.
         METHOD_ECHO if echo_enabled => DaemonResponse::ok(
             request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
             crate::core::support_bundle::redact_json_value(&request.params),
         ),
         METHOD_ECHO => DaemonResponse::err(
             request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
             DAEMON_ECHO_DISABLED_CODE,
             "ee.daemon.echo is disabled by default; set EE_DAEMON_ENABLE_ECHO=1 for local diagnostics.",
         ),
         METHOD_CONTEXT => DaemonResponse::err(
             request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
             DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
             "ee.daemon.context is a stub until the ANN warm-load slice ships; \
              the CLI client should fall back to the in-process `ee context` path.",
@@ -1003,6 +1032,8 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
         .with_degraded(DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE),
         other => DaemonResponse::err(
             request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
             DAEMON_UNKNOWN_METHOD_CODE,
             format!("unknown daemon method `{other}`"),
         ),
@@ -1101,6 +1132,8 @@ impl std::error::Error for ClientError {
 mod tests {
     use super::*;
 
+    const TEST_AGENT_ID: &str = "agent-daemon-server-test";
+
     #[test]
     fn daemon_echo_env_value_truthy_accepts_only_explicit_true_values() {
         for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON", " true "] {
@@ -1121,11 +1154,13 @@ mod tests {
     fn dispatch_echo_disabled_returns_error_by_default() {
         let request = DaemonRequest::new(
             "req-echo-disabled-001",
+            TEST_AGENT_ID,
             METHOD_ECHO,
             serde_json::json!({"k": "v", "n": 7}),
         );
         let response = dispatch_with_echo_policy(&request, false);
         assert_eq!(response.request_id, "req-echo-disabled-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         assert!(response.result.is_none());
         let error = response.error.as_ref().expect("echo must be disabled");
         assert_eq!(error.code, DAEMON_ECHO_DISABLED_CODE);
@@ -1134,9 +1169,11 @@ mod tests {
     #[test]
     fn dispatch_echo_enabled_returns_benign_params_unchanged() {
         let params = serde_json::json!({"k": "v", "n": 7});
-        let request = DaemonRequest::new("req-echo-001", METHOD_ECHO, params.clone());
+        let request =
+            DaemonRequest::new("req-echo-001", TEST_AGENT_ID, METHOD_ECHO, params.clone());
         let response = dispatch_with_echo_policy(&request, true);
         assert_eq!(response.request_id, "req-echo-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         assert_eq!(response.result, Some(params));
         assert!(response.error.is_none());
         assert!(response.degraded_codes.is_empty());
@@ -1152,6 +1189,7 @@ mod tests {
         let secret = "sk_live_abcdefghijklmnopqrstuvwxyz0123456789";
         let request = DaemonRequest::new(
             "req-echo-redact-001",
+            TEST_AGENT_ID,
             METHOD_ECHO,
             serde_json::json!({"token": secret, "note": "hello"}),
         );
@@ -1174,6 +1212,7 @@ mod tests {
     fn dispatch_context_returns_warmload_not_yet_implemented() {
         let request = DaemonRequest::new(
             "req-ctx-001",
+            TEST_AGENT_ID,
             METHOD_CONTEXT,
             serde_json::json!({"task": "ship daemon"}),
         );
@@ -1190,7 +1229,12 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_method_returns_unknown_method_code() {
-        let request = DaemonRequest::new("req-unk-001", "ee.daemon.nope", serde_json::Value::Null);
+        let request = DaemonRequest::new(
+            "req-unk-001",
+            TEST_AGENT_ID,
+            "ee.daemon.nope",
+            serde_json::Value::Null,
+        );
         let response = dispatch(&request);
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_UNKNOWN_METHOD_CODE);
@@ -1201,7 +1245,7 @@ mod tests {
     // per-method attribution cannot silently drift.
     #[test]
     fn classify_dispatch_response_ok_has_no_error_flags() {
-        let response = DaemonResponse::ok("r", serde_json::json!({"x": 1}));
+        let response = DaemonResponse::ok("r", TEST_AGENT_ID, None, serde_json::json!({"x": 1}));
         assert_eq!(classify_dispatch_response(&response), ("ok", false, false));
     }
 
@@ -1210,6 +1254,8 @@ mod tests {
         let bogus = DaemonRequest {
             schema: "ee.daemon.request.v0_wrong".to_owned(),
             request_id: "r".to_owned(),
+            agent_id: TEST_AGENT_ID.to_owned(),
+            workspace_id: None,
             method: METHOD_ECHO.to_owned(),
             params: serde_json::Value::Null,
         };
@@ -1222,7 +1268,12 @@ mod tests {
 
     #[test]
     fn classify_dispatch_response_unknown_method_sets_only_unknown_flag() {
-        let request = DaemonRequest::new("r", "ee.daemon.nope", serde_json::Value::Null);
+        let request = DaemonRequest::new(
+            "r",
+            TEST_AGENT_ID,
+            "ee.daemon.nope",
+            serde_json::Value::Null,
+        );
         let response = dispatch(&request);
         let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
         assert_eq!(code, DAEMON_UNKNOWN_METHOD_CODE);
@@ -1263,6 +1314,8 @@ mod tests {
         let bogus = DaemonRequest {
             schema: "ee.daemon.request.v0_wrong".to_owned(),
             request_id: "req-schema-001".to_owned(),
+            agent_id: TEST_AGENT_ID.to_owned(),
+            workspace_id: None,
             method: METHOD_ECHO.to_owned(),
             params: serde_json::Value::Null,
         };
@@ -1282,16 +1335,23 @@ mod tests {
     #[test]
     fn handle_connection_panicking_method_returns_structured_envelope_not_connection_reset() {
         let request_id = "req-panic-001";
+        let request = DaemonRequest::new(
+            request_id,
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({"task": "panic"}),
+        );
         let dispatched =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> DaemonResponse {
                 panic!("simulated warm-load bounds-check failure");
             }));
         let response = match dispatched {
             Ok(response) => response,
-            Err(payload) => build_panic_response(request_id, payload.as_ref()),
+            Err(payload) => build_panic_response(&request, payload.as_ref()),
         };
         // The client gets a real, parseable envelope — not a reset.
         assert_eq!(response.request_id, request_id);
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         let error = response
             .error
             .as_ref()
@@ -1366,11 +1426,13 @@ mod tests {
 
         let request = DaemonRequest::new(
             "req-roundtrip-001",
+            TEST_AGENT_ID,
             METHOD_ECHO,
             serde_json::json!({"ping": "pong"}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
         assert_eq!(response.request_id, "req-roundtrip-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         assert!(response.result.is_none());
         let error = response.error.as_ref().expect("echo must be disabled");
         assert_eq!(error.code, DAEMON_ECHO_DISABLED_CODE);
@@ -1442,11 +1504,13 @@ mod tests {
 
         let request = DaemonRequest::new(
             "req-peer-001",
+            TEST_AGENT_ID,
             METHOD_CONTEXT,
             serde_json::json!({"peer": "self"}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
         assert_eq!(response.request_id, "req-peer-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         let error = response
             .error
             .as_ref()
@@ -1499,10 +1563,12 @@ mod tests {
         );
         let request = DaemonRequest::new(
             "req-stale-001",
+            TEST_AGENT_ID,
             METHOD_CONTEXT,
             serde_json::json!({"ping": 1}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
         let error = response.error.as_ref().expect("fresh socket dispatches");
         assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
 

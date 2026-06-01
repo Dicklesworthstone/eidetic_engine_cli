@@ -32,6 +32,7 @@ use ee::daemon::{
 };
 
 type TestResult = Result<(), String>;
+const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -123,6 +124,7 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
 
     let request = DaemonRequest::new(
         "req-echo-roundtrip-001",
+        TEST_AGENT_ID,
         METHOD_ECHO,
         serde_json::json!({
             "hello": "world",
@@ -148,6 +150,10 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
             "request_id must echo unchanged; got {}",
             response.request_id
         ),
+    )?;
+    ensure(
+        response.agent_id == TEST_AGENT_ID,
+        format!("agent_id must echo unchanged; got {}", response.agent_id),
     )?;
     ensure_error_code(&response, DAEMON_ECHO_DISABLED_CODE)?;
     let error = response
@@ -188,13 +194,26 @@ fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> T
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
     wait_for_accept_loop();
 
-    let request = DaemonRequest::new(
+    let mut request = DaemonRequest::new(
         "req-ctx-stub-001",
+        TEST_AGENT_ID,
         METHOD_CONTEXT,
         serde_json::json!({"task": "ship daemon skeleton"}),
     );
+    request.workspace_id = Some("workspace-daemon-uds-test".to_owned());
     let response = client_round_trip(handle.socket_path(), &request)
         .map_err(|error| format!("client_round_trip: {error}"))?;
+    ensure(
+        response.agent_id == TEST_AGENT_ID,
+        format!("agent_id must echo unchanged; got {}", response.agent_id),
+    )?;
+    ensure(
+        response.workspace_id.as_deref() == Some("workspace-daemon-uds-test"),
+        format!(
+            "workspace_id must echo unchanged; got {:?}",
+            response.workspace_id
+        ),
+    )?;
 
     ensure(
         response.result.is_none(),
@@ -241,6 +260,7 @@ fn daemon_schema_mismatch_returns_error_envelope_over_wire() -> TestResult {
 
     let mut request = DaemonRequest::new(
         "req-schema-mismatch-001",
+        TEST_AGENT_ID,
         METHOD_ECHO,
         serde_json::json!({"hello": "world"}),
     );
@@ -251,6 +271,10 @@ fn daemon_schema_mismatch_returns_error_envelope_over_wire() -> TestResult {
     ensure(
         response.request_id == "req-schema-mismatch-001",
         format!("request_id must round-trip; got {}", response.request_id),
+    )?;
+    ensure(
+        response.agent_id == TEST_AGENT_ID,
+        format!("agent_id must round-trip; got {}", response.agent_id),
     )?;
     ensure_error_code(&response, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE)?;
 
@@ -271,6 +295,7 @@ fn daemon_unknown_method_returns_error_envelope_over_wire() -> TestResult {
 
     let request = DaemonRequest::new(
         "req-unknown-method-001",
+        TEST_AGENT_ID,
         "ee.daemon.nope",
         serde_json::json!({"hello": "world"}),
     );
@@ -280,6 +305,10 @@ fn daemon_unknown_method_returns_error_envelope_over_wire() -> TestResult {
     ensure(
         response.request_id == "req-unknown-method-001",
         format!("request_id must round-trip; got {}", response.request_id),
+    )?;
+    ensure(
+        response.agent_id == TEST_AGENT_ID,
+        format!("agent_id must round-trip; got {}", response.agent_id),
     )?;
     ensure_error_code(&response, DAEMON_UNKNOWN_METHOD_CODE)?;
 
@@ -310,6 +339,13 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
         format!(
             "malformed request must use <unknown> request_id; got {}",
             response.request_id
+        ),
+    )?;
+    ensure(
+        response.agent_id == "<unknown>",
+        format!(
+            "malformed request must use <unknown> agent_id; got {}",
+            response.agent_id
         ),
     )?;
     ensure_error_code(&response, DAEMON_REQUEST_DECODE_FAILED_CODE)?;
@@ -360,6 +396,13 @@ fn daemon_oversize_request_prefix_returns_decode_failed_without_body_allocation(
             response.request_id
         ),
     )?;
+    ensure(
+        response.agent_id == "<unknown>",
+        format!(
+            "oversize request must use <unknown> agent_id; got {}",
+            response.agent_id
+        ),
+    )?;
     ensure_error_code(&response, DAEMON_REQUEST_DECODE_FAILED_CODE)?;
 
     handle
@@ -382,6 +425,7 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     let client_a = thread::spawn(move || {
         let request = DaemonRequest::new(
             "req-concurrent-a",
+            "agent-daemon-uds-a",
             METHOD_CONTEXT,
             serde_json::json!({"client": "a"}),
         );
@@ -390,6 +434,7 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     let client_b = thread::spawn(move || {
         let request = DaemonRequest::new(
             "req-concurrent-b",
+            "agent-daemon-uds-b",
             METHOD_CONTEXT,
             serde_json::json!({"client": "b"}),
         );
@@ -408,8 +453,16 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
         format!("client a request_id drifted: {}", response_a.request_id),
     )?;
     ensure(
+        response_a.agent_id == "agent-daemon-uds-a",
+        format!("client a agent_id drifted: {}", response_a.agent_id),
+    )?;
+    ensure(
         response_b.request_id == "req-concurrent-b",
         format!("client b request_id drifted: {}", response_b.request_id),
+    )?;
+    ensure(
+        response_b.agent_id == "agent-daemon-uds-b",
+        format!("client b agent_id drifted: {}", response_b.agent_id),
     )?;
     ensure_error_code(&response_a, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
     ensure_error_code(&response_b, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;

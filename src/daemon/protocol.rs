@@ -27,15 +27,26 @@ use super::{
     DAEMON_RESPONSE_SCHEMA_V1,
 };
 
+fn deserialize_present_json_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
 /// Wire-level request envelope. Mirrors
 /// `docs/schemas/ee.daemon.request.v1.json` exactly: `schema` is pinned
 /// to the v1 constant, `request_id` is caller-chosen (ULID/UUIDv7
-/// recommended), `method` is one of the dispatch names, and `params`
-/// is a method-specific JSON object.
+/// recommended), `agent_id` names the calling agent, `workspace_id`
+/// optionally scopes the caller's workspace, `method` is one of the
+/// dispatch names, and `params` is a method-specific JSON object.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct DaemonRequest {
     pub schema: String,
     pub request_id: String,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     pub method: String,
     // `params` is `type: object` in ee.daemon.request.v1 and optional
     // (not in the schema's `required`). Skip serializing a null so the
@@ -50,10 +61,17 @@ impl DaemonRequest {
     /// Construct a request envelope with the canonical schema id
     /// already populated. Helper for tests and the CLI client.
     #[must_use]
-    pub fn new(request_id: impl Into<String>, method: impl Into<String>, params: Value) -> Self {
+    pub fn new(
+        request_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        method: impl Into<String>,
+        params: Value,
+    ) -> Self {
         Self {
             schema: DAEMON_REQUEST_SCHEMA_V1.to_owned(),
             request_id: request_id.into(),
+            agent_id: agent_id.into(),
+            workspace_id: None,
             method: method.into(),
             params,
         }
@@ -78,8 +96,11 @@ impl<'de> Deserialize<'de> for DaemonRequest {
         struct Wire {
             schema: String,
             request_id: String,
-            method: String,
+            agent_id: String,
             #[serde(default)]
+            workspace_id: Option<String>,
+            method: String,
+            #[serde(default, deserialize_with = "deserialize_present_json_value")]
             params: Option<Value>,
         }
 
@@ -100,6 +121,8 @@ impl<'de> Deserialize<'de> for DaemonRequest {
         Ok(DaemonRequest {
             schema: wire.schema,
             request_id: wire.request_id,
+            agent_id: wire.agent_id,
+            workspace_id: wire.workspace_id,
             method: wire.method,
             params,
         })
@@ -122,6 +145,9 @@ pub struct DaemonResponseError {
 pub struct DaemonResponse {
     pub schema: String,
     pub request_id: String,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -151,6 +177,9 @@ impl<'de> Deserialize<'de> for DaemonResponse {
         struct Wire {
             schema: String,
             request_id: String,
+            agent_id: String,
+            #[serde(default)]
+            workspace_id: Option<String>,
             #[serde(default)]
             result: Option<Value>,
             #[serde(default)]
@@ -176,6 +205,8 @@ impl<'de> Deserialize<'de> for DaemonResponse {
         Ok(DaemonResponse {
             schema: wire.schema,
             request_id: wire.request_id,
+            agent_id: wire.agent_id,
+            workspace_id: wire.workspace_id,
             result: wire.result,
             error: wire.error,
             degraded_codes: wire.degraded_codes,
@@ -186,10 +217,17 @@ impl<'de> Deserialize<'de> for DaemonResponse {
 impl DaemonResponse {
     /// Build a success response with the supplied result value.
     #[must_use]
-    pub fn ok(request_id: impl Into<String>, result: Value) -> Self {
+    pub fn ok(
+        request_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        workspace_id: Option<String>,
+        result: Value,
+    ) -> Self {
         Self {
             schema: DAEMON_RESPONSE_SCHEMA_V1.to_owned(),
             request_id: request_id.into(),
+            agent_id: agent_id.into(),
+            workspace_id,
             result: Some(result),
             error: None,
             degraded_codes: Vec::new(),
@@ -200,12 +238,16 @@ impl DaemonResponse {
     #[must_use]
     pub fn err(
         request_id: impl Into<String>,
+        agent_id: impl Into<String>,
+        workspace_id: Option<String>,
         code: impl Into<String>,
         message: impl Into<String>,
     ) -> Self {
         Self {
             schema: DAEMON_RESPONSE_SCHEMA_V1.to_owned(),
             request_id: request_id.into(),
+            agent_id: agent_id.into(),
+            workspace_id,
             result: None,
             error: Some(DaemonResponseError {
                 code: code.into(),
@@ -434,6 +476,7 @@ mod tests {
     fn roundtrip_echo_request_through_read_request() {
         let request = DaemonRequest::new(
             "req-echo-001",
+            "agent-protocol-test",
             "ee.daemon.echo",
             serde_json::json!({"hello": "world", "n": 42}),
         );
@@ -495,6 +538,7 @@ mod tests {
         let filler = "x".repeat(REQUEST_BODY_READ_CHUNK * 3);
         let request = DaemonRequest::new(
             "req-chunked-001",
+            "agent-protocol-test",
             "ee.daemon.echo",
             serde_json::json!({ "blob": filler }),
         );
@@ -541,7 +585,12 @@ mod tests {
 
     #[test]
     fn write_response_emits_length_prefixed_frame() {
-        let response = DaemonResponse::ok("req-echo-001", serde_json::json!({"hello": "world"}));
+        let response = DaemonResponse::ok(
+            "req-echo-001",
+            "agent-protocol-test",
+            Some("workspace-protocol-test".to_owned()),
+            serde_json::json!({"hello": "world"}),
+        );
         let mut buffer = Vec::new();
         write_response(&mut buffer, &response).expect("response must write");
         assert!(buffer.len() > 4, "frame must include length + body");
@@ -558,7 +607,12 @@ mod tests {
         // DAEMON_RESPONSE_MAX_BYTES. The writer must refuse rather
         // than emit a frame that downstream clients would reject.
         let huge_payload = "x".repeat(DAEMON_RESPONSE_MAX_BYTES + 1);
-        let response = DaemonResponse::ok("req-too-large", Value::String(huge_payload));
+        let response = DaemonResponse::ok(
+            "req-too-large",
+            "agent-protocol-test",
+            None,
+            Value::String(huge_payload),
+        );
         let mut buffer = Vec::new();
         let error =
             write_response(&mut buffer, &response).expect_err("oversize response must be refused");
@@ -572,6 +626,8 @@ mod tests {
     fn response_with_degraded_appends_code() {
         let response = DaemonResponse::err(
             "req-stub-001",
+            "agent-protocol-test",
+            None,
             "daemon_ann_warmload_not_yet_implemented",
             "stub",
         )
@@ -589,16 +645,38 @@ mod tests {
         // populated per response. Test the serialization shape so the
         // wire bytes match the JSON Schema in
         // `docs/schemas/ee.daemon.response.v1.json`.
-        let ok_response = DaemonResponse::ok("req-ok", serde_json::json!({"k": "v"}));
+        let ok_response = DaemonResponse::ok(
+            "req-ok",
+            "agent-protocol-test",
+            Some("workspace-ok".to_owned()),
+            serde_json::json!({"k": "v"}),
+        );
         let ok_serialized = serde_json::to_value(&ok_response).expect("ok must serialize");
+        assert_eq!(
+            ok_serialized.get("agent_id").and_then(Value::as_str),
+            Some("agent-protocol-test")
+        );
+        assert_eq!(
+            ok_serialized.get("workspace_id").and_then(Value::as_str),
+            Some("workspace-ok")
+        );
         assert!(ok_serialized.get("result").is_some());
         assert!(
             ok_serialized.get("error").is_none(),
             "got {ok_serialized:?}"
         );
 
-        let err_response = DaemonResponse::err("req-err", "code", "msg");
+        let err_response =
+            DaemonResponse::err("req-err", "agent-protocol-test", None, "code", "msg");
         let err_serialized = serde_json::to_value(&err_response).expect("err must serialize");
+        assert_eq!(
+            err_serialized.get("agent_id").and_then(Value::as_str),
+            Some("agent-protocol-test")
+        );
+        assert!(
+            err_serialized.get("workspace_id").is_none(),
+            "absent workspace_id must be skipped; got {err_serialized:?}"
+        );
         assert!(err_serialized.get("error").is_some());
         assert!(
             err_serialized.get("result").is_none(),
@@ -615,10 +693,10 @@ mod tests {
         // deserialize boundary rather than silently accepted and
         // dispatched. bd-17g8u.
         let cases = [
-            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":null}"#,
-            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":"x"}"#,
-            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":[1,2]}"#,
-            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":7}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo","params":null}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo","params":"x"}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo","params":[1,2]}"#,
+            r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo","params":7}"#,
         ];
         for bad in cases {
             assert!(
@@ -633,21 +711,30 @@ mod tests {
         // A present object is accepted unchanged; absent params is
         // schema-valid (params is optional) and defaults to Value::Null,
         // preserving the prior behaviour.
-        let with_obj = r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":{"k":1}}"#;
+        let with_obj = r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","workspace_id":"workspace-a","method":"ee.daemon.echo","params":{"k":1}}"#;
         let parsed = serde_json::from_str::<DaemonRequest>(with_obj).expect("object params ok");
+        assert_eq!(parsed.agent_id, "agent-a");
+        assert_eq!(parsed.workspace_id.as_deref(), Some("workspace-a"));
         assert_eq!(parsed.params, serde_json::json!({"k": 1}));
 
-        let no_params =
-            r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo"}"#;
+        let no_params = r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo"}"#;
         let parsed = serde_json::from_str::<DaemonRequest>(no_params).expect("absent params ok");
+        assert_eq!(parsed.agent_id, "agent-a");
+        assert_eq!(parsed.workspace_id, None);
         assert_eq!(parsed.params, Value::Null);
     }
 
     #[test]
+    fn daemon_request_rejects_missing_agent_id() {
+        let bad = r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":{}}"#;
+        assert!(serde_json::from_str::<DaemonRequest>(bad).is_err());
+    }
+
+    #[test]
     fn daemon_request_rejects_unknown_envelope_field() {
-        // additionalProperties:false — an unknown envelope field (e.g. a
-        // spoofed agent_id) must be refused, not silently dropped.
-        let bad = r#"{"schema":"ee.daemon.request.v1","request_id":"r","method":"ee.daemon.echo","params":{},"agent_id":"spoof"}"#;
+        // additionalProperties:false — an unknown envelope field must be
+        // refused, not silently dropped.
+        let bad = r#"{"schema":"ee.daemon.request.v1","request_id":"r","agent_id":"agent-a","method":"ee.daemon.echo","params":{},"unexpected":"spoof"}"#;
         assert!(serde_json::from_str::<DaemonRequest>(bad).is_err());
     }
 
@@ -658,34 +745,40 @@ mod tests {
         // The schema's "exactly one of result or error" invariant must
         // be enforced on the READ side: a both-populated response is a
         // confused-deputy / client-trust hazard. bd-3a0zx.
-        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":1,"error":{"code":"x","message":"y"}}"#;
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a","result":1,"error":{"code":"x","message":"y"}}"#;
         assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
     }
 
     #[test]
     fn daemon_response_rejects_neither_result_nor_error() {
-        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r"}"#;
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a"}"#;
         assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
     }
 
     #[test]
     fn daemon_response_accepts_exactly_one_populated() {
-        let ok = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":{"k":1}}"#;
+        let ok = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a","workspace_id":"workspace-a","result":{"k":1}}"#;
         assert!(serde_json::from_str::<DaemonResponse>(ok).is_ok());
-        let err = r#"{"schema":"ee.daemon.response.v1","request_id":"r","error":{"code":"c","message":"m"}}"#;
+        let err = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a","error":{"code":"c","message":"m"}}"#;
         assert!(serde_json::from_str::<DaemonResponse>(err).is_ok());
     }
 
     #[test]
+    fn daemon_response_rejects_missing_agent_id() {
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":1}"#;
+        assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
+    }
+
+    #[test]
     fn daemon_response_rejects_unknown_envelope_field() {
-        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","result":1,"workspace_id":"leak"}"#;
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a","result":1,"unexpected":"leak"}"#;
         assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
     }
 
     #[test]
     fn daemon_response_error_rejects_unknown_field() {
         // The nested error object is additionalProperties:false too.
-        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","error":{"code":"x","message":"y","extra":1}}"#;
+        let bad = r#"{"schema":"ee.daemon.response.v1","request_id":"r","agent_id":"agent-a","error":{"code":"x","message":"y","extra":1}}"#;
         assert!(serde_json::from_str::<DaemonResponse>(bad).is_err());
     }
 }

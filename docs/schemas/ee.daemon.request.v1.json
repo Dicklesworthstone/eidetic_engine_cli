@@ -2,11 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.request.v1.json",
   "title": "ee.daemon.request.v1",
-  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux and `/tmp/ee-daemon.sock` on macOS (XDG_RUNTIME_DIR is not standard on Darwin). The daemon is opt-in; every CLI command continues to work when the socket is absent. The skeleton shipped under this schema covers the two seed methods — `ee.daemon.echo` (round-trip integrity check) and `ee.daemon.context` (degraded stub that surfaces `daemon_ann_warmload_not_yet_implemented` until the ANN warm-load slice lands).",
+  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux and `/tmp/ee-daemon.sock` on macOS (XDG_RUNTIME_DIR is not standard on Darwin). The daemon is opt-in; every CLI command continues to work when the socket is absent. The skeleton shipped under this schema covers the two seed methods — `ee.daemon.echo` (round-trip integrity check) and `ee.daemon.context` (degraded stub that surfaces `daemon_ann_warmload_not_yet_implemented` until the ANN warm-load slice lands). Requests carry `agent_id` and optional `workspace_id` so future warm-load, audit, and authorization slices do not have to break the v1 envelope to attribute calls.",
   "type": "object",
   "required": [
     "schema",
     "request_id",
+    "agent_id",
     "method"
   ],
   "additionalProperties": false,
@@ -20,6 +21,18 @@
       "minLength": 1,
       "maxLength": 128,
       "description": "Caller-chosen identifier echoed in the matching response. Recommended shape: ULID or UUIDv7. The daemon does not assign request ids; missing or non-matching ids in responses indicate a framing bug or a redirected connection."
+    },
+    "agent_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Caller-chosen local agent identity echoed in the matching response. This is an attribution/audit field reserved by bd-1clej; authorization policy remains a follow-up and MUST NOT be inferred from the field alone."
+    },
+    "workspace_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "description": "Optional caller workspace identity echoed in the matching response when present. This reserves the envelope slot for future workspace-scoped warm-load and audit logic without changing the daemon v1 wire shape later."
     },
     "method": {
       "type": "string",

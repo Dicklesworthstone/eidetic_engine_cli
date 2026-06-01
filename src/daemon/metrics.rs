@@ -156,13 +156,20 @@ mod tests {
     }
 
     fn ok_response() -> DaemonResponse {
-        DaemonResponse::ok("req-1", serde_json::json!({"ok": true}))
+        DaemonResponse::ok(
+            "req-1",
+            "agent-metrics-test",
+            None,
+            serde_json::json!({"ok": true}),
+        )
     }
 
     fn error_response() -> DaemonResponse {
         DaemonResponse {
             schema: super::super::DAEMON_RESPONSE_SCHEMA_V1.to_owned(),
             request_id: "req-2".to_owned(),
+            agent_id: "agent-metrics-test".to_owned(),
+            workspace_id: None,
             result: None,
             error: Some(DaemonResponseError {
                 code: "daemon_unknown_method".to_owned(),
@@ -173,7 +180,8 @@ mod tests {
     }
 
     fn degraded_response() -> DaemonResponse {
-        DaemonResponse::ok("req-3", serde_json::Value::Null).with_degraded("daemon_overloaded")
+        DaemonResponse::ok("req-3", "agent-metrics-test", None, serde_json::Value::Null)
+            .with_degraded("daemon_overloaded")
     }
 
     #[test]

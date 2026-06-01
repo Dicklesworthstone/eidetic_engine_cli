@@ -42509,6 +42509,7 @@ fn probe_daemon_stop_liveness(socket_path: &Path) -> Result<(), DomainError> {
 
     let request = crate::daemon::protocol::DaemonRequest::new(
         "daemon-stop-liveness-probe",
+        "ee-cli-daemon-stop",
         crate::daemon::server::METHOD_ECHO,
         serde_json::json!({}),
     );
@@ -47621,7 +47622,8 @@ mod tests {
         SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand,
         TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
-        hook_git_readiness_response_json, mesh, parse_completion_audit_evidence_input,
+        format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
+        json_with_data_result_path, mesh, parse_completion_audit_evidence_input,
         parse_context_profile, parse_lab_counterfactual_swap,
         parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
         parse_verification_evidence_record_input, plan_cache_diag_degraded,
