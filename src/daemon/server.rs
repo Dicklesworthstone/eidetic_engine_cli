@@ -24,7 +24,7 @@
 
 use std::fs;
 use std::io;
-use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -203,20 +203,10 @@ impl DaemonServerHandle {
                 .join()
                 .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
         }
-        // Idempotent unlink (bd-wj6v9): drop the prior
-        // `exists()`-then-`remove_file` check-then-act, which had a
-        // TOCTOU window — an external unlinker (a peer `ee daemon
-        // stop`, an operator, or a tmpreaper) removing the socket
-        // between the `exists()` probe and the `remove_file` call
-        // turned a successful shutdown into a spurious `io::Error`
-        // with `NotFound`. Unconditionally unlink and treat NotFound
-        // as success: the post-condition we care about ("the socket
-        // file is gone") already holds.
-        match fs::remove_file(&self.socket_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
+        // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
+        // `NotFound`, but do not let shutdown delete an arbitrary
+        // regular file if the socket path was swapped underneath us.
+        remove_owned_socket_file(&self.socket_path)
     }
 }
 
@@ -228,6 +218,41 @@ impl Drop for DaemonServerHandle {
         // swallowed in Drop; the explicit `shutdown` method surfaces
         // them when callers care.
         let _ = self.shutdown();
+    }
+}
+
+fn remove_owned_socket_file(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "refusing to remove non-socket daemon path {}",
+                        path.display()
+                    ),
+                ));
+            }
+            let euid = current_euid();
+            if metadata.uid() != euid {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "refusing to remove daemon socket {} owned by uid {}, current uid {euid}",
+                        path.display(),
+                        metadata.uid()
+                    ),
+                ));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1480,6 +1505,41 @@ mod tests {
                 std::mem::forget(handle);
             }
         }
+    }
+
+    /// bd-2z3e8: shutdown cleanup must never turn a swapped daemon
+    /// socket path into an arbitrary-file unlink. The helper is tested
+    /// directly so the test can simulate hostile path state without
+    /// deadlocking the accept thread's wakeup connection.
+    #[test]
+    fn guarded_socket_unlink_refuses_regular_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("not-a-daemon-socket");
+        fs::write(&path, b"operator data").expect("write regular file");
+
+        let error = remove_owned_socket_file(&path).expect_err("regular file must be refused");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            path.exists(),
+            "regular file must remain on disk after refused daemon cleanup"
+        );
+    }
+
+    #[test]
+    fn guarded_socket_unlink_removes_owned_socket_and_tolerates_absent_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("owned.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind test socket");
+        drop(listener);
+
+        remove_owned_socket_file(&socket_path).expect("owned socket cleanup must succeed");
+        assert!(
+            !socket_path.exists(),
+            "owned socket file must be removed by guarded cleanup"
+        );
+
+        remove_owned_socket_file(&socket_path).expect("absent path is already clean");
     }
 
     /// Regression test for bd-wj6v9. A second `shutdown()` call (the

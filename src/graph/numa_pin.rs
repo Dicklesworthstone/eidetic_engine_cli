@@ -25,6 +25,7 @@
 //! optimization via `NumaPinConfig::disabled()` the result short-circuits
 //! with the `numa_pin_disabled` code regardless of platform.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -117,10 +118,10 @@ pub enum NumaPinPreference {
 
 impl NumaPinPreference {
     #[must_use]
-    pub fn as_str(self) -> String {
+    pub fn as_str(self) -> Cow<'static, str> {
         match self {
-            Self::Auto => NUMA_PIN_PREFERRED_NODE_AUTO.to_string(),
-            Self::Node(node) => node.to_string(),
+            Self::Auto => Cow::Borrowed(NUMA_PIN_PREFERRED_NODE_AUTO),
+            Self::Node(node) => Cow::Owned(node.to_string()),
         }
     }
 }
@@ -281,12 +282,12 @@ pub struct NumaPinPlan {
     pub enabled: bool,
     pub mapping_kind: NumaPinMappingKind,
     pub bind_requested: bool,
-    pub preferred_node: String,
+    pub preferred_node: Cow<'static, str>,
     pub populate_requested: bool,
     pub snapshot_bytes: u64,
     pub snapshot_path: PathBuf,
     pub fallback_path: NumaPinFallbackPath,
-    pub degraded_codes: Vec<String>,
+    pub degraded_codes: Vec<&'static str>,
 }
 
 impl NumaPinPlan {
@@ -338,9 +339,9 @@ impl NumaPinPlan {
         plan
     }
 
-    fn push_unique_code(&mut self, code: &str) {
-        if !self.degraded_codes.iter().any(|existing| existing == code) {
-            self.degraded_codes.push(code.to_string());
+    fn push_unique_code(&mut self, code: &'static str) {
+        if !self.degraded_codes.contains(&code) {
+            self.degraded_codes.push(code);
         }
     }
 }
@@ -374,12 +375,12 @@ pub struct GraphSnapshotNumaHintRecord {
     pub content_hash: String,
     pub snapshot_path: PathBuf,
     pub snapshot_bytes: u64,
-    pub requested_node: String,
+    pub requested_node: Cow<'static, str>,
     pub map_populate_requested: bool,
     pub mapping_kind: NumaPinMappingKind,
     pub bind_requested: bool,
     pub fallback_path: NumaPinFallbackPath,
-    pub degraded_codes: Vec<String>,
+    pub degraded_codes: Vec<&'static str>,
 }
 
 /// Build the side-table hint row for one graph snapshot. The function is
@@ -420,13 +421,13 @@ pub struct NumaPinResult {
     pub enabled: bool,
     pub attempted: bool,
     pub succeeded: bool,
-    pub preferred_node: String,
+    pub preferred_node: Cow<'static, str>,
     pub populate_requested: bool,
     pub bytes_resident: u64,
     pub populated: bool,
     pub fallback_path: NumaPinFallbackPath,
     pub snapshot_path: Option<PathBuf>,
-    pub degraded_codes: Vec<String>,
+    pub degraded_codes: Vec<&'static str>,
 }
 
 impl NumaPinResult {
@@ -691,14 +692,19 @@ impl NumaPinningAdapter for LinuxNumaPinningAdapter {
 /// happens to map cleanly to BSD/Windows-Unsupported in this scaffold —
 /// the umbrella code distinguishes the cases for now).
 #[must_use]
-pub fn default_numa_pinning_adapter() -> Box<dyn NumaPinningAdapter> {
+pub fn default_numa_pinning_adapter() -> &'static dyn NumaPinningAdapter {
+    #[cfg(target_os = "linux")]
+    static LINUX_ADAPTER: LinuxNumaPinningAdapter = LinuxNumaPinningAdapter;
+    #[cfg(not(target_os = "linux"))]
+    static NON_LINUX_ADAPTER: MacosNumaPinningAdapter = MacosNumaPinningAdapter;
+
     #[cfg(target_os = "linux")]
     {
-        Box::new(LinuxNumaPinningAdapter)
+        &LINUX_ADAPTER
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Box::new(MacosNumaPinningAdapter)
+        &NON_LINUX_ADAPTER
     }
 }
 
@@ -735,7 +741,7 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for code in &result.degraded_codes {
             assert!(
-                seen.insert(code.clone()),
+                seen.insert(*code),
                 "duplicate degraded code {code} in {:?}",
                 result.degraded_codes
             );
@@ -746,7 +752,7 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for code in &plan.degraded_codes {
             assert!(
-                seen.insert(code.clone()),
+                seen.insert(*code),
                 "duplicate degraded code {code} in {:?}",
                 plan.degraded_codes
             );
@@ -771,10 +777,7 @@ mod tests {
             result.fallback_path,
             NumaPinFallbackPath::DisabledByOperator
         );
-        assert_eq!(
-            result.degraded_codes,
-            vec![NUMA_PIN_DISABLED_CODE.to_string()]
-        );
+        assert_eq!(result.degraded_codes, vec![NUMA_PIN_DISABLED_CODE]);
         assert_no_duplicate_codes(&result);
     }
 
@@ -786,10 +789,7 @@ mod tests {
         assert!(!plan.bind_requested);
         assert_eq!(plan.snapshot_bytes, 4096);
         assert_eq!(plan.fallback_path, NumaPinFallbackPath::DisabledByOperator);
-        assert_eq!(
-            plan.degraded_codes,
-            vec![NUMA_PIN_DISABLED_CODE.to_string()]
-        );
+        assert_eq!(plan.degraded_codes, vec![NUMA_PIN_DISABLED_CODE]);
         assert_plan_has_no_duplicate_codes(&plan);
     }
 
@@ -922,7 +922,7 @@ mod tests {
         );
         assert_eq!(
             plan.degraded_codes,
-            vec![NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE.to_string()]
+            vec![NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE]
         );
         assert_plan_has_no_duplicate_codes(&plan);
     }
@@ -1095,10 +1095,7 @@ mod tests {
         assert_eq!(hint.mapping_kind, NumaPinMappingKind::None);
         assert!(!hint.bind_requested);
         assert_eq!(hint.fallback_path, NumaPinFallbackPath::DisabledByOperator);
-        assert_eq!(
-            hint.degraded_codes,
-            vec![NUMA_PIN_DISABLED_CODE.to_string()]
-        );
+        assert_eq!(hint.degraded_codes, vec![NUMA_PIN_DISABLED_CODE]);
     }
 
     #[test]
@@ -1295,7 +1292,7 @@ mod tests {
         fn assert_send_sync<T: Send + Sync + ?Sized>() {}
         assert_send_sync::<dyn NumaPinningAdapter>();
 
-        let adapter: Box<dyn NumaPinningAdapter> = default_numa_pinning_adapter();
+        let adapter = default_numa_pinning_adapter();
         let outcome = adapter.set_node_affinity(Some(0));
         // The platform-specific code is whichever adapter we got; the
         // load-bearing invariant is just that *some* honest degraded
