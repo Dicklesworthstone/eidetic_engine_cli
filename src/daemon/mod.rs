@@ -153,14 +153,20 @@ pub const DAEMON_SHUTTING_DOWN_CODE: &str = "daemon_shutting_down";
 /// every local UID and is a documented attack surface (bd-3j0td).
 #[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+    default_daemon_socket_path_with(std::env::var_os, current_euid())
+}
+
+fn default_daemon_socket_path_with(
+    mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+    uid: u32,
+) -> PathBuf {
+    if let Some(runtime_dir) = env_var("XDG_RUNTIME_DIR") {
         let runtime = Path::new(&runtime_dir);
         if !runtime.as_os_str().is_empty() {
             return runtime.join("ee").join("daemon.sock");
         }
     }
-    let tmp = std::env::var_os("TMPDIR").unwrap_or_else(|| "/tmp".into());
-    let uid = current_euid();
+    let tmp = env_var("TMPDIR").unwrap_or_else(|| "/tmp".into());
     Path::new(&tmp)
         .join(format!("ee-{uid}"))
         .join("daemon.sock")
@@ -245,21 +251,47 @@ impl std::error::Error for DaemonStartError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+
+    fn daemon_socket_path_for_env(vars: &[(&str, &str)], uid: u32) -> PathBuf {
+        default_daemon_socket_path_with(
+            |name| {
+                vars.iter()
+                    .find(|(candidate, _)| *candidate == name)
+                    .map(|(_, value)| OsString::from(value))
+            },
+            uid,
+        )
+    }
 
     #[test]
     fn default_socket_path_uses_xdg_runtime_dir_when_set() {
-        // Bypass the env-var read by exercising the canonical-path
-        // construction directly; the production helper consults
-        // process env which tests cannot mutate safely.
-        let runtime = Path::new("/run/user/1000");
         assert_eq!(
-            runtime.join("ee").join("daemon.sock"),
+            daemon_socket_path_for_env(
+                &[
+                    ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                    ("TMPDIR", "/ignored")
+                ],
+                501,
+            ),
             Path::new("/run/user/1000/ee/daemon.sock"),
         );
     }
 
     #[test]
-    fn default_socket_path_falls_back_to_per_uid_tmpdir_on_darwin() {
+    fn default_socket_path_falls_back_to_tmpdir_when_xdg_is_unset_or_empty() {
+        assert_eq!(
+            daemon_socket_path_for_env(&[("TMPDIR", "/var/tmp")], 1000),
+            Path::new("/var/tmp/ee-1000/daemon.sock"),
+        );
+        assert_eq!(
+            daemon_socket_path_for_env(&[("XDG_RUNTIME_DIR", ""), ("TMPDIR", "/var/tmp")], 1000),
+            Path::new("/var/tmp/ee-1000/daemon.sock"),
+        );
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_per_uid_tmpdir_default() {
         // Post-bd-3j0td: the fallback shape is
         // `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock`. The per-UID parent
         // partitions the socket across local tenants so the shared
@@ -267,10 +299,8 @@ mod tests {
         // is gone. Pin the construction; a future refactor that
         // collapses this back to the world-shared bare path is a
         // regression of the P0 fix.
-        let tmp = Path::new("/tmp");
-        let uid: u32 = 1000;
         assert_eq!(
-            tmp.join(format!("ee-{uid}")).join("daemon.sock"),
+            daemon_socket_path_for_env(&[], 1000),
             Path::new("/tmp/ee-1000/daemon.sock"),
         );
     }
