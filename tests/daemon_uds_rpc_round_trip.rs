@@ -18,11 +18,12 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ee::daemon::{
     DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_REQUEST_MAX_BYTES,
     DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1,
+    DAEMON_SHUTTING_DOWN_CODE,
     protocol::{DaemonRequest, DaemonResponse},
     server::{
         DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
@@ -470,6 +471,208 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     handle
         .shutdown()
         .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_shutdown_is_idempotent_across_repeated_calls_over_uds() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-idempotent-uds.sock");
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+    wait_for_accept_loop();
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("first shutdown: {error}"))?;
+    ensure(
+        !socket_path.exists(),
+        "socket file must be unlinked after first shutdown",
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("second shutdown must be idempotent: {error}"))?;
+    handle
+        .shutdown()
+        .map_err(|error| format!("third shutdown must be idempotent: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_drop_without_explicit_shutdown_unlinks_socket() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-drop-cleanup.sock");
+
+    {
+        let handle =
+            start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+        wait_for_accept_loop();
+        ensure(
+            handle.socket_path().exists(),
+            "socket file must exist while daemon handle is live",
+        )?;
+    }
+
+    ensure(
+        !socket_path.exists(),
+        "dropping the daemon handle without explicit shutdown must unlink the socket",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-restart-same-path.sock");
+
+    let mut first =
+        start_server(&socket_path).map_err(|error| format!("first start_server: {error}"))?;
+    wait_for_accept_loop();
+    first
+        .shutdown()
+        .map_err(|error| format!("first shutdown: {error}"))?;
+    ensure(
+        !socket_path.exists(),
+        "socket file must be absent before restarting on the same path",
+    )?;
+
+    let mut second =
+        start_server(&socket_path).map_err(|error| format!("second start_server: {error}"))?;
+    wait_for_accept_loop();
+    let request = DaemonRequest::new(
+        "req-restart-same-path",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        serde_json::json!({"restart": true}),
+    );
+    let response = client_round_trip(second.socket_path(), &request)
+        .map_err(|error| format!("client_round_trip after restart: {error}"))?;
+    ensure(
+        response.request_id == "req-restart-same-path",
+        format!(
+            "restarted daemon must echo request_id; got {}",
+            response.request_id
+        ),
+    )?;
+    ensure_error_code(&response, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
+
+    second
+        .shutdown()
+        .map_err(|error| format!("second shutdown: {error}"))?;
+    ensure(
+        !socket_path.exists(),
+        "socket file must be unlinked after second shutdown",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn daemon_shutdown_unblocks_accept_loop_without_any_client_connection() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-idle-shutdown.sock");
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+    wait_for_accept_loop();
+
+    let started = Instant::now();
+    handle
+        .shutdown()
+        .map_err(|error| format!("idle shutdown: {error}"))?;
+    ensure(
+        started.elapsed() < Duration::from_secs(1),
+        format!(
+            "idle shutdown should wake accept loop promptly; elapsed {:?}",
+            started.elapsed()
+        ),
+    )?;
+    ensure(
+        !socket_path.exists(),
+        "idle shutdown must unlink the socket",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn daemon_shutdown_during_connected_client_returns_structured_response() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-shutdown-client-race.sock");
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+    wait_for_accept_loop();
+
+    let mut stream = connect_client(handle.socket_path())?;
+    wait_for_accept_loop();
+
+    let shutdown = thread::spawn(move || {
+        handle
+            .shutdown()
+            .map_err(|error| format!("shutdown thread: {error}"))
+    });
+    thread::sleep(Duration::from_millis(25));
+
+    let request = DaemonRequest::new(
+        "req-shutdown-race",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        serde_json::json!({"race": "shutdown"}),
+    );
+    let body = serde_json::to_vec(&request).map_err(|error| format!("encode request: {error}"))?;
+    write_raw_frame(&mut stream, &body)?;
+    let response = read_response_frame(&mut stream)?;
+
+    shutdown
+        .join()
+        .map_err(|_| "shutdown thread panicked".to_owned())??;
+
+    ensure(
+        response.schema == DAEMON_RESPONSE_SCHEMA_V1,
+        format!(
+            "shutdown race response schema must be {DAEMON_RESPONSE_SCHEMA_V1}; got {}",
+            response.schema
+        ),
+    )?;
+    let error = response
+        .error
+        .as_ref()
+        .ok_or_else(|| format!("shutdown race must return an error envelope; got {response:?}"))?;
+    ensure(
+        error.code == DAEMON_SHUTTING_DOWN_CODE
+            || error.code == DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
+        format!(
+            "shutdown race must return structured shutdown or normal stub error; got {}",
+            error.code
+        ),
+    )?;
+    if error.code == DAEMON_SHUTTING_DOWN_CODE {
+        ensure(
+            response
+                .degraded_codes
+                .contains(&DAEMON_SHUTTING_DOWN_CODE.to_owned()),
+            format!(
+                "shutdown response must carry degraded code; got {:?}",
+                response.degraded_codes
+            ),
+        )?;
+    } else {
+        ensure(
+            response.request_id == "req-shutdown-race",
+            format!(
+                "normal race response must echo request_id; got {}",
+                response.request_id
+            ),
+        )?;
+        ensure(
+            response.agent_id == TEST_AGENT_ID,
+            format!(
+                "normal race response must echo agent_id; got {}",
+                response.agent_id
+            ),
+        )?;
+    }
     Ok(())
 }
 
