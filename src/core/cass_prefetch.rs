@@ -668,10 +668,16 @@ pub trait SpeculativePrefetch {
 /// Position 0 (most recent) gets weight 1.0; position 3 gets ~0.5;
 /// position 6 gets ~0.25; position 10 gets ~0.099. Smooth decay
 /// across the canonical 10-element window without a hard cutoff.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RecencyWeightedFrequencyPredictor {
     half_life: f64,
     min_score: f64,
+}
+
+impl Default for RecencyWeightedFrequencyPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecencyWeightedFrequencyPredictor {
@@ -1130,6 +1136,19 @@ mod tests {
         let first = predictor.predict_next_n(&h, 5);
         let second = predictor.predict_next_n(&h, 5);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn default_predictor_matches_new_bd_8rdn7() {
+        let h = history(&["current", "alpha", "bravo", "alpha"]);
+        let from_default = RecencyWeightedFrequencyPredictor::default().predict_next_n(&h, 5);
+        let from_new = RecencyWeightedFrequencyPredictor::new().predict_next_n(&h, 5);
+
+        assert!(
+            !from_default.is_empty(),
+            "Default must remain a functional predictor"
+        );
+        assert_eq!(from_default, from_new);
     }
 
     #[test]
