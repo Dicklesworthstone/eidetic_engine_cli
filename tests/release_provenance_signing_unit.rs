@@ -1,5 +1,10 @@
 use std::{fs, path::PathBuf};
 
+const INSTALLER_TAG_ONLY_IDENTITY: &str =
+    r"^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/tags/v[0-9].*$";
+const WORKFLOW_TAG_ONLY_IDENTITY: &str = r"^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$";
+const MAIN_BRANCH_IDENTITY_ALTERNATION: &str = r"release\.yml@refs/(tags/v[0-9].*|heads/main)$";
+
 fn repo_file(path: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path);
     fs::read_to_string(&path).unwrap_or_else(|err| {
@@ -28,6 +33,28 @@ fn assert_order(haystack: &str, first: &str, second: &str) {
 }
 
 #[test]
+fn keyless_release_identity_is_tag_only() {
+    let installer = repo_file("install.sh");
+    let workflow = repo_file(".github/workflows/release.yml");
+    let doc = repo_file("docs/security/release-signing.md");
+
+    assert_contains(&installer, INSTALLER_TAG_ONLY_IDENTITY);
+    assert_contains(&workflow, WORKFLOW_TAG_ONLY_IDENTITY);
+    assert_contains(&doc, WORKFLOW_TAG_ONLY_IDENTITY);
+
+    for (surface, content) in [
+        ("install.sh", installer.as_str()),
+        (".github/workflows/release.yml", workflow.as_str()),
+        ("docs/security/release-signing.md", doc.as_str()),
+    ] {
+        assert!(
+            !content.contains(MAIN_BRANCH_IDENTITY_ALTERNATION),
+            "{surface} must not trust release.yml signatures from refs/heads/main"
+        );
+    }
+}
+
+#[test]
 fn release_workflow_signs_provenance_with_same_sigstore_trust_boundary() {
     let workflow = repo_file(".github/workflows/release.yml");
 
@@ -42,6 +69,7 @@ fn release_workflow_signs_provenance_with_same_sigstore_trust_boundary() {
         "--insecure-ignore-tlog=false",
         "--certificate-identity-regexp \"$CERT_IDENTITY_REGEXP\"",
         "--certificate-oidc-issuer \"$CERT_OIDC_ISSUER\"",
+        WORKFLOW_TAG_ONLY_IDENTITY,
         "https://token.actions.githubusercontent.com",
     ] {
         assert_contains(&workflow, needle);
@@ -60,6 +88,7 @@ fn installer_requires_provenance_when_requested() {
         "EE_INSTALL_REQUIRE_KEYLESS",
         "REQUIRE_KEYLESS=\"${EE_INSTALL_REQUIRE_KEYLESS:-0}\"",
         "--insecure-ignore-tlog=false",
+        INSTALLER_TAG_ONLY_IDENTITY,
         "Sigstore verified via pinned-key fallback",
         "${artifact_url%.tar.xz}.provenance.json",
         "${provenance_url}.sigstore.json",
@@ -111,6 +140,7 @@ fn release_signing_policy_documents_key_ceremony_and_keyless_only_mode() {
         "Rotation",
         "Revocation",
         "mode `0600`",
+        WORKFLOW_TAG_ONLY_IDENTITY,
     ] {
         assert_contains(&doc, needle);
     }

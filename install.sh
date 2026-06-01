@@ -67,7 +67,7 @@ CHECKSUM_URL="${CHECKSUM_URL:-}"
 # exact OIDC issuer that maintainer used at signing time; do not relax these
 # to wildcards.
 CERT_IDENTITY_REGEXPS=(
-  "^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$"
+  "^https://github\.com/${OWNER}/${REPO}/\.github/workflows/release\.yml@refs/tags/v[0-9].*$"
   '^jeff141421@gmail\.com$'
 )
 CERT_OIDC_ISSUERS=(

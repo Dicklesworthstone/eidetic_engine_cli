@@ -569,7 +569,7 @@ jobs:
       - name: Verify Sigstore bundles and provenance
         run: |
           set -euo pipefail
-          CERT_IDENTITY_REGEXP='^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$'
+          CERT_IDENTITY_REGEXP='^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$'
           CERT_OIDC_ISSUER='https://token.actions.githubusercontent.com'
           for artifact in release/ee-*.tar.xz; do
             bundle="${artifact}.sigstore.json"
@@ -672,7 +672,7 @@ jobs:
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
             printf '%s\n' '  --insecure-ignore-tlog=false \'
-            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
+            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$" \'
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
@@ -693,7 +693,7 @@ jobs:
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.provenance.json.sigstore.json \'
             printf '%s\n' '  --insecure-ignore-tlog=false \'
-            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
+            printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$" \'
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.provenance.json'
             printf '%s\n\n' '```'

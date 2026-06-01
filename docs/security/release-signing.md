@@ -8,7 +8,7 @@ signing. The preferred path is Sigstore keyless signing from
 cosign verify-blob \
   --bundle ee-<target>.tar.xz.sigstore.json \
   --insecure-ignore-tlog=false \
-  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \
+  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/tags/v[0-9].*$" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   ee-<target>.tar.xz
 ```
