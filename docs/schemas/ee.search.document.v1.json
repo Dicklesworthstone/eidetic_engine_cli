@@ -9,6 +9,7 @@
     "score",
     "scoreInterval",
     "coverageGuarantee",
+    "calibrated",
     "source",
     "why",
     "provenance"
@@ -36,7 +37,12 @@
       ]
     },
     "coverageGuarantee": {
-      "type": "number"
+      "type": ["number", "null"],
+      "description": "Calibrated coverage probability for scoreInterval (e.g. 0.95). Null when `calibrated` is false: scoreInterval is the trivial [0,1] band and coverage is unknown rather than 95%."
+    },
+    "calibrated": {
+      "type": "boolean",
+      "description": "True when a conformal residual quantile produced scoreInterval/coverageGuarantee. When false, treat `score` as a raw uncalibrated fusion score over a trivial [0,1] band."
     },
     "source": {
       "type": "string",

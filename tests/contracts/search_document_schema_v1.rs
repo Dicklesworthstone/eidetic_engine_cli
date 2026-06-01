@@ -69,6 +69,7 @@ fn full_emitted_search_document() -> Result<Value, String> {
             "provenance_uri": "file://AGENTS.md#L42",
             "scoreInterval": [0.72, 0.97],
             "coverageGuarantee": 0.95,
+            "calibrated": true,
             "driftHint": {
                 "status": "current"
             },
@@ -146,7 +147,7 @@ fn search_document_v1_validator_rejects_unknown_result_fields() -> TestResult {
 fn search_document_v1_validator_rejects_missing_calibration_fields() -> TestResult {
     let schema = read_schema()?;
 
-    for field in ["scoreInterval", "coverageGuarantee"] {
+    for field in ["scoreInterval", "coverageGuarantee", "calibrated"] {
         let mut document = full_emitted_search_document()?;
         document
             .as_object_mut()

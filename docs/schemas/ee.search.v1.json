@@ -46,10 +46,14 @@
                 "description": "Closed [lo, hi] uncertainty interval around `score`."
               },
               "coverageGuarantee": {
-                "type": "number",
+                "type": ["number", "null"],
                 "minimum": 0.0,
                 "maximum": 1.0,
-                "description": "Calibrated coverage probability the scoreInterval is expected to satisfy (e.g. 0.95 for a 95% interval)."
+                "description": "Calibrated coverage probability the scoreInterval is expected to satisfy (e.g. 0.95 for a 95% interval). Null when `calibrated` is false: no conformal residual quantile exists, so the scoreInterval is the trivial [0,1] band and coverage is unknown rather than 95%."
+              },
+              "calibrated": {
+                "type": "boolean",
+                "description": "True when a conformal residual quantile produced the scoreInterval/coverageGuarantee. When false, scoreInterval is the trivial [0,1] band and coverageGuarantee is null; treat `score` as an uncalibrated raw fusion score, not a calibrated [0,1] relevance."
               },
               "source": {"type": "string", "enum": ["lexical", "semantic_fast", "semantic_quality", "hybrid", "lexical_only", "semantic_only"]},
               "why": {"type": "string"},

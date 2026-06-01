@@ -216,6 +216,12 @@ fn search_json_uses_real_calibration_rows_for_score_intervals() -> TestResult {
         first.pointer("/coverageGuarantee").and_then(Value::as_f64) == Some(0.95),
         "coverageGuarantee must surface the configured 95% coverage target",
     )?;
+    // bd-1h4nu: a real conformal residual quantile exists here, so the hit is
+    // calibrated and the 0.95 coverageGuarantee above is honest.
+    ensure(
+        first.pointer("/calibrated").and_then(Value::as_bool) == Some(true),
+        "calibrated hits must report calibrated=true alongside the 0.95 coverageGuarantee",
+    )?;
     ensure(
         first
             .pointer("/metadata/scoreCalibration/status")

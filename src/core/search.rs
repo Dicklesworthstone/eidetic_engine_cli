@@ -1453,6 +1453,7 @@ impl SearchReport {
                     "score": hit.score,
                     "scoreInterval": search_hit_score_interval_json(hit),
                     "coverageGuarantee": search_hit_coverage_guarantee_json(hit),
+                    "calibrated": search_hit_calibrated_json(hit),
                     "source": hit.source.as_str(),
                     "why": hit.why(),
                     "provenance": provenance,
@@ -2662,6 +2663,14 @@ fn annotate_hits_with_score_calibration(
         SearchScoreCalibrationStatus::Absent | SearchScoreCalibrationStatus::Calibrated => {}
     }
 
+    // bd-1h4nu: only advertise a calibrated coverage probability when a
+    // conformal residual quantile actually exists. Without one,
+    // `interval_for_score` returns the trivial [0,1] band; pairing that with a
+    // hardcoded 0.95 "coverageGuarantee" misleads agents into reading the raw
+    // RRF score as a 95%-calibrated [0,1] relevance. When uncalibrated we emit
+    // `coverageGuarantee: null` and `calibrated: false` so [0,1] reads as
+    // "unknown", not "95% sure".
+    let calibrated = calibration.residual_quantile.is_some();
     for hit in hits {
         let interval = calibration.interval_for_score(hit.score);
         let mut metadata = hit
@@ -2673,9 +2682,14 @@ fn annotate_hits_with_score_calibration(
             "scoreInterval".to_string(),
             serde_json::json!([interval[0], interval[1]]),
         );
+        metadata.insert("calibrated".to_string(), serde_json::json!(calibrated));
         metadata.insert(
             "coverageGuarantee".to_string(),
-            serde_json::json!(round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE)),
+            if calibrated {
+                serde_json::json!(round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE))
+            } else {
+                serde_json::Value::Null
+            },
         );
         metadata.insert("scoreCalibration".to_string(), calibration.data_json());
         hit.metadata = Some(serde_json::Value::Object(metadata));
@@ -2851,11 +2865,25 @@ fn search_hit_score_interval_json(hit: &SearchHit) -> serde_json::Value {
 }
 
 fn search_hit_coverage_guarantee_json(hit: &SearchHit) -> serde_json::Value {
+    // bd-1h4nu: absence of a `coverageGuarantee` annotation means calibration
+    // never ran for this hit, so the honest default is `null` ("unknown"), not
+    // a 0.95 coverage claim over the trivial [0,1] interval.
     hit.metadata
         .as_ref()
         .and_then(|metadata| metadata.get("coverageGuarantee"))
         .cloned()
-        .unwrap_or_else(|| serde_json::json!(round_metric_f32(SEARCH_SCORE_COVERAGE_GUARANTEE)))
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn search_hit_calibrated_json(hit: &SearchHit) -> serde_json::Value {
+    // bd-1h4nu: `calibrated` is the explicit flag agents should branch on. A
+    // hit with no calibration metadata is uncalibrated (false), so the
+    // scoreInterval/coverageGuarantee pair must be read as "unknown".
+    hit.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("calibrated"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(false))
 }
 
 fn redact_search_provenance_uri(
@@ -7396,7 +7424,14 @@ mod tests {
             json["results"][0]["scoreInterval"],
             serde_json::json!([0.0, 1.0])
         );
-        assert_eq!(json["results"][0]["coverageGuarantee"], 0.95);
+        // bd-1h4nu: this hit carries no calibration metadata, so the trivial
+        // [0,1] interval must read as "unknown" — coverageGuarantee null and
+        // calibrated false — not a misleading 0.95 coverage claim.
+        assert_eq!(
+            json["results"][0]["coverageGuarantee"],
+            serde_json::Value::Null
+        );
+        assert_eq!(json["results"][0]["calibrated"], serde_json::json!(false));
         assert!(json["results"][0]["why"].is_string());
         assert!(json["results"][0]["provenance"].is_array());
     }

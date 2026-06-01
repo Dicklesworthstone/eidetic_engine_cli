@@ -13,7 +13,8 @@
           0.0,
           1.0
         ],
-        "coverageGuarantee": 0.95,
+        "coverageGuarantee": null,
+        "calibrated": false,
         "source": "hybrid",
         "why": "Score 0.0328 via RRF fusion of 2 signals",
         "provenance": [
@@ -59,7 +60,8 @@
           0.0,
           1.0
         ],
-        "coverageGuarantee": 0.95,
+        "coverageGuarantee": null,
+        "calibrated": false,
         "source": "hybrid",
         "why": "Score 0.0320 via RRF fusion of 2 signals",
         "provenance": [
@@ -105,7 +107,8 @@
           0.0,
           1.0
         ],
-        "coverageGuarantee": 0.95,
+        "coverageGuarantee": null,
+        "calibrated": false,
         "source": "hybrid",
         "why": "Score 0.0320 via RRF fusion of 2 signals",
         "provenance": [

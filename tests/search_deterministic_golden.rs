@@ -600,11 +600,19 @@ fn assert_search_contract(value: &JsonValue) -> TestResult {
             0.000_001,
             "search result scoreInterval upper bound",
         )?;
-        ensure_json_number_close(
+        // bd-1h4nu: this fixture has no calibration JSONL, so every hit is
+        // uncalibrated: the scoreInterval is the trivial [0,1] band and the
+        // honest coverageGuarantee is null with calibrated=false, not a 0.95
+        // coverage claim over raw RRF scores.
+        ensure_equal(
             &result["coverageGuarantee"],
-            &serde_json::json!(0.95),
-            0.000_001,
-            "search result coverage guarantee",
+            &serde_json::Value::Null,
+            "search result coverage guarantee (uncalibrated => null)",
+        )?;
+        ensure_equal(
+            &result["calibrated"],
+            &serde_json::json!(false),
+            "search result calibrated flag (uncalibrated)",
         )?;
         ensure(
             result["source"].is_string(),
