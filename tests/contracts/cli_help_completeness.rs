@@ -163,7 +163,7 @@ fn split_shell_words(command: &str) -> Result<Vec<String>, String> {
 #[test]
 fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
     // The `ee context --help` checks were removed with the deprecated
-    // `ee context` command. Context-only flags (`--ppr-weight`, `--explain`,
+    // `ee context` command. Context-only tuning flags (`--ppr-weight`,
     // `--no-pack-dna`, `--stream`, `--include-tombstoned`, `--relevance-floor`)
     // are not part of the `ee pack` surface that replaced it, so they are no
     // longer help-discoverable. The `ee pack --help` coverage below pins the
@@ -179,6 +179,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--profile",
             "--pack-profile",
             "--resource-profile",
+            "--explain",
             "--explain-performance",
             "--no-coverage-fill",
             "--no-rendered-text",
@@ -204,6 +205,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--profile",
             "--pack-profile",
             "--resource-profile",
+            "--explain",
             "--explain-performance",
             "--no-coverage-fill",
             "--no-rendered-text",
@@ -907,11 +909,12 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "--limit", "5", "--json",
         ][..],
         // The `ee context ...` documented examples were removed with the
-        // deprecated command. Their context-only flags (`--ppr-weight`,
-        // `--explain`, `--no-pack-dna`, `--stream`, `--include-tombstoned`) are
-        // not part of `ee pack`, so they cannot be re-expressed against the
-        // replacement surface. The `ee pack build` examples below pin the
-        // documented context-pack invocations that still parse.
+        // deprecated command. Their context-only tuning flags (`--ppr-weight`,
+        // `--no-pack-dna`, `--stream`, `--include-tombstoned`) are not part of
+        // `ee pack`, so they cannot be re-expressed against the replacement
+        // surface. The `ee pack` examples below pin the documented context-pack
+        // invocations that still parse.
+        &["ee", "pack", "release", "--explain", "--json"][..],
         &[
             "ee",
             "pack",
@@ -928,6 +931,7 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "verbose",
             "--resource-profile",
             "swarm_heavy",
+            "--explain",
             "--explain-performance",
             "--no-coverage-fill=false",
             "--coordination-snapshot",

@@ -1457,6 +1457,26 @@ fn json_with_redaction_metadata(
     value.to_string()
 }
 
+fn json_with_data_result_path(raw_json: String, result_path: Option<&str>) -> String {
+    let Some(result_path) = result_path else {
+        return raw_json;
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_json) else {
+        return raw_json;
+    };
+    let Some(data) = value
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return raw_json;
+    };
+    data.insert(
+        "resultPath".to_string(),
+        serde_json::Value::String(result_path.to_string()),
+    );
+    value.to_string()
+}
+
 /// Arguments for `ee export`.
 #[derive(Clone, Debug, Eq, Parser, PartialEq)]
 pub struct ExportArgs {
@@ -2534,6 +2554,10 @@ pub struct PackArgs {
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
+    /// Include pack explanation metadata in JSON output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -2644,6 +2668,10 @@ pub struct PackBuildArgs {
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
 
+    /// Include pack explanation metadata in JSON output.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub explain: bool,
+
     /// Emit a redaction-safe query and pack performance report instead of the context pack.
     #[arg(long, action = ArgAction::SetTrue)]
     pub explain_performance: bool,
@@ -2697,6 +2725,7 @@ impl PackArgs {
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
             output: self.output.clone(),
+            explain: self.explain,
             explain_performance: self.explain_performance,
             as_of: self.as_of,
             include_expired: self.include_expired,
@@ -28690,6 +28719,7 @@ fn write_context_response<W>(
     response: &ContextResponse,
     redaction: Option<&EffectiveRedactionLevel>,
     render_options: output::ContextJsonRenderOptions,
+    result_path_hint: Option<&'static str>,
     output_path: Option<&Path>,
     stdout: &mut W,
 ) -> ProcessExitCode
@@ -28728,14 +28758,20 @@ where
             Some(redaction) => {
                 let (fields, patterns) = context_redaction_fields_and_patterns(response);
                 json_with_redaction_metadata(
-                    output::render_context_response_json_with_options(response, render_options),
+                    json_with_data_result_path(
+                        output::render_context_response_json_with_options(response, render_options),
+                        result_path_hint,
+                    ),
                     redaction,
                     fields,
                     patterns,
                 ) + "\n"
             }
             None => {
-                output::render_context_response_json_with_options(response, render_options) + "\n"
+                json_with_data_result_path(
+                    output::render_context_response_json_with_options(response, render_options),
+                    result_path_hint,
+                ) + "\n"
             }
         },
         output::Renderer::Jsonl => output::render_context_response_jsonl(response) + "\n",
@@ -29196,6 +29232,7 @@ where
                 &response,
                 Some(&redaction),
                 render_options,
+                args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
                 stdout,
             )
@@ -32041,7 +32078,7 @@ where
             index_dir: args.index_dir.clone(),
             output: args.output.clone(),
             explain_performance: args.explain_performance,
-            explain: false,
+            explain: args.explain,
             no_pack_dna: false,
             no_coverage_fill: args.no_coverage_fill,
             no_rendered_text: args.no_rendered_text,
@@ -32218,6 +32255,13 @@ where
     match run_context_pack(&options) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
+            if args.explain {
+                let database_path_for_pack_dna = options
+                    .database_path
+                    .clone()
+                    .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+                attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
+            }
             attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
             write_context_response(
                 renderer,
@@ -32225,6 +32269,7 @@ where
                 &response,
                 None,
                 output::ContextJsonRenderOptions::from(output_options),
+                args.explain.then_some("data.pack.items"),
                 args.output.as_deref(),
                 stdout,
             )
@@ -34283,6 +34328,7 @@ where
                     &report,
                     args.mesh_mode,
                     recalibration.as_ref(),
+                    args.explain.then_some("data.results"),
                 ) + "\n"),
             ),
         },
@@ -34306,15 +34352,24 @@ fn format_search_json(report: &SearchReport) -> String {
 }
 
 fn format_search_json_with_mesh(report: &SearchReport, mesh_mode: MeshCommandMode) -> String {
-    format_search_json_with_mesh_and_recalibration(report, mesh_mode, None)
+    format_search_json_with_mesh_and_recalibration(report, mesh_mode, None, None)
 }
 
 fn format_search_json_with_mesh_and_recalibration(
     report: &SearchReport,
     mesh_mode: MeshCommandMode,
     recalibration: Option<&SearchScoreRecalibrationReport>,
+    result_path_hint: Option<&'static str>,
 ) -> String {
     let mut data = report.data_json();
+    if let Some(result_path) = result_path_hint
+        && let Some(data_object) = data.as_object_mut()
+    {
+        data_object.insert(
+            "resultPath".to_owned(),
+            serde_json::Value::String(result_path.to_owned()),
+        );
+    }
     if let Some(revision) =
         crate::core::search::SearchRevisionMetadata::for_report(report, mesh_mode)
         && let Some(data_object) = data.as_object_mut()
@@ -49248,6 +49303,15 @@ mod tests {
             other => return Err(format!("expected pack command, got {other:?}")),
         }
 
+        let pack_query_explain = Cli::try_parse_from(["ee", "pack", "release", "--explain"])
+            .map_err(|error| format!("pack query explain parse failed: {:?}", error.kind()))?;
+        match pack_query_explain.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(&args.explain, &true, "pack query explain")?;
+            }
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
         let pack = Cli::try_parse_from([
             "ee",
             "pack",
@@ -49261,6 +49325,25 @@ mod tests {
             Some(Command::Pack(args)) => match args.command {
                 Some(PackCommand::Build(args)) => {
                     ensure_equal(&args.explain_performance, &true, "pack explain performance")?;
+                }
+                other => return Err(format!("expected pack build command, got {other:?}")),
+            },
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
+        let pack_explain = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "build",
+            "--query-file",
+            "query.json",
+            "--explain",
+        ])
+        .map_err(|error| format!("pack explain flag parse failed: {:?}", error.kind()))?;
+        match pack_explain.command {
+            Some(Command::Pack(args)) => match args.command {
+                Some(PackCommand::Build(args)) => {
+                    ensure_equal(&args.explain, &true, "pack explain")?;
                 }
                 other => return Err(format!("expected pack build command, got {other:?}")),
             },
@@ -49287,6 +49370,22 @@ mod tests {
             other => return Err(format!("expected legacy pack command, got {other:?}")),
         }
 
+        let legacy_pack_explain =
+            Cli::try_parse_from(["ee", "pack", "--query-file", "query.json", "--explain"])
+                .map_err(|error| {
+                    format!("legacy pack explain flag parse failed: {:?}", error.kind())
+                })?;
+        match legacy_pack_explain.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(&args.explain, &true, "legacy pack explain")?;
+                let build_args = args
+                    .legacy_build_args()
+                    .map_err(|error| error.to_string())?;
+                ensure_equal(&build_args.explain, &true, "legacy pack explain build args")?;
+            }
+            other => return Err(format!("expected legacy pack command, got {other:?}")),
+        }
+
         let search = Cli::try_parse_from(["ee", "search", "release", "--explain-performance"])
             .map_err(|error| format!("search flag parse failed: {:?}", error.kind()))?;
         match search.command {
@@ -49297,6 +49396,47 @@ mod tests {
             ),
             other => Err(format!("expected search command, got {other:?}")),
         }
+    }
+
+    #[test]
+    fn json_result_path_hint_attaches_to_pack_data() -> TestResult {
+        let rendered = json_with_data_result_path(
+            r#"{"schema":"ee.response.v2","success":true,"data":{"pack":{"items":[]}}}"#
+                .to_string(),
+            Some("data.pack.items"),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["resultPath"],
+            &serde_json::json!("data.pack.items"),
+            "pack result path",
+        )?;
+        ensure(
+            value["data"]["pack"]["items"].is_array(),
+            "pack items remain present",
+        )
+    }
+
+    #[test]
+    fn search_result_path_hint_attaches_to_search_data() -> TestResult {
+        let rendered = format_search_json_with_mesh_and_recalibration(
+            &search_report_fixture(),
+            MeshCommandMode::Off,
+            None,
+            Some("data.results"),
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["data"]["resultPath"],
+            &serde_json::json!("data.results"),
+            "search result path",
+        )?;
+        ensure(
+            value["data"]["results"].is_array(),
+            "search results remain present",
+        )
     }
 
     fn why_rationale_trace_fixture() -> WhyReport {
