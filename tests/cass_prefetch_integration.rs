@@ -31,8 +31,8 @@
 
 use ee::core::cass_prefetch::{
     CASS_PREFETCH_DECISION_SCHEMA_V1, CASS_PREFETCH_METRICS_SCHEMA_V1, CassPrefetchCandidate,
-    CassPrefetchHistory, CassPrefetchMetrics, DEFAULT_PREFETCH_TOP_K,
-    RecencyWeightedFrequencyPredictor, SpeculativePrefetch,
+    CassPrefetchHistory, CassPrefetchMetrics, DEFAULT_PREFETCH_HISTORY_WINDOW,
+    DEFAULT_PREFETCH_TOP_K, RecencyWeightedFrequencyPredictor, SpeculativePrefetch,
 };
 
 type TestResult = Result<(), String>;
@@ -186,6 +186,114 @@ fn predictor_is_deterministic_across_repeated_calls() -> TestResult {
 }
 
 #[test]
+fn all_same_topic_history_predicts_nothing() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics(["refactor", "refactor", "refactor"]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if !predictions.is_empty() {
+        return Err(format!(
+            "all-same-topic history must not predict an immediate repeat; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn single_element_history_predicts_nothing() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics(["only_topic"]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if !predictions.is_empty() {
+        return Err(format!(
+            "single-element history must not emit candidates; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_topic_ids_are_never_emitted() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics(["current", "", "alpha", ""]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if predictions
+        .iter()
+        .any(|candidate| candidate.topic_id.is_empty())
+    {
+        return Err(format!(
+            "empty topic_id must be ignored rather than emitted; got {predictions:?}"
+        ));
+    }
+    if !predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "alpha")
+    {
+        return Err(format!(
+            "non-empty older topic should remain eligible after empty topics are ignored; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn default_window_boundary_emits_finite_normalized_candidates() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics([
+        "current", "alpha", "bravo", "alpha", "charlie", "bravo", "delta", "alpha", "echo", "bravo",
+    ]);
+    if history.len() != DEFAULT_PREFETCH_HISTORY_WINDOW {
+        return Err(format!(
+            "test fixture must have DEFAULT_PREFETCH_HISTORY_WINDOW ({DEFAULT_PREFETCH_HISTORY_WINDOW}) entries; got {}",
+            history.len()
+        ));
+    }
+
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_finite_normalized_predictions("default window boundary", &predictions)
+}
+
+#[test]
+fn history_exceeding_default_window_still_emits_finite_normalized_scores() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let topics: Vec<String> = (0..(DEFAULT_PREFETCH_HISTORY_WINDOW * 2))
+        .map(|index| match index {
+            0 => "current".to_string(),
+            value if value % 3 == 0 => "alpha".to_string(),
+            value if value % 3 == 1 => "bravo".to_string(),
+            _ => "charlie".to_string(),
+        })
+        .collect();
+    let history = CassPrefetchHistory::from_topics(topics);
+    if history.len() <= DEFAULT_PREFETCH_HISTORY_WINDOW {
+        return Err(format!(
+            "test fixture must exceed DEFAULT_PREFETCH_HISTORY_WINDOW ({DEFAULT_PREFETCH_HISTORY_WINDOW}); got {}",
+            history.len()
+        ));
+    }
+
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_finite_normalized_predictions("history exceeding default window", &predictions)
+}
+
+#[test]
+fn tied_score_predictions_use_lex_tie_break_at_integration_boundary() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let history = CassPrefetchHistory::from_topics(["current", "zeta", "alpha"]);
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if predictions.len() != 2 {
+        return Err(format!(
+            "tie fixture should emit two candidates; got {predictions:?}"
+        ));
+    }
+    if predictions[0].topic_id != "alpha" || predictions[1].topic_id != "zeta" {
+        return Err(format!(
+            "tied candidates must sort lexicographically; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn trait_seam_accepts_caller_supplied_predictor() -> TestResult {
     // The constant stub returns predictions independent of the
     // history. The point of the test is to confirm a caller can
@@ -271,6 +379,61 @@ fn metrics_counter_records_hits_misses_and_candidates() -> TestResult {
 }
 
 #[test]
+fn metrics_hit_rate_edges_cover_zero_miss_only_and_hit_only() -> TestResult {
+    let zero_attempts = CassPrefetchMetrics::new();
+    if (zero_attempts.hit_rate() - 0.0).abs() > f64::EPSILON {
+        return Err(format!(
+            "zero-attempt hit_rate must be 0.0; got {}",
+            zero_attempts.hit_rate()
+        ));
+    }
+
+    let mut miss_only = CassPrefetchMetrics::new();
+    miss_only.record_miss();
+    miss_only.record_miss();
+    if (miss_only.hit_rate() - 0.0).abs() > f64::EPSILON {
+        return Err(format!(
+            "miss-only hit_rate must be 0.0; got {}",
+            miss_only.hit_rate()
+        ));
+    }
+
+    let mut hit_only = CassPrefetchMetrics::new();
+    hit_only.record_hit();
+    hit_only.record_hit();
+    if (hit_only.hit_rate() - 1.0).abs() > f64::EPSILON {
+        return Err(format!(
+            "hit-only hit_rate must be 1.0; got {}",
+            hit_only.hit_rate()
+        ));
+    }
+    Ok(())
+}
+
+fn assert_finite_normalized_predictions(
+    fixture_name: &str,
+    predictions: &[CassPrefetchCandidate],
+) -> TestResult {
+    if predictions.is_empty() {
+        return Err(format!("{fixture_name} should emit at least one candidate"));
+    }
+    for candidate in predictions {
+        if candidate.topic_id.is_empty() {
+            return Err(format!(
+                "{fixture_name} emitted empty topic_id; predictions={predictions:?}"
+            ));
+        }
+        if !candidate.score.is_finite() || !(0.0..=1.0).contains(&candidate.score) {
+            return Err(format!(
+                "{fixture_name} emitted invalid score for {:?}: {}; predictions={predictions:?}",
+                candidate.topic_id, candidate.score
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn history_iterator_preserves_most_recent_first_order() -> TestResult {
     let history = synthetic_task_template_history();
     if history.is_empty() {
@@ -284,7 +447,9 @@ fn history_iterator_preserves_most_recent_first_order() -> TestResult {
     }
 
     // First entry is the most-recent observation.
-    let first = history.iter().next().unwrap();
+    let Some(first) = history.iter().next() else {
+        return Err("synthetic history must expose a first observation".to_string());
+    };
     if first.topic_id != "refactor" {
         return Err(format!(
             "most-recent observation must be 'refactor'; got {:?}",

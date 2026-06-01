@@ -734,10 +734,10 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         // immediate repeat provides no prefetch value). All other
         // topics in the rolling window contribute their recency
         // weight.
-        let most_recent_topic = history
-            .recent_first
-            .first()
-            .map(|obs| obs.topic_id.as_str());
+        let most_recent_topic = history.recent_first.iter().find_map(|observation| {
+            let topic = observation.topic_id.as_str();
+            (!topic.is_empty()).then_some(topic)
+        });
 
         // Bounded accumulator: capacity is capped at MAX_PREFETCH_HISTORY
         // (the count is already <= the cap by the guard above), so the
@@ -746,12 +746,16 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             HashMap::with_capacity(history.recent_first.len().min(MAX_PREFETCH_HISTORY));
         let mut total_weight: f64 = 0.0;
         for (position, observation) in history.recent_first.iter().enumerate() {
+            let topic_id = observation.topic_id.as_str();
+            if topic_id.is_empty() {
+                continue;
+            }
             let weight = self.recency_weight(position);
             if !weight.is_finite() || weight < 0.0 {
                 continue;
             }
             total_weight += weight;
-            if Some(observation.topic_id.as_str()) == most_recent_topic {
+            if Some(topic_id) == most_recent_topic {
                 continue;
             }
             *accumulator
