@@ -95,7 +95,32 @@ fn complex_query_uniform_topk_and_high_fanout_inflates_budget_within_ceiling() {
 fn classify_adaptive_budget_is_deterministic_for_same_input() {
     let scores = vec![0.9_f32, 0.6, 0.3, 0.1];
     let input = AdaptiveBudgetInput::new("debug regression in pack scoring", &scores, 1.5);
-    let left = classify_adaptive_budget(input.clone());
+    let left = classify_adaptive_budget(input);
     let right = classify_adaptive_budget(input);
     assert_eq!(left, right);
+}
+
+#[test]
+fn task_keyword_markers_are_ascii_case_insensitive_words() {
+    let marker = classify_adaptive_budget(AdaptiveBudgetInput::new(
+        "SECURITY,performance audit",
+        &[],
+        0.0,
+    ));
+    assert_close(
+        marker.classifier_contributions.task_keyword_score,
+        0.3,
+        "case-insensitive punctuation-delimited marker",
+    );
+
+    let embedded = classify_adaptive_budget(AdaptiveBudgetInput::new(
+        "prefixsecurity refactor2",
+        &[],
+        0.0,
+    ));
+    assert_close(
+        embedded.classifier_contributions.task_keyword_score,
+        0.0,
+        "embedded markers must not match",
+    );
 }

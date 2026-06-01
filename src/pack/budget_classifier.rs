@@ -124,28 +124,36 @@ pub fn classify_adaptive_budget(input: AdaptiveBudgetInput<'_>) -> AdaptiveBudge
 
 #[must_use]
 pub fn normalized_retrieval_entropy(retrieval_scores: &[f32]) -> f64 {
-    let positive_scores = retrieval_scores
+    let mut positive_scores = [0.0_f64; RETRIEVAL_ENTROPY_SAMPLE_LIMIT];
+    let mut positive_count = 0;
+    let mut total = 0.0;
+    for score in retrieval_scores
         .iter()
         .copied()
         .filter(|score| score.is_finite() && *score > 0.0)
-        .take(RETRIEVAL_ENTROPY_SAMPLE_LIMIT)
-        .map(f64::from)
-        .collect::<Vec<_>>();
-    if positive_scores.len() <= 1 {
+    {
+        if positive_count == RETRIEVAL_ENTROPY_SAMPLE_LIMIT {
+            break;
+        }
+        let score = f64::from(score);
+        positive_scores[positive_count] = score;
+        positive_count += 1;
+        total += score;
+    }
+    if positive_count <= 1 {
         return 0.0;
     }
-    let total = positive_scores.iter().sum::<f64>();
     if total <= 0.0 || !total.is_finite() {
         return 0.0;
     }
-    let entropy = positive_scores
+    let entropy = positive_scores[..positive_count]
         .iter()
         .map(|score| {
             let probability = score / total;
             -probability * probability.ln()
         })
         .sum::<f64>();
-    let normalized = entropy / (positive_scores.len() as f64).ln();
+    let normalized = entropy / (positive_count as f64).ln();
     if normalized.is_nan() {
         0.0
     } else {
@@ -164,19 +172,14 @@ pub fn capped_graph_fanout(graph_fanout: f64) -> f64 {
 
 #[must_use]
 pub fn task_keyword_score(query: &str) -> f64 {
-    let normalized = query
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>();
-    let has_marker = normalized
-        .split_whitespace()
-        .any(|word| TASK_COMPLEXITY_MARKERS.binary_search(&word).is_ok());
+    let has_marker = query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| {
+            TASK_COMPLEXITY_MARKERS
+                .iter()
+                .any(|marker| word.eq_ignore_ascii_case(marker))
+        });
     if has_marker {
         TASK_KEYWORD_MARKER_SCORE
     } else {
