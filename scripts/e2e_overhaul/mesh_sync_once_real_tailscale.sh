@@ -40,8 +40,10 @@ chmod 0700 "$EVENT_DIR"
 EVENT_FILE="$EVENT_DIR/events.jsonl"
 if [ -n "${EE_E2E_ARTIFACT_DIR:-}" ]; then
     ARTIFACT_DIR="$EE_E2E_ARTIFACT_DIR"
+    ARTIFACT_DIR_SOURCE="explicit"
 else
     ARTIFACT_DIR="$EVENT_DIR/artifacts"
+    ARTIFACT_DIR_SOURCE="fallback"
 fi
 mkdir -p "$ARTIFACT_DIR"
 chmod 0700 "$ARTIFACT_DIR"
@@ -130,12 +132,112 @@ assert_json_file() {
     fi
 }
 
+assert_json_text() {
+    local text="${1:-}"
+    local label="${2:?label required}"
+    if [ -z "$text" ]; then
+        fail "$label" "JSON payload is empty"
+    fi
+    if ! printf '%s\n' "$text" | jq -e . >/dev/null; then
+        fail "$label" "JSON payload is not valid JSON"
+    fi
+}
+
 assert_jq() {
     local path="${1:?path required}"
     local filter="${2:?jq filter required}"
     local label="${3:?label required}"
     if ! jq -e "$filter" "$path" >/dev/null; then
         fail "$label" "JSON assertion failed for $label: $filter"
+    fi
+}
+
+require_tailnet_artifact_dir_opt_in() {
+    if [ "$ARTIFACT_DIR_SOURCE" = "fallback" ] && [ "${EE_TAILNET_TMP_OK:-0}" != "1" ]; then
+        skip "set EE_E2E_ARTIFACT_DIR to a private directory for retained tailnet artifacts, or set EE_TAILNET_TMP_OK=1 to allow the temporary fallback"
+    fi
+}
+
+select_peer_entry() {
+    local status_json="${1:-}"
+    local peer_selector="${2:?peer selector required}"
+    printf '%s\n' "$status_json" | jq -c --arg peer "$peer_selector" '
+        (.Peer // {})
+        | to_entries
+        | map(select(
+            .key == $peer
+            or (.value.ID? == $peer)
+            or (.value.HostName? == $peer)
+            or ((.value.DNSName? // "" | rtrimstr(".")) == ($peer | rtrimstr(".")))
+            or ((.value.TailscaleIPs? // []) | index($peer))
+          ))
+        | first // empty
+      '
+}
+
+write_redacted_tailnet_artifacts() {
+    local status_json="${1:-}"
+    local selected_peer="${2:?selected peer JSON required}"
+    local peer_hash="${3:?peer hash required}"
+    local route_hash="${4:?route hash required}"
+    local tailnet_hash="${5:?tailnet hash required}"
+    local selected_peer_hash="${6:?selected peer hash required}"
+    local status_path="${7:?status output path required}"
+    local peer_path="${8:?peer output path required}"
+
+    # Persist replay-friendly facts without retaining raw node keys, hostnames,
+    # Tailscale IPs, or the full peer table from `tailscale status --json`.
+    if ! printf '%s\n' "$status_json" | jq \
+            --argjson selectedPeer "$selected_peer" \
+            --arg peerHash "$peer_hash" \
+            --arg routeHash "$route_hash" \
+            --arg tailnetHash "$tailnet_hash" \
+            --arg selectedPeerHash "$selected_peer_hash" \
+            '{
+              schema: "ee.tailscale.retained_status.v1",
+              redacted: true,
+              tailnetHash: $tailnetHash,
+              self: {
+                backendState: (.BackendState? // null),
+                online: (.Self.Online? // null),
+                authenticated: (.Self.Authenticated? // null)
+              },
+              selectedPeer: {
+                recordHash: $selectedPeerHash,
+                peerSelectorHash: $peerHash,
+                routeHash: $routeHash,
+                online: ($selectedPeer.value.Online? // null),
+                relayPresent: (($selectedPeer.value.Relay? // null) != null),
+                currentAddressPresent: (($selectedPeer.value.CurAddr? // null) != null),
+                tailscaleIpCount: (($selectedPeer.value.TailscaleIPs? // []) | length),
+                tagCount: (($selectedPeer.value.Tags? // []) | length)
+              }
+            }' >"$status_path"; then
+        skip "failed to write redacted tailscale status artifact"
+    fi
+
+    if ! jq -cn \
+            --argjson selectedPeer "$selected_peer" \
+            --arg peerHash "$peer_hash" \
+            --arg routeHash "$route_hash" \
+            --arg tailnetHash "$tailnet_hash" \
+            --arg selectedPeerHash "$selected_peer_hash" \
+            '{
+              schema: "ee.tailscale.retained_peer.v1",
+              redacted: true,
+              tailnetHash: $tailnetHash,
+              selectedPeer: {
+                recordHash: $selectedPeerHash,
+                peerSelectorHash: $peerHash,
+                routeHash: $routeHash,
+                online: ($selectedPeer.value.Online? // null),
+                relayPresent: (($selectedPeer.value.Relay? // null) != null),
+                currentAddressPresent: (($selectedPeer.value.CurAddr? // null) != null),
+                tailscaleIpCount: (($selectedPeer.value.TailscaleIPs? // []) | length),
+                tagCount: (($selectedPeer.value.Tags? // []) | length)
+              }
+            }' >"$peer_path"; then
+        skip "failed to write redacted selected-peer artifact"
     fi
 }
 
@@ -175,6 +277,7 @@ fi
 require_tool jq
 require_tool shasum
 require_tool tailscale
+require_tailnet_artifact_dir_opt_in
 
 PEER_SELECTOR="${EE_REAL_TAILSCALE_PEER:-}"
 if [ -z "$PEER_SELECTOR" ]; then
@@ -187,42 +290,38 @@ if [ ! -x "$EE_BINARY" ]; then
 fi
 
 TAILSCALE_STATUS="$ARTIFACT_DIR/tailscale_status.json"
-if ! tailscale status --json >"$TAILSCALE_STATUS"; then
+if ! TAILSCALE_STATUS_RAW="$(tailscale status --json)"; then
     skip "tailscale status --json failed; authenticate tailscaled before running this smoke"
 fi
-assert_json_file "$TAILSCALE_STATUS" "tailscale_status_json"
+assert_json_text "$TAILSCALE_STATUS_RAW" "tailscale_status_json"
 
-if ! jq -e '(.Self? // null) != null and (((.BackendState? // "") == "Running") or (.Self.Online? == true))' "$TAILSCALE_STATUS" >/dev/null; then
+if ! printf '%s\n' "$TAILSCALE_STATUS_RAW" | jq -e '(.Self? // null) != null and (((.BackendState? // "") == "Running") or (.Self.Online? == true))' >/dev/null; then
     skip "tailscale status did not include an authenticated local Self node"
 fi
 
 PEER_JSON="$ARTIFACT_DIR/peer.json"
-if ! jq --arg peer "$PEER_SELECTOR" '
-    (.Peer // {})
-    | to_entries
-    | map(select(
-        .key == $peer
-        or (.value.ID? == $peer)
-        or (.value.HostName? == $peer)
-        or ((.value.DNSName? // "" | rtrimstr(".")) == ($peer | rtrimstr(".")))
-        or ((.value.TailscaleIPs? // []) | index($peer))
-      ))
-    | first // empty
-  ' "$TAILSCALE_STATUS" >"$PEER_JSON"; then
+if ! PEER_ENTRY_RAW="$(select_peer_entry "$TAILSCALE_STATUS_RAW" "$PEER_SELECTOR")"; then
     skip "failed to inspect peer list from tailscale status"
 fi
-if [ ! -s "$PEER_JSON" ] || ! jq -e '.value' "$PEER_JSON" >/dev/null; then
+if [ -z "$PEER_ENTRY_RAW" ] || ! printf '%s\n' "$PEER_ENTRY_RAW" | jq -e '.value' >/dev/null; then
     skip "requested peer was not visible in tailscale status --json"
 fi
 
 PEER_HASH="$(json_hash "$PEER_SELECTOR")"
-ROUTE_HINT="$(jq -r '.value.Relay? // .value.CurAddr? // "unknown"' "$PEER_JSON")"
-TAILNET_ID="$(jq -r '.CurrentTailnet.Name? // .CurrentTailnet.MagicDNSSuffix? // "unknown"' "$TAILSCALE_STATUS")"
+ROUTE_HINT="$(printf '%s\n' "$PEER_ENTRY_RAW" | jq -r '.value.Relay? // .value.CurAddr? // "unknown"')"
+ROUTE_HASH="$(json_hash "$ROUTE_HINT")"
+TAILNET_ID="$(printf '%s\n' "$TAILSCALE_STATUS_RAW" | jq -r '.CurrentTailnet.Name? // .CurrentTailnet.MagicDNSSuffix? // .Self.Tailnet? // .Self.TailnetName? // "unknown"')"
 TAILNET_HASH="$(json_hash "$TAILNET_ID")"
+SELECTED_PEER_HASH="$(json_hash "$PEER_ENTRY_RAW")"
+write_redacted_tailnet_artifacts "$TAILSCALE_STATUS_RAW" "$PEER_ENTRY_RAW" "$PEER_HASH" "$ROUTE_HASH" "$TAILNET_HASH" "$SELECTED_PEER_HASH" "$TAILSCALE_STATUS" "$PEER_JSON"
+assert_json_file "$TAILSCALE_STATUS" "redacted_tailscale_status_json"
+assert_json_file "$PEER_JSON" "redacted_peer_json"
+assert_jq "$TAILSCALE_STATUS" '.redacted == true and (.Peer? | not) and (.tailnetHash | type == "string") and (.selectedPeer.recordHash | type == "string")' "redacted_tailscale_status"
+assert_jq "$PEER_JSON" '.redacted == true and (.value? | not) and (.selectedPeer.recordHash | type == "string")' "redacted_peer_json"
 emit_event "precondition" "passed" "real tailnet peer is visible for sync-once" \
     "$(jq -cn \
         --arg peerHash "$PEER_HASH" \
-        --arg routeHash "$(json_hash "$ROUTE_HINT")" \
+        --arg routeHash "$ROUTE_HASH" \
         --arg tailnetHash "$TAILNET_HASH" \
         '{peerNodeHash: $peerHash, routeHash: $routeHash, tailnetHash: $tailnetHash}')"
 

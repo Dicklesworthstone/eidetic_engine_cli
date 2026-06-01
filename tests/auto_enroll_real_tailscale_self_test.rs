@@ -29,8 +29,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 type TestResult = Result<(), String>;
@@ -64,6 +65,173 @@ fn isolated_event_dir(label: &str) -> PathBuf {
 }
 
 #[cfg(unix)]
+fn write_executable(path: &Path, body: &str) -> TestResult {
+    fs::write(path, body).map_err(|error| format!("write {}: {error}", path.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(path)
+        .map_err(|error| format!("stat {}: {error}", path.display()))?
+        .permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(path, permissions)
+        .map_err(|error| format!("chmod +x {}: {error}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn path_with_fake_bin(bin_dir: &Path) -> OsString {
+    let mut path = OsString::from(bin_dir.as_os_str());
+    path.push(":");
+    path.push(env::var_os("PATH").unwrap_or_default());
+    path
+}
+
+#[cfg(unix)]
+fn write_fake_tailscale(bin_dir: &Path) -> TestResult {
+    write_executable(
+        &bin_dir.join("tailscale"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "status" ] && [ "${2:-}" = "--json" ]; then
+cat <<'JSON'
+{
+  "BackendState": "Running",
+  "CurrentTailnet": {
+    "Name": "secret-tailnet-name",
+    "MagicDNSSuffix": "secret-tailnet.ts.net"
+  },
+  "Self": {
+    "Authenticated": true,
+    "Online": true,
+    "HostName": "self-secret-host",
+    "DNSName": "self-secret.tailnet.test.",
+    "TailscaleIPs": ["100.64.0.10"]
+  },
+  "Peer": {
+    "nodekey:selectedSECRET": {
+      "ID": "selected-id-secret",
+      "HostName": "selected-host",
+      "DNSName": "selected-host.tailnet.test.",
+      "Online": true,
+      "Relay": "sfo",
+      "CurAddr": "203.0.113.9:41641",
+      "TailscaleIPs": ["100.64.0.20"],
+      "Tags": ["tag:selected-secret"]
+    },
+    "nodekey:otherSECRET": {
+      "ID": "other-id-secret",
+      "HostName": "other-host",
+      "DNSName": "other-host.tailnet.test.",
+      "Online": true,
+      "Relay": "nyc",
+      "CurAddr": "198.51.100.7:41641",
+      "TailscaleIPs": ["100.64.0.30"],
+      "Tags": ["tag:other-secret"]
+    }
+  }
+}
+JSON
+else
+    echo "unexpected tailscale args: $*" >&2
+    exit 64
+fi
+"#,
+    )
+}
+
+#[cfg(unix)]
+fn write_fake_ee(bin_dir: &Path) -> TestResult {
+    write_executable(
+        &bin_dir.join("ee"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '{"schema":"ee.response.v2","success":true,"data":{"contactedPeers":1},"degraded":[]}\n'
+"#,
+    )
+}
+
+#[cfg(unix)]
+fn assert_redacted_tailnet_artifacts(artifact_dir: &Path) -> TestResult {
+    let status_path = artifact_dir.join("tailscale_status.json");
+    let peer_path = artifact_dir.join("peer.json");
+    let status_text = fs::read_to_string(&status_path)
+        .map_err(|error| format!("read {}: {error}", status_path.display()))?;
+    let peer_text = fs::read_to_string(&peer_path)
+        .map_err(|error| format!("read {}: {error}", peer_path.display()))?;
+    let retained = format!("{status_text}\n{peer_text}");
+
+    for forbidden in [
+        "nodekey:otherSECRET",
+        "other-id-secret",
+        "other-host",
+        "other-host.tailnet.test",
+        "100.64.0.30",
+        "198.51.100.7",
+        "tag:other-secret",
+        "secret-tailnet-name",
+        "secret-tailnet.ts.net",
+    ] {
+        if retained.contains(forbidden) {
+            return Err(format!(
+                "retained tailnet artifacts must redact {forbidden:?}; contents={retained}"
+            ));
+        }
+    }
+
+    let status_json: serde_json::Value = serde_json::from_str(&status_text)
+        .map_err(|error| format!("parse {}: {error}", status_path.display()))?;
+    let peer_json: serde_json::Value = serde_json::from_str(&peer_text)
+        .map_err(|error| format!("parse {}: {error}", peer_path.display()))?;
+
+    if status_json
+        .get("Peer")
+        .or_else(|| status_json.get("CurrentTailnet"))
+        .is_some()
+    {
+        return Err(format!(
+            "retained status must not preserve raw Peer or CurrentTailnet: {status_text}"
+        ));
+    }
+    if status_json
+        .pointer("/redacted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(format!(
+            "retained status must be marked redacted: {status_text}"
+        ));
+    }
+    if status_json
+        .pointer("/selectedPeer/recordHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(format!(
+            "retained status must include selected peer recordHash: {status_text}"
+        ));
+    }
+    if peer_json
+        .pointer("/redacted")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return Err(format!(
+            "retained peer must be marked redacted: {peer_text}"
+        ));
+    }
+    if peer_json
+        .get("key")
+        .or_else(|| peer_json.get("value"))
+        .is_some()
+    {
+        return Err(format!(
+            "retained peer artifact must not preserve raw key/value peer entry: {peer_text}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 #[test]
 fn auto_enroll_real_tailscale_harness_exists_and_is_executable() -> TestResult {
     let path = harness_path();
@@ -84,6 +252,90 @@ fn auto_enroll_real_tailscale_harness_exists_and_is_executable() -> TestResult {
         ));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_enroll_real_tailscale_refuses_tmp_fallback_without_opt_in() -> TestResult {
+    let run_dir = isolated_event_dir("tmp-gate");
+    let bin_dir = run_dir.join("bin");
+    let event_dir = run_dir.join("events");
+    let work_dir = run_dir.join("work");
+    fs::create_dir_all(&bin_dir).map_err(|error| format!("create bin dir: {error}"))?;
+    fs::create_dir_all(&event_dir).map_err(|error| format!("create event dir: {error}"))?;
+    fs::create_dir_all(&work_dir).map_err(|error| format!("create work dir: {error}"))?;
+    write_fake_tailscale(&bin_dir)?;
+    write_fake_ee(&bin_dir)?;
+
+    let output = Command::new("bash")
+        .arg(harness_path())
+        .env("PATH", path_with_fake_bin(&bin_dir))
+        .env("EE_E2E_REAL_TAILSCALE", "1")
+        .env("EE_TEST_EVENT_DIR", &event_dir)
+        .env("EE_E2E_TMPDIR", &work_dir)
+        .env("EE_BINARY", bin_dir.join("ee"))
+        .env_remove("EE_E2E_ARTIFACT_DIR")
+        .env_remove("EE_TAILNET_TMP_OK")
+        .output()
+        .map_err(|error| format!("spawn bash harness: {error}"))?;
+
+    let code = output
+        .status
+        .code()
+        .ok_or_else(|| "harness terminated by signal".to_string())?;
+    if code != 78 {
+        return Err(format!(
+            "expected temp-artifact gate to exit 78; got {code}; stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("EE_E2E_ARTIFACT_DIR") || !stderr.contains("EE_TAILNET_TMP_OK") {
+        return Err(format!(
+            "tmp fallback skip must name the explicit artifact-dir and override env vars; stderr={stderr}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn auto_enroll_real_tailscale_fake_run_retains_redacted_tailnet_artifacts() -> TestResult {
+    let run_dir = isolated_event_dir("fake-redaction");
+    let bin_dir = run_dir.join("bin");
+    let event_dir = run_dir.join("events");
+    let artifact_dir = run_dir.join("artifacts");
+    let work_dir = run_dir.join("work");
+    fs::create_dir_all(&bin_dir).map_err(|error| format!("create bin dir: {error}"))?;
+    fs::create_dir_all(&event_dir).map_err(|error| format!("create event dir: {error}"))?;
+    fs::create_dir_all(&artifact_dir).map_err(|error| format!("create artifact dir: {error}"))?;
+    fs::create_dir_all(&work_dir).map_err(|error| format!("create work dir: {error}"))?;
+    write_fake_tailscale(&bin_dir)?;
+    write_fake_ee(&bin_dir)?;
+
+    let output = Command::new("bash")
+        .arg(harness_path())
+        .env("PATH", path_with_fake_bin(&bin_dir))
+        .env("EE_E2E_REAL_TAILSCALE", "1")
+        .env("EE_REAL_TAILSCALE_PEER", "selected-host")
+        .env("EE_TEST_EVENT_DIR", &event_dir)
+        .env("EE_E2E_ARTIFACT_DIR", &artifact_dir)
+        .env("EE_E2E_TMPDIR", &work_dir)
+        .env("EE_BINARY", bin_dir.join("ee"))
+        .env_remove("EE_TAILNET_TMP_OK")
+        .output()
+        .map_err(|error| format!("spawn bash harness: {error}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "expected fake real-tailnet run to pass; status={:?}; stdout={}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    assert_redacted_tailnet_artifacts(&artifact_dir)
 }
 
 #[cfg(unix)]
