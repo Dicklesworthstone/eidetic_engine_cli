@@ -534,7 +534,7 @@ pub fn pin_snapshot_blob(snapshot_path: &Path, config: &NumaPinConfig) -> NumaPi
 // `#![forbid(unsafe_code)]` is intact at the crate level. The real libnuma
 // FFI must land behind a safe adapter dependency (memmap2 + a safe
 // numa-lib wrapper) in a follow-up slice; this slice ships the trait
-// shape, both impls, the factory, and Mac-runnable tests so downstream
+// shape, concrete impls, the factory, and Mac-runnable tests so downstream
 // wiring can target the trait now instead of the concrete function.
 // ---------------------------------------------------------------------------
 
@@ -648,6 +648,26 @@ impl NumaPinningAdapter for MacosNumaPinningAdapter {
     }
 }
 
+/// Generic adapter for non-Linux, non-macOS hosts. It reports the
+/// effective runtime platform so status output never labels Windows or
+/// another Unix as macOS just because the operation is unsupported.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UnsupportedPlatformNumaPinningAdapter;
+
+impl NumaPinningAdapter for UnsupportedPlatformNumaPinningAdapter {
+    fn platform(&self) -> NumaPinPlatform {
+        NumaPinPlatform::detect()
+    }
+
+    fn pin_mmap(&self, _snapshot_path: &Path, _populate: bool) -> NumaPinningAdapterOutcome {
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+    }
+
+    fn set_node_affinity(&self, _node: Option<i32>) -> NumaPinningAdapterOutcome {
+        NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+    }
+}
+
 /// Linux adapter. The trait shape ships now; the libnuma + mmap syscall
 /// payload lands in the follow-up slice once a safe-wrapper dep
 /// (memmap2 + safe-numa) is approved. Until then both ops emit
@@ -658,7 +678,14 @@ pub struct LinuxNumaPinningAdapter;
 
 impl NumaPinningAdapter for LinuxNumaPinningAdapter {
     fn platform(&self) -> NumaPinPlatform {
-        NumaPinPlatform::Linux
+        #[cfg(target_os = "linux")]
+        {
+            NumaPinPlatform::Linux
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            NumaPinPlatform::detect()
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -670,8 +697,9 @@ impl NumaPinningAdapter for LinuxNumaPinningAdapter {
     fn pin_mmap(&self, _snapshot_path: &Path, _populate: bool) -> NumaPinningAdapterOutcome {
         // The Linux adapter constructed on a non-Linux build is a
         // pure-architecture object (used by tests that exercise the
-        // trait dispatch shape). Surface the umbrella platform code
-        // rather than pretending the Linux path executed.
+        // trait dispatch shape). Surface the runtime platform and the
+        // umbrella degraded code rather than pretending the Linux path
+        // executed.
         NumaPinningAdapterOutcome::degraded(NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
     }
 
@@ -687,24 +715,30 @@ impl NumaPinningAdapter for LinuxNumaPinningAdapter {
 }
 
 /// Returns the adapter for the running host. Linux returns
-/// `LinuxNumaPinningAdapter`; every other platform returns
-/// `MacosNumaPinningAdapter` (the only non-Linux concrete impl, which
-/// happens to map cleanly to BSD/Windows-Unsupported in this scaffold —
-/// the umbrella code distinguishes the cases for now).
+/// `LinuxNumaPinningAdapter`, macOS returns `MacosNumaPinningAdapter`,
+/// and every other platform returns `UnsupportedPlatformNumaPinningAdapter`
+/// so the reported platform stays aligned with [`NumaPinPlatform::detect`].
 #[must_use]
 pub fn default_numa_pinning_adapter() -> &'static dyn NumaPinningAdapter {
     #[cfg(target_os = "linux")]
     static LINUX_ADAPTER: LinuxNumaPinningAdapter = LinuxNumaPinningAdapter;
-    #[cfg(not(target_os = "linux"))]
-    static NON_LINUX_ADAPTER: MacosNumaPinningAdapter = MacosNumaPinningAdapter;
+    #[cfg(target_os = "macos")]
+    static MACOS_ADAPTER: MacosNumaPinningAdapter = MacosNumaPinningAdapter;
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+    static UNSUPPORTED_ADAPTER: UnsupportedPlatformNumaPinningAdapter =
+        UnsupportedPlatformNumaPinningAdapter;
 
     #[cfg(target_os = "linux")]
     {
         &LINUX_ADAPTER
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
-        &NON_LINUX_ADAPTER
+        &MACOS_ADAPTER
+    }
+    #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+    {
+        &UNSUPPORTED_ADAPTER
     }
 }
 
@@ -1195,7 +1229,7 @@ mod tests {
     use super::{
         LinuxNumaPinningAdapter, MacosNumaPinningAdapter, NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE,
         NUMA_UNAVAILABLE_ON_MACOS_CODE, NumaPinningAdapter, NumaPinningAdapterOutcome,
-        default_numa_pinning_adapter,
+        UnsupportedPlatformNumaPinningAdapter, default_numa_pinning_adapter,
     };
 
     #[test]
@@ -1242,7 +1276,12 @@ mod tests {
         // adapter emits `numa_pin_linux_not_implemented` until the
         // libnuma + memmap2 syscall payload lands.
         let adapter = LinuxNumaPinningAdapter;
-        assert_eq!(adapter.platform(), NumaPinPlatform::Linux);
+        let expected_platform = if cfg!(target_os = "linux") {
+            NumaPinPlatform::Linux
+        } else {
+            NumaPinPlatform::detect()
+        };
+        assert_eq!(adapter.platform(), expected_platform);
         let outcome = adapter.pin_mmap(fake_snapshot_path(), true);
         let expected_code = if cfg!(target_os = "linux") {
             NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE
@@ -1254,22 +1293,32 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_platform_adapter_reports_runtime_platform() {
+        let adapter = UnsupportedPlatformNumaPinningAdapter;
+        assert_eq!(adapter.platform(), NumaPinPlatform::detect());
+
+        let mmap_outcome = adapter.pin_mmap(fake_snapshot_path(), true);
+        assert!(!mmap_outcome.executed);
+        assert_eq!(
+            mmap_outcome.degraded_code,
+            Some(super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+        );
+
+        let affinity_outcome = adapter.set_node_affinity(Some(0));
+        assert!(!affinity_outcome.executed);
+        assert_eq!(
+            affinity_outcome.degraded_code,
+            Some(super::NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+        );
+    }
+
+    #[test]
     fn default_adapter_selects_platform_specific_implementation() {
-        // The factory must return the Linux adapter on Linux and the
-        // macOS adapter elsewhere. Tested via the `platform()` accessor
-        // so the assertion stays Mac-runnable (no `is_a` reflection).
+        // The factory must report the same runtime platform as the
+        // platform detector. This guards against collapsing Windows or
+        // other non-Linux hosts into the macOS label.
         let adapter = default_numa_pinning_adapter();
-        let expected = if cfg!(target_os = "linux") {
-            NumaPinPlatform::Linux
-        } else if cfg!(target_os = "macos") {
-            NumaPinPlatform::MacosUnsupported
-        } else {
-            // Other non-Linux platforms still receive the macOS-shaped
-            // adapter under this scaffold; the umbrella platform code
-            // distinguishes the cases at the result-envelope layer.
-            NumaPinPlatform::MacosUnsupported
-        };
-        assert_eq!(adapter.platform(), expected);
+        assert_eq!(adapter.platform(), NumaPinPlatform::detect());
     }
 
     #[test]
