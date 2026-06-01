@@ -15,6 +15,9 @@ use ee::core::workspace::WORKSPACE_REGISTRY_ENV_VAR;
 use insta::{assert_json_snapshot, assert_snapshot};
 use serde_json::{Map, Value, json};
 
+#[path = "support/command_inventory.rs"]
+mod command_inventory;
+
 type TestResult = Result<(), String>;
 
 const EXIT_SUCCESS: i32 = 0;
@@ -157,6 +160,50 @@ fn error_case(
 
 fn fixed_gap(bead: &'static str, reason: &'static str) -> Enforcement {
     Enforcement::KnownGap { bead, reason }
+}
+
+#[test]
+fn response_envelope_harness_uses_shared_command_inventory() -> TestResult {
+    let inventory = command_inventory::ee_command_inventory_by_path();
+    for command_path in [
+        "init",
+        "remember",
+        "search",
+        "pack",
+        "why",
+        "status",
+        "doctor",
+        "curate show",
+        "reflect propose",
+        "reflect request-ledger diagnostics",
+        "swarm brief",
+        "swarm next-action",
+        "swarm work-packet",
+        "diag streams",
+        "diag plan-cache",
+        "diag dependencies",
+        "diag host-profile",
+        "diag artifacts",
+        "diag build-admission",
+    ] {
+        let entry = inventory.get(command_path).ok_or_else(|| {
+            format!(
+                "response envelope conformance case `{command_path}` is not in the shared clap-derived inventory"
+            )
+        })?;
+        if !entry.supports_json {
+            return Err(format!(
+                "response envelope conformance case `{command_path}` is not marked JSON-capable"
+            ));
+        }
+        if entry.declared_response_schema != RESPONSE_SCHEMA {
+            return Err(format!(
+                "response envelope conformance case `{command_path}` declared schema {}, expected {RESPONSE_SCHEMA}",
+                entry.declared_response_schema
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn assess_case(case: &CommandCase) -> Result<(ObservedCase, Option<Value>), String> {

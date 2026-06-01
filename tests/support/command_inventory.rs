@@ -1,6 +1,26 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use clap::CommandFactory;
+use ee::core::effect::{EffectManifest, SideEffectClass};
+use ee::models::RESPONSE_SCHEMA_V2;
+
+const UNCLASSIFIED_SIDE_EFFECT_CLASS: &str = "class=unclassified";
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommandInventoryEntry {
+    pub path: String,
+    pub is_leaf: bool,
+    pub supports_json: bool,
+    pub side_effect_class: &'static str,
+    pub declared_response_schema: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ClapCommandPath {
+    path: String,
+    is_leaf: bool,
+}
 
 /// Recursively collect every subcommand path in the clap tree, joined by spaces
 /// (for example, "pack", "plan goal", or "agent-docs contracts").
@@ -27,6 +47,67 @@ pub fn collect_command_paths(root: clap::Command) -> BTreeSet<String> {
 
 pub fn ee_command_paths() -> BTreeSet<String> {
     collect_command_paths(ee::cli::Cli::command())
+}
+
+#[allow(dead_code)]
+pub fn collect_command_inventory(root: clap::Command) -> Vec<CommandInventoryEntry> {
+    let manifest = EffectManifest::build();
+    collect_clap_command_paths(root)
+        .into_iter()
+        .map(|command| {
+            let side_effect_class = match manifest.get(command.path.as_str()) {
+                Some(effect) => effect.mutation_contract.side_effect_class.as_str(),
+                None if !command.is_leaf => SideEffectClass::Mixed.as_str(),
+                None => UNCLASSIFIED_SIDE_EFFECT_CLASS,
+            };
+            CommandInventoryEntry {
+                path: command.path,
+                is_leaf: command.is_leaf,
+                supports_json: true,
+                side_effect_class,
+                declared_response_schema: RESPONSE_SCHEMA_V2,
+            }
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
+pub fn ee_command_inventory() -> Vec<CommandInventoryEntry> {
+    collect_command_inventory(ee::cli::Cli::command())
+}
+
+#[allow(dead_code)]
+pub fn ee_command_inventory_by_path() -> BTreeMap<String, CommandInventoryEntry> {
+    ee_command_inventory()
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect()
+}
+
+fn collect_clap_command_paths(root: clap::Command) -> Vec<ClapCommandPath> {
+    let mut out = Vec::new();
+    for subcommand in root.get_subcommands() {
+        collect_clap_command_path(Vec::new(), subcommand, &mut out);
+    }
+    out.sort_by(|left, right| left.path.cmp(&right.path));
+    out
+}
+
+fn collect_clap_command_path(
+    mut prefix: Vec<String>,
+    command: &clap::Command,
+    out: &mut Vec<ClapCommandPath>,
+) {
+    prefix.push(command.get_name().to_owned());
+    let path = prefix.join(" ");
+    let subcommands = command.get_subcommands().collect::<Vec<_>>();
+    out.push(ClapCommandPath {
+        path,
+        is_leaf: subcommands.is_empty(),
+    });
+    for subcommand in subcommands {
+        collect_clap_command_path(prefix.clone(), subcommand, out);
+    }
 }
 
 /// Extract the leading `ee <subcommand path>` from an advertised command string,
