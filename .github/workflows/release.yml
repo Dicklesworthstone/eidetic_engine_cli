@@ -163,42 +163,25 @@ jobs:
             echo "::warning title=Vision coverage gap::${GAP}% of documented surfaces are missing or stubbed (advisory; see report artifact)"
           fi
 
-      - name: Performance benchmarks (advisory)
-        # NOTE (v0.3.7): on release-tag runs, skip the perf-bench
+      - name: Performance benchmarks
+        # NOTE (v0.3.7): on release-tag reruns, skip the perf-bench
         # step entirely. It alone compiles the full franken-stack
         # via path-deps (asupersync, frankensearch, frankensqlite,
         # fnx-*) which takes 60-90min from cold cache and has
         # already cancelled v0.3.5 (60min timeout) and v0.3.6
-        # (120min timeout). The perf artifact is for downstream
-        # dashboards, not release gating — running it on every
-        # release tag is purely overhead and the dashboards can
-        # pick it up from the parallel main-branch CI runs. The
-        # branch-push path of THIS workflow (`on: push: branches:
-        # main`) still runs the perf-bench so the artifact stays
-        # available.
+        # (120min timeout). The branch-push release path of THIS
+        # workflow (`on: push: branches: main`) runs the perf gate
+        # before creating the tag, so version-bump releases cannot
+        # reach tag/build/sign without this check passing.
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        # NOTE (issue #5): the perf benchmark is intentionally ADVISORY for
-        # release gating. It pulls in the full franken-stack via path-deps
-        # and historically fails on transient external drift (e.g. new enum
-        # variants in `asupersync`/`raptorq` exhausting matches elsewhere)
-        # that has nothing to do with an ee perf regression. Release-blocking
-        # on benchmark output is also a recognized anti-pattern. We still run
-        # the bench so the artifact exists for downstream perf dashboards,
-        # but we do not fail the release on it. Real perf regressions should
-        # be caught by the dedicated perf workflow / tracking dashboard.
-        continue-on-error: true
         run: |
-          set -uo pipefail
-          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json || {
-            echo "::warning title=Performance benchmarks::bench_perf_regression failed (advisory only) — not blocking release"
-          }
-          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check || {
-            echo "::warning title=Performance README drift::sync_perf_table reported drift (advisory only) — not blocking release"
-          }
-          echo "::notice title=Performance results::Benchmark artifact generated (advisory)"
+          set -euo pipefail
+          ./scripts/bench_perf_regression.sh --check-regression --json > ee-perf.v1.json
+          ./scripts/sync_perf_table.sh --input benches/baselines/perf_v0_2.json --readme README.md --check
+          echo "::notice title=Performance results::Benchmark artifact generated"
 
       - name: Upload perf artifact
-        # Always upload whatever the advisory bench produced, even on bench failure.
+        # Upload the perf report even when the release-blocking check fails.
         if: always()
         uses: actions/upload-artifact@v4
         with:
