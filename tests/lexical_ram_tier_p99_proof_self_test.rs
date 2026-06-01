@@ -43,6 +43,11 @@ fn harness_path() -> PathBuf {
         .join("lexical_ram_tier_p99_proof.sh")
 }
 
+fn harness_source() -> Result<String, String> {
+    let path = harness_path();
+    fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))
+}
+
 fn isolated_event_dir(label: &str) -> PathBuf {
     let mut path = env::temp_dir();
     path.push(format!(
@@ -180,5 +185,31 @@ fn lexical_ram_tier_p99_proof_passes_bash_n_parse_check() -> TestResult {
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn lexical_ram_tier_p99_probe_declares_sample_size_and_scope() -> TestResult {
+    let source = harness_source()?;
+
+    for required in [
+        "MIN_BENCH_RUNS_FOR_P99=200",
+        r#"BENCH_RUNS="${EE_LEXICAL_RAM_TIER_BENCH_RUNS:-$MIN_BENCH_RUNS_FOR_P99}""#,
+        "n=50 makes p99 the maximum sample",
+        "fresh_process_warm_startup_pagecache_probe",
+        "fresh_process_per_query",
+        "steadyStateRamTierProof: false",
+        "publishFlipEvidence: \"insufficient_for_steady_state_ram_tier_claim\"",
+        "each iteration starts a new ee process",
+        "in-process pinned mappings cannot",
+    ] {
+        if !source.contains(required) {
+            return Err(format!(
+                "harness must declare benchmark validity contract fragment {required:?}"
+            ));
+        }
+    }
+
     Ok(())
 }

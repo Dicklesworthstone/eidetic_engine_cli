@@ -4,19 +4,18 @@
 #
 # This script is intentionally outside normal CI. Without EE_HUGE_HOST=1
 # it exits 78 after writing an ee.test_event.v1 skip event. With opt-in
-# enabled, it captures a disabled-baseline and enabled-RAM-tier run of
-# the lexical search hot path on a workspace whose lexical index is
-# large enough to exercise posting-list IO cost, then emits ee.perf.v1
-# rows with p50/p95/p99 latencies, byte counts, and degraded codes.
+# enabled, it captures a disabled-baseline and enabled-RAM-tier fresh-process
+# warm-startup probe on a workspace whose lexical index is large enough to
+# exercise posting-list IO cost, then emits ee.perf.v1 rows with p50/p95/p99
+# latencies, byte counts, and degraded codes.
 #
 # Parent acceptance (bd-21xbi) requires the enabled run to improve p99
 # hot-path latency by >= 30 percent versus the disabled baseline on a
-# 256GB+/64-core host. This script does NOT enforce the 30 percent gate
-# itself — the comparison is captured for human review and for a future
-# CI gate that runs only on the qualified host class. Forcing the
-# 30 percent gate inside the script would make it brittle when run on
-# mid-tier Linux hosts that are warm enough to verify the seam but not
-# beefy enough to hit the production target.
+# 256GB+/64-core host. This harness does NOT satisfy that steady-state
+# claim by itself: each iteration starts a new ee process, so only OS
+# page-cache warmth can survive between runs. The emitted perf row is
+# intentionally labeled as a fresh-process warm-startup/page-cache probe;
+# publish_flip evidence still needs a persistent-process harness.
 #
 # Parallel to bd-1crtj's mesh_tailscale_smoke.sh and bd-36bbk.1.11's
 # auto_enroll_real_tailscale.sh: each is an opt-in evidence harness
@@ -32,6 +31,9 @@ EXIT_SKIP=78
 EXIT_CLEANUP_FAILURE=79
 SCENARIO="lexical_ram_tier_p99_proof"
 BEAD_ID="bd-21xbi.3"
+MIN_BENCH_RUNS_FOR_P99=200
+MEASUREMENT_KIND="fresh_process_warm_startup_pagecache_probe"
+PROCESS_MODEL="fresh_process_per_query"
 
 # Predictable PID-suffixed /tmp paths are a symlink-attack surface, and
 # with the default umask they leave artifacts world-readable on the
@@ -183,6 +185,18 @@ require_tool jq
 require_tool shasum
 require_tool awk
 
+BENCH_RUNS="${EE_LEXICAL_RAM_TIER_BENCH_RUNS:-$MIN_BENCH_RUNS_FOR_P99}"
+case "$BENCH_RUNS" in
+    ''|*[!0-9]*)
+        fail "precondition" "EE_LEXICAL_RAM_TIER_BENCH_RUNS must be an integer >= $MIN_BENCH_RUNS_FOR_P99 for p99 resolution"
+        ;;
+esac
+if [ "$BENCH_RUNS" -lt "$MIN_BENCH_RUNS_FOR_P99" ]; then
+    fail "precondition" "EE_LEXICAL_RAM_TIER_BENCH_RUNS=$BENCH_RUNS is too low; need >= $MIN_BENCH_RUNS_FOR_P99 so p99 is not max-of-run"
+fi
+emit_event "precondition" "passed" "bench run count supports p99 resolution" \
+    "$(jq -cn --argjson benchRuns "$BENCH_RUNS" --argjson minBenchRuns "$MIN_BENCH_RUNS_FOR_P99" '{benchRuns: $benchRuns, minBenchRunsForP99: $minBenchRuns}')"
+
 # Detect total RAM in MiB. We require >= 256 GiB (262144 MiB) per the
 # parent bead's "256GB+ / 64-core host class" acceptance.
 RAM_MIB="$(awk '/^MemTotal:/ {printf "%d\n", $2 / 1024}' /proc/meminfo 2>/dev/null || echo 0)"
@@ -257,7 +271,10 @@ emit_event "precondition" "passed" "lexical index is large enough" \
 # Run the bench in both modes. Each run is a fixed query set executed
 # N times to capture p50/p95/p99 latencies. The fixed query set lives
 # in the corpus seed manifest under data.benchQueries.
-BENCH_RUNS="${EE_LEXICAL_RAM_TIER_BENCH_RUNS:-50}"
+#
+# This loop launches one ee process per sample. That is useful for a
+# warm-startup/page-cache probe, but it cannot demonstrate steady-state
+# reuse of an in-process pinned lexical mapping.
 BENCH_QUERIES="$(jq -cr '.data.benchQueries // []' "$ARTIFACT_DIR/seed.json")"
 if [ "$(printf '%s' "$BENCH_QUERIES" | jq 'length')" -eq 0 ]; then
     skip "corpus seed manifest provided no benchQueries; cannot measure latencies"
@@ -300,7 +317,10 @@ run_bench() {
 BASELINE_OUT="$(run_bench "baseline" "0" "0")"
 ENABLED_OUT="$(run_bench "ram_tier" "1" "1")"
 
-# Compute p50/p95/p99 for each mode via jq + awk.
+# Compute p50/p95/p99 for each mode via jq + awk. With the current
+# nearest-rank-ish formula, n=50 makes p99 the maximum sample; n=200 gives
+# two samples of headroom above the selected p99 point, so this harness
+# refuses smaller run counts before collecting evidence.
 compute_percentiles() {
     local jsonl="${1:?jsonl required}"
     jq -r '.elapsedMs' "$jsonl" | awk '
@@ -335,8 +355,11 @@ P99_DELTA_PCT="$(awk -v b="$BASELINE_P99" -v e="$ENABLED_P99" 'BEGIN {
     if (b <= 0) { printf "0\n" } else { printf "%.2f\n", ((b - e) / b) * 100 }
 }')"
 
-emit_perf "lexical_ram_tier_p99_proof" \
+emit_perf "lexical_ram_tier_fresh_process_p99_probe" \
     "$(jq -cn \
+        --arg measurementKind "$MEASUREMENT_KIND" \
+        --arg processModel "$PROCESS_MODEL" \
+        --argjson minBenchRuns "$MIN_BENCH_RUNS_FOR_P99" \
         --argjson baselineP50 "$BASELINE_P50" \
         --argjson baselineP95 "$BASELINE_P95" \
         --argjson baselineP99 "$BASELINE_P99" \
@@ -351,12 +374,22 @@ emit_perf "lexical_ram_tier_p99_proof" \
           baseline: {p50Ms: $baselineP50, p95Ms: $baselineP95, p99Ms: $baselineP99},
           enabled: {p50Ms: $enabledP50, p95Ms: $enabledP95, p99Ms: $enabledP99},
           p99ImprovementPct: $p99DeltaPct,
+          measurementKind: $measurementKind,
+          processModel: $processModel,
+          steadyStateRamTierProof: false,
+          publishFlipEvidence: "insufficient_for_steady_state_ram_tier_claim",
+          claimLimitations: [
+            "each iteration starts a new ee process",
+            "latency includes process startup, config/database/index open, and query execution",
+            "only OS page-cache warmth can persist across iterations; in-process pinned mappings cannot"
+          ],
           benchRuns: $benchRuns,
+          minBenchRunsForP99: $minBenchRuns,
           queryCount: $queryCount,
           indexBytes: $indexBytes
         }')"
 
-emit_event "assert" "passed" "p99 proof captured" \
-    "$(jq -cn --argjson p99DeltaPct "$P99_DELTA_PCT" '{p99ImprovementPct: $p99DeltaPct}')"
+emit_event "assert" "passed" "fresh-process p99 probe captured; not steady-state RAM-tier proof" \
+    "$(jq -cn --arg measurementKind "$MEASUREMENT_KIND" --arg processModel "$PROCESS_MODEL" --argjson p99DeltaPct "$P99_DELTA_PCT" '{p99ImprovementPct: $p99DeltaPct, measurementKind: $measurementKind, processModel: $processModel, steadyStateRamTierProof: false}')"
 
 printf '%s\n' "$EVENT_FILE"
