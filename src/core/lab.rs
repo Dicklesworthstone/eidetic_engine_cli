@@ -30,6 +30,12 @@ pub const LAB_REPLAY_SCHEMA_V1: &str = "ee.lab.replay.v1";
 /// Schema for agent workload replay reports derived from redacted traces.
 pub const AGENT_WORKLOAD_REPLAY_SCHEMA_V1: &str = "ee.agent_workload_replay.v1";
 
+/// Schema for swarm workload replay inputs.
+pub const SWARM_WORKLOAD_SCHEMA_V1: &str = "ee.swarm_workload.v1";
+
+/// Schema for swarm replay result ledgers.
+pub const SWARM_REPLAY_RESULT_SCHEMA_V1: &str = "ee.swarm_replay_result.v1";
+
 /// Schema for lab counterfactual report.
 pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 
@@ -290,6 +296,303 @@ impl AgentWorkloadReplayReport {
     pub fn to_json(&self) -> String {
         crate::core::serialize_or_error(self)
     }
+}
+
+/// Redaction-safe multi-agent workload trace consumed by future swarm replay.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadTrace {
+    pub schema: String,
+    pub workload_id: String,
+    pub fixture_seed: String,
+    pub side_effect_free: bool,
+    pub redaction_level: SwarmWorkloadRedactionLevel,
+    pub workspace_shape: SwarmWorkloadWorkspaceShape,
+    pub agent_count: u16,
+    pub command_sequence: Vec<SwarmWorkloadCommandStep>,
+    pub expected_degraded_posture: SwarmExpectedDegradedPosture,
+    pub redaction_probes: Vec<SwarmWorkloadRedactionProbe>,
+    pub resource_profile_hints: SwarmWorkloadResourceProfileHints,
+    pub provenance: SwarmWorkloadProvenance,
+}
+
+impl SwarmWorkloadTrace {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+/// Trace redaction posture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWorkloadRedactionLevel {
+    Strict,
+    Audit,
+}
+
+/// Host-independent workspace shape; never a raw absolute path.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadWorkspaceShape {
+    pub fixture_profile: String,
+    pub workspace_fingerprint: String,
+    pub path_policy: SwarmWorkloadPathPolicy,
+    pub path_tail_hash: Option<String>,
+    pub repo_state: String,
+}
+
+/// Path handling policy for replay fixtures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWorkloadPathPolicy {
+    NoAbsolutePaths,
+    RelativeFixturePaths,
+    HashedPathTails,
+}
+
+/// One command-shape step in a swarm workload.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadCommandStep {
+    pub step_id: String,
+    pub agent_slot: u16,
+    pub command: SwarmWorkloadCommandShape,
+    pub expected_schema: Option<String>,
+    pub expected_exit_code: Option<u8>,
+    pub timeout_ms: Option<u64>,
+    pub depends_on: Vec<String>,
+}
+
+/// Redacted command shape. Raw argv/query/task values are intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadCommandShape {
+    pub verbs: Vec<String>,
+    pub positional_arity: u16,
+    pub flag_names: Vec<String>,
+    pub output_format: Option<String>,
+    pub command_hash: String,
+}
+
+/// Expected degraded posture for the replayed workload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmExpectedDegradedPosture {
+    #[serde(rename = "none")]
+    NoneExpected,
+    Recoverable,
+    Required,
+    Blocked,
+}
+
+/// A replay-time probe proving raw-sensitive classes are absent or redacted.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadRedactionProbe {
+    pub probe_id: String,
+    pub class: SwarmRedactionProbeClass,
+    pub value_hash: String,
+    pub expected_status: SwarmRedactionProbeStatus,
+}
+
+/// Raw-content class guarded by a redaction probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmRedactionProbeClass {
+    RawTaskString,
+    RawQueryText,
+    RawMemoryBody,
+    RawMailBody,
+    Secret,
+    AbsoluteHostPath,
+    EnvironmentDump,
+    FullFileListing,
+}
+
+/// Expected redaction probe result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmRedactionProbeStatus {
+    Absent,
+    Redacted,
+    Blocked,
+}
+
+/// Resource hints used for admission and budget selection, not measurement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadResourceProfileHints {
+    pub profile: String,
+    pub requested_parallel_agents: u16,
+    pub max_parallel_agents: u16,
+    pub memory_budget_mb: Option<u64>,
+    pub cpu_budget_ms: Option<u64>,
+    pub rch_required: bool,
+}
+
+/// Provenance for a swarm workload fixture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmWorkloadProvenance {
+    pub kind: SwarmWorkloadProvenanceKind,
+    pub source_trace_hashes: Vec<String>,
+    pub derived_from_schemas: Vec<String>,
+    pub fixture_author_hash: Option<String>,
+}
+
+/// Source class for a workload fixture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmWorkloadProvenanceKind {
+    Synthetic,
+    Recorded,
+    Mixed,
+}
+
+/// Compact deterministic ledger emitted by a future swarm replay runner.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayResult {
+    pub schema: String,
+    pub workload_id: String,
+    pub run_id: String,
+    pub side_effect_free: bool,
+    pub status: SwarmReplayStatus,
+    pub command_results: Vec<SwarmReplayCommandResult>,
+    pub aggregate: SwarmReplayAggregate,
+    pub redaction_status: SwarmReplayRedactionStatus,
+    pub resource_usage: SwarmReplayResourceUsage,
+    pub first_failure: Option<SwarmReplayFailure>,
+    pub verification: SwarmReplayVerification,
+    pub warnings: Vec<String>,
+}
+
+impl SwarmReplayResult {
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        crate::core::serialize_or_error(self)
+    }
+}
+
+/// Overall swarm replay status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayStatus {
+    Pass,
+    Fail,
+    Blocked,
+    Degraded,
+}
+
+/// One command outcome in a swarm replay ledger.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayCommandResult {
+    pub step_id: String,
+    pub agent_slot: u16,
+    pub command_hash: String,
+    pub exit_code: u8,
+    pub elapsed_ms: u64,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub degraded_codes: Vec<String>,
+    pub artifact_paths: Vec<SwarmReplayArtifactRef>,
+    pub redaction_status: SwarmReplayCommandRedactionStatus,
+    pub memory_rss_bytes: Option<u64>,
+    pub cpu_ms: Option<u64>,
+}
+
+/// Redacted artifact reference. `pathTail` is relative or hashed, never absolute.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayArtifactRef {
+    pub kind: String,
+    pub path_tail: String,
+    pub path_hash: String,
+}
+
+/// Redaction result for one command outcome.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayCommandRedactionStatus {
+    Clean,
+    Redacted,
+    ProbeFailed,
+}
+
+/// Aggregate command and latency counts for the replay ledger.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayAggregate {
+    pub command_count: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub degraded_count: u64,
+    pub elapsed_ms_total: u64,
+    pub p50_ms: u64,
+    pub p95_ms: u64,
+    pub p99_ms: u64,
+}
+
+/// Replay-wide redaction posture.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayRedactionStatus {
+    pub raw_task_string_present: bool,
+    pub raw_query_text_present: bool,
+    pub raw_memory_body_present: bool,
+    pub raw_mail_body_present: bool,
+    pub absolute_host_path_present: bool,
+    pub secrets_present: bool,
+    pub environment_dump_present: bool,
+    pub full_file_listing_present: bool,
+    pub redaction_probes_passed: bool,
+}
+
+/// Replay resource summary. Fields are optional when the host cannot measure them.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayResourceUsage {
+    pub peak_rss_bytes: Option<u64>,
+    pub max_command_rss_bytes: Option<u64>,
+    pub total_cpu_ms: Option<u64>,
+    pub io_read_bytes: Option<u64>,
+    pub io_write_bytes: Option<u64>,
+}
+
+/// First actionable failure in a replay ledger.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayFailure {
+    pub step_id: String,
+    pub agent_slot: u16,
+    pub code: String,
+    pub severity: String,
+    pub diagnosis: String,
+    pub repair_hint: Option<String>,
+}
+
+/// Determinism and remote-proof posture for a replay ledger.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmReplayVerification {
+    pub rch_required: bool,
+    pub rch_status: SwarmReplayRchStatus,
+    pub deterministic: bool,
+    pub workload_hash: String,
+    pub replay_hash: String,
+    pub volatile_fields_stripped: Vec<String>,
+}
+
+/// RCH evidence posture for verification attached to the ledger.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmReplayRchStatus {
+    NotRequired,
+    Passed,
+    BlockedBeforeCargo,
+    Failed,
 }
 
 /// Synthetic fan-out posture for replaying redacted traces across many agents.

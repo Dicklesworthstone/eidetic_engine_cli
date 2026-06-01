@@ -348,6 +348,16 @@ pub const LAB_SCHEMAS: &[SchemaEntry] = &[
         "ee.lab.reconstruct.v1",
         SchemaCategory::Lab,
     ),
+    SchemaEntry::new(
+        "swarm_workload",
+        "ee.swarm_workload.v1",
+        SchemaCategory::Lab,
+    ),
+    SchemaEntry::new(
+        "swarm_replay_result",
+        "ee.swarm_replay_result.v1",
+        SchemaCategory::Lab,
+    ),
 ];
 
 /// Situation and plan schemas.
@@ -2562,6 +2572,14 @@ mod tests {
         ensure(
             versions.contains(&"ee.lab.reconstruct.v1"),
             "lab schemas must include reconstruct (EE-405)",
+        )?;
+        ensure(
+            versions.contains(&"ee.swarm_workload.v1"),
+            "lab schemas must include swarm workload replay inputs (bd-ppbue.1)",
+        )?;
+        ensure(
+            versions.contains(&"ee.swarm_replay_result.v1"),
+            "lab schemas must include swarm replay result ledgers (bd-ppbue.1)",
         )
     }
 

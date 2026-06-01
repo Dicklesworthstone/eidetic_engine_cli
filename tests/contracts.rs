@@ -145,6 +145,9 @@ mod integration_foundation;
 #[path = "contracts/effect_manifest_completeness.rs"]
 mod effect_manifest_completeness;
 
+#[path = "contracts/command_inventory.rs"]
+mod command_inventory;
+
 #[path = "contracts/sqlmodel_frankensqlite.rs"]
 mod sqlmodel_frankensqlite;
 
@@ -402,6 +405,9 @@ mod agent_workload_trace_schema;
 
 #[path = "contracts/agent_workload_replay_schema.rs"]
 mod agent_workload_replay_schema;
+
+#[path = "contracts/swarm_workload_replay_schema.rs"]
+mod swarm_workload_replay_schema;
 
 #[path = "contracts/qos_lanes_e2e_contract.rs"]
 mod qos_lanes_e2e_contract;

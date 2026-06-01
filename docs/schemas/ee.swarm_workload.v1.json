@@ -1,0 +1,399 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm_workload.v1.json",
+  "title": "ee.swarm_workload.v1",
+  "description": "Redaction-safe orchestration metadata for a multi-agent replay workload. It describes fixture identity, workspace shape, agent count, redacted command sequence, expected degraded posture, redaction probes, resource-profile hints, and provenance without raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workloadId",
+    "fixtureSeed",
+    "sideEffectFree",
+    "redactionLevel",
+    "workspaceShape",
+    "agentCount",
+    "commandSequence",
+    "expectedDegradedPosture",
+    "redactionProbes",
+    "resourceProfileHints",
+    "provenance"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.swarm_workload.v1"
+    },
+    "workloadId": {
+      "$ref": "#/$defs/workloadId"
+    },
+    "fixtureSeed": {
+      "description": "Deterministic seed chosen by fixture generation. This is not a timestamp and must not embed raw prompt text.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{2,96}$"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "redactionLevel": {
+      "type": "string",
+      "enum": ["strict", "audit"]
+    },
+    "workspaceShape": {
+      "$ref": "#/$defs/workspaceShape"
+    },
+    "agentCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024
+    },
+    "commandSequence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/commandStep"
+      }
+    },
+    "expectedDegradedPosture": {
+      "type": "string",
+      "enum": ["none", "recoverable", "required", "blocked"]
+    },
+    "redactionProbes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/redactionProbe"
+      }
+    },
+    "resourceProfileHints": {
+      "$ref": "#/$defs/resourceProfileHints"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    }
+  },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "workloadId",
+      "fixtureSeed",
+      "sideEffectFree",
+      "redactionLevel",
+      "workspaceShape",
+      "agentCount",
+      "commandSequence",
+      "expectedDegradedPosture",
+      "redactionProbes",
+      "resourceProfileHints",
+      "provenance"
+    ],
+    "summary": [
+      "schema",
+      "workloadId",
+      "agentCount",
+      "commandSequence",
+      "expectedDegradedPosture",
+      "resourceProfileHints",
+      "provenance"
+    ],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm_workload.v1",
+      "workloadId": "swarmwl_1111111111111111",
+      "fixtureSeed": "healthy_small_seed_001",
+      "sideEffectFree": true,
+      "redactionLevel": "strict",
+      "workspaceShape": {
+        "fixtureProfile": "healthy_small_checkout",
+        "workspaceFingerprint": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
+        "pathPolicy": "no_absolute_paths",
+        "pathTailHash": "blake3:2222222222222222",
+        "repoState": "clean_fixture"
+      },
+      "agentCount": 4,
+      "commandSequence": [
+        {
+          "stepId": "step_001",
+          "agentSlot": 0,
+          "command": {
+            "verbs": ["pack"],
+            "positionalArity": 1,
+            "flagNames": ["--workspace", "--json"],
+            "outputFormat": "json",
+            "commandHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333"
+          },
+          "expectedSchema": "ee.response.v2",
+          "expectedExitCode": 0,
+          "timeoutMs": 2500,
+          "dependsOn": []
+        }
+      ],
+      "expectedDegradedPosture": "none",
+      "redactionProbes": [],
+      "resourceProfileHints": {
+        "profile": "ci_smoke",
+        "requestedParallelAgents": 4,
+        "maxParallelAgents": 4,
+        "memoryBudgetMb": 2048,
+        "cpuBudgetMs": 10000,
+        "rchRequired": true
+      },
+      "provenance": {
+        "kind": "synthetic",
+        "sourceTraceHashes": [],
+        "derivedFromSchemas": ["ee.agent_workload_trace.v1"],
+        "fixtureAuthorHash": "blake3:4444444444444444"
+      }
+    }
+  ],
+  "$defs": {
+    "workloadId": {
+      "type": "string",
+      "pattern": "^swarmwl_[A-Fa-f0-9]{16,64}$"
+    },
+    "safeLabel": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]*$"
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{16,128}$"
+    },
+    "workspaceShape": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixtureProfile",
+        "workspaceFingerprint",
+        "pathPolicy",
+        "repoState"
+      ],
+      "properties": {
+        "fixtureProfile": {
+          "$ref": "#/$defs/safeLabel"
+        },
+        "workspaceFingerprint": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "pathPolicy": {
+          "type": "string",
+          "enum": [
+            "no_absolute_paths",
+            "relative_fixture_paths",
+            "hashed_path_tails"
+          ]
+        },
+        "pathTailHash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/blake3Hash"
+            }
+          ]
+        },
+        "repoState": {
+          "type": "string",
+          "enum": [
+            "clean_fixture",
+            "dirty_fixture",
+            "synthetic_empty",
+            "crowded_checkout"
+          ]
+        }
+      }
+    },
+    "commandStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stepId", "agentSlot", "command", "dependsOn"],
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "pattern": "^step_[A-Za-z0-9_.-]{3,64}$"
+        },
+        "agentSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1023
+        },
+        "command": {
+          "$ref": "#/$defs/commandShape"
+        },
+        "expectedSchema": {
+          "type": ["string", "null"],
+          "pattern": "^ee\\.[a-z0-9_.-]+\\.v[0-9]+$"
+        },
+        "expectedExitCode": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "timeoutMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "dependsOn": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^step_[A-Za-z0-9_.-]{3,64}$"
+          }
+        }
+      }
+    },
+    "commandShape": {
+      "description": "Command shape captured without raw argv values. It records verb chain, positional arity, flag names, output format, and a stable hash of the redacted shape.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verbs",
+        "positionalArity",
+        "flagNames",
+        "commandHash"
+      ],
+      "properties": {
+        "verbs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*$"
+          }
+        },
+        "positionalArity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flagNames": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^--[a-z][a-z0-9-]*$"
+          }
+        },
+        "outputFormat": {
+          "type": ["string", "null"],
+          "enum": ["json", "human", "markdown", "toon", "jsonl", "compact", "hook", null]
+        },
+        "commandHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "redactionProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probeId", "class", "valueHash", "expectedStatus"],
+      "properties": {
+        "probeId": {
+          "type": "string",
+          "pattern": "^probe_[A-Za-z0-9_.-]{3,64}$"
+        },
+        "class": {
+          "type": "string",
+          "enum": [
+            "raw_task_string",
+            "raw_query_text",
+            "raw_memory_body",
+            "raw_mail_body",
+            "secret",
+            "absolute_host_path",
+            "environment_dump",
+            "full_file_listing"
+          ]
+        },
+        "valueHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "expectedStatus": {
+          "type": "string",
+          "enum": ["absent", "redacted", "blocked"]
+        }
+      }
+    },
+    "resourceProfileHints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile",
+        "requestedParallelAgents",
+        "maxParallelAgents",
+        "rchRequired"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": [
+            "ci_smoke",
+            "developer_crowded_checkout",
+            "swarm_heavy_64_agent",
+            "stress_256gb_host"
+          ]
+        },
+        "requestedParallelAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxParallelAgents": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memoryBudgetMb": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cpuBudgetMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "rchRequired": {
+          "type": "boolean"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "sourceTraceHashes", "derivedFromSchemas"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["synthetic", "recorded", "mixed"]
+        },
+        "sourceTraceHashes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/blake3Hash"
+          }
+        },
+        "derivedFromSchemas": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^ee\\.[a-z0-9_.-]+\\.v[0-9]+$"
+          }
+        },
+        "fixtureAuthorHash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/blake3Hash"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

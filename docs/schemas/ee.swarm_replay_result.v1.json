@@ -1,0 +1,497 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.swarm_replay_result.v1.json",
+  "title": "ee.swarm_replay_result.v1",
+  "description": "Compact deterministic result ledger for a multi-agent swarm workload replay. It records per-command latency, stdout/stderr byte counts, degraded codes, exit code, redaction status, optional resource measurements, command hashes, redacted artifact references, first-failure diagnosis, and verification posture without raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "workloadId",
+    "runId",
+    "sideEffectFree",
+    "status",
+    "commandResults",
+    "aggregate",
+    "redactionStatus",
+    "resourceUsage",
+    "firstFailure",
+    "verification",
+    "warnings"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.swarm_replay_result.v1"
+    },
+    "workloadId": {
+      "$ref": "#/$defs/workloadId"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^swarmrun_[A-Fa-f0-9]{16,64}$"
+    },
+    "sideEffectFree": {
+      "type": "boolean",
+      "const": true
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "fail", "blocked", "degraded"]
+    },
+    "commandResults": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/commandResult"
+      }
+    },
+    "aggregate": {
+      "$ref": "#/$defs/aggregate"
+    },
+    "redactionStatus": {
+      "$ref": "#/$defs/redactionStatus"
+    },
+    "resourceUsage": {
+      "$ref": "#/$defs/resourceUsage"
+    },
+    "firstFailure": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/firstFailure"
+        }
+      ]
+    },
+    "verification": {
+      "$ref": "#/$defs/verification"
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "maxLength": 240
+      }
+    }
+  },
+  "field_presets": {
+    "minimal": [
+      "schema",
+      "workloadId",
+      "runId",
+      "sideEffectFree",
+      "status",
+      "commandResults",
+      "aggregate",
+      "redactionStatus",
+      "resourceUsage",
+      "firstFailure",
+      "verification",
+      "warnings"
+    ],
+    "summary": [
+      "schema",
+      "workloadId",
+      "runId",
+      "status",
+      "aggregate",
+      "redactionStatus",
+      "firstFailure",
+      "verification"
+    ],
+    "standard": ["*"],
+    "full": ["*"]
+  },
+  "examples": [
+    {
+      "schema": "ee.swarm_replay_result.v1",
+      "workloadId": "swarmwl_1111111111111111",
+      "runId": "swarmrun_2222222222222222",
+      "sideEffectFree": true,
+      "status": "pass",
+      "commandResults": [
+        {
+          "stepId": "step_001",
+          "agentSlot": 0,
+          "commandHash": "blake3:3333333333333333333333333333333333333333333333333333333333333333",
+          "exitCode": 0,
+          "elapsedMs": 184,
+          "stdoutBytes": 4096,
+          "stderrBytes": 0,
+          "degradedCodes": [],
+          "artifactPaths": [
+            {
+              "kind": "json",
+              "pathTail": "artifacts/pack-result.json",
+              "pathHash": "blake3:4444444444444444"
+            }
+          ],
+          "redactionStatus": "clean",
+          "memoryRssBytes": 73400320,
+          "cpuMs": 73
+        }
+      ],
+      "aggregate": {
+        "commandCount": 1,
+        "successCount": 1,
+        "failureCount": 0,
+        "degradedCount": 0,
+        "elapsedMsTotal": 184,
+        "p50Ms": 184,
+        "p95Ms": 184,
+        "p99Ms": 184
+      },
+      "redactionStatus": {
+        "rawTaskStringPresent": false,
+        "rawQueryTextPresent": false,
+        "rawMemoryBodyPresent": false,
+        "rawMailBodyPresent": false,
+        "absoluteHostPathPresent": false,
+        "secretsPresent": false,
+        "environmentDumpPresent": false,
+        "fullFileListingPresent": false,
+        "redactionProbesPassed": true
+      },
+      "resourceUsage": {
+        "peakRssBytes": 73400320,
+        "maxCommandRssBytes": 73400320,
+        "totalCpuMs": 73,
+        "ioReadBytes": 8192,
+        "ioWriteBytes": 4096
+      },
+      "firstFailure": null,
+      "verification": {
+        "rchRequired": true,
+        "rchStatus": "passed",
+        "deterministic": true,
+        "workloadHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
+        "replayHash": "blake3:6666666666666666666666666666666666666666666666666666666666666666",
+        "volatileFieldsStripped": ["elapsedMs"]
+      },
+      "warnings": []
+    }
+  ],
+  "$defs": {
+    "workloadId": {
+      "type": "string",
+      "pattern": "^swarmwl_[A-Fa-f0-9]{16,64}$"
+    },
+    "blake3Hash": {
+      "type": "string",
+      "pattern": "^blake3:[A-Fa-f0-9]{16,128}$"
+    },
+    "stepId": {
+      "type": "string",
+      "pattern": "^step_[A-Za-z0-9_.-]{3,64}$"
+    },
+    "degradedCode": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "commandResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stepId",
+        "agentSlot",
+        "commandHash",
+        "exitCode",
+        "elapsedMs",
+        "stdoutBytes",
+        "stderrBytes",
+        "degradedCodes",
+        "artifactPaths",
+        "redactionStatus"
+      ],
+      "properties": {
+        "stepId": {
+          "$ref": "#/$defs/stepId"
+        },
+        "agentSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1023
+        },
+        "commandHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "exitCode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "elapsedMs": {
+          "description": "Normalized elapsed duration in milliseconds. This is the only time-like per-command field in the ledger.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdoutBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stderrBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degradedCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/degradedCode"
+          }
+        },
+        "artifactPaths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifactRef"
+          }
+        },
+        "redactionStatus": {
+          "type": "string",
+          "enum": ["clean", "redacted", "probe_failed"]
+        },
+        "memoryRssBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cpuMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "pathTail", "pathHash"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["json", "jsonl", "markdown", "log", "support_bundle", "other"]
+        },
+        "pathTail": {
+          "description": "Relative fixture path tail or redacted path token. Absolute host paths are not valid artifact references.",
+          "type": "string",
+          "not": {
+            "anyOf": [
+              { "pattern": "^/" },
+              { "pattern": "^[A-Za-z]:" }
+            ]
+          },
+          "pattern": "^[A-Za-z0-9._/-]{1,160}$"
+        },
+        "pathHash": {
+          "$ref": "#/$defs/blake3Hash"
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commandCount",
+        "successCount",
+        "failureCount",
+        "degradedCount",
+        "elapsedMsTotal",
+        "p50Ms",
+        "p95Ms",
+        "p99Ms"
+      ],
+      "properties": {
+        "commandCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failureCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degradedCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elapsedMsTotal": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p50Ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p95Ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p99Ms": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "redactionStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rawTaskStringPresent",
+        "rawQueryTextPresent",
+        "rawMemoryBodyPresent",
+        "rawMailBodyPresent",
+        "absoluteHostPathPresent",
+        "secretsPresent",
+        "environmentDumpPresent",
+        "fullFileListingPresent",
+        "redactionProbesPassed"
+      ],
+      "properties": {
+        "rawTaskStringPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawQueryTextPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMemoryBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "rawMailBodyPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "absoluteHostPathPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "secretsPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "environmentDumpPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "fullFileListingPresent": {
+          "type": "boolean",
+          "const": false
+        },
+        "redactionProbesPassed": {
+          "type": "boolean"
+        }
+      }
+    },
+    "resourceUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "peakRssBytes",
+        "maxCommandRssBytes",
+        "totalCpuMs",
+        "ioReadBytes",
+        "ioWriteBytes"
+      ],
+      "properties": {
+        "peakRssBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "maxCommandRssBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "totalCpuMs": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "ioReadBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "ioWriteBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "firstFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stepId", "agentSlot", "code", "severity", "diagnosis"],
+      "properties": {
+        "stepId": {
+          "$ref": "#/$defs/stepId"
+        },
+        "agentSlot": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1023
+        },
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["info", "low", "warning", "medium", "high", "critical"]
+        },
+        "diagnosis": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "repairHint": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rchRequired",
+        "rchStatus",
+        "deterministic",
+        "workloadHash",
+        "replayHash",
+        "volatileFieldsStripped"
+      ],
+      "properties": {
+        "rchRequired": {
+          "type": "boolean"
+        },
+        "rchStatus": {
+          "type": "string",
+          "enum": [
+            "not_required",
+            "passed",
+            "blocked_before_cargo",
+            "failed"
+          ]
+        },
+        "deterministic": {
+          "type": "boolean"
+        },
+        "workloadHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "replayHash": {
+          "$ref": "#/$defs/blake3Hash"
+        },
+        "volatileFieldsStripped": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["elapsedMs", "cpuMs", "memoryRssBytes", "ioReadBytes", "ioWriteBytes"]
+          }
+        }
+      }
+    }
+  }
+}
