@@ -42,6 +42,19 @@ pub enum CassError {
     /// at the explicit override path.
     BinaryNotFound { binary: PathBuf },
 
+    /// A `cass` binary *was* located on `$PATH`, but at a location outside
+    /// ee's trusted execution allowlist (e.g. `~/.local/bin/cass`). ee will
+    /// not auto-execute a binary from an untrusted location for safety
+    /// (EE-3qgw), but it must NOT tell the agent to "install cass" when cass
+    /// is already installed. `found_at` is the detected (never executed) path,
+    /// shown so the agent can opt in via `EE_CASS_BINARY` or relocate cass.
+    ///
+    /// `bd-3twa9`: this is the honest counterpart to [`Self::BinaryNotFound`].
+    /// It is treated as `cass_unavailable` for ee's purposes (cass is
+    /// unavailable to ee until the operator opts in), but the message and
+    /// repair never claim cass is missing.
+    FoundButUntrusted { found_at: PathBuf },
+
     /// Spawning or communicating with the `cass` subprocess failed at
     /// the OS level (e.g. permission denied, broken pipe).
     Io { message: String },
@@ -88,6 +101,7 @@ impl CassError {
         match self {
             Self::InvalidBinary { .. } => "invalid_binary",
             Self::BinaryNotFound { .. } => "binary_not_found",
+            Self::FoundButUntrusted { .. } => "found_but_untrusted",
             Self::Io { .. } => "io",
             Self::EmptyStdout => "empty_stdout",
             Self::InvalidStdoutJson { .. } => "invalid_stdout_json",
@@ -116,6 +130,9 @@ impl CassError {
                 Some("set EE_CASS_BINARY or [cass.binary] to an absolute trusted cass executable")
             }
             Self::BinaryNotFound { .. } => Some("install cass or set [cass.binary] in config"),
+            Self::FoundButUntrusted { .. } => Some(
+                "cass is installed but outside ee's trusted allowlist; set EE_CASS_BINARY to its absolute path (or install cass into a system bin such as /usr/local/bin) to let ee use it",
+            ),
             Self::ContractMismatch { .. } => Some("upgrade cass to a compatible contract version"),
             Self::Degraded { repair_hint, .. } => Some(repair_hint.as_str()),
             Self::EmptyStdout
@@ -140,6 +157,11 @@ impl fmt::Display for CassError {
             Self::BinaryNotFound { binary } => {
                 write!(f, "cass binary not found at '{}'", binary.display())
             }
+            Self::FoundButUntrusted { found_at } => write!(
+                f,
+                "cass is installed at '{}' but outside ee's trusted execution allowlist",
+                found_at.display()
+            ),
             Self::Io { message } => write!(f, "cass subprocess io error: {message}"),
             Self::EmptyStdout => f.write_str("cass produced no stdout payload"),
             Self::InvalidStdoutJson { hint } => write!(f, "cass stdout was not valid JSON: {hint}"),
@@ -221,6 +243,12 @@ mod tests {
                 "degraded",
             ),
             (
+                CassError::FoundButUntrusted {
+                    found_at: PathBuf::from("/home/u/.local/bin/cass"),
+                },
+                "found_but_untrusted",
+            ),
+            (
                 CassError::Runtime {
                     kind: "session_not_found".into(),
                     message: "no such id".into(),
@@ -290,6 +318,41 @@ mod tests {
             message: "y".into(),
         };
         assert_eq!(opaque.repair_hint(), None);
+    }
+
+    #[test]
+    fn found_but_untrusted_never_claims_cass_is_missing() {
+        // bd-3twa9: the whole point of this variant is to stop telling agents
+        // to "install cass" when cass is already installed (just at an
+        // untrusted location). The message must not read as "not found" and the
+        // repair must point at EE_CASS_BINARY, never at installing cass.
+        let error = CassError::FoundButUntrusted {
+            found_at: PathBuf::from("/home/u/.local/bin/cass"),
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("/home/u/.local/bin/cass"),
+            "message must surface the detected path: {message}"
+        );
+        assert!(
+            message.contains("installed"),
+            "message must acknowledge cass IS installed: {message}"
+        );
+        assert!(
+            !message.contains("not found"),
+            "message must not claim cass is missing: {message}"
+        );
+
+        let repair = error.repair_hint().expect("untrusted has a repair hint");
+        assert!(
+            repair.contains("EE_CASS_BINARY"),
+            "repair must point at the opt-in env var: {repair}"
+        );
+        assert!(
+            !repair.to_lowercase().contains("install cass"),
+            "repair must not tell the agent to install already-installed cass: {repair}"
+        );
+        assert!(!error.is_degraded());
     }
 
     #[test]

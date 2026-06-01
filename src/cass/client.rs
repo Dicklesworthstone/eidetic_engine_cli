@@ -157,6 +157,22 @@ fn discover_import_binary_from_sources(
     config_override: Option<&Path>,
     trusted_locations: &[PathBuf],
 ) -> Result<DiscoveredBinary, CassError> {
+    discover_import_binary_from_sources_with_probe(
+        env_override,
+        config_override,
+        trusted_locations,
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+/// Inner discovery with an injectable `$PATH` value for the untrusted-location
+/// probe, so the bd-3twa9 detection branch is deterministically testable.
+fn discover_import_binary_from_sources_with_probe(
+    env_override: Option<&OsStr>,
+    config_override: Option<&Path>,
+    trusted_locations: &[PathBuf],
+    probe_path_var: Option<&OsStr>,
+) -> Result<DiscoveredBinary, CassError> {
     if let Some(env_path) = env_override {
         let path = PathBuf::from(env_path);
         return validate_import_binary(&path, DiscoverySource::EnvVar);
@@ -172,6 +188,20 @@ fn discover_import_binary_from_sources(
         if candidate.is_file() {
             return validate_import_binary(candidate, DiscoverySource::Path);
         }
+    }
+
+    // bd-3twa9: cass was not found in any trusted location. Before reporting
+    // "not found / install cass", do a non-executing `$PATH` probe to detect
+    // whether cass is in fact installed at an *untrusted* location (e.g.
+    // ~/.local/bin/cass). If so, we must not tell the agent to install
+    // something that is already installed — we report `FoundButUntrusted` with
+    // a repair that points at `EE_CASS_BINARY`. This only stats the path; ee
+    // still refuses to auto-execute it (EE-3qgw), so the security posture is
+    // unchanged.
+    if let Some(found_at) =
+        probe_path_var.and_then(|path_var| search_path_for_in(DEFAULT_BINARY, path_var))
+    {
+        return Err(CassError::FoundButUntrusted { found_at });
     }
 
     Err(CassError::BinaryNotFound {
@@ -764,8 +794,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        CassClient, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource, STABLE_ENV_OVERRIDES,
-        discover, discover_import_binary_from_sources, discover_with_override, search_path_for_in,
+        CassClient, CassError, DEFAULT_BINARY, DiscoveredBinary, DiscoverySource,
+        STABLE_ENV_OVERRIDES, discover, discover_import_binary_from_sources,
+        discover_import_binary_from_sources_with_probe, discover_with_override, search_path_for_in,
         trusted_cass_locations_for_home,
     };
 
@@ -1246,6 +1277,18 @@ mod tests {
                 );
                 assert_eq!(discovered.source, DiscoverySource::Path);
             }
+            // bd-3twa9: when no trusted location has cass, discovery now probes
+            // `$PATH` to produce an honest "found but untrusted" error instead
+            // of "not found". The security invariant is unchanged: the reported
+            // path must NEVER be the attacker-staged binary under evil_home,
+            // and ee still refuses to execute it.
+            Err(CassError::FoundButUntrusted { found_at }) => {
+                assert!(
+                    !found_at.starts_with(&evil_home),
+                    "discover reported attacker-staged binary {}",
+                    found_at.display(),
+                );
+            }
             Err(error) => {
                 assert_eq!(error.kind_str(), "binary_not_found");
             }
@@ -1355,6 +1398,71 @@ mod tests {
         })?;
         assert_eq!(discovered.source, DiscoverySource::EnvVar);
         Ok(())
+    }
+
+    /// bd-3twa9: when cass is installed at an untrusted `$PATH` location and no
+    /// trusted location has it, discovery must report `FoundButUntrusted` (so
+    /// the agent is NOT told to install already-installed cass), while still
+    /// refusing to execute it. The detected path must be the real on-PATH cass.
+    #[cfg(unix)]
+    #[test]
+    fn import_discovery_reports_found_but_untrusted_for_on_path_cass() -> TestResult {
+        let untrusted_dir = unique_test_dir("untrusted-path")?;
+        fs::create_dir_all(&untrusted_dir).map_err(|error| error.to_string())?;
+        let staged = untrusted_dir.join(DEFAULT_BINARY);
+        write_test_cass_binary(&staged, 0o755)?;
+
+        // Empty trusted allowlist + the untrusted dir as the probe PATH.
+        let result = discover_import_binary_from_sources_with_probe(
+            None,
+            None,
+            &[],
+            Some(untrusted_dir.as_os_str()),
+        );
+
+        match result {
+            Err(CassError::FoundButUntrusted { found_at }) => {
+                assert_eq!(
+                    found_at.file_name(),
+                    Some(OsStr::new(DEFAULT_BINARY)),
+                    "detected path must be the cass binary: {}",
+                    found_at.display()
+                );
+                assert!(
+                    found_at.is_file(),
+                    "detected path must exist: {}",
+                    found_at.display()
+                );
+            }
+            other => {
+                return Err(format!(
+                    "expected FoundButUntrusted for on-PATH untrusted cass, got {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// bd-3twa9: with no cass anywhere — not in trusted locations, not on the
+    /// probe PATH — discovery falls back to the honest `BinaryNotFound`, which
+    /// is the only case where "install cass" is the correct advice.
+    #[test]
+    fn import_discovery_reports_not_found_when_cass_is_truly_absent() -> TestResult {
+        let empty_dir = unique_test_dir("empty-path")?;
+        fs::create_dir_all(&empty_dir).map_err(|error| error.to_string())?;
+
+        let result = discover_import_binary_from_sources_with_probe(
+            None,
+            None,
+            &[],
+            Some(empty_dir.as_os_str()),
+        );
+        match result {
+            Err(CassError::BinaryNotFound { .. }) => Ok(()),
+            other => Err(format!(
+                "expected BinaryNotFound for absent cass, got {other:?}"
+            )),
+        }
     }
 
     #[test]

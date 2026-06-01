@@ -12305,7 +12305,11 @@ fn domain_error_degraded(error: &DomainError, message: &str) -> Vec<ErrorDegrada
     if matches!(
         error,
         DomainError::Import { .. } | DomainError::ImportWithDetails { .. }
-    ) && lower_message.contains("cass binary")
+    ) && (lower_message.contains("cass binary")
+        // bd-3twa9: the honest "found but untrusted" message does not contain
+        // "cass binary" (cass is not missing), but it is still cass-unavailable
+        // to ee until the operator opts in via EE_CASS_BINARY.
+        || lower_message.contains("trusted execution allowlist"))
     {
         return vec![ErrorDegradation {
             code: "cass_unavailable",
