@@ -1019,7 +1019,7 @@ mod tests {
             result
                 .degraded_codes
                 .iter()
-                .any(|code| code == NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
+                .any(|code| *code == NUMA_PIN_LINUX_NOT_IMPLEMENTED_CODE)
         );
         assert_no_duplicate_codes(&result);
     }
