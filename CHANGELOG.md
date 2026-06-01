@@ -24,6 +24,32 @@ Evidence scale:
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-06-01
+
+### Added
+
+- `calibrated` boolean on search hit and document results. When no conformal
+  residual quantile exists, `coverageGuarantee` is now `null` and `calibrated`
+  is `false`, so agents no longer read a raw fusion score over the trivial
+  `[0,1]` band as a 95%-calibrated relevance (bd-1h4nu).
+- High-confidence co-tag auto-linking on `ee remember`: ordinary tagged
+  remembers now populate the memory-link graph (PageRank/HITS/PPR/centrality),
+  not only `--workflow`-scoped ones. Gated on `--auto-link` (default on); see
+  [ADR-0051](docs/adr/0051-remember-cotag-auto-linking.md) (bd-pp1fk).
+- `responseFieldMap` in agent-docs so agents can discover result paths (bd-13h5k).
+- Adaptive-budget benchmark now emits p50/p99 latency percentiles
+  (`EE_ADAPTIVE_BUDGET_PERCENTILES`), guarded by a perf-bench envelope contract.
+- closure-lint infers implementation surface from known file paths, and a
+  command-inventory metadata guard asserts every advertised `ee` command
+  resolves with schema and side-effect metadata.
+
+### Changed
+
+- `ee.daemon.echo` diagnostic method is disabled by default and gated behind
+  `EE_DAEMON_ENABLE_ECHO`, so production daemon sockets never reflect
+  caller-supplied request params.
+- CASS prefetch histories are scoped by agent (bd-298n0).
+
 ### Fixed
 
 - Hardened the v0.3.2+ installer signing trust boundary: `install.sh`
@@ -33,6 +59,14 @@ Evidence scale:
   `--insecure-ignore-tlog=false`, and
   [`docs/security/release-signing.md`](docs/security/release-signing.md)
   documents key generation, storage, rotation, and revocation policy.
+- `cass` now reports "installed but untrusted" with an `EE_CASS_BINARY` repair
+  instead of telling agents to install a cass that is already present at an
+  untrusted location; the path is probed via a non-executing `$PATH` stat, so
+  the execution-allowlist security posture is unchanged (bd-3twa9).
+- Storage operations are routed through a panic guard that converts
+  sqlmodel/fsqlite panics into structured `DbError`s instead of unwinding.
+- Daemon hardening: verify stop-target liveness, tighten cleanup and NUMA
+  allocations, bound read-request pre-allocation, and cover UDS error envelopes.
 
 ## [0.3.8] - 2026-05-30
 
