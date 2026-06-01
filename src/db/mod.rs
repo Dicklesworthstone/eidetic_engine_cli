@@ -1470,61 +1470,69 @@ impl DbConnection {
     }
 
     fn execute_raw_for(&self, operation: DbOperation, sql: &str) -> Result<()> {
-        if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(operation, || {
-                let _write_owner = lock_file_write_owner_gate(&self.location)?;
+        let run = || {
+            guard_storage_panic(operation, || {
                 self.inner
                     .execute_raw(sql)
                     .map_err(|source| DbError::sqlmodel(operation, source))
+            })
+        };
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, || {
+                let _write_owner = lock_file_write_owner_gate(&self.location)?;
+                run()
             });
         }
 
-        self.inner
-            .execute_raw(sql)
-            .map_err(|source| DbError::sqlmodel(operation, source))
+        run()
     }
 
     fn execute_read_snapshot_raw(&self, operation: DbOperation, sql: &str) -> Result<()> {
-        if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(operation, || {
+        let run = || {
+            guard_storage_panic(operation, || {
                 self.inner
                     .execute_raw(sql)
                     .map_err(|source| DbError::sqlmodel(operation, source))
-            });
+            })
+        };
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, run);
         }
 
-        self.inner
-            .execute_raw(sql)
-            .map_err(|source| DbError::sqlmodel(operation, source))
+        run()
     }
 
     fn execute_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<u64> {
-        if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(operation, || {
-                let _write_owner = lock_file_write_owner_gate(&self.location)?;
+        let run = || {
+            guard_storage_panic(operation, || {
                 self.inner
                     .execute_sync(sql, params)
                     .map_err(|source| DbError::sqlmodel(operation, source))
+            })
+        };
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, || {
+                let _write_owner = lock_file_write_owner_gate(&self.location)?;
+                run()
             });
         }
 
-        self.inner
-            .execute_sync(sql, params)
-            .map_err(|source| DbError::sqlmodel(operation, source))
+        run()
     }
 
     fn query_for(&self, operation: DbOperation, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
-        if matches!(self.location, DatabaseLocation::File(_)) {
-            return retry_sqlite_contention(operation, || {
+        let run = || {
+            guard_storage_panic(operation, || {
                 self.inner
                     .query_sync(sql, params)
                     .map_err(|source| DbError::sqlmodel(operation, source))
-            });
+            })
+        };
+        if matches!(self.location, DatabaseLocation::File(_)) {
+            return retry_sqlite_contention(operation, run);
         }
 
-        self.inner
-            .query_sync(sql, params)
-            .map_err(|source| DbError::sqlmodel(operation, source))
+        run()
     }
 }
 
@@ -1635,6 +1643,56 @@ fn sqlite_u64_column(
 
 const FILE_DATABASE_OPEN_MAX_ATTEMPTS: usize = 8;
 const SQLITE_CONTENTION_MAX_ATTEMPTS: usize = 16;
+
+/// Run a frankensqlite operation, converting a panic into a recoverable
+/// [`DbError::StoragePanic`] instead of letting it unwind past the CLI
+/// response-envelope boundary.
+///
+/// frankensqlite can panic during result assembly — e.g. an out-of-bounds
+/// slice when a JOIN row materializes with fewer columns than the computed
+/// primary width (bd-22kjw). Without this guard the panic aborts the process
+/// (raw exit 101, no `ee.error.v2` envelope) and orphans the workspace
+/// write-owner lock. Catching it here turns the fault into an ordinary
+/// `DbError` that flows through the existing storage-error path: callers map
+/// it to `DomainError::Storage`, which renders `ee.error.v2` and exits 3.
+///
+/// The default panic hook still records the panic on stderr for debugging;
+/// only the unwinding is intercepted. A `StoragePanic` is never transient
+/// contention, so the retry loops return it immediately rather than spinning.
+fn guard_storage_panic<T>(operation: DbOperation, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(payload) => Err(DbError::storage_panic(
+            operation,
+            sanitize_panic_payload(payload.as_ref()),
+        )),
+    }
+}
+
+/// Extract a short, single-line, control-character-free message from a caught
+/// panic payload. Mirrors the daemon's `sanitize_panic_message` posture so the
+/// rendered storage error stays bounded and parser-safe.
+fn sanitize_panic_payload(payload: &(dyn std::any::Any + Send)) -> String {
+    let raw = if let Some(text) = payload.downcast_ref::<&'static str>() {
+        (*text).to_owned()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "<non-string panic payload>".to_owned()
+    };
+    let cleaned: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let trimmed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_CHARS: usize = 300;
+    if trimmed.chars().count() > MAX_CHARS {
+        let truncated: String = trimmed.chars().take(MAX_CHARS).collect();
+        format!("{truncated}…")
+    } else {
+        trimmed
+    }
+}
 
 fn retry_sqlite_contention<T>(
     retry_operation: DbOperation,
@@ -1925,6 +1983,17 @@ pub enum DbError {
         operation: DbOperation,
         message: String,
     },
+    /// A frankensqlite call unwound through a panic (e.g. an out-of-bounds
+    /// slice during JOIN row materialization) rather than returning an error.
+    /// Caught at the connection chokepoint by [`guard_storage_panic`] and
+    /// converted into a recoverable storage fault so durable-write commands
+    /// emit `ee.error.v2` with exit code 3 instead of aborting the process
+    /// (raw exit 101) and orphaning the workspace write-owner lock. See
+    /// bd-22kjw.
+    StoragePanic {
+        operation: DbOperation,
+        message: String,
+    },
 }
 
 impl DbError {
@@ -1935,12 +2004,18 @@ impl DbError {
         }
     }
 
+    fn storage_panic(operation: DbOperation, message: String) -> Self {
+        Self::StoragePanic { operation, message }
+    }
+
     pub const fn operation(&self) -> Option<DbOperation> {
         match self {
             Self::SqlModel { operation, .. } | Self::InvalidPath { operation, .. } => {
                 Some(*operation)
             }
-            Self::MalformedRow { operation, .. } => Some(*operation),
+            Self::MalformedRow { operation, .. } | Self::StoragePanic { operation, .. } => {
+                Some(*operation)
+            }
             Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
             | Self::MigrationDrift { .. } => None,
@@ -1954,7 +2029,8 @@ impl DbError {
             | Self::InvalidPath { .. }
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
-            | Self::MalformedRow { .. } => None,
+            | Self::MalformedRow { .. }
+            | Self::StoragePanic { .. } => None,
         }
     }
 
@@ -1965,7 +2041,8 @@ impl DbError {
             | Self::InvalidPath { .. }
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
-            | Self::MalformedRow { .. } => None,
+            | Self::MalformedRow { .. }
+            | Self::StoragePanic { .. } => None,
         }
     }
 }
@@ -2020,6 +2097,13 @@ impl fmt::Display for DbError {
                     operation, message
                 )
             }
+            Self::StoragePanic { operation, message } => {
+                write!(
+                    f,
+                    "database {} aborted on an internal storage fault (recovered from panic): {}",
+                    operation, message
+                )
+            }
         }
     }
 }
@@ -2032,7 +2116,8 @@ impl Error for DbError {
             | Self::InvalidMode { .. }
             | Self::InvalidMigration { .. }
             | Self::MigrationDrift { .. }
-            | Self::MalformedRow { .. } => None,
+            | Self::MalformedRow { .. }
+            | Self::StoragePanic { .. } => None,
         }
     }
 }
@@ -19623,8 +19708,10 @@ mod tests {
         Migration, MigrationRecord, MigrationTableColumn,
         ReflectionRequestCandidateConsumptionOutcome, ReflectionRequestLedgerIngestOutcome,
         ReflectionRequestReplayStatus, StoredEpisodeAction, UpdateProceduralRuleLifecycleInput,
-        WalCheckpointMode, file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
-        lock_file_write_owner_gate, sqlite_u32_column, sqlite_u64_column, subsystem_name,
+        WalCheckpointMode, db_error_is_transient_sqlite_contention,
+        file_write_owner_depth_for_test, file_write_owner_gate_address_for_test,
+        guard_storage_panic, lock_file_write_owner_gate, sanitize_panic_payload, sqlite_u32_column,
+        sqlite_u64_column, subsystem_name,
     };
     use crate::models::{
         AgentContextProfileCounts, EmbeddingMetadataRecord, ModelDistanceMetric, ModelProvider,
@@ -19688,6 +19775,153 @@ mod tests {
                 "{context}: expected {expected:?}, got {actual:?}"
             )))
         }
+    }
+
+    // bd-22kjw: the DB connection chokepoint must convert a frankensqlite
+    // panic into a recoverable `DbError::StoragePanic` (which callers map to a
+    // storage error → exit 3 / ee.error.v2) instead of unwinding past the CLI
+    // response boundary (raw exit 101).
+
+    #[test]
+    fn guard_storage_panic_returns_ok_unchanged() -> TestResult {
+        let value = guard_storage_panic(DbOperation::Query, || Ok::<u64, DbError>(7))?;
+        ensure_equal(&value, &7, "guard passes Ok through")
+    }
+
+    #[test]
+    fn guard_storage_panic_preserves_inner_db_error() -> TestResult {
+        // An ordinary DbError returned by the closure must flow through
+        // unchanged, never re-wrapped as a StoragePanic.
+        let result = guard_storage_panic(DbOperation::Query, || {
+            Err::<u64, DbError>(DbError::MalformedRow {
+                operation: DbOperation::Query,
+                message: "boom".to_string(),
+            })
+        });
+        match result {
+            Err(DbError::MalformedRow { message, .. }) => {
+                ensure_equal(&message, &"boom".to_string(), "inner error preserved")
+            }
+            other => Err(TestFailure::new(format!(
+                "expected MalformedRow passthrough, got {other:?}"
+            ))),
+        }
+    }
+
+    #[test]
+    fn guard_storage_panic_converts_str_panic_to_storage_panic() -> TestResult {
+        // Mirrors the observed frankensqlite JOIN row-assembly panic.
+        let result = guard_storage_panic::<u64>(DbOperation::Query, || {
+            panic!("range end index 27 out of range for slice of length 26")
+        });
+        match result {
+            Err(DbError::StoragePanic { operation, message }) => {
+                ensure(
+                    matches!(operation, DbOperation::Query),
+                    "operation preserved on StoragePanic",
+                )?;
+                ensure(
+                    message.contains("range end index 27 out of range"),
+                    format!("panic payload preserved in message: {message}"),
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "expected StoragePanic, got {other:?}"
+            ))),
+        }
+    }
+
+    #[test]
+    fn guard_storage_panic_sanitizes_string_payload() -> TestResult {
+        // `panic!` with format args boxes a `String` payload (vs the
+        // `&'static str` payload above), exercising the other downcast arm.
+        let result = guard_storage_panic::<u64>(DbOperation::Execute, || {
+            panic!("{}", "line one\n\tline two   with   spaces".to_string())
+        });
+        match result {
+            Err(DbError::StoragePanic { message, .. }) => {
+                ensure(
+                    !message.contains('\n') && !message.contains('\t'),
+                    format!("control chars stripped: {message:?}"),
+                )?;
+                ensure(
+                    !message.contains("  "),
+                    format!("runs of whitespace collapsed: {message:?}"),
+                )
+            }
+            other => Err(TestFailure::new(format!(
+                "expected StoragePanic, got {other:?}"
+            ))),
+        }
+    }
+
+    #[test]
+    fn storage_panic_is_not_transient_contention() -> TestResult {
+        let error = DbError::StoragePanic {
+            operation: DbOperation::Query,
+            message: "range end index 27 out of range for slice of length 26".to_string(),
+        };
+        ensure(
+            !db_error_is_transient_sqlite_contention(&error),
+            "StoragePanic must not be treated as transient SQLite contention",
+        )?;
+        let rendered = error.to_string();
+        ensure(
+            rendered.contains("internal storage fault"),
+            format!("display identifies a storage fault: {rendered}"),
+        )?;
+        // The remember-path retry classifier is substring-based; the rendered
+        // message must not collide with any contention marker or it would be
+        // retried instead of mapped to a storage error.
+        let lowered = rendered.to_ascii_lowercase();
+        for needle in [
+            "database is busy",
+            "database is locked",
+            "snapshot conflict",
+            "sqlite_busy",
+            "could not acquire database write lock",
+            "resource temporarily unavailable",
+        ] {
+            ensure(
+                !lowered.contains(needle),
+                format!("display must not contain contention marker {needle:?}: {rendered}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn storage_panic_reports_operation() -> TestResult {
+        let error = DbError::StoragePanic {
+            operation: DbOperation::Execute,
+            message: "boom".to_string(),
+        };
+        ensure(
+            matches!(error.operation(), Some(DbOperation::Execute)),
+            "StoragePanic surfaces its operation",
+        )
+    }
+
+    #[test]
+    fn sanitize_panic_payload_truncates_long_messages() -> TestResult {
+        let long = "x".repeat(1000);
+        let cleaned = sanitize_panic_payload(&long as &(dyn std::any::Any + Send));
+        ensure(
+            cleaned.chars().count() <= 301,
+            format!("truncated to bound, got {} chars", cleaned.chars().count()),
+        )?;
+        ensure(cleaned.ends_with('…'), "ellipsis marks truncation")
+    }
+
+    #[test]
+    fn sanitize_panic_payload_handles_unknown_payload() -> TestResult {
+        let value: u32 = 17;
+        let cleaned = sanitize_panic_payload(&value as &(dyn std::any::Any + Send));
+        ensure_equal(
+            &cleaned,
+            &"<non-string panic payload>".to_string(),
+            "non-string payloads get a stable placeholder",
+        )
     }
 
     fn first_value<'a>(
