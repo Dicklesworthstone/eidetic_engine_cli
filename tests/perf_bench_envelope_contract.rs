@@ -158,6 +158,49 @@ fn graph_hits_benchmark_is_registered_and_budgeted() -> TestResult {
 }
 
 #[test]
+fn adaptive_budget_benchmark_reports_percentiles_and_valid_scenarios() -> TestResult {
+    let bench_source = fs::read_to_string("benches/adaptive_budget.rs")
+        .map_err(|error| format!("failed to read benches/adaptive_budget.rs: {error}"))?;
+
+    for expected in [
+        "const BENCH_GROUP_NAME: &str = \"adaptive_budget\";",
+        "const PERCENTILE_SUMMARY_RELATIVE_PATH: &str = \"criterion/adaptive_budget/percentiles.json\";",
+        "const PERCENTILE_MEASURE_ITERS: usize = 401;",
+        "const PERCENTILE_BATCH_ITERS: usize = 128;",
+        "const P50_BUDGET_MS: f64 = 2.0;",
+        "const P99_TO_P50_MAX_RATIO: f64 = 2.0;",
+        "fanout_just_below_cap",
+        "fanout_at_cap",
+        "fanout_just_above_cap",
+        "retrieval_scores_at_1000_elements",
+        "scores: skewed_scores(1_000)",
+        "let inputs = scenarios",
+        "classify_prebuilt_input(black_box(input))",
+        "EE_ADAPTIVE_BUDGET_PERCENTILES",
+    ] {
+        if !bench_source.contains(expected) {
+            return Err(format!(
+                "adaptive budget benchmark contract missing `{expected}`"
+            ));
+        }
+    }
+
+    for forbidden in [
+        "group.sample_size(50)",
+        "complex_skewed_high_fanout",
+        "fanout: 12.0",
+    ] {
+        if bench_source.contains(forbidden) {
+            return Err(format!(
+                "adaptive budget benchmark retained invalid fragment `{forbidden}`"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn host_calibration_harness_is_invoked_only_and_perf_v1_shaped() -> TestResult {
     let source = fs::read_to_string("scripts/e2e_overhaul/host_calibration.sh")
         .map_err(|error| format!("failed to read host calibration harness: {error}"))?;
