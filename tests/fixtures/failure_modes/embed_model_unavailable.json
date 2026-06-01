@@ -12,7 +12,7 @@
   "severity": "warning",
   "repair_present": true,
   "trigger": {
-    "description": "The embedding model or embedder feature is unavailable while the lexical search arm remains functional, so search continues in lexical fallback mode.",
+    "description": "The embedding model or semantic embedder feature is unavailable while the lexical search arm remains functional. This includes explicit missing-model configuration and the default frankensearch_hash_fallback posture where the active embedder reports semantic=false.",
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Cargo workspace uses Rust nightly.' --workspace . --level semantic --kind fact --json",

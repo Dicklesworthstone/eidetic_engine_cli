@@ -4452,7 +4452,7 @@ ee diag search 'cargo fmt' --workspace . --all-arms --inject-duplicate-hit --jso
 
 **Introduced by:** bd-3qs2i.4.1 (epic F4)
 
-**Trigger.** The embedding model or embedder feature is unavailable while the lexical search arm remains functional, so search continues in lexical fallback mode.
+**Trigger.** The embedding model or semantic embedder feature is unavailable while the lexical search arm remains functional. This includes explicit missing-model configuration and the default `frankensearch_hash_fallback` posture where the active embedder reports `semantic=false`.
 
 **Setup.**
 

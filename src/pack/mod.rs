@@ -3999,7 +3999,7 @@ fn context_advisory_banner(
 
     PackAdvisoryBanner {
         status,
-        summary: advisory_summary(status, &counts, degraded.len()),
+        summary: advisory_summary(status, &counts, degraded),
         authoritative_count: counts.authoritative(),
         advisory_count: counts.advisory(),
         legacy_count: counts.legacy(),
@@ -4839,7 +4839,7 @@ const fn context_profile_section(section: PackSection) -> ContextProfileSection 
 fn advisory_summary(
     status: PackAdvisoryStatus,
     counts: &PackTrustCounts,
-    degradation_count: usize,
+    degraded: &[ContextResponseDegradation],
 ) -> String {
     match status {
         PackAdvisoryStatus::Clear => {
@@ -4855,11 +4855,24 @@ fn advisory_summary(
                 plural_suffix(total, "y", "ies")
             )
         }
-        PackAdvisoryStatus::Degraded => format!(
-            "Context includes {} degraded signal{}; validate advisory memory and repair degraded sources before relying on this pack.",
-            degradation_count,
-            plural_s(degradation_count)
-        ),
+        PackAdvisoryStatus::Degraded => {
+            let degradation_count = degraded.len();
+            if degraded
+                .iter()
+                .any(|entry| entry.code == "embed_model_unavailable")
+            {
+                return format!(
+                    "Context includes {} degraded signal{}; semantic embedding is unavailable, so treat retrieval ranking as lexical-only until a semantic model is available.",
+                    degradation_count,
+                    plural_s(degradation_count)
+                );
+            }
+            format!(
+                "Context includes {} degraded signal{}; validate advisory memory and repair degraded sources before relying on this pack.",
+                degradation_count,
+                plural_s(degradation_count)
+            )
+        }
     }
 }
 
@@ -11654,6 +11667,38 @@ mod tests {
             &banner.notes[1].memory_ids,
             &vec![memory_id(3).to_string()],
             "legacy memory ids",
+        )
+    }
+
+    #[test]
+    fn advisory_banner_names_lexical_only_when_embed_model_is_unavailable() -> TestResult {
+        let request = ContextRequest::from_query("prepare safe release")
+            .map_err(|error| format!("request rejected: {error:?}"))?;
+        let draft = assemble_draft(
+            request.query.clone(),
+            request.budget,
+            vec![candidate(1, 0.9, 0.8, 10)?],
+        )
+        .map_err(|error| format!("draft rejected: {error:?}"))?;
+        let degraded = ContextResponseDegradation::new(
+            "embed_model_unavailable",
+            ContextResponseSeverity::Warning,
+            "Embedding model unavailable; semantic similarity is disabled.",
+            Some("ee index reembed --workspace .".to_string()),
+        )
+        .map_err(|error| format!("degradation rejected: {error:?}"))?;
+        let response = ContextResponse::new(request, draft, vec![degraded])
+            .map_err(|error| format!("response rejected: {error:?}"))?;
+
+        let banner = response.data.advisory_banner();
+        ensure_equal(&banner.status.as_str(), &"degraded", "banner status")?;
+        ensure(
+            banner.summary.contains("semantic embedding is unavailable"),
+            "banner should name unavailable semantic embedding",
+        )?;
+        ensure(
+            banner.summary.contains("lexical-only"),
+            "banner should tell agents to treat ranking as lexical-only",
         )
     }
 

@@ -84,6 +84,8 @@ const SEARCH_ANALYSIS_PROVENANCE_URI_KEY: &str = "_ee_analysis_provenance_uri";
 const SEARCH_ANALYSIS_CREATED_AT_KEY: &str = "_ee_analysis_created_at";
 const EMBED_MODEL_UNAVAILABLE_MODEL_ID: &str = "EE_EMBED_MODEL_PATH";
 const EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG: &str = "embed-fast";
+const HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON: &str =
+    "active embedder source frankensearch_hash_fallback reports semantic=false";
 const SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
 const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 
@@ -214,6 +216,7 @@ struct SourceModeResolution {
 struct SearchTierState<'a> {
     lexical_available: bool,
     embed_model_unavailable: Option<&'a str>,
+    semantic_embedder_degraded: Option<&'a str>,
 }
 
 /// Default relevance floor for 0..=1-normalized score sources (bead
@@ -1004,7 +1007,7 @@ impl SearchDegradation {
             code: "embed_model_unavailable".to_string(),
             severity: "warning".to_string(),
             message: format!(
-                "Embedding model unavailable ({reason}); falling back to lexical search."
+                "Embedding model unavailable ({reason}); semantic similarity is disabled and lexical search remains available."
             ),
             repair: Some("ee index reembed --workspace .".to_string()),
         }
@@ -5173,9 +5176,14 @@ fn resolve_source_mode(
     degraded: &mut Vec<SearchDegradation>,
 ) -> Result<SourceModeResolution, SearchError> {
     let embed_model_unavailable = embed_model_unavailable_reason_from_env();
+    let lexical_available = lexical_search_available(index_dir);
     let tiers = SearchTierState {
-        lexical_available: lexical_search_available(index_dir),
+        lexical_available,
         embed_model_unavailable: embed_model_unavailable.as_deref(),
+        semantic_embedder_degraded: embed_model_unavailable
+            .is_none()
+            .then_some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON)
+            .filter(|_| lexical_available && !active_search_embedder_is_semantic()),
     };
     resolve_source_mode_with_tiers(options, degraded, tiers)
 }
@@ -5225,6 +5233,30 @@ fn resolve_source_mode_with_tiers(
             }
             SearchSourceMode::LexicalOnly => {}
         }
+    }
+
+    if let Some(reason) = tiers.semantic_embedder_degraded
+        && matches!(
+            requested,
+            SearchSourceMode::Hybrid | SearchSourceMode::SemanticOnly
+        )
+    {
+        if options.strict_source_mode {
+            return Err(SearchError::SourceModeUnavailable {
+                requested,
+                reason: format!("semantic similarity unavailable: {reason}"),
+            });
+        }
+        degraded.push(SearchDegradation::embed_model_unavailable(reason));
+        tracing::warn!(
+            target: "ee::search::embedder_down",
+            code = "embed_model_unavailable",
+            model_id = EMBED_MODEL_UNAVAILABLE_MODEL_ID,
+            feature_flag = EMBED_MODEL_UNAVAILABLE_FEATURE_FLAG,
+            lexical_available,
+            reason,
+            "active embedder is deterministic hash fallback; semantic similarity unavailable"
+        );
     }
 
     match requested {
@@ -5277,6 +5309,10 @@ fn resolve_source_mode_with_tiers(
             })
         }
     }
+}
+
+fn active_search_embedder_is_semantic() -> bool {
+    HashEmbedder::default_256().is_semantic()
 }
 
 fn embed_model_unavailable_reason_from_env() -> Option<String> {
@@ -8722,6 +8758,7 @@ mod tests {
             SearchTierState {
                 lexical_available: true,
                 embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_degraded: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -8747,6 +8784,7 @@ mod tests {
             SearchTierState {
                 lexical_available: false,
                 embed_model_unavailable: None,
+                semantic_embedder_degraded: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -8772,6 +8810,7 @@ mod tests {
             SearchTierState {
                 lexical_available: false,
                 embed_model_unavailable: Some("missing model fixture"),
+                semantic_embedder_degraded: None,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -8784,6 +8823,88 @@ mod tests {
             .map(|degradation| degradation.code.as_str())
             .collect();
         assert_eq!(codes, vec!["search_unavailable"]);
+        Ok(())
+    }
+
+    #[test]
+    fn emit_embed_model_unavailable_for_hash_fallback_without_source_mode_fallback() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: None,
+                semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::Hybrid);
+        assert!(!resolution.fallback_applied);
+        assert!(!resolution.unavailable_no_results);
+        assert_eq!(degraded.len(), 1);
+        assert_eq!(degraded[0].code, "embed_model_unavailable");
+        assert!(
+            degraded[0].message.contains("frankensearch_hash_fallback"),
+            "hash fallback reason should reach the degraded message: {}",
+            degraded[0].message
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strict_semantic_only_errors_when_hash_fallback_is_active() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::SemanticOnly, true);
+        let mut degraded = Vec::new();
+
+        let error = match resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: None,
+                semantic_embedder_degraded: Some(HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON),
+            },
+        ) {
+            Ok(resolution) => {
+                return Err(format!(
+                    "strict semantic-only mode should fail when hash fallback is active: {resolution:?}"
+                ));
+            }
+            Err(error) => error,
+        };
+
+        match error {
+            SearchError::SourceModeUnavailable { requested, reason } => {
+                assert_eq!(requested, SearchSourceMode::SemanticOnly);
+                assert!(reason.contains("semantic similarity unavailable"));
+                assert!(reason.contains("frankensearch_hash_fallback"));
+            }
+            other => return Err(format!("unexpected source mode error: {other}")),
+        }
+        assert!(degraded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn real_semantic_embedder_posture_does_not_emit_hash_fallback_warning() -> TestResult {
+        let options = source_mode_test_options(SearchSourceMode::Hybrid, false);
+        let mut degraded = Vec::new();
+        let resolution = resolve_source_mode_with_tiers(
+            &options,
+            &mut degraded,
+            SearchTierState {
+                lexical_available: true,
+                embed_model_unavailable: None,
+                semantic_embedder_degraded: None,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        assert_eq!(resolution.applied, SearchSourceMode::Hybrid);
+        assert!(degraded.is_empty());
         Ok(())
     }
 
