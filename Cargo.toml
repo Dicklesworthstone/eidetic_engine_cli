@@ -284,6 +284,10 @@ harness = false
 name = "adaptive_budget"
 harness = false
 
+[[bench]]
+name = "cass_prefetch"
+harness = false
+
 [[test]]
 name = "cass_contracts"
 path = "tests/conformance/cass_contracts.rs"

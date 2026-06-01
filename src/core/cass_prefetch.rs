@@ -99,10 +99,11 @@
 //! or the `--explain` decision blob — and a daemon hydrating a history
 //! from untrusted request params cannot smuggle one through `serde`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Schema id for the per-call prefetch decision blob emitted under
 /// `--explain` (a follow-up CLI slice surfaces it; the constant is
@@ -148,7 +149,7 @@ pub const DEFAULT_PREFETCH_BUDGET: Duration = Duration::from_millis(50);
 /// carry before the predictor refuses it (bd-1suaa). The default rolling
 /// window is [`DEFAULT_PREFETCH_HISTORY_WINDOW`] (10); 64 is generous
 /// headroom while still capping the work at a constant. `predict_next_n`
-/// is `O(N)` in history length (a `powf`-class weight + a `String` clone
+/// is `O(N)` in history length (a recency weight + a bounded map lookup
 /// per observation), so an unbounded `N` is a CPU/RAM amplification
 /// vector the instant the daemon wires a dispatch method that
 /// deserializes a `CassPrefetchHistory` from a (4 MiB) request envelope.
@@ -540,18 +541,30 @@ pub struct CassPrefetchCandidate {
     pub score: f64,
     /// Predictor identifier for audit / explain blobs. Defaults to
     /// the predictor's `name()`; tests can override.
-    pub predictor: String,
+    #[serde(deserialize_with = "deserialize_predictor_cow")]
+    pub predictor: Cow<'static, str>,
 }
 
 impl CassPrefetchCandidate {
     #[must_use]
-    pub fn new(topic_id: impl Into<TopicId>, score: f64, predictor: impl Into<String>) -> Self {
+    pub fn new(
+        topic_id: impl Into<TopicId>,
+        score: f64,
+        predictor: impl Into<Cow<'static, str>>,
+    ) -> Self {
         Self {
             topic_id: topic_id.into(),
             score,
             predictor: predictor.into(),
         }
     }
+}
+
+fn deserialize_predictor_cow<'de, D>(deserializer: D) -> Result<Cow<'static, str>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Cow::Owned)
 }
 
 /// Result of a generation-gated prediction
@@ -838,9 +851,11 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             if Some(topic_id) == most_recent_topic {
                 continue;
             }
-            *accumulator
-                .entry(observation.topic_id.clone())
-                .or_insert(0.0) += weight;
+            if let Some(existing_weight) = accumulator.get_mut(&observation.topic_id) {
+                *existing_weight += weight;
+            } else {
+                accumulator.insert(observation.topic_id.clone(), weight);
+            }
         }
 
         if total_weight <= 0.0 || !total_weight.is_finite() {
@@ -1502,6 +1517,24 @@ mod tests {
         let candidate = CassPrefetchCandidate::new("refactor", 0.5, "p");
         let json = serde_json::to_string(&candidate).expect("serialize candidate");
         assert!(json.contains(r#""topicId":"refactor""#), "got {json}");
+    }
+
+    #[test]
+    fn built_in_predictor_borrows_static_name_bd_1cc1c() {
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let history = history(&["current", "alpha", "alpha"]);
+        let candidates = predictor.predict_next_n(&history, 3);
+        assert_eq!(candidates.len(), 1);
+        assert!(matches!(
+            candidates[0].predictor,
+            Cow::Borrowed("recency_weighted_frequency_v1")
+        ));
+
+        let json = serde_json::to_string(&candidates[0]).expect("serialize candidate");
+        let decoded: CassPrefetchCandidate =
+            serde_json::from_str(&json).expect("deserialize candidate");
+        assert_eq!(decoded.predictor.as_ref(), "recency_weighted_frequency_v1");
+        assert!(matches!(decoded.predictor, Cow::Owned(_)));
     }
 
     #[test]
