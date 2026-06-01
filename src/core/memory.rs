@@ -667,7 +667,7 @@ fn remember_memory_inner(
 
     append_remember_audit_jsonl(&prepared, &audit_id, &memory_id, &memory_input)?;
 
-    let (auto_links, auto_link_status, auto_link_degradations) =
+    let (mut auto_links, mut auto_link_status, mut auto_link_degradations) =
         match create_auto_links_for_remember(
             &connection,
             &prepared.workspace_id,
@@ -715,7 +715,7 @@ fn remember_memory_inner(
             ),
         };
 
-    let (suggested_links, suggested_link_status, suggested_link_degradations) =
+    let (mut suggested_links, mut suggested_link_status, suggested_link_degradations) =
         match suggest_links_for_remember(
             &connection,
             &prepared.workspace_id,
@@ -745,6 +745,58 @@ fn remember_memory_inner(
                 }],
             ),
         };
+
+    // bd-pp1fk: auto-persist the strongest co-tag neighbors as audited links so
+    // ordinary tagged remembers populate the graph (not only workflow-scoped
+    // ones). Gated on the same `--auto-link` toggle (default on). Persisted
+    // targets are removed from the advisory `suggested_links` set so a memory is
+    // never both auto-linked and re-suggested.
+    {
+        let existing_auto_link_targets: BTreeSet<String> = auto_links
+            .iter()
+            .map(|link| link.target_memory_id.clone())
+            .collect();
+        match persist_high_confidence_cotag_links(
+            &connection,
+            &prepared.workspace_id,
+            &memory_id,
+            options.auto_link,
+            &existing_auto_link_targets,
+            &suggested_links,
+        ) {
+            Ok(cotag_links) if !cotag_links.is_empty() => {
+                let persisted: BTreeSet<String> = cotag_links
+                    .iter()
+                    .map(|link| link.target_memory_id.clone())
+                    .collect();
+                suggested_links.retain(|link| !persisted.contains(&link.target_memory_id));
+                if suggested_links.is_empty() && suggested_link_status == "ready" {
+                    suggested_link_status = "no_candidates".to_owned();
+                }
+                auto_links.extend(cotag_links);
+                // We linked, so drop the workflow-less "use ee memory link"
+                // advisory and report the honest "linked" status.
+                auto_link_degradations
+                    .retain(|degradation| degradation.code != "auto_link_disabled");
+                if auto_link_status == "no_workflow_required" || auto_link_status == "no_candidates"
+                {
+                    auto_link_status = "linked".to_owned();
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                auto_link_degradations.push(RememberSuggestedLinkDegradation {
+                    code: "remember_cotag_auto_link_failed".to_owned(),
+                    severity: "low".to_owned(),
+                    message: format!(
+                        "Remembered the memory, but co-tag auto-linking failed: {}",
+                        error.message()
+                    ),
+                    repair: "Run `ee doctor --json` and inspect memory link indexes.".to_owned(),
+                });
+            }
+        }
+    }
 
     let index_dir = prepared
         .workspace_path
@@ -3039,6 +3091,21 @@ fn append_remember_audit_jsonl(
 const REMEMBER_AUTO_LINK_LIMIT: u32 = 8;
 const REMEMBER_AUTO_LINK_WEIGHT: f32 = 0.5;
 
+// bd-pp1fk: high-confidence co-tag auto-linking. Plain `ee remember` (no
+// workflow) historically produced zero links, leaving the entire graph layer
+// (PageRank/HITS/bridges/proximity/Pack DNA/skyline) dormant by default. We now
+// persist a bounded, deterministic set of the strongest co-tag neighbors as
+// audited `related` links so the graph wakes up from ordinary tagged remembers.
+// See docs/adr/0051-remember-cotag-auto-linking.md.
+//
+// MIN_SCORE 0.75 maps (via `co_tag_score`) to "at least half of the new
+// memory's tags overlap the neighbor", so a single incidental shared tag never
+// triggers a durable link. LIMIT caps fan-out; WEIGHT sits just below the
+// workflow-recency weight because co-tag is a weaker structural signal.
+const REMEMBER_AUTO_COTAG_LINK_LIMIT: usize = 3;
+const REMEMBER_AUTO_COTAG_LINK_MIN_SCORE: f32 = 0.75;
+const REMEMBER_AUTO_COTAG_LINK_WEIGHT: f32 = 0.4;
+
 fn create_auto_links_for_remember(
     connection: &DbConnection,
     workspace_id: &str,
@@ -3148,6 +3215,127 @@ fn create_auto_links_for_remember(
     Ok(auto_links)
 }
 
+/// bd-pp1fk: persist the strongest co-tag neighbors as durable, audited
+/// `related` links. Returns the links it created; callers drop the persisted
+/// targets from the advisory `suggested_links` set so a memory is never both
+/// auto-linked and re-suggested.
+///
+/// Deterministic: `suggested` arrives already ordered by co-tag score then
+/// ULID payload, so the bounded prefix we persist is stable for a given DB +
+/// input. Each write is wrapped in a transaction with a `memory_link.create`
+/// audit entry — this honors the "no silent memory mutation" principle: the
+/// links are automatic but never silent.
+fn persist_high_confidence_cotag_links(
+    connection: &DbConnection,
+    workspace_id: &str,
+    memory_id: &str,
+    enabled: bool,
+    existing_auto_link_targets: &BTreeSet<String>,
+    suggested: &[RememberSuggestedLink],
+) -> Result<Vec<RememberAutoLink>, DomainError> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+
+    let mut created = Vec::new();
+    for link in suggested {
+        if created.len() >= REMEMBER_AUTO_COTAG_LINK_LIMIT {
+            break;
+        }
+        if link.score < REMEMBER_AUTO_COTAG_LINK_MIN_SCORE
+            || existing_auto_link_targets.contains(&link.target_memory_id)
+        {
+            continue;
+        }
+
+        // `suggest_links_for_remember` already excludes existing links, but
+        // re-check here so a workflow-recency link created earlier in the same
+        // remember (or a concurrent writer) is never duplicated.
+        let exists = connection
+            .memory_link_exists_between(memory_id, &link.target_memory_id)
+            .map_err(|error| DomainError::Storage {
+                message: format!(
+                    "Failed to query existing memory links for co-tag linking: {error}"
+                ),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+        if exists {
+            continue;
+        }
+
+        let link_id = generate_memory_link_id();
+        let audit_id = generate_audit_id();
+        let reinforced_at = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let input = CreateMemoryLinkInput {
+            src_memory_id: memory_id.to_owned(),
+            dst_memory_id: link.target_memory_id.clone(),
+            relation: MemoryLinkRelation::Related,
+            weight: REMEMBER_AUTO_COTAG_LINK_WEIGHT,
+            confidence: link.confidence,
+            directed: false,
+            evidence_count: link.evidence_count,
+            last_reinforced_at: Some(reinforced_at),
+            source: MemoryLinkSource::Auto,
+            created_by: Some("ee remember".to_owned()),
+            metadata_json: Some(
+                serde_json::json!({
+                    "schema": "ee.memory_link.cotag_auto.v1",
+                    "linkKind": "cotag",
+                    "reason": "high_confidence_cotag_overlap",
+                    "matchedTags": link.matched_tags,
+                    "cotagScore": link.score,
+                })
+                .to_string(),
+            ),
+        };
+        let audit_details = serde_json::json!({
+            "schema": "ee.audit.memory_link_auto_create.v1",
+            "command": "ee remember",
+            "linkId": &link_id,
+            "srcMemoryId": memory_id,
+            "dstMemoryId": &link.target_memory_id,
+            "relation": input.relation.as_str(),
+            "source": input.source.as_str(),
+            "weight": input.weight,
+            "linkKind": "cotag",
+            "matchedTags": &link.matched_tags,
+            "cotagScore": link.score,
+        })
+        .to_string();
+
+        connection
+            .with_transaction(|| {
+                connection.insert_memory_link(&link_id, &input)?;
+                connection.insert_audit(
+                    &audit_id,
+                    &CreateAuditInput {
+                        workspace_id: Some(workspace_id.to_owned()),
+                        actor: Some("ee remember".to_owned()),
+                        action: audit_actions::MEMORY_LINK_CREATE.to_owned(),
+                        target_type: Some("memory_link".to_owned()),
+                        target_id: Some(link_id.clone()),
+                        details: Some(audit_details.clone()),
+                    },
+                )
+            })
+            .map_err(|error| DomainError::Storage {
+                message: format!("Failed to create co-tag auto-link: {error}"),
+                repair: Some("ee doctor".to_owned()),
+            })?;
+
+        created.push(RememberAutoLink {
+            link_id,
+            target_memory_id: link.target_memory_id.clone(),
+            relation: input.relation.as_str().to_owned(),
+            weight: input.weight,
+            source: input.source.as_str().to_owned(),
+            audit_id,
+        });
+    }
+
+    Ok(created)
+}
+
 fn auto_link_status(
     workflow_id: Option<&str>,
     enabled: bool,
@@ -3155,6 +3343,12 @@ fn auto_link_status(
 ) -> &'static str {
     if !enabled {
         "disabled"
+    } else if !auto_links.is_empty() {
+        // bd-pp1fk: any durable link (workflow-recency OR high-confidence
+        // co-tag) means we linked. Checked before the workflow branch so a
+        // workflow-less remember that produced co-tag links reports "linked",
+        // not the misleading "no_workflow_required".
+        "linked"
     } else if workflow_id.is_none() {
         // G7 (bd-17c65.7.6): honest-unimplemented. Without a workflow
         // context we cannot meaningfully auto-link. The status name
@@ -3164,10 +3358,10 @@ fn auto_link_status(
         // degraded entry pointing at the explicit `ee memory link`
         // surface as the recovery path.
         "no_workflow_required"
-    } else if auto_links.is_empty() {
-        "no_candidates"
     } else {
-        "linked"
+        // In a workflow but no links survived (all candidates already linked,
+        // or none cleared the co-tag threshold).
+        "no_candidates"
     }
 }
 
@@ -8886,18 +9080,24 @@ mod tests {
     }
 
     #[test]
-    fn remember_memory_returns_tag_cooccurrence_suggestions_without_links() -> TestResult {
+    fn remember_memory_persists_high_confidence_cotag_links_and_keeps_weak_suggestions()
+    -> TestResult {
+        // bd-pp1fk: a strong co-tag neighbor (>= 50% tag overlap, score >= 0.75)
+        // is now persisted as a durable, audited `related` link so the graph
+        // wakes up from ordinary tagged remembers. A weak neighbor (one shared
+        // tag out of three => score 0.683) stays an advisory suggestion.
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
 
-        let first = remember_memory(&RememberMemoryOptions {
+        // High-overlap neighbor: shares {alpha, beta} with `third` (2/3 tags).
+        let high = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
             database_path: None,
             content: "Release checks include cargo fmt.",
             workflow_id: None,
             level: "procedural",
             kind: "rule",
-            tags: Some("release,checks"),
+            tags: Some("alpha,beta,extra"),
             confidence: 0.9,
             source: None,
             allow_secret_mention: false,
@@ -8908,14 +9108,16 @@ mod tests {
             propose_candidates: true,
         })
         .map_err(|error| error.message())?;
-        let second = remember_memory(&RememberMemoryOptions {
+        // Weak neighbor: shares only {gamma} with `third` (1/3 tags), and
+        // shares nothing with `high`, so its own remember creates no link.
+        let weak = remember_memory(&RememberMemoryOptions {
             workspace_path: temp.path(),
             database_path: None,
             content: "Release docs mention supported targets.",
             workflow_id: None,
             level: "semantic",
             kind: "fact",
-            tags: Some("release,docs"),
+            tags: Some("gamma,docs,targets"),
             confidence: 0.8,
             source: None,
             allow_secret_mention: false,
@@ -8933,7 +9135,7 @@ mod tests {
             workflow_id: None,
             level: "procedural",
             kind: "rule",
-            tags: Some("checks,release"),
+            tags: Some("alpha,beta,gamma"),
             confidence: 0.85,
             source: None,
             allow_secret_mention: false,
@@ -8945,44 +9147,110 @@ mod tests {
         })
         .map_err(|error| error.message())?;
 
+        // The strong neighbor became a durable, audited co-tag link.
         ensure(
-            third.suggested_link_status,
-            "ready".to_string(),
-            "suggested link status",
+            third.auto_link_status,
+            "linked".to_string(),
+            "auto-link status",
         )?;
+        ensure(third.auto_links.len(), 1, "co-tag auto-link count")?;
+        let cotag = third
+            .auto_links
+            .first()
+            .ok_or_else(|| "co-tag auto-link missing".to_string())?;
         ensure(
-            third.suggested_link_degradations.is_empty(),
-            true,
-            "suggested link degradations",
+            cotag.target_memory_id.clone(),
+            high.memory_id.to_string(),
+            "co-tag link targets the high-overlap neighbor",
         )?;
-        ensure(third.suggested_links.len(), 2, "suggestion count")?;
+        ensure(cotag.relation.clone(), "related".to_string(), "relation")?;
+        ensure(cotag.source.clone(), "auto".to_string(), "source")?;
+        ensure(cotag.weight, REMEMBER_AUTO_COTAG_LINK_WEIGHT, "weight")?;
         ensure(
-            third.suggested_links[0].target_memory_id.clone(),
-            first.memory_id.to_string(),
-            "highest-overlap target first",
-        )?;
-        ensure(
-            third.suggested_links[0].matched_tags.clone(),
-            vec!["checks".to_string(), "release".to_string()],
-            "highest-overlap tags",
-        )?;
-        ensure(
-            third.suggested_links[0].relation.clone(),
-            "co_tag".to_string(),
-            "relation",
-        )?;
-        ensure(
-            third.suggested_links[0].source.clone(),
-            "tag_cooccurrence".to_string(),
-            "source",
-        )?;
-        ensure(
-            third.suggested_links[1].target_memory_id.clone(),
-            second.memory_id.to_string(),
-            "lower-overlap target second",
+            cotag.audit_id.is_empty(),
+            false,
+            "co-tag link must carry an audit id (no silent mutation)",
         )?;
 
+        // The weak neighbor stays an advisory suggestion, never auto-linked.
+        ensure(third.suggested_links.len(), 1, "weak suggestion retained")?;
+        ensure(
+            third.suggested_links[0].target_memory_id.clone(),
+            weak.memory_id.to_string(),
+            "weak neighbor is the surviving suggestion",
+        )?;
+
+        // Exactly one durable link exists, and it is audited.
         let connection = crate::db::DbConnection::open_file(&third.database_path)
+            .map_err(|error| error.to_string())?;
+        let links = connection
+            .list_all_memory_links(None)
+            .map_err(|error| error.to_string())?;
+        ensure(links.len(), 1, "exactly one durable co-tag link")?;
+        let stored = links
+            .first()
+            .ok_or_else(|| "stored co-tag link missing".to_string())?;
+        ensure(stored.id.clone(), cotag.link_id.clone(), "stored link id")?;
+        Ok(())
+    }
+
+    #[test]
+    fn remember_memory_no_auto_link_suppresses_cotag_links() -> TestResult {
+        // bd-pp1fk: the existing --no-auto-link (auto_link=false) toggle must
+        // suppress co-tag auto-links too, leaving strong neighbors as advisory
+        // suggestions and the graph empty.
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::create_dir(temp.path().join(".ee")).map_err(|error| error.to_string())?;
+
+        let _first = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Release checks include cargo fmt.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("alpha,beta"),
+            confidence: 0.9,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+        let second = remember_memory(&RememberMemoryOptions {
+            workspace_path: temp.path(),
+            database_path: None,
+            content: "Before release, run checks and record evidence.",
+            workflow_id: None,
+            level: "procedural",
+            kind: "rule",
+            tags: Some("alpha,beta"),
+            confidence: 0.85,
+            source: None,
+            allow_secret_mention: false,
+            valid_from: None,
+            valid_to: None,
+            dry_run: false,
+            auto_link: false,
+            propose_candidates: true,
+        })
+        .map_err(|error| error.message())?;
+
+        ensure(
+            second.auto_links.is_empty(),
+            true,
+            "no auto-links when disabled",
+        )?;
+        ensure(
+            second.suggested_links.is_empty(),
+            false,
+            "strong neighbor still surfaced as a suggestion",
+        )?;
+
+        let connection = crate::db::DbConnection::open_file(&second.database_path)
             .map_err(|error| error.to_string())?;
         let links = connection
             .list_all_memory_links(None)
@@ -8990,7 +9258,7 @@ mod tests {
         ensure(
             links.is_empty(),
             true,
-            "suggestions must not create durable memory links",
+            "no durable links when auto-link disabled",
         )
     }
 
