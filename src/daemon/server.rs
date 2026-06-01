@@ -28,9 +28,9 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::env_registry::{self, EnvVar};
 
@@ -81,6 +81,7 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 /// pathological panic payload (e.g. a `Display` impl that walked a
 /// huge memory body) cannot blow out the journal.
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
+const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bounded-pool permit. A clone-on-acquire counter that decrements on
 /// drop, used to cap the number of in-flight per-connection worker
@@ -101,6 +102,9 @@ impl Drop for InflightPermit {
             .lock()
             .expect("daemon inflight mutex must not be poisoned");
         *current = current.saturating_sub(1);
+        if *current == 0 {
+            self.pool.idle.notify_all();
+        }
     }
 }
 
@@ -112,6 +116,7 @@ impl Drop for InflightPermit {
 struct InflightPool {
     capacity: usize,
     inflight: Mutex<usize>,
+    idle: Condvar,
 }
 
 impl InflightPool {
@@ -124,6 +129,7 @@ impl InflightPool {
         Arc::new(Self {
             capacity,
             inflight: Mutex::new(0),
+            idle: Condvar::new(),
         })
     }
 
@@ -139,6 +145,30 @@ impl InflightPool {
         Some(InflightPermit {
             pool: Arc::clone(self),
         })
+    }
+
+    fn wait_until_idle(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut current = self
+            .inflight
+            .lock()
+            .expect("daemon inflight mutex must not be poisoned");
+        while *current > 0 {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let (next, result) = self
+                .idle
+                .wait_timeout(current, remaining)
+                .expect("daemon inflight condvar must not be poisoned");
+            current = next;
+            if result.timed_out() && *current > 0 {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -178,15 +208,17 @@ fn daemon_echo_env_value_truthy(value: &str) -> bool {
 pub struct DaemonServerHandle {
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
+    pool: Arc<InflightPool>,
     accept_thread: Option<JoinHandle<()>>,
-    /// Once-guard for [`DaemonServerHandle::shutdown`]. The first call
-    /// performs the real teardown; any later call — typically the
-    /// `Drop` impl running after an explicit `shutdown()` — observes
-    /// this latch and returns `Ok(())` without re-touching the socket
-    /// file. Distinct from the `shutdown` signal field above, which
-    /// tells the accept loop to stop; this tracks whether the teardown
-    /// *body* has already run. bd-wj6v9.
+    /// Once-guard for accept-loop and socket teardown. The first
+    /// shutdown call stops the listener and unlinks the socket; later
+    /// calls skip that irreversible section but may still wait for a
+    /// previously timed-out worker drain.
     shutdown_done: AtomicBool,
+    /// Set only after all per-connection worker permits have dropped.
+    /// Kept separate from `shutdown_done` so a timed-out explicit
+    /// shutdown does not make later calls falsely report success.
+    workers_drained: AtomicBool,
 }
 
 impl DaemonServerHandle {
@@ -201,31 +233,53 @@ impl DaemonServerHandle {
     /// `start_server` call against the same path does not need a
     /// manual cleanup step.
     pub fn shutdown(&mut self) -> io::Result<()> {
-        // Once-guard (bd-wj6v9): the first call performs the real
-        // teardown; a second call — typically `Drop` running after an
-        // explicit `shutdown()` — observes the latch and returns Ok
-        // without re-entering the teardown. Before this guard, the
-        // second pass relied on `accept_thread.take()` already being
-        // `None` and the socket already gone, and any residual
-        // `remove_file` could surface a misleading ENOENT.
-        if self.shutdown_done.swap(true, Ordering::AcqRel) {
+        self.shutdown_with_worker_drain_timeout(DAEMON_WORKER_DRAIN_TIMEOUT)
+    }
+
+    fn shutdown_with_worker_drain_timeout(
+        &mut self,
+        worker_drain_timeout: Duration,
+    ) -> io::Result<()> {
+        if self.workers_drained.load(Ordering::Acquire) {
             return Ok(());
         }
-        self.shutdown.store(true, Ordering::SeqCst);
-        // Wake the accept loop by connecting to the socket from the
-        // current process; the loop checks the shutdown flag between
-        // accepts but blocks inside `accept()` itself. The connect-
-        // and-immediately-drop pattern unblocks the listener cheaply.
-        let _ = UnixStream::connect(&self.socket_path);
-        if let Some(handle) = self.accept_thread.take() {
-            handle
-                .join()
-                .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
+
+        let first_teardown = !self.shutdown_done.swap(true, Ordering::AcqRel);
+        let unlink_result = if first_teardown {
+            self.shutdown.store(true, Ordering::SeqCst);
+            // Wake the accept loop by connecting to the socket from the
+            // current process; the loop checks the shutdown flag between
+            // accepts but blocks inside `accept()` itself. The connect-
+            // and-immediately-drop pattern unblocks the listener cheaply.
+            let _ = UnixStream::connect(&self.socket_path);
+            if let Some(handle) = self.accept_thread.take() {
+                handle
+                    .join()
+                    .map_err(|_| io::Error::other("daemon accept thread panicked"))?;
+            }
+            // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
+            // `NotFound`, but do not let shutdown delete an arbitrary
+            // regular file if the socket path was swapped underneath us.
+            remove_owned_socket_file(&self.socket_path)
+        } else {
+            Ok(())
+        };
+
+        let workers_drained = self.pool.wait_until_idle(worker_drain_timeout);
+        if workers_drained {
+            self.workers_drained.store(true, Ordering::Release);
         }
-        // Idempotent guarded unlink (bd-wj6v9, bd-2z3e8): tolerate
-        // `NotFound`, but do not let shutdown delete an arbitrary
-        // regular file if the socket path was swapped underneath us.
-        remove_owned_socket_file(&self.socket_path)
+        unlink_result?;
+        if !workers_drained {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "daemon worker threads did not drain within {}ms",
+                    worker_drain_timeout.as_millis()
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -408,11 +462,17 @@ pub fn start_server(
     let shutdown_in_thread = Arc::clone(&shutdown);
     let listener_path_in_thread = socket_path.clone();
     let pool = InflightPool::new(configured_max_inflight());
+    let pool_in_thread = Arc::clone(&pool);
 
     let accept_thread = thread::Builder::new()
         .name("ee-daemon-accept".to_owned())
         .spawn(move || {
-            run_accept_loop(listener, listener_path_in_thread, shutdown_in_thread, pool);
+            run_accept_loop(
+                listener,
+                listener_path_in_thread,
+                shutdown_in_thread,
+                pool_in_thread,
+            );
         })
         .map_err(|source| DaemonStartError::Bind {
             path: socket_path.clone(),
@@ -422,8 +482,10 @@ pub fn start_server(
     Ok(DaemonServerHandle {
         socket_path,
         shutdown,
+        pool,
         accept_thread: Some(accept_thread),
         shutdown_done: AtomicBool::new(false),
+        workers_drained: AtomicBool::new(false),
     })
 }
 
@@ -480,13 +542,14 @@ fn run_accept_loop(
                 if let Some(permit) = pool.try_acquire() {
                     match stream.try_clone() {
                         Ok(worker_stream) => {
+                            let worker_shutdown = Arc::clone(&shutdown);
                             let spawn_result = thread::Builder::new()
                                 .name("ee-daemon-conn".to_owned())
                                 .spawn(move || {
                                     // Permit is held for the lifetime of the
                                     // worker; on drop the counter decrements
                                     // and the next accept can proceed.
-                                    handle_connection(worker_stream);
+                                    handle_connection(worker_stream, worker_shutdown);
                                     drop(permit);
                                 });
                             if let Err(error) = spawn_result {
@@ -572,16 +635,24 @@ fn write_overloaded_response(stream: &mut UnixStream) {
 /// bd-36dp2.
 fn write_shutting_down_response(stream: &mut UnixStream) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let response = DaemonResponse::err(
-        "<shutdown>",
-        "<unknown>",
-        None,
+    let response = daemon_shutting_down_response("<shutdown>", "<unknown>", None);
+    let _ = write_response(stream, &response);
+}
+
+fn daemon_shutting_down_response(
+    request_id: impl Into<String>,
+    agent_id: impl Into<String>,
+    workspace_id: Option<String>,
+) -> DaemonResponse {
+    DaemonResponse::err(
+        request_id,
+        agent_id,
+        workspace_id,
         super::DAEMON_SHUTTING_DOWN_CODE,
         "daemon is shutting down and is no longer accepting connections; retry against a \
          fresh daemon or fall back to the in-process CLI path.",
     )
-    .with_degraded(super::DAEMON_SHUTTING_DOWN_CODE);
-    let _ = write_response(stream, &response);
+    .with_degraded(super::DAEMON_SHUTTING_DOWN_CODE)
 }
 
 /// Wall-clock milliseconds since `started`, saturating at `u64::MAX`
@@ -706,7 +777,7 @@ fn trace_daemon_rpc_decode_failure(peer: u32, elapsed_ms: u64, kind: &str) {
     );
 }
 
-fn handle_connection(mut stream: UnixStream) {
+fn handle_connection(mut stream: UnixStream, shutdown: Arc<AtomicBool>) {
     // Install the per-connection deadlines BEFORE any read. The read
     // timeout is the only backstop that stops a half-open peer from
     // pinning this worker thread forever; if `setsockopt` fails (low
@@ -842,6 +913,27 @@ fn handle_connection(mut stream: UnixStream) {
             return;
         }
     };
+
+    if shutdown.load(Ordering::SeqCst) {
+        let response = daemon_shutting_down_response(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+        );
+        let degraded: Vec<&str> = response.degraded_codes.iter().map(String::as_str).collect();
+        trace_daemon_rpc_dispatch(
+            &request.request_id,
+            &request.method,
+            peer,
+            elapsed_ms_since(started),
+            super::DAEMON_SHUTTING_DOWN_CODE,
+            &degraded,
+            false,
+            false,
+        );
+        let _ = write_response(&mut stream, &response);
+        return;
+    }
 
     // Panic supervision (bd-b82q4): if `dispatch` (or any method it
     // delegates to in a future warm-load slice) panics, `catch_unwind`
@@ -1134,6 +1226,19 @@ mod tests {
 
     const TEST_AGENT_ID: &str = "agent-daemon-server-test";
 
+    fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
+        use std::io::Read;
+
+        let mut prefix = [0_u8; 4];
+        stream
+            .read_exact(&mut prefix)
+            .expect("length prefix must arrive");
+        let announced = u32::from_be_bytes(prefix) as usize;
+        let mut body = vec![0_u8; announced];
+        stream.read_exact(&mut body).expect("body must arrive");
+        serde_json::from_slice(&body).expect("body must parse as daemon response")
+    }
+
     #[test]
     fn daemon_echo_env_value_truthy_accepts_only_explicit_true_values() {
         for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON", " true "] {
@@ -1322,6 +1427,65 @@ mod tests {
         let response = dispatch(&bogus);
         let error = response.error.as_ref().expect("must have error");
         assert_eq!(error.code, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE);
+    }
+
+    #[test]
+    fn daemon_cancellation_drains_in_flight_workers_before_shutdown_reports_idle() {
+        let pool = InflightPool::new(1);
+        let permit = pool.try_acquire().expect("first permit must acquire");
+
+        assert!(
+            !pool.wait_until_idle(Duration::from_millis(1)),
+            "pool with a held permit must not report idle"
+        );
+
+        drop(permit);
+
+        assert!(
+            pool.wait_until_idle(Duration::from_millis(50)),
+            "pool must report idle after the last permit drops"
+        );
+    }
+
+    #[test]
+    fn daemon_shutdown_timeout_can_be_retried_after_workers_drain() {
+        let pool = InflightPool::new(1);
+        let permit = pool.try_acquire().expect("first permit must acquire");
+        let mut handle = DaemonServerHandle {
+            socket_path: std::env::temp_dir().join(format!(
+                "ee-daemon-drain-test-{}-{}",
+                std::process::id(),
+                uuid::Uuid::now_v7()
+            )),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            pool,
+            accept_thread: None,
+            shutdown_done: AtomicBool::new(false),
+            workers_drained: AtomicBool::new(false),
+        };
+
+        let error = handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(1))
+            .expect_err("held worker permit must make shutdown time out");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            handle.shutdown_done.load(Ordering::Acquire),
+            "listener/socket teardown should not be retried after the first shutdown attempt"
+        );
+        assert!(
+            !handle.workers_drained.load(Ordering::Acquire),
+            "timed-out worker drain must not be recorded as success"
+        );
+
+        drop(permit);
+
+        handle
+            .shutdown_with_worker_drain_timeout(Duration::from_millis(50))
+            .expect("shutdown retry should succeed once workers drain");
+        assert!(
+            handle.workers_drained.load(Ordering::Acquire),
+            "successful retry must latch drained worker state"
+        );
     }
 
     /// bd-b82q4: a connection-handler panic must surface to the client
@@ -1716,22 +1880,11 @@ mod tests {
     /// loop — and assert the wire frame parses to the expected code.
     #[test]
     fn write_shutting_down_response_emits_framed_daemon_shutting_down_envelope() {
-        use std::io::Read;
         let (mut server_side, mut client_side) = UnixStream::pair().expect("socketpair");
         write_shutting_down_response(&mut server_side);
         drop(server_side);
 
-        let mut prefix = [0_u8; 4];
-        client_side
-            .read_exact(&mut prefix)
-            .expect("length prefix must arrive");
-        let announced = u32::from_be_bytes(prefix) as usize;
-        let mut body = vec![0_u8; announced];
-        client_side
-            .read_exact(&mut body)
-            .expect("framed body must arrive");
-        let response: DaemonResponse =
-            serde_json::from_slice(&body).expect("frame must parse as DaemonResponse");
+        let response = read_framed_daemon_response(&mut client_side);
         let error = response.error.as_ref().expect("must carry an error");
         assert_eq!(error.code, crate::daemon::DAEMON_SHUTTING_DOWN_CODE);
         assert!(
@@ -1739,6 +1892,56 @@ mod tests {
                 .degraded_codes
                 .contains(&crate::daemon::DAEMON_SHUTTING_DOWN_CODE.to_owned()),
             "shutdown envelope must surface the code in degraded[]"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn handle_connection_refuses_parsed_request_after_shutdown_latch() {
+        use std::io::Write;
+
+        let (mut client_side, server_side) = UnixStream::pair().expect("socketpair");
+        client_side
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout");
+        client_side
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("client write timeout");
+        let shutdown = Arc::new(AtomicBool::new(true));
+
+        let worker = thread::spawn(move || handle_connection(server_side, shutdown));
+
+        let mut request = DaemonRequest::new(
+            "req-worker-shutdown",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({"task": "drain worker"}),
+        );
+        request.workspace_id = Some("workspace-worker-shutdown".to_owned());
+        let body = serde_json::to_vec(&request).expect("request must encode");
+        let length = u32::try_from(body.len()).expect("body length fits u32");
+        client_side
+            .write_all(&length.to_be_bytes())
+            .expect("write length");
+        client_side.write_all(&body).expect("write body");
+        client_side.flush().expect("flush request");
+
+        let response = read_framed_daemon_response(&mut client_side);
+        worker.join().expect("worker thread must not panic");
+
+        assert_eq!(response.request_id, "req-worker-shutdown");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
+        assert_eq!(
+            response.workspace_id.as_deref(),
+            Some("workspace-worker-shutdown")
+        );
+        let error = response.error.as_ref().expect("must carry an error");
+        assert_eq!(error.code, crate::daemon::DAEMON_SHUTTING_DOWN_CODE);
+        assert!(
+            response
+                .degraded_codes
+                .contains(&crate::daemon::DAEMON_SHUTTING_DOWN_CODE.to_owned()),
+            "worker shutdown envelope must surface the code in degraded[]"
         );
     }
 }
