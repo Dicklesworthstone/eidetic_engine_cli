@@ -166,3 +166,26 @@ must change for it to land cleanly.
   closures of the kind ADR 0026 + the honesty-only/implements-surface
   bead taxonomy were created to prevent. Deferral with an ADR is the
   honest tracking shape.
+
+## Verification
+
+How a future reviewer can confirm this decision remains valid:
+
+- `br show bd-17c65.14.9` reports the N9 tracker item as deferred or
+  closed with ADR 0049 named as the documented decision.
+- `docs/adr/README.md` lists ADR 0049 in the ADR index as deferred to
+  the research backlog.
+- `rg -n "LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE" src/search/lexical_ram_tier.rs`
+  still finds the current scaffold emission path for Linux builds where
+  the mmap / pinning adapter has not landed.
+- `rg -n "MmapFrankensearch|memmap2|zerocopy|mmap_friendly" src/search Cargo.toml`
+  returns no matches unless a superseding ADR names the upstream layout
+  contract and unsafe-policy decision.
+- The dependency path remains rooted in the bd-21xbi.2 unsafe-policy
+  decision plus an upstream Frankensearch on-disk-format contract; if
+  either dependency lands, the reviewer should re-run the reopen
+  criteria instead of silently treating this ADR as obsolete.
+
+If any of those checks fail without a superseding ADR, the deferral has
+drifted. Restore the deferred state or open a new ADR with the upstream
+format, safe-mmap, and representative p99 evidence required above.

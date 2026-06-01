@@ -54,6 +54,53 @@ to flip to an implementation slot.
 A future research slice may reopen the bead and adopt this ADR as the
 design baseline; nothing here freezes that surface.
 
+## Consequences
+
+What becomes easier:
+
+- Future agents can stop re-triaging N6 as ready implementation work.
+  The ADR records that persistent homology is a real design option, but
+  not a current milestone deliverable.
+- The graph-curation backlog keeps a concrete H0/H1 design baseline
+  without adding a speculative dependency, feature flag, schema, or
+  degraded-code surface.
+- Reviewers have explicit reopen conditions instead of treating "not
+  implemented" as drift.
+
+What becomes harder:
+
+- `ee curate` continues without topology-derived consolidation
+  candidates. Any useful H0/H1 signal remains unavailable until a
+  consumer surface asks for it.
+- The future spike still has to run the `fnx-algorithms` audit and
+  library-selection work; this ADR deliberately does not spend that
+  budget before a consumer exists.
+- A future implementation must carry the full determinism, schema,
+  benchmark, and dependency-policy proof instead of treating this ADR as
+  partial implementation credit.
+
+What is intentionally impossible while deferred:
+
+- No `ee.curate.homology.v1` schema, `homology_*` degraded code, config
+  key, or feature flag should land without either satisfying the reopen
+  criteria below or superseding this ADR.
+- No closure should claim N6 is implemented merely because the design
+  and candidate-library notes exist here.
+
+## Rejected Alternatives
+
+These implementation paths are rejected for the current milestone. They
+remain candidates for the future spike only after the reopen criteria
+below are met.
+
+| Alternative | Why rejected now | Notes |
+|---|---|---|
+| Ship `gudhi` Rust bindings | C++ FFI through `bindgen` conflicts with the `#![forbid(unsafe_code)]` crate policy, and there is no current consumer to justify an adapter carve-out | Best-fit algorithm coverage for H0/H1 + persistence diagrams if a future feature-gated adapter is approved |
+| Ship `phat-rs` directly | Pure Rust is attractive, but the project has no measured 10K-100K-edge graph benchmark or curation consumer to keep the dependency honest | Needs a spike to confirm scaling and schema fit |
+| Build on `simplicial-rs` or another low-level complex crate | Pushes too much of the persistence reduction and determinism proof into `ee` before the product surface exists | Could become useful if upstream high-level libraries fail the dep-policy review |
+| Hand-roll boundary-matrix reduction in `fnx-algorithms` | Avoids a new dep but turns a deferred research item into 1-2 weeks of algorithm work with no current consumer | The right owner would be `franken_networkx`, not an `ee`-local one-off |
+| Run only the Phase-0 `fnx-algorithms` audit now | The audit outcome has no downstream action while H0/H1 features have no consuming command | Preserve the audit as day 1 of the future spike instead of creating stale notes |
+
 ## What persistent homology would compute on the memory-link graph
 
 Input shape: the memory-link graph projection that
@@ -112,24 +159,6 @@ undirected weighted simplicial complex; the typical translation is:
   configured threshold (suggested default: 0.3) or H1 birth-death gap
   exceeds 0.5; both thresholds belong in
   `[curate.homology]` config with sensible defaults.
-
-## Candidate libraries
-
-Three Rust persistent-homology crates evaluated by author intent
-only (no Cargo experiments staged from this ADR):
-
-| Crate | Suitability | Notes |
-|---|---|---|
-| `gudhi` Rust bindings | Best-fit for H0/H1 + persistence diagrams; mature upstream (C++ GUDHI), wide algorithm coverage | C++ FFI through `bindgen`; conflicts with the `#![forbid(unsafe_code)]` crate policy unless gated behind a feature + a thin safe adapter |
-| `phat-rs` | Pure-Rust persistent homology via the matrix-reduction algorithm (PHAT); smaller surface than GUDHI | Active but small; no published `Cargo.toml` benchmark on our typical 10K-100K-edge graph; needs a spike to confirm scaling |
-| `simplicial-rs` (or equivalent pure-Rust simplicial-complex crate) | Lower-level — builds the complex, expects the consumer to drive reduction | More work for the implementer; cleanest unsafe-free path |
-| Hand-rolled boundary-matrix reduction in `fnx-algorithms` | Avoids the new dep + license review; matches the existing "use franken_*" convention | The implementation work itself is 1–2 weeks; we are still paying the spike cost just on `fnx-algorithms` side |
-
-The Phase-0 audit the original bead requested
-(`fnx-algorithms` persistent-homology surface inventory) is not
-performed by this ADR. The deferral is upstream of that audit: until
-a consumer surface asks for H0/H1 features, the audit's branch (A: use
-upstream; B: file sibling bead; C: defer) collapses to "C: defer."
 
 ## Spike scope (if the deferral ever flips)
 
