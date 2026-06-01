@@ -33,7 +33,7 @@ const TASK_COMPLEXITY_MARKERS: &[&str] = &[
     "verify",
 ];
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdaptiveBudgetInput<'a> {
     pub query: &'a str,

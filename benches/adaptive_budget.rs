@@ -113,9 +113,9 @@ fn scenarios() -> Vec<Scenario> {
             fanout: 3.1,
         },
         Scenario {
-            label: "retrieval_scores_at_1000_elements",
+            label: "large_retrieval_no_op_growth",
             query: "audit refactor migrate security performance",
-            scores: skewed_scores(1_000),
+            scores: skewed_scores(10_000),
             fanout: 2.5,
         },
     ]
@@ -133,20 +133,11 @@ fn bench_adaptive_budget(c: &mut Criterion) {
             BenchmarkId::new("classify", scenario.label),
             input,
             |b, input| {
-                b.iter(|| black_box(classify_prebuilt_input(black_box(input))));
+                b.iter(|| black_box(classify_adaptive_budget(black_box(*input))));
             },
         );
     }
     group.finish();
-}
-
-fn classify_prebuilt_input(
-    input: &AdaptiveBudgetInput<'_>,
-) -> ee::pack::budget_classifier::AdaptiveBudgetDecision {
-    classify_adaptive_budget(
-        AdaptiveBudgetInput::new(input.query, input.retrieval_scores, input.graph_fanout)
-            .with_max_tokens(input.max_tokens),
-    )
 }
 
 fn measure_percentiles() -> AdaptiveBudgetPercentileSummary {
@@ -154,14 +145,14 @@ fn measure_percentiles() -> AdaptiveBudgetPercentileSummary {
     for scenario in scenarios() {
         let input = scenario.input();
         for _ in 0..PERCENTILE_WARMUP_ITERS {
-            black_box(classify_prebuilt_input(black_box(&input)));
+            black_box(classify_adaptive_budget(black_box(input)));
         }
 
         let mut elapsed_ms = Vec::with_capacity(PERCENTILE_MEASURE_ITERS);
         for _ in 0..PERCENTILE_MEASURE_ITERS {
             let start = Instant::now();
             for _ in 0..PERCENTILE_BATCH_ITERS {
-                black_box(classify_prebuilt_input(black_box(&input)));
+                black_box(classify_adaptive_budget(black_box(input)));
             }
             let elapsed = start.elapsed();
             elapsed_ms.push(elapsed.as_secs_f64() * 1_000.0 / PERCENTILE_BATCH_ITERS as f64);
