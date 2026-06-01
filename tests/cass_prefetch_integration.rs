@@ -389,6 +389,130 @@ fn metrics_counter_records_hits_misses_and_candidates() -> TestResult {
 }
 
 #[test]
+fn aggressive_min_score_drops_low_confidence_candidates_at_integration_boundary() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new().with_min_score(0.45);
+    let history = CassPrefetchHistory::from_topics(
+        TEST_AGENT_SCOPE,
+        ["current", "alpha", "alpha", "alpha", "noise", "noise"],
+    );
+
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    if !predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "alpha")
+    {
+        return Err(format!(
+            "dominant alpha topic must survive aggressive min_score; got {predictions:?}"
+        ));
+    }
+    if predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "noise")
+    {
+        return Err(format!(
+            "low-confidence noise topic must be dropped by min_score; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn non_finite_predictor_options_fall_back_to_finite_defaults() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new()
+        .with_half_life(f64::NAN)
+        .with_min_score(f64::NAN);
+    let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["current", "alpha", "alpha"]);
+
+    let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
+    assert_finite_normalized_predictions("non-finite predictor options", &predictions)?;
+    if !predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "alpha")
+    {
+        return Err(format!(
+            "alpha should remain eligible after non-finite options fall back; got {predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_history_or_zero_top_k_returns_empty_at_integration_boundary() -> TestResult {
+    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let empty_history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, Vec::<&str>::new());
+    let empty_predictions = predictor.predict_next_n(&empty_history, DEFAULT_PREFETCH_TOP_K);
+    if !empty_predictions.is_empty() {
+        return Err(format!(
+            "empty history must emit no candidates; got {empty_predictions:?}"
+        ));
+    }
+
+    let history = synthetic_task_template_history();
+    let zero_top_k_predictions = predictor.predict_next_n(&history, 0);
+    if !zero_top_k_predictions.is_empty() {
+        return Err(format!(
+            "top_k=0 must emit no candidates; got {zero_top_k_predictions:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn metrics_serialize_under_camel_case_schema() -> TestResult {
+    let mut metrics = CassPrefetchMetrics::new();
+    metrics.record_candidate();
+    metrics.record_budget_exceeded();
+    metrics.record_history_too_short();
+    metrics.record_stale_generation_drop();
+    metrics.record_history_oversized();
+
+    let value = serde_json::to_value(metrics)
+        .map_err(|error| format!("serialize CassPrefetchMetrics: {error}"))?;
+    let Some(object) = value.as_object() else {
+        return Err(format!(
+            "metrics must serialize to a JSON object; got {value:?}"
+        ));
+    };
+
+    for forbidden in [
+        "candidates_emitted",
+        "budget_exceeded",
+        "history_too_short",
+        "stale_generation_drop",
+        "history_oversized",
+    ] {
+        if object.contains_key(forbidden) {
+            return Err(format!(
+                "metrics JSON must use camelCase, but found snake_case field {forbidden:?}: {value}"
+            ));
+        }
+    }
+
+    let expected_fields = [
+        ("hits", 0),
+        ("misses", 0),
+        ("candidatesEmitted", 1),
+        ("budgetExceeded", 1),
+        ("historyTooShort", 1),
+        ("staleGenerationDrop", 1),
+        ("historyOversized", 1),
+    ];
+    for (field, expected) in expected_fields {
+        let Some(actual) = value.get(field).and_then(serde_json::Value::as_u64) else {
+            return Err(format!(
+                "metrics JSON missing numeric field {field:?}: {value}"
+            ));
+        };
+        if actual != expected {
+            return Err(format!(
+                "metrics JSON field {field:?} expected {expected}, got {actual}: {value}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn metrics_hit_rate_edges_cover_zero_miss_only_and_hit_only() -> TestResult {
     let zero_attempts = CassPrefetchMetrics::new();
     if (zero_attempts.hit_rate() - 0.0).abs() > f64::EPSILON {
