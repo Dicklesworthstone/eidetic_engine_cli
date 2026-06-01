@@ -134,7 +134,8 @@ use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS, InterventionSpec,
     LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE, ReplayOptions as LabReplayOptions,
-    SwapRevisionMode, capture_episode, replay_agent_workload_trace, replay_episode,
+    SwapRevisionMode, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile, SwarmWorkloadTrace,
+    capture_episode, generate_swarm_workload_fixture, replay_agent_workload_trace, replay_episode,
     run_counterfactual,
 };
 use crate::core::learn::{
@@ -4138,8 +4139,32 @@ pub enum LabCommand {
     Capture(LabCaptureArgs),
     /// Replay a captured episode with the same memory state.
     Replay(LabReplayArgs),
+    /// Generate a deterministic redaction-safe swarm workload fixture.
+    GenerateWorkload(LabGenerateWorkloadArgs),
     /// Run a counterfactual replay with memory interventions.
     Counterfactual(LabCounterfactualArgs),
+}
+
+/// Built-in profiles for `ee lab generate-workload`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum LabSwarmWorkloadProfile {
+    /// Small CI smoke fixture covering the core agent command path.
+    #[default]
+    Small,
+    /// Medium crowded-checkout fixture with daemon/support/doctor read paths.
+    Medium,
+    /// Large stress fixture for high-agent replay admission tests.
+    Large,
+}
+
+impl From<LabSwarmWorkloadProfile> for SwarmWorkloadFixtureProfile {
+    fn from(profile: LabSwarmWorkloadProfile) -> Self {
+        match profile {
+            LabSwarmWorkloadProfile::Small => Self::Small,
+            LabSwarmWorkloadProfile::Medium => Self::Medium,
+            LabSwarmWorkloadProfile::Large => Self::Large,
+        }
+    }
 }
 
 /// Arguments for `ee lab capture`.
@@ -4192,6 +4217,18 @@ pub struct LabReplayArgs {
     /// Report the replay plan without executing.
     #[arg(long, action = ArgAction::SetTrue)]
     pub dry_run: bool,
+}
+
+/// Arguments for `ee lab generate-workload`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabGenerateWorkloadArgs {
+    /// Deterministic fixture seed matching ^[a-z][a-z0-9_.-]{2,96}$.
+    #[arg(long, value_name = "SEED", default_value = "stable_small_seed_001")]
+    pub fixture_seed: String,
+
+    /// Built-in workload profile to generate.
+    #[arg(long, value_enum, default_value_t = LabSwarmWorkloadProfile::Small)]
+    pub profile: LabSwarmWorkloadProfile,
 }
 
 /// Arguments for `ee lab counterfactual`.
@@ -10656,6 +10693,9 @@ where
         Some(Command::Lab(LabCommand::Replay(ref args))) => {
             handle_lab_replay(&cli, args, stdout, stderr)
         }
+        Some(Command::Lab(LabCommand::GenerateWorkload(ref args))) => {
+            handle_lab_generate_workload(&cli, args, stdout, stderr)
+        }
         Some(Command::Lab(LabCommand::Counterfactual(ref args))) => {
             handle_lab_counterfactual(&cli, args, stdout, stderr)
         }
@@ -16830,6 +16870,17 @@ where
     write_stdout(stdout, &(report.to_json() + "\n"))
 }
 
+fn write_lab_swarm_workload_trace<W>(
+    _cli: &Cli,
+    trace: &SwarmWorkloadTrace,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    write_stdout(stdout, &(trace.to_json() + "\n"))
+}
+
 fn write_lab_counterfactual_report<W>(
     cli: &Cli,
     report: &crate::core::lab::CounterfactualReport,
@@ -16938,6 +16989,47 @@ where
     match replay_episode(&options) {
         Ok(report) => write_lab_replay_report(cli, &report, stdout),
         Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn handle_lab_generate_workload<W, E>(
+    cli: &Cli,
+    args: &LabGenerateWorkloadArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    if let Err(error) = validate_lab_swarm_fixture_seed(&args.fixture_seed) {
+        return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+    }
+
+    let options = SwarmWorkloadFixtureOptions::new(args.profile.into(), args.fixture_seed.clone());
+    let trace = generate_swarm_workload_fixture(&options);
+    write_lab_swarm_workload_trace(cli, &trace, stdout)
+}
+
+fn validate_lab_swarm_fixture_seed(seed: &str) -> Result<(), DomainError> {
+    let bytes = seed.as_bytes();
+    let valid = (3..=97).contains(&bytes.len())
+        && bytes.first().is_some_and(|byte| byte.is_ascii_lowercase())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'.' | b'-')
+        });
+
+    if valid {
+        Ok(())
+    } else {
+        Err(DomainError::Usage {
+            message: "lab generate-workload --fixture-seed must match ^[a-z][a-z0-9_.-]{2,96}$."
+                .to_owned(),
+            repair: Some(
+                "Use a lowercase seed of 3 to 97 ASCII characters, starting with a letter."
+                    .to_owned(),
+            ),
+        })
     }
 }
 
@@ -46512,6 +46604,7 @@ impl NormalizedInvocation {
                 Command::Lab(lab) => match lab {
                     LabCommand::Capture(_) => "lab capture".to_string(),
                     LabCommand::Replay(_) => "lab replay".to_string(),
+                    LabCommand::GenerateWorkload(_) => "lab generate-workload".to_string(),
                     LabCommand::Counterfactual(_) => "lab counterfactual".to_string(),
                 },
                 Command::Learn(learn) => match learn {
