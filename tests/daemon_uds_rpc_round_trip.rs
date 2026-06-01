@@ -2,7 +2,7 @@
 //!
 //! Pins the wire-framing contract end-to-end: spin up the daemon
 //! server on a tempdir UDS, send an `ee.daemon.echo` request, assert
-//! the response echoes the params unchanged, send an
+//! default production servers refuse the diagnostic reflector, send an
 //! `ee.daemon.context` request, assert the `daemon_ann_warmload_not_yet_implemented`
 //! stub error fires with the degraded code attached, and shut the
 //! server down cleanly so the socket file is unlinked.
@@ -25,8 +25,9 @@ use ee::daemon::{
     DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1,
     protocol::{DaemonRequest, DaemonResponse},
     server::{
-        DAEMON_REQUEST_DECODE_FAILED_CODE, DAEMON_REQUEST_SCHEMA_MISMATCH_CODE,
-        DAEMON_UNKNOWN_METHOD_CODE, METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server,
+        DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
+        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CONTEXT,
+        METHOD_ECHO, client_round_trip, start_server,
     },
 };
 
@@ -112,7 +113,7 @@ fn ensure_error_code(response: &DaemonResponse, expected: &str) -> TestResult {
 }
 
 #[test]
-fn daemon_echo_round_trip_preserves_request_id_and_params() -> TestResult {
+fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-rt.sock");
 
@@ -126,7 +127,8 @@ fn daemon_echo_round_trip_preserves_request_id_and_params() -> TestResult {
         serde_json::json!({
             "hello": "world",
             "n": 42,
-            "nested": {"k": "v"}
+            "nested": {"k": "v"},
+            "token": "sk_live_abcdefghijklmnopqrstuvwxyz0123456789"
         }),
     );
 
@@ -147,27 +149,22 @@ fn daemon_echo_round_trip_preserves_request_id_and_params() -> TestResult {
             response.request_id
         ),
     )?;
-    ensure(
-        response.error.is_none(),
-        format!("echo must not return error; got {:?}", response.error),
-    )?;
-    let result = response
-        .result
+    ensure_error_code(&response, DAEMON_ECHO_DISABLED_CODE)?;
+    let error = response
+        .error
         .as_ref()
-        .ok_or_else(|| format!("echo must return result; got response {response:?}"))?;
+        .ok_or_else(|| format!("echo-disabled response must contain error; got {response:?}"))?;
     ensure(
-        result
-            == &serde_json::json!({
-                "hello": "world",
-                "n": 42,
-                "nested": {"k": "v"}
-            }),
-        format!("echo result must equal request params; got {result}"),
+        !error.message.contains("sk_live_"),
+        format!(
+            "echo disabled message must not reflect params; got {}",
+            error.message
+        ),
     )?;
     ensure(
         response.degraded_codes.is_empty(),
         format!(
-            "echo must not attach degraded codes; got {:?}",
+            "echo disabled is a structured method error, not a response degradation; got {:?}",
             response.degraded_codes
         ),
     )?;
@@ -302,7 +299,10 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
     wait_for_accept_loop();
 
     let mut stream = connect_client(handle.socket_path())?;
-    write_raw_frame(&mut stream, b"{not valid json")?;
+    write_raw_frame(
+        &mut stream,
+        br#"{"token":"sk_live_abcdefghijklmnopqrstuvwxyz0123456789","oops":"#,
+    )?;
     let response = read_response_frame(&mut stream)?;
 
     ensure(
@@ -313,6 +313,21 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
         ),
     )?;
     ensure_error_code(&response, DAEMON_REQUEST_DECODE_FAILED_CODE)?;
+    let error = response
+        .error
+        .as_ref()
+        .ok_or_else(|| format!("decode response must contain error; got {response:?}"))?;
+    ensure(
+        error.message == "request body failed to decode",
+        format!("decode error must use fixed message; got {}", error.message),
+    )?;
+    ensure(
+        !error.message.contains("sk_live_"),
+        format!(
+            "decode error must not reflect input bytes; got {}",
+            error.message
+        ),
+    )?;
 
     handle
         .shutdown()
@@ -367,7 +382,7 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     let client_a = thread::spawn(move || {
         let request = DaemonRequest::new(
             "req-concurrent-a",
-            METHOD_ECHO,
+            METHOD_CONTEXT,
             serde_json::json!({"client": "a"}),
         );
         client_round_trip(&socket_a, &request).map_err(|error| format!("client a: {error}"))
@@ -375,7 +390,7 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     let client_b = thread::spawn(move || {
         let request = DaemonRequest::new(
             "req-concurrent-b",
-            METHOD_ECHO,
+            METHOD_CONTEXT,
             serde_json::json!({"client": "b"}),
         );
         client_round_trip(&socket_b, &request).map_err(|error| format!("client b: {error}"))
@@ -396,10 +411,8 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
         response_b.request_id == "req-concurrent-b",
         format!("client b request_id drifted: {}", response_b.request_id),
     )?;
-    ensure(
-        response_a.error.is_none() && response_b.error.is_none(),
-        format!("concurrent echo clients must both succeed; got {response_a:?} and {response_b:?}"),
-    )?;
+    ensure_error_code(&response_a, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
+    ensure_error_code(&response_b, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)?;
 
     handle
         .shutdown()

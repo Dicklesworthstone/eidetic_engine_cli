@@ -46,6 +46,9 @@ use super::{
 /// Method dispatch name for the round-trip integrity check.
 pub const METHOD_ECHO: &str = "ee.daemon.echo";
 
+/// Error code returned when the diagnostic echo method is not enabled.
+pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
+
 /// Method dispatch name for the warm-loaded `ee context` stub.
 pub const METHOD_CONTEXT: &str = "ee.daemon.context";
 
@@ -149,6 +152,22 @@ fn configured_max_inflight() -> usize {
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DAEMON_MAX_INFLIGHT)
+}
+
+/// Whether the diagnostic echo method should be exposed. The method
+/// reflects caller-supplied content, so production daemons keep it off
+/// unless a local diagnostic run explicitly opts in.
+fn daemon_echo_enabled() -> bool {
+    env_registry::read_or_default(EnvVar::DaemonEnableEcho)
+        .is_some_and(|value| daemon_echo_env_value_truthy(&value))
+}
+
+fn daemon_echo_env_value_truthy(value: &str) -> bool {
+    let value = value.trim();
+    value == "1"
+        || value.eq_ignore_ascii_case("true")
+        || value.eq_ignore_ascii_case("yes")
+        || value.eq_ignore_ascii_case("on")
 }
 
 /// Handle returned by [`start_server`]. Holds the accept-loop thread
@@ -941,6 +960,10 @@ fn peer_uid(_stream: &UnixStream) -> io::Result<u32> {
 /// dispatch table without paying for a UDS round-trip.
 #[must_use]
 pub fn dispatch(request: &DaemonRequest) -> DaemonResponse {
+    dispatch_with_echo_policy(request, daemon_echo_enabled())
+}
+
+fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -960,10 +983,16 @@ pub fn dispatch(request: &DaemonRequest) -> DaemonResponse {
         // surface uses (core::outcome, support_bundle, mcp). Reflecting
         // `params` verbatim would make the socket a redaction-bypassing
         // round-trip oracle. The integrity contract becomes "echo returns
-        // the redaction-stable form of what you sent".
-        METHOD_ECHO => DaemonResponse::ok(
+        // the redaction-stable form of what you sent", and only when the
+        // diagnostic method is explicitly enabled for the local daemon.
+        METHOD_ECHO if echo_enabled => DaemonResponse::ok(
             request.request_id.clone(),
             crate::core::support_bundle::redact_json_value(&request.params),
+        ),
+        METHOD_ECHO => DaemonResponse::err(
+            request.request_id.clone(),
+            DAEMON_ECHO_DISABLED_CODE,
+            "ee.daemon.echo is disabled by default; set EE_DAEMON_ENABLE_ECHO=1 for local diagnostics.",
         ),
         METHOD_CONTEXT => DaemonResponse::err(
             request.request_id.clone(),
@@ -1073,10 +1102,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dispatch_echo_returns_params_unchanged() {
+    fn daemon_echo_env_value_truthy_accepts_only_explicit_true_values() {
+        for value in ["1", "true", "TRUE", "yes", "YES", "on", "ON", " true "] {
+            assert!(
+                daemon_echo_env_value_truthy(value),
+                "{value:?} should enable daemon echo"
+            );
+        }
+        for value in ["", "0", "false", "no", "off", "enabled", "please"] {
+            assert!(
+                !daemon_echo_env_value_truthy(value),
+                "{value:?} should not enable daemon echo"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_echo_disabled_returns_error_by_default() {
+        let request = DaemonRequest::new(
+            "req-echo-disabled-001",
+            METHOD_ECHO,
+            serde_json::json!({"k": "v", "n": 7}),
+        );
+        let response = dispatch_with_echo_policy(&request, false);
+        assert_eq!(response.request_id, "req-echo-disabled-001");
+        assert!(response.result.is_none());
+        let error = response.error.as_ref().expect("echo must be disabled");
+        assert_eq!(error.code, DAEMON_ECHO_DISABLED_CODE);
+    }
+
+    #[test]
+    fn dispatch_echo_enabled_returns_benign_params_unchanged() {
         let params = serde_json::json!({"k": "v", "n": 7});
         let request = DaemonRequest::new("req-echo-001", METHOD_ECHO, params.clone());
-        let response = dispatch(&request);
+        let response = dispatch_with_echo_policy(&request, true);
         assert_eq!(response.request_id, "req-echo-001");
         assert_eq!(response.result, Some(params));
         assert!(response.error.is_none());
@@ -1096,7 +1155,7 @@ mod tests {
             METHOD_ECHO,
             serde_json::json!({"token": secret, "note": "hello"}),
         );
-        let response = dispatch(&request);
+        let response = dispatch_with_echo_policy(&request, true);
         assert!(response.error.is_none());
         let result = response.result.expect("echo returns a result");
         let serialized = result.to_string();
@@ -1298,7 +1357,7 @@ mod tests {
     }
 
     #[test]
-    fn start_server_then_client_round_trip_echo() {
+    fn start_server_then_echo_is_disabled_by_default() {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("ee-daemon-test.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
@@ -1312,7 +1371,9 @@ mod tests {
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
         assert_eq!(response.request_id, "req-roundtrip-001");
-        assert_eq!(response.result, Some(serde_json::json!({"ping": "pong"})));
+        assert!(response.result.is_none());
+        let error = response.error.as_ref().expect("echo must be disabled");
+        assert_eq!(error.code, DAEMON_ECHO_DISABLED_CODE);
 
         handle.shutdown().expect("shutdown");
         // After shutdown, the socket file must be gone so a subsequent
@@ -1381,13 +1442,16 @@ mod tests {
 
         let request = DaemonRequest::new(
             "req-peer-001",
-            METHOD_ECHO,
+            METHOD_CONTEXT,
             serde_json::json!({"peer": "self"}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
         assert_eq!(response.request_id, "req-peer-001");
-        assert!(response.error.is_none(), "same-UID peer must be admitted");
-        assert_eq!(response.result, Some(serde_json::json!({"peer": "self"})));
+        let error = response
+            .error
+            .as_ref()
+            .expect("same-UID peer reaches dispatch");
+        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
 
         handle.shutdown().expect("shutdown");
     }
@@ -1433,10 +1497,14 @@ mod tests {
             0o600,
             "replaced socket must be 0o600 (bd-3j0td invariant preserved across rename)",
         );
-        let request =
-            DaemonRequest::new("req-stale-001", METHOD_ECHO, serde_json::json!({"ping": 1}));
+        let request = DaemonRequest::new(
+            "req-stale-001",
+            METHOD_CONTEXT,
+            serde_json::json!({"ping": 1}),
+        );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
-        assert_eq!(response.result, Some(serde_json::json!({"ping": 1})));
+        let error = response.error.as_ref().expect("fresh socket dispatches");
+        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
 
         handle.shutdown().expect("shutdown");
     }

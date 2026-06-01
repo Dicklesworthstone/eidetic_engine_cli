@@ -19,9 +19,9 @@
 //! ANN warm-load and the `mlock`/`MADV_HUGEPAGE` adapter (bd-17c65.14.9)
 //! can land behind it without re-litigating the protocol shape:
 //!
-//! - `ee.daemon.echo` — round-trip integrity check. Returns the request
-//!   `params` unchanged. Used by `tests/daemon_uds_rpc_round_trip.rs` to
-//!   pin the framing contract.
+//! - `ee.daemon.echo` — diagnostic round-trip integrity check. Disabled
+//!   by default unless `EE_DAEMON_ENABLE_ECHO=1` is set, and even then
+//!   returns only the canonical redacted form of request `params`.
 //! - `ee.daemon.context` — stub for the future warm-loaded `ee context`
 //!   path. Always returns `error.code = daemon_ann_warmload_not_yet_implemented`
 //!   until the ANN warm-load slice ships.

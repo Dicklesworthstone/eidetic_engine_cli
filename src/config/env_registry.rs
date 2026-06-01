@@ -28,6 +28,8 @@ pub enum EnvVar {
     CurationAutoPromoteMaxPerRun,
     /// `EE_CURATION_DERIVED_PREVIEW_LIMIT`
     CurationDerivedPreviewLimit,
+    /// `EE_DAEMON_ENABLE_ECHO`
+    DaemonEnableEcho,
     /// `EE_DAEMON_MAX_INFLIGHT`
     DaemonMaxInflight,
     /// `EE_DATABASE_PATH`
@@ -224,6 +226,7 @@ impl EnvVar {
             Self::CurationAutoPromoteConfidenceFloor,
             Self::CurationAutoPromoteMaxPerRun,
             Self::CurationDerivedPreviewLimit,
+            Self::DaemonEnableEcho,
             Self::DaemonMaxInflight,
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
@@ -330,6 +333,7 @@ impl EnvVar {
             Self::CurationAutoPromoteConfidenceFloor => "EE_CURATION_AUTO_PROMOTE_CONFIDENCE_FLOOR",
             Self::CurationAutoPromoteMaxPerRun => "EE_CURATION_AUTO_PROMOTE_MAX_PER_RUN",
             Self::CurationDerivedPreviewLimit => "EE_CURATION_DERIVED_PREVIEW_LIMIT",
+            Self::DaemonEnableEcho => "EE_DAEMON_ENABLE_ECHO",
             Self::DaemonMaxInflight => "EE_DAEMON_MAX_INFLIGHT",
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
@@ -453,6 +457,7 @@ impl EnvVar {
             Self::CurationDerivedPreviewLimit => {
                 "Override the derived-candidate preview/reject listing limit."
             }
+            Self::DaemonEnableEcho => "Enable the diagnostic `ee.daemon.echo` round-trip method.",
             Self::DaemonMaxInflight => {
                 "Override the cap on in-flight `ee daemon` worker threads; saturated accepts emit `daemon_overloaded`."
             }
@@ -710,6 +715,7 @@ impl EnvVar {
             Self::ReflectionSourceBudgetBytes => Some("65536"),
             Self::RememberCurationSyncBudgetMs => Some("50"),
             Self::McpMaxRequestBytes => Some("16777216"),
+            Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
             _ => None,
         }
@@ -743,7 +749,7 @@ impl EnvVar {
             | Self::ShardsDir
             | Self::Workspace
             | Self::WorkspaceRegistry => "paths",
-            Self::DiagForceCapabilityGap => "diagnostics",
+            Self::DaemonEnableEcho | Self::DiagForceCapabilityGap => "diagnostics",
             Self::AgentMode
             | Self::AgentName
             | Self::DisableToon
