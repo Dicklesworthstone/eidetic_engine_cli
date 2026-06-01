@@ -1034,6 +1034,64 @@ ensure_rust() {
   rustup component add rustfmt clippy 2>/dev/null || true
 }
 
+select_extracted_binary() {
+  local candidate
+  local executable_candidates=()
+  local all_candidates=()
+
+  # NOTE: -perm -u+x (owner-execute) rather than -perm -111 — macOS tarballs
+  # historically ship the binary with mode 700, so requiring g+x/o+x falsely
+  # rejects a valid binary (see issue #4).
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] && executable_candidates+=("$candidate")
+  done < <(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" -perm -u+x 2>/dev/null | LC_ALL=C sort)
+
+  if [ "${#executable_candidates[@]}" -eq 1 ]; then
+    BIN="${executable_candidates[0]}"
+    return 0
+  fi
+
+  if [ "${#executable_candidates[@]}" -gt 1 ]; then
+    err "Archive contains multiple executable '$BINARY' candidates:"
+    for candidate in "${executable_candidates[@]}"; do
+      err "  - ${candidate#$TMP/extract/}"
+    done
+    err "Refusing to choose by filesystem traversal order."
+    return 1
+  fi
+
+  # Fallback for archives that carry the right file but omit owner-execute mode:
+  # accept exactly one candidate, log the repair, and fail loudly if chmod fails.
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] && all_candidates+=("$candidate")
+  done < <(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" 2>/dev/null | LC_ALL=C sort)
+
+  if [ "${#all_candidates[@]}" -eq 0 ]; then
+    err "Binary '$BINARY' not found in archive after extraction"
+    return 1
+  fi
+
+  if [ "${#all_candidates[@]}" -gt 1 ]; then
+    err "Archive contains multiple matching '$BINARY' candidates without owner-execute mode:"
+    for candidate in "${all_candidates[@]}"; do
+      err "  - ${candidate#$TMP/extract/}"
+    done
+    err "Refusing to choose by filesystem traversal order."
+    return 1
+  fi
+
+  BIN="${all_candidates[0]}"
+  warn "Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x to ${BIN#$TMP/extract/}"
+  if ! chmod u+x "$BIN" 2>/dev/null; then
+    err "Binary '$BINARY' found but chmod u+x failed: ${BIN#$TMP/extract/}"
+    return 1
+  fi
+  if [ ! -x "$BIN" ]; then
+    err "Binary '$BINARY' found but is still not executable after chmod: ${BIN#$TMP/extract/}"
+    return 1
+  fi
+}
+
 # ───────────────────────────────────────────────────────────────────────────
 # Header banner
 # ───────────────────────────────────────────────────────────────────────────
@@ -1242,21 +1300,8 @@ else
     exit 1
   fi
 
-  # NOTE: -perm -u+x (owner-execute) rather than -perm -111 — macOS tarballs
-  # historically ship the binary with mode 700, so requiring g+x/o+x falsely
-  # rejects a valid binary (see issue #4).
-  BIN=$(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" -perm -u+x 2>/dev/null | head -n 1)
-  # Fallback: if -perm -u+x found nothing (e.g. some older `find` variants),
-  # accept any matching regular file and let the `[ ! -x ]` chmod-aware check
-  # below validate it after we touch its permissions.
-  if [ -z "$BIN" ]; then
-    BIN=$(find "$TMP/extract" -maxdepth 3 -type f -name "$BINARY" 2>/dev/null | head -n 1)
-  fi
-  if [ -n "$BIN" ] && [ ! -x "$BIN" ]; then
-    chmod u+x "$BIN" 2>/dev/null || true
-  fi
-  if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then
-    err "Binary '$BINARY' not found in archive after extraction"
+  BIN=""
+  if ! select_extracted_binary; then
     exit 1
   fi
   install -m 0755 "$BIN" "$DEST/$BINARY"

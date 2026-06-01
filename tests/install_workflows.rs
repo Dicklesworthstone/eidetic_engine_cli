@@ -145,6 +145,50 @@ fn assert_install_golden(
     ensure_equal(actual.trim(), expected.trim(), name)
 }
 
+#[test]
+fn installer_archive_binary_selection_refuses_ambiguous_fallbacks() -> TestResult {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("install.sh");
+    let script = fs::read_to_string(&path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+
+    ensure(
+        script.contains("select_extracted_binary()"),
+        "installer should isolate archive binary candidate selection",
+    )?;
+    ensure(
+        script.contains("Archive contains multiple executable '$BINARY' candidates:"),
+        "installer should reject multiple executable candidates",
+    )?;
+    ensure(
+        script.contains(
+            "Archive contains multiple matching '$BINARY' candidates without owner-execute mode:",
+        ),
+        "installer should reject ambiguous chmod fallback candidates",
+    )?;
+    ensure(
+        script.contains("Refusing to choose by filesystem traversal order."),
+        "installer should explain why ambiguous candidates are refused",
+    )?;
+    ensure(
+        script.contains("Extracted '$BINARY' lacks owner-execute mode; applying chmod u+x"),
+        "installer should log the chmod fallback",
+    )?;
+    ensure(
+        script.contains("if ! chmod u+x \"$BIN\" 2>/dev/null; then"),
+        "installer should treat chmod fallback failure as fatal",
+    )?;
+    ensure(
+        !script.contains(
+            "find \"$TMP/extract\" -maxdepth 3 -type f -name \"$BINARY\" 2>/dev/null | head -n 1",
+        ),
+        "installer must not pick a non-executable fallback by traversal order",
+    )?;
+    ensure(
+        !script.contains("chmod u+x \"$BIN\" 2>/dev/null || true"),
+        "installer must not silently ignore chmod fallback failure",
+    )
+}
+
 #[cfg(unix)]
 fn write_fake_ee(path: &Path) -> TestResult {
     fs::write(path, "#!/bin/sh\nexit 0\n").map_err(|error| error.to_string())?;
