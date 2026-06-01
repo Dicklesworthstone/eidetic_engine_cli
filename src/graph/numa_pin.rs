@@ -942,7 +942,7 @@ mod tests {
         assert!(
             plan.degraded_codes
                 .iter()
-                .any(|code| code == NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+                .any(|code| *code == NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
         );
         match plan.platform {
             NumaPinPlatform::MacosUnsupported => {
@@ -996,7 +996,7 @@ mod tests {
             result
                 .degraded_codes
                 .iter()
-                .any(|code| code == NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
+                .any(|code| *code == NUMA_PIN_UNSUPPORTED_PLATFORM_CODE)
         );
         assert_no_duplicate_codes(&result);
     }
