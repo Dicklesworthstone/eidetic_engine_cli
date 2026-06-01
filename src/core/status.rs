@@ -2209,7 +2209,7 @@ fn push_lexical_ram_tier_degradations(
         return;
     }
     for code in &report.degraded_codes {
-        match code.as_str() {
+        match *code {
             LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => degradations.push(DegradationReport {
                 code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
                 severity: "info",

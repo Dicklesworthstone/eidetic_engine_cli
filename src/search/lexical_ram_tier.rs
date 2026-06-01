@@ -25,7 +25,10 @@
 //! extends `tests/determinism_unit.rs` with the `pin_ram` × `request_hugepages`
 //! dimensions.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -368,7 +371,10 @@ pub struct LexicalRamTierResult {
     pub page_faults_post: u64,
     pub fallback_path: LexicalRamTierFallbackPath,
     pub index_path: Option<PathBuf>,
-    pub degraded_codes: Vec<String>,
+    pub degraded_codes: Vec<&'static str>,
+    // O(1) duplicate checks while `degraded_codes` preserves JSON order.
+    #[serde(skip)]
+    degraded_code_set: HashSet<&'static str>,
 }
 
 impl LexicalRamTierResult {
@@ -393,12 +399,13 @@ impl LexicalRamTierResult {
             fallback_path: LexicalRamTierFallbackPath::None,
             index_path: Some(index_path.to_path_buf()),
             degraded_codes: Vec::new(),
+            degraded_code_set: HashSet::new(),
         }
     }
 
-    fn push_unique_code(&mut self, code: &str) {
-        if !self.degraded_codes.iter().any(|existing| existing == code) {
-            self.degraded_codes.push(code.to_string());
+    fn push_unique_code(&mut self, code: &'static str) {
+        if self.degraded_code_set.insert(code) {
+            self.degraded_codes.push(code);
         }
     }
 }
@@ -509,11 +516,30 @@ mod tests {
             result.fallback_path,
             LexicalRamTierFallbackPath::DisabledByOperator
         );
+        assert_eq!(result.degraded_codes, vec![LEXICAL_RAM_TIER_DISABLED_CODE]);
+        assert_no_duplicate_codes(&result);
+    }
+
+    #[test]
+    fn degraded_code_sidecar_preserves_order_and_filters_duplicates() {
+        let mut result = LexicalRamTierResult::base(
+            LexicalRamTierPlatform::MacosLimited,
+            &LexicalRamTierConfig::default(),
+            fake_index_dir(),
+        );
+
+        result.push_unique_code(LEXICAL_HUGEPAGES_UNAVAILABLE_CODE);
+        result.push_unique_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
+        result.push_unique_code(LEXICAL_HUGEPAGES_UNAVAILABLE_CODE);
+
         assert_eq!(
             result.degraded_codes,
-            vec![LEXICAL_RAM_TIER_DISABLED_CODE.to_string()]
+            vec![
+                LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
+                LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+            ]
         );
-        assert_no_duplicate_codes(&result);
+        assert_eq!(result.degraded_code_set.len(), 2);
     }
 
     #[test]
@@ -786,6 +812,10 @@ mod tests {
                 "expected field {key} in serialized result {serialized}"
             );
         }
+        assert!(
+            serialized.get("degradedCodeSet").is_none(),
+            "private degraded-code sidecar must not leak into JSON: {serialized}"
+        );
         assert_eq!(
             serialized
                 .get("fallbackPath")
