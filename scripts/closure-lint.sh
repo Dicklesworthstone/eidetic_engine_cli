@@ -6,6 +6,8 @@
 # - implements-surface:* beads cannot close while a sentinel-family code
 #   (*_UNAVAILABLE_CODE / *_NOT_IMPLEMENTED_CODE / *_NOT_YET_IMPLEMENTED_CODE) exists
 # - implements-surface:* beads must have a golden snapshot
+# - closed beads with implementation FILE SURFACE paths must carry the matching
+#   implements-surface:* label/title instead of bypassing the implementation gates
 # - math-ambition beads cannot close without explicit rejection-threshold evidence
 # - *_unimplemented failure-mode fixtures must be marked honesty_only:true
 # - honesty-only beads must have an open implements-surface sibling, unless a
@@ -311,7 +313,7 @@ write_closure_quality_report() {
     ' "$BEADS_FILE" > "$QUALITY_REPORT_FILE"
 }
 
-implementation_surfaces_for_bead() {
+explicit_implementation_surfaces_for_bead() {
     local bead_id="$1"
     jq -r --arg bead_id "$bead_id" '
         select(.id == $bead_id)
@@ -321,6 +323,14 @@ implementation_surfaces_for_bead() {
           ]
         | unique[]
     ' "$BEADS_FILE" 2>/dev/null || true
+}
+
+implementation_surfaces_for_bead() {
+    local bead_id="$1"
+    {
+        explicit_implementation_surfaces_for_bead "$bead_id"
+        inferred_implementation_surfaces_for_bead "$bead_id"
+    } | sed '/^$/d' | sort -u
 }
 
 OPEN_SURFACES_JSON=$(
@@ -461,6 +471,75 @@ bead_declared_file_surfaces() {
         tr ',' '\n' |
         sed -E 's/^[[:space:]]*//; s/[[:space:]].*$//; s/^`//; s/`$//' |
         grep -E '^[A-Za-z0-9_./*?+-]+$' || true
+}
+
+implementation_surface_for_file_path() {
+    local path="$1"
+
+    case "$path" in
+        src/core/cass_prefetch.rs)
+            echo "cass_prefetch"
+            ;;
+        src/daemon.rs|src/daemon/*)
+            echo "daemon_hot_mode"
+            ;;
+        src/graph/numa_pin.rs)
+            echo "graph_numa_pin"
+            ;;
+        src/search/lexical_ram_tier.rs)
+            echo "lexical_ram_tier"
+            ;;
+    esac
+}
+
+inferred_implementation_surface_records_for_bead() {
+    local bead_id="$1"
+    local path surface
+
+    bead_declared_file_surfaces "$bead_id" |
+        while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            surface=$(implementation_surface_for_file_path "$path")
+            [ -n "$surface" ] || continue
+            printf '%s\t%s\n' "$surface" "$path"
+        done |
+        sort -u
+}
+
+inferred_implementation_surfaces_for_bead() {
+    inferred_implementation_surface_records_for_bead "$1" |
+        cut -f1 |
+        sort -u
+}
+
+bead_has_explicit_implementation_surface() {
+    local bead_id="$1"
+    local surface="$2"
+
+    jq -e --arg bead_id "$bead_id" --arg surface "$surface" '
+        select(.id == $bead_id)
+        | (
+            any((.labels // [])[]?; . == ("implements-surface:" + $surface))
+            or (try ((.title // "") | capture("\\[implements-surface:(?<declared>[^]]+)\\]").declared == $surface) catch false)
+          )
+    ' "$BEADS_FILE" >/dev/null 2>&1
+}
+
+check_inferred_implementation_surface_labels() {
+    local bead_id="$1"
+    local records record surface path
+
+    records=$(inferred_implementation_surface_records_for_bead "$bead_id" | tr '\t' '|')
+    for record in $records; do
+        surface=${record%%|*}
+        path=${record#*|}
+        [ -n "$surface" ] || continue
+
+        if ! bead_has_explicit_implementation_surface "$bead_id" "$surface"; then
+            add_violation "$bead_id" "implements-surface" "$surface" \
+                "FILE SURFACE maps $path to $surface but bead lacks implements-surface:$surface label/title"
+        fi
+    done
 }
 
 bead_referenced_test_paths() {
@@ -1161,6 +1240,7 @@ relevant_closed_bead_ids() {
             or ((.labels // []) | index("math-ambition"))
             or ((.labels // []) | any(startswith("implements-surface:")))
             or ((.title // "") | test("\\[implements-surface:"))
+            or ((.description // "") | test("(^|\\n)FILE SURFACE:[^\\n]*src/"))
           )
         | .id
     ' "$BEADS_FILE" 2>/dev/null || true
@@ -1197,6 +1277,7 @@ else
                 or ((.labels // []) | index("math-ambition"))
                 or ((.labels // []) | any(startswith("implements-surface:")))
                 or ((.title // "") | test("\\[implements-surface:"))
+                or ((.description // "") | test("(^|\\n)FILE SURFACE:[^\\n]*src/"))
               )
         ' "$BEADS_FILE" >/dev/null 2>&1; then
             BEAD_IDS="${BEAD_IDS}${changed_id}
@@ -1249,10 +1330,8 @@ fi
 # Process each bead by ID
 for bead_id in $BEAD_IDS; do
     # Get bead data
-    labels=$(jq -r "select(.id == \"$bead_id\") | .labels | join(\",\")" "$BEADS_FILE" 2>/dev/null || echo "")
+    labels=$(jq -r --arg bead_id "$bead_id" 'select(.id == $bead_id) | (.labels // []) | join(",")' "$BEADS_FILE" 2>/dev/null || echo "")
     close_reason=$(jq -r "select(.id == \"$bead_id\") | .close_reason // \"\"" "$BEADS_FILE" 2>/dev/null || echo "")
-
-    [ -z "$labels" ] && continue
 
     if echo "$labels" | grep -qE '\bmath-ambition\b'; then
         check_math_ambition_closure "$bead_id" "$close_reason"
@@ -1260,6 +1339,8 @@ for bead_id in $BEAD_IDS; do
 
     implementation_surfaces=$(implementation_surfaces_for_bead "$bead_id")
     if [ -n "$implementation_surfaces" ]; then
+        check_inferred_implementation_surface_labels "$bead_id"
+
         # Rule 1: Check for abstention language in close_reason
         if close_reason_contains_abstention "$close_reason"; then
             for surface in $implementation_surfaces; do

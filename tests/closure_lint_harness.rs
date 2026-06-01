@@ -307,6 +307,62 @@ fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult
     )
 }
 
+#[test]
+fn closure_lint_rejects_known_file_surface_without_implements_surface_label() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-file-surface-inference-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-unlabeled-cass-prefetch","title":"real CASS prefetch implementation without taxonomy label","status":"closed","description":"Implementation touched the real CASS prefetch surface.\n\nFILE SURFACE: src/core/cass_prefetch.rs","close_reason":"implemented with durable evidence","labels":[]}"#,
+            r#"{"id":"closed-labeled-cass-prefetch","title":"[implements-surface:cass_prefetch] real CASS prefetch implementation","status":"closed","description":"Same implementation path, but with the taxonomy label.\n\nFILE SURFACE: src/core/cass_prefetch.rs","close_reason":"implemented with durable evidence","labels":["implements-surface:cass_prefetch"]}"#,
+            r#"{"id":"closed-script-only-unlabeled","title":"script-only closure without taxonomy label","status":"closed","description":"This is not an implementation surface.\n\nFILE SURFACE: scripts/closure-lint.sh","close_reason":"implemented with durable evidence","labels":[]}"#,
+        ],
+        "",
+        &["cass_prefetch"],
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/core/cass_prefetch.rs",
+        UNIT_TESTS_HAPPY_EDGE_ERROR,
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail unlabeled implementation FILE SURFACE\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+
+    let observed = violation_keys(&report)?;
+    let missing_label_reason = "FILE SURFACE maps src/core/cass_prefetch.rs to cass_prefetch but bead lacks implements-surface:cass_prefetch label/title";
+    ensure(
+        observed.iter().any(|(bead, surface, reason)| {
+            bead == "closed-unlabeled-cass-prefetch"
+                && surface == "cass_prefetch"
+                && reason == missing_label_reason
+        }),
+        format!(
+            "unlabeled implementation path should produce missing implements-surface violation, got {observed:?}"
+        ),
+    )?;
+    ensure(
+        !observed
+            .iter()
+            .any(|(bead, _, _)| bead == "closed-labeled-cass-prefetch"),
+        format!("labeled implementation path should remain clean, got {observed:?}"),
+    )?;
+    ensure(
+        !observed
+            .iter()
+            .any(|(bead, _, _)| bead == "closed-script-only-unlabeled"),
+        format!("script-only unlabeled closure should remain out of scope, got {observed:?}"),
+    )?;
+    Ok(())
+}
+
 // Regression for bd-37u08: close_reason_contains_abstention must scrub
 // false-positive abstention triggers before applying the regex. The five
 // patterns covered: 'non-abstention' (negation), '*_UNAVAILABLE_CODE' (literal
