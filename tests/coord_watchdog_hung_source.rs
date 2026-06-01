@@ -13,8 +13,16 @@
 //! and artifact paths. Raw stdout/stderr bodies are deliberately omitted;
 //! only bounded tails and hashes leave the test surface.
 
+#[cfg(unix)]
+use std::fs;
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ee::core::source_run::{
     SOURCE_RUN_EVIDENCE_SCHEMA_V1, SourceRunCommand, SourceRunEvidence, SourceRunKind,
@@ -23,9 +31,13 @@ use ee::core::source_run::{
 use serde::Serialize;
 
 const HUNG_SOURCE_TIMEOUT: Duration = Duration::from_millis(150);
-const HUNG_SOURCE_TIMEOUT_TOLERANCE: Duration = Duration::from_millis(750);
+const HUNG_SOURCE_TIMEOUT_TOLERANCE: Duration = Duration::from_millis(300);
 const HUNG_SOURCE_TAIL_BYTES_MAX: usize = 64;
 const PARTIAL_STDOUT_MARKER: &str = "PARTIAL_STDOUT_MARKER";
+#[cfg(unix)]
+const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const PROCESS_EXIT_WAIT: Duration = Duration::from_secs(2);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,16 +109,17 @@ fn hung_after_partial_stdout_request() -> SourceRunRequest {
     .with_tail_bytes_max(HUNG_SOURCE_TAIL_BYTES_MAX)
 }
 
-#[test]
-fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
-    let request = hung_after_partial_stdout_request();
-    let started = std::time::Instant::now();
-    let evidence = run_source_command(&request);
+fn assert_timeout_within_tolerance(started: Instant, scenario: &str, evidence: &SourceRunEvidence) {
     let wall = started.elapsed();
-
     let within = wall <= HUNG_SOURCE_TIMEOUT + HUNG_SOURCE_TIMEOUT_TOLERANCE;
-    emit_test_event("hung_after_partial_stdout", &evidence, within);
+    emit_test_event(scenario, evidence, within);
+    assert!(
+        within,
+        "wall-clock elapsed {wall:?} exceeded timeout {HUNG_SOURCE_TIMEOUT:?} + tolerance {HUNG_SOURCE_TIMEOUT_TOLERANCE:?}; watchdog did not bound the source"
+    );
+}
 
+fn assert_hung_source_timeout_evidence(evidence: &SourceRunEvidence) {
     assert_eq!(evidence.schema, SOURCE_RUN_EVIDENCE_SCHEMA_V1);
     assert_eq!(
         evidence.status,
@@ -121,10 +134,7 @@ fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
         !evidence.exit.killed_peer_processes,
         "child kill must stay scoped to the source's own process group"
     );
-    assert!(
-        within,
-        "wall-clock elapsed {wall:?} exceeded timeout {HUNG_SOURCE_TIMEOUT:?} + tolerance {HUNG_SOURCE_TIMEOUT_TOLERANCE:?}; watchdog did not bound the source"
-    );
+    assert_watchdog_sigkill(evidence);
     assert_eq!(
         evidence.timing.timeout_ms,
         HUNG_SOURCE_TIMEOUT.as_millis() as u64,
@@ -138,12 +148,62 @@ fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
         elapsed_ms >= HUNG_SOURCE_TIMEOUT.as_millis() as u64,
         "elapsed_ms ({elapsed_ms}) should be at least the timeout budget for a wedged source"
     );
+}
+
+#[cfg(unix)]
+fn assert_watchdog_sigkill(evidence: &SourceRunEvidence) {
+    assert_eq!(
+        evidence.exit.signal.as_deref(),
+        Some("signal:9"),
+        "Unix watchdog timeout should report SIGKILL evidence"
+    );
+}
+
+#[cfg(not(unix))]
+fn assert_watchdog_sigkill(_evidence: &SourceRunEvidence) {}
+
+#[cfg(unix)]
+fn read_pid_file(path: &Path) -> u32 {
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("read grandchild pid from {}: {error}", path.display()))
+        .trim()
+        .parse()
+        .unwrap_or_else(|error| panic!("parse grandchild pid from {}: {error}", path.display()))
+}
+
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32) -> bool {
+    let deadline = Instant::now() + PROCESS_EXIT_WAIT;
+    while Instant::now() < deadline {
+        if !process_exists(pid) {
+            return true;
+        }
+        thread::sleep(PROCESS_EXIT_POLL_INTERVAL);
+    }
+    !process_exists(pid)
+}
+
+#[test]
+fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
+    let request = hung_after_partial_stdout_request();
+    let started = Instant::now();
+    let evidence = run_source_command(&request);
+
+    assert_timeout_within_tolerance(started, "hung_after_partial_stdout", &evidence);
+    assert_hung_source_timeout_evidence(&evidence);
 
     let stdout_tail = evidence.output.stdout_tail.as_deref().unwrap_or_default();
-    let drain_marker = "source command pipe drain timed out";
     assert!(
-        stdout_tail.contains(PARTIAL_STDOUT_MARKER) || stdout_tail.contains(drain_marker),
-        "stdout tail must preserve partial output or the drain-timeout sentinel; got {stdout_tail:?}"
+        stdout_tail.contains(PARTIAL_STDOUT_MARKER),
+        "stdout tail must preserve partial output without falling back to the drain-timeout sentinel; got {stdout_tail:?}"
     );
     assert!(
         evidence.output.stdout_hash.is_some(),
@@ -172,6 +232,44 @@ fn hung_source_after_partial_stdout_kills_child_within_timeout_budget() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn hung_source_process_group_kills_background_grandchild() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let pid_file = temp.path().join("grandchild.pid");
+    let request = SourceRunRequest::new(
+        SourceRunSource::new(SourceRunKind::Shell, "shell", "hung_background_grandchild"),
+        SourceRunCommand::new("sh")
+            .with_args([
+                "-c",
+                "sleep 30 & printf '%s\n' \"$!\" > \"$EE_WATCHDOG_GRANDCHILD_PID\"; printf '%s' \"$EE_WATCHDOG_MARKER\"; sleep 30",
+            ])
+            .with_env(
+                "EE_WATCHDOG_GRANDCHILD_PID",
+                pid_file.to_string_lossy().into_owned(),
+            )
+            .with_env("EE_WATCHDOG_MARKER", PARTIAL_STDOUT_MARKER),
+        HUNG_SOURCE_TIMEOUT,
+    )
+    .with_tail_bytes_max(HUNG_SOURCE_TAIL_BYTES_MAX);
+
+    let started = Instant::now();
+    let evidence = run_source_command(&request);
+
+    assert_timeout_within_tolerance(started, "hung_background_grandchild", &evidence);
+    assert_hung_source_timeout_evidence(&evidence);
+    let grandchild_pid = read_pid_file(&pid_file);
+    assert!(
+        wait_for_process_exit(grandchild_pid),
+        "watchdog process-group kill should reap background grandchild pid {grandchild_pid}"
+    );
+    let stdout_tail = evidence.output.stdout_tail.as_deref().unwrap_or_default();
+    assert!(
+        stdout_tail.contains(PARTIAL_STDOUT_MARKER),
+        "stdout tail must preserve marker from command with background grandchild; got {stdout_tail:?}"
+    );
+}
+
 #[test]
 fn clean_failure_emits_stable_failed_evidence() {
     let request = SourceRunRequest::new(
@@ -180,7 +278,7 @@ fn clean_failure_emits_stable_failed_evidence() {
         Duration::from_secs(5),
     )
     .with_tail_bytes_max(HUNG_SOURCE_TAIL_BYTES_MAX);
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let evidence = run_source_command(&request);
     let wall = started.elapsed();
     let within = wall <= Duration::from_secs(5);
@@ -212,7 +310,7 @@ fn missing_binary_spawn_failure_does_not_panic_or_unblock_other_sources() {
         Duration::from_secs(2),
     )
     .with_tail_bytes_max(HUNG_SOURCE_TAIL_BYTES_MAX);
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     let evidence = run_source_command(&request);
     let within = started.elapsed() <= Duration::from_secs(2);
     emit_test_event("missing_binary_spawn_failure", &evidence, within);
