@@ -21,10 +21,10 @@ optional RSS/CPU measurements, aggregate latency percentiles, first-failure
 diagnosis, redaction posture, and verification posture.
 
 Result ledgers remain side-effect-free. They can record that RCH was required,
-passed, failed, or blocked before Cargo, but they do not treat local Cargo
-fallback as acceptable proof. They also do not include timestamps; volatile
-measurement fields are normalized and named under `volatileFieldsStripped`
-when they are excluded from replay hashes.
+passed, failed, or blocked before Cargo, but a `local Cargo fallback` is not
+acceptable proof. They also do not include timestamps; volatile measurement
+fields are normalized and named under `volatileFieldsStripped` when they are
+excluded from replay hashes.
 
 These contracts are intentionally smaller than a runner API. Later beads can
 build fixture generation, admission checks, replay execution, and support
