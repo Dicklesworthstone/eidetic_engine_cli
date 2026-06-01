@@ -24,6 +24,16 @@ Evidence scale:
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardened the v0.3.2+ installer signing trust boundary: `install.sh`
+  now tries keyless Sigstore identities before the pinned release-key
+  fallback, `EE_INSTALL_REQUIRE_KEYLESS=1` refuses that fallback,
+  Sigstore verification pins transparency-log enforcement with
+  `--insecure-ignore-tlog=false`, and
+  [`docs/security/release-signing.md`](docs/security/release-signing.md)
+  documents key generation, storage, rotation, and revocation policy.
+
 ## [0.3.8] - 2026-05-30
 
 Release-pipeline fix #4 (the final whack-a-mole in this series — gates

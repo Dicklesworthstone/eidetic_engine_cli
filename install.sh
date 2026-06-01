@@ -31,6 +31,8 @@
 #   EE_SKIP_VERIFY     set to 1 to skip verification (== --no-verify)
 #   EE_REQUIRE_PROVENANCE
 #                      set to 1 to require provenance verification
+#   EE_INSTALL_REQUIRE_KEYLESS
+#                      set to 1 to refuse pinned-key fallback verification
 #   HTTPS_PROXY / HTTP_PROXY   honored for every network call
 #
 set -euo pipefail
@@ -91,6 +93,7 @@ CERT_OIDC_ISSUER="${CERT_OIDC_ISSUERS[0]}"
 #
 # Signing (automated, per release):
 #   COSIGN_PASSWORD="" cosign sign-blob --yes \
+#     --tlog-upload=true \
 #     --key ~/.config/ee-signing/cosign-ee.key \
 #     --bundle <file>.sigstore.json <file>
 EE_RELEASE_SIGNING_PUBLIC_KEY='-----BEGIN PUBLIC KEY-----
@@ -99,39 +102,50 @@ h3VXjvm63PcMNKFcvqq39g3UIGwQMLdNPwkiPHM4lqE2vrQOoAHcRIXf4Q==
 -----END PUBLIC KEY-----'
 
 # Try every supported verification path against $bundle + $payload. Returns
-# 0 on the first success, 1 if no path matched. Order matters: pinned-key
-# verification first (covers fully-automated manual releases signed with
-# the embedded EE_RELEASE_SIGNING_PUBLIC_KEY); then each (identity,
-# issuer) pair (covers keyless CI-built releases and historical
-# device-flow-signed maintainer releases). Stderr is suppressed per
-# attempt so a release signed by one path does not surface the other
-# paths' "no matching certificate" message as a user-facing error.
-# Caller is responsible for the final user-facing failure message.
+# 0 on the first success, 1 if no path matched. Order matters: keyless
+# identity-bound certificates first (CI builds and historical device-flow
+# maintainer releases), then the pinned long-lived key as a visible fallback
+# for manual maintainer-cut releases. Stderr is suppressed per attempt so a
+# release signed by one path does not surface the other paths' "no matching
+# certificate" message as a user-facing error. Caller is responsible for the
+# final user-facing failure message.
 verify_blob_against_anchors() {
   local bundle="$1" payload="$2"
 
-  # Path 1: pinned long-lived key (fast path, fully-automated releases).
+  SIGSTORE_VERIFIED_VIA=""
+
+  # Path 1..N: keyless identity-bound certs (CI builds + device-flow).
+  local i
+  for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
+    if cosign verify-blob \
+          --bundle "$bundle" \
+          --insecure-ignore-tlog=false \
+          --certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}" \
+          --certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}" \
+          "$payload" >/dev/null 2>&1; then
+      SIGSTORE_VERIFIED_VIA="keyless:${i}"
+      return 0
+    fi
+  done
+
+  if [ "$REQUIRE_KEYLESS" = "1" ]; then
+    return 1
+  fi
+
+  # Fallback path: pinned long-lived key for manual maintainer-cut releases.
   local pubkey_file
   pubkey_file="$TMP/ee-release-signing-key.pub"
   printf '%s\n' "$EE_RELEASE_SIGNING_PUBLIC_KEY" > "$pubkey_file"
   if cosign verify-blob \
         --bundle "$bundle" \
+        --insecure-ignore-tlog=false \
         --key "$pubkey_file" \
         "$payload" >/dev/null 2>&1; then
+    SIGSTORE_VERIFIED_VIA="pinned-key"
+    info "Sigstore verified via pinned-key fallback for $(basename "$payload")"
     return 0
   fi
 
-  # Path 2..N: keyless identity-bound certs (CI builds + device-flow).
-  local i
-  for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
-    if cosign verify-blob \
-          --bundle "$bundle" \
-          --certificate-identity-regexp "${CERT_IDENTITY_REGEXPS[$i]}" \
-          --certificate-oidc-issuer "${CERT_OIDC_ISSUERS[$i]}" \
-          "$payload" >/dev/null 2>&1; then
-      return 0
-    fi
-  done
   return 1
 }
 
@@ -144,6 +158,7 @@ NO_GUM=0
 NO_CONFIGURE=0
 NO_CHECKSUM="${EE_SKIP_VERIFY:-0}"
 REQUIRE_PROVENANCE="${EE_REQUIRE_PROVENANCE:-0}"
+REQUIRE_KEYLESS="${EE_INSTALL_REQUIRE_KEYLESS:-0}"
 FORCE_INSTALL=0
 OFFLINE="${EE_OFFLINE:-0}"
 
@@ -322,6 +337,8 @@ Environment variables:
   EE_SKIP_VERIFY=1   == --no-verify
   EE_REQUIRE_PROVENANCE=1
                      == --require-provenance
+  EE_INSTALL_REQUIRE_KEYLESS=1
+                     refuse pinned-key fallback; require a keyless Sigstore identity match
   HTTPS_PROXY        Proxy URL honored on every curl call
 EOFU
 }
@@ -374,8 +391,18 @@ case "$REQUIRE_PROVENANCE" in
   *) err "EE_REQUIRE_PROVENANCE must be 0 or 1"; exit 2;;
 esac
 
+case "$REQUIRE_KEYLESS" in
+  0|1) ;;
+  *) err "EE_INSTALL_REQUIRE_KEYLESS must be 0 or 1"; exit 2;;
+esac
+
 if [ "$REQUIRE_PROVENANCE" = "1" ] && [ "$NO_CHECKSUM" = "1" ]; then
   err "--require-provenance cannot be combined with --no-verify / EE_SKIP_VERIFY=1"
+  exit 2
+fi
+
+if [ "$REQUIRE_KEYLESS" = "1" ] && [ "$NO_CHECKSUM" = "1" ]; then
+  err "EE_INSTALL_REQUIRE_KEYLESS=1 cannot be combined with --no-verify / EE_SKIP_VERIFY=1"
   exit 2
 fi
 
@@ -851,9 +878,9 @@ verify_sigstore_bundle() {
   info "Fetching sigstore bundle"
   info "Sigstore bundle: $bundle_url" >&2
   if ! ee_curl "$bundle_url" -o "$bundle_file" 2>/dev/null; then
-    if [ "$REQUIRE_PROVENANCE" = "1" ]; then
+    if [ "$REQUIRE_PROVENANCE" = "1" ] || [ "$REQUIRE_KEYLESS" = "1" ]; then
       err "Sigstore bundle not available at $bundle_url."
-      err "--require-provenance was passed; cannot continue without a signed bundle."
+      err "Strict verification was requested; cannot continue without a signed bundle."
       return 1
     fi
     warn "Sigstore bundle not available at $bundle_url; skipping signature verification (sha256 already verified)."
@@ -862,6 +889,11 @@ verify_sigstore_bundle() {
   fi
 
   if ! command -v cosign &>/dev/null; then
+    if [ "$REQUIRE_KEYLESS" = "1" ]; then
+      err "cosign not found. EE_INSTALL_REQUIRE_KEYLESS=1 requires keyless Sigstore verification."
+      err "Install cosign (https://github.com/sigstore/cosign) or unset EE_INSTALL_REQUIRE_KEYLESS."
+      return 1
+    fi
     warn "cosign not found; skipping Sigstore signature verification for $file (sha256 already verified)."
     warn "Install cosign (https://github.com/sigstore/cosign) for cryptographic-trust verification."
     return 0
@@ -876,6 +908,9 @@ verify_sigstore_bundle() {
     for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
       err "  - identity_regexp='${CERT_IDENTITY_REGEXPS[$i]}' issuer='${CERT_OIDC_ISSUERS[$i]}'"
     done
+    if [ "$REQUIRE_KEYLESS" = "1" ]; then
+      err "Pinned-key fallback was disabled by EE_INSTALL_REQUIRE_KEYLESS=1."
+    fi
     err "This is a security signal worth investigating; do not pass --no-verify to bypass."
     return 1
   fi
@@ -928,6 +963,9 @@ verify_provenance_bundle() {
     for i in "${!CERT_IDENTITY_REGEXPS[@]}"; do
       err "  - identity_regexp='${CERT_IDENTITY_REGEXPS[$i]}' issuer='${CERT_OIDC_ISSUERS[$i]}'"
     done
+    if [ "$REQUIRE_KEYLESS" = "1" ]; then
+      err "Pinned-key fallback was disabled by EE_INSTALL_REQUIRE_KEYLESS=1."
+    fi
     return 1
   fi
 
@@ -1028,6 +1066,10 @@ resolve_version
 set_artifact_url
 if [ "$REQUIRE_PROVENANCE" = "1" ] && [ "$FROM_SOURCE" -eq 1 ]; then
   err "--require-provenance only applies to signed release artifacts, not --from-source builds"
+  exit 2
+fi
+if [ "$REQUIRE_KEYLESS" = "1" ] && [ "$FROM_SOURCE" -eq 1 ]; then
+  err "EE_INSTALL_REQUIRE_KEYLESS=1 only applies to signed release artifacts, not --from-source builds"
   exit 2
 fi
 

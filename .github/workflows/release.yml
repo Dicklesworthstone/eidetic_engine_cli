@@ -510,9 +510,11 @@ jobs:
           set -euo pipefail
           cd dist
           cosign sign-blob --yes \
+            --tlog-upload=true \
             --bundle ee-${{ matrix.target }}.tar.xz.sigstore.json \
             ee-${{ matrix.target }}.tar.xz
           cosign sign-blob --yes \
+            --tlog-upload=true \
             --bundle ee-${{ matrix.target }}.provenance.json.sigstore.json \
             ee-${{ matrix.target }}.provenance.json
 
@@ -577,6 +579,7 @@ jobs:
             fi
             cosign verify-blob \
               --bundle "$bundle" \
+              --insecure-ignore-tlog=false \
               --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
               "$artifact"
@@ -593,6 +596,7 @@ jobs:
             fi
             cosign verify-blob \
               --bundle "$provenance_bundle" \
+              --insecure-ignore-tlog=false \
               --certificate-identity-regexp "$CERT_IDENTITY_REGEXP" \
               --certificate-oidc-issuer "$CERT_OIDC_ISSUER" \
               "$provenance"
@@ -667,16 +671,20 @@ jobs:
             printf '%s\n' '```bash'
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
+            printf '%s\n' '  --insecure-ignore-tlog=false \'
             printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
             printf '%s\n' '### Pinned key (manual-cut fallback releases)'
             printf '%s\n' 'When release.yml is unavailable, the maintainer may sign with the pinned EE release key.'
+            printf '%s\n' 'The official installer tries keyless signatures first and only uses this fallback when keyless verification does not match.'
+            printf '%s\n' 'Set EE_INSTALL_REQUIRE_KEYLESS=1 to refuse the pinned-key fallback.'
             printf '%s\n' 'The public key lives at `signing/cosign.pub` in the repo. Verify with:'
             printf '%s\n' '```bash'
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.tar.xz.sigstore.json \'
+            printf '%s\n' '  --insecure-ignore-tlog=false \'
             printf '%s\n' '  --key https://raw.githubusercontent.com/Dicklesworthstone/eidetic_engine_cli/main/signing/cosign.pub \'
             printf '%s\n' '  ee-<target>.tar.xz'
             printf '%s\n\n' '```'
@@ -684,6 +692,7 @@ jobs:
             printf '%s\n' '```bash'
             printf '%s\n' 'cosign verify-blob \'
             printf '%s\n' '  --bundle ee-<target>.provenance.json.sigstore.json \'
+            printf '%s\n' '  --insecure-ignore-tlog=false \'
             printf '%s\n' '  --certificate-identity-regexp "^https://github\.com/Dicklesworthstone/eidetic_engine_cli/\.github/workflows/release\.yml@refs/(tags/v[0-9].*|heads/main)$" \'
             printf '%s\n' '  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \'
             printf '%s\n' '  ee-<target>.provenance.json'
