@@ -296,3 +296,5 @@ tests/audit_artifacts/install_pipeline_*.json
 /ee_illustration.png
 /.beads.snapshot_*/
 /tests/artifacts/
+# git-repo-janitor skill scratch + recovery bundles (regenerable, never source)
+/.repo_janitor_workspace/
