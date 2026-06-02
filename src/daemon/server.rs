@@ -1,7 +1,8 @@
 //! Unix-domain socket accept loop + per-connection dispatcher
 //! (bd-oja31 skeleton). Wraps the framing in
 //! [`super::protocol`] with the seed dispatch table for
-//! `ee.daemon.echo` and the `ee.daemon.context` stub.
+//! `ee.daemon.capabilities`, `ee.daemon.echo`, and the
+//! `ee.daemon.context` stub.
 //!
 //! Threading: each accepted connection is dispatched onto a bounded
 //! worker pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
@@ -47,6 +48,9 @@ use super::{
 
 /// Method dispatch name for the round-trip integrity check.
 pub const METHOD_ECHO: &str = "ee.daemon.echo";
+
+/// Method dispatch name for daemon protocol discovery.
+pub const METHOD_CAPABILITIES: &str = "ee.daemon.capabilities";
 
 /// Error code returned when the diagnostic echo method is not enabled.
 pub const DAEMON_ECHO_DISABLED_CODE: &str = "daemon_echo_disabled";
@@ -1222,6 +1226,12 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
     }
 
     match request.method.as_str() {
+        METHOD_CAPABILITIES => DaemonResponse::ok(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            daemon_capabilities_result(),
+        ),
         // bd-3uev6: echo is the one public dispatch method that returns
         // caller-supplied content, so it MUST route through the same
         // canonical redaction pipeline every other content-bearing
@@ -1260,6 +1270,24 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
             format!("unknown daemon method `{other}`"),
         ),
     }
+}
+
+fn daemon_capabilities_result() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "ee.daemon",
+        "request_schemas": [super::DAEMON_REQUEST_SCHEMA_V1],
+        "response_schemas": [super::DAEMON_RESPONSE_SCHEMA_V1],
+        "methods": [
+            METHOD_CAPABILITIES,
+            METHOD_CONTEXT,
+            METHOD_ECHO
+        ],
+        "forward_compat": {
+            "v1_unknown_fields": "rejected",
+            "v1_unknown_methods": DAEMON_UNKNOWN_METHOD_CODE,
+            "v2_migration": "Call ee.daemon.capabilities with ee.daemon.request.v1 before sending any non-v1 schema or method; downgrade to an advertised schema/method when absent."
+        }
+    })
 }
 
 /// Open a UDS client connection to a running daemon and send exactly
@@ -1494,6 +1522,64 @@ mod tests {
             response
                 .degraded_codes
                 .contains(&DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned())
+        );
+    }
+
+    #[test]
+    fn dispatch_capabilities_advertises_strict_v1_migration_contract() {
+        let request = DaemonRequest::new(
+            "req-capabilities-001",
+            TEST_AGENT_ID,
+            METHOD_CAPABILITIES,
+            serde_json::json!({}),
+        );
+        let response = dispatch(&request);
+        assert!(response.error.is_none());
+        assert!(response.degraded_codes.is_empty());
+
+        let result = response
+            .result
+            .as_ref()
+            .expect("capabilities returns result");
+        assert_eq!(
+            result.get("protocol").and_then(serde_json::Value::as_str),
+            Some("ee.daemon")
+        );
+        assert_eq!(
+            result.get("request_schemas"),
+            Some(&serde_json::json!([super::super::DAEMON_REQUEST_SCHEMA_V1]))
+        );
+        assert_eq!(
+            result.get("response_schemas"),
+            Some(&serde_json::json!([
+                super::super::DAEMON_RESPONSE_SCHEMA_V1
+            ]))
+        );
+        assert_eq!(
+            result.get("methods"),
+            Some(&serde_json::json!([
+                METHOD_CAPABILITIES,
+                METHOD_CONTEXT,
+                METHOD_ECHO
+            ]))
+        );
+        assert_eq!(
+            result
+                .pointer("/forward_compat/v1_unknown_fields")
+                .and_then(serde_json::Value::as_str),
+            Some("rejected")
+        );
+        assert_eq!(
+            result
+                .pointer("/forward_compat/v1_unknown_methods")
+                .and_then(serde_json::Value::as_str),
+            Some(DAEMON_UNKNOWN_METHOD_CODE)
+        );
+        assert!(
+            result
+                .pointer("/forward_compat/v2_migration")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|policy| policy.contains(METHOD_CAPABILITIES))
         );
     }
 

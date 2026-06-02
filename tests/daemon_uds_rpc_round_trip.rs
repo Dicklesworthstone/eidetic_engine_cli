@@ -28,8 +28,8 @@ use ee::daemon::{
     protocol::{DaemonRequest, DaemonResponse},
     server::{
         ClientError, DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
-        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CONTEXT,
-        METHOD_ECHO, client_round_trip, start_server,
+        DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CAPABILITIES,
+        METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server,
     },
 };
 
@@ -330,6 +330,102 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
         !socket_path.exists(),
         "socket file must be unlinked after shutdown".to_owned(),
     )?;
+    Ok(())
+}
+
+#[test]
+fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-capabilities.sock");
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+
+    let request = DaemonRequest::new(
+        "req-capabilities-roundtrip-001",
+        TEST_AGENT_ID,
+        METHOD_CAPABILITIES,
+        serde_json::json!({}),
+    );
+    let response = client_round_trip(handle.socket_path(), &request)
+        .map_err(|error| format!("client_round_trip: {error}"))?;
+
+    ensure(
+        response.schema == DAEMON_RESPONSE_SCHEMA_V1,
+        format!(
+            "response schema must be {DAEMON_RESPONSE_SCHEMA_V1}; got {}",
+            response.schema
+        ),
+    )?;
+    ensure(
+        response.request_id == "req-capabilities-roundtrip-001",
+        format!(
+            "request_id must echo unchanged; got {}",
+            response.request_id
+        ),
+    )?;
+    ensure(
+        response.agent_id == TEST_AGENT_ID,
+        format!("agent_id must echo unchanged; got {}", response.agent_id),
+    )?;
+    ensure(
+        response.error.is_none(),
+        format!("capabilities must succeed; got {:?}", response.error),
+    )?;
+    ensure(
+        response.degraded_codes.is_empty(),
+        format!(
+            "capabilities is discovery, not a degraded response; got {:?}",
+            response.degraded_codes
+        ),
+    )?;
+
+    let result = response
+        .result
+        .as_ref()
+        .ok_or_else(|| format!("capabilities response missing result; got {response:?}"))?;
+    ensure(
+        result
+            .pointer("/protocol")
+            .and_then(serde_json::Value::as_str)
+            == Some("ee.daemon"),
+        format!("capabilities protocol missing or wrong; got {result}"),
+    )?;
+    ensure(
+        result.get("request_schemas") == Some(&serde_json::json!([DAEMON_REQUEST_SCHEMA_V1])),
+        format!("capabilities request_schemas wrong; got {result}"),
+    )?;
+    ensure(
+        result.get("response_schemas") == Some(&serde_json::json!([DAEMON_RESPONSE_SCHEMA_V1])),
+        format!("capabilities response_schemas wrong; got {result}"),
+    )?;
+    ensure(
+        result.get("methods")
+            == Some(&serde_json::json!([
+                METHOD_CAPABILITIES,
+                METHOD_CONTEXT,
+                METHOD_ECHO
+            ])),
+        format!("capabilities methods wrong; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/forward_compat/v1_unknown_fields")
+            .and_then(serde_json::Value::as_str)
+            == Some("rejected"),
+        format!("strict v1 unknown-field policy missing; got {result}"),
+    )?;
+    ensure(
+        result
+            .pointer("/forward_compat/v1_unknown_methods")
+            .and_then(serde_json::Value::as_str)
+            == Some(DAEMON_UNKNOWN_METHOD_CODE),
+        format!("strict v1 unknown-method policy missing; got {result}"),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
     Ok(())
 }
 

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.daemon.request.v1.json",
   "title": "ee.daemon.request.v1",
-  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux and `/tmp/ee-daemon.sock` on macOS (XDG_RUNTIME_DIR is not standard on Darwin). The daemon is opt-in; every CLI command continues to work when the socket is absent. The skeleton shipped under this schema covers the two seed methods — `ee.daemon.echo` (round-trip integrity check) and `ee.daemon.context` (degraded stub that surfaces `daemon_ann_warmload_not_yet_implemented` until the ANN warm-load slice lands). Requests carry `agent_id` and optional `workspace_id` so future warm-load, audit, and authorization slices do not have to break the v1 envelope to attribute calls.",
+  "description": "Length-prefixed JSON request envelope for the optional `ee daemon` Unix-domain socket RPC introduced by bd-oja31 (SRR1 hot-mode skeleton). Wire framing: 4-byte big-endian unsigned length, then exactly that many bytes of UTF-8 JSON conforming to this schema. The daemon process binds the socket at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on Linux and `/tmp/ee-daemon.sock` on macOS (XDG_RUNTIME_DIR is not standard on Darwin). The daemon is opt-in; every CLI command continues to work when the socket is absent. The skeleton shipped under this schema covers `ee.daemon.capabilities` (schema/method discovery), `ee.daemon.echo` (round-trip integrity check), and `ee.daemon.context` (degraded stub that surfaces `daemon_ann_warmload_not_yet_implemented` until the ANN warm-load slice lands). Requests carry `agent_id` and optional `workspace_id` so future warm-load, audit, and authorization slices do not have to break the v1 envelope to attribute calls. This v1 envelope is strict by design: unknown top-level fields and unknown methods are rejected. Clients that might speak a newer protocol MUST first call `ee.daemon.capabilities` with `ee.daemon.request.v1`, inspect the advertised request/response schema versions and method names, then downgrade or fall back to the in-process CLI path when the needed contract is absent.",
   "type": "object",
   "required": [
     "schema",
@@ -37,14 +37,15 @@
     "method": {
       "type": "string",
       "enum": [
+        "ee.daemon.capabilities",
         "ee.daemon.echo",
         "ee.daemon.context"
       ],
-      "description": "Method dispatch name. `ee.daemon.echo` returns the supplied params unchanged for round-trip integrity checks. `ee.daemon.context` is the warm-loaded `ee context` path stub; today it returns `error.code = daemon_ann_warmload_not_yet_implemented` with severity `medium` until the ANN warm-load slice (bd-17c65.14.9 follow-up) ships."
+      "description": "Method dispatch name. `ee.daemon.capabilities` returns the daemon protocol discovery payload for v1-to-v2 negotiation. `ee.daemon.echo` returns the supplied params in redaction-stable form for round-trip integrity checks when explicitly enabled. `ee.daemon.context` is the warm-loaded `ee context` path stub; today it returns `error.code = daemon_ann_warmload_not_yet_implemented` with severity `medium` until the ANN warm-load slice (bd-17c65.14.9 follow-up) ships."
     },
     "params": {
       "type": "object",
-      "description": "Method-specific parameters. For `ee.daemon.echo` this is an arbitrary JSON object that will be returned unchanged. For `ee.daemon.context` this carries the same shape as `ee context --json` request (workspace, task, max_tokens, profile); the stub does NOT validate the shape and returns `daemon_ann_warmload_not_yet_implemented` immediately regardless of contents.",
+      "description": "Method-specific parameters. For `ee.daemon.capabilities`, callers SHOULD send an empty object and the daemon ignores its contents. For `ee.daemon.echo` this is an arbitrary JSON object that will be returned in redaction-stable form when echo is explicitly enabled. For `ee.daemon.context` this carries the same shape as `ee context --json` request (workspace, task, max_tokens, profile); the stub does NOT validate the shape and returns `daemon_ann_warmload_not_yet_implemented` immediately regardless of contents.",
       "additionalProperties": true
     }
   }

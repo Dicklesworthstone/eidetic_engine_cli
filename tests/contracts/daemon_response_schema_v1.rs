@@ -16,6 +16,9 @@ type TestResult = Result<(), String>;
 
 const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
 const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
+const METHOD_CAPABILITIES: &str = "ee.daemon.capabilities";
+const METHOD_CONTEXT: &str = "ee.daemon.context";
+const METHOD_ECHO: &str = "ee.daemon.echo";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -40,10 +43,20 @@ fn serialized_request() -> Result<Value, String> {
     let mut request = DaemonRequest::new(
         "req-schema-cross-validation",
         "agent-schema-cross-validation",
-        "ee.daemon.echo",
+        METHOD_ECHO,
         serde_json::json!({"hello": "world", "n": 42}),
     );
     request.workspace_id = Some("workspace-schema-cross-validation".to_owned());
+    serde_json::to_value(request).map_err(|error| format!("serialize DaemonRequest: {error}"))
+}
+
+fn capabilities_request() -> Result<Value, String> {
+    let request = DaemonRequest::new(
+        "req-capabilities-schema-cross-validation",
+        "agent-schema-cross-validation",
+        METHOD_CAPABILITIES,
+        serde_json::json!({}),
+    );
     serde_json::to_value(request).map_err(|error| format!("serialize DaemonRequest: {error}"))
 }
 
@@ -53,6 +66,30 @@ fn success_response() -> Value {
         "agent-a",
         Some("workspace-a".to_owned()),
         serde_json::json!({"echo": true}),
+    ))
+    .expect("DaemonResponse::ok must serialize")
+}
+
+fn capabilities_response() -> Value {
+    serde_json::to_value(DaemonResponse::ok(
+        "req-capabilities",
+        "agent-a",
+        None,
+        serde_json::json!({
+            "protocol": "ee.daemon",
+            "request_schemas": ["ee.daemon.request.v1"],
+            "response_schemas": [DAEMON_RESPONSE_SCHEMA_V1],
+            "methods": [
+                METHOD_CAPABILITIES,
+                METHOD_CONTEXT,
+                METHOD_ECHO
+            ],
+            "forward_compat": {
+                "v1_unknown_fields": "rejected",
+                "v1_unknown_methods": "daemon_unknown_method",
+                "v2_migration": "Call ee.daemon.capabilities with ee.daemon.request.v1 before sending any non-v1 schema or method; downgrade to an advertised schema/method when absent."
+            }
+        }),
     ))
     .expect("DaemonResponse::ok must serialize")
 }
@@ -78,9 +115,21 @@ fn daemon_schema_cross_validation_accepts_serialized_rust_request() -> TestResul
 }
 
 #[test]
+fn daemon_schema_cross_validation_accepts_capabilities_request() -> TestResult {
+    let schema = read_request_schema()?;
+    validate_json_schema(&capabilities_request()?, &schema, "$")
+}
+
+#[test]
 fn daemon_schema_cross_validation_accepts_serialized_rust_result_response() -> TestResult {
     let schema = read_response_schema()?;
     validate_json_schema(&success_response(), &schema, "$")
+}
+
+#[test]
+fn daemon_schema_cross_validation_accepts_capabilities_response() -> TestResult {
+    let schema = read_response_schema()?;
+    validate_json_schema(&capabilities_response(), &schema, "$")
 }
 
 #[test]
@@ -136,6 +185,46 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
     ] {
         if !description.contains(code) {
             return Err(format!("schema error.description missing {code}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn daemon_request_schema_documents_strict_v1_capabilities_migration() -> TestResult {
+    let schema = read_request_schema()?;
+    let description = schema
+        .pointer("/description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "schema description missing".to_string())?;
+
+    for needle in [
+        METHOD_CAPABILITIES,
+        "unknown top-level fields and unknown methods are rejected",
+        "downgrade or fall back to the in-process CLI path",
+    ] {
+        if !description.contains(needle) {
+            return Err(format!(
+                "request schema description missing migration phrase {needle:?}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn daemon_request_schema_advertises_seed_methods() -> TestResult {
+    let schema = read_request_schema()?;
+    let methods = schema
+        .pointer("/properties/method/enum")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "schema method enum missing".to_string())?;
+
+    for method in [METHOD_CAPABILITIES, METHOD_CONTEXT, METHOD_ECHO] {
+        if !methods.iter().any(|value| value.as_str() == Some(method)) {
+            return Err(format!("request schema method enum missing {method}"));
         }
     }
 

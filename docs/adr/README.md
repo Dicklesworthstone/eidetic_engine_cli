@@ -59,3 +59,4 @@ including rejected alternatives and verification hooks.
 - [ADR 0051: High-confidence co-tag auto-linking on `ee remember`](0051-remember-cotag-auto-linking.md)
 - [ADR 0052: Daemon round-trip benchmark baseline](0052-daemon-round-trip-benchmark.md)
 - [ADR 0053: Daemon Panic Supervision Boundary](0053-daemon-panic-supervision.md)
+- [ADR 0054: Daemon Protocol Version Negotiation](0054-daemon-protocol-version-negotiation.md)

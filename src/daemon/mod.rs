@@ -16,10 +16,13 @@
 //!
 //! This module ships the skeleton only. The end goal of bd-oja31 is a
 //! RAM-pinned ANN + lexical-index hot-mode RPC; the skeleton lands the
-//! transport, framing, dispatch table, and two seed methods so the
+//! transport, framing, dispatch table, and seed methods so the
 //! ANN warm-load and the `mlock`/`MADV_HUGEPAGE` adapter (bd-17c65.14.9)
 //! can land behind it without re-litigating the protocol shape:
 //!
+//! - `ee.daemon.capabilities` — protocol discovery method. Clients call this
+//!   before attempting future schemas or non-v1 methods so they can downgrade
+//!   or fall back deterministically.
 //! - `ee.daemon.echo` — diagnostic round-trip integrity check. Disabled
 //!   by default unless `EE_DAEMON_ENABLE_ECHO=1` is set, and even then
 //!   returns only the canonical redacted form of request `params`.
