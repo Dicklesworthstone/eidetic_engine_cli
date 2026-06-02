@@ -29,6 +29,7 @@
 //! [`NoopMetricsCollector`], so a future collector plugs in at that one
 //! call site.
 
+use std::io;
 use std::time::{Duration, Instant};
 
 use super::protocol::DaemonResponse;
@@ -92,6 +93,26 @@ impl DispatchOutcome {
 pub trait DaemonMetricsCollector: Send + Sync {
     /// Record one completed dispatch.
     fn record_dispatch(&self, method: &str, outcome: DispatchOutcome, elapsed: Duration);
+
+    /// Record a non-transient accept-loop error that terminates the
+    /// listener. The tracing layer records the socket path; metrics use
+    /// only the low-cardinality I/O kind.
+    fn record_accept_loop_terminated(&self, _kind: io::ErrorKind) {}
+
+    /// Record failure to spawn a per-connection worker after a stream was
+    /// accepted. The caller still returns a bounded overload envelope to
+    /// the client; this hook gives metrics a counter without touching the
+    /// accept-loop match arms later.
+    fn record_worker_spawn_failure(&self, _kind: io::ErrorKind) {}
+
+    /// Record failure to duplicate a stream before handing it to a worker.
+    /// This is operationally equivalent to a spawn refusal for the client
+    /// but distinct enough to keep as a separate low-cardinality counter.
+    fn record_stream_clone_failure(&self, _kind: io::ErrorKind) {}
+
+    /// Record that a dispatch handler panic was caught and converted into
+    /// a structured response.
+    fn record_handler_panic(&self, _method: &str) {}
 }
 
 /// Zero-cost collector wired into release builds. Every method body is
@@ -131,6 +152,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::io;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -144,6 +166,15 @@ mod tests {
     #[derive(Default)]
     struct CapturingCollector {
         samples: Mutex<Vec<(String, DispatchOutcome)>>,
+        events: Mutex<Vec<CapturedEvent>>,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    enum CapturedEvent {
+        AcceptLoopTerminated(io::ErrorKind),
+        WorkerSpawnFailure(io::ErrorKind),
+        StreamCloneFailure(io::ErrorKind),
+        HandlerPanic(String),
     }
 
     impl DaemonMetricsCollector for CapturingCollector {
@@ -152,6 +183,34 @@ mod tests {
                 .lock()
                 .expect("capturing collector mutex must not be poisoned")
                 .push((method.to_owned(), outcome));
+        }
+
+        fn record_accept_loop_terminated(&self, kind: io::ErrorKind) {
+            self.events
+                .lock()
+                .expect("capturing collector mutex must not be poisoned")
+                .push(CapturedEvent::AcceptLoopTerminated(kind));
+        }
+
+        fn record_worker_spawn_failure(&self, kind: io::ErrorKind) {
+            self.events
+                .lock()
+                .expect("capturing collector mutex must not be poisoned")
+                .push(CapturedEvent::WorkerSpawnFailure(kind));
+        }
+
+        fn record_stream_clone_failure(&self, kind: io::ErrorKind) {
+            self.events
+                .lock()
+                .expect("capturing collector mutex must not be poisoned")
+                .push(CapturedEvent::StreamCloneFailure(kind));
+        }
+
+        fn record_handler_panic(&self, method: &str) {
+            self.events
+                .lock()
+                .expect("capturing collector mutex must not be poisoned")
+                .push(CapturedEvent::HandlerPanic(method.to_owned()));
         }
     }
 
@@ -224,6 +283,27 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(samples[0].0, "ee.daemon.echo");
         assert_eq!(samples[0].1, DispatchOutcome::Success);
+    }
+
+    #[test]
+    fn observer_hooks_record_accept_spawn_clone_and_panic_events() {
+        let collector = CapturingCollector::default();
+
+        collector.record_accept_loop_terminated(io::ErrorKind::AddrInUse);
+        collector.record_worker_spawn_failure(io::ErrorKind::Other);
+        collector.record_stream_clone_failure(io::ErrorKind::UnexpectedEof);
+        collector.record_handler_panic("ee.daemon.context");
+
+        let events = collector.events.lock().unwrap();
+        assert_eq!(
+            events.as_slice(),
+            &[
+                CapturedEvent::AcceptLoopTerminated(io::ErrorKind::AddrInUse),
+                CapturedEvent::WorkerSpawnFailure(io::ErrorKind::Other),
+                CapturedEvent::StreamCloneFailure(io::ErrorKind::UnexpectedEof),
+                CapturedEvent::HandlerPanic("ee.daemon.context".to_owned()),
+            ]
+        );
     }
 
     #[test]

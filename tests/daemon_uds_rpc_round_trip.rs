@@ -22,19 +22,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ee::daemon::{
-    DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_REQUEST_MAX_BYTES,
-    DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES, DAEMON_RESPONSE_SCHEMA_V1,
-    DAEMON_SHUTTING_DOWN_CODE,
+    DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_METHOD_UNAUTHORIZED_CODE,
+    DAEMON_REQUEST_MAX_BYTES, DAEMON_REQUEST_SCHEMA_V1, DAEMON_RESPONSE_MAX_BYTES,
+    DAEMON_RESPONSE_SCHEMA_V1, DAEMON_SHUTTING_DOWN_CODE,
     protocol::{DaemonRequest, DaemonResponse},
     server::{
         ClientError, DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CAPABILITIES,
-        METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server,
+        METHOD_CONTEXT, METHOD_ECHO, client_round_trip, start_server, start_server_for_workspace,
     },
 };
 
 type TestResult = Result<(), String>;
 const TEST_AGENT_ID: &str = "agent-daemon-uds-test";
+const TEST_WORKSPACE_ID: &str = "workspace-daemon-uds-test";
 
 fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     if condition {
@@ -53,6 +54,16 @@ fn connect_client(socket_path: &Path) -> Result<UnixStream, String> {
         .set_write_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| format!("set_write_timeout: {error}"))?;
     Ok(stream)
+}
+
+fn context_request(
+    request_id: &'static str,
+    agent_id: &'static str,
+    params: serde_json::Value,
+) -> DaemonRequest {
+    let mut request = DaemonRequest::new(request_id, agent_id, METHOD_CONTEXT, params);
+    request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
+    request
 }
 
 fn write_raw_frame(stream: &mut UnixStream, body: &[u8]) -> TestResult {
@@ -190,10 +201,9 @@ fn client_round_trip_rejects_response_schema_mismatch() -> TestResult {
             "result": {"ok": true}
         }),
     )?;
-    let request = DaemonRequest::new(
+    let request = context_request(
         "req-client-schema-drift",
         TEST_AGENT_ID,
-        METHOD_CONTEXT,
         serde_json::json!({"task": "schema drift"}),
     );
     let error = client_round_trip(&socket_path, &request)
@@ -233,10 +243,9 @@ fn client_round_trip_rejects_response_request_id_mismatch() -> TestResult {
             "result": {"ok": true}
         }),
     )?;
-    let request = DaemonRequest::new(
+    let request = context_request(
         "req-client-request-id",
         TEST_AGENT_ID,
-        METHOD_CONTEXT,
         serde_json::json!({"task": "request id drift"}),
     );
     let error = client_round_trip(&socket_path, &request)
@@ -410,6 +419,13 @@ fn daemon_capabilities_advertises_schema_and_method_contract_over_wire() -> Test
     )?;
     ensure(
         result
+            .pointer("/authorization/ee.daemon.context")
+            .and_then(serde_json::Value::as_str)
+            == Some("same_uid_workspace"),
+        format!("capabilities authorization wrong; got {result}"),
+    )?;
+    ensure(
+        result
             .pointer("/forward_compat/v1_unknown_fields")
             .and_then(serde_json::Value::as_str)
             == Some("rejected"),
@@ -437,13 +453,11 @@ fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> T
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
 
-    let mut request = DaemonRequest::new(
+    let request = context_request(
         "req-ctx-stub-001",
         TEST_AGENT_ID,
-        METHOD_CONTEXT,
         serde_json::json!({"task": "ship daemon skeleton"}),
     );
-    request.workspace_id = Some("workspace-daemon-uds-test".to_owned());
     let response = client_round_trip(handle.socket_path(), &request)
         .map_err(|error| format!("client_round_trip: {error}"))?;
     ensure(
@@ -482,6 +496,54 @@ fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> T
             .contains(&DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned()),
         format!(
             "context stub must attach the warmload degraded code; got {:?}",
+            response.degraded_codes
+        ),
+    )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_context_wrong_workspace_returns_method_unauthorized_over_wire() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-ctx-auth.sock");
+
+    let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
+        .map_err(|error| format!("start_server_for_workspace: {error}"))?;
+
+    let mut request = context_request(
+        "req-ctx-auth-001",
+        TEST_AGENT_ID,
+        serde_json::json!({"task": "ship daemon skeleton"}),
+    );
+    request.workspace_id = Some("workspace-other".to_owned());
+    let response = client_round_trip(handle.socket_path(), &request)
+        .map_err(|error| format!("client_round_trip: {error}"))?;
+
+    ensure(
+        response.request_id == "req-ctx-auth-001",
+        format!(
+            "request_id must echo unchanged; got {}",
+            response.request_id
+        ),
+    )?;
+    ensure(
+        response.workspace_id.as_deref() == Some("workspace-other"),
+        format!(
+            "workspace_id must echo caller value; got {:?}",
+            response.workspace_id
+        ),
+    )?;
+    ensure_error_code(&response, DAEMON_METHOD_UNAUTHORIZED_CODE)?;
+    ensure(
+        response
+            .degraded_codes
+            .contains(&DAEMON_METHOD_UNAUTHORIZED_CODE.to_owned()),
+        format!(
+            "method auth failure must attach degraded code; got {:?}",
             response.degraded_codes
         ),
     )?;
@@ -690,19 +752,17 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
     let socket_a = handle.socket_path().to_path_buf();
     let socket_b = handle.socket_path().to_path_buf();
     let client_a = thread::spawn(move || {
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-concurrent-a",
             "agent-daemon-uds-a",
-            METHOD_CONTEXT,
             serde_json::json!({"client": "a"}),
         );
         client_round_trip(&socket_a, &request).map_err(|error| format!("client a: {error}"))
     });
     let client_b = thread::spawn(move || {
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-concurrent-b",
             "agent-daemon-uds-b",
-            METHOD_CONTEXT,
             serde_json::json!({"client": "b"}),
         );
         client_round_trip(&socket_b, &request).map_err(|error| format!("client b: {error}"))
@@ -803,10 +863,9 @@ fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
 
     let mut second =
         start_server(&socket_path).map_err(|error| format!("second start_server: {error}"))?;
-    let request = DaemonRequest::new(
+    let request = context_request(
         "req-restart-same-path",
         TEST_AGENT_ID,
-        METHOD_CONTEXT,
         serde_json::json!({"restart": true}),
     );
     let response = client_round_trip(second.socket_path(), &request)
@@ -873,10 +932,9 @@ fn daemon_shutdown_during_connected_client_returns_structured_response() -> Test
     });
     thread::sleep(Duration::from_millis(25));
 
-    let request = DaemonRequest::new(
+    let request = context_request(
         "req-shutdown-race",
         TEST_AGENT_ID,
-        METHOD_CONTEXT,
         serde_json::json!({"race": "shutdown"}),
     );
     let body = serde_json::to_vec(&request).map_err(|error| format!("encode request: {error}"))?;

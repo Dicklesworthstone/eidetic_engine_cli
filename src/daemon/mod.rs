@@ -26,9 +26,10 @@
 //! - `ee.daemon.echo` — diagnostic round-trip integrity check. Disabled
 //!   by default unless `EE_DAEMON_ENABLE_ECHO=1` is set, and even then
 //!   returns only the canonical redacted form of request `params`.
-//! - `ee.daemon.context` — stub for the future warm-loaded `ee context`
-//!   path. Always returns `error.code = daemon_ann_warmload_not_yet_implemented`
-//!   until the ANN warm-load slice ships.
+//! - `ee.daemon.context` — same-UID, workspace-bound stub for the future
+//!   warm-loaded `ee context` path. Requires a matching `workspace_id`, then
+//!   returns `error.code = daemon_ann_warmload_not_yet_implemented` until the
+//!   ANN warm-load slice ships.
 //!
 //! Threading model: the skeleton uses a `std::thread::spawn` accept loop
 //! and a small per-connection worker. A future slice will wrap the
@@ -120,6 +121,13 @@ pub const DAEMON_MAX_INFLIGHT: usize = 32;
 /// world-connectable) fix surface: the chmod-0600 + getpeereid gate
 /// IS the cross-tenant exfil defense.
 pub const DAEMON_PEER_UNAUTHORIZED_CODE: &str = "daemon_peer_unauthorized";
+
+/// Degraded code emitted when a same-UID daemon peer calls a registered
+/// workspace-bound method without the required workspace context, or with a
+/// workspace id that does not match the daemon's bound workspace. This is a
+/// per-method authorization failure, distinct from
+/// [`DAEMON_PEER_UNAUTHORIZED_CODE`]'s connection-level UID gate. bd-3mbao.
+pub const DAEMON_METHOD_UNAUTHORIZED_CODE: &str = "daemon_method_unauthorized";
 
 /// Degraded code emitted when the daemon fails to install the
 /// per-connection read/write deadline (`setsockopt(SO_RCVTIMEO /

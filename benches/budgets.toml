@@ -19,6 +19,9 @@ ci_suitability = "normal_ci"
 workload_tier = "small"
 benches = [
   "status",
+  "cass_prefetch",
+  "daemon_protocol",
+  "daemon_dispatch",
   "daemon_round_trip",
   "pack_replay_freshness_smoke",
 ]
@@ -57,6 +60,9 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "graph_full_stack",
+  "cass_prefetch",
+  "daemon_protocol",
+  "daemon_dispatch",
   "daemon_round_trip",
   "curate_candidates",
   "graph_refresh_cooperative",
@@ -96,6 +102,9 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "graph_full_stack",
+  "cass_prefetch",
+  "daemon_protocol",
+  "daemon_dispatch",
   "daemon_round_trip",
   "curate_candidates",
   "graph_refresh_cooperative",
@@ -312,7 +321,22 @@ p50_ms_max = 1.0
 p99_ms_max = 5.0
 description = "Pure daemon dispatch table overhead for seed methods before UDS framing"
 
+[operations.ee_daemon_protocol_read_request]
+p50_ms_max = 1.0
+p99_ms_max = 6.0
+description = "Parse one daemon request frame across small and large payload sizes"
+
+[operations.ee_daemon_protocol_write_response]
+p50_ms_max = 1.0
+p99_ms_max = 6.0
+description = "Serialize and frame one daemon response across small and large payload sizes"
+
 [operations.ee_daemon_uds_round_trip]
 p50_ms_max = 5.0
 p99_ms_max = 25.0
 description = "Unix-domain socket request/response framing and dispatch round trip for seed daemon methods"
+
+[operations.ee_cass_prefetch_predict_next_n]
+p50_ms_max = 1.0
+p99_ms_max = 5.0
+description = "Predict speculative CASS prefetch candidates from bounded history windows"

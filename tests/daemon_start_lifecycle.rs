@@ -30,9 +30,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -76,6 +77,37 @@ fn run_daemon_start(socket_path: &Path) -> Result<Value, String> {
         .map_err(|error| format!("envelope is not valid JSON: {error}; line={line:?}"))
 }
 
+fn wait_for_child_exit(child: &mut Child, timeout: Duration) -> Result<ExitStatus, String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(format!("wait for child exit: {error}")),
+        }
+    }
+    Err(format!(
+        "child process {} did not exit within {}ms",
+        child.id(),
+        timeout.as_millis()
+    ))
+}
+
+fn terminate_process(pid: u32, signal: &str) -> Result<(), String> {
+    let status = Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .status()
+        .map_err(|error| format!("failed to invoke kill {signal} {pid}: {error}"))?;
+    ensure(
+        status.success(),
+        format!("kill {signal} {pid} exited with {status}"),
+    )
+}
+
 /// Best-effort teardown: kill any detached daemon child still listening
 /// on `socket_path`. The child's argv contains the unique tempdir
 /// socket path, so a `pkill -f` match is precise. Also unlinks the
@@ -91,6 +123,69 @@ fn teardown_daemon(socket_path: &Path) {
     if socket_path.exists() {
         let _ = fs::remove_file(socket_path);
     }
+}
+
+#[test]
+fn daemon_start_foreground_sigterm_shuts_down_and_unlinks_socket() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-foreground-sigterm.sock");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ee"))
+        .args(["daemon", "start", "--foreground", "--socket"])
+        .arg(&socket_path)
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("spawn foreground daemon: {error}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "foreground daemon stdout was not piped".to_owned())?;
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("read startup envelope: {error}"))?;
+    let envelope: Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("startup envelope is not valid JSON: {error}; line={line:?}"))?;
+
+    let result: TestResult = (|| {
+        ensure(
+            envelope.pointer("/success").and_then(Value::as_bool) == Some(true),
+            format!("foreground start must report success:true; got {envelope}"),
+        )?;
+        ensure(
+            envelope
+                .pointer("/data/foreground")
+                .and_then(Value::as_bool)
+                == Some(true),
+            format!("foreground start data.foreground must be true; got {envelope}"),
+        )?;
+        ensure(
+            UnixStream::connect(&socket_path).is_ok(),
+            "foreground daemon socket must be connectable before SIGTERM",
+        )?;
+
+        terminate_process(child.id(), "-TERM")?;
+        let status = wait_for_child_exit(&mut child, Duration::from_secs(5))?;
+        ensure(
+            status.success(),
+            format!("foreground daemon should exit successfully after SIGTERM; got {status}"),
+        )?;
+        ensure(
+            !socket_path.exists(),
+            "foreground daemon must unlink its socket during SIGTERM shutdown",
+        )
+    })();
+
+    if result.is_err() {
+        let _ = terminate_process(child.id(), "-KILL");
+        let _ = child.wait();
+    }
+    teardown_daemon(&socket_path);
+    result
 }
 
 #[test]

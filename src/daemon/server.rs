@@ -2,7 +2,7 @@
 //! (bd-oja31 skeleton). Wraps the framing in
 //! [`super::protocol`] with the seed dispatch table for
 //! `ee.daemon.capabilities`, `ee.daemon.echo`, and the
-//! `ee.daemon.context` stub.
+//! workspace-bound `ee.daemon.context` stub.
 //!
 //! Threading: each accepted connection is dispatched onto a bounded
 //! worker pool (capped at [`super::DAEMON_MAX_INFLIGHT`], overridable
@@ -42,8 +42,8 @@ use super::protocol::{
 };
 use super::{
     DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE, DAEMON_DEFAULT_RPC_TIMEOUT, DAEMON_MAX_INFLIGHT,
-    DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE, DAEMON_SETSOCKOPT_FAILED_CODE,
-    DaemonStartError, current_euid,
+    DAEMON_METHOD_UNAUTHORIZED_CODE, DAEMON_OVERLOADED_CODE, DAEMON_PEER_UNAUTHORIZED_CODE,
+    DAEMON_SETSOCKOPT_FAILED_CODE, DaemonStartError, current_euid,
 };
 
 /// Method dispatch name for the round-trip integrity check.
@@ -88,6 +88,44 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 /// huge memory body) cannot blow out the journal.
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Per-daemon dispatch policy that is resolved at daemon start and
+/// then shared by every accepted connection. Connection-level peer
+/// credentials still gate local UID; this policy gates method-specific
+/// workspace authority inside dispatch. bd-3mbao.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DaemonDispatchPolicy {
+    bound_workspace_id: Option<String>,
+}
+
+impl DaemonDispatchPolicy {
+    /// Bind workspace-scoped daemon methods to one workspace id.
+    #[must_use]
+    pub fn for_workspace(workspace_id: impl Into<String>) -> Self {
+        Self {
+            bound_workspace_id: Some(workspace_id.into()),
+        }
+    }
+
+    fn bound_workspace_id(&self) -> Option<&str> {
+        self.bound_workspace_id.as_deref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonAuthority {
+    SameUid,
+    SameUidWorkspace,
+}
+
+impl DaemonAuthority {
+    const fn as_wire_label(self) -> &'static str {
+        match self {
+            Self::SameUid => "same_uid",
+            Self::SameUidWorkspace => "same_uid_workspace",
+        }
+    }
+}
 
 #[derive(Debug)]
 struct DaemonSocketPublishLock {
@@ -352,6 +390,27 @@ fn remove_owned_socket_file(path: &Path) -> io::Result<()> {
 pub fn start_server(
     socket_path: impl Into<PathBuf>,
 ) -> Result<DaemonServerHandle, DaemonStartError> {
+    start_server_with_dispatch_policy(socket_path, DaemonDispatchPolicy::default())
+}
+
+/// Bind a UDS at `socket_path` for a daemon scoped to `workspace_id`.
+/// Workspace-bound methods (currently `ee.daemon.context`) must carry
+/// the same workspace id in their request envelope or dispatch refuses
+/// them with `daemon_method_unauthorized`.
+pub fn start_server_for_workspace(
+    socket_path: impl Into<PathBuf>,
+    workspace_id: impl Into<String>,
+) -> Result<DaemonServerHandle, DaemonStartError> {
+    start_server_with_dispatch_policy(
+        socket_path,
+        DaemonDispatchPolicy::for_workspace(workspace_id),
+    )
+}
+
+fn start_server_with_dispatch_policy(
+    socket_path: impl Into<PathBuf>,
+    dispatch_policy: DaemonDispatchPolicy,
+) -> Result<DaemonServerHandle, DaemonStartError> {
     let socket_path = socket_path.into();
 
     if let Some(parent) = socket_path.parent()
@@ -479,6 +538,8 @@ pub fn start_server(
     let listener_path_in_thread = socket_path.clone();
     let pool = InflightPool::new(configured_max_inflight());
     let pool_in_thread = Arc::clone(&pool);
+    let dispatch_policy = Arc::new(dispatch_policy);
+    let dispatch_policy_in_thread = Arc::clone(&dispatch_policy);
     let (accept_ready_tx, accept_ready_rx) = mpsc::channel();
 
     let accept_thread = thread::Builder::new()
@@ -490,6 +551,7 @@ pub fn start_server(
                 listener_path_in_thread,
                 shutdown_in_thread,
                 pool_in_thread,
+                dispatch_policy_in_thread,
             );
         })
         .map_err(|source| DaemonStartError::Bind {
@@ -591,6 +653,8 @@ trait ConnectionWorkerSpawner {
         &self,
         stream: UnixStream,
         shutdown: Arc<AtomicBool>,
+        dispatch_policy: Arc<DaemonDispatchPolicy>,
+        metrics: Arc<dyn super::metrics::DaemonMetricsCollector>,
         permit: InflightPermit,
     ) -> io::Result<JoinHandle<()>>;
 }
@@ -603,6 +667,8 @@ impl ConnectionWorkerSpawner for ThreadConnectionWorkerSpawner {
         &self,
         stream: UnixStream,
         shutdown: Arc<AtomicBool>,
+        dispatch_policy: Arc<DaemonDispatchPolicy>,
+        metrics: Arc<dyn super::metrics::DaemonMetricsCollector>,
         permit: InflightPermit,
     ) -> io::Result<JoinHandle<()>> {
         thread::Builder::new()
@@ -610,7 +676,7 @@ impl ConnectionWorkerSpawner for ThreadConnectionWorkerSpawner {
             .spawn(move || {
                 // Permit is held for the lifetime of the worker; on drop
                 // the counter decrements and the next accept can proceed.
-                handle_connection(stream, shutdown);
+                handle_connection(stream, shutdown, dispatch_policy, metrics);
                 drop(permit);
             })
     }
@@ -621,12 +687,17 @@ fn run_accept_loop(
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
+    dispatch_policy: Arc<DaemonDispatchPolicy>,
 ) {
+    let metrics: Arc<dyn super::metrics::DaemonMetricsCollector> =
+        Arc::new(super::metrics::NoopMetricsCollector);
     run_accept_loop_with_spawner(
         listener,
         socket_path,
         shutdown,
         pool,
+        dispatch_policy,
+        metrics,
         ThreadConnectionWorkerSpawner,
     );
 }
@@ -636,11 +707,12 @@ fn run_accept_loop_with_spawner<S>(
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
+    dispatch_policy: Arc<DaemonDispatchPolicy>,
+    metrics: Arc<dyn super::metrics::DaemonMetricsCollector>,
     spawner: S,
 ) where
     S: ConnectionWorkerSpawner,
 {
-    let _ = socket_path; // reserved for future tracing.
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
             // We've been signalled to stop, but `incoming` may still be
@@ -664,9 +736,13 @@ fn run_accept_loop_with_spawner<S>(
                     match stream.try_clone() {
                         Ok(worker_stream) => {
                             let worker_shutdown = Arc::clone(&shutdown);
+                            let worker_policy = Arc::clone(&dispatch_policy);
+                            let worker_metrics = Arc::clone(&metrics);
                             let spawn_result = spawner.spawn_connection_worker(
                                 worker_stream,
                                 worker_shutdown,
+                                worker_policy,
+                                worker_metrics,
                                 permit,
                             );
                             if let Err(error) = spawn_result {
@@ -675,7 +751,7 @@ fn run_accept_loop_with_spawner<S>(
                                 // permit immediately; keep the original stream
                                 // available so the client still receives the
                                 // bounded-pool refusal envelope.
-                                let _ = error;
+                                metrics.record_worker_spawn_failure(error.kind());
                                 let mut rejected = stream;
                                 write_overloaded_response(&mut rejected);
                             }
@@ -685,7 +761,7 @@ fn run_accept_loop_with_spawner<S>(
                             // owned a descriptor. Release the permit and refuse
                             // the client with the same overloaded envelope; the
                             // daemon is unable to service this connection.
-                            let _ = error;
+                            metrics.record_stream_clone_failure(error.kind());
                             drop(permit);
                             let mut rejected = stream;
                             write_overloaded_response(&mut rejected);
@@ -711,6 +787,8 @@ fn run_accept_loop_with_spawner<S>(
                 if error.kind() == io::ErrorKind::Interrupted {
                     continue;
                 }
+                trace_daemon_accept_loop_terminated(&socket_path, &error);
+                metrics.record_accept_loop_terminated(error.kind());
                 break;
             }
         }
@@ -911,7 +989,52 @@ fn trace_daemon_rpc_decode_failure(peer: u32, elapsed_ms: u64, kind: &str) {
     );
 }
 
-fn handle_connection(mut stream: UnixStream, shutdown: Arc<AtomicBool>) {
+fn trace_daemon_accept_loop_terminated(socket_path: &Path, error: &io::Error) {
+    let io_error_kind = io_error_kind_label(error.kind());
+    tracing::warn!(
+        workspace_id = "daemon-rpc",
+        request_id = "<accept-loop>",
+        bead_id = option_env!("EE_TRACE_BEAD_ID").unwrap_or("bd-n0o5m"),
+        surface = "daemon_rpc",
+        phase = "accept_loop",
+        event = "ee.daemon.accept_loop_terminated",
+        socket_path = %socket_path.display(),
+        io_error_kind,
+        "ee.daemon.accept_loop_terminated"
+    );
+}
+
+fn io_error_kind_label(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "not_found",
+        io::ErrorKind::PermissionDenied => "permission_denied",
+        io::ErrorKind::ConnectionRefused => "connection_refused",
+        io::ErrorKind::ConnectionReset => "connection_reset",
+        io::ErrorKind::ConnectionAborted => "connection_aborted",
+        io::ErrorKind::NotConnected => "not_connected",
+        io::ErrorKind::AddrInUse => "addr_in_use",
+        io::ErrorKind::AddrNotAvailable => "addr_not_available",
+        io::ErrorKind::BrokenPipe => "broken_pipe",
+        io::ErrorKind::AlreadyExists => "already_exists",
+        io::ErrorKind::WouldBlock => "would_block",
+        io::ErrorKind::InvalidInput => "invalid_input",
+        io::ErrorKind::InvalidData => "invalid_data",
+        io::ErrorKind::TimedOut => "timed_out",
+        io::ErrorKind::WriteZero => "write_zero",
+        io::ErrorKind::Interrupted => "interrupted",
+        io::ErrorKind::Unsupported => "unsupported",
+        io::ErrorKind::UnexpectedEof => "unexpected_eof",
+        io::ErrorKind::OutOfMemory => "out_of_memory",
+        _ => "other",
+    }
+}
+
+fn handle_connection(
+    mut stream: UnixStream,
+    shutdown: Arc<AtomicBool>,
+    dispatch_policy: Arc<DaemonDispatchPolicy>,
+    metrics: Arc<dyn super::metrics::DaemonMetricsCollector>,
+) {
     // Install the per-connection deadlines BEFORE any read. The read
     // timeout is the only backstop that stops a half-open peer from
     // pinning this worker thread forever; if `setsockopt` fails (low
@@ -1093,15 +1216,16 @@ fn handle_connection(mut stream: UnixStream, shutdown: Arc<AtomicBool>) {
     // hot dispatch table.
     let request_id = request.request_id.clone();
     let dispatched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        super::metrics::instrument_dispatch(
-            &request.method,
-            &super::metrics::NoopMetricsCollector,
-            || dispatch(&request),
-        )
+        super::metrics::instrument_dispatch(&request.method, metrics.as_ref(), || {
+            dispatch_with_policy(&request, dispatch_policy.as_ref())
+        })
     }));
     let response = match dispatched {
         Ok(response) => response,
-        Err(payload) => build_panic_response(&request, payload.as_ref()),
+        Err(payload) => {
+            metrics.record_handler_panic(&request.method);
+            build_panic_response(&request, payload.as_ref())
+        }
     };
     let (code, schema_mismatch, unknown_method) = classify_dispatch_response(&response);
     let degraded: Vec<&str> = response.degraded_codes.iter().map(String::as_str).collect();
@@ -1210,7 +1334,23 @@ pub fn dispatch(request: &DaemonRequest) -> DaemonResponse {
     dispatch_with_echo_policy(request, daemon_echo_enabled())
 }
 
+fn dispatch_with_policy(request: &DaemonRequest, policy: &DaemonDispatchPolicy) -> DaemonResponse {
+    dispatch_with_echo_policy_and_workspace(
+        request,
+        daemon_echo_enabled(),
+        policy.bound_workspace_id(),
+    )
+}
+
 fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> DaemonResponse {
+    dispatch_with_echo_policy_and_workspace(request, echo_enabled, None)
+}
+
+fn dispatch_with_echo_policy_and_workspace(
+    request: &DaemonRequest,
+    echo_enabled: bool,
+    bound_workspace_id: Option<&str>,
+) -> DaemonResponse {
     if request.schema != super::DAEMON_REQUEST_SCHEMA_V1 {
         return DaemonResponse::err(
             request.request_id.clone(),
@@ -1223,6 +1363,20 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
                 request.schema,
             ),
         );
+    }
+
+    let Some(authority) = daemon_method_authority(&request.method) else {
+        let other = request.method.as_str();
+        return DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            request.workspace_id.clone(),
+            DAEMON_UNKNOWN_METHOD_CODE,
+            format!("unknown daemon method `{other}`"),
+        );
+    };
+    if let Err(response) = authorize_daemon_method(request, authority, bound_workspace_id) {
+        return response;
     }
 
     match request.method.as_str() {
@@ -1262,14 +1416,59 @@ fn dispatch_with_echo_policy(request: &DaemonRequest, echo_enabled: bool) -> Dae
              the CLI client should fall back to the in-process `ee context` path.",
         )
         .with_degraded(DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE),
-        other => DaemonResponse::err(
-            request.request_id.clone(),
-            request.agent_id.clone(),
-            request.workspace_id.clone(),
-            DAEMON_UNKNOWN_METHOD_CODE,
-            format!("unknown daemon method `{other}`"),
-        ),
+        _ => unreachable!("registered daemon methods are handled above"),
     }
+}
+
+fn daemon_method_authority(method: &str) -> Option<DaemonAuthority> {
+    match method {
+        METHOD_CAPABILITIES | METHOD_ECHO => Some(DaemonAuthority::SameUid),
+        METHOD_CONTEXT => Some(DaemonAuthority::SameUidWorkspace),
+        _ => None,
+    }
+}
+
+fn authorize_daemon_method(
+    request: &DaemonRequest,
+    authority: DaemonAuthority,
+    bound_workspace_id: Option<&str>,
+) -> Result<(), DaemonResponse> {
+    match authority {
+        DaemonAuthority::SameUid => Ok(()),
+        DaemonAuthority::SameUidWorkspace => {
+            let workspace_id = request
+                .workspace_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|workspace_id| !workspace_id.is_empty());
+            let Some(workspace_id) = workspace_id else {
+                return Err(method_unauthorized_response(
+                    request,
+                    "registered daemon method requires a non-empty workspace_id",
+                ));
+            };
+            if let Some(bound_workspace_id) = bound_workspace_id
+                && workspace_id != bound_workspace_id
+            {
+                return Err(method_unauthorized_response(
+                    request,
+                    "registered daemon method is not authorized for this daemon workspace",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn method_unauthorized_response(request: &DaemonRequest, message: &'static str) -> DaemonResponse {
+    DaemonResponse::err(
+        request.request_id.clone(),
+        request.agent_id.clone(),
+        request.workspace_id.clone(),
+        DAEMON_METHOD_UNAUTHORIZED_CODE,
+        message,
+    )
+    .with_degraded(DAEMON_METHOD_UNAUTHORIZED_CODE)
 }
 
 fn daemon_capabilities_result() -> serde_json::Value {
@@ -1282,6 +1481,11 @@ fn daemon_capabilities_result() -> serde_json::Value {
             METHOD_CONTEXT,
             METHOD_ECHO
         ],
+        "authorization": {
+            "ee.daemon.capabilities": daemon_method_authority(METHOD_CAPABILITIES).expect("registered method").as_wire_label(),
+            "ee.daemon.context": daemon_method_authority(METHOD_CONTEXT).expect("registered method").as_wire_label(),
+            "ee.daemon.echo": daemon_method_authority(METHOD_ECHO).expect("registered method").as_wire_label()
+        },
         "forward_compat": {
             "v1_unknown_fields": "rejected",
             "v1_unknown_methods": DAEMON_UNKNOWN_METHOD_CODE,
@@ -1418,6 +1622,17 @@ mod tests {
     use super::*;
 
     const TEST_AGENT_ID: &str = "agent-daemon-server-test";
+    const TEST_WORKSPACE_ID: &str = "workspace-daemon-server-test";
+
+    fn context_request(
+        request_id: &'static str,
+        agent_id: &'static str,
+        params: serde_json::Value,
+    ) -> DaemonRequest {
+        let mut request = DaemonRequest::new(request_id, agent_id, METHOD_CONTEXT, params);
+        request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
+        request
+    }
 
     fn read_framed_daemon_response(stream: &mut UnixStream) -> DaemonResponse {
         use std::io::Read;
@@ -1508,10 +1723,9 @@ mod tests {
 
     #[test]
     fn dispatch_context_returns_warmload_not_yet_implemented() {
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-ctx-001",
             TEST_AGENT_ID,
-            METHOD_CONTEXT,
             serde_json::json!({"task": "ship daemon"}),
         );
         let response = dispatch(&request);
@@ -1523,6 +1737,70 @@ mod tests {
                 .degraded_codes
                 .contains(&DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned())
         );
+    }
+
+    #[test]
+    fn dispatch_context_without_workspace_returns_method_unauthorized() {
+        let request = DaemonRequest::new(
+            "req-ctx-no-workspace-001",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({"task": "ship daemon"}),
+        );
+        let response = dispatch(&request);
+        assert!(response.result.is_none());
+        let error = response.error.as_ref().expect("must have error");
+        assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
+        assert!(
+            response
+                .degraded_codes
+                .contains(&DAEMON_METHOD_UNAUTHORIZED_CODE.to_owned())
+        );
+    }
+
+    #[test]
+    fn dispatch_context_blank_workspace_returns_method_unauthorized() {
+        let mut request = DaemonRequest::new(
+            "req-ctx-blank-workspace-001",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({"task": "ship daemon"}),
+        );
+        request.workspace_id = Some("  ".to_owned());
+        let response = dispatch(&request);
+        let error = response.error.as_ref().expect("must have error");
+        assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
+    }
+
+    #[test]
+    fn dispatch_context_workspace_mismatch_returns_method_unauthorized() {
+        let mut request = context_request(
+            "req-ctx-wrong-workspace-001",
+            TEST_AGENT_ID,
+            serde_json::json!({"task": "ship daemon"}),
+        );
+        request.workspace_id = Some("workspace-other".to_owned());
+        let response =
+            dispatch_with_echo_policy_and_workspace(&request, false, Some(TEST_WORKSPACE_ID));
+        let error = response.error.as_ref().expect("must have error");
+        assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
+    }
+
+    #[test]
+    fn daemon_method_authority_classifies_seed_methods() {
+        assert_eq!(
+            daemon_method_authority(METHOD_CAPABILITIES),
+            Some(DaemonAuthority::SameUid)
+        );
+        assert_eq!(
+            daemon_method_authority(METHOD_ECHO),
+            Some(DaemonAuthority::SameUid)
+        );
+        assert_eq!(
+            daemon_method_authority(METHOD_CONTEXT),
+            Some(DaemonAuthority::SameUidWorkspace)
+        );
+        assert_eq!(daemon_method_authority("ee.daemon.nope"), None);
     }
 
     #[test]
@@ -1580,6 +1858,12 @@ mod tests {
                 .pointer("/forward_compat/v2_migration")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|policy| policy.contains(METHOD_CAPABILITIES))
+        );
+        assert_eq!(
+            result
+                .pointer("/authorization/ee.daemon.context")
+                .and_then(serde_json::Value::as_str),
+            Some(DaemonAuthority::SameUidWorkspace.as_wire_label())
         );
     }
 
@@ -1700,6 +1984,20 @@ mod tests {
         assert!(!frame_error_closes_without_response(
             &FrameReadError::Decode(decode_err)
         ));
+    }
+
+    #[test]
+    fn accept_loop_terminated_io_error_kind_labels_are_stable() {
+        assert_eq!(
+            io_error_kind_label(io::ErrorKind::Interrupted),
+            "interrupted"
+        );
+        assert_eq!(io_error_kind_label(io::ErrorKind::AddrInUse), "addr_in_use");
+        assert_eq!(io_error_kind_label(io::ErrorKind::TimedOut), "timed_out");
+        assert_eq!(
+            io_error_kind_label(io::ErrorKind::UnexpectedEof),
+            "unexpected_eof"
+        );
     }
 
     #[test]
@@ -1918,10 +2216,9 @@ mod tests {
             "second start against a live daemon must return AlreadyRunning; got {error:?}",
         );
 
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-live-existing-001",
             TEST_AGENT_ID,
-            METHOD_CONTEXT,
             serde_json::json!({"still": "first"}),
         );
         let response =
@@ -1979,10 +2276,9 @@ mod tests {
         let socket_path = temp.path().join("ee-daemon-peer.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
 
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-peer-001",
             TEST_AGENT_ID,
-            METHOD_CONTEXT,
             serde_json::json!({"peer": "self"}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
@@ -1993,6 +2289,36 @@ mod tests {
             .as_ref()
             .expect("same-UID peer reaches dispatch");
         assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+
+        handle.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn start_server_for_workspace_rejects_same_uid_context_for_wrong_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-workspace-auth.sock");
+        let mut handle = start_server_for_workspace(&socket_path, TEST_WORKSPACE_ID)
+            .expect("workspace-bound server must start");
+
+        let mut request = context_request(
+            "req-peer-wrong-workspace-001",
+            TEST_AGENT_ID,
+            serde_json::json!({"peer": "self"}),
+        );
+        request.workspace_id = Some("workspace-other".to_owned());
+        let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
+        assert_eq!(response.request_id, "req-peer-wrong-workspace-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
+        let error = response
+            .error
+            .as_ref()
+            .expect("wrong workspace reaches method authorization");
+        assert_eq!(error.code, DAEMON_METHOD_UNAUTHORIZED_CODE);
+        assert!(
+            response
+                .degraded_codes
+                .contains(&DAEMON_METHOD_UNAUTHORIZED_CODE.to_owned())
+        );
 
         handle.shutdown().expect("shutdown");
     }
@@ -2037,10 +2363,9 @@ mod tests {
             0o600,
             "replaced socket must be 0o600 (bd-3j0td invariant preserved across rename)",
         );
-        let request = DaemonRequest::new(
+        let request = context_request(
             "req-stale-001",
             TEST_AGENT_ID,
-            METHOD_CONTEXT,
             serde_json::json!({"ping": 1}),
         );
         let response = client_round_trip(handle.socket_path(), &request).expect("round-trip");
@@ -2152,15 +2477,41 @@ mod tests {
 
     struct FailingConnectionWorkerSpawner;
 
+    #[derive(Default)]
+    struct CapturingDaemonMetricsCollector {
+        worker_spawn_failures: Mutex<Vec<io::ErrorKind>>,
+    }
+
+    impl super::super::metrics::DaemonMetricsCollector for CapturingDaemonMetricsCollector {
+        fn record_dispatch(
+            &self,
+            _method: &str,
+            _outcome: super::super::metrics::DispatchOutcome,
+            _elapsed: Duration,
+        ) {
+        }
+
+        fn record_worker_spawn_failure(&self, kind: io::ErrorKind) {
+            self.worker_spawn_failures
+                .lock()
+                .expect("metrics capture mutex must not be poisoned")
+                .push(kind);
+        }
+    }
+
     impl ConnectionWorkerSpawner for FailingConnectionWorkerSpawner {
         fn spawn_connection_worker(
             &self,
             stream: UnixStream,
             shutdown: Arc<AtomicBool>,
+            dispatch_policy: Arc<DaemonDispatchPolicy>,
+            metrics: Arc<dyn super::super::metrics::DaemonMetricsCollector>,
             permit: InflightPermit,
         ) -> io::Result<JoinHandle<()>> {
             drop(stream);
             drop(shutdown);
+            drop(dispatch_policy);
+            drop(metrics);
             drop(permit);
             Err(io::Error::other("simulated pthread_create failure"))
         }
@@ -2181,6 +2532,9 @@ mod tests {
         let runner_shutdown = Arc::clone(&shutdown);
         let runner_pool = Arc::clone(&pool);
         let runner_socket_path = socket_path.clone();
+        let metrics = Arc::new(CapturingDaemonMetricsCollector::default());
+        let runner_metrics: Arc<dyn super::super::metrics::DaemonMetricsCollector> =
+            metrics.clone();
 
         let runner = thread::spawn(move || {
             run_accept_loop_with_spawner(
@@ -2188,6 +2542,8 @@ mod tests {
                 runner_socket_path,
                 runner_shutdown,
                 runner_pool,
+                Arc::new(DaemonDispatchPolicy::default()),
+                runner_metrics,
                 FailingConnectionWorkerSpawner,
             );
         });
@@ -2212,6 +2568,11 @@ mod tests {
         shutdown.store(true, Ordering::SeqCst);
         let _ = UnixStream::connect(&socket_path);
         runner.join().expect("accept loop thread must not panic");
+        let failures = metrics
+            .worker_spawn_failures
+            .lock()
+            .expect("metrics capture mutex must not be poisoned");
+        assert_eq!(failures.as_slice(), &[io::ErrorKind::Other]);
     }
 
     /// Regression test for bd-wj6v9. A second `shutdown()` call (the
@@ -2282,7 +2643,13 @@ mod tests {
             .expect("client write timeout");
         let shutdown = Arc::new(AtomicBool::new(true));
 
-        let worker = thread::spawn(move || handle_connection(server_side, shutdown));
+        let dispatch_policy = Arc::new(DaemonDispatchPolicy::for_workspace(
+            "workspace-worker-shutdown",
+        ));
+        let metrics = Arc::new(super::super::metrics::NoopMetricsCollector);
+        let worker = thread::spawn(move || {
+            handle_connection(server_side, shutdown, dispatch_policy, metrics)
+        });
 
         let mut request = DaemonRequest::new(
             "req-worker-shutdown",

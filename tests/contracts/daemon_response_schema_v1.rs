@@ -84,6 +84,11 @@ fn capabilities_response() -> Value {
                 METHOD_CONTEXT,
                 METHOD_ECHO
             ],
+            "authorization": {
+                "ee.daemon.capabilities": "same_uid",
+                "ee.daemon.context": "same_uid_workspace",
+                "ee.daemon.echo": "same_uid"
+            },
             "forward_compat": {
                 "v1_unknown_fields": "rejected",
                 "v1_unknown_methods": "daemon_unknown_method",
@@ -179,6 +184,7 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
 
     for code in [
         "daemon_unknown_method",
+        "daemon_method_unauthorized",
         "daemon_request_decode_failed",
         "daemon_request_schema_mismatch",
         "daemon_ann_warmload_not_yet_implemented",

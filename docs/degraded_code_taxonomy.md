@@ -686,7 +686,7 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 | `lexical_ram_tier_not_implemented` | info | bd-1hvzh (bd-21xbi scaffold) |
 | `lexical_ram_unavailable_on_macos` | info | bd-21xbi.2 |
 
-#### Daemon UDS RPC (6 — response_time)
+#### Daemon UDS RPC (7 — response_time)
 
 The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits these
 codes from the per-connection dispatcher (`src/daemon/server.rs`) and
@@ -702,6 +702,7 @@ and security rows respectively.
 |------|----------|------|
 | `daemon_ann_warmload_not_yet_implemented` | medium | bd-oja31 |
 | `daemon_handler_panic` | high | bd-b82q4 |
+| `daemon_method_unauthorized` | high | bd-3mbao |
 | `daemon_request_decode_failed` | medium | bd-oja31 |
 | `daemon_request_schema_mismatch` | medium | bd-oja31 |
 | `daemon_socket_unavailable` | info | bd-oja31 (bd-1feff emission wiring) |
