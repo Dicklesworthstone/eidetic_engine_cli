@@ -4,8 +4,20 @@ Schema: `ee.support_bundle.swarm_brief_summary.v1`
 
 Support bundles include a compact, redacted summary derived from
 `ee.swarm.brief.v1`. The ownership posture appears under
-`fileSurfaceRiskSummary`, with counts by severity, reservation holder, and git
-status bucket plus the top risks represented by hashes and IDs.
+`fileSurfaceRiskSummary`, with counts by severity, hashed reservation-holder
+label, and git status bucket plus the top risks represented by hashes and IDs.
+Ready-work reservation pressure appears under `readyReservationPressureSummary`
+with action, severity, and hashed reservation-holder-label counts plus the top
+ready Beads represented by Bead IDs, hashed holder labels, hashed titles,
+hashed likely surfaces, and hashed suggested commands.
+Stalled in-progress work posture appears under `stalledBeadLivenessSummary`
+with counts by posture/action/severity and top Bead IDs, title hashes, assignee
+hashes, evidence hashes, and suggested-command hashes only. It is advisory and non-mutating:
+support bundles may show that a Bead looks stale, but they never reopen Beads,
+release reservations, or expose raw mail/thread content. Push-safety,
+verification reuse, and symbol-risk posture are included under `gitAhead`,
+`verificationBroker`, and `symbolRiskSummary`, respectively, using counts,
+status codes, IDs, and hashes only.
 The duplicate-work posture appears under `singleFlight` using the same
 redaction-safe `ee.singleflight.posture.v1` shape exposed by `ee status` and
 `ee doctor`, so handoff readers can see active leaders, follower waits,
@@ -26,12 +38,13 @@ schema version and a migration note. Additive counts may remain in
 `ee.support_bundle.swarm_brief_summary.v1` when existing consumers can safely
 ignore them.
 
-Redaction rules: counts, severity labels, risk codes, reservation subjects,
-Bead IDs, affected memory IDs, drift status codes, path hashes, command hashes,
-single-flight key hashes, surface names, and generation counters are allowed.
-Raw paths in the top-risk summary, raw commands, mail bodies, raw logs, raw
-memory content, raw source snippets, raw query text, env dumps, file contents,
-and secret-like tokens are not allowed.
+Redaction rules: counts, severity labels, risk codes, hashed reservation holder
+labels, Bead IDs, affected memory IDs, drift status codes, path hashes, command
+hashes, single-flight key hashes, surface names, and generation counters are
+allowed. Raw reservation holder labels, raw paths in the top-risk summary, raw
+commands, mail bodies, raw logs, raw memory content, raw source snippets, raw
+query text, raw symbol names, env dumps, file contents, and secret-like tokens
+are not allowed.
 
 Example:
 

@@ -26,8 +26,8 @@ use sqlmodel_core::{Row as SqlRow, Value as SqlValue};
 
 use crate::cache::CacheBudget;
 use crate::core::qos::{
-    QosBackgroundThrottleAction, QosBackgroundThrottleDecision, QosBackgroundThrottleInput,
-    QosLane, QosLaneSummary, QosThrottleCheckpoint, decide_background_throttle,
+    QosBackgroundThrottleDecision, QosBackgroundThrottleInput, QosLane, QosLaneSummary,
+    QosThrottleCheckpoint, decide_background_throttle,
 };
 use crate::db::{DbConnection, StoredAuditEntry, audit_actions};
 use crate::models::{
@@ -1685,7 +1685,109 @@ fn pack_replay_summary_json(workspace: &Path) -> String {
 }
 
 fn swarm_brief_summary_json(workspace: &Path) -> String {
-    stable_json(&super::swarm_brief::collect_swarm_brief_summary(workspace))
+    let mut summary = super::swarm_brief::collect_swarm_brief_summary(workspace);
+    redact_support_bundle_swarm_brief_summary(&mut summary);
+    stable_json(&summary)
+}
+
+pub(crate) fn redact_support_bundle_swarm_brief_summary(summary: &mut Value) {
+    hash_holder_count_keys(summary, "/fileSurfaceRiskSummary/countsByReservationHolder");
+    hash_holder_array_field(
+        summary,
+        "/fileSurfaceRiskSummary/topRisks",
+        "reservationHolders",
+    );
+    hash_holder_count_keys(
+        summary,
+        "/readyReservationPressureSummary/countsByReservationHolder",
+    );
+    hash_holder_array_field(
+        summary,
+        "/readyReservationPressureSummary/topReadyBeads",
+        "reservationHolders",
+    );
+    let Some(summary_object) = summary.as_object_mut() else {
+        return;
+    };
+    let redaction_value = summary_object
+        .entry("redaction".to_string())
+        .or_insert_with(|| json!({}));
+    if !redaction_value.is_object() {
+        *redaction_value = json!({});
+    }
+    if let Some(redaction) = redaction_value.as_object_mut() {
+        redaction.insert("rawAgentNamesIncluded".to_string(), json!(false));
+        redaction.insert("rawSymbolNamesIncluded".to_string(), json!(false));
+        redaction.insert(
+            "reservationHolderLabelsIncluded".to_string(),
+            json!("hashes_only"),
+        );
+    }
+}
+
+fn hash_holder_count_keys(summary: &mut Value, pointer: &str) {
+    let Some(counts) = summary
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let original = std::mem::take(counts);
+    for (holder, count) in original {
+        insert_holder_count(counts, support_holder_label_hash(&holder), count);
+    }
+}
+
+fn insert_holder_count(
+    counts: &mut serde_json::Map<String, Value>,
+    holder_hash: String,
+    count: Value,
+) {
+    let Some(existing) = counts.get_mut(&holder_hash) else {
+        counts.insert(holder_hash, count);
+        return;
+    };
+    if let (Some(existing_count), Some(incoming_count)) = (existing.as_u64(), count.as_u64()) {
+        *existing = json!(existing_count.saturating_add(incoming_count));
+    }
+}
+
+fn hash_holder_array_field(summary: &mut Value, array_pointer: &str, field: &str) {
+    let Some(items) = summary
+        .pointer_mut(array_pointer)
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for item in items {
+        let Some(holders) = item
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for holder in holders {
+            let Some(raw_holder) = holder.as_str() else {
+                continue;
+            };
+            *holder = Value::String(support_holder_label_hash(raw_holder));
+        }
+    }
+}
+
+fn support_holder_label_hash(holder: &str) -> String {
+    if is_support_holder_label_hash(holder) {
+        holder.to_string()
+    } else {
+        support_agent_name_hash(holder)
+    }
+}
+
+fn is_support_holder_label_hash(holder: &str) -> bool {
+    let Some(hex) = holder.strip_prefix("blake3:") else {
+        return false;
+    };
+    matches!(hex.len(), 12 | 64) && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn swarm_incident_summary_json(workspace: &Path) -> String {
@@ -3468,6 +3570,7 @@ pub fn support_bundle_qos_throttle_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::qos::QosBackgroundThrottleAction;
 
     type TestResult = Result<(), String>;
 
@@ -5614,6 +5717,105 @@ mod tests {
     }
 
     #[test]
+    fn support_bundle_swarm_brief_summary_hashes_holder_labels() -> TestResult {
+        let holder_hash = support_agent_name_hash("OtherAgent");
+        let prefixed_holder_hash = support_agent_name_hash("blake3:OtherAgent");
+        let mut summary = json!({
+            "fileSurfaceRiskSummary": {
+                "countsByReservationHolder": {"OtherAgent": 1},
+                "topRisks": [
+                    {
+                        "reservationHolders": ["OtherAgent"],
+                    }
+                ]
+            },
+            "readyReservationPressureSummary": {
+                "countsByReservationHolder": {"OtherAgent": 2},
+                "topReadyBeads": [
+                    {
+                        "reservationHolders": ["OtherAgent"],
+                    }
+                ]
+            },
+            "redaction": {
+                "rawMailBodiesIncluded": false,
+                "rawQueryTextIncluded": false,
+                "rawProvenanceTextIncluded": false,
+                "fullFileListingsIncluded": false,
+                "recommendationEvidenceIncluded": "hashes_only"
+            }
+        });
+        summary
+            .pointer_mut("/fileSurfaceRiskSummary/countsByReservationHolder")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| "test summary missing countsByReservationHolder".to_string())?
+            .insert(holder_hash.clone(), json!(3));
+        summary
+            .pointer_mut("/readyReservationPressureSummary/countsByReservationHolder")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| "test summary missing ready countsByReservationHolder".to_string())?
+            .insert("blake3:OtherAgent".to_string(), json!(5));
+
+        redact_support_bundle_swarm_brief_summary(&mut summary);
+        let encoded = stable_json(&summary);
+
+        assert!(!encoded.contains("OtherAgent"));
+        assert!(!encoded.contains("blake3:OtherAgent"));
+        assert_eq!(
+            summary.pointer(&format!(
+                "/fileSurfaceRiskSummary/countsByReservationHolder/{holder_hash}"
+            )),
+            Some(&json!(4))
+        );
+        assert_eq!(
+            summary.pointer("/fileSurfaceRiskSummary/topRisks/0/reservationHolders/0"),
+            Some(&json!(holder_hash.clone()))
+        );
+        assert_eq!(
+            summary.pointer(&format!(
+                "/readyReservationPressureSummary/countsByReservationHolder/{holder_hash}"
+            )),
+            Some(&json!(2))
+        );
+        assert_eq!(
+            summary.pointer(&format!(
+                "/readyReservationPressureSummary/countsByReservationHolder/{prefixed_holder_hash}"
+            )),
+            Some(&json!(5))
+        );
+        assert_eq!(
+            summary
+                .pointer("/readyReservationPressureSummary/topReadyBeads/0/reservationHolders/0"),
+            Some(&json!(holder_hash))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/rawAgentNamesIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/reservationHolderLabelsIncluded"),
+            Some(&json!("hashes_only"))
+        );
+
+        let mut missing_redaction_summary = json!({
+            "fileSurfaceRiskSummary": {
+                "countsByReservationHolder": {"OtherAgent": 1},
+                "topRisks": []
+            }
+        });
+        redact_support_bundle_swarm_brief_summary(&mut missing_redaction_summary);
+        assert_eq!(
+            missing_redaction_summary.pointer("/redaction/rawAgentNamesIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            missing_redaction_summary.pointer("/redaction/reservationHolderLabelsIncluded"),
+            Some(&json!("hashes_only"))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn create_bundle_includes_redaction_safe_pack_replay_summary() -> TestResult {
         let root = unique_test_path("pack-replay-summary");
         let workspace = root.join("workspace");
@@ -5853,6 +6055,24 @@ mod tests {
         assert!(
             swarm_summary.pointer("/fileSurfaceRiskSummary").is_some(),
             "swarm brief summary must include the compact ownership-risk section"
+        );
+        assert!(
+            swarm_summary.pointer("/gitAhead").is_some(),
+            "swarm brief summary must include the push-safety section"
+        );
+        assert!(
+            swarm_summary.pointer("/verificationBroker").is_some(),
+            "swarm brief summary must include the verification broker section"
+        );
+        assert!(
+            swarm_summary
+                .pointer("/readyReservationPressureSummary")
+                .is_some(),
+            "swarm brief summary must include ready-work reservation pressure"
+        );
+        assert!(
+            swarm_summary.pointer("/symbolRiskSummary").is_some(),
+            "swarm brief summary must include symbol-risk posture"
         );
         let incident_summary_text =
             fs::read_to_string(bundle_dir.join(SWARM_INCIDENT_SUMMARY_FILE))

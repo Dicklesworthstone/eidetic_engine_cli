@@ -49,7 +49,10 @@ fn stdout_json(output: &Output) -> Result<serde_json::Value, String> {
 }
 
 fn init_workspace() -> Result<(tempfile::TempDir, String), String> {
-    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let dir = tempfile::Builder::new()
+        .prefix("ee-handoff-roundtrip.")
+        .tempdir_in(canonical_system_temp_root())
+        .map_err(|e| e.to_string())?;
     let ws = dir.path().to_string_lossy().to_string();
     let init = run_ee(&["--workspace", &ws, "init", "--json"])?;
     ensure(
@@ -57,6 +60,11 @@ fn init_workspace() -> Result<(tempfile::TempDir, String), String> {
         format!("init failed: {:?}", init.status.code()),
     )?;
     Ok((dir, ws))
+}
+
+fn canonical_system_temp_root() -> PathBuf {
+    let root = PathBuf::from("/tmp");
+    fs::canonicalize(&root).unwrap_or(root)
 }
 
 fn capsule_path(workspace: &str, name: &str) -> String {
@@ -105,6 +113,14 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
     ensure(
         hash.len() == 16,
         format!("content_hash should be 16 hex chars, got {hash}"),
+    )?;
+    let canonical_hash = json
+        .get("canonical_content_hash")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "missing canonical_content_hash".to_string())?;
+    ensure(
+        canonical_hash.len() == 16,
+        format!("canonical_content_hash should be 16 hex chars, got {canonical_hash}"),
     )?;
     ensure(
         json.pointer("/swarm_brief_summary/schema")
@@ -161,7 +177,9 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             && swarm_summary.pointer("/redaction/rawQueryTextIncluded")
                 == Some(&serde_json::json!(false))
             && swarm_summary.pointer("/redaction/fullFileListingsIncluded")
-                == Some(&serde_json::json!(false)),
+                == Some(&serde_json::json!(false))
+            && swarm_summary.pointer("/redaction/reservationHolderLabelsIncluded")
+                == Some(&serde_json::json!("hashes_only")),
         "capsule swarm brief summary is redaction-safe",
     )?;
     ensure(
@@ -575,15 +593,12 @@ fn handoff_create_redacts_task_frame_secrets_from_capsule_file() -> TestResult {
     Ok(())
 }
 
-/// Documents the determinism gap: CLI-layer create produces a NEW
+/// Documents the split hash contract: CLI-layer create produces a NEW
 /// capsule_id and content_hash on every invocation because both
 /// `generate_capsule_id` (UUID v7) and `created_at: Utc::now()` are
-/// non-deterministic. The h0h1 acceptance criterion "Same inputs → same
-/// capsule data_hash" is NOT met at the CLI layer; only the
-/// `compute_content_hash(s)` function itself is deterministic over a
-/// fixed string. This test pins the current behavior so that whoever
-/// closes the determinism gap (file follow-up bead) sees the test fail
-/// and updates the contract intentionally.
+/// non-deterministic, while canonical_content_hash strips those volatile
+/// fields plus captured_at and diagnostic summaries, remaining stable for
+/// the same workspace state.
 #[test]
 fn handoff_create_capsule_ids_currently_differ_across_runs() -> TestResult {
     let (_dir, ws) = init_workspace()?;
@@ -634,6 +649,22 @@ fn handoff_create_capsule_ids_currently_differ_across_runs() -> TestResult {
         hash_a != hash_b && !hash_a.is_empty(),
         format!(
             "expected distinct content_hashes (created_at + capsule_id are mixed in), got a={hash_a} b={hash_b}"
+        ),
+    )?;
+    let canonical_hash_a = ja
+        .get("canonical_content_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let canonical_hash_b = jb
+        .get("canonical_content_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    ensure(
+        canonical_hash_a == canonical_hash_b
+            && !canonical_hash_a.is_empty()
+            && canonical_hash_a.len() == 16,
+        format!(
+            "expected stable canonical_content_hash across creates, got a={canonical_hash_a} b={canonical_hash_b}"
         ),
     )?;
     Ok(())

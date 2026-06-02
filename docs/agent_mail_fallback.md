@@ -46,6 +46,13 @@ The script emits `ee.swarm.coordination_health.v1` JSON with MCP reachability,
 status. It is safe to run during an outage; failures are reported as fields in
 the JSON event.
 
+`ee swarm brief` does not call live Agent Mail MCP tools. Without
+`--agent-mail-snapshot`, it only performs a tiny bounded probe of
+`127.0.0.1:8765/health` so the degraded message can say whether the local health
+endpoint appears reachable. Pass a redacted output file from this script with
+`--agent-mail-snapshot <path>` when the brief must include reservations, unread
+counts, or thread freshness.
+
 Useful environment overrides:
 
 ```bash

@@ -5587,6 +5587,10 @@ mod tests {
             status: "in_progress".to_owned(),
             priority: Some(2),
             assignee: Some("BlueLake".to_owned()),
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
             source_bucket: "in_progress".to_owned(),
         }];
         brief.file_surface_risks = vec![crate::core::swarm_brief::SwarmBriefFileSurfaceRisk {
@@ -5654,6 +5658,10 @@ mod tests {
             status: "in_progress".to_owned(),
             priority: Some(2),
             assignee: Some("BlueLake".to_owned()),
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
             source_bucket: "in_progress".to_owned(),
         }];
         brief.dirty_files = vec![SwarmBriefDirtyFile {
@@ -6608,6 +6616,10 @@ mod tests {
             status: "open".to_owned(),
             priority: Some(priority),
             assignee: None,
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
             source_bucket: "ready".to_owned(),
         }
     }

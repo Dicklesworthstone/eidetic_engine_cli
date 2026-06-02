@@ -41,6 +41,9 @@ git status --short
 
 Missing Agent Mail data means the coordination source is unavailable. It does
 not mean there are no reservations, no messages, or no active owners.
+`ee swarm brief` may report that `127.0.0.1:8765/health` is reachable when no
+snapshot is configured; that only proves the health endpoint answered, not that
+the brief consumed live reservations or inbox state.
 
 When a context pack or swarm brief reports `agent_mail_unavailable`, treat the
 coordination confidence as degraded and verify with Beads comments before

@@ -12,114 +12,72 @@
         {
           "source": "agent_inventory",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "agent_mail",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "beads",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": "br ready --json",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "bv",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": "bv --robot-triage --robot-triage-by-track",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "git",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": "git status --short --branch --untracked-files=all",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "host_profile",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": null,
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         },
         {
           "source": "rch",
           "status": "ready",
-          "freshness": {
-            "state": "current",
-            "observedAt": null,
-            "ageSeconds": null,
-            "staleAfterSeconds": null
-          },
+          "freshness": "current",
           "itemCount": 1,
           "command": "rch status --json",
           "sideEffectFree": true,
           "redaction": "paths_counts_subjects_only_no_content",
-          "degradedCodes": [],
-          "degraded": []
+          "degradedCodes": []
         }
       ],
       "degraded": [],
@@ -171,6 +129,8 @@
           ]
         }
       ],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.candidate.eidetic_engine_cli-pdav",
@@ -204,22 +164,27 @@
             "Do not start editing without an Agent Mail file reservation on the likely surface.",
             "Do not run local cargo verification; use rch for build and test gates."
           ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
         }
-      ],
-      "dirtyFiles": [],
-      "recentCommits": [],
-      "beads": {
-        "ready": [],
-        "blocked": [],
-        "inProgress": [],
-        "deferred": []
-      },
-      "fileReservations": [],
-      "inbox": [],
-      "threads": [],
-      "resourcePressure": [],
-      "hostProfile": null,
-      "agentInventory": null
+      ]
     },
     {
       "case": "no_ready_work",
@@ -300,7 +265,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.work_selection.no_ready_beads",
           "kind": "work_selection",
@@ -429,6 +415,42 @@
           ]
         }
       ],
+      "readyReservationPressure": [
+        {
+          "beadId": "eidetic_engine_cli-u7r5",
+          "title": "[swarm-brief][advisor] Add non-overlap recommendations",
+          "priority": 1,
+          "action": "wait",
+          "severity": "high",
+          "likelySurfaces": [
+            "src/core/swarm_brief.rs"
+          ],
+          "reservationHolders": [
+            "IndigoBrook"
+          ],
+          "exclusiveReservationCount": 1,
+          "sharedReservationCount": 0,
+          "earliestExpiresAt": "2026-05-09T20:00:00Z",
+          "maxRiskScore": 67,
+          "riskFactors": [
+            "active_exclusive_reservation",
+            "bead_reservation_overlap",
+            "ready_bead_likely_surface",
+            "ready_bead_reservation_pressure"
+          ],
+          "evidence": [
+            "agent_mail_reservation:IndigoBrook:src/core/swarm_brief.rs",
+            "bead:eidetic_engine_cli-u7r5:ready:[swarm-brief][advisor] Add non-overlap recommendations",
+            "overlap:reservation:src/core/swarm_brief.rs<->bead:src/core/swarm_brief.rs",
+            "ready_reservation:eidetic_engine_cli-u7r5:IndigoBrook:src/core/swarm_brief.rs"
+          ],
+          "suggestedCommands": [
+            "br show eidetic_engine_cli-u7r5 --json",
+            "message IndigoBrook before editing src/core/swarm_brief.rs"
+          ]
+        }
+      ],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.candidate.eidetic_engine_cli-u7r5",
@@ -458,6 +480,25 @@
             "Do not start editing without an Agent Mail file reservation on the likely surface.",
             "Do not run local cargo verification; use rch for build and test gates.",
             "Do not claim this bead until active reservation conflicts are coordinated."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -591,6 +632,8 @@
           ]
         }
       ],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.candidate.eidetic_engine_cli-u7r5",
@@ -620,6 +663,25 @@
             "Do not start editing without an Agent Mail file reservation on the likely surface.",
             "Do not run local cargo verification; use rch for build and test gates.",
             "Do not claim this bead until active reservation conflicts are coordinated."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         }
       ]
@@ -703,7 +765,61 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [
+        {
+          "beadId": "eidetic_engine_cli-w0xy",
+          "title": "[vision-coverage][graph] Implement graph centrality and graph refresh surfaces",
+          "assignee": null,
+          "priority": 1,
+          "posture": "reclaim_candidate",
+          "action": "reopen_manually",
+          "severity": "high",
+          "lastActivityAt": "2026-05-01T13:00:00.654321Z",
+          "ageSecondsPresent": true,
+          "evidenceSources": [
+            "beads_comment",
+            "beads_updated_at"
+          ],
+          "evidence": [
+            "bead:eidetic_engine_cli-w0xy:in_progress:[vision-coverage][graph] Implement graph centrality and graph refresh surfaces",
+            "beads_comment_count:eidetic_engine_cli-w0xy:1",
+            "beads_latest_comment_at:eidetic_engine_cli-w0xy:2026-05-01T13:00:00.654321Z",
+            "beads_updated_at:eidetic_engine_cli-w0xy:2026-05-01T12:00:00.123456Z",
+            "last_activity_age_seconds:<present>"
+          ],
+          "suggestedCommands": [
+            "Search Agent Mail for thread eidetic_engine_cli-w0xy",
+            "br show eidetic_engine_cli-w0xy --json",
+            "br update eidetic_engine_cli-w0xy --status open --json"
+          ],
+          "mustNotDo": [
+            "Do not auto-reopen in-progress work from swarm brief output.",
+            "Do not force-release reservations from liveness guidance alone.",
+            "Do not treat deferred or human-approval work as abandoned."
+          ]
+        }
+      ],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.in_progress_follow_up.eidetic_engine_cli-w0xy",
           "kind": "stale_in_progress_follow_up",
@@ -827,6 +943,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.bv.bv_unavailable",
@@ -845,6 +963,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded bv data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -950,6 +1087,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.agent_mail.agent_mail_unavailable",
@@ -968,6 +1107,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded agent_mail data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -1073,6 +1231,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.beads.beads_unavailable",
@@ -1091,6 +1251,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded beads data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -1196,7 +1375,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.degraded.rch.rch_unavailable",
           "kind": "degraded_capability",
@@ -1319,6 +1519,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.beads.beads_tracker_stale",
@@ -1337,6 +1539,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded beads data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -1442,6 +1663,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.beads.beads_tracker_stale",
@@ -1460,6 +1683,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded beads data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -1563,7 +1805,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.work_selection.no_ready_beads",
           "kind": "work_selection",
@@ -1682,7 +1945,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.degraded.rch.rch_worker_topology_blocked",
           "kind": "degraded_capability",
@@ -1806,7 +2090,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.degraded.rch.rch_remote_required_fallback_prevented",
           "kind": "degraded_capability",
@@ -1928,7 +2233,28 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
+          ]
+        },
         {
           "id": "rec.resource_pressure.use_rch_for_cargo",
           "kind": "resource_pressure",
@@ -2056,6 +2382,8 @@
       ],
       "degraded": [],
       "fileSurfaceRisks": [],
+      "readyReservationPressure": [],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.degraded.git.workspace_ambiguous",
@@ -2074,6 +2402,25 @@
           ],
           "mustNotDo": [
             "Do not treat degraded git data as complete evidence."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {
@@ -2204,6 +2551,42 @@
           ]
         }
       ],
+      "readyReservationPressure": [
+        {
+          "beadId": "eidetic_engine_cli-secret",
+          "title": "Use token [REDACTED:github_token] in swarm brief",
+          "priority": 1,
+          "action": "wait",
+          "severity": "high",
+          "likelySurfaces": [
+            "src/core/swarm_brief.rs"
+          ],
+          "reservationHolders": [
+            "Agent [REDACTED:github_token]"
+          ],
+          "exclusiveReservationCount": 1,
+          "sharedReservationCount": 0,
+          "earliestExpiresAt": "2026-05-09T20:00:00Z",
+          "maxRiskScore": 67,
+          "riskFactors": [
+            "active_exclusive_reservation",
+            "bead_reservation_overlap",
+            "ready_bead_likely_surface",
+            "ready_bead_reservation_pressure"
+          ],
+          "evidence": [
+            "agent_mail_reservation:Agent [REDACTED:github_token]:src/core/swarm_brief.rs",
+            "bead:eidetic_engine_cli-secret:[REDACTED:secret] token [REDACTED:github_token] in swarm brief",
+            "overlap:reservation:src/core/swarm_brief.rs<->bead:src/core/swarm_brief.rs",
+            "ready_reservation:eidetic_engine_cli-secret:Agent [REDACTED:github_token]:src/core/swarm_brief.rs"
+          ],
+          "suggestedCommands": [
+            "br show eidetic_engine_cli-secret --json",
+            "message Agent [REDACTED:github_token] before editing src/core/swarm_brief.rs"
+          ]
+        }
+      ],
+      "stalledBeadLiveness": [],
       "recommendations": [
         {
           "id": "rec.candidate.eidetic_engine_cli-secret",
@@ -2234,6 +2617,25 @@
             "Do not start editing without an Agent Mail file reservation on the likely surface.",
             "Do not run local cargo verification; use rch for build and test gates.",
             "Do not claim this bead until active reservation conflicts are coordinated."
+          ]
+        },
+        {
+          "id": "rec.degraded.memory_drift.memory_drift_missing",
+          "kind": "degraded_capability",
+          "severity": "medium",
+          "confidence": "high",
+          "reasonCodes": [
+            "memory_drift_missing",
+            "source_status:missing"
+          ],
+          "evidence": [
+            "could_not_know:memory_drift:recent pack memory drift posture"
+          ],
+          "suggestedCommands": [
+            "ee memory drift --mode recent-pack-items --json"
+          ],
+          "mustNotDo": [
+            "Do not treat missing memory_drift data as empty evidence."
           ]
         },
         {

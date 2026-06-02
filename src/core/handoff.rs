@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
+use crate::core::support_bundle::redact_support_bundle_swarm_brief_summary;
 use crate::core::swarm_brief::{
     collect_swarm_brief_summary, collect_swarm_incident_summary,
     render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
@@ -85,6 +86,12 @@ const HANDOFF_HMAC_KEY_MODE_WORKSPACE_SECRET: &str = "workspace_secret";
 const HANDOFF_HMAC_KEY_MODE_MACHINE_BOUND: &str = "workspace_secret_machine_bound";
 const HANDOFF_WORKSPACE_SECRET_FILE: &str = "handoff_hmac_key";
 const HANDOFF_MACHINE_SALT_FILE: &str = "handoff_machine_salt";
+
+fn collect_handoff_swarm_brief_summary(workspace: &Path) -> serde_json::Value {
+    let mut summary = collect_swarm_brief_summary(workspace);
+    redact_support_bundle_swarm_brief_summary(&mut summary);
+    summary
+}
 
 /// Hard upper bound on the byte length of a handoff capsule file or key
 /// material read from a user-supplied path. Realistic capsules are on the
@@ -691,8 +698,9 @@ pub struct CreateReport {
     pub content_hash: String,
     /// Round-trip-stable BLAKE3 hash over the capsule body with
     /// volatile fields stripped (capsule_id, created_at, audit_ids,
-    /// last_accessed_at). Two creates of the same workspace state
-    /// produce the same value regardless of when/who/where they ran.
+    /// captured_at, last_accessed_at, diagnostic swarm summaries).
+    /// Two creates of the same workspace state produce the same value
+    /// regardless of when/who/where they ran.
     /// Bead bd-17c65.13.4 (M3).
     pub canonical_content_hash: String,
     pub redaction_summary: RedactionSummary,
@@ -1308,11 +1316,11 @@ fn compute_content_hash(content: &str) -> String {
 /// (M3 / bd-17c65.13.4). Delegates to the single source of truth
 /// [`crate::obs::volatile_fields::strip_volatile_fields`] (augmented with
 /// capsule-specific names per bd-1um33) for all common volatile timestamps,
-/// paths, ids, run indices, and "swarm_brief_summary" keys. Then applies
-/// the one value-dependent special case that cannot be expressed as a pure
-/// field-name list: when an object carries `"id": "swarm_brief_summary"`,
-/// its large diagnostic content subtree is redacted for both determinism
-/// (host-specific posture) and because it is not durable workspace memory.
+/// paths, ids, run indices, and diagnostic swarm-summary keys. Then applies
+/// the value-dependent special case that cannot be expressed as a pure
+/// field-name list: when an object carries a diagnostic swarm-summary section
+/// id, its rendered diagnostic content subtree is redacted for determinism and
+/// because it is not durable workspace memory.
 ///
 /// Two creates of the same workspace state always produce the same
 /// canonical hash regardless of when/where they ran. This is the
@@ -1331,41 +1339,44 @@ fn compute_canonical_capsule_hash(content: &serde_json::Value) -> String {
 /// so that any future timestamp/path/elapsed/runIndex/etc. field added for
 /// J7 determinism automatically applies to capsules without drift.
 ///
-/// Only the value-dependent "swarm_brief_summary by id" content redaction
+/// Only the value-dependent diagnostic swarm-summary section redaction
 /// remains local; everything else is delegated.
 fn strip_volatile_capsule_fields(value: &mut serde_json::Value) {
     // Delegate name-based volatile stripping (timestamps, paths, runIndex,
-    // capsule_id, integrity, swarm_brief_summary key itself, etc.) to the
+    // capsule_id, integrity, swarm-summary keys themselves, etc.) to the
     // single source of truth. This recurses into every object/array.
     crate::obs::volatile_fields::strip_volatile_fields(value);
 
-    // Apply the *one* value-dependent rule that the pure name-based registry
-    // cannot express: any object whose "id" field is "swarm_brief_summary"
-    // has its large diagnostic content subtree redacted (for determinism
-    // of host posture + because it is not part of durable memory state).
+    // Apply the value-dependent rule that the pure name-based registry cannot
+    // express: diagnostic swarm-summary section objects are identified by
+    // their "id" value, not by a volatile key name.
     // We must recurse ourselves for this rule because it is not a simple
     // key-name match.
-    strip_swarm_brief_content_by_id(value);
+    strip_swarm_diagnostic_section_content_by_id(value);
 }
 
-/// Recursively find objects with `"id": "swarm_brief_summary"` and remove
-/// their volatile diagnostic payload fields. Kept separate so the main
-/// name-based stripping can stay in the canonical obs implementation.
-fn strip_swarm_brief_content_by_id(value: &mut serde_json::Value) {
+/// Recursively find diagnostic swarm-summary sections and remove their volatile
+/// rendered payload fields. Kept separate so the main name-based stripping can
+/// stay in the canonical obs implementation.
+fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
-            if object.get("id").and_then(serde_json::Value::as_str) == Some("swarm_brief_summary") {
+            let section_id = object.get("id").and_then(serde_json::Value::as_str);
+            if matches!(
+                section_id,
+                Some("swarm_brief_summary" | "swarm_incident_summary")
+            ) {
                 object.remove("content");
                 object.remove("evidence_ids");
                 object.remove("token_estimate");
             }
             for (_, child) in object.iter_mut() {
-                strip_swarm_brief_content_by_id(child);
+                strip_swarm_diagnostic_section_content_by_id(child);
             }
         }
         serde_json::Value::Array(items) => {
             for child in items.iter_mut() {
-                strip_swarm_brief_content_by_id(child);
+                strip_swarm_diagnostic_section_content_by_id(child);
             }
         }
         _ => {}
@@ -2918,7 +2929,7 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         token_estimate: actions_section.token_estimate,
     });
 
-    let swarm_brief_summary = collect_swarm_brief_summary(&options.workspace);
+    let swarm_brief_summary = collect_handoff_swarm_brief_summary(&options.workspace);
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     let swarm_brief_section = CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
         .with_content(render_swarm_brief_summary_for_handoff(&swarm_brief_summary))
@@ -3116,7 +3127,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     }
     report.task_frame = task_frame_json.clone();
 
-    let swarm_brief_summary = collect_swarm_brief_summary(&options.workspace);
+    let swarm_brief_summary = collect_handoff_swarm_brief_summary(&options.workspace);
     let swarm_brief_evidence = vec![swarm_brief_summary_evidence_id(&swarm_brief_summary)];
     sections.push(
         CapsuleSection::new("swarm_brief_summary", "Swarm Brief Summary")
@@ -3219,8 +3230,9 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
     report.content_hash = compute_content_hash(&content_str);
     // Bead bd-17c65.13.4 (M3): canonical content hash for round-trip
     // determinism. Strips volatile fields (capsule_id, created_at,
-    // audit_id, last_accessed_at) so two creates of the same workspace
-    // state always produce the same value.
+    // captured_at, audit_id, last_accessed_at, diagnostic swarm-summary
+    // subtrees) so two creates of the same workspace state always produce
+    // the same value.
     report.canonical_content_hash = compute_canonical_capsule_hash(&capsule_content);
 
     if !options.dry_run {
@@ -4577,6 +4589,8 @@ memories_revised = 3
             "created_at": "2026-05-16T00:00:00Z",
             "integrity": {"hmac": "secret-one", "hmacPrefix": "aaa"},
             "swarm_brief_summary": {"hostname": "agent-host-a", "generatedAt": "now"},
+            "swarm_incident_summary": {"summaryHash": "blake3:first", "status": "clean"},
+            "memory_snapshot": {"captured_at": "2026-05-16T00:00:00Z", "memory_count": 0},
             "sections": [
                 stable_section.clone(),
                 {
@@ -4585,6 +4599,13 @@ memories_revised = 3
                     "content": "host-specific diagnostic body A",
                     "evidence_ids": ["evidence-a"],
                     "token_estimate": 99,
+                },
+                {
+                    "id": "swarm_incident_summary",
+                    "title": "Swarm Incident Summary",
+                    "content": "path-specific incident body A",
+                    "evidence_ids": ["incident-a"],
+                    "token_estimate": 7,
                 }
             ]
         });
@@ -4594,6 +4615,8 @@ memories_revised = 3
             "created_at": "2026-05-16T00:01:00Z",
             "integrity": {"hmac": "secret-two", "hmacPrefix": "bbb"},
             "swarm_brief_summary": {"hostname": "agent-host-b", "generatedAt": "later"},
+            "swarm_incident_summary": {"summaryHash": "blake3:second", "status": "degraded"},
+            "memory_snapshot": {"captured_at": "2026-05-16T00:01:00Z", "memory_count": 0},
             "sections": [
                 stable_section,
                 {
@@ -4602,6 +4625,13 @@ memories_revised = 3
                     "content": "host-specific diagnostic body B",
                     "evidence_ids": ["evidence-b"],
                     "token_estimate": 5,
+                },
+                {
+                    "id": "swarm_incident_summary",
+                    "title": "Swarm Incident Summary",
+                    "content": "path-specific incident body B",
+                    "evidence_ids": ["incident-b"],
+                    "token_estimate": 17,
                 }
             ]
         });
