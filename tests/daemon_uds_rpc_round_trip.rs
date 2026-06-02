@@ -16,7 +16,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -27,7 +27,7 @@ use ee::daemon::{
     DAEMON_SHUTTING_DOWN_CODE,
     protocol::{DaemonRequest, DaemonResponse},
     server::{
-        DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
+        ClientError, DAEMON_ECHO_DISABLED_CODE, DAEMON_REQUEST_DECODE_FAILED_CODE,
         DAEMON_REQUEST_SCHEMA_MISMATCH_CODE, DAEMON_UNKNOWN_METHOD_CODE, METHOD_CONTEXT,
         METHOD_ECHO, client_round_trip, start_server,
     },
@@ -85,6 +85,49 @@ fn read_response_frame(stream: &mut UnixStream) -> Result<DaemonResponse, String
     serde_json::from_slice(&body).map_err(|error| format!("decode response: {error}"))
 }
 
+fn spawn_one_response_daemon(
+    socket_path: &Path,
+    response: serde_json::Value,
+) -> Result<thread::JoinHandle<TestResult>, String> {
+    let listener = UnixListener::bind(socket_path).map_err(|error| format!("bind: {error}"))?;
+    let response_body =
+        serde_json::to_vec(&response).map_err(|error| format!("encode response: {error}"))?;
+
+    Ok(thread::spawn(move || {
+        let (mut stream, _) = listener
+            .accept()
+            .map_err(|error| format!("accept: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("set_read_timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("set_write_timeout: {error}"))?;
+
+        let mut request_prefix = [0_u8; 4];
+        stream
+            .read_exact(&mut request_prefix)
+            .map_err(|error| format!("read request length: {error}"))?;
+        let announced = u32::from_be_bytes(request_prefix);
+        let announced_usize = usize::try_from(announced)
+            .map_err(|error| format!("request length conversion failed: {error}"))?;
+        let mut request_body = vec![0_u8; announced_usize];
+        stream
+            .read_exact(&mut request_body)
+            .map_err(|error| format!("read request body: {error}"))?;
+
+        let response_length = u32::try_from(response_body.len())
+            .map_err(|error| format!("response frame too large: {error}"))?;
+        stream
+            .write_all(&response_length.to_be_bytes())
+            .map_err(|error| format!("write response length: {error}"))?;
+        stream
+            .write_all(&response_body)
+            .map_err(|error| format!("write response body: {error}"))?;
+        stream.flush().map_err(|error| format!("flush: {error}"))
+    }))
+}
+
 fn ensure_peer_closed_without_response(stream: &mut UnixStream) -> TestResult {
     let mut prefix = [0_u8; 4];
     match stream.read_exact(&mut prefix) {
@@ -131,6 +174,92 @@ fn ensure_error_code(response: &DaemonResponse, expected: &str) -> TestResult {
         error.code == expected,
         format!("error code must be {expected}; got {}", error.code),
     )
+}
+
+#[test]
+fn client_round_trip_rejects_response_schema_mismatch() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-client-schema-drift.sock");
+
+    let server = spawn_one_response_daemon(
+        &socket_path,
+        serde_json::json!({
+            "schema": "ee.daemon.response.v2",
+            "request_id": "req-client-schema-drift",
+            "agent_id": TEST_AGENT_ID,
+            "result": {"ok": true}
+        }),
+    )?;
+    let request = DaemonRequest::new(
+        "req-client-schema-drift",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        serde_json::json!({"task": "schema drift"}),
+    );
+    let error = client_round_trip(&socket_path, &request)
+        .expect_err("client must reject daemon response schema drift");
+    server
+        .join()
+        .map_err(|_| "fake daemon thread panicked".to_owned())??;
+
+    match error {
+        ClientError::ResponseSchemaMismatch { expected, actual } => {
+            ensure(
+                expected == DAEMON_RESPONSE_SCHEMA_V1,
+                format!("expected schema must be {DAEMON_RESPONSE_SCHEMA_V1}; got {expected}"),
+            )?;
+            ensure(
+                actual == "ee.daemon.response.v2",
+                format!("actual schema must report the daemon value; got {actual}"),
+            )
+        }
+        other => Err(format!(
+            "schema drift must return ResponseSchemaMismatch; got {other:?}"
+        )),
+    }
+}
+
+#[test]
+fn client_round_trip_rejects_response_request_id_mismatch() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-client-request-id-drift.sock");
+
+    let server = spawn_one_response_daemon(
+        &socket_path,
+        serde_json::json!({
+            "schema": DAEMON_RESPONSE_SCHEMA_V1,
+            "request_id": "req-attacker-chosen",
+            "agent_id": TEST_AGENT_ID,
+            "result": {"ok": true}
+        }),
+    )?;
+    let request = DaemonRequest::new(
+        "req-client-request-id",
+        TEST_AGENT_ID,
+        METHOD_CONTEXT,
+        serde_json::json!({"task": "request id drift"}),
+    );
+    let error = client_round_trip(&socket_path, &request)
+        .expect_err("client must reject daemon response request_id drift");
+    server
+        .join()
+        .map_err(|_| "fake daemon thread panicked".to_owned())??;
+
+    match error {
+        ClientError::ResponseRequestIdMismatch { expected, actual } => {
+            ensure(
+                expected == "req-client-request-id",
+                format!("expected request_id must be the sent value; got {expected}"),
+            )?;
+            ensure(
+                actual == "req-attacker-chosen",
+                format!("actual request_id must report the daemon value; got {actual}"),
+            )
+        }
+        other => Err(format!(
+            "request_id drift must return ResponseRequestIdMismatch; got {other:?}"
+        )),
+    }
 }
 
 #[test]

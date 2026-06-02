@@ -1259,6 +1259,18 @@ pub fn client_round_trip(
     let mut buffer = vec![0_u8; announced_usize];
     stream.read_exact(&mut buffer).map_err(ClientError::Io)?;
     let response: DaemonResponse = serde_json::from_slice(&buffer).map_err(ClientError::Decode)?;
+    if response.schema != super::DAEMON_RESPONSE_SCHEMA_V1 {
+        return Err(ClientError::ResponseSchemaMismatch {
+            expected: super::DAEMON_RESPONSE_SCHEMA_V1,
+            actual: response.schema,
+        });
+    }
+    if response.request_id != request.request_id {
+        return Err(ClientError::ResponseRequestIdMismatch {
+            expected: request.request_id.clone(),
+            actual: response.request_id,
+        });
+    }
     Ok(response)
 }
 
@@ -1269,8 +1281,20 @@ pub enum ClientError {
     Io(io::Error),
     Encode(serde_json::Error),
     Decode(serde_json::Error),
-    RequestTooLarge { actual: usize },
-    ResponseTooLarge { announced: u32 },
+    RequestTooLarge {
+        actual: usize,
+    },
+    ResponseTooLarge {
+        announced: u32,
+    },
+    ResponseSchemaMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    ResponseRequestIdMismatch {
+        expected: String,
+        actual: String,
+    },
 }
 
 impl std::fmt::Display for ClientError {
@@ -1292,6 +1316,14 @@ impl std::fmt::Display for ClientError {
                 "daemon response announced {announced} bytes which exceeds the {}-byte cap",
                 super::DAEMON_RESPONSE_MAX_BYTES
             ),
+            Self::ResponseSchemaMismatch { expected, actual } => write!(
+                formatter,
+                "daemon response schema mismatch: expected {expected}, got {actual}"
+            ),
+            Self::ResponseRequestIdMismatch { expected, actual } => write!(
+                formatter,
+                "daemon response request_id mismatch: sent {expected}, got {actual}"
+            ),
         }
     }
 }
@@ -1301,7 +1333,10 @@ impl std::error::Error for ClientError {
         match self {
             Self::Connect(source) | Self::Io(source) => Some(source),
             Self::Encode(source) | Self::Decode(source) => Some(source),
-            Self::RequestTooLarge { .. } | Self::ResponseTooLarge { .. } => None,
+            Self::RequestTooLarge { .. }
+            | Self::ResponseTooLarge { .. }
+            | Self::ResponseSchemaMismatch { .. }
+            | Self::ResponseRequestIdMismatch { .. } => None,
         }
     }
 }
