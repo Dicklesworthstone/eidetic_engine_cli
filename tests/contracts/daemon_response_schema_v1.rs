@@ -83,6 +83,28 @@ fn daemon_response_schema_structurally_requires_result_xor_error() -> TestResult
 }
 
 #[test]
+fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
+    let schema = read_schema()?;
+    let description = schema
+        .pointer("/properties/error/description")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "schema error.description missing".to_string())?;
+
+    for code in [
+        "daemon_unknown_method",
+        "daemon_request_decode_failed",
+        "daemon_request_schema_mismatch",
+        "daemon_ann_warmload_not_yet_implemented",
+    ] {
+        if !description.contains(code) {
+            return Err(format!("schema error.description missing {code}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
 fn daemon_response_schema_accepts_result_response() -> TestResult {
     let schema = read_schema()?;
     validate_json_schema(&success_response(), &schema, "$")

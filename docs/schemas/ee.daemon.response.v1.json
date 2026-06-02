@@ -46,7 +46,7 @@
     },
     "error": {
       "type": "object",
-      "description": "Populated when the method failed. The `code` vocabulary is method-specific; the seed codes used by the skeleton are `daemon_unknown_method`, `daemon_request_decode_failed`, and `daemon_ann_warmload_not_yet_implemented`. The CLI client maps these onto the canonical `ee.error.v2` envelope before returning to the user.",
+      "description": "Populated when the method failed. The `code` vocabulary is method-specific; the seed codes used by the skeleton are `daemon_unknown_method`, `daemon_request_decode_failed`, `daemon_request_schema_mismatch`, and `daemon_ann_warmload_not_yet_implemented`. Additional codes may be added; consumers must tolerate unknown codes. The CLI client maps these onto the canonical `ee.error.v2` envelope before returning to the user.",
       "required": ["code", "message"],
       "additionalProperties": false,
       "properties": {
