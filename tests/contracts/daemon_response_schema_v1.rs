@@ -1,59 +1,97 @@
-//! bd-333u0: contract checks for `docs/schemas/ee.daemon.response.v1.json`.
+//! Contract checks for the daemon request/response JSON Schemas.
 //!
-//! The schema prose says exactly one of `result` or `error` is present. This
-//! test pins that invariant structurally so non-Rust daemon clients cannot
-//! accept responses that the Rust serde boundary would reject.
+//! bd-333u0 pins the response `result` / `error` xor invariant structurally.
+//! bd-3cwdd pins real Rust-serialized daemon envelopes against the published
+//! schema files so Rust type drift cannot silently diverge from the docs.
 
 use std::fs;
 use std::path::PathBuf;
 
 use serde_json::Value;
 
+use ee::daemon::DAEMON_RESPONSE_SCHEMA_V1;
+use ee::daemon::protocol::{DaemonRequest, DaemonResponse};
+
 type TestResult = Result<(), String>;
 
-const SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
-const DAEMON_RESPONSE_SCHEMA_V1: &str = "ee.daemon.response.v1";
+const REQUEST_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.request.v1.json";
+const RESPONSE_SCHEMA_PATH: &str = "docs/schemas/ee.daemon.response.v1.json";
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn read_schema() -> Result<Value, String> {
-    let path = repo_root().join(SCHEMA_PATH);
+fn read_schema(schema_path: &str) -> Result<Value, String> {
+    let path = repo_root().join(schema_path);
     let text =
         fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+fn read_request_schema() -> Result<Value, String> {
+    read_schema(REQUEST_SCHEMA_PATH)
+}
+
+fn read_response_schema() -> Result<Value, String> {
+    read_schema(RESPONSE_SCHEMA_PATH)
+}
+
+fn serialized_request() -> Result<Value, String> {
+    let mut request = DaemonRequest::new(
+        "req-schema-cross-validation",
+        "agent-schema-cross-validation",
+        "ee.daemon.echo",
+        serde_json::json!({"hello": "world", "n": 42}),
+    );
+    request.workspace_id = Some("workspace-schema-cross-validation".to_owned());
+    serde_json::to_value(request).map_err(|error| format!("serialize DaemonRequest: {error}"))
+}
+
 fn success_response() -> Value {
-    serde_json::json!({
-        "schema": DAEMON_RESPONSE_SCHEMA_V1,
-        "request_id": "req-success",
-        "agent_id": "agent-a",
-        "workspace_id": "workspace-a",
-        "result": {
-            "echo": true
-        },
-        "degraded_codes": []
-    })
+    serde_json::to_value(DaemonResponse::ok(
+        "req-success",
+        "agent-a",
+        Some("workspace-a".to_owned()),
+        serde_json::json!({"echo": true}),
+    ))
+    .expect("DaemonResponse::ok must serialize")
 }
 
 fn error_response() -> Value {
-    serde_json::json!({
-        "schema": DAEMON_RESPONSE_SCHEMA_V1,
-        "request_id": "req-error",
-        "agent_id": "agent-a",
-        "error": {
-            "code": "daemon_unknown_method",
-            "message": "unknown method"
-        },
-        "degraded_codes": ["daemon_unknown_method"]
-    })
+    serde_json::to_value(
+        DaemonResponse::err(
+            "req-error",
+            "agent-a",
+            None,
+            "daemon_unknown_method",
+            "unknown method",
+        )
+        .with_degraded("daemon_unknown_method"),
+    )
+    .expect("DaemonResponse::err must serialize")
+}
+
+#[test]
+fn daemon_schema_cross_validation_accepts_serialized_rust_request() -> TestResult {
+    let schema = read_request_schema()?;
+    validate_json_schema(&serialized_request()?, &schema, "$")
+}
+
+#[test]
+fn daemon_schema_cross_validation_accepts_serialized_rust_result_response() -> TestResult {
+    let schema = read_response_schema()?;
+    validate_json_schema(&success_response(), &schema, "$")
+}
+
+#[test]
+fn daemon_schema_cross_validation_accepts_serialized_rust_error_response() -> TestResult {
+    let schema = read_response_schema()?;
+    validate_json_schema(&error_response(), &schema, "$")
 }
 
 #[test]
 fn daemon_response_schema_structurally_requires_result_xor_error() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
 
     let one_of = schema
         .pointer("/oneOf")
@@ -84,7 +122,7 @@ fn daemon_response_schema_structurally_requires_result_xor_error() -> TestResult
 
 #[test]
 fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
     let description = schema
         .pointer("/properties/error/description")
         .and_then(Value::as_str)
@@ -106,19 +144,19 @@ fn daemon_response_schema_documents_seed_error_codes() -> TestResult {
 
 #[test]
 fn daemon_response_schema_accepts_result_response() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
     validate_json_schema(&success_response(), &schema, "$")
 }
 
 #[test]
 fn daemon_response_schema_accepts_error_response() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
     validate_json_schema(&error_response(), &schema, "$")
 }
 
 #[test]
 fn daemon_response_schema_rejects_both_result_and_error() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
     let mut response = success_response();
     response
         .as_object_mut()
@@ -139,7 +177,7 @@ fn daemon_response_schema_rejects_both_result_and_error() -> TestResult {
 
 #[test]
 fn daemon_response_schema_rejects_neither_result_nor_error() -> TestResult {
-    let schema = read_schema()?;
+    let schema = read_response_schema()?;
     let response = serde_json::json!({
         "schema": DAEMON_RESPONSE_SCHEMA_V1,
         "request_id": "req-empty",
@@ -168,6 +206,12 @@ fn validate_json_schema(value: &Value, schema: &Value, path: &str) -> TestResult
         && value != expected
     {
         return Err(format!("{path} expected const {expected}, got {value}"));
+    }
+
+    if let Some(options) = schema.get("enum").and_then(Value::as_array)
+        && !options.iter().any(|option| option == value)
+    {
+        return Err(format!("{path} expected one of {options:?}, got {value}"));
     }
 
     if let Some(expected_types) = schema_types(schema)
