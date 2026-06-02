@@ -22,6 +22,10 @@ use crate::db::{
         shard_fanout_enabled_from_env_value,
     },
 };
+use crate::graph::numa_pin::{
+    NUMA_PIN_DISABLE_ENV, NUMA_PIN_NODE_ENV, NUMA_PIN_POPULATE_ENV, NumaPinConfig, NumaPinResult,
+    pin_snapshot_blob,
+};
 use crate::mesh::hello_responder::HelloResponderStatusReport;
 use crate::mesh::repair_action_graph::{
     ActionKind, ExecutionContext, ExpectedOutcome, Priority, REPAIR_ACTION_GRAPH_SCHEMA_V1,
@@ -29,13 +33,17 @@ use crate::mesh::repair_action_graph::{
 };
 use crate::models::error_codes::{self, ErrorCode};
 use crate::models::{SingleFlightPostureReport, TrustClass};
+use crate::search::lexical_ram_tier::{
+    LEXICAL_RAM_TIER_HUGEPAGES_ENV, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
+    LexicalRamTierResult, pin_lexical_index_files,
+};
 
 use super::budget_delta_recommender::{
     HostCalibrationPostureReport, gather_host_calibration_posture,
 };
 use super::build_cli_runtime;
 use super::curate::stable_workspace_id;
-use super::index::{IndexHealth, IndexStatusOptions, get_index_status};
+use super::index::{DEFAULT_INDEX_SUBDIR, IndexHealth, IndexStatusOptions, get_index_status};
 use super::qos::{QosLaneSummary, summarize_qos_lane_registry};
 use super::singleflight::singleflight_posture_report;
 use super::status::{
@@ -276,6 +284,8 @@ impl DoctorReport {
             check_shard_fanout(workspace_path),
             check_flight_recorder(&flight_recorder),
             check_search_index(workspace_path),
+            check_lexical_ram_tier(workspace_path),
+            check_graph_numa_pin(workspace_path),
             check_rch_worker_pressure(&rch_worker_pressure),
             check_rch_verify_ledger(&verification_ledger),
             check_cass(),
@@ -2711,6 +2721,166 @@ fn check_search_index(workspace_path: Option<&Path>) -> CheckResult {
     }
 }
 
+fn check_lexical_ram_tier(workspace_path: Option<&Path>) -> CheckResult {
+    check_lexical_ram_tier_with_config(
+        workspace_path,
+        lexical_ram_tier_config_for_doctor(workspace_path),
+    )
+}
+
+fn check_lexical_ram_tier_with_config(
+    workspace_path: Option<&Path>,
+    config: LexicalRamTierConfig,
+) -> CheckResult {
+    let index_path = lexical_ram_tier_index_path(workspace_path);
+    let result = pin_lexical_index_files(&index_path, &config);
+    lexical_ram_tier_check_from_result(&result)
+}
+
+fn lexical_ram_tier_check_from_result(result: &LexicalRamTierResult) -> CheckResult {
+    let index_path = result
+        .index_path
+        .as_deref()
+        .map(Path::display)
+        .map(|display| display.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    if !result.enabled {
+        return CheckResult::ok(
+            "lexical_ram_tier",
+            format!("Lexical RAM-tier pinning is disabled for {index_path}."),
+        );
+    }
+
+    if result.succeeded {
+        return CheckResult::ok(
+            "lexical_ram_tier",
+            format!("Lexical RAM-tier pinning succeeded for {index_path}."),
+        );
+    }
+
+    CheckResult {
+        name: "lexical_ram_tier",
+        severity: CheckSeverity::Warning,
+        message: format!(
+            "Lexical RAM-tier pinning is enabled but degraded for {index_path}; degraded codes: {}.",
+            format_string_codes(&result.degraded_codes)
+        ),
+        error_code: None,
+        repair: Some(
+            "Inspect `ee status --json` search.lexicalRamTier and lexical RAM-tier env/config.",
+        ),
+    }
+}
+
+fn lexical_ram_tier_config_for_doctor(workspace_path: Option<&Path>) -> LexicalRamTierConfig {
+    if let Some(workspace_path) = workspace_path
+        && let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path)
+    {
+        return LexicalRamTierConfig::from_config_overrides(&merged.values.search.lexical_ram_tier);
+    }
+
+    LexicalRamTierConfig::from_environment_with_reader(
+        |name| match name {
+            LEXICAL_RAM_TIER_PIN_RAM_ENV => read_env_var(EnvVar::LexicalIndexPinRam),
+            LEXICAL_RAM_TIER_HUGEPAGES_ENV => read_env_var(EnvVar::LexicalIndexHugepages),
+            _ => None,
+        },
+        |_name, _raw| {},
+    )
+}
+
+fn lexical_ram_tier_index_path(workspace_path: Option<&Path>) -> PathBuf {
+    workspace_path
+        .map(|path| path.join(".ee").join(DEFAULT_INDEX_SUBDIR).join("lexical"))
+        .unwrap_or_else(|| {
+            PathBuf::from(".ee")
+                .join(DEFAULT_INDEX_SUBDIR)
+                .join("lexical")
+        })
+}
+
+fn check_graph_numa_pin(workspace_path: Option<&Path>) -> CheckResult {
+    check_graph_numa_pin_with_config(workspace_path, graph_numa_pin_config_for_doctor())
+}
+
+fn check_graph_numa_pin_with_config(
+    workspace_path: Option<&Path>,
+    config: NumaPinConfig,
+) -> CheckResult {
+    let snapshot_path = graph_numa_pin_snapshot_path(workspace_path);
+    let result = pin_snapshot_blob(&snapshot_path, &config);
+    graph_numa_pin_check_from_result(&result)
+}
+
+fn graph_numa_pin_check_from_result(result: &NumaPinResult) -> CheckResult {
+    let snapshot_path = result
+        .snapshot_path
+        .as_deref()
+        .map(Path::display)
+        .map(|display| display.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+
+    if !result.enabled {
+        return CheckResult::ok(
+            "graph_numa_pin",
+            format!("Graph NUMA pinning is disabled for {snapshot_path}."),
+        );
+    }
+
+    if result.succeeded {
+        return CheckResult::ok(
+            "graph_numa_pin",
+            format!("Graph NUMA pinning succeeded for {snapshot_path}."),
+        );
+    }
+
+    CheckResult {
+        name: "graph_numa_pin",
+        severity: CheckSeverity::Warning,
+        message: format!(
+            "Graph NUMA pinning is enabled but degraded for {snapshot_path}; degraded codes: {}.",
+            format_static_codes(&result.degraded_codes)
+        ),
+        error_code: None,
+        repair: Some("Inspect `ee status --json` graph.numaPin and graph NUMA env/config."),
+    }
+}
+
+fn graph_numa_pin_config_for_doctor() -> NumaPinConfig {
+    NumaPinConfig::from_environment_with_reader(
+        |name| match name {
+            NUMA_PIN_DISABLE_ENV => read_env_var(EnvVar::GraphNumaPinDisable),
+            NUMA_PIN_NODE_ENV => read_env_var(EnvVar::GraphNumaPinNode),
+            NUMA_PIN_POPULATE_ENV => read_env_var(EnvVar::GraphNumaPinPopulate),
+            _ => None,
+        },
+        |_name, _raw| {},
+    )
+}
+
+fn graph_numa_pin_snapshot_path(workspace_path: Option<&Path>) -> PathBuf {
+    workspace_path
+        .map(|path| path.join(".ee").join("graph"))
+        .unwrap_or_else(|| PathBuf::from(".ee").join("graph"))
+}
+
+fn format_string_codes(codes: &[String]) -> String {
+    if codes.is_empty() {
+        "none".to_owned()
+    } else {
+        codes.join(",")
+    }
+}
+
+fn format_static_codes(codes: &[&'static str]) -> String {
+    if codes.is_empty() {
+        "none".to_owned()
+    } else {
+        codes.join(",")
+    }
+}
+
 fn check_cass() -> CheckResult {
     use crate::models::CapabilityStatus;
     match probe_cass_capability() {
@@ -3486,6 +3656,105 @@ mod tests {
             check.repair,
             Some("rch status --workers --jobs --json"),
             "repair command",
+        )
+    }
+
+    #[test]
+    fn doctor_report_includes_memory_tier_posture_checks() -> TestResult {
+        let report = DoctorReport::gather_with_workspace(None);
+
+        ensure(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "lexical_ram_tier"),
+            true,
+            "lexical RAM-tier doctor check exists",
+        )?;
+        ensure(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "graph_numa_pin"),
+            true,
+            "graph NUMA pin doctor check exists",
+        )
+    }
+
+    #[test]
+    fn lexical_ram_tier_check_is_ok_when_disabled() -> TestResult {
+        let check = check_lexical_ram_tier_with_config(None, LexicalRamTierConfig::disabled());
+
+        ensure(check.name, "lexical_ram_tier", "check name")?;
+        ensure(check.severity, CheckSeverity::Ok, "disabled is ok")?;
+        ensure(
+            check.message.contains("disabled"),
+            true,
+            "message explains disabled posture",
+        )
+    }
+
+    #[test]
+    fn lexical_ram_tier_check_warns_when_enabled_but_degraded() -> TestResult {
+        let check = check_lexical_ram_tier_with_config(
+            None,
+            LexicalRamTierConfig {
+                enabled: true,
+                request_hugepages: false,
+                populate_on_open: true,
+            },
+        );
+
+        ensure(check.name, "lexical_ram_tier", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Warning,
+            "enabled scaffold degrades",
+        )?;
+        ensure(
+            check.message.contains("degraded codes:"),
+            true,
+            "message includes degraded codes",
+        )?;
+        ensure(
+            check.repair.is_some(),
+            true,
+            "degraded posture has repair guidance",
+        )
+    }
+
+    #[test]
+    fn graph_numa_pin_check_is_ok_when_disabled() -> TestResult {
+        let check = check_graph_numa_pin_with_config(None, NumaPinConfig::disabled());
+
+        ensure(check.name, "graph_numa_pin", "check name")?;
+        ensure(check.severity, CheckSeverity::Ok, "disabled is ok")?;
+        ensure(
+            check.message.contains("disabled"),
+            true,
+            "message explains disabled posture",
+        )
+    }
+
+    #[test]
+    fn graph_numa_pin_check_warns_when_enabled_but_degraded() -> TestResult {
+        let check = check_graph_numa_pin_with_config(None, NumaPinConfig::default());
+
+        ensure(check.name, "graph_numa_pin", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Warning,
+            "enabled scaffold degrades",
+        )?;
+        ensure(
+            check.message.contains("degraded codes:"),
+            true,
+            "message includes degraded codes",
+        )?;
+        ensure(
+            check.repair.is_some(),
+            true,
+            "degraded posture has repair guidance",
         )
     }
 
