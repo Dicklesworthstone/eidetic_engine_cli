@@ -3874,7 +3874,7 @@ mod tests {
         ensure(
             database.severity,
             CheckSeverity::Ok,
-            format!("database check should use canonical path: {database:?}"),
+            "database check should use canonical path",
         )?;
         ensure(
             database

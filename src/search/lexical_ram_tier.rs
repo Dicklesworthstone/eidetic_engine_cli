@@ -449,7 +449,9 @@ fn lexical_index_revision(index_dir: &Path) -> Option<CorpusRevision> {
                 hasher.update(&secs.to_le_bytes());
                 hasher.update(&nanos.to_le_bytes());
             }
-            None => hasher.update(b"modified_unknown"),
+            None => {
+                hasher.update(b"modified_unknown");
+            }
         }
         hasher.update(&[0xff]);
     }
