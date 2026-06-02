@@ -22,7 +22,11 @@
 //!   3. A [`CassPrefetchMetrics`] counter that tracks hit/miss/budget
 //!      events so the existing `--explain` surface and steward-side
 //!      flight recorder can render the prefetch posture without
-//!      reaching into the predictor's internal state.
+//!      reaching into the predictor's internal state. Daemon callers
+//!      that serve multiple workspaces must store these counters
+//!      through [`CassPrefetchWorkspaceMetrics`], keyed by a stable,
+//!      redaction-safe workspace id, so one workspace switch cannot
+//!      leak hit-rate posture into the next workspace's rollup.
 //!
 //!   4. Deterministic schema constants
 //!      ([`CASS_PREFETCH_DECISION_SCHEMA_V1`],
@@ -100,7 +104,7 @@
 //! from untrusted request params cannot smuggle one through `serde`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1007,6 +1011,69 @@ impl CassPrefetchMetrics {
     }
 }
 
+/// Caller-owned workspace boundary for CASS prefetch metrics.
+///
+/// [`CassPrefetchMetrics`] intentionally remains a small per-instance counter.
+/// A daemon or flight recorder that serves more than one workspace must keep one
+/// bucket per workspace instead of sharing a global counter. The key is a stable,
+/// redaction-safe workspace id supplied by the caller; this module does not
+/// derive it from paths so the pure predictor surface stays free of workspace
+/// I/O.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CassPrefetchWorkspaceMetrics {
+    workspaces: BTreeMap<String, CassPrefetchMetrics>,
+}
+
+impl CassPrefetchWorkspaceMetrics {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the mutable metrics bucket for `workspace_id`, creating it with
+    /// zeroed counters when this is the first observation for the workspace.
+    pub fn for_workspace_mut(
+        &mut self,
+        workspace_id: impl Into<String>,
+    ) -> &mut CassPrefetchMetrics {
+        self.workspaces.entry(workspace_id.into()).or_default()
+    }
+
+    /// Return the metrics bucket for `workspace_id` when it has been observed.
+    #[must_use]
+    pub fn for_workspace(&self, workspace_id: &str) -> Option<&CassPrefetchMetrics> {
+        self.workspaces.get(workspace_id)
+    }
+
+    /// Reset only the named workspace bucket. Returns `true` when a bucket was
+    /// present and reset, or `false` when the workspace had no metrics yet.
+    pub fn reset_workspace(&mut self, workspace_id: &str) -> bool {
+        if let Some(metrics) = self.workspaces.get_mut(workspace_id) {
+            metrics.reset();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Deterministic snapshot view ordered by workspace id.
+    #[must_use]
+    pub fn snapshot(&self) -> &BTreeMap<String, CassPrefetchMetrics> {
+        &self.workspaces
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.workspaces.is_empty()
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.workspaces.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1219,6 +1286,72 @@ mod tests {
         metrics.misses = u64::MAX;
         // attempts() must saturate, not panic.
         assert_eq!(metrics.attempts(), u64::MAX);
+    }
+
+    #[test]
+    fn workspace_metrics_keep_counters_isolated_bd_1brl3() {
+        let mut metrics = CassPrefetchWorkspaceMetrics::new();
+        assert!(metrics.is_empty());
+
+        {
+            let workspace_a = metrics.for_workspace_mut("workspace-a");
+            workspace_a.record_hit();
+            workspace_a.record_hit();
+            workspace_a.record_candidate();
+        }
+        {
+            let workspace_b = metrics.for_workspace_mut("workspace-b");
+            workspace_b.record_miss();
+            workspace_b.record_budget_exceeded();
+        }
+
+        let workspace_a = metrics
+            .for_workspace("workspace-a")
+            .expect("workspace-a metrics should exist");
+        let workspace_b = metrics
+            .for_workspace("workspace-b")
+            .expect("workspace-b metrics should exist");
+
+        assert_eq!(workspace_a.hits, 2);
+        assert_eq!(workspace_a.misses, 0);
+        assert_eq!(workspace_a.candidates_emitted, 1);
+        assert_eq!(workspace_a.attempts(), 2);
+        assert_eq!(workspace_a.hit_rate(), 1.0);
+
+        assert_eq!(workspace_b.hits, 0);
+        assert_eq!(workspace_b.misses, 1);
+        assert_eq!(workspace_b.budget_exceeded, 1);
+        assert_eq!(workspace_b.attempts(), 1);
+        assert_eq!(workspace_b.hit_rate(), 0.0);
+
+        let workspace_ids: Vec<&str> = metrics.snapshot().keys().map(String::as_str).collect();
+        assert_eq!(workspace_ids, vec!["workspace-a", "workspace-b"]);
+        assert_eq!(metrics.len(), 2);
+    }
+
+    #[test]
+    fn workspace_metrics_reset_only_named_workspace_bd_1brl3() {
+        let mut metrics = CassPrefetchWorkspaceMetrics::new();
+        metrics.for_workspace_mut("workspace-a").record_hit();
+        metrics.for_workspace_mut("workspace-a").record_candidate();
+        metrics.for_workspace_mut("workspace-b").record_miss();
+        metrics
+            .for_workspace_mut("workspace-b")
+            .record_history_too_short();
+
+        assert!(metrics.reset_workspace("workspace-a"));
+        assert!(!metrics.reset_workspace("workspace-c"));
+
+        assert_eq!(
+            metrics.for_workspace("workspace-a"),
+            Some(&CassPrefetchMetrics::new())
+        );
+
+        let workspace_b = metrics
+            .for_workspace("workspace-b")
+            .expect("workspace-b metrics should remain");
+        assert_eq!(workspace_b.misses, 1);
+        assert_eq!(workspace_b.history_too_short, 1);
     }
 
     #[test]
