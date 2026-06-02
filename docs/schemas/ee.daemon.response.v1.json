@@ -9,6 +9,14 @@
     "request_id",
     "agent_id"
   ],
+  "oneOf": [
+    {
+      "required": ["result"]
+    },
+    {
+      "required": ["error"]
+    }
+  ],
   "additionalProperties": false,
   "properties": {
     "schema": {

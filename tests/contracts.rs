@@ -166,6 +166,9 @@ mod asupersync_quiescence;
 #[path = "contracts/schema_drift.rs"]
 mod schema_drift;
 
+#[path = "contracts/daemon_response_schema_v1.rs"]
+mod daemon_response_schema_v1;
+
 #[path = "contracts/toon_gate12.rs"]
 mod toon_gate12;
 
