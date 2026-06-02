@@ -93,7 +93,7 @@ use crate::pack::{
     PackProvenance, PackResourceProfile, PackScoreBreakdown, PackSection, PackTrustSignal,
     assemble_draft_with_profile_and_options_seeded,
     budget_classifier::{AdaptiveBudgetDecision, AdaptiveBudgetInput, classify_adaptive_budget},
-    estimate_tokens_default, pack_item_provenance_json,
+    estimate_tokens_default, pack_item_provenance_json, redact_pack_provenance_text,
 };
 use crate::runtime::determinism::{Deterministic, Seed};
 use crate::util::radix_ulid_sort::sort_by_ulid_payload_or_lexical;
@@ -8339,6 +8339,8 @@ fn push_evidence_freshness_degradation(
         crate::core::memory::EvidenceFreshnessStatus::Fresh
         | crate::core::memory::EvidenceFreshnessStatus::Unknown => return,
     };
+    let detail = redact_pack_provenance_text(&freshness.detail);
+    let repair = freshness.repair.as_deref().map(redact_pack_provenance_text);
     push_degradation(
         degraded,
         code,
@@ -8347,9 +8349,9 @@ fn push_evidence_freshness_degradation(
             "Memory {} evidence freshness is {}: {}",
             memory.id,
             freshness.status.as_str(),
-            freshness.detail
+            detail
         ),
-        freshness.repair.clone(),
+        repair,
     );
 }
 
@@ -8543,6 +8545,81 @@ mod tests {
 
     fn test_runtime_profile() -> RuntimeProfileReport {
         RuntimeProfileReport::for_profile(OperatingProfile::Workstation, "test_fixture")
+    }
+
+    #[test]
+    fn evidence_freshness_degradation_redacts_provenance_detail_and_repair() -> Result<(), String> {
+        let memory = tier_memory(
+            MemoryId::from_uuid(uuid::Uuid::from_u128(7210)),
+            0.9,
+            0.8,
+            0.7,
+            "rule",
+        );
+        let secret = "AbCDefGhIjKlMnOpQrStUvWxYz0123456789abCDefGhIj";
+        let freshness = crate::core::memory::EvidenceFreshness {
+            status: crate::core::memory::EvidenceFreshnessStatus::MissingSource,
+            provenance_uri: Some(
+                "file:/Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md#L1186"
+                    .to_string(),
+            ),
+            detail: format!(
+                "Referenced provenance file /Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md is missing; token={secret}."
+            ),
+            repair: Some(format!(
+                "Restore /Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md with token={secret}."
+            )),
+        };
+        let mut degraded = Vec::new();
+
+        push_evidence_freshness_degradation(&memory, &freshness, &mut degraded);
+
+        ensure_equal(&degraded.len(), &1, "freshness degradation count")?;
+        let entry = &degraded[0];
+        ensure_equal(
+            &entry.code,
+            &"context_evidence_freshness_missing_source".to_string(),
+            "freshness degradation code",
+        )?;
+        ensure_equal(
+            &entry.message.contains("[REDACTED_PATH]"),
+            &true,
+            "message path placeholder",
+        )?;
+        ensure_equal(
+            &entry.message.contains("[REDACTED:token]"),
+            &true,
+            "message token placeholder",
+        )?;
+        ensure_equal(
+            &entry.message.contains("/Users/jemanuel"),
+            &false,
+            "message raw path leak",
+        )?;
+        ensure_equal(
+            &entry.message.contains(secret),
+            &false,
+            "message raw token leak",
+        )?;
+        let repair = entry
+            .repair
+            .as_deref()
+            .ok_or("expected redacted repair command")?;
+        ensure_equal(
+            &repair.contains("[REDACTED_PATH]"),
+            &true,
+            "repair path placeholder",
+        )?;
+        ensure_equal(
+            &repair.contains("[REDACTED:token]"),
+            &true,
+            "repair token placeholder",
+        )?;
+        ensure_equal(
+            &repair.contains("/Users/jemanuel"),
+            &false,
+            "repair raw path leak",
+        )
     }
 
     #[test]

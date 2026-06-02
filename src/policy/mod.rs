@@ -1859,10 +1859,14 @@ fn secret_value_range(
         return Some((value_start, value_end));
     }
 
+    let stop_at_uri_fragment = secret_key_appears_in_uri_query(input, key_end);
     let value_end = input[cursor..]
         .char_indices()
         .find_map(|(offset, ch)| {
-            if ch.is_whitespace() || matches!(ch, ',' | ';' | '&') {
+            if ch.is_whitespace()
+                || matches!(ch, ',' | ';' | '&')
+                || (stop_at_uri_fragment && ch == '#')
+            {
                 Some(cursor + offset)
             } else {
                 None
@@ -1870,6 +1874,16 @@ fn secret_value_range(
         })
         .unwrap_or(input.len());
     Some((cursor, value_end))
+}
+
+fn secret_key_appears_in_uri_query(input: &str, key_end: usize) -> bool {
+    let segment_start = input[..key_end]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| ch.is_whitespace().then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let segment = &input[segment_start..key_end];
+    segment.contains('?') || segment.contains('&')
 }
 
 fn quoted_secret_value_end(input: &str, value_start: usize, quote: u8) -> usize {
@@ -2310,6 +2324,30 @@ fn looks_like_standalone_high_entropy_secret(candidate: &str) -> bool {
     let trimmed = candidate.trim_matches('=');
     trimmed.len() >= STANDALONE_HIGH_ENTROPY_MIN_LEN
         && !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !looks_like_public_locator_or_identifier(trimmed)
+}
+
+fn looks_like_public_locator_or_identifier(candidate: &str) -> bool {
+    looks_like_absolute_path_locator(candidate) || looks_like_screaming_public_identifier(candidate)
+}
+
+fn looks_like_absolute_path_locator(candidate: &str) -> bool {
+    const ABSOLUTE_PATH_PREFIXES: &[&str] =
+        &["/home/", "/Users/", "/data/", "/workspace/", "/Volumes/"];
+
+    ABSOLUTE_PATH_PREFIXES
+        .iter()
+        .any(|prefix| candidate.starts_with(prefix) || candidate.contains(prefix))
+}
+
+fn looks_like_screaming_public_identifier(candidate: &str) -> bool {
+    let trimmed = candidate.trim_matches(|ch| matches!(ch, '_' | '-' | '.'));
+    let has_separator = trimmed.contains('_') || trimmed.contains('-') || trimmed.contains('.');
+    has_separator
+        && trimmed.bytes().any(|byte| byte.is_ascii_alphabetic())
+        && trimmed.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-' | b'.')
+        })
 }
 
 fn next_entropy_candidate(input: &str, mut cursor: usize) -> Option<(usize, usize)> {
@@ -3797,6 +3835,57 @@ mod tests {
 
         assert!(!report.redacted);
         assert!(report.content.contains(&short_secret));
+    }
+
+    #[test]
+    fn secret_redactor_preserves_absolute_file_provenance_without_secret_context() {
+        let provenance =
+            "file:/Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md#L1186-1193";
+        let report = redact_secret_like_content(provenance);
+
+        assert!(!report.redacted);
+        assert_eq!(report.content, provenance);
+        assert!(!report.redacted_reasons.contains(&"high_entropy_secret"));
+    }
+
+    #[test]
+    fn secret_redactor_preserves_screaming_public_identifier_without_secret_context() {
+        let identifier =
+            "CLOSE_THE_GAP_PLAN_RELEASE_NOTES_FIXTURE_PUBLIC_IDENTIFIER_2026_ALPHA_BRAVO";
+        let report = redact_secret_like_content(&format!("Build artifact {identifier}."));
+
+        assert!(!report.redacted);
+        assert!(report.content.contains(identifier));
+    }
+
+    #[test]
+    fn secret_redactor_masks_secret_query_values_inside_file_provenance() {
+        let secret = synthetic_base64_secret(48);
+        let provenance = format!(
+            "file:/Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md?token={secret}#L1186"
+        );
+        let report = redact_secret_like_content(&provenance);
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"token"));
+        assert!(
+            report
+                .content
+                .contains(&format!("{}#L1186", redaction_placeholder("token")))
+        );
+        assert!(!report.content.contains(&secret));
+        assert!(!report.redacted_reasons.contains(&"high_entropy_secret"));
+    }
+
+    #[test]
+    fn secret_redactor_keeps_hash_suffix_inside_plain_key_values_redacted() {
+        let secret = format!("{}#fragment", synthetic_base64_secret(48));
+        let report = redact_secret_like_content(&format!("token={secret}"));
+
+        assert!(report.redacted);
+        assert!(report.redacted_reasons.contains(&"token"));
+        assert!(!report.content.contains(&secret));
+        assert!(!report.content.contains("#fragment"));
     }
 
     #[test]

@@ -34,6 +34,7 @@ use crate::models::{
     AgentContextProfileCounts, RationaleTrace, RationaleTraceVisibility,
     VerificationEvidenceRecord,
 };
+use crate::pack::redact_pack_provenance_text;
 use crate::runtime::determinism::{Deterministic, Seed};
 use serde_json::Value as JsonValue;
 use sqlmodel_core::{Row, Value};
@@ -1657,15 +1658,17 @@ fn why_evidence_freshness_degradation(
         EvidenceFreshnessStatus::UnsupportedSource => "why_evidence_freshness_unsupported_source",
         EvidenceFreshnessStatus::Fresh | EvidenceFreshnessStatus::Unknown => return None,
     };
+    let detail = redact_pack_provenance_text(&freshness.detail);
+    let repair = freshness.repair.as_deref().map(redact_pack_provenance_text);
     Some(WhyDegradation {
         code,
         severity: "low",
         message: format!(
             "Memory {memory_id} evidence freshness is {}: {}",
             freshness.status.as_str(),
-            freshness.detail
+            detail
         ),
-        repair: freshness.repair.clone(),
+        repair,
     })
 }
 
@@ -3189,6 +3192,67 @@ mod tests {
     fn why_report_version_matches_package() -> TestResult {
         let report = WhyReport::not_found("mem_test".to_string());
         ensure(report.version, env!("CARGO_PKG_VERSION"), "version")
+    }
+
+    #[test]
+    fn why_evidence_freshness_degradation_redacts_provenance_detail_and_repair() -> TestResult {
+        let secret = "AbCDefGhIjKlMnOpQrStUvWxYz0123456789abCDefGhIj";
+        let freshness = EvidenceFreshness {
+            status: EvidenceFreshnessStatus::MissingSource,
+            provenance_uri: Some(
+                "file:/Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md#L1186"
+                    .to_string(),
+            ),
+            detail: format!(
+                "Referenced provenance file /Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md is missing; token={secret}."
+            ),
+            repair: Some(format!(
+                "Restore /Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md with token={secret}."
+            )),
+        };
+
+        let degradation = why_evidence_freshness_degradation("mem_test", &freshness)
+            .ok_or("expected freshness degradation")?;
+
+        ensure(
+            degradation.message.contains("[REDACTED_PATH]"),
+            true,
+            "message path placeholder",
+        )?;
+        ensure(
+            degradation.message.contains("[REDACTED:token]"),
+            true,
+            "message token placeholder",
+        )?;
+        ensure(
+            degradation.message.contains("/Users/jemanuel"),
+            false,
+            "message raw path leak",
+        )?;
+        ensure(
+            degradation.message.contains(secret),
+            false,
+            "message raw token leak",
+        )?;
+        let repair = degradation
+            .repair
+            .as_deref()
+            .ok_or("expected redacted repair")?;
+        ensure(
+            repair.contains("[REDACTED_PATH]"),
+            true,
+            "repair path placeholder",
+        )?;
+        ensure(
+            repair.contains("[REDACTED:token]"),
+            true,
+            "repair token placeholder",
+        )?;
+        ensure(
+            repair.contains("/Users/jemanuel"),
+            false,
+            "repair raw path leak",
+        )
     }
 
     #[test]

@@ -225,3 +225,55 @@ fn embedded_path_inside_word_is_still_detected() {
     assert!(!out.contains("/data/cache/build.log"));
     assert!(out.starts_with("see-also[REDACTED_PATH]"), "got: {out}");
 }
+
+#[test]
+fn file_provenance_with_screaming_snake_filename_uses_path_placeholder_not_secret_placeholder() {
+    let uri = ProvenanceUri::from_str(
+        "file:///Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md#L1186-1193",
+    )
+    .expect("fixture URI parses");
+    let json = pack_item_provenance_json(&[
+        PackProvenance::new(uri, "source evidence").expect("fixture provenance is valid")
+    ]);
+    let value: Value = serde_json::from_str(&json).expect("provenance JSON parses");
+    let rendered = value.to_string();
+
+    assert_eq!(
+        value["entries"][0]["uri"].as_str(),
+        Some("file://[REDACTED_PATH]#L1186-1193")
+    );
+    assert!(
+        !rendered.contains("[REDACTED:high_entropy_secret]"),
+        "high-entropy placeholder leaked into provenance: {rendered}"
+    );
+    assert!(
+        !rendered.contains("CLOSE_THE_GAP_PLAN"),
+        "raw local filename leaked into provenance: {rendered}"
+    );
+}
+
+#[test]
+fn file_provenance_still_redacts_embedded_secret_query_values() {
+    let uri = ProvenanceUri::from_str(
+        "file:///Users/jemanuel/projects/eidetic_engine_cli/CLOSE_THE_GAP_PLAN.md?token=AbCDefGhIjKlMnOpQrStUvWxYz0123456789abCDefGhIj#L1186",
+    )
+    .expect("fixture URI parses");
+    let json = pack_item_provenance_json(&[
+        PackProvenance::new(uri, "source evidence").expect("fixture provenance is valid")
+    ]);
+    let value: Value = serde_json::from_str(&json).expect("provenance JSON parses");
+    let rendered = value.to_string();
+
+    assert_eq!(
+        value["entries"][0]["uri"].as_str(),
+        Some("file://[REDACTED_PATH]?token=[REDACTED:token]#L1186")
+    );
+    assert!(
+        !rendered.contains("AbCDefGhIjKlMnOpQrStUvWxYz0123456789abCDefGhIj"),
+        "raw query token leaked into provenance: {rendered}"
+    );
+    assert!(
+        !rendered.contains("[REDACTED:high_entropy_secret]"),
+        "high-entropy placeholder leaked into token provenance: {rendered}"
+    );
+}
