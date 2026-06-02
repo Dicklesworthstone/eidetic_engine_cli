@@ -14,7 +14,8 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::thread;
@@ -90,6 +91,32 @@ fn read_response_frame(stream: &mut UnixStream) -> Result<DaemonResponse, String
         .read_exact(&mut body)
         .map_err(|error| format!("read response body: {error}"))?;
     serde_json::from_slice(&body).map_err(|error| format!("decode response: {error}"))
+}
+
+fn ensure_peer_closed_without_response(stream: &mut UnixStream) -> TestResult {
+    let mut prefix = [0_u8; 4];
+    match stream.read_exact(&mut prefix) {
+        Ok(()) => {
+            let announced = u32::from_be_bytes(prefix);
+            Err(format!(
+                "expected daemon to close without a response frame; got response length prefix {announced}"
+            ))
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::UnexpectedEof
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "expected daemon to close connection without a response frame; read response length failed with {error}"
+        )),
+    }
 }
 
 fn ensure_error_code(response: &DaemonResponse, expected: &str) -> TestResult {
@@ -365,6 +392,36 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
             error.message
         ),
     )?;
+
+    handle
+        .shutdown()
+        .map_err(|error| format!("shutdown: {error}"))?;
+    Ok(())
+}
+
+#[test]
+fn daemon_mid_frame_disconnect_closes_without_decode_failed_envelope() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-truncated-frame.sock");
+
+    let mut handle =
+        start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
+    wait_for_accept_loop();
+
+    let announced = 64_u32;
+    let mut stream = connect_client(handle.socket_path())?;
+    stream
+        .write_all(&announced.to_be_bytes())
+        .map_err(|error| format!("write announced length: {error}"))?;
+    stream
+        .write_all(br#"{"partial":"#)
+        .map_err(|error| format!("write partial body: {error}"))?;
+    stream.flush().map_err(|error| format!("flush: {error}"))?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|error| format!("shutdown write half: {error}"))?;
+
+    ensure_peer_closed_without_response(&mut stream)?;
 
     handle
         .shutdown()

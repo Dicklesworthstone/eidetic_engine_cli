@@ -697,6 +697,23 @@ fn frame_error_kind(error: &FrameReadError) -> &'static str {
     }
 }
 
+#[must_use]
+fn frame_error_closes_without_response(error: &FrameReadError) -> bool {
+    match error {
+        FrameReadError::Eof | FrameReadError::Truncated { .. } => true,
+        FrameReadError::Io(source) => matches!(
+            source.kind(),
+            io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+        ),
+        FrameReadError::TooLarge { .. } | FrameReadError::Decode(_) => false,
+    }
+}
+
 /// Emit one structured `ee.daemon.rpc` tracing event for a completed
 /// dispatch (bd-qwlzu). Fields follow the canonical tracing-field
 /// convention (workspace_id / request_id / bead_id / surface / phase /
@@ -891,7 +908,7 @@ fn handle_connection(mut stream: UnixStream, shutdown: Arc<AtomicBool>) {
     // that because each frame is self-contained.
     let request = match read_request(&mut stream) {
         Ok(request) => request,
-        Err(FrameReadError::Eof) => return,
+        Err(error) if frame_error_closes_without_response(&error) => return,
         Err(other) => {
             let kind = frame_error_kind(&other);
             // bd-3uev6: the wire message is a FIXED string. `other.to_string()`
@@ -1412,6 +1429,43 @@ mod tests {
             frame_error_kind(&FrameReadError::Decode(decode_err)),
             "decode"
         );
+    }
+
+    #[test]
+    fn frame_transport_failures_close_without_decode_envelope() {
+        assert!(frame_error_closes_without_response(&FrameReadError::Eof));
+        assert!(frame_error_closes_without_response(
+            &FrameReadError::Truncated {
+                expected: 9,
+                got: 2,
+            }
+        ));
+        assert!(frame_error_closes_without_response(&FrameReadError::Io(
+            io::Error::new(io::ErrorKind::TimedOut, "read timeout")
+        )));
+        assert!(frame_error_closes_without_response(&FrameReadError::Io(
+            io::Error::new(io::ErrorKind::WouldBlock, "timeout on unix")
+        )));
+        assert!(frame_error_closes_without_response(&FrameReadError::Io(
+            io::Error::new(io::ErrorKind::ConnectionReset, "peer reset")
+        )));
+        assert!(frame_error_closes_without_response(&FrameReadError::Io(
+            io::Error::new(io::ErrorKind::UnexpectedEof, "short read")
+        )));
+
+        assert!(!frame_error_closes_without_response(
+            &FrameReadError::TooLarge {
+                announced: 9,
+                max: 4,
+            }
+        ));
+        assert!(!frame_error_closes_without_response(&FrameReadError::Io(
+            io::Error::other("non-timeout read failure")
+        )));
+        let decode_err = serde_json::from_str::<DaemonRequest>("{").unwrap_err();
+        assert!(!frame_error_closes_without_response(
+            &FrameReadError::Decode(decode_err)
+        ));
     }
 
     #[test]
