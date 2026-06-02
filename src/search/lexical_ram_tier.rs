@@ -371,7 +371,7 @@ pub struct LexicalRamTierResult {
     pub page_faults_post: u64,
     pub fallback_path: LexicalRamTierFallbackPath,
     pub index_path: Option<PathBuf>,
-    pub degraded_codes: Vec<&'static str>,
+    pub degraded_codes: Vec<String>,
     // O(1) duplicate checks while `degraded_codes` preserves JSON order.
     #[serde(skip)]
     degraded_code_set: HashSet<&'static str>,
@@ -405,7 +405,7 @@ impl LexicalRamTierResult {
 
     fn push_unique_code(&mut self, code: &'static str) {
         if self.degraded_code_set.insert(code) {
-            self.degraded_codes.push(code);
+            self.degraded_codes.push(code.to_owned());
         }
     }
 }
@@ -516,7 +516,10 @@ mod tests {
             result.fallback_path,
             LexicalRamTierFallbackPath::DisabledByOperator
         );
-        assert_eq!(result.degraded_codes, vec![LEXICAL_RAM_TIER_DISABLED_CODE]);
+        assert_eq!(
+            result.degraded_codes,
+            vec![LEXICAL_RAM_TIER_DISABLED_CODE.to_owned()]
+        );
         assert_no_duplicate_codes(&result);
     }
 
@@ -535,8 +538,8 @@ mod tests {
         assert_eq!(
             result.degraded_codes,
             vec![
-                LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
-                LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+                LEXICAL_HUGEPAGES_UNAVAILABLE_CODE.to_owned(),
+                LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE.to_owned(),
             ]
         );
         assert_eq!(result.degraded_code_set.len(), 2);
