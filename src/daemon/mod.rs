@@ -3,7 +3,8 @@
 //! The daemon is opt-in: every CLI command continues to work without it.
 //! When started, it binds a UDS at `${XDG_RUNTIME_DIR}/ee/daemon.sock` on
 //! Linux, falling back to `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` on
-//! platforms (macOS) that do not standardize `XDG_RUNTIME_DIR`. The
+//! platforms (macOS) that do not standardize `XDG_RUNTIME_DIR` or when
+//! `XDG_RUNTIME_DIR` points at a shared temp root such as `/tmp`. The
 //! socket file is chmodded to 0o600 and the parent directory to 0o700
 //! immediately after bind; the accept loop also gates every connection
 //! through a `getpeereid` / `SO_PEERCRED` check (bd-3j0td). The wire
@@ -144,13 +145,15 @@ pub const DAEMON_SETSOCKOPT_FAILED_CODE: &str = "daemon_setsockopt_failed";
 pub const DAEMON_SHUTTING_DOWN_CODE: &str = "daemon_shutting_down";
 
 /// Compute the canonical daemon socket path for the current platform.
-/// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` (the
-/// runtime dir is already mode 0700 per the systemd-user contract);
-/// on macOS (and any other Unix-y platform where `XDG_RUNTIME_DIR` is
-/// unset) the fallback is `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` so
-/// the per-UID parent directory partitions the socket across local
-/// tenants. The bare `/tmp/ee-daemon.sock` shape collided across
-/// every local UID and is a documented attack surface (bd-3j0td).
+/// On Linux the path is `${XDG_RUNTIME_DIR}/ee/daemon.sock` when the
+/// runtime dir follows the systemd-user 0700-per-user contract; on
+/// macOS (and any other Unix-y platform where `XDG_RUNTIME_DIR` is
+/// unset, empty, or pointed at a shared temp root) the fallback is
+/// `${TMPDIR:-/tmp}/ee-${uid}/daemon.sock` so the per-UID parent
+/// directory partitions the socket across local tenants. The bare
+/// `/tmp/ee-daemon.sock` shape collided across every local UID and is
+/// a documented attack surface (bd-3j0td); the `/tmp` XDG branch also
+/// split same-host shells across two daemon sockets (bd-10ex7).
 #[must_use]
 pub fn default_daemon_socket_path() -> PathBuf {
     default_daemon_socket_path_with(|key| std::env::var_os(key), current_euid())
@@ -160,16 +163,20 @@ fn default_daemon_socket_path_with(
     mut env_var: impl FnMut(&str) -> Option<std::ffi::OsString>,
     uid: u32,
 ) -> PathBuf {
+    let tmp = env_var("TMPDIR").unwrap_or_else(|| "/tmp".into());
     if let Some(runtime_dir) = env_var("XDG_RUNTIME_DIR") {
         let runtime = Path::new(&runtime_dir);
-        if !runtime.as_os_str().is_empty() {
+        if !runtime.as_os_str().is_empty() && !runtime_dir_is_shared_tmp_root(runtime) {
             return runtime.join("ee").join("daemon.sock");
         }
     }
-    let tmp = env_var("TMPDIR").unwrap_or_else(|| "/tmp".into());
     Path::new(&tmp)
         .join(format!("ee-{uid}"))
         .join("daemon.sock")
+}
+
+fn runtime_dir_is_shared_tmp_root(path: &Path) -> bool {
+    path == Path::new("/tmp") || path == Path::new("/var/tmp") || path == Path::new("/private/tmp")
 }
 
 /// Return the effective UID of the calling process. Used by
@@ -298,6 +305,39 @@ mod tests {
             daemon_socket_path_for_env(&[("XDG_RUNTIME_DIR", ""), ("TMPDIR", "/var/tmp")], 1000),
             Path::new("/var/tmp/ee-1000/daemon.sock"),
         );
+    }
+
+    #[test]
+    fn default_socket_path_ignores_shared_tmp_xdg_runtime_dir() {
+        assert_eq!(
+            daemon_socket_path_for_env(&[("XDG_RUNTIME_DIR", "/tmp"), ("TMPDIR", "/tmp")], 1000),
+            Path::new("/tmp/ee-1000/daemon.sock"),
+        );
+        assert_eq!(
+            daemon_socket_path_for_env(
+                &[("XDG_RUNTIME_DIR", "/var/tmp"), ("TMPDIR", "/var/tmp")],
+                1000,
+            ),
+            Path::new("/var/tmp/ee-1000/daemon.sock"),
+        );
+        assert_eq!(
+            daemon_socket_path_for_env(
+                &[
+                    ("XDG_RUNTIME_DIR", "/private/tmp"),
+                    ("TMPDIR", "/private/tmp"),
+                ],
+                501,
+            ),
+            Path::new("/private/tmp/ee-501/daemon.sock"),
+        );
+    }
+
+    #[test]
+    fn default_socket_path_collapses_xdg_tmp_and_unset_xdg_to_same_path() {
+        let with_tmp_xdg =
+            daemon_socket_path_for_env(&[("XDG_RUNTIME_DIR", "/tmp"), ("TMPDIR", "/tmp")], 1000);
+        let without_xdg = daemon_socket_path_for_env(&[("TMPDIR", "/tmp")], 1000);
+        assert_eq!(with_tmp_xdg, without_xdg);
     }
 
     #[test]
