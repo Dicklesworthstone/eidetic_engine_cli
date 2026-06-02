@@ -103,6 +103,9 @@ static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, Ca
 static SEARCH_SCORE_CALIBRATION_JSONL_CACHE: OnceLock<
     RwLock<HashMap<PathBuf, CachedSearchScoreCalibrationJsonl>>,
 > = OnceLock::new();
+static LEXICAL_RAM_TIER_SEARCH_CONFIG_CACHE: OnceLock<
+    Mutex<HashMap<PathBuf, CachedLexicalRamTierSearchConfig>>,
+> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct IndexStatusCacheKey {
@@ -127,6 +130,19 @@ impl IndexStatusCacheKey {
 struct CachedIndexStatus {
     checked_at: Instant,
     report: IndexStatusReport,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LexicalRamTierSearchConfigFingerprint {
+    exists: bool,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CachedLexicalRamTierSearchConfig {
+    fingerprint: LexicalRamTierSearchConfigFingerprint,
+    config: LexicalRamTierConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -5133,6 +5149,29 @@ fn pin_lexical_ram_tier_for_search(
 /// ("Search and status agree on enabled, hugepages requested, and
 /// populate-on-open.").
 fn lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierConfig {
+    let fingerprint = lexical_ram_tier_search_config_fingerprint(workspace_path);
+    let cache = LEXICAL_RAM_TIER_SEARCH_CONFIG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(cache_guard) = cache.lock()
+        && let Some(cached) = cache_guard.get(workspace_path)
+        && cached.fingerprint == fingerprint
+    {
+        return cached.config;
+    }
+
+    let config = resolve_lexical_ram_tier_config_for_search(workspace_path);
+    if let Ok(mut cache_guard) = cache.lock() {
+        cache_guard.insert(
+            workspace_path.to_path_buf(),
+            CachedLexicalRamTierSearchConfig {
+                fingerprint,
+                config,
+            },
+        );
+    }
+    config
+}
+
+fn resolve_lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierConfig {
     if let Ok(merged) = crate::core::config_surface::merged_workspace_config(workspace_path) {
         return LexicalRamTierConfig::from_config_overrides(&merged.values.search.lexical_ram_tier);
     }
@@ -5148,6 +5187,24 @@ fn lexical_ram_tier_config_for_search(workspace_path: &Path) -> LexicalRamTierCo
         },
         |_name, _raw| {},
     )
+}
+
+fn lexical_ram_tier_search_config_fingerprint(
+    workspace_path: &Path,
+) -> LexicalRamTierSearchConfigFingerprint {
+    let config_path = workspace_path.join(".ee").join("config.toml");
+    match std::fs::symlink_metadata(config_path) {
+        Ok(metadata) => LexicalRamTierSearchConfigFingerprint {
+            exists: true,
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        },
+        Err(_) => LexicalRamTierSearchConfigFingerprint {
+            exists: false,
+            len: 0,
+            modified: None,
+        },
+    }
 }
 
 fn push_lexical_ram_tier_search_degradations(
@@ -11815,6 +11872,55 @@ mod tests {
             return Err(format!(
                 "workspace config populate_on_open=false must drive search posture; got {:?}",
                 config
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_ram_tier_search_config_cache_refreshes_when_workspace_config_changes() -> TestResult
+    {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = temp.path().join(".ee");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let config_path = config_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            "[search.lexical_ram_tier]\nenabled = true\npopulate_on_open = false\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let first = lexical_ram_tier_config_for_search(temp.path());
+        if !first.enabled || first.populate_on_open {
+            return Err(format!(
+                "initial workspace config must drive enabled=true/populate=false; got {:?}",
+                first
+            ));
+        }
+
+        std::fs::write(
+            &config_path,
+            "[search.lexical_ram_tier]\nenabled = false\npopulate_on_open = true\nrequest_hugepages = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let second = lexical_ram_tier_config_for_search(temp.path());
+        if second.enabled {
+            return Err(format!(
+                "changed workspace config must refresh cached enabled=false; got {:?}",
+                second
+            ));
+        }
+        if !second.populate_on_open {
+            return Err(format!(
+                "changed workspace config must refresh cached populate_on_open=true; got {:?}",
+                second
+            ));
+        }
+        if second.request_hugepages {
+            return Err(format!(
+                "disabled RAM tier must normalize hugepages off after cache refresh; got {:?}",
+                second
             ));
         }
         Ok(())
