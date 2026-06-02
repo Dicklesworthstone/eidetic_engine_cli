@@ -33,9 +33,10 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["docId", "score", "source", "why", "provenance"],
+            "required": ["memoryId", "docId", "score", "source", "why", "provenance"],
             "additionalProperties": false,
             "properties": {
+              "memoryId": {"type": "string"},
               "docId": {"type": "string"},
               "score": {"type": "number"},
               "scoreInterval": {
@@ -74,9 +75,9 @@
     }
   },
   "field_presets": {
-    "minimal": ["docId", "score", "source"],
-    "summary": ["query", "status", "resultCount", "docId", "score", "source"],
-    "standard": ["query", "status", "resultCount", "results", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
+    "minimal": ["memoryId", "docId", "score", "source"],
+    "summary": ["query", "status", "resultCount", "memoryId", "docId", "score", "source"],
+    "standard": ["query", "status", "resultCount", "results", "memoryId", "docId", "score", "source", "why", "provenance", "degraded", "errors", "metrics", "elapsedMs"],
     "full": ["*"]
   },
   "$defs": {

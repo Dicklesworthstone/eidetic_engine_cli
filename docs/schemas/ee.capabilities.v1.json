@@ -32,7 +32,7 @@
   "field_presets": {
     "minimal": ["command", "version"],
     "summary": ["command", "version", "summary"],
-    "standard": ["command", "version", "subsystems", "features", "unimplemented", "commands", "binaries", "envOverrides", "output", "summary"],
+    "standard": ["command", "version", "subsystems", "features", "commands", "binaries", "envOverrides", "output", "summary"],
     "full": ["*"]
   },
   "$defs": {

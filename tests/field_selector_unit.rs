@@ -14,6 +14,8 @@ use ee::output::{
     FieldProfile, FieldSelector, apply_field_selector_to_json, error_response_json,
     field_preset_names_for_command,
 };
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
 use serde_json::{Map, Value, json};
 
 type TestResult = Result<(), String>;
@@ -198,7 +200,14 @@ fn explicit_list_and_preset_additions_are_precise() -> TestResult {
     let mixed_json: Value = serde_json::from_str(&mixed).map_err(|error| error.to_string())?;
     assert_data_keys(
         &mixed_json,
-        &["command", "version", "workspace", "capabilities", "runtime"],
+        &[
+            "command",
+            "version",
+            "workspace",
+            "posture",
+            "capabilities",
+            "runtime",
+        ],
         "preset plus addition",
     )
 }
@@ -234,6 +243,42 @@ fn unknown_and_conflicting_fields_have_structured_usage_codes() -> TestResult {
         return Err(format!("conflicting preset code mismatch: {conflict_json}"));
     }
     Ok(())
+}
+
+fn arbitrary_field_selector_text() -> impl Strategy<Value = String> {
+    proptest::collection::vec(any::<char>(), 0..96).prop_map(|chars| chars.into_iter().collect())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    #[test]
+    fn arbitrary_field_selector_strings_are_total_and_enveloped(raw in arbitrary_field_selector_text()) {
+        let schema = read_json(schema_path("ee.status.v1.json")).expect("status schema fixture");
+        let response = synthetic_response(&schema, "status").expect("synthetic status response");
+        let selector = FieldSelector::parse(&raw);
+
+        match apply_field_selector_to_json(&response, &selector) {
+            Ok(rendered) => {
+                let value: Value = serde_json::from_str(&rendered)
+                    .map_err(|error| TestCaseError::fail(format!("success JSON parses: {error}")))?;
+                prop_assert_eq!(value.get("schema").and_then(Value::as_str), Some("ee.response.v2"));
+                prop_assert_eq!(value.get("success").and_then(Value::as_bool), Some(true));
+                prop_assert!(value.get("data").and_then(Value::as_object).is_some());
+            }
+            Err(error) => {
+                let rendered = error_response_json(&error);
+                let value: Value = serde_json::from_str(&rendered)
+                    .map_err(|parse_error| TestCaseError::fail(format!("error JSON parses: {parse_error}")))?;
+                prop_assert_eq!(value.get("schema").and_then(Value::as_str), Some("ee.error.v2"));
+                prop_assert!(
+                    value.pointer("/error/code")
+                        .and_then(Value::as_str)
+                        .is_some_and(|code| !code.is_empty())
+                );
+            }
+        }
+    }
 }
 
 fn assert_data_keys(value: &Value, expected: &[&str], label: &str) -> TestResult {
@@ -283,9 +328,7 @@ fn collect_selected_names(
 }
 
 fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
-    let data_schema = schema
-        .pointer("/properties/data")
-        .ok_or("schema missing /properties/data")?;
+    let data_schema = response_data_schema(schema)?;
     let mut data = sample_object_from_schema(data_schema);
     data.insert("command".to_string(), Value::String(command.to_string()));
     enrich_surface_samples(command, &mut data);
@@ -295,6 +338,20 @@ fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
         "data": data,
     });
     Ok(response.to_string())
+}
+
+fn response_data_schema(schema: &Value) -> Result<&Value, String> {
+    if let Some(data_schema) = schema.pointer("/properties/data") {
+        return Ok(data_schema);
+    }
+    if schema
+        .pointer("/properties/schema/const")
+        .and_then(Value::as_str)
+        .is_some()
+    {
+        return Ok(schema);
+    }
+    Err("schema missing /properties/data or data payload schema const".to_string())
 }
 
 fn sample_object_from_schema(schema: &Value) -> Map<String, Value> {

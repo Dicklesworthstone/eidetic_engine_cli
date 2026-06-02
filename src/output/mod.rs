@@ -1823,6 +1823,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "workspace",
                 "redactionStatus",
                 "sources",
+                "readyReservationPressure",
                 "degraded",
             ],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
@@ -2545,7 +2546,7 @@ pub fn render_context_response_json_with_options(
                 obj.field_raw("sourceCount", &footer.source_count.to_string());
                 obj.field_raw(
                     "schemes",
-                    &string_array_json(footer.schemes.iter().copied()),
+                    &string_array_json(footer.schemes.iter()),
                 );
             });
         });
@@ -3486,7 +3487,7 @@ fn build_pack_selection_step(obj: &mut JsonBuilder, step: &PackSelectionStep) {
 
 fn build_rendered_provenance(obj: &mut JsonBuilder, source: &RenderedPackProvenance) {
     obj.field_str("uri", &source.uri);
-    obj.field_str("scheme", source.scheme);
+    obj.field_str("scheme", &source.scheme);
     obj.field_str("label", &source.label);
     if let Some(locator) = &source.locator {
         obj.field_str("locator", locator);
@@ -15756,7 +15757,9 @@ pub fn render_handoff_preview_json(report: &HandoffPreviewReport) -> String {
         "omitted_sections": report.omitted_sections,
         "evidence_ids": report.evidence_ids,
         "active_focus": report.active_focus,
+        "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
+        "swarm_incident_summary": report.swarm_incident_summary,
         "token_estimate": report.token_estimate,
         "byte_estimate": report.byte_estimate,
         "redaction_posture": report.redaction_posture,
@@ -15837,10 +15840,13 @@ pub fn render_handoff_create_json(report: &HandoffCreateReport) -> String {
         "sections_included": report.sections_included,
         "evidence_count": report.evidence_count,
         "active_focus": report.active_focus,
+        "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
+        "swarm_incident_summary": report.swarm_incident_summary,
         "token_count": report.token_count,
         "byte_count": report.byte_count,
         "content_hash": report.content_hash,
+        "canonical_content_hash": report.canonical_content_hash,
         "redaction_summary": report.redaction_summary,
         "dry_run": report.dry_run,
         "created_at": report.created_at
@@ -16012,6 +16018,7 @@ pub fn render_handoff_resume_json(report: &HandoffResumeReport) -> String {
         "active_focus": report.active_focus,
         "task_frame": report.task_frame,
         "swarm_brief_summary": report.swarm_brief_summary,
+        "swarm_incident_summary": report.swarm_incident_summary,
         "artifact_pointers": report.artifact_pointers,
         "degradations": report.degradations,
         "resumed_at": report.resumed_at,
@@ -18996,7 +19003,10 @@ mod tests {
         let error = DomainError::Storage {
             message: "advisory lock timeout while waiting for workspace write lock held by agent"
                 .to_string(),
-            repair: Some("ee diag advisory-lock --workspace . --json".to_string()),
+            repair: Some(
+                "ee diag advisory-lock --workspace . --resource-type workspace --release --json"
+                    .to_string(),
+            ),
         };
         let json = error_response_json(&error);
         ensure_contains(&json, "\"code\":\"storage\"", "storage code")?;
@@ -19012,7 +19022,7 @@ mod tests {
         )?;
         ensure_contains(
             &json,
-            "ee diag advisory-lock --workspace . --json",
+            "ee diag advisory-lock --workspace . --resource-type workspace --release --json",
             "repair command",
         )?;
         let parsed: serde_json::Value =
@@ -20271,6 +20281,16 @@ mod tests {
         preview.token_estimate = 42;
         preview.byte_estimate = 420;
         preview.sufficient_for_resume = true;
+        preview.task_frame = Some(serde_json::json!({
+            "schema": "ee.task_frame.v1",
+            "redactionStatus": "redacted",
+        }));
+        preview.swarm_brief_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_brief_summary.v1",
+        }));
+        preview.swarm_incident_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_incident_summary.v1",
+        }));
 
         let mut create = HandoffCreateReport::new(
             "hcap_toon_fixture".to_string(),
@@ -20283,7 +20303,61 @@ mod tests {
         create.token_count = 99;
         create.byte_count = 999;
         create.content_hash = "blake3:fixture".to_string();
+        create.canonical_content_hash = "abc123def4567890".to_string();
+        create.task_frame = Some(serde_json::json!({
+            "schema": "ee.task_frame.v1",
+            "redactionStatus": "redacted",
+        }));
+        create.swarm_brief_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_brief_summary.v1",
+        }));
+        create.swarm_incident_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_incident_summary.v1",
+        }));
         create.dry_run = true;
+
+        let preview_json =
+            serde_json::from_str::<serde_json::Value>(&render_handoff_preview_json(&preview))
+                .map_err(|error| format!("handoff preview JSON should parse: {error}"))?;
+        ensure_equal(
+            &preview_json
+                .pointer("/task_frame/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.task_frame.v1"),
+            "handoff preview JSON includes task frame",
+        )?;
+        ensure_equal(
+            &preview_json
+                .pointer("/swarm_incident_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_incident_summary.v1"),
+            "handoff preview JSON includes swarm incident summary",
+        )?;
+
+        let create_json =
+            serde_json::from_str::<serde_json::Value>(&render_handoff_create_json(&create))
+                .map_err(|error| format!("handoff create JSON should parse: {error}"))?;
+        ensure_equal(
+            &create_json
+                .pointer("/task_frame/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.task_frame.v1"),
+            "handoff create JSON includes task frame",
+        )?;
+        ensure_equal(
+            &create_json
+                .pointer("/swarm_incident_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_incident_summary.v1"),
+            "handoff create JSON includes swarm incident summary",
+        )?;
+        ensure_equal(
+            &create_json
+                .pointer("/canonical_content_hash")
+                .and_then(serde_json::Value::as_str),
+            &Some("abc123def4567890"),
+            "handoff create JSON includes canonical content hash",
+        )?;
 
         let mut inspect =
             HandoffInspectReport::new(PathBuf::from("/tmp/ee-handoff-workspace/handoff.json"));
@@ -20298,6 +20372,19 @@ mod tests {
         );
         resume.resumed_at = "2026-05-04T12:03:00Z".to_string();
         resume.workspace = Some("workspace_toon_fixture".to_string());
+        resume.swarm_incident_summary = Some(serde_json::json!({
+            "schema": "ee.support_bundle.swarm_incident_summary.v1",
+        }));
+        let resume_json =
+            serde_json::from_str::<serde_json::Value>(&render_handoff_resume_json(&resume))
+                .map_err(|error| format!("handoff resume JSON should parse: {error}"))?;
+        ensure_equal(
+            &resume_json
+                .pointer("/swarm_incident_summary/schema")
+                .and_then(serde_json::Value::as_str),
+            &Some("ee.support_bundle.swarm_incident_summary.v1"),
+            "handoff resume JSON includes swarm incident summary",
+        )?;
 
         let pairs = [
             (

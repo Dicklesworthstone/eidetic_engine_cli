@@ -47,8 +47,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "posture", "healthy"],
-    "summary": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment"],
-    "standard": ["command", "version", "posture", "healthy", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "meshAutoEnrollment", "checks"],
+    "summary": ["command", "version", "posture", "healthy"],
+    "standard": ["command", "version", "posture", "healthy", "checks"],
     "full": ["*"]
   },
   "$defs": {
