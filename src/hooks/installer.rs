@@ -1998,9 +1998,10 @@ if [ -n "${{BASH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; the
     EE_PREFLIGHT_HOOK_BINARY={ee_path}
 
     __ee_preflight_hook_check() {{
-        # Skip our own callbacks and shell builtins that have nothing to gate.
+        # Skip only our own callbacks and empty commands. Broad builtin-prefix
+        # skips are unsafe: `echo $(rm -rf /)` still executes the substitution.
         case "${{BASH_COMMAND:-}}" in
-            __ee_preflight_*|*__ee_preflight_hook_check*|trap*|exit*|return*|fc*|history*|cd*|''|set*|unset*|declare*|echo*) return 0 ;;
+            __ee_preflight_*|*__ee_preflight_hook_check*|'') return 0 ;;
         esac
         # Only intercept in interactive shells. The /dev/tty read below
         # defaults to N (block) when no controlling tty is available.
@@ -2065,7 +2066,7 @@ if [ -n "${{ZSH_VERSION:-}}" ] && [ -z "${{EE_PREFLIGHT_HOOK_ACTIVE:-}}" ]; then
         # $1 is the verbatim command line as typed by the user.
         local _ee_cmd="$1"
         case "$_ee_cmd" in
-            __ee_preflight_*|trap*|exit*|return*|fc*|history*|''|cd*|set*|unset*) return 0 ;;
+            __ee_preflight_*|'') return 0 ;;
         esac
         # Only intercept in interactive shells. The /dev/tty read below
         # defaults to N (block-via-SIGINT) when no controlling tty is

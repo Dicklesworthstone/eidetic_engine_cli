@@ -241,6 +241,72 @@ exit 7
 }
 
 #[test]
+fn zsh_snippet_checks_cd_prefixed_compound_lines() -> TestResult {
+    let Some(zsh) = zsh_or_skip() else {
+        eprintln!("skipping: zsh not available on PATH");
+        return Ok(());
+    };
+    let temp = worker_local_tempdir("ee-preflight-zsh-")?;
+    let stub_path = temp.path().join("ee");
+    let argv_log = temp.path().join("stub_argv.txt");
+    let script_body = format!(
+        r#"#!/usr/bin/env bash
+printf '%s\n' "$@" > {argv}
+echo '{{"schema":"ee.preflight.v1","severity":"high","message":"test-fire"}}'
+exit 7
+"#,
+        argv = argv_log.display(),
+    );
+    fs::write(&stub_path, script_body).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&stub_path)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&stub_path, perms).map_err(|e| e.to_string())?;
+    }
+    let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
+
+    let script = format!(
+        "PS1=test\nsource {snippet}\n\
+         ( __ee_preflight_hook_check 'cd /tmp && rm -rf /tmp/test' ) || true\n\
+         print rc=$?",
+        snippet = snippet_path.display(),
+    );
+    let output = Command::new(&zsh)
+        .arg("-c")
+        .arg(&script)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !stderr.contains("[ee preflight]") {
+        return Err(format!(
+            "expected cd-prefixed compound command to reach ee preflight; stderr={stderr}, stdout={stdout}"
+        ));
+    }
+
+    let argv_text = fs::read_to_string(&argv_log).map_err(|e| e.to_string())?;
+    let argv_lines: Vec<&str> = argv_text.lines().collect();
+    let expected = [
+        "preflight",
+        "check",
+        "--cmd",
+        "cd /tmp && rm -rf /tmp/test",
+        "--json",
+    ];
+    if argv_lines != expected {
+        return Err(format!(
+            "stub ee received unexpected argv for cd-prefixed compound command: {argv_lines:?}, expected {expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn zsh_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
     let Some(zsh) = zsh_or_skip() else {
         eprintln!("skipping: zsh not available on PATH");

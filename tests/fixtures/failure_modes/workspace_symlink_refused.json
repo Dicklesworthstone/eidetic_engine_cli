@@ -11,7 +11,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "ee init is invoked with a workspace path that traverses a symlink while --allow-symlink is not set. On macOS, /tmp paths naturally hit this guard because /tmp points at /private/tmp.",
+    "description": "ee init is invoked with a workspace whose final path component is a symlink while --allow-symlink is not set. Ancestor symlinks, including macOS /tmp -> /private/tmp, are canonicalized before this guard runs.",
     "setup_commands": [
       "mkdir -p /tmp/ee-symlink-target",
       "ln -s /tmp/ee-symlink-target /tmp/ee-symlink-workspace"
