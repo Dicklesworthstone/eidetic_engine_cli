@@ -946,6 +946,10 @@ impl CassPrefetchMetrics {
         }
     }
 
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn record_hit(&mut self) {
         self.hits = self.hits.saturating_add(1);
     }
@@ -1188,6 +1192,22 @@ mod tests {
         assert_eq!(metrics.candidates_emitted, 3);
         assert_eq!(metrics.budget_exceeded, 1);
         assert_eq!(metrics.history_too_short, 1);
+    }
+
+    #[test]
+    fn metrics_reset_clears_all_counters() {
+        let mut metrics = CassPrefetchMetrics::new();
+        metrics.record_hit();
+        metrics.record_miss();
+        metrics.record_candidate();
+        metrics.record_budget_exceeded();
+        metrics.record_history_too_short();
+        metrics.record_stale_generation_drop();
+        metrics.record_history_oversized();
+
+        assert_ne!(metrics, CassPrefetchMetrics::new());
+        metrics.reset();
+        assert_eq!(metrics, CassPrefetchMetrics::new());
     }
 
     #[test]
