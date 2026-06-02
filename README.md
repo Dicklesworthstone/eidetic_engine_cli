@@ -80,6 +80,7 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 For agent use, the core rhythm is small and repetitive:
 
 ```bash
+ee orient "<task>" --workspace . --json
 ee swarm brief --workspace . --json
 ee pack "<task>" --workspace . --max-tokens 4000 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
@@ -91,6 +92,7 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 
 | Situation | First `ee` command |
 |---|---|
+| Starting from a cold agent session | `ee orient "<task>" --workspace . --json` |
 | Starting substantive work | `ee pack "<task>" --workspace . --max-tokens 4000 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
@@ -426,6 +428,7 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
+| `ee orient "<task>" --json` | Read-only session-start bundle: swarm brief, doctor triage, install/path posture, workspace hygiene, and a no-persist pack |
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
@@ -536,6 +539,7 @@ Common red flags:
 | Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
 | Output format | `--format markdown\|json\|toon`, `--stream --json` | Token-tight prompt text (markdown), parser output (json), stable-field structured output (toon — not smaller than json for packs), or NDJSON frames |
 | JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
+| Persistence | `--read-only`, `--no-persist` | Assemble prompt context without writing pack records, audit rows, or L2 cache entries |
 | Coordination | `--coordination-snapshot <path>`, `--coordination-stale-after-ms N` | Embed a redacted coordination snapshot |
 | Code-change hints | `--changed-symbol <selector>`, `--changed-symbols-from-git` | Bias toward memories linked to changed symbols |
 | Time windows | `--as-of <RFC3339>`, `--include-expired`, `--include-future`, `--include-stale`, `--include-tombstoned` | Inspect validity-window behavior |

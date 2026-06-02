@@ -4,11 +4,9 @@
 //! stream envelope shape is golden-snapshot stable and the terminal-frame
 //! validator rejects partial streams.
 //!
-//! The former real-binary `ee context --stream` parity test was removed when
-//! the deprecated `ee context` CLI command (and its `--stream` flag) was
-//! deleted in favor of `ee pack`. `ee pack` does not expose a streaming flag,
-//! so the CLI-driven stream/batch parity check no longer has a surface to
-//! exercise. The library-level streaming adapter remains covered below.
+//! `ee context --stream` is a soft-deprecated alias surface; this file keeps the
+//! library-level streaming adapter pinned independently of binary-level alias
+//! coverage.
 
 #![allow(clippy::expect_used)]
 

@@ -606,6 +606,7 @@ pub struct ContextPackOptions {
     pub coordination_snapshot_path: Option<PathBuf>,
     pub coordination_stale_after_ms: u64,
     pub output_options: ContextPackOutputOptions,
+    pub persist_pack: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1012,6 +1013,31 @@ impl std::fmt::Display for ContextPackError {
 }
 
 impl std::error::Error for ContextPackError {}
+
+fn context_pack_persist_failed_message_and_repair(persist_error: &str) -> (String, String) {
+    if context_pack_persist_error_is_contention(persist_error) {
+        (
+            format!(
+                "Pack assembled, but the pack ledger write was skipped because another process held the database write lock: {persist_error}"
+            ),
+            "Retry after a short delay, or use `ee pack \"<task>\" --read-only --json` when you only need prompt context and do not need a persisted pack ledger."
+                .to_owned(),
+        )
+    } else {
+        (
+            format!("Pack assembled but persistence failed: {persist_error}"),
+            "Run `ee status --json` and inspect storage/index posture; use `--read-only` if prompt context is sufficient for this run."
+                .to_owned(),
+        )
+    }
+}
+
+fn context_pack_persist_error_is_contention(persist_error: &str) -> bool {
+    persist_error.contains("could not acquire database write lock")
+        || persist_error.contains("database transaction begin failed")
+        || persist_error.contains("Resource temporarily unavailable")
+        || persist_error.contains("contention timeout")
+}
 
 pub fn run_context_pack(options: &ContextPackOptions) -> Result<ContextResponse, ContextPackError> {
     run_context_pack_with_performance(options, "context").map(|run| run.response)
@@ -1574,7 +1600,11 @@ fn run_context_pack_with_performance_inner(
     };
 
     let search_start = Instant::now();
-    let mut context_write_connection = DbConnection::open_file(&database_path).ok();
+    let mut context_write_connection = if options.persist_pack {
+        DbConnection::open_file(&database_path).ok()
+    } else {
+        None
+    };
     let read_connection = checked_context_read_snapshot(&read_pool, &read_snapshot)?;
     let mut search_preloaded_memories = BTreeMap::new();
     let mut search_report = match run_context_search_with_preloaded_memories(
@@ -2209,85 +2239,94 @@ fn run_context_pack_with_performance_inner(
     response_degraded.extend(slo.context_degradations());
 
     let persist_start = Instant::now();
-    trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
+    if options.persist_pack {
+        trace.pack_record_writes = trace.pack_record_writes.saturating_add(1);
+    }
     let mut pack_persistence = PackPersistenceSubspans::default();
     let mut persist_connection = None;
-    let persist_result = match context_write_connection.take() {
-        Some(connection) => {
-            let result = match pack_record_persistence {
-                PackRecordPersistence::Ambient => persist_pack_record_measured(
-                    &connection,
-                    &options.workspace_path,
-                    &request,
-                    &draft,
-                    &degraded,
-                    &mut pack_persistence,
-                )
-                .map_err(|error| error.to_string()),
-                PackRecordPersistence::Seeded(pack_id_seed) => persist_pack_record_seeded_measured(
-                    &connection,
-                    &options.workspace_path,
-                    &request,
-                    &draft,
-                    &degraded,
-                    pack_id_seed,
-                    &mut pack_persistence,
-                )
-                .map(|_| ())
-                .map_err(|error| error.to_string()),
-            };
-            persist_connection = Some(connection);
-            result
-        }
-        None => {
-            let connection_open_start = Instant::now();
-            match DbConnection::open_file(&database_path) {
-                Ok(connection) => {
-                    pack_persistence.connection_open = connection_open_start.elapsed();
-                    let result = match pack_record_persistence {
-                        PackRecordPersistence::Ambient => persist_pack_record_measured(
+    let persist_result = if options.persist_pack {
+        match context_write_connection.take() {
+            Some(connection) => {
+                let result = match pack_record_persistence {
+                    PackRecordPersistence::Ambient => persist_pack_record_measured(
+                        &connection,
+                        &options.workspace_path,
+                        &request,
+                        &draft,
+                        &degraded,
+                        &mut pack_persistence,
+                    )
+                    .map_err(|error| error.to_string()),
+                    PackRecordPersistence::Seeded(pack_id_seed) => {
+                        persist_pack_record_seeded_measured(
                             &connection,
                             &options.workspace_path,
                             &request,
                             &draft,
                             &degraded,
+                            pack_id_seed,
                             &mut pack_persistence,
                         )
-                        .map_err(|error| error.to_string()),
-                        PackRecordPersistence::Seeded(pack_id_seed) => {
-                            persist_pack_record_seeded_measured(
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                    }
+                };
+                persist_connection = Some(connection);
+                result
+            }
+            None => {
+                let connection_open_start = Instant::now();
+                match DbConnection::open_file(&database_path) {
+                    Ok(connection) => {
+                        pack_persistence.connection_open = connection_open_start.elapsed();
+                        let result = match pack_record_persistence {
+                            PackRecordPersistence::Ambient => persist_pack_record_measured(
                                 &connection,
                                 &options.workspace_path,
                                 &request,
                                 &draft,
                                 &degraded,
-                                pack_id_seed,
                                 &mut pack_persistence,
                             )
-                            .map(|_| ())
-                            .map_err(|error| error.to_string())
-                        }
-                    };
-                    persist_connection = Some(connection);
-                    result
-                }
-                Err(error) => {
-                    pack_persistence.attempted = true;
-                    pack_persistence.connection_open = connection_open_start.elapsed();
-                    Err(error.to_string())
+                            .map_err(|error| error.to_string()),
+                            PackRecordPersistence::Seeded(pack_id_seed) => {
+                                persist_pack_record_seeded_measured(
+                                    &connection,
+                                    &options.workspace_path,
+                                    &request,
+                                    &draft,
+                                    &degraded,
+                                    pack_id_seed,
+                                    &mut pack_persistence,
+                                )
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
+                            }
+                        };
+                        persist_connection = Some(connection);
+                        result
+                    }
+                    Err(error) => {
+                        pack_persistence.attempted = true;
+                        pack_persistence.connection_open = connection_open_start.elapsed();
+                        Err(error.to_string())
+                    }
                 }
             }
         }
+    } else {
+        Ok(())
     };
-    let persist_succeeded = persist_result.is_ok();
+    let persist_succeeded = options.persist_pack && persist_result.is_ok();
     pack_persistence.succeeded = persist_succeeded;
     if let Err(persist_error) = persist_result {
+        let (message, repair) = context_pack_persist_failed_message_and_repair(&persist_error);
         push_degradation(
             &mut response_degraded,
             "context_pack_persist_failed",
             ContextResponseSeverity::Medium,
-            format!("Pack assembled but persistence failed: {persist_error}"),
-            Some("ee status --json".to_string()),
+            message,
+            Some(repair),
         );
     }
     trace.pack_persistence = pack_persistence;
@@ -2302,6 +2341,7 @@ fn run_context_pack_with_performance_inner(
     );
     let mut response = ContextResponse::new(request, draft, response_degraded)
         .map_err(|error| ContextPackError::Pack(error.to_string()))?;
+    response.data.command = command;
     response.data.adaptive_budget = adaptive_budget_decision;
     response.data.agent_profile = agent_profile;
     response.data.slo = Some(slo);
@@ -2320,7 +2360,7 @@ fn run_context_pack_with_performance_inner(
     // BLAKE3 prefix of the query reaches the audit log. Failures are
     // swallowed so an audit append never blocks a successful pack.
     let audit_start = Instant::now();
-    if persist_succeeded {
+    if options.persist_pack && persist_succeeded {
         if let Some(connection) = persist_connection.as_ref() {
             audit_context_pack_assembly_with_connection(
                 connection,
@@ -2330,8 +2370,6 @@ fn run_context_pack_with_performance_inner(
         } else {
             audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
         }
-    } else {
-        audit_context_pack_assembly(&database_path, &options.workspace_path, &response);
     }
     trace.pack_persistence.audit = audit_start.elapsed();
     trace.record_pack_persistence_subspans();
@@ -4109,7 +4147,7 @@ fn context_pack_l2_try_hit(
     let lookup_start = Instant::now();
     match l2_context.cache.get(&l2_context.key) {
         Ok(PackL2CacheLookup::Hit(hit)) => {
-            match context_pack_l2_cached_response_json(&hit.pack_json) {
+            match context_pack_l2_cached_response_json(&hit.pack_json, command) {
                 Ok(cached_json) => {
                     trace.record_elapsed("packL2Lookup", lookup_start);
                     trace.record_elapsed("total", total_start);
@@ -4127,7 +4165,11 @@ fn context_pack_l2_try_hit(
                         stored_at_epoch_seconds = hit.stored_at_epoch_seconds,
                     );
                     return Some(ContextPackPerformanceRun {
-                        response: ContextResponse::from_cached_json(request.clone(), cached_json),
+                        response: ContextResponse::from_cached_json_with_command(
+                            request.clone(),
+                            cached_json,
+                            command,
+                        ),
                         performance: context_pack_l2_hit_performance_json(
                             command,
                             options,
@@ -4474,7 +4516,10 @@ fn context_pack_l2_feature_flags_hash(
     finalize_blake3(hasher)
 }
 
-fn context_pack_l2_cached_response_json(payload: &serde_json::Value) -> Result<String, String> {
+fn context_pack_l2_cached_response_json(
+    payload: &serde_json::Value,
+    command: &'static str,
+) -> Result<String, String> {
     let schema = payload
         .get("schema")
         .and_then(serde_json::Value::as_str)
@@ -4488,9 +4533,28 @@ fn context_pack_l2_cached_response_json(payload: &serde_json::Value) -> Result<S
         .get("responseJson")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "L2 pack cache payload is missing responseJson".to_string())?;
-    serde_json::from_str::<serde_json::Value>(response_json)
+    let parsed = serde_json::from_str::<serde_json::Value>(response_json)
         .map_err(|error| format!("L2 pack cache responseJson is malformed: {error}"))?;
-    Ok(response_json.to_owned())
+    if parsed
+        .pointer("/data/command")
+        .and_then(serde_json::Value::as_str)
+        == Some(command)
+    {
+        return Ok(response_json.to_owned());
+    }
+    let mut adjusted = parsed;
+    let Some(data) = adjusted
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err("L2 pack cache responseJson is missing data.command".to_string());
+    };
+    data.insert(
+        "command".to_string(),
+        serde_json::Value::String(command.to_string()),
+    );
+    serde_json::to_string(&adjusted)
+        .map_err(|error| format!("L2 pack cache responseJson command rewrite failed: {error}"))
 }
 
 fn context_pack_l2_hit_performance_json(
@@ -8929,6 +8993,7 @@ mod tests {
             coordination_snapshot_path: Some(path),
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         }
     }
 
@@ -11453,6 +11518,7 @@ pub fn unrelated_context() -> u64 {
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         };
         let trace = ContextPerformanceTrace {
             db_open_count: 1,
@@ -11642,6 +11708,7 @@ pub fn unrelated_context() -> u64 {
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         })
         .map_err(|error| error.to_string())?;
 
@@ -11753,6 +11820,7 @@ pub fn unrelated_context() -> u64 {
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: super::ContextPackOutputOptions::default()
                 .with_cache_json_response(true),
+            persist_pack: true,
         };
 
         let fresh = super::run_context_pack(&options).map_err(|error| error.to_string())?;
@@ -11892,6 +11960,7 @@ pub fn unrelated_context() -> u64 {
                     coordination_snapshot_path: None,
                     coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
                     output_options: Default::default(),
+                    persist_pack: true,
                 },
                 &determinism,
             )
@@ -11999,6 +12068,7 @@ pub fn unrelated_context() -> u64 {
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         };
 
         let mut hashes_by_pool_size = BTreeMap::new();
@@ -12625,6 +12695,7 @@ pub fn unrelated_context() -> u64 {
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         };
 
         let default_response = super::run_context_pack(&base_options)
@@ -12789,6 +12860,7 @@ pub fn unrelated_context() -> u64 {
             coordination_snapshot_path: None,
             coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
             output_options: Default::default(),
+            persist_pack: true,
         };
 
         let default_response = super::run_context_pack(&base_options)

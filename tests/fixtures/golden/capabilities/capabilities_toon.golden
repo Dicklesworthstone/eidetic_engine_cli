@@ -23,7 +23,7 @@ data:
     daemon_background_mode_unimplemented,serve,v0.5,bd-17c65.5.5,Background daemon mode is not implemented in this build; bounded foreground mode is available.
     diagram_backend_unavailable,franken-mermaid-adapter,v0.3,bd-17c65.5.5,Diagram backend support is not linked in this build.
     mcp_feature_disabled,mcp,v0.2,bd-17c65.5.5,MCP stdio adapter support is disabled in this build.
-  commands[20]{name,available,description}:
+  commands[21]{name,available,description}:
     capabilities,true,Report feature availability
     check,true,Quick posture summary
     doctor,true,Health checks
@@ -36,6 +36,7 @@ data:
     status,true,Subsystem readiness
     version,true,Version info
     context,true,Context packing
+    orient,true,Agent orientation bundle
     search,true,Memory search
     why,true,Explainability
     init,true,Workspace initialization
@@ -207,5 +208,5 @@ data:
     enabledFeatures: 4
     totalFeatures: 8
     unimplementedCapabilities: 3
-    availableCommands: 18
-    totalCommands: 20
+    availableCommands: 19
+    totalCommands: 21

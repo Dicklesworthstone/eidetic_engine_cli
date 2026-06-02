@@ -16,7 +16,7 @@ No command is removed in the promotion milestone. The triad becomes the preferre
 - `ee pack "<task>"` for common retrieval plus context packing.
 - `ee why <id>` for storage, retrieval, history, and link explanation.
 
-Verbose commands stay available for explicit workflows, debugging, audit, and human operation. The soft-deprecation period for the `ee context` alias has ended: it has been removed, and `ee pack "<task>"` is the sole canonical context-pack surface (both routed through the same `run_context_pack` engine).
+Verbose commands stay available for explicit workflows, debugging, audit, and human operation. `ee pack "<task>"` is the canonical context-pack surface. `ee context "<task>"` is retained as a soft-deprecated compatibility alias routed through the same `run_context_pack` engine, and emits an info-severity `deprecated_alias` degraded entry so agent harnesses can migrate intentionally.
 
 ## Disposition Table
 
@@ -33,7 +33,7 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee certificate` | kept | Certificate inspection remains explicit. |
 | `ee causal` | kept | Causal tracing remains an advanced surface. |
 | `ee claim` | kept | Executable claim management remains explicit. |
-| `ee context "<task>"` | removed | Deleted after the soft-deprecation window. Use `ee pack "<task>"`, which runs the identical `run_context_pack` engine. |
+| `ee context "<task>"` | soft-deprecated alias | Runs the identical `run_context_pack` engine as `ee pack "<task>"` and emits an info-severity `deprecated_alias` degraded entry. Prefer `ee pack` in new scripts. |
 | `ee completion` | kept | Shell completion generation remains explicit. |
 | `ee curate` | kept | Curation review and apply workflows remain explicit. |
 | `ee diag` | kept | Diagnostics remain explicit. |
@@ -69,7 +69,7 @@ Verbose commands stay available for explicit workflows, debugging, audit, and hu
 | `ee model` | kept | Model registry inspection remains explicit. |
 | `ee outcome` | kept | Feedback recording remains explicit. |
 | `ee outcome-quarantine` | kept | Harmful-feedback quarantine review remains explicit. |
-| `ee pack "<task>"` | canonical | Preferred agent context command. It remains byte-thin over `ee context`. |
+| `ee pack "<task>"` | canonical | Preferred agent context command. It remains byte-thin over the shared context-pack engine. |
 | `ee pack build --query-file <path>` | kept | Query-file packing remains explicit for reproducible jobs. |
 | `ee pack replay <pack-id>` | kept | Replay remains explicit for audit and debugging. |
 | `ee pack diff <left> <right>` | kept | Diff remains explicit for audit and debugging. |
@@ -115,19 +115,19 @@ These subcommands stay because they expose detail that the triad intentionally s
 | `ee memory expire <id>` | kept | Explicit lifecycle mutation. |
 | `ee memory revise <id>` | kept | Immutable revision workflow. |
 
-## Alias Removal
+## Alias Compatibility
 
-The `ee context` compatibility alias has been removed. There is no longer a
-`deprecated_alias` degraded entry; `ee pack "<task>"` is the canonical surface
-and emits the same response envelope the alias used to (minus the now-gone
-alias notice).
+The `ee context` compatibility alias remains available as a soft-deprecated
+surface. It emits a `deprecated_alias` degraded entry while executing the same
+retrieval and packing behavior as `ee pack "<task>"`. New agent harnesses,
+scripts, docs, and examples should use `ee pack`.
 
 Other explicit commands keep their existing semantic contract. For example, `ee remember` remains explicit: provided `--level`, `--kind`, and `--tags` values are honored exactly, and `ee note` inference is not applied behind the user's back.
 
 ## Promotion Checklist
 
 1. Implemented in `bd-17c65.15`: remove the hidden gating behavior from `--experimental-triad`; keep the flag as a no-op compatibility flag for one milestone.
-2. Implemented in `bd-17c65.15`, revised by `bd-2xdom.2`, then retired: the `deprecated_alias` emission and the `ee context` alias itself have been removed; keep `ee remember` quiet because canonical docs still present it as explicit capture.
+2. Implemented in `bd-17c65.15`, revised by `bd-2xdom.2`, then restored for agent ergonomics: the `ee context` alias remains soft-deprecated and emits `deprecated_alias`; keep `ee remember` quiet because canonical docs still present it as explicit capture.
 3. Keep `ee search` and all detail/debug surfaces because they serve workflows outside the common agent path.
 4. Implemented in `bd-17c65.15`: update `ee --help` so `note`, `pack`, and `why` are the first agent-facing commands.
 5. Re-run `scripts/e2e_overhaul/agent_triad.sh`; promotion remains blocked if `pack_hash_parity` or any promote condition fails.

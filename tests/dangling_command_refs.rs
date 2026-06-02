@@ -85,16 +85,16 @@ fn agent_docs_commands_resolve_against_clap_tree() {
 }
 
 /// The guard is only meaningful if it can tell a real command from a removed one.
-/// `context` was removed in c8c993c2, so it must NOT be in the valid set.
+/// `context` is a soft-deprecated alias for `pack`, so it must resolve while
+/// genuinely removed commands still fail through the broken-fixture test below.
 #[test]
-fn removed_context_command_is_absent_from_clap_tree() {
+fn context_soft_deprecated_alias_is_present_in_clap_tree() {
     let valid = command_inventory::ee_command_paths();
     assert!(
-        !valid.contains("context"),
-        "`ee context` was removed (c8c993c2); its presence would make the \
-         dangling-ref guard vacuous"
+        valid.contains("context"),
+        "`ee context` must resolve as the soft-deprecated alias for `ee pack`"
     );
-    // Sanity: the canonical replacement and a known nested command DO resolve.
+    // Sanity: the canonical command and a known nested command DO resolve.
     assert!(valid.contains("pack"), "`ee pack` must resolve");
     assert!(valid.contains("agent-docs"), "`ee agent-docs` must resolve");
 }

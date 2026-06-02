@@ -162,12 +162,6 @@ fn split_shell_words(command: &str) -> Result<Vec<String>, String> {
 
 #[test]
 fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
-    // The `ee context --help` checks were removed with the deprecated
-    // `ee context` command. Context-only tuning flags (`--ppr-weight`,
-    // `--no-pack-dna`, `--stream`, `--include-tombstoned`, `--relevance-floor`)
-    // are not part of the `ee pack` surface that replaced it, so they are no
-    // longer help-discoverable. The `ee pack --help` coverage below pins the
-    // flags that remain on the canonical context-pack surface.
     let pack_help = help_for(&["ee", "pack", "--help"])?;
     assert_contains_all(
         &pack_help,
@@ -191,8 +185,37 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--include-expired",
             "--include-future",
             "--include-stale",
+            "--read-only",
         ],
         "ee pack --help",
+    )?;
+
+    let context_help = help_for(&["ee", "context", "--help"])?;
+    assert_contains_all(
+        &context_help,
+        &[
+            "--ppr-weight",
+            "--no-pack-dna",
+            "--stream",
+            "--include-tombstoned",
+            "--relevance-floor",
+            "--redaction",
+            "--read-only",
+        ],
+        "ee context --help",
+    )?;
+
+    let orient_help = help_for(&["ee", "orient", "--help"])?;
+    assert_contains_all(
+        &orient_help,
+        &[
+            "TASK",
+            "--max-tokens",
+            "--profile",
+            "--candidate-pool",
+            "--include-rch",
+        ],
+        "ee orient --help",
     )?;
 
     let pack_build_help = help_for(&["ee", "pack", "build", "--help"])?;
@@ -218,6 +241,7 @@ fn graph_pack_and_insights_flags_are_help_discoverable() -> TestResult {
             "--include-expired",
             "--include-future",
             "--include-stale",
+            "--read-only",
         ],
         "ee pack build --help",
     )?;
@@ -908,12 +932,31 @@ fn documented_graph_flag_combinations_parse() -> TestResult {
             "ee", "--fields", "standard", "--cards", "summary", "--meta", "graph", "pagerank",
             "--limit", "5", "--json",
         ][..],
-        // The `ee context ...` documented examples were removed with the
-        // deprecated command. Their context-only tuning flags (`--ppr-weight`,
-        // `--no-pack-dna`, `--stream`, `--include-tombstoned`) are not part of
-        // `ee pack`, so they cannot be re-expressed against the replacement
-        // surface. The `ee pack` examples below pin the documented context-pack
-        // invocations that still parse.
+        &[
+            "ee",
+            "context",
+            "release",
+            "--ppr-weight",
+            "0.4",
+            "--no-pack-dna",
+            "--stream",
+            "--include-tombstoned",
+            "--relevance-floor",
+            "0.1",
+            "--read-only",
+            "--json",
+        ][..],
+        &[
+            "ee",
+            "orient",
+            "release",
+            "--max-tokens",
+            "3000",
+            "--candidate-pool",
+            "50",
+            "--include-rch",
+            "--json",
+        ][..],
         &["ee", "pack", "release", "--explain", "--json"][..],
         &[
             "ee",

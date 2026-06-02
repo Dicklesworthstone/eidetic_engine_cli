@@ -1163,6 +1163,7 @@ impl EffectManifest {
             CommandEffect::read_only("config get", "Read one merged config key"),
             CommandEffect::read_only("config show", "Show merged config values"),
             CommandEffect::read_only_db("context", "Assemble context pack (reads only)"),
+            CommandEffect::read_only_db("orient", "Assemble read-only agent orientation bundle"),
             CommandEffect::read_only("completion", "Generate shell completion scripts"),
             CommandEffect::read_only_db("db status", "Report database status"),
             CommandEffect::read_only_db("db check", "Check database integrity"),
@@ -1587,7 +1588,7 @@ impl EffectManifest {
             CommandEffect::durable_write(
                 "daemon start",
                 Vec::new(),
-                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or $TMPDIR/ee-daemon.sock); creates the parent directory and writes a UDS file outside the workspace",
+                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or $TMPDIR/ee-daemon.sock); creates the parent directory and writes a UDS file outside the workspace. RPC dispatch is same-uid auth-required, and workspace-bound methods such as ee.daemon.context reject missing or mismatched workspace_id values.",
             ),
             CommandEffect::durable_write(
                 "daemon stop",
@@ -2769,6 +2770,7 @@ mod tests {
         let manifest = EffectManifest::build();
         let db_backed = [
             "context",
+            "orient",
             "search",
             "why",
             "status",

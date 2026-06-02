@@ -1558,12 +1558,37 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
             ],
             FieldProfile::Full => &["*"],
         },
-        "context" => match preset {
+        "context" | "pack" => match preset {
             FieldProfile::Minimal => &["command", "query", "hash"],
             FieldProfile::Summary => &[
                 "command", "request", "pack", "budget", "quality", "degraded",
             ],
             FieldProfile::Standard => &["command", "request", "pack", "items", "degraded"],
+            FieldProfile::Full => &["*"],
+        },
+        "orient" => match preset {
+            FieldProfile::Minimal => &["command", "task", "workspace"],
+            FieldProfile::Summary => &[
+                "command",
+                "task",
+                "workspace",
+                "doctor",
+                "workspaceHygiene",
+                "pack",
+                "degraded",
+            ],
+            FieldProfile::Standard => &[
+                "command",
+                "task",
+                "workspace",
+                "swarmBrief",
+                "doctor",
+                "install",
+                "workspaceHygiene",
+                "pack",
+                "nextCommands",
+                "degraded",
+            ],
             FieldProfile::Full => &["*"],
         },
         "status" => match preset {
@@ -1810,6 +1835,37 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         "swarm work-packet" => match preset {
             FieldProfile::Minimal => &["schema", "workspace", "redactionStatus"],
             FieldProfile::Summary => &["schema", "workspace", "redactionStatus", "degraded"],
+            FieldProfile::Standard | FieldProfile::Full => &["*"],
+        },
+        // `remember`/`note` responses expose `memory_id`/`memoryId` (and `persisted`,
+        // `index_status`) but no top-level `id`/`status`/`summary`/`count`. The default
+        // arm below would request `id`, which `collect_field_names` never finds on a
+        // remember response, so `--fields minimal`/`summary` errored with
+        // `usage_unknown_field`. Provide a dedicated arm whose presets reference only
+        // fields that actually exist on the response (and prefer the camelCase
+        // `memoryId` so minimal output drops the duplicate snake_case key).
+        "remember" | "note" => match preset {
+            FieldProfile::Minimal => &[
+                "command",
+                "version",
+                "memoryId",
+                "persisted",
+                "index_status",
+            ],
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "memoryId",
+                "level",
+                "kind",
+                "confidence",
+                "tags",
+                "content",
+                "persisted",
+                "index_status",
+                "audit_id",
+                "degraded",
+            ],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
         },
         _ => match preset {
@@ -11041,12 +11097,24 @@ const COMMAND_MANIFEST: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "context",
-        description: "Assemble a task-specific context pack from relevant memories",
+        description: "Soft-deprecated alias for `ee pack`",
         available: true,
         subcommands: &[],
         args: &[CommandArg {
             name: "TASK",
             description: "Task description to assemble a context pack for",
+            required: true,
+            default: None,
+        }],
+    },
+    CommandEntry {
+        name: "orient",
+        description: "Run a read-only agent orientation bundle for a task",
+        available: true,
+        subcommands: &[],
+        args: &[CommandArg {
+            name: "TASK",
+            description: "Task description to orient around",
             required: true,
             default: None,
         }],
@@ -11926,7 +11994,9 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             );
             d.field_array_of_strs(
                 "coreCommands",
-                &["init", "remember", "search", "pack", "why", "status"],
+                &[
+                    "init", "remember", "search", "pack", "orient", "why", "status",
+                ],
             );
             d.field_str("recipeCatalogCommand", "ee agent-docs recipes --json");
             d.field_raw("recipeCount", &AGENT_DOC_RECIPES.len().to_string());
@@ -11945,6 +12015,10 @@ pub fn render_agent_docs_json(report: &AgentDocsReport) -> String {
             d.field_object("responseFieldMap", |m| {
                 m.field_str("search", "data.results (count: data.resultCount)");
                 m.field_str("pack", "data.pack.items (omitted: data.pack.omitted)");
+                m.field_str(
+                    "orient",
+                    "data.pack.pack.items plus data.doctor/data.workspaceHygiene",
+                );
                 m.field_str("insights", "data.sections");
                 m.field_str("swarm brief", "data.recommendations");
                 m.field_str("memory list", "data.memories");

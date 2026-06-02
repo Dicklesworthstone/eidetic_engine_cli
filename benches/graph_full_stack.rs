@@ -307,6 +307,7 @@ fn context_options(fixture: &BenchFixture, query: &str, mode: CacheMode) -> Cont
         output_options: ContextPackOutputOptions::default()
             .with_resource_profile(PackResourceProfile::SwarmHeavy)
             .with_cache_json_response(mode.cache_json_response()),
+        persist_pack: true,
     }
 }
 

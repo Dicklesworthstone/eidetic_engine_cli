@@ -391,6 +391,7 @@ impl CapabilitiesReport {
             CommandEntry::new("status", true, "Subsystem readiness"),
             CommandEntry::new("version", true, "Version info"),
             CommandEntry::new("context", true, "Context packing"),
+            CommandEntry::new("orient", true, "Agent orientation bundle"),
             CommandEntry::new("search", true, "Memory search"),
             CommandEntry::new("why", true, "Explainability"),
             CommandEntry::new("init", true, "Workspace initialization"),

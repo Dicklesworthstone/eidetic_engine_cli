@@ -66,7 +66,7 @@ use crate::core::config_surface::{
 use crate::core::context::{
     ContextPackError, ContextPackOptions, ContextPackOutputOptionOverrides,
     ContextPackOutputOptions, ContextPackOutputProfile, attach_pack_dna_to_context_response,
-    run_context_pack, run_context_pack_with_performance,
+    run_context_pack_with_performance,
 };
 use crate::core::context_delta::{
     CONTEXT_DELTA_FORMAT_UNSUPPORTED_CODE, CONTEXT_DELTA_PRIOR_UNKNOWN_CODE,
@@ -681,6 +681,8 @@ pub enum Command {
     /// Manage and verify executable claims.
     #[command(subcommand)]
     Claim(ClaimCommand),
+    /// Soft-deprecated alias for `ee pack`.
+    Context(ContextArgs),
     /// Retrieve a previously persisted context pack by ID.
     ///
     /// Persisted packs are immutable artifacts created during a prior
@@ -805,6 +807,8 @@ pub enum Command {
     Model(ModelCommand),
     /// Record observed feedback about a memory or related target.
     Outcome(OutcomeArgs),
+    /// Read-only orientation bundle for an agent starting a task.
+    Orient(OrientArgs),
     /// Review harmful-feedback quarantine rows.
     #[command(name = "outcome-quarantine", subcommand)]
     OutcomeQuarantine(OutcomeQuarantineCommand),
@@ -2352,6 +2356,10 @@ pub struct ContextArgs {
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
 
+    /// Assemble context without writing pack_records, audit rows, or L2 cache entries.
+    #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
+    pub read_only: bool,
+
     /// Redaction level for context pack output.
     #[arg(long, value_enum)]
     pub redaction: Option<BackupRedaction>,
@@ -2411,6 +2419,34 @@ pub struct ContextArgs {
     /// Mesh command mode: off, cache, revisable, or blocking.
     #[arg(long = "mesh", value_parser = parse_mesh_command_mode_arg, default_value = "off")]
     pub mesh_mode: MeshCommandMode,
+}
+
+/// Arguments for `ee orient`.
+#[derive(Clone, Debug, Parser, PartialEq)]
+pub struct OrientArgs {
+    /// Task description to orient the current agent around.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+
+    /// Maximum token budget for the embedded read-only context pack.
+    #[arg(long, short = 't', default_value_t = 4000)]
+    pub max_tokens: u32,
+
+    /// Context profile used for the embedded pack.
+    #[arg(long, short = 'p', default_value = "orientation")]
+    pub profile: String,
+
+    /// Maximum candidate memories to retrieve before packing.
+    #[arg(long, default_value_t = 100)]
+    pub candidate_pool: u32,
+
+    /// Include remote-compilation posture in the swarm brief portion.
+    #[arg(long = "include-rch", action = ArgAction::SetTrue)]
+    pub include_rch: bool,
+
+    /// Timeout for external probe commands used by the swarm brief.
+    #[arg(long = "command-timeout-ms", default_value_t = 1500)]
+    pub command_timeout_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -2483,6 +2519,10 @@ pub struct PackArgs {
     #[arg(value_name = "QUERY")]
     pub query: Option<String>,
 
+    /// Suppress data.pack.packDna in --explain JSON output (parity with `ee context`).
+    #[arg(long = "no-pack-dna")]
+    pub no_pack_dna: bool,
+
     /// Path to an `ee.query.v1` JSON query document.
     #[arg(long, value_name = "PATH")]
     pub query_file: Option<PathBuf>,
@@ -2526,6 +2566,10 @@ pub struct PackArgs {
     /// Suppress data.pack.meta in JSON output.
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
+
+    /// Assemble context without writing pack_records, audit rows, or L2 cache entries.
+    #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
+    pub read_only: bool,
 
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
@@ -2641,6 +2685,10 @@ pub struct PackBuildArgs {
     #[arg(long = "no-meta", num_args = 0..=1, default_missing_value = "true", require_equals = true, value_parser = clap::value_parser!(bool))]
     pub no_meta: Option<bool>,
 
+    /// Assemble context without writing pack_records, audit rows, or L2 cache entries.
+    #[arg(long = "read-only", alias = "no-persist", action = ArgAction::SetTrue)]
+    pub read_only: bool,
+
     /// Redacted ee.coordination_snapshot.v1 JSON to embed in the pack.
     #[arg(long, value_name = "PATH")]
     pub coordination_snapshot: Option<PathBuf>,
@@ -2721,6 +2769,7 @@ impl PackArgs {
             no_rendered_text: self.no_rendered_text,
             no_skipped: self.no_skipped,
             no_meta: self.no_meta,
+            read_only: self.read_only,
             include_non_affecting_degradations: self.include_non_affecting_degradations,
             database: self.database.clone(),
             index_dir: self.index_dir.clone(),
@@ -9957,6 +10006,9 @@ where
             ClaimCommand::Show(args) => handle_claim_show(&cli, args, stdout, stderr),
             ClaimCommand::Verify(args) => handle_claim_verify(&cli, args, stdout, stderr),
         },
+        Some(Command::Context(ref args)) => {
+            handle_context_pack_query(&cli, args, "context", true, stdout, stderr)
+        }
         Some(Command::Demo(ref demo_cmd)) => match demo_cmd {
             DemoCommand::List(args) => handle_demo_list(&cli, args, stdout, stderr),
             DemoCommand::Run(args) => handle_demo_run(&cli, args, stdout, stderr),
@@ -10804,6 +10856,7 @@ where
             handle_graph_neighborhood(&cli, args, stdout, stderr)
         }
         Some(Command::Outcome(ref args)) => handle_outcome(&cli, args, stdout, stderr),
+        Some(Command::Orient(ref args)) => handle_orient(&cli, args, stdout, stderr),
         Some(Command::OutcomeQuarantine(OutcomeQuarantineCommand::List(ref args))) => {
             handle_outcome_quarantine_list(&cli, args, stdout, stderr)
         }
@@ -15500,11 +15553,17 @@ fn write_help<W>(stdout: &mut W) -> ProcessExitCode
 where
     W: Write,
 {
-    let mut command = Cli::command();
-    match command
-        .write_help(stdout)
-        .and_then(|()| stdout.write_all(b"\n"))
-    {
+    // Bare `ee` renders the curated prelude (most-used commands, agent
+    // shortcuts, quick categories) WITHOUT clap's full alphabetical dump of
+    // all 80+ subcommands, so the discovery view stays scannable. The complete
+    // command list and every flag remain one keystroke away via `ee --help`
+    // (and `ee help <command>` for a single command). (agent-UX item 7)
+    let terse = format!(
+        "{HELP_PRELUDE}\nUsage: ee [OPTIONS] [COMMAND]\n\n\
+         Run `ee --help` for the complete command list and all global flags, \
+         or `ee help <command>` for one command.\n"
+    );
+    match stdout.write_all(terse.as_bytes()) {
         Ok(()) => ProcessExitCode::Success,
         Err(_) => ProcessExitCode::Usage,
     }
@@ -29098,9 +29157,325 @@ where
     ProcessExitCode::Success
 }
 
+fn handle_orient<W, E>(
+    cli: &Cli,
+    args: &OrientArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let profile = match parse_context_profile(&args.profile) {
+        Ok(profile) => profile,
+        Err(message) => {
+            let domain_error = DomainError::Usage {
+                message,
+                repair: Some("ee orient --help".to_string()),
+            };
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
+    };
+
+    let workspace_path = cli.resolve_workspace();
+    let mut degraded = Vec::new();
+
+    let mut swarm_sources = default_swarm_brief_sources();
+    if args.include_rch {
+        swarm_sources.insert(SwarmBriefSourceKind::Rch);
+    }
+    let mut swarm_options = SwarmBriefCollectOptions::for_workspace(workspace_path.clone());
+    swarm_options.include_rch = args.include_rch;
+    swarm_options.enabled_sources = swarm_sources;
+    swarm_options.command_timeout_ms = args.command_timeout_ms;
+    let swarm_report = collect_swarm_brief(&swarm_options, &SystemSwarmBriefCommandRunner);
+    let swarm_brief = match render_swarm_brief_json(&swarm_report, output::FieldProfile::Summary) {
+        Ok(raw) => orient_component_data_from_envelope(&raw),
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_swarm_brief_unavailable",
+                "warning",
+                format!("Swarm brief could not be serialized: {error}"),
+                Some(
+                    "Run `ee swarm brief --json` to inspect the source-specific failure."
+                        .to_string(),
+                ),
+            ));
+            serde_json::Value::Null
+        }
+    };
+
+    let doctor_report = DoctorReport::gather_for_workspace(&workspace_path);
+    let doctor = orient_component_data_from_envelope(&doctor_robot_triage_json(&doctor_report));
+
+    let install_report = check_install(&InstallCheckOptions {
+        current_binary: std::env::current_exe().ok(),
+        offline: true,
+        ..InstallCheckOptions::default()
+    });
+    let install = serde_json::to_value(&install_report).unwrap_or_else(|error| {
+        degraded.push(orient_degradation_value(
+            "orient_install_check_unavailable",
+            "warning",
+            format!("Install check could not be serialized: {error}"),
+            Some("Run `ee install check --json` to inspect install posture.".to_string()),
+        ));
+        serde_json::Value::Null
+    });
+
+    let hygiene_options = workspace_core::WorkspaceHygieneOptions {
+        workspace_path: workspace_path.clone(),
+        self_agent_name: None,
+        agent_mail_snapshot_path: None,
+    };
+    let workspace_hygiene = match workspace_core::build_workspace_hygiene_report(&hygiene_options) {
+        Ok(report) => orient_workspace_hygiene_summary(&report),
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_workspace_hygiene_unavailable",
+                "warning",
+                format!("Workspace hygiene could not be collected: {error}"),
+                Some(
+                    "Run `ee workspace hygiene --json` to inspect workspace-state posture."
+                        .to_string(),
+                ),
+            ));
+            serde_json::Value::Null
+        }
+    };
+
+    let filters = crate::models::QueryFilters::default();
+    let output_options = ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Standard)
+        .with_resource_profile(PackResourceProfile::Standard);
+    let pack_options = ContextPackOptions {
+        workspace_path: workspace_path.clone(),
+        database_path: None,
+        index_dir: None,
+        query: args.task.clone(),
+        speed: crate::search::SpeedMode::Default,
+        filters,
+        profile: Some(profile),
+        max_tokens: Some(args.max_tokens),
+        candidate_pool: Some(args.candidate_pool),
+        max_results: None,
+        include_tombstoned: false,
+        as_of: None,
+        include_expired: false,
+        include_future: false,
+        include_stale: false,
+        relevance_floor: None,
+        redaction_level: BackupRedaction::Minimal.to_model(),
+        memory_scope: MemoryScope::Swarm,
+        strict_scope: false,
+        ppr_weight: None,
+        changed_symbols: Vec::new(),
+        changed_symbols_from_git: false,
+        pagination: None,
+        coordination_snapshot_path: None,
+        coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+        output_options,
+        persist_pack: false,
+    };
+    let pack = match run_context_pack_with_performance(&pack_options, "orient") {
+        Ok(run) => {
+            let raw = output::render_context_response_json_with_options(
+                &run.response,
+                output::ContextJsonRenderOptions::from(output_options),
+            );
+            orient_component_data_from_envelope(&raw)
+        }
+        Err(error) => {
+            degraded.push(orient_degradation_value(
+                "orient_pack_unavailable",
+                "warning",
+                format!("Read-only context pack could not be assembled: {error}"),
+                Some("Run `ee pack \"<task>\" --read-only --json` to isolate pack retrieval posture.".to_string()),
+            ));
+            serde_json::Value::Null
+        }
+    };
+
+    let data = serde_json::json!({
+        "schema": "ee.orient.v1",
+        "command": "orient",
+        "version": env!("CARGO_PKG_VERSION"),
+        "workspace": workspace_path.display().to_string(),
+        "task": &args.task,
+        "sideEffectFree": true,
+        "configMutation": "never",
+        "swarmBrief": swarm_brief,
+        "doctor": doctor,
+        "install": install,
+        "workspaceHygiene": workspace_hygiene,
+        "pack": pack,
+        "nextCommands": orient_next_commands(&workspace_path, &args.task, args.max_tokens),
+    });
+
+    match cli.renderer() {
+        output::Renderer::Human | output::Renderer::Markdown => {
+            write_stdout(stdout, &render_orient_human(&data, &degraded))
+        }
+        output::Renderer::Toon => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+                "degraded": degraded,
+            });
+            write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&envelope.to_string()) + "\n"),
+            )
+        }
+        output::Renderer::Json
+        | output::Renderer::Jsonl
+        | output::Renderer::Compact
+        | output::Renderer::Hook => {
+            let envelope = serde_json::json!({
+                "schema": crate::models::RESPONSE_SCHEMA_V2,
+                "success": true,
+                "data": data,
+                "degraded": degraded,
+            });
+            write_stdout(stdout, &(envelope.to_string() + "\n"))
+        }
+    }
+}
+
+fn orient_component_data_from_envelope(raw: &str) -> serde_json::Value {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("data").cloned())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+fn orient_degradation_value(
+    code: &'static str,
+    severity: &'static str,
+    message: String,
+    repair: Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "repair": repair,
+    })
+}
+
+fn orient_workspace_hygiene_summary(
+    report: &workspace_core::WorkspaceHygieneReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": report.schema,
+        "command": report.command,
+        "readOnly": report.read_only,
+        "workspace": &report.workspace_path,
+        "repositoryRoot": &report.repository_root,
+        "dirtyPathCount": report.dirty_path_count,
+        "bucketCounts": &report.bucket_counts,
+        "kindCounts": &report.kind_counts,
+        "stagingRecommendations": report.staging_groups.iter().take(8).map(|group| {
+            serde_json::json!({
+                "name": &group.name,
+                "pathCount": group.path_count,
+                "paths": group.paths.iter().take(12).collect::<Vec<_>>(),
+                "pathsTruncated": group.paths_truncated || group.paths.len() > 12,
+                "omittedPathCount": group.omitted_path_count
+                    + group.paths.len().saturating_sub(12),
+                "recommendation": group.recommendation,
+                "readOnly": group.read_only,
+            })
+        }).collect::<Vec<_>>(),
+        "doNotCommit": report.do_not_commit.iter().take(12).collect::<Vec<_>>(),
+        "needsHumanReview": report.needs_human_review.iter().take(12).collect::<Vec<_>>(),
+        "degraded": &report.degraded_codes,
+        "nextActions": &report.next_actions,
+    })
+}
+
+fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<String> {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    let task = shell_quote_cli_arg(task);
+    vec![
+        format!("ee pack --workspace {workspace} --max-tokens {max_tokens} --json -- {task}"),
+        format!("ee search --workspace {workspace} --json -- {task}"),
+        format!("ee workspace hygiene --workspace {workspace} --json"),
+        format!("ee doctor --workspace {workspace} --robot-triage"),
+    ]
+}
+
+fn shell_quote_cli_arg(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value]) -> String {
+    let workspace = data
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("-");
+    let task = data
+        .get("task")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("-");
+    let posture = data
+        .pointer("/doctor/posture")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let dirty_paths = data
+        .pointer("/workspaceHygiene/dirtyPathCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let pack_items = data
+        .pointer("/pack/pack/items")
+        .and_then(serde_json::Value::as_array)
+        .map_or(0, Vec::len);
+    let mut out = format!(
+        "Orientation: {task}\nWorkspace: {workspace}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\n"
+    );
+    if !degraded.is_empty() {
+        out.push_str("\nDegraded:\n");
+        for entry in degraded {
+            let code = entry
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("degraded");
+            let message = entry
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            out.push_str(&format!("  {code}: {message}\n"));
+        }
+    }
+    if let Some(commands) = data
+        .get("nextCommands")
+        .and_then(serde_json::Value::as_array)
+    {
+        out.push_str("\nNext commands:\n");
+        for command in commands {
+            if let Some(command) = command.as_str() {
+                out.push_str(&format!("  {command}\n"));
+            }
+        }
+    }
+    out
+}
+
 fn handle_context_pack_query<W, E>(
     cli: &Cli,
     args: &ContextArgs,
+    command: &'static str,
+    deprecated_alias: bool,
     stdout: &mut W,
     stderr: &mut E,
 ) -> ProcessExitCode
@@ -29141,7 +29516,8 @@ where
             && !args.stream
             && args.mesh_mode == MeshCommandMode::Off
             && args.changed_symbols.is_empty()
-            && !args.changed_symbols_from_git,
+            && !args.changed_symbols_from_git
+            && !args.read_only,
     );
     let redaction = effective_redaction_level(
         &workspace_path,
@@ -29181,10 +29557,11 @@ where
         coordination_stale_after_ms: args.coordination_stale_after_ms,
         filters,
         output_options,
+        persist_pack: !args.read_only,
     };
 
     if args.explain_performance {
-        return match run_context_pack_with_performance(&options, "pack") {
+        return match run_context_pack_with_performance(&options, command) {
             Ok(run) => write_stdout(stdout, &(run.performance.to_string() + "\n")),
             Err(error) => {
                 let domain_error = context_error_to_domain(&error);
@@ -29193,12 +29570,27 @@ where
         };
     }
 
-    match run_context_pack(&options) {
+    match run_context_pack_with_performance(&options, command).map(|run| run.response) {
         Ok(mut response) => {
+            if deprecated_alias {
+                let entry = ContextResponseDegradation::new(
+                    "deprecated_alias",
+                    ContextResponseSeverity::Info,
+                    "`ee context` is a soft-deprecated alias for `ee pack`.",
+                    Some("Use `ee pack \"<task>\" ...` in new harnesses.".to_string()),
+                )
+                .unwrap_or(ContextResponseDegradation {
+                    code: "deprecated_alias".to_string(),
+                    severity: ContextResponseSeverity::Info,
+                    message: "`ee context` is a soft-deprecated alias for `ee pack`.".to_string(),
+                    repair: Some("Use `ee pack \"<task>\" ...` in new harnesses.".to_string()),
+                });
+                response.data.degraded.push(entry);
+            }
             if args.explain && !args.no_pack_dna {
                 attach_pack_dna_to_context_response(&database_path_for_pack_dna, &mut response);
             }
-            attach_revisable_pack_metadata(&mut response, args.mesh_mode, "pack");
+            attach_revisable_pack_metadata(&mut response, args.mesh_mode, command);
             let render_options = output::ContextJsonRenderOptions::from(output_options);
             if let Some(exit) = maybe_write_context_delta(
                 cli.context_renderer(),
@@ -32079,11 +32471,12 @@ where
             output: args.output.clone(),
             explain_performance: args.explain_performance,
             explain: args.explain,
-            no_pack_dna: false,
+            no_pack_dna: args.no_pack_dna,
             no_coverage_fill: args.no_coverage_fill,
             no_rendered_text: args.no_rendered_text,
             no_skipped: args.no_skipped,
             no_meta: args.no_meta,
+            read_only: args.read_only,
             redaction: None,
             include_non_affecting_degradations: args.include_non_affecting_degradations,
             include_tombstoned: false,
@@ -32103,7 +32496,7 @@ where
             since: None,
             max_delta_bytes: None,
         };
-        return handle_context_pack_query(cli, &context_args, stdout, stderr);
+        return handle_context_pack_query(cli, &context_args, "pack", false, stdout, stderr);
     }
 
     match &args.command {
@@ -32239,6 +32632,7 @@ where
         coordination_snapshot_path: args.coordination_snapshot.clone(),
         coordination_stale_after_ms: args.coordination_stale_after_ms,
         output_options,
+        persist_pack: !args.read_only,
     };
     let renderer = effective_pack_renderer(cli, request.renderer);
 
@@ -32252,7 +32646,7 @@ where
         };
     }
 
-    match run_context_pack(&options) {
+    match run_context_pack_with_performance(&options, "pack").map(|run| run.response) {
         Ok(mut response) => {
             response.data.degraded.extend(request.degraded);
             if args.explain {
@@ -42176,13 +42570,43 @@ fn daemon_already_running_error(socket_path: &Path) -> DomainError {
     }
 }
 
+#[cfg(unix)]
+fn daemon_foreground_shutdown_signals() -> Result<signal_hook::iterator::Signals, DomainError> {
+    signal_hook::iterator::Signals::new([
+        signal_hook::consts::signal::SIGINT,
+        signal_hook::consts::signal::SIGTERM,
+    ])
+    .map_err(|error| DomainError::Configuration {
+        message: format!("Failed to install daemon foreground signal handler: {error}"),
+        repair: Some(
+            "Inspect host signal-handler limits, then retry `ee daemon start --foreground`."
+                .to_owned(),
+        ),
+    })
+}
+
+#[cfg(unix)]
+fn wait_for_daemon_shutdown_signal(
+    signals: &mut signal_hook::iterator::Signals,
+) -> Result<i32, DomainError> {
+    signals
+        .forever()
+        .next()
+        .ok_or_else(|| DomainError::Configuration {
+            message: "Daemon foreground signal iterator ended before receiving SIGINT or SIGTERM."
+                .to_owned(),
+            repair: Some("Retry `ee daemon start --foreground`.".to_owned()),
+        })
+}
+
 /// Handler for `ee daemon start` (bd-oja31 skeleton, lifecycle fix
 /// bd-37o8k).
 ///
 /// Two paths:
 ///
-/// - `--foreground`: bind the UDS in-process via [`start_server`], emit
-///   the success envelope, then block until terminated. This is also
+/// - `--foreground`: bind the UDS in-process via
+///   `start_server_for_workspace`, emit the success envelope, then wait
+///   for SIGINT/SIGTERM and shut the handle down explicitly. This is also
 ///   the process shape the detached path spawns as a child.
 /// - default (detached): spawn `current_exe daemon start --foreground
 ///   --detached-session-child --socket <path>` as a child that calls
@@ -42204,13 +42628,19 @@ where
 {
     #[cfg(unix)]
     {
-        use crate::daemon::{DaemonStartError, server::start_server};
+        use crate::daemon::{DaemonStartError, server::start_server_for_workspace};
         let socket_path = args
             .socket
             .clone()
             .unwrap_or_else(crate::daemon::default_daemon_socket_path);
+        let workspace_path = cli.resolve_workspace();
+        let daemon_workspace_id = workspace_path.display().to_string();
 
         if args.foreground {
+            let mut shutdown_signals = match daemon_foreground_shutdown_signals() {
+                Ok(signals) => signals,
+                Err(error) => return write_domain_error(&error, cli.wants_json(), stdout, stderr),
+            };
             if args.detached_session_child
                 && let Err(error) = rustix::process::setsid()
             {
@@ -42224,8 +42654,8 @@ where
                 };
                 return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
             }
-            return match start_server(&socket_path) {
-                Ok(handle) => {
+            return match start_server_for_workspace(&socket_path, daemon_workspace_id) {
+                Ok(mut handle) => {
                     let payload = serde_json::json!({
                         "schema": "ee.response.v2",
                         "success": true,
@@ -42239,12 +42669,26 @@ where
                     let rendered =
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_owned());
                     write_stdout(stdout, &(rendered + "\n"));
-                    // Keep the handle alive across the sleep loop. When
-                    // the process is terminated the handle's Drop runs
-                    // and unlinks the socket file.
-                    let _kept = handle;
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(60));
+                    let signal = match wait_for_daemon_shutdown_signal(&mut shutdown_signals) {
+                        Ok(signal) => signal,
+                        Err(error) => {
+                            let _ = handle.shutdown();
+                            return write_domain_error(&error, cli.wants_json(), stdout, stderr);
+                        }
+                    };
+                    match handle.shutdown() {
+                        Ok(()) => ProcessExitCode::Success,
+                        Err(error) => {
+                            let domain_error = DomainError::Configuration {
+                                message: format!(
+                                    "Daemon received termination signal {signal} but failed to shut down cleanly: {error}"
+                                ),
+                                repair: Some(
+                                    "Inspect the daemon socket path before restarting.".to_owned(),
+                                ),
+                            };
+                            write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                        }
                     }
                 }
                 Err(DaemonStartError::AlreadyRunning { .. }) => {
@@ -42307,6 +42751,8 @@ where
 
         let mut command = std::process::Command::new(&exe);
         command
+            .arg("--workspace")
+            .arg(&workspace_path)
             .arg("daemon")
             .arg("start")
             .arg("--foreground")
@@ -46228,6 +46674,7 @@ const COMMAND_NAMES: &[&str] = &[
     "claim",
     "config",
     "coordination",
+    "context",
     "curate",
     "daemon",
     "diag",
@@ -46256,6 +46703,7 @@ const COMMAND_NAMES: &[&str] = &[
     "model",
     "outcome",
     "outcome-quarantine",
+    "orient",
     "pack",
     "perf",
     "plan",
@@ -46531,6 +46979,7 @@ impl NormalizedInvocation {
                     ClaimCommand::Show(_) => "claim show".to_string(),
                     ClaimCommand::Verify(_) => "claim verify".to_string(),
                 },
+                Command::Context(_) => "context".to_string(),
                 Command::Demo(demo) => match demo {
                     DemoCommand::List(_) => "demo list".to_string(),
                     DemoCommand::Run(_) => "demo run".to_string(),
@@ -46751,6 +47200,7 @@ impl NormalizedInvocation {
                     ModelCommand::Fetch(_) => "model fetch".to_string(),
                 },
                 Command::Outcome(_) => "outcome".to_string(),
+                Command::Orient(_) => "orient".to_string(),
                 Command::OutcomeQuarantine(command) => match command {
                     OutcomeQuarantineCommand::List(_) => "outcome quarantine list".to_string(),
                     OutcomeQuarantineCommand::Release(_) => {
@@ -47660,11 +48110,11 @@ mod tests {
         TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        json_with_data_result_path, mesh, parse_completion_audit_evidence_input,
-        parse_context_profile, parse_lab_counterfactual_swap,
-        parse_lab_counterfactual_swap_revision, parse_search_source_mode_arg,
-        parse_verification_evidence_record_input, plan_cache_diag_degraded,
-        plan_cache_diag_response_json, run, write_index_rebuild_error,
+        json_with_data_result_path, mesh, orient_next_commands,
+        parse_completion_audit_evidence_input, parse_context_profile,
+        parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
+        parse_search_source_mode_arg, parse_verification_evidence_record_input,
+        plan_cache_diag_degraded, plan_cache_diag_response_json, run, write_index_rebuild_error,
     };
     use crate::config::MeshCommandMode;
     use crate::core::index::IndexRebuildError;
@@ -49432,6 +49882,69 @@ mod tests {
                 &args.explain_performance,
                 &true,
                 "search explain performance",
+            ),
+            other => Err(format!("expected search command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn orient_next_commands_put_task_after_option_sentinel() -> TestResult {
+        let commands = orient_next_commands(Path::new("/tmp/ws"), "-fix quoted task", 1234);
+        ensure_equal(
+            &commands[0],
+            &"ee pack --workspace /tmp/ws --max-tokens 1234 --json -- '-fix quoted task'"
+                .to_string(),
+            "orient pack next command",
+        )?;
+        ensure_equal(
+            &commands[1],
+            &"ee search --workspace /tmp/ws --json -- '-fix quoted task'".to_string(),
+            "orient search next command",
+        )?;
+
+        let pack = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--workspace",
+            "/tmp/ws",
+            "--max-tokens",
+            "1234",
+            "--json",
+            "--",
+            "-fix quoted task",
+        ])
+        .map_err(|error| format!("orient pack next command should parse: {:?}", error.kind()))?;
+        match pack.command {
+            Some(Command::Pack(args)) => {
+                ensure_equal(
+                    &args.query.as_deref(),
+                    &Some("-fix quoted task"),
+                    "orient pack task",
+                )?;
+            }
+            other => return Err(format!("expected pack command, got {other:?}")),
+        }
+
+        let search = Cli::try_parse_from([
+            "ee",
+            "search",
+            "--workspace",
+            "/tmp/ws",
+            "--json",
+            "--",
+            "-fix quoted task",
+        ])
+        .map_err(|error| {
+            format!(
+                "orient search next command should parse: {:?}",
+                error.kind()
+            )
+        })?;
+        match search.command {
+            Some(Command::Search(args)) => ensure_equal(
+                &args.query.as_str(),
+                &"-fix quoted task",
+                "orient search task",
             ),
             other => Err(format!("expected search command, got {other:?}")),
         }

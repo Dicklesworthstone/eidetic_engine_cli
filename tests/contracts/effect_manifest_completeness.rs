@@ -49,6 +49,14 @@ fn daemon_start_is_declared_durable_write() -> TestResult {
             effect.write_surfaces.db_tables
         ));
     }
+    if !effect.description.contains("same-uid auth-required")
+        || !effect.description.contains("workspace-bound methods")
+    {
+        return Err(format!(
+            "`daemon start` manifest must document daemon RPC authorization; got {:?}",
+            effect.description
+        ));
+    }
     Ok(())
 }
 

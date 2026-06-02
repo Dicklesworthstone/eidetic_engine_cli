@@ -3575,12 +3575,21 @@ impl ContextResponse {
 
     #[must_use]
     pub fn from_cached_json(request: ContextRequest, cached_json: String) -> Self {
+        Self::from_cached_json_with_command(request, cached_json, CONTEXT_COMMAND)
+    }
+
+    #[must_use]
+    pub fn from_cached_json_with_command(
+        request: ContextRequest,
+        cached_json: String,
+        command: &'static str,
+    ) -> Self {
         Self {
             schema: RESPONSE_SCHEMA_V2,
             success: true,
             cached_json: Some(cached_json),
             data: ContextResponseData {
-                command: CONTEXT_COMMAND,
+                command,
                 request: request.clone(),
                 pack: PackDraft {
                     query: request.query.clone(),
