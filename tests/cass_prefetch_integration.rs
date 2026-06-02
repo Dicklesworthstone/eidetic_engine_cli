@@ -475,6 +475,7 @@ fn metrics_serialize_under_camel_case_schema() -> TestResult {
     };
 
     for forbidden in [
+        "measured_against_revision",
         "candidates_emitted",
         "budget_exceeded",
         "history_too_short",
@@ -489,23 +490,22 @@ fn metrics_serialize_under_camel_case_schema() -> TestResult {
     }
 
     let expected_fields = [
-        ("hits", 0),
-        ("misses", 0),
-        ("candidatesEmitted", 1),
-        ("budgetExceeded", 1),
-        ("historyTooShort", 1),
-        ("staleGenerationDrop", 1),
-        ("historyOversized", 1),
+        ("measuredAgainstRevision", serde_json::json!("unknown")),
+        ("hits", serde_json::json!(0)),
+        ("misses", serde_json::json!(0)),
+        ("candidatesEmitted", serde_json::json!(1)),
+        ("budgetExceeded", serde_json::json!(1)),
+        ("historyTooShort", serde_json::json!(1)),
+        ("staleGenerationDrop", serde_json::json!(1)),
+        ("historyOversized", serde_json::json!(1)),
     ];
     for (field, expected) in expected_fields {
-        let Some(actual) = value.get(field).and_then(serde_json::Value::as_u64) else {
-            return Err(format!(
-                "metrics JSON missing numeric field {field:?}: {value}"
-            ));
+        let Some(actual) = value.get(field) else {
+            return Err(format!("metrics JSON missing field {field:?}: {value}"));
         };
-        if actual != expected {
+        if actual != &expected {
             return Err(format!(
-                "metrics JSON field {field:?} expected {expected}, got {actual}: {value}"
+                "metrics JSON field {field:?} expected {expected:?}, got {actual}: {value}"
             ));
         }
     }

@@ -109,6 +109,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::models::CorpusRevision;
+
 /// Schema id for the per-call prefetch decision blob emitted under
 /// `--explain` (a follow-up CLI slice surfaces it; the constant is
 /// pinned here so the schema + producer share a single source of
@@ -183,6 +185,13 @@ pub const CASS_PREFETCH_HISTORY_OVERSIZED_CODE: &str = "cass_prefetch_history_ov
 /// fixture + taxonomy row) is deferred to the daemon-wiring slice, same
 /// as `cass_prefetch_budget_exceeded`.
 pub const CASS_PREFETCH_STALE_GENERATION_CODE: &str = "cass_prefetch_stale_generation";
+
+/// Degraded code emitted when a revision-gated prediction is skipped because
+/// the history's corpus stamp no longer matches the live lexical/index corpus
+/// revision (bd-1eh60). This is more specific than a generation mismatch: a
+/// caller can bump revision identity when the underlying segment set changes
+/// even if its coarse numeric generation source has not been wired yet.
+pub const CASS_PREFETCH_STALE_CORPUS_REVISION_CODE: &str = "cass_prefetch_stale_corpus_revision";
 
 /// Cache-coherence generation tag (bd-qud3c).
 ///
@@ -325,6 +334,12 @@ pub struct CassPrefetchObservation {
     /// task-template mapping; storing it as a [`TopicId`] guarantees a
     /// secret-like fragment is masked before it reaches the predictor.
     pub topic_id: TopicId,
+    /// Opaque corpus/index revision this observation was measured against
+    /// (bd-1eh60). Legacy observations default to `unknown`; revision-aware
+    /// gates treat that as stale once a live revision is available, so an old
+    /// history cannot silently warm entries for a regenerated index.
+    #[serde(default)]
+    pub corpus_revision: CorpusRevision,
 }
 
 impl CassPrefetchObservation {
@@ -332,7 +347,14 @@ impl CassPrefetchObservation {
     pub fn new(topic_id: impl Into<String>) -> Self {
         Self {
             topic_id: TopicId::from(topic_id.into()),
+            corpus_revision: CorpusRevision::unknown(),
         }
+    }
+
+    #[must_use]
+    pub fn with_corpus_revision(mut self, corpus_revision: CorpusRevision) -> Self {
+        self.corpus_revision = corpus_revision;
+        self
     }
 }
 
@@ -498,6 +520,30 @@ impl CassPrefetchHistory {
         self
     }
 
+    /// Stamp every retained observation with the corpus/index revision it was
+    /// measured against (bd-1eh60). Builder-style to pair naturally with
+    /// [`with_generation`](Self::with_generation).
+    #[must_use]
+    pub fn with_corpus_revision(mut self, corpus_revision: CorpusRevision) -> Self {
+        for observation in &mut self.recent_first {
+            observation.corpus_revision = corpus_revision.clone();
+        }
+        self
+    }
+
+    /// True iff every non-empty observation was measured against the live
+    /// corpus revision. `unknown` is deliberately incoherent for non-empty
+    /// histories so legacy serialized observations cannot mask index
+    /// regeneration staleness.
+    #[must_use]
+    pub fn corpus_revision_is_coherent_with(&self, current: &CorpusRevision) -> bool {
+        self.recent_first.is_empty()
+            || self
+                .recent_first
+                .iter()
+                .all(|observation| observation.corpus_revision.is_coherent_with(current))
+    }
+
     /// True iff this history is within the bd-1suaa admission bounds:
     /// at most [`MAX_PREFETCH_HISTORY`] observations, each with a
     /// `topic_id` no longer than [`MAX_PREFETCH_TOPIC_ID_BYTES`] bytes.
@@ -577,9 +623,9 @@ where
 pub struct GatedPrediction {
     /// Candidates to warm. Empty when `degraded` is set.
     pub candidates: Vec<CassPrefetchCandidate>,
-    /// `Some(`[`CASS_PREFETCH_STALE_GENERATION_CODE`]`)` when the
-    /// prediction was dropped because the history's generation tag no
-    /// longer matched the live gate; `None` on a coherent prediction.
+    /// `Some(...)` when prediction was dropped because the history was
+    /// oversized, stale by generation, or stale by corpus revision; `None` on
+    /// a coherent prediction.
     pub degraded: Option<&'static str>,
 }
 
@@ -650,6 +696,42 @@ pub trait SpeculativePrefetch {
             return GatedPrediction {
                 candidates: Vec::new(),
                 degraded: Some(CASS_PREFETCH_STALE_GENERATION_CODE),
+            };
+        }
+        GatedPrediction {
+            candidates: self.predict_next_n(history, top_k),
+            degraded: None,
+        }
+    }
+
+    /// Revision-aware generation-gated prediction (bd-1eh60). In addition to
+    /// the coarse [`PrefetchGeneration`] gate, every observation in the history
+    /// must carry the same non-unknown [`CorpusRevision`] as the live lexical
+    /// corpus. This keeps a regenerated index from accepting a hot trail that
+    /// was measured against a different segment set.
+    fn predict_next_n_gated_for_revision(
+        &self,
+        history: &CassPrefetchHistory,
+        current_generation: PrefetchGeneration,
+        current_corpus_revision: &CorpusRevision,
+        top_k: usize,
+    ) -> GatedPrediction {
+        if !history.is_within_admission_bounds() {
+            return GatedPrediction {
+                candidates: Vec::new(),
+                degraded: Some(CASS_PREFETCH_HISTORY_OVERSIZED_CODE),
+            };
+        }
+        if !history.generation.is_coherent_with(current_generation) {
+            return GatedPrediction {
+                candidates: Vec::new(),
+                degraded: Some(CASS_PREFETCH_STALE_GENERATION_CODE),
+            };
+        }
+        if !history.corpus_revision_is_coherent_with(current_corpus_revision) {
+            return GatedPrediction {
+                candidates: Vec::new(),
+                degraded: Some(CASS_PREFETCH_STALE_CORPUS_REVISION_CODE),
             };
         }
         GatedPrediction {
@@ -911,9 +993,15 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
 /// consume. The struct is intentionally simple — `u64` saturating
 /// adds, no `Atomic*` — because the daemon owns the call site and
 /// can wrap it in whatever synchronization it needs.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CassPrefetchMetrics {
+    /// Opaque corpus/index revision the counters were measured against
+    /// (bd-1eh60). A daemon serving regenerated indexes can reset or rotate
+    /// metrics by revision instead of carrying hit-rate posture across
+    /// incompatible segment sets.
+    #[serde(default)]
+    pub measured_against_revision: CorpusRevision,
     pub hits: u64,
     pub misses: u64,
     pub candidates_emitted: u64,
@@ -938,8 +1026,9 @@ pub struct CassPrefetchMetrics {
 
 impl CassPrefetchMetrics {
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
+            measured_against_revision: CorpusRevision::unknown(),
             hits: 0,
             misses: 0,
             candidates_emitted: 0,
@@ -988,6 +1077,10 @@ impl CassPrefetchMetrics {
     /// [`CASS_PREFETCH_HISTORY_OVERSIZED_CODE`] (bd-1suaa).
     pub fn record_history_oversized(&mut self) {
         self.history_oversized = self.history_oversized.saturating_add(1);
+    }
+
+    pub fn set_measured_against_revision(&mut self, revision: CorpusRevision) {
+        self.measured_against_revision = revision;
     }
 
     /// Hit rate as a fraction in `[0.0, 1.0]`. Returns 0.0 when no
@@ -1489,6 +1582,27 @@ mod tests {
     }
 
     #[test]
+    fn history_corpus_revision_defaults_unknown_and_builder_stamps_bd_1eh60() {
+        let legacy = CassPrefetchHistory::from_topics(test_agent_scope(), ["a", "b"]);
+        assert!(
+            legacy
+                .recent_first
+                .iter()
+                .all(|observation| observation.corpus_revision.is_unknown())
+        );
+        assert!(!legacy.corpus_revision_is_coherent_with(&CorpusRevision::from("corpus:v1")));
+
+        let stamped = legacy.with_corpus_revision(CorpusRevision::from("corpus:v1"));
+        assert!(stamped.recent_first.iter().all(|observation| {
+            observation
+                .corpus_revision
+                .is_coherent_with(&CorpusRevision::from("corpus:v1"))
+        }));
+        assert!(stamped.corpus_revision_is_coherent_with(&CorpusRevision::from("corpus:v1")));
+        assert!(!stamped.corpus_revision_is_coherent_with(&CorpusRevision::from("corpus:v2")));
+    }
+
+    #[test]
     fn gated_prediction_drops_stale_generation_bd_qud3c() {
         // History was built at index_generation 5; a reindex has since
         // bumped the live gate to 6. The gated predictor MUST return no
@@ -1524,6 +1638,38 @@ mod tests {
     }
 
     #[test]
+    fn revision_gated_prediction_drops_stale_corpus_revision_bd_1eh60() {
+        let predictor = RecencyWeightedFrequencyPredictor::new();
+        let current_generation = PrefetchGeneration::new(1, 5);
+        let revision_v1 = CorpusRevision::from("corpus:v1");
+        let revision_v2 = CorpusRevision::from("corpus:v2");
+        let history = history(&["current", "alpha", "alpha", "bravo"])
+            .with_generation(current_generation)
+            .with_corpus_revision(revision_v1.clone());
+
+        let stale = predictor.predict_next_n_gated_for_revision(
+            &history,
+            current_generation,
+            &revision_v2,
+            3,
+        );
+        assert!(stale.candidates.is_empty());
+        assert_eq!(
+            stale.degraded,
+            Some(CASS_PREFETCH_STALE_CORPUS_REVISION_CODE)
+        );
+
+        let fresh = predictor.predict_next_n_gated_for_revision(
+            &history,
+            current_generation,
+            &revision_v1,
+            3,
+        );
+        assert_eq!(fresh.degraded, None);
+        assert_eq!(fresh.candidates, predictor.predict_next_n(&history, 3));
+    }
+
+    #[test]
     fn metrics_record_stale_generation_drop_bd_qud3c() {
         let mut metrics = CassPrefetchMetrics::new();
         assert_eq!(metrics.stale_generation_drop, 0);
@@ -1534,6 +1680,20 @@ mod tests {
         metrics.stale_generation_drop = u64::MAX;
         metrics.record_stale_generation_drop();
         assert_eq!(metrics.stale_generation_drop, u64::MAX);
+    }
+
+    #[test]
+    fn metrics_record_measured_against_revision_bd_1eh60() {
+        let mut metrics = CassPrefetchMetrics::new();
+        assert!(metrics.measured_against_revision.is_unknown());
+
+        metrics.set_measured_against_revision(CorpusRevision::from("corpus:v1"));
+        assert_eq!(metrics.measured_against_revision.as_str(), "corpus:v1");
+
+        metrics.record_hit();
+        assert_ne!(metrics, CassPrefetchMetrics::new());
+        metrics.reset();
+        assert_eq!(metrics, CassPrefetchMetrics::new());
     }
 
     #[test]

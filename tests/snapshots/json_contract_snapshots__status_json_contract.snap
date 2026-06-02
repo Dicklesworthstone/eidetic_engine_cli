@@ -252,6 +252,7 @@ expression: status
         "hugepagesGranted": false,
         "hugepagesRequested": false,
         "indexPath": "[INDEX]/lexical",
+        "indexRevision": null,
         "pageFaultsPost": 0,
         "pageFaultsPre": 0,
         "platform": "linux",

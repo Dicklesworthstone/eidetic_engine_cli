@@ -18,6 +18,7 @@
     "pageFaultsPre",
     "pageFaultsPost",
     "fallbackPath",
+    "indexRevision",
     "degradedCodes"
   ],
   "additionalProperties": false,
@@ -93,6 +94,10 @@
     "indexPath": {
       "type": ["string", "null"],
       "description": "Filesystem path of the lexical index directory the loader operated on, when known."
+    },
+    "indexRevision": {
+      "type": ["string", "null"],
+      "description": "Opaque corpus/index revision measured for the lexical index directory when pinning is enabled and the directory can be inspected. Consumers compare this for exact equality only."
     },
     "degradedCodes": {
       "type": "array",

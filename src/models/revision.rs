@@ -20,6 +20,8 @@
 
 use std::{convert::Infallible, fmt};
 
+use serde::{Deserialize, Serialize};
+
 fn normalized_supersession_reason_token(input: &str) -> String {
     let trimmed = input.trim();
     let mut normalized = String::with_capacity(trimmed.len());
@@ -65,6 +67,90 @@ pub const LEGAL_HOLD_PREFIX: &str = "hold_";
 
 /// Expected length for legal hold IDs (prefix + 25 chars = 30 total).
 pub const LEGAL_HOLD_ID_LEN: usize = 30;
+
+/// Opaque content/index corpus revision stamp.
+///
+/// Unlike [`RevisionGroupId`], this is not a memory-history identifier. It is
+/// a caller-supplied or derived stamp for the corpus a cache, prefetch history,
+/// or derived index was measured against. Consumers compare it for exact
+/// equality only; the inner string intentionally has no semantics outside the
+/// producer that minted it.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(from = "String", into = "String")]
+pub struct CorpusRevision(String);
+
+impl CorpusRevision {
+    /// Sentinel for legacy or not-yet-measured data. Revision-aware gates treat
+    /// this as incoherent with any non-empty live corpus revision.
+    pub const UNKNOWN: &'static str = "unknown";
+
+    #[must_use]
+    pub fn new(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            Self::unknown()
+        } else {
+            Self(trimmed.to_owned())
+        }
+    }
+
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self(Self::UNKNOWN.to_owned())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        self.0 == Self::UNKNOWN
+    }
+
+    #[must_use]
+    pub fn is_coherent_with(&self, current: &Self) -> bool {
+        !self.is_unknown() && !current.is_unknown() && self == current
+    }
+}
+
+impl Default for CorpusRevision {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
+impl From<&str> for CorpusRevision {
+    fn from(raw: &str) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<String> for CorpusRevision {
+    fn from(raw: String) -> Self {
+        Self::new(raw)
+    }
+}
+
+impl From<CorpusRevision> for String {
+    fn from(revision: CorpusRevision) -> Self {
+        revision.0
+    }
+}
+
+impl fmt::Display for CorpusRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for CorpusRevision {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
 
 /// Error validating a revision or hold ID.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -517,6 +603,17 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), String>;
+
+    #[test]
+    fn corpus_revision_is_opaque_and_unknown_is_incoherent() {
+        let revision = CorpusRevision::new(" corpus:v1 ");
+        assert_eq!(revision.as_str(), "corpus:v1");
+        assert!(revision.is_coherent_with(&CorpusRevision::from("corpus:v1")));
+        assert!(!revision.is_coherent_with(&CorpusRevision::from("corpus:v2")));
+        assert!(!CorpusRevision::unknown().is_coherent_with(&revision));
+        assert!(!revision.is_coherent_with(&CorpusRevision::unknown()));
+        assert!(CorpusRevision::new("").is_unknown());
+    }
 
     fn ensure_equal<T: std::fmt::Debug + PartialEq>(
         actual: &T,

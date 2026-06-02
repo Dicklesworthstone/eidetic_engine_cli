@@ -4361,6 +4361,10 @@ fn render_search_status_json(
                 }
                 None => tier.field_raw("indexPath", "null"),
             };
+            match lexical_ram_tier.index_revision.as_ref() {
+                Some(revision) => tier.field_str("indexRevision", revision.as_str()),
+                None => tier.field_raw("indexRevision", "null"),
+            };
             tier.field_array_of_strings("degradedCodes", &lexical_ram_tier.degraded_codes);
         });
     });

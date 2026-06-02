@@ -27,10 +27,14 @@
 
 use std::{
     collections::HashSet,
+    fs,
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use serde::Serialize;
+
+use crate::models::CorpusRevision;
 
 /// `degraded[]` code emitted when an operator requested transparent
 /// hugepages but the host platform or kernel does not expose
@@ -297,10 +301,16 @@ pub fn trace_lexical_ram_tier(
         .map(Path::display)
         .map(|display| display.to_string())
         .unwrap_or_else(|| "unknown".to_owned());
+    let index_revision = result
+        .index_revision
+        .as_ref()
+        .map(CorpusRevision::as_str)
+        .unwrap_or("unknown");
     tracing::info!(
         surface = "lexical_ram_tier",
         workspace_id,
         index_path = %index_path,
+        index_revision,
         bytes_mmapped = result.bytes_mmapped,
         hugepages_requested = result.hugepages_requested,
         hugepages_granted = result.hugepages_granted,
@@ -371,6 +381,7 @@ pub struct LexicalRamTierResult {
     pub page_faults_post: u64,
     pub fallback_path: LexicalRamTierFallbackPath,
     pub index_path: Option<PathBuf>,
+    pub index_revision: Option<CorpusRevision>,
     pub degraded_codes: Vec<String>,
     // O(1) duplicate checks while `degraded_codes` preserves JSON order.
     #[serde(skip)]
@@ -398,6 +409,7 @@ impl LexicalRamTierResult {
             page_faults_post: 0,
             fallback_path: LexicalRamTierFallbackPath::None,
             index_path: Some(index_path.to_path_buf()),
+            index_revision: None,
             degraded_codes: Vec::new(),
             degraded_code_set: HashSet::new(),
         }
@@ -407,6 +419,96 @@ impl LexicalRamTierResult {
         if self.degraded_code_set.insert(code) {
             self.degraded_codes.push(code.to_owned());
         }
+    }
+}
+
+#[derive(Debug)]
+struct LexicalIndexRevisionEntry {
+    relative_path: String,
+    kind: &'static str,
+    len: u64,
+    modified: Option<(u64, u32)>,
+}
+
+fn lexical_index_revision(index_dir: &Path) -> Option<CorpusRevision> {
+    let mut entries = Vec::new();
+    collect_lexical_index_revision_entries(index_dir, index_dir, &mut entries).ok()?;
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"ee.lexical_ram_tier.index_revision.v1\0");
+    hasher.update(&(entries.len() as u64).to_le_bytes());
+    for entry in entries {
+        hasher.update(entry.relative_path.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(entry.kind.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&entry.len.to_le_bytes());
+        match entry.modified {
+            Some((secs, nanos)) => {
+                hasher.update(&secs.to_le_bytes());
+                hasher.update(&nanos.to_le_bytes());
+            }
+            None => hasher.update(b"modified_unknown"),
+        }
+        hasher.update(&[0xff]);
+    }
+
+    Some(CorpusRevision::new(format!(
+        "lexical:{}",
+        hasher.finalize().to_hex()
+    )))
+}
+
+fn collect_lexical_index_revision_entries(
+    root: &Path,
+    path: &Path,
+    entries: &mut Vec<LexicalIndexRevisionEntry>,
+) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    entries.push(lexical_index_revision_entry(root, path, &metadata));
+    if metadata.is_dir() {
+        let mut children = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        children.sort_by_key(std::fs::DirEntry::path);
+        for child in children {
+            collect_lexical_index_revision_entries(root, &child.path(), entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn lexical_index_revision_entry(
+    root: &Path,
+    path: &Path,
+    metadata: &fs::Metadata,
+) -> LexicalIndexRevisionEntry {
+    let relative_path = path
+        .strip_prefix(root)
+        .ok()
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+    let file_type = metadata.file_type();
+    let kind = if file_type.is_dir() {
+        "dir"
+    } else if file_type.is_file() {
+        "file"
+    } else if file_type.is_symlink() {
+        "symlink"
+    } else {
+        "other"
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+    LexicalIndexRevisionEntry {
+        relative_path,
+        kind,
+        len: metadata.len(),
+        modified,
     }
 }
 
@@ -437,6 +539,8 @@ pub fn pin_lexical_index_files(
         result.push_unique_code(LEXICAL_RAM_TIER_DISABLED_CODE);
         return result;
     }
+
+    result.index_revision = lexical_index_revision(index_dir);
 
     if config.request_hugepages && !platform.supports_full_pinning() {
         result.push_unique_code(LEXICAL_HUGEPAGES_UNAVAILABLE_CODE);
@@ -790,6 +894,33 @@ mod tests {
     }
 
     #[test]
+    fn disabled_result_leaves_index_revision_empty_bd_1eh60() {
+        let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::disabled());
+        assert_eq!(result.index_revision, None);
+    }
+
+    #[test]
+    fn enabled_result_records_stable_index_revision_bd_1eh60() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/search");
+        let config = LexicalRamTierConfig {
+            enabled: true,
+            ..LexicalRamTierConfig::default()
+        };
+        let first = pin_lexical_index_files(&path, &config);
+        let second = pin_lexical_index_files(&path, &config);
+
+        let revision = first
+            .index_revision
+            .as_ref()
+            .expect("existing index path should produce a revision");
+        assert!(
+            revision.as_str().starts_with("lexical:"),
+            "revision must be namespaced and opaque: {revision}"
+        );
+        assert_eq!(first.index_revision, second.index_revision);
+    }
+
+    #[test]
     fn result_serializes_with_camel_case_fields() {
         let result = pin_lexical_index_files(fake_index_dir(), &LexicalRamTierConfig::disabled());
         let serialized = serde_json::to_value(&result).expect("serialize result");
@@ -808,6 +939,7 @@ mod tests {
             "pageFaultsPost",
             "fallbackPath",
             "indexPath",
+            "indexRevision",
             "degradedCodes",
         ] {
             assert!(
@@ -818,6 +950,10 @@ mod tests {
         assert!(
             serialized.get("degradedCodeSet").is_none(),
             "private degraded-code sidecar must not leak into JSON: {serialized}"
+        );
+        assert!(
+            serialized.get("index_revision").is_none(),
+            "index revision must use camelCase in JSON: {serialized}"
         );
         assert_eq!(
             serialized

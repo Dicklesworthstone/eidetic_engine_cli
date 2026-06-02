@@ -251,9 +251,9 @@ pub use repro::{
     ReproProvenance,
 };
 pub use revision::{
-    IdempotencyKey, IdempotencyKeyError, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX, LegalHold,
-    LegalHoldId, REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX, RevisionGroupId, RevisionIdError,
-    RevisionMeta, SupersessionLink, SupersessionReason,
+    CorpusRevision, IdempotencyKey, IdempotencyKeyError, LEGAL_HOLD_ID_LEN, LEGAL_HOLD_PREFIX,
+    LegalHold, LegalHoldId, REVISION_GROUP_ID_LEN, REVISION_GROUP_PREFIX, RevisionGroupId,
+    RevisionIdError, RevisionMeta, SupersessionLink, SupersessionReason,
 };
 pub use rule::{
     ParseRuleLifecycleActionError, ParseRuleLifecycleTriggerError, ParseRuleMaturityError,

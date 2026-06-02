@@ -93,9 +93,14 @@ can write parsers ahead of the wiring slice.
   "pageFaultsPost": 12044,
   "fallbackPath": "none",
   "indexPath": "/var/lib/ee/indexes/combined/lexical",
+  "indexRevision": "lexical:8cb00c...",
   "degradedCodes": []
 }
 ```
+
+`indexRevision` is an opaque corpus stamp for the index directory. Consumers
+compare it for exact equality only; the hash input is an implementation detail
+and may change when the index manifest format grows a first-class revision.
 
 On any non-success path the loader populates `degradedCodes` with one of the
 codes documented in `tests/fixtures/failure_modes/`. The fixture files for the
