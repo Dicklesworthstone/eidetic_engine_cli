@@ -2358,7 +2358,7 @@ pub fn collect_swarm_brief(
     // bd-1eq3l.6: embed the compact workspace-hygiene summary so the swarm
     // brief surfaces counts/dirtyPathCount/needsHumanReviewTop/coordination
     // blockers/beadsStateStatus without forcing a separate
-    // `ee workspace-hygiene --json` shell-out. The summary builder returns
+    // `ee workspace hygiene --json` shell-out. The summary builder returns
     // an `unavailable`-status payload (not None) on report-build failure,
     // so the field stays serializable in degraded modes.
     let hygiene_options = WorkspaceHygieneOptions {

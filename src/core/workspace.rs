@@ -533,7 +533,7 @@ pub const WORKSPACE_HYGIENE_SWARM_BRIEF_SUMMARY_SCHEMA_V1: &str =
     "ee.workspace_hygiene.swarm_brief_summary.v1";
 pub const WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATHS_LIMIT: usize = 10;
 pub const WORKSPACE_HYGIENE_SWARM_BRIEF_TOP_PATTERNS_LIMIT: usize = 5;
-pub const WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT: &str = "ee workspace-hygiene --json";
+pub const WORKSPACE_HYGIENE_SWARM_BRIEF_COMMAND_HINT: &str = "ee workspace hygiene --json";
 
 /// Compact, redaction-safe projection of a workspace hygiene report suitable
 /// for embedding in the swarm brief and support bundle surfaces. Drops
