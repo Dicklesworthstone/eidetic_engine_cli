@@ -837,7 +837,7 @@ fn remember_memory_inner(
 
     write_replay_guard.mark_clean()?;
 
-    Ok(RememberMemoryReport {
+    let report = RememberMemoryReport {
         version: env!("CARGO_PKG_VERSION"),
         memory_id: prepared.memory_id,
         workspace_id: prepared.workspace_id,
@@ -874,7 +874,17 @@ fn remember_memory_inner(
         curation_candidate,
         curation_candidate_status,
         curation_candidate_degradations,
-    })
+    };
+    drop(_workspace_write_lock);
+    if let Err(error) = connection.close() {
+        tracing::warn!(
+            target: "ee::memory",
+            event = "remember_connection_close_failed",
+            database_path = %report.database_path.display(),
+            error = %error,
+        );
+    }
+    Ok(report)
 }
 
 /// Close a workflow and promote eligible working memories to episodic.
