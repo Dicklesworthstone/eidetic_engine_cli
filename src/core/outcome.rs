@@ -626,6 +626,14 @@ pub struct OutcomeRecordReport {
     /// quarantine absorbed the event without affecting live scoring).
     /// Empty for the steady-state success path.
     pub degraded: Vec<OutcomeDegradation>,
+    /// Memory confidence (Bayesian posterior mean) before this feedback was
+    /// applied. `None` for non-memory targets, dry-run, already-recorded, and
+    /// quarantined paths where live scoring did not change.
+    pub confidence_before: Option<f32>,
+    /// Memory confidence (Bayesian posterior mean) after this feedback was
+    /// applied. Pairs with `confidence_before` so an agent can see what the
+    /// outcome signal actually changed without a follow-up `ee why`.
+    pub confidence_after: Option<f32>,
 }
 
 /// Response-level degraded entry for outcome commands.
@@ -691,6 +699,18 @@ impl OutcomeRecordReport {
             "  Feedback total: {}\n",
             self.feedback.total_count
         ));
+        if let (Some(before), Some(after)) = (self.confidence_before, self.confidence_after) {
+            let arrow = if (after - before).abs() < f32::EPSILON {
+                "unchanged"
+            } else if after > before {
+                "↑"
+            } else {
+                "↓"
+            };
+            output.push_str(&format!(
+                "  Confidence: {before:.4} → {after:.4} ({arrow})\n"
+            ));
+        }
         output
     }
 
@@ -720,6 +740,14 @@ impl OutcomeRecordReport {
                 "sessionId": &self.session_id,
             },
             "quarantine": self.quarantine.as_ref().map(OutcomeQuarantineSummary::data_json),
+            // Posterior-mean confidence on either side of this feedback so agents
+            // can confirm the signal changed live scoring. Null on dry-run,
+            // already-recorded, quarantined, and non-memory paths.
+            "confidence": self.confidence_before.zip(self.confidence_after).map(|(before, after)| serde_json::json!({
+                "before": score_json_value(before),
+                "after": score_json_value(after),
+                "delta": score_json_value(after - before),
+            })),
             "feedback": self.feedback.data_json(),
             // bd-3qs2i.3.1: surface response-level degraded entries
             // (currently: harmful_burst_quarantine) so agents can branch
@@ -969,6 +997,8 @@ fn record_outcome_inner(
             quarantine,
             feedback,
             degraded,
+            confidence_before: None,
+            confidence_after: None,
         });
     }
 
@@ -1002,6 +1032,8 @@ fn record_outcome_inner(
                 quarantine: None,
                 feedback,
                 degraded: Vec::new(),
+                confidence_before: None,
+                confidence_after: None,
             });
         }
 
@@ -1122,6 +1154,8 @@ fn record_outcome_inner(
             quarantine: Some(final_quarantine),
             feedback,
             degraded,
+            confidence_before: None,
+            confidence_after: None,
         });
     }
 
@@ -1188,6 +1222,11 @@ fn record_outcome_inner(
     // 2.5 per README [curation] config; future Phase 7 wires the
     // config override). Only memories carry posteriors today;
     // procedures use the older scalar-score path above.
+    //
+    // Capture the posterior-mean confidence on either side of the update so
+    // the response can show the agent what the outcome signal changed.
+    let mut confidence_before: Option<f32> = None;
+    let mut confidence_after: Option<f32> = None;
     if target_type == "memory" {
         let stored = connection
             .get_memory_bayes_posterior(&target_id)
@@ -1209,6 +1248,8 @@ fn record_outcome_inner(
                 // posterior unchanged as a defensive fallthrough.
                 _ => (prior, 0.0),
             };
+            confidence_before = Some(prior.mean() as f32);
+            confidence_after = Some(posterior.mean() as f32);
             if posterior != prior {
                 tracing::debug!(
                     target: "ee::trust::bayes",
@@ -1322,6 +1363,8 @@ fn record_outcome_inner(
         quarantine: None,
         feedback,
         degraded,
+        confidence_before,
+        confidence_after,
     })
 }
 
@@ -3308,6 +3351,8 @@ mod tests {
                 trust_score: 0.0,
             },
             degraded: Vec::new(),
+            confidence_before: None,
+            confidence_after: None,
         };
 
         let rendered = report.data_json().to_string();
@@ -3521,6 +3566,8 @@ mod tests {
                 trust_score: 1.0,
             },
             degraded: Vec::new(),
+            confidence_before: None,
+            confidence_after: None,
         };
 
         let rendered = report.data_json().to_string();
