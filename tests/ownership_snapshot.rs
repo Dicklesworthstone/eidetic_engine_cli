@@ -157,7 +157,7 @@ error[E0432]: unresolved import `crate::missing`
             report.owner_candidates
         ));
     }
-    if report.fallback_code.as_deref() != Some("unattributed_compile_blocker") {
+    if report.fallback_code.is_some() {
         return Err(format!("unexpected fallback {:?}", report.fallback_code));
     }
     if !report

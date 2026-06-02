@@ -4257,27 +4257,6 @@ impl ContextResponseDegradation {
     }
 }
 
-/// Tombstone for the legacy `degraded_context` meta-banner code.
-///
-/// The code itself was deleted by E2 (bd-17c65.5.2) — it duplicated
-/// information already present in `data.degraded[]` and trained
-/// agents to ignore the banner. The string is kept here as a const
-/// reference so the J6 failure-mode fixture catalog (which asserts
-/// every fixture's `code` field appears as a literal under `src/`)
-/// continues to find this legacy code's literal. The J6 fixture for
-/// `degraded_context` should be updated to mark this code as retired
-/// in a follow-up; this const is the source-side tombstone that lets
-/// the catalog gate stay green during the transition.
-///
-/// Adding this code back to a real emission site is a regression
-/// against bd-17c65.5.2. The
-/// `tests/diagnostics_banner_aliasing_unit.rs` regression guard
-/// asserts the source has no `code: "degraded_context"` emission
-/// pattern (struct-literal assignment); a string-const reference
-/// like this one is intentionally allowed.
-#[allow(dead_code)]
-pub(crate) const LEGACY_DEGRADED_CONTEXT_CODE: &str = "degraded_context";
-
 /// Categorization for a degraded signal (bead bd-17c65.5.2 / E2).
 ///
 /// Determines whether the current response was actually affected by the

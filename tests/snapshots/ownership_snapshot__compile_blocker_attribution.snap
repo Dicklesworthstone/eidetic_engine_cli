@@ -57,7 +57,7 @@ expression: value
       "message": "unresolved import `crate::missing`"
     },
     "ownerCandidates": [],
-    "fallbackCode": "unattributed_compile_blocker",
+    "fallbackCode": null,
     "suggestedCommands": [
       "br list --status in_progress --json",
       "bv --robot-file-beads src/graph/unowned.rs",

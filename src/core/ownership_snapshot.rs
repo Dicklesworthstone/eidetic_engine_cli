@@ -16,7 +16,6 @@ use crate::core::tripwire::glob_match;
 pub const OWNERSHIP_SNAPSHOT_SCHEMA_V1: &str = "ee.ownership_snapshot.v1";
 pub const OWNERSHIP_FILE_REPORT_SCHEMA_V1: &str = "ee.ownership_file_report.v1";
 pub const COMPILE_BLOCKER_ATTRIBUTION_SCHEMA_V1: &str = "ee.compile_blocker_attribution.v1";
-pub const UNATTRIBUTED_COMPILE_BLOCKER_CODE: &str = "unattributed_compile_blocker";
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -208,7 +207,7 @@ pub fn attribute_compile_blocker(
             status: CompileBlockerAttributionStatus::Unparsed,
             diagnostic: None,
             owner_candidates: Vec::new(),
-            fallback_code: Some(UNATTRIBUTED_COMPILE_BLOCKER_CODE.to_owned()),
+            fallback_code: None,
             suggested_commands: vec![
                 "rerun with a concise Rust compiler diagnostic excerpt".to_owned(),
             ],
@@ -237,7 +236,7 @@ pub fn attribute_compile_blocker_diagnostic(
             status: CompileBlockerAttributionStatus::Unattributed,
             diagnostic: Some(diagnostic),
             owner_candidates: Vec::new(),
-            fallback_code: Some(UNATTRIBUTED_COMPILE_BLOCKER_CODE.to_owned()),
+            fallback_code: None,
             suggested_commands: vec![
                 "br list --status in_progress --json".to_owned(),
                 format!("bv --robot-file-beads {diagnostic_path}"),
