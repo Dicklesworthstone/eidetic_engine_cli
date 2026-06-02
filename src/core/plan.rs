@@ -511,7 +511,7 @@ pub fn builtin_recipes() -> Vec<Recipe> {
                 },
                 CommandStep {
                     order: 2,
-                    command: "ee context \"<task>\" --workspace . --max-tokens 4000 --json".to_string(),
+                    command: "ee pack \"<task>\" --workspace . --max-tokens 4000 --json".to_string(),
                     description: "Generate context pack for task".to_string(),
                     effect_class: EffectPosture::ReadOnly,
                     dry_run_available: false,
@@ -698,7 +698,7 @@ pub fn builtin_recipes() -> Vec<Recipe> {
                 },
                 CommandStep {
                     order: 2,
-                    command: "ee context \"handoff summary\" --workspace . --json".to_string(),
+                    command: "ee pack \"handoff summary\" --workspace . --json".to_string(),
                     description: "Generate handoff context".to_string(),
                     effect_class: EffectPosture::ReadOnly,
                     dry_run_available: false,
@@ -1508,6 +1508,40 @@ mod tests {
         let recipes = builtin_recipes();
         assert!(!recipes.is_empty());
         assert!(recipes.len() >= 10);
+    }
+
+    #[test]
+    fn builtin_recipes_use_canonical_pack_command_for_context_packs() -> TestResult {
+        let mut commands = Vec::new();
+        for recipe in builtin_recipes() {
+            for step in recipe.steps {
+                commands.push(step.command);
+            }
+            for branch in recipe.degraded_branches {
+                for step in branch.alternative_steps {
+                    commands.push(step.command);
+                }
+            }
+        }
+
+        let stale_context_prefix = ["ee", "context"].join(" ");
+        let stale_context_commands = commands
+            .iter()
+            .filter(|command| command.starts_with(&format!("{stale_context_prefix} ")))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !stale_context_commands.is_empty() {
+            return Err(format!(
+                "built-in plan recipes must recommend canonical `ee pack`, not the soft-deprecated context alias: {stale_context_commands:?}"
+            ));
+        }
+        if !commands
+            .iter()
+            .any(|command| command.starts_with("ee pack "))
+        {
+            return Err("expected at least one built-in recipe to recommend `ee pack`".to_string());
+        }
+        Ok(())
     }
 
     #[test]

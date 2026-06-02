@@ -26,6 +26,6 @@
       "planned for v2"
     ],
     "repair_contains": "docs/adr/0033-serve-localhost-v2-design.md",
-    "repair_string": "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee context`, `ee search`, `ee why`, and `ee status` for now."
+    "repair_string": "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee pack`, `ee search`, `ee why`, and `ee status` for now."
   }
 }

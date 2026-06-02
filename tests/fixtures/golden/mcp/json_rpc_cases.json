@@ -38,7 +38,7 @@
         "prompts": [
           {
             "name": "pre-task-context",
-            "description": "Prepare an agent before a task by retrieving an ee context pack.",
+            "description": "Prepare an agent before a task by retrieving a context pack with ee.",
             "arguments": [
               {
                 "name": "task",
@@ -138,8 +138,8 @@
           },
           {
             "uriTemplate": "ee://context-packs/by-query?query={query}",
-            "name": "ee context pack",
-            "description": "Assemble a task-specific context pack through ee context --json",
+            "name": "ee pack",
+            "description": "Assemble a task-specific context pack through ee pack --json",
             "mimeType": "application/json"
           },
           {

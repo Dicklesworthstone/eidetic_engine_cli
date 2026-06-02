@@ -139,7 +139,7 @@ impl McpPrompt {
     const fn description(self) -> &'static str {
         match self {
             Self::PreTaskContext => {
-                "Prepare an agent before a task by retrieving an ee context pack."
+                "Prepare an agent before a task by retrieving a context pack with ee."
             }
             Self::RecordLesson => "Turn a durable lesson into an explicit ee remember workflow.",
             Self::ReviewSession => "Review a prior session and propose curation candidates.",
@@ -274,7 +274,7 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
     },
     McpToolEntry {
         name: "ee_context",
-        description: "Run ee context --json to assemble task-specific context",
+        description: "Run ee pack --json to assemble task-specific context",
         input_schema: context_tool_schema,
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
         effect: None,
@@ -298,7 +298,7 @@ const TOOL_REGISTRY: &[McpToolEntry] = &[
     },
     McpToolEntry {
         name: "ee_pack_dna_explain",
-        description: "Run ee context --explain --json and return only data.pack.packDna",
+        description: "Run ee pack --explain --json and return only data.pack.packDna",
         input_schema: pack_dna_explain_tool_schema,
         annotations: READ_ONLY_TOOL_ANNOTATIONS,
         effect: None,
@@ -629,7 +629,7 @@ fn render_pre_task_context_prompt(arguments: &Value) -> Result<String, String> {
         .map_or_else(|| "4000".to_string(), |value| value.to_string());
 
     Ok(format!(
-        "Prepare for this task with ee before editing.\n\nTask:\n{task}\n\nUse the read-only MCP tool `ee_context` or the CLI command below:\n`ee --workspace {workspace} --json context {task:?} --profile {profile} --max-tokens {max_tokens}`\n\nRead the returned `ee.response.v2` envelope, summarize the highest-confidence procedural rules, relevant failures, decisions, provenance, and degraded capabilities, then proceed with the task. Keep machine JSON separate from human diagnostics."
+        "Prepare for this task with ee before editing.\n\nTask:\n{task}\n\nUse the read-only MCP tool `ee_context` or the CLI command below:\n`ee pack {task:?} --workspace {workspace} --profile {profile} --max-tokens {max_tokens} --json`\n\nRead the returned `ee.response.v2` envelope, summarize the highest-confidence procedural rules, relevant failures, decisions, provenance, and degraded capabilities, then proceed with the task. Keep machine JSON separate from human diagnostics."
     ))
 }
 
@@ -776,8 +776,8 @@ fn handle_resources_templates_list(id: Value) -> Value {
                 ),
                 mcp_resource_template(
                     "ee://context-packs/by-query?query={query}",
-                    "ee context pack",
-                    "Assemble a task-specific context pack through ee context --json"
+                    "ee pack",
+                    "Assemble a task-specific context pack through ee pack --json"
                 ),
                 mcp_resource_template(
                     "ee://schemas/{schemaId}",
@@ -1469,7 +1469,7 @@ fn build_search_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result
 }
 
 fn build_context_tool_args(args: &mut Vec<OsString>, arguments: &Value) -> Result<(), String> {
-    push_arg(args, "context");
+    push_arg(args, "pack");
     push_arg(args, required_string(arguments, &["query"])?);
     if let Some(max_tokens) = optional_u32(arguments, &["maxTokens", "max_tokens"])? {
         push_arg(args, "--max-tokens");
@@ -2954,6 +2954,7 @@ mod tests {
         };
         assert!(text.contains("prepare release"));
         assert!(text.contains("ee_context"));
+        assert!(text.contains("ee pack"));
         assert!(text.contains("--max-tokens 3000"));
         Ok(())
     }
@@ -3583,6 +3584,8 @@ mod tests {
         )?)?;
 
         let max_tokens = u32::MAX.to_string();
+        assert!(args.contains(&"pack".to_string()));
+        assert!(!args.contains(&"context".to_string()));
         let max_tokens_index = args
             .iter()
             .position(|arg| arg == "--max-tokens")

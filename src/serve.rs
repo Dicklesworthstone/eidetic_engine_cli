@@ -72,7 +72,7 @@ pub fn serve_unavailable_v1_error() -> DomainError {
         code: SERVE_UNAVAILABLE_V1_CODE,
         message: "The localhost HTTP adapter is planned for v2; forbidden-dep-clean HTTP/SSE is not wired in v1.".to_owned(),
         repair: Some(
-            "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee context`, `ee search`, `ee why`, and `ee status` for now."
+            "Track bd-3usjw.4 and docs/adr/0033-serve-localhost-v2-design.md; use direct CLI commands such as `ee pack`, `ee search`, `ee why`, and `ee status` for now."
                 .to_owned(),
         ),
         details_json: json!({
@@ -85,7 +85,7 @@ pub fn serve_unavailable_v1_error() -> DomainError {
                     "priority": 1,
                     "kind": "broaden",
                     "rationale": "Use the direct context-pack CLI surface instead of the planned localhost adapter.",
-                    "command": "ee context \"<task>\" --workspace . --json",
+                    "command": "ee pack \"<task>\" --workspace . --json",
                     "resultsIn": "A deterministic context pack response on stdout."
                 },
                 {
@@ -185,7 +185,7 @@ impl ServeEndpoint {
             Self::Status => Some("ee status --json"),
             Self::Doctor => Some("ee doctor --json"),
             Self::Search => Some("ee search \"<query>\" --json"),
-            Self::Context => Some("ee context \"<task>\" --json"),
+            Self::Context => Some("ee pack \"<task>\" --json"),
             Self::Why => Some("ee why <memory-id> --json"),
             Self::SwarmBrief => Some("ee swarm brief --json"),
             Self::DurableWrite | Self::Events | Self::Unknown => None,
@@ -460,10 +460,10 @@ pub fn serve_dispatch_plan(request: &ServeHttpRequest) -> Result<ServeDispatchPl
             let task = require_single_query_value(request, "task", "/v1/context")?;
             Ok(ServeDispatchPlan {
                 endpoint: ServeEndpoint::Context,
-                handler_surface: "cli.context",
+                handler_surface: "cli.pack",
                 cli_argv: vec![
                     "ee".to_owned(),
-                    "context".to_owned(),
+                    "pack".to_owned(),
                     task,
                     "--json".to_owned(),
                 ],
@@ -2575,10 +2575,10 @@ mod tests {
         let context = plan_request(
             "GET /v1/context?task=prepare+release HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
         )?;
-        ensure(context.handler_surface, "cli.context", "context handler")?;
+        ensure(context.handler_surface, "cli.pack", "context handler")?;
         ensure(
             context.cli_argv,
-            argv(&["ee", "context", "prepare release", "--json"]),
+            argv(&["ee", "pack", "prepare release", "--json"]),
             "context argv",
         )?;
 
