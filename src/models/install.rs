@@ -27,8 +27,10 @@ pub enum InstallFindingCode {
     ArtifactMissing,
     BinaryNotOnPath,
     ChecksumVerificationPending,
+    CurrentBinaryShadowed,
     DuplicatePathBinary,
     ExistingUnknownFile,
+    PathBinaryVersionMismatch,
     InstallDirMissing,
     InstallDirNotWritable,
     DuplicateTarget,
@@ -54,8 +56,10 @@ impl InstallFindingCode {
             Self::ArtifactMissing => "artifact_missing",
             Self::BinaryNotOnPath => "binary_not_on_path",
             Self::ChecksumVerificationPending => "checksum_verification_pending",
+            Self::CurrentBinaryShadowed => "current_binary_shadowed",
             Self::DuplicatePathBinary => "duplicate_path_binary",
             Self::ExistingUnknownFile => "existing_unknown_file",
+            Self::PathBinaryVersionMismatch => "path_binary_version_mismatch",
             Self::InstallDirMissing => "install_dir_missing",
             Self::InstallDirNotWritable => "install_dir_not_writable",
             Self::DuplicateTarget => "duplicate_target",
@@ -246,6 +250,10 @@ pub struct PathBinary {
     pub path: String,
     pub ordinal: usize,
     pub is_current_binary: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_status: Option<String>,
 }
 
 /// PATH analysis for an install check.

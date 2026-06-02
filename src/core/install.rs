@@ -4,8 +4,11 @@ use std::cmp::Ordering;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crate::core::build_info;
 use crate::models::{
@@ -22,6 +25,8 @@ const TRUSTED_TAR_PATHS: &[&str] = &["/usr/bin/tar", "/bin/tar"];
 const TRUSTED_INSTALL_TOOL_PATH: &str = "/usr/bin:/bin";
 const EXTRACT_TEMP_PREFIX: &str = "ee-extract-";
 const MAX_BACKUP_PATH_ATTEMPTS: usize = 1000;
+const PATH_BINARY_VERSION_TIMEOUT: Duration = Duration::from_millis(750);
+const PATH_BINARY_VERSION_STDOUT_MAX_BYTES: u64 = 4096;
 
 /// Hard upper bound on the byte length of a release manifest read from a
 /// user-supplied `--manifest <path>`. Realistic manifests are on the order
@@ -148,6 +153,51 @@ pub fn check_install(options: &InstallCheckOptions) -> InstallCheckReport {
                 path.duplicate_count, target.executable_name
             ),
             "Remove stale duplicates or make the intended install directory appear first in PATH.",
+        ));
+    }
+    let current_binary_path = current_binary.as_deref().map(normalize_path);
+    if let (Some(current_path), Some(first_binary)) =
+        (current_binary_path.as_deref(), path.first_binary.as_deref())
+        && first_binary != current_path
+    {
+        findings.push(InstallFinding::warning(
+            InstallFindingCode::CurrentBinaryShadowed,
+            format!(
+                "the running ee binary ({current_path}) is shadowed by the first PATH binary ({first_binary})"
+            ),
+            "Run `ee install check --json` from the PATH binary you expect agents to use, or update PATH/install-dir ordering.",
+        ));
+    }
+    let mismatched_versions = path
+        .binaries
+        .iter()
+        .filter_map(|binary| {
+            let version = binary.version.as_deref()?;
+            (compare_versions(version, info.version) != Ordering::Equal)
+                .then(|| format!("{}={version}", binary.path))
+        })
+        .collect::<Vec<_>>();
+    if !mismatched_versions.is_empty() {
+        let shown = mismatched_versions
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        findings.push(InstallFinding::warning(
+            InstallFindingCode::PathBinaryVersionMismatch,
+            format!(
+                "{} PATH ee binar{} report a different version than the running binary ({}){}",
+                mismatched_versions.len(),
+                if mismatched_versions.len() == 1 { "y" } else { "ies" },
+                info.version,
+                if shown.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {shown}")
+                }
+            ),
+            "Run the intended PATH binary directly, then rebuild/install the current release if the PATH version is stale.",
         ));
     }
 
@@ -517,10 +567,13 @@ fn analyze_path(
         let candidate = entry.join(executable_name);
         if candidate.is_file() {
             let path = normalize_path(&candidate);
+            let version_probe = probe_ee_binary_version(&candidate);
             binaries.push(PathBinary {
                 is_current_binary: current.as_ref() == Some(&path),
                 path,
                 ordinal,
+                version: version_probe.version,
+                version_status: version_probe.status,
             });
         }
     }
@@ -548,8 +601,9 @@ fn analyze_path(
 }
 
 fn check_permissions(install_dir: &Path, install_path: &str) -> InstallPermissionCheck {
+    let target_exists = Path::new(install_path).is_file();
     let metadata = fs::metadata(install_dir);
-    let (status, exists, writable) = match metadata {
+    let (status, writable) = match metadata {
         Ok(metadata) => {
             let writable = metadata.is_dir() && !metadata.permissions().readonly();
             (
@@ -558,7 +612,6 @@ fn check_permissions(install_dir: &Path, install_path: &str) -> InstallPermissio
                 } else {
                     InstallPermissionStatus::NotWritable
                 },
-                true,
                 writable,
             )
         }
@@ -567,9 +620,9 @@ fn check_permissions(install_dir: &Path, install_path: &str) -> InstallPermissio
             .and_then(|parent| fs::metadata(parent).ok())
         {
             Some(parent) if parent.is_dir() && !parent.permissions().readonly() => {
-                (InstallPermissionStatus::MissingParentWritable, false, false)
+                (InstallPermissionStatus::MissingParentWritable, false)
             }
-            _ => (InstallPermissionStatus::MissingParentUnknown, false, false),
+            _ => (InstallPermissionStatus::MissingParentUnknown, false),
         },
     };
 
@@ -577,8 +630,98 @@ fn check_permissions(install_dir: &Path, install_path: &str) -> InstallPermissio
         status,
         install_dir: normalize_path(install_dir),
         target_path: install_path.to_owned(),
-        exists,
+        exists: target_exists,
         writable,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BinaryVersionProbe {
+    version: Option<String>,
+    status: Option<String>,
+}
+
+fn probe_ee_binary_version(path: &Path) -> BinaryVersionProbe {
+    let mut child = match Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            return BinaryVersionProbe {
+                version: None,
+                status: Some("probe_failed".to_owned()),
+            };
+        }
+    };
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return BinaryVersionProbe {
+                        version: None,
+                        status: Some("nonzero".to_owned()),
+                    };
+                }
+                let mut bytes = Vec::new();
+                if let Some(stdout) = child.stdout.take()
+                    && stdout
+                        .take(PATH_BINARY_VERSION_STDOUT_MAX_BYTES)
+                        .read_to_end(&mut bytes)
+                        .is_err()
+                {
+                    return BinaryVersionProbe {
+                        version: None,
+                        status: Some("read_failed".to_owned()),
+                    };
+                }
+                let stdout = String::from_utf8_lossy(&bytes);
+                let version = stdout
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .and_then(parse_ee_version_line);
+                return BinaryVersionProbe {
+                    status: Some(if version.is_some() {
+                        "reported".to_owned()
+                    } else {
+                        "unparseable".to_owned()
+                    }),
+                    version,
+                };
+            }
+            Ok(None) if started.elapsed() >= PATH_BINARY_VERSION_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return BinaryVersionProbe {
+                    version: None,
+                    status: Some("timeout".to_owned()),
+                };
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                return BinaryVersionProbe {
+                    version: None,
+                    status: Some("probe_failed".to_owned()),
+                };
+            }
+        }
+    }
+}
+
+fn parse_ee_version_line(line: &str) -> Option<String> {
+    let mut parts = line.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("ee"), Some(version)) => Some(version.to_owned()),
+        (Some(version), None) if version.chars().next().is_some_and(|c| c.is_ascii_digit()) => {
+            Some(version.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -667,7 +810,6 @@ fn load_manifest(
     // limit. Parallel defense to the `take(CAP + 1)` shape used in
     // `read_preflight_rules_file_no_follow` and
     // `read_preflight_run_store_file_no_follow`.
-    use io::Read;
     let file = fs::File::open(path).map_err(|error| {
         InstallFinding::error(
             InstallFindingCode::ManifestMissing,
