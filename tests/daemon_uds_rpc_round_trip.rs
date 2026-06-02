@@ -44,14 +44,6 @@ fn ensure(condition: bool, message: impl Into<String>) -> TestResult {
     }
 }
 
-fn wait_for_accept_loop() {
-    // Tiny pause so the accept-loop thread enters `listener.accept()`
-    // before the client opens its connection. The skeleton's accept
-    // loop blocks inside the syscall, so this is just for test
-    // robustness on slow CI hosts.
-    thread::sleep(Duration::from_millis(75));
-}
-
 fn connect_client(socket_path: &Path) -> Result<UnixStream, String> {
     let stream = UnixStream::connect(socket_path).map_err(|error| format!("connect: {error}"))?;
     stream
@@ -148,7 +140,6 @@ fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let request = DaemonRequest::new(
         "req-echo-roundtrip-001",
@@ -220,7 +211,6 @@ fn daemon_context_returns_warmload_not_yet_implemented_with_degraded_code() -> T
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let mut request = DaemonRequest::new(
         "req-ctx-stub-001",
@@ -284,7 +274,6 @@ fn daemon_schema_mismatch_returns_error_envelope_over_wire() -> TestResult {
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let mut request = DaemonRequest::new(
         "req-schema-mismatch-001",
@@ -319,7 +308,6 @@ fn daemon_unknown_method_returns_error_envelope_over_wire() -> TestResult {
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let request = DaemonRequest::new(
         "req-unknown-method-001",
@@ -353,7 +341,6 @@ fn daemon_malformed_json_returns_decode_failed_envelope_over_wire() -> TestResul
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let mut stream = connect_client(handle.socket_path())?;
     write_raw_frame(
@@ -406,7 +393,6 @@ fn daemon_mid_frame_disconnect_closes_without_decode_failed_envelope() -> TestRe
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let announced = 64_u32;
     let mut stream = connect_client(handle.socket_path())?;
@@ -436,7 +422,6 @@ fn daemon_oversize_request_prefix_returns_decode_failed_without_body_allocation(
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let oversized = u32::try_from(DAEMON_REQUEST_MAX_BYTES + 1)
         .map_err(|error| format!("request cap must fit u32 for test: {error}"))?;
@@ -476,7 +461,6 @@ fn daemon_serves_two_clients_concurrently() -> TestResult {
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let socket_a = handle.socket_path().to_path_buf();
     let socket_b = handle.socket_path().to_path_buf();
@@ -538,7 +522,6 @@ fn daemon_shutdown_is_idempotent_across_repeated_calls_over_uds() -> TestResult 
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     handle
         .shutdown()
@@ -565,7 +548,6 @@ fn daemon_drop_without_explicit_shutdown_unlinks_socket() -> TestResult {
     {
         let handle =
             start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-        wait_for_accept_loop();
         ensure(
             handle.socket_path().exists(),
             "socket file must exist while daemon handle is live",
@@ -586,7 +568,6 @@ fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
 
     let mut first =
         start_server(&socket_path).map_err(|error| format!("first start_server: {error}"))?;
-    wait_for_accept_loop();
     first
         .shutdown()
         .map_err(|error| format!("first shutdown: {error}"))?;
@@ -597,7 +578,6 @@ fn daemon_restart_on_same_path_after_shutdown_succeeds() -> TestResult {
 
     let mut second =
         start_server(&socket_path).map_err(|error| format!("second start_server: {error}"))?;
-    wait_for_accept_loop();
     let request = DaemonRequest::new(
         "req-restart-same-path",
         TEST_AGENT_ID,
@@ -632,7 +612,6 @@ fn daemon_shutdown_unblocks_accept_loop_without_any_client_connection() -> TestR
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let started = Instant::now();
     handle
@@ -659,10 +638,8 @@ fn daemon_shutdown_during_connected_client_returns_structured_response() -> Test
 
     let mut handle =
         start_server(&socket_path).map_err(|error| format!("start_server: {error}"))?;
-    wait_for_accept_loop();
 
     let mut stream = connect_client(handle.socket_path())?;
-    wait_for_accept_loop();
 
     let shutdown = thread::spawn(move || {
         handle

@@ -28,7 +28,7 @@ use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt}
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -463,10 +463,12 @@ pub fn start_server(
     let listener_path_in_thread = socket_path.clone();
     let pool = InflightPool::new(configured_max_inflight());
     let pool_in_thread = Arc::clone(&pool);
+    let (accept_ready_tx, accept_ready_rx) = mpsc::channel();
 
     let accept_thread = thread::Builder::new()
         .name("ee-daemon-accept".to_owned())
         .spawn(move || {
+            let _ = accept_ready_tx.send(());
             run_accept_loop(
                 listener,
                 listener_path_in_thread,
@@ -478,6 +480,15 @@ pub fn start_server(
             path: socket_path.clone(),
             source,
         })?;
+    if let Err(source) = accept_ready_rx.recv() {
+        let _ = accept_thread.join();
+        return Err(DaemonStartError::Bind {
+            path: socket_path,
+            source: io::Error::other(format!(
+                "daemon accept thread did not report readiness: {source}"
+            )),
+        });
+    }
 
     Ok(DaemonServerHandle {
         socket_path,
@@ -1639,8 +1650,6 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("ee-daemon-test.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
-        // Give the accept thread a moment to enter the listen state.
-        thread::sleep(Duration::from_millis(50));
 
         let request = DaemonRequest::new(
             "req-roundtrip-001",
@@ -1718,7 +1727,6 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("ee-daemon-peer.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
-        thread::sleep(Duration::from_millis(50));
 
         let request = DaemonRequest::new(
             "req-peer-001",
@@ -1767,7 +1775,6 @@ mod tests {
         );
 
         let mut handle = start_server(&socket_path).expect("server must replace stale socket");
-        thread::sleep(Duration::from_millis(50));
 
         let metadata = fs::symlink_metadata(handle.socket_path()).expect("socket metadata");
         assert!(
@@ -1906,7 +1913,6 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let socket_path = temp.path().join("ee-daemon-idempotent.sock");
         let mut handle = start_server(&socket_path).expect("server must start");
-        thread::sleep(Duration::from_millis(50));
 
         handle.shutdown().expect("first shutdown must succeed");
         assert!(
