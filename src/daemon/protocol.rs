@@ -261,7 +261,10 @@ impl DaemonResponse {
     /// response so callers can chain in a builder style.
     #[must_use]
     pub fn with_degraded(mut self, code: impl Into<String>) -> Self {
-        self.degraded_codes.push(code.into());
+        let code = code.into();
+        if !self.degraded_codes.contains(&code) {
+            self.degraded_codes.push(code);
+        }
         self
     }
 }
@@ -623,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn response_with_degraded_appends_code() {
+    fn response_with_degraded_preserves_order_and_dedups() {
         let response = DaemonResponse::err(
             "req-stub-001",
             "agent-protocol-test",
@@ -631,11 +634,18 @@ mod tests {
             "daemon_ann_warmload_not_yet_implemented",
             "stub",
         )
+        .with_degraded("alpha")
+        .with_degraded("beta")
+        .with_degraded("alpha")
+        .with_degraded(super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE)
         .with_degraded(super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
-        assert_eq!(response.degraded_codes.len(), 1);
         assert_eq!(
-            response.degraded_codes[0],
-            super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE
+            response.degraded_codes,
+            vec![
+                "alpha".to_owned(),
+                "beta".to_owned(),
+                super::super::DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE.to_owned(),
+            ]
         );
     }
 
