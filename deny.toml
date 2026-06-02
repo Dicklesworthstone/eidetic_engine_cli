@@ -63,4 +63,12 @@ allow = [
 # date the ban-gate review revisits) — never a blanket downgrade.
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2024-0436: `paste` is unmaintained (a maintenance advisory, not a
+    # vulnerability; "no safe upgrade available"). It enters the tree purely
+    # transitively via frankensearch -> frankensearch-embed -> tokenizers ->
+    # paste and cannot be removed without dropping tokenizers from the embed
+    # stack. Ignored to unblock the v0.4.0 release; revisit when tokenizers
+    # drops its paste dependency.
+    "RUSTSEC-2024-0436",
+]
