@@ -582,12 +582,60 @@ fn existing_socket_accepts_connection(socket_path: &Path) -> bool {
     UnixStream::connect(socket_path).is_ok()
 }
 
+trait ConnectionWorkerSpawner {
+    fn spawn_connection_worker(
+        &self,
+        stream: UnixStream,
+        shutdown: Arc<AtomicBool>,
+        permit: InflightPermit,
+    ) -> io::Result<JoinHandle<()>>;
+}
+
+#[derive(Clone, Copy)]
+struct ThreadConnectionWorkerSpawner;
+
+impl ConnectionWorkerSpawner for ThreadConnectionWorkerSpawner {
+    fn spawn_connection_worker(
+        &self,
+        stream: UnixStream,
+        shutdown: Arc<AtomicBool>,
+        permit: InflightPermit,
+    ) -> io::Result<JoinHandle<()>> {
+        thread::Builder::new()
+            .name("ee-daemon-conn".to_owned())
+            .spawn(move || {
+                // Permit is held for the lifetime of the worker; on drop
+                // the counter decrements and the next accept can proceed.
+                handle_connection(stream, shutdown);
+                drop(permit);
+            })
+    }
+}
+
 fn run_accept_loop(
     listener: UnixListener,
     socket_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     pool: Arc<InflightPool>,
 ) {
+    run_accept_loop_with_spawner(
+        listener,
+        socket_path,
+        shutdown,
+        pool,
+        ThreadConnectionWorkerSpawner,
+    );
+}
+
+fn run_accept_loop_with_spawner<S>(
+    listener: UnixListener,
+    socket_path: PathBuf,
+    shutdown: Arc<AtomicBool>,
+    pool: Arc<InflightPool>,
+    spawner: S,
+) where
+    S: ConnectionWorkerSpawner,
+{
     let _ = socket_path; // reserved for future tracing.
     for incoming in listener.incoming() {
         if shutdown.load(Ordering::SeqCst) {
@@ -612,15 +660,11 @@ fn run_accept_loop(
                     match stream.try_clone() {
                         Ok(worker_stream) => {
                             let worker_shutdown = Arc::clone(&shutdown);
-                            let spawn_result = thread::Builder::new()
-                                .name("ee-daemon-conn".to_owned())
-                                .spawn(move || {
-                                    // Permit is held for the lifetime of the
-                                    // worker; on drop the counter decrements
-                                    // and the next accept can proceed.
-                                    handle_connection(worker_stream, worker_shutdown);
-                                    drop(permit);
-                                });
+                            let spawn_result = spawner.spawn_connection_worker(
+                                worker_stream,
+                                worker_shutdown,
+                                permit,
+                            );
                             if let Err(error) = spawn_result {
                                 // Thread spawn itself failed (resource
                                 // exhaustion). The failed closure drops the
@@ -2018,6 +2062,70 @@ mod tests {
         );
 
         remove_owned_socket_file(&socket_path).expect("absent path is already clean");
+    }
+
+    struct FailingConnectionWorkerSpawner;
+
+    impl ConnectionWorkerSpawner for FailingConnectionWorkerSpawner {
+        fn spawn_connection_worker(
+            &self,
+            stream: UnixStream,
+            shutdown: Arc<AtomicBool>,
+            permit: InflightPermit,
+        ) -> io::Result<JoinHandle<()>> {
+            drop(stream);
+            drop(shutdown);
+            drop(permit);
+            Err(io::Error::other("simulated pthread_create failure"))
+        }
+    }
+
+    /// Regression test for bd-poxok. A real `thread::Builder::spawn`
+    /// failure is host-resource dependent, so the accept loop exposes a
+    /// test-only spawn seam and pins the observable contract: the client
+    /// receives a framed `daemon_overloaded` response instead of a bare
+    /// connection reset.
+    #[test]
+    fn accept_loop_spawn_failure_returns_overloaded_envelope() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-spawn-fails.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon socket");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let pool = InflightPool::new(1);
+        let runner_shutdown = Arc::clone(&shutdown);
+        let runner_pool = Arc::clone(&pool);
+        let runner_socket_path = socket_path.clone();
+
+        let runner = thread::spawn(move || {
+            run_accept_loop_with_spawner(
+                listener,
+                runner_socket_path,
+                runner_shutdown,
+                runner_pool,
+                FailingConnectionWorkerSpawner,
+            );
+        });
+
+        let mut client = UnixStream::connect(&socket_path).expect("client must connect");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout");
+        let response = read_framed_daemon_response(&mut client);
+        let error = response.error.as_ref().expect("must carry an error");
+
+        assert_eq!(response.request_id, "<overloaded>");
+        assert_eq!(response.agent_id, "<unknown>");
+        assert_eq!(error.code, DAEMON_OVERLOADED_CODE);
+        assert!(
+            response
+                .degraded_codes
+                .contains(&DAEMON_OVERLOADED_CODE.to_owned()),
+            "spawn failure envelope must surface daemon_overloaded in degraded[]",
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = UnixStream::connect(&socket_path);
+        runner.join().expect("accept loop thread must not panic");
     }
 
     /// Regression test for bd-wj6v9. A second `shutdown()` call (the
