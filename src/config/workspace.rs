@@ -1193,6 +1193,17 @@ fn canonical_or_lexical(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| lexical_absolute(Path::new("."), path))
 }
 
+/// Resolve an existing workspace root to its filesystem-canonical path, falling
+/// back to a lexical absolute path when the root does not exist yet.
+///
+/// Callers that derive `.ee` storage paths from a workspace root should use this
+/// helper before appending storage components so platform aliases such as
+/// macOS `/var -> /private/var` address the same database and index paths.
+#[must_use]
+pub fn canonical_workspace_root_or_lexical(path: &Path) -> PathBuf {
+    canonical_or_lexical(path)
+}
+
 /// Compute a stable workspace fingerprint from a canonical root path.
 ///
 /// Returns the first 24 hex chars of BLAKE3 over the path's string

@@ -270,6 +270,9 @@ impl DoctorReport {
 
     #[must_use]
     pub fn gather_with_workspace(workspace_path: Option<&Path>) -> Self {
+        let canonical_workspace =
+            workspace_path.map(crate::config::workspace::canonical_workspace_root_or_lexical);
+        let workspace_path = canonical_workspace.as_deref();
         let singleflight_posture = singleflight_posture_report();
         let qos_posture = gather_qos_posture(workspace_path);
         let rch_worker_pressure = gather_rch_worker_pressure(workspace_path);
@@ -3841,6 +3844,44 @@ mod tests {
                 .contains(&dir.path().display().to_string()),
             true,
             "workspace message includes selected path",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_canonicalizes_symlinked_workspace_before_database_checks() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let target = root.path().join("real-workspace");
+        let alias = root.path().join("alias-workspace");
+        let ee_dir = target.join(".ee");
+        std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;
+        symlink(&target, &alias).map_err(|error| error.to_string())?;
+
+        let database_path = ee_dir.join("ee.db");
+        let connection = crate::db::DbConnection::open_file(&database_path)
+            .map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        connection.close().map_err(|error| error.to_string())?;
+
+        let report = DoctorReport::gather_for_workspace(&alias);
+        let database = report
+            .checks
+            .iter()
+            .find(|check| check.name == "database")
+            .ok_or_else(|| "database check missing".to_string())?;
+        ensure(
+            database.severity,
+            CheckSeverity::Ok,
+            format!("database check should use canonical path: {database:?}"),
+        )?;
+        ensure(
+            database
+                .message
+                .contains(&database_path.display().to_string()),
+            true,
+            "database message includes canonical database path",
         )
     }
 

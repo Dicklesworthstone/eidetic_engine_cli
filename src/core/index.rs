@@ -191,13 +191,13 @@ impl IndexRebuildOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
 }
 
@@ -227,13 +227,13 @@ impl IndexReembedOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
 }
 
@@ -271,14 +271,30 @@ impl IndexProcessingOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
+}
+
+fn default_workspace_root(workspace_path: &Path) -> PathBuf {
+    crate::config::workspace::canonical_workspace_root_or_lexical(workspace_path)
+}
+
+fn default_workspace_database_path(workspace_path: &Path) -> PathBuf {
+    default_workspace_root(workspace_path)
+        .join(".ee")
+        .join("ee.db")
+}
+
+fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
+    default_workspace_root(workspace_path)
+        .join(".ee")
+        .join(DEFAULT_INDEX_SUBDIR)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1887,13 +1903,13 @@ impl IndexStatusOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
 }
 
@@ -1909,13 +1925,13 @@ impl IndexVacuumOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
 }
 
@@ -3578,6 +3594,68 @@ mod tests {
             options.resolve_index_dir(),
             PathBuf::from("/home/user/project/.ee/index")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_default_paths_canonicalize_existing_workspace_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("canonical-default-paths");
+        let target = root.join("real-workspace");
+        let alias = root.join("alias-workspace");
+        std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        symlink(&target, &alias).map_err(|error| error.to_string())?;
+
+        let canonical = target.canonicalize().map_err(|error| error.to_string())?;
+        let expected_database = canonical.join(".ee").join("ee.db");
+        let expected_index = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+
+        let rebuild = IndexRebuildOptions {
+            workspace_path: alias.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        };
+        assert_eq!(rebuild.resolve_database_path(), expected_database);
+        assert_eq!(rebuild.resolve_index_dir(), expected_index);
+
+        let reembed = IndexReembedOptions {
+            workspace_path: alias.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+        };
+        assert_eq!(reembed.resolve_database_path(), expected_database);
+        assert_eq!(reembed.resolve_index_dir(), expected_index);
+
+        let processing = IndexProcessingOptions {
+            workspace_path: alias.clone(),
+            database_path: None,
+            index_dir: None,
+            dry_run: false,
+            job_limit: None,
+        };
+        assert_eq!(processing.resolve_database_path(), expected_database);
+        assert_eq!(processing.resolve_index_dir(), expected_index);
+
+        let status = IndexStatusOptions {
+            workspace_path: alias.clone(),
+            database_path: None,
+            index_dir: None,
+        };
+        assert_eq!(status.resolve_database_path(), expected_database);
+        assert_eq!(status.resolve_index_dir(), expected_index);
+
+        let vacuum = IndexVacuumOptions {
+            workspace_path: alias,
+            database_path: None,
+            index_dir: None,
+        };
+        assert_eq!(vacuum.resolve_database_path(), expected_database);
+        assert_eq!(vacuum.resolve_index_dir(), expected_index);
+
+        Ok(())
     }
 
     #[test]

@@ -118,7 +118,7 @@ impl IndexStatusCacheKey {
         let database_path = options
             .database_path
             .clone()
-            .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+            .unwrap_or_else(|| default_workspace_database_path(&options.workspace_path));
         Self {
             database_path,
             index_dir: index_dir.to_path_buf(),
@@ -283,13 +283,13 @@ impl SearchOptions {
     fn resolve_database_path(&self) -> PathBuf {
         self.database_path
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join("ee.db"))
+            .unwrap_or_else(|| default_workspace_database_path(&self.workspace_path))
     }
 
     fn resolve_index_dir(&self) -> PathBuf {
         self.index_dir
             .clone()
-            .unwrap_or_else(|| self.workspace_path.join(".ee").join(DEFAULT_INDEX_SUBDIR))
+            .unwrap_or_else(|| default_workspace_index_dir(&self.workspace_path))
     }
 
     #[cfg(test)]
@@ -307,6 +307,22 @@ impl SearchOptions {
         config.explain = self.explain;
         config
     }
+}
+
+fn default_workspace_root(workspace_path: &Path) -> PathBuf {
+    crate::config::workspace::canonical_workspace_root_or_lexical(workspace_path)
+}
+
+fn default_workspace_database_path(workspace_path: &Path) -> PathBuf {
+    default_workspace_root(workspace_path)
+        .join(".ee")
+        .join("ee.db")
+}
+
+fn default_workspace_index_dir(workspace_path: &Path) -> PathBuf {
+    default_workspace_root(workspace_path)
+        .join(".ee")
+        .join(DEFAULT_INDEX_SUBDIR)
 }
 
 #[derive(Clone, Debug)]
@@ -2720,7 +2736,8 @@ fn search_score_calibration_feedback_events(
     database_path: Option<&Path>,
     read_connection: Option<&DbConnection>,
 ) -> SearchScoreCalibrationFeedbackEvents {
-    let workspace_id = crate::core::curate::stable_workspace_id(workspace_path);
+    let workspace_root = default_workspace_root(workspace_path);
+    let workspace_id = crate::core::curate::stable_workspace_id(&workspace_root);
     if let Some(connection) = read_connection {
         return match connection.list_feedback_events(&workspace_id) {
             Ok(events) => SearchScoreCalibrationFeedbackEvents::available(events),
@@ -2730,7 +2747,7 @@ fn search_score_calibration_feedback_events(
         };
     }
 
-    let default_database_path = workspace_path.join(".ee").join("ee.db");
+    let default_database_path = default_workspace_database_path(workspace_path);
     let database_path = database_path.unwrap_or(&default_database_path);
     if !database_path.exists() {
         return SearchScoreCalibrationFeedbackEvents::available(Vec::new());
@@ -4794,17 +4811,11 @@ fn run_search_inner_with_performance(
             // row per memory hit so L3 has a `last_accessed` signal and
             // G1 can count search activity per workspace. Privacy: only
             // the BLAKE3 prefix of the query reaches the audit log.
-            let database_path = options
-                .database_path
-                .clone()
-                .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+            let database_path = options.resolve_database_path();
             // Match memory_command_workspace_id's canonicalize-then-hash so the
             // audit row joins to the same workspace the memory was written
             // under (especially important on macOS where /tmp -> /private/tmp).
-            let canonical_workspace = options
-                .workspace_path
-                .canonicalize()
-                .unwrap_or_else(|_| options.workspace_path.clone());
+            let canonical_workspace = default_workspace_root(&options.workspace_path);
             let workspace_id = crate::core::curate::stable_workspace_id(&canonical_workspace);
             let audit_workspace_persisted = search_audit_workspace_persisted(
                 audit_connection.or(read_connection),
@@ -6405,10 +6416,7 @@ fn apply_tombstone_visibility_collecting(
     }
 
     let explicit_database_path = options.database_path.is_some();
-    let database_path = options
-        .database_path
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    let database_path = options.resolve_database_path();
     if !explicit_database_path && !database_path.exists() {
         return hits;
     }
@@ -6737,10 +6745,7 @@ fn apply_memory_scope_visibility_with_metadata_mode_collecting(
     }
 
     let explicit_database_path = options.database_path.is_some();
-    let database_path = options
-        .database_path
-        .clone()
-        .unwrap_or_else(|| options.workspace_path.join(".ee").join("ee.db"));
+    let database_path = options.resolve_database_path();
     if !explicit_database_path && !database_path.exists() {
         for hit in &hits {
             stats.record_candidate_id(passthrough_scope, Some(&hit.doc_id));
@@ -10406,6 +10411,51 @@ mod tests {
             options.resolve_index_dir(),
             PathBuf::from("/home/user/project/.ee/index")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn search_default_paths_canonicalize_existing_workspace_root() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("canonical-default-paths");
+        let target = root.join("real-workspace");
+        let alias = root.join("alias-workspace");
+        std::fs::create_dir_all(&target).map_err(|error| error.to_string())?;
+        symlink(&target, &alias).map_err(|error| error.to_string())?;
+
+        let canonical = target.canonicalize().map_err(|error| error.to_string())?;
+        let expected_database = canonical.join(".ee").join("ee.db");
+        let expected_index = canonical.join(".ee").join(DEFAULT_INDEX_SUBDIR);
+        let options = SearchOptions {
+            workspace_path: alias,
+            database_path: None,
+            index_dir: None,
+            query: "test".to_string(),
+            limit: 10,
+            speed: SpeedMode::Default,
+            explain: false,
+            as_of: None,
+            include_tombstoned: false,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            dedup_mode: SearchDedupMode::DocId,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+        };
+
+        assert_eq!(options.resolve_database_path(), expected_database);
+        assert_eq!(options.resolve_index_dir(), expected_index);
+
+        let key = IndexStatusCacheKey::from_search_options(&options, &expected_index);
+        assert_eq!(key.database_path, expected_database);
+        assert_eq!(key.index_dir, expected_index);
+
+        Ok(())
     }
 
     #[test]
