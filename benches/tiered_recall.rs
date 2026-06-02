@@ -15,6 +15,7 @@ use ee::core::context::{
     ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::search::SearchSourceMode;
 use ee::db::{CreateMemoryInput, CreateWorkspaceInput, DbConnection};
 use ee::models::{MemoryScope, RedactionLevel, WorkspaceId};
 use ee::search::SpeedMode;
@@ -159,6 +160,8 @@ fn context_options(workspace_path: &Path, index_dir: &Path) -> ContextPackOption
         index_dir: Some(index_dir.to_path_buf()),
         query: TIERED_RECALL_QUERY.to_owned(),
         speed: SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(20_000),

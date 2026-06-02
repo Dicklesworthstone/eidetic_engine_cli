@@ -127,7 +127,7 @@ ee daemon request ee.daemon.context --json
 
 **Introduced by:** bd-3usjw.57 (epic J)
 
-**Trigger.** A multi-agent write path attempts to acquire a workspace advisory lock, but another live process holds the lock beyond the retry budget.
+**Trigger.** A multi-agent write path attempts to acquire a workspace advisory lock, but another holder keeps the lock beyond the retry budget.
 
 **Setup.**
 
@@ -144,7 +144,7 @@ ee remember 'contention fixture' --workspace . --level procedural --kind fact --
 
 **Expected emission.** Message contains: `advisory lock ... timeout`
 
-**Repair hint.** `ee diag advisory-lock`
+**Repair hint.** `ee diag advisory-lock --workspace . --resource-type workspace --release --json`
 
 **Fixture.** [`tests/fixtures/failure_modes/advisory_lock_timeout.json`](../tests/fixtures/failure_modes/advisory_lock_timeout.json)
 
@@ -13533,7 +13533,7 @@ cd nested && ee status --json
 
 **Introduced by:** bd-2bbtw (epic E)
 
-**Trigger.** ee init is invoked with a workspace path that traverses a symlink while --allow-symlink is not set. On macOS, /tmp paths naturally hit this guard because /tmp points at /private/tmp.
+**Trigger.** ee init is invoked with a workspace whose final path component is a symlink while --allow-symlink is not set. Ancestor symlinks, including macOS /tmp -> /private/tmp, are canonicalized before this guard runs.
 
 **Setup.**
 

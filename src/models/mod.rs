@@ -1249,6 +1249,30 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
                 example: None,
             },
         ],
+        "search_index_stale" | "index_stale" => vec![
+            recovery_command(
+                1,
+                "ee index status --workspace . --json",
+                "Inspect database and index generations before rebuilding the derived search asset.",
+            ),
+            recovery_command(
+                2,
+                "ee index rebuild --workspace . --json",
+                "Rebuild the derived search index after confirming it is stale.",
+            ),
+        ],
+        "index_missing" => vec![
+            recovery_command(
+                1,
+                "ee index status --workspace . --json",
+                "Confirm whether index metadata or files are missing.",
+            ),
+            recovery_command(
+                2,
+                "ee index rebuild --workspace . --json",
+                "Recreate the derived search index from the source-of-truth database.",
+            ),
+        ],
         _ => Vec::new(),
     }
 }
@@ -2527,6 +2551,22 @@ mod tests {
         assert_eq!(
             first_json["resultsIn"],
             "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+        );
+    }
+
+    #[test]
+    fn degraded_recovery_actions_for_stale_index_start_with_status() {
+        let actions = super::degraded_recovery_actions("search_index_stale");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].priority, 1);
+        assert_eq!(actions[0].kind, super::RecoveryKind::Command);
+        assert_eq!(
+            actions[0].command.as_deref(),
+            Some("ee index status --workspace . --json")
+        );
+        assert_eq!(
+            actions[1].command.as_deref(),
+            Some("ee index rebuild --workspace . --json")
         );
     }
 

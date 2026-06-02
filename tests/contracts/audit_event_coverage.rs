@@ -197,6 +197,8 @@ fn ee_context_writes_pack_assembled_and_included_mem_rows() -> TestResult {
         candidate_pool: Some(10),
         max_results: None,
         speed: SpeedMode::Default,
+        source_mode: ee::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         include_tombstoned: false,
         as_of: None,

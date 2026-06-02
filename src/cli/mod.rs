@@ -366,7 +366,7 @@ pub struct Cli {
     #[arg(skip)]
     format_explicit: bool,
 
-    /// Control output fields by preset or comma-separated canonical names.
+    /// Control output fields by preset or comma-separated canonical names; may appear before or after subcommands.
     #[arg(
         long,
         global = true,
@@ -2280,6 +2280,14 @@ pub struct ContextArgs {
     #[arg(long, value_parser = parse_speed_mode_arg, default_value = "default")]
     pub speed: crate::search::SpeedMode,
 
+    /// Retrieval source to use before packing: lexical_only, semantic_only, or hybrid.
+    #[arg(long, value_parser = parse_search_source_mode_arg, default_value = "hybrid")]
+    pub source_mode: SearchSourceMode,
+
+    /// Fail instead of falling back when the requested retrieval source is unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_source_mode: bool,
+
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p', default_value = "balanced")]
     pub profile: String,
@@ -2440,6 +2448,10 @@ pub struct OrientArgs {
     #[arg(long, default_value_t = 100)]
     pub candidate_pool: u32,
 
+    /// Fast session-start mode: skip full doctor and embedded pack work.
+    #[arg(long, alias = "quick", action = ArgAction::SetTrue)]
+    pub fast: bool,
+
     /// Include remote-compilation posture in the swarm brief portion.
     #[arg(long = "include-rch", action = ArgAction::SetTrue)]
     pub include_rch: bool,
@@ -2538,6 +2550,14 @@ pub struct PackArgs {
     /// Retrieval speed/quality budget. Overrides query-file speed.
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
+
+    /// Retrieval source to use before packing. Overrides the default hybrid retrieval mode.
+    #[arg(long, value_parser = parse_search_source_mode_arg)]
+    pub source_mode: Option<SearchSourceMode>,
+
+    /// Fail instead of falling back when the requested retrieval source is unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_source_mode: bool,
 
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
@@ -2657,6 +2677,14 @@ pub struct PackBuildArgs {
     #[arg(long, value_parser = parse_speed_mode_arg)]
     pub speed: Option<crate::search::SpeedMode>,
 
+    /// Retrieval source to use before packing. Overrides the default hybrid retrieval mode.
+    #[arg(long, value_parser = parse_search_source_mode_arg)]
+    pub source_mode: Option<SearchSourceMode>,
+
+    /// Fail instead of falling back when the requested retrieval source is unavailable.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub strict_source_mode: bool,
+
     /// Context profile: compact, balanced, grounding, orientation, thorough, or submodular.
     #[arg(long, short = 'p')]
     pub profile: Option<String>,
@@ -2762,6 +2790,8 @@ impl PackArgs {
             max_tokens: self.max_tokens,
             candidate_pool: self.candidate_pool,
             speed: self.speed,
+            source_mode: self.source_mode,
+            strict_source_mode: self.strict_source_mode,
             profile: self.profile.clone(),
             pack_profile: self.pack_profile,
             resource_profile: self.resource_profile,
@@ -2911,6 +2941,18 @@ pub struct DiagAdvisoryLockArgs {
     /// Holder id to store in the advisory lock.
     #[arg(long, default_value = "j6-diagnostic-holder", value_name = "ID")]
     pub holder: String,
+
+    /// List currently held advisory locks without mutating them.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub list: bool,
+
+    /// Release a dead same-host holder for the selected resource.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub release: bool,
+
+    /// Force release the selected resource even when holder liveness is unknown or alive.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub force: bool,
 
     /// Lock TTL in seconds.
     #[arg(long, default_value_t = 3600, value_name = "SECONDS")]
@@ -10612,7 +10654,7 @@ where
                 skip_boilerplate: args.skip_boilerplate,
             };
             let report = init_workspace(&options);
-            match cli.renderer() {
+            let write_exit = match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &report.human_summary())
                 }
@@ -10624,7 +10666,8 @@ where
                     let json = init_response_json(&report);
                     write_stdout(stdout, &(json.to_string() + "\n"))
                 }
-            }
+            };
+            init_report_exit_code(&report, write_exit)
         }
         Some(Command::Economy(EconomyCommand::Report(ref args))) => {
             handle_economy_report(&cli, args, stdout, stderr)
@@ -13814,6 +13857,24 @@ where
 const INIT_WORKSPACE_SYMLINK_REFUSED_CODE: &str = "workspace_symlink_refused";
 const INIT_WORKSPACE_SYMLINK_REFUSED_REPAIR: &str = "Resolve the workspace path with realpath and retry ee init, or pass --allow-symlink only after confirming the target is safe.";
 
+fn init_report_exit_code(report: &InitReport, write_exit: ProcessExitCode) -> ProcessExitCode {
+    if write_exit != ProcessExitCode::Success {
+        return write_exit;
+    }
+    if report.status.is_success() {
+        return ProcessExitCode::Success;
+    }
+    if report
+        .action_errors
+        .iter()
+        .any(|error| error.status == "failed")
+    {
+        ProcessExitCode::Storage
+    } else {
+        ProcessExitCode::Configuration
+    }
+}
+
 fn init_response_json(report: &InitReport) -> serde_json::Value {
     let degraded = init_degraded_json(report);
     let mut response = serde_json::json!({
@@ -15339,6 +15400,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
+        "degraded": [],
     })
     .to_string()
 }
@@ -15357,6 +15419,7 @@ where
         "schema": crate::models::RESPONSE_SCHEMA_V2,
         "success": true,
         "data": report,
+        "degraded": [],
     })
     .to_string()
 }
@@ -22966,6 +23029,33 @@ where
     }
 }
 
+fn advisory_lock_liveness_json(holder_id: &str) -> serde_json::Value {
+    match crate::db::advisory_lock_holder_liveness(holder_id) {
+        crate::db::AdvisoryLockHolderLiveness::Alive { pid } => {
+            serde_json::json!({ "status": "alive", "pid": pid, "reason": null })
+        }
+        crate::db::AdvisoryLockHolderLiveness::Dead { pid } => {
+            serde_json::json!({ "status": "dead", "pid": pid, "reason": null })
+        }
+        crate::db::AdvisoryLockHolderLiveness::Unknown { reason } => {
+            serde_json::json!({ "status": "unknown", "pid": null, "reason": reason })
+        }
+    }
+}
+
+fn advisory_lock_json(lock: &crate::db::AdvisoryLock) -> serde_json::Value {
+    serde_json::json!({
+        "resourceType": lock.id.resource_type(),
+        "resourceId": lock.id.resource_id(),
+        "canonicalKey": lock.id.canonical_key(),
+        "holderId": lock.holder_id.as_str(),
+        "acquiredAt": lock.acquired_at.as_str(),
+        "expiresAt": lock.expires_at.as_deref(),
+        "reason": lock.reason.as_deref(),
+        "holderLiveness": advisory_lock_liveness_json(&lock.holder_id),
+    })
+}
+
 fn handle_diag_advisory_lock<W, E>(
     cli: &Cli,
     args: &DiagAdvisoryLockArgs,
@@ -23018,6 +23108,253 @@ where
         .clone()
         .unwrap_or_else(|| workspace_id.clone());
     let lock_id = crate::db::AdvisoryLockId::new(&args.resource_type, &resource_id);
+    let release_repair = advisory_lock_repair_command(args, &resource_id, "--release");
+    let list_repair = advisory_lock_repair_command(args, &resource_id, "--list");
+
+    if args.list && args.release {
+        let domain_error = DomainError::Usage {
+            message: "Use either --list or --release, not both.".to_owned(),
+            repair: Some("Run ee diag advisory-lock --list --workspace . --json".to_owned()),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if args.force && !args.release {
+        let domain_error = DomainError::Usage {
+            message: "--force only applies with --release.".to_owned(),
+            repair: Some(
+                "Run ee diag advisory-lock --release --force --workspace . --json".to_owned(),
+            ),
+        };
+        return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+    }
+
+    if args.list {
+        let locks = match conn.list_active_advisory_locks() {
+            Ok(locks) => locks,
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to list advisory locks: {error}"),
+                    repair: Some(MIGRATION_REPAIR_COMMAND.to_owned()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+        let filter_resource = args.resource_id.is_some();
+        let locks_json: Vec<_> = locks
+            .iter()
+            .filter(|lock| {
+                !filter_resource
+                    || (lock.id.resource_type() == args.resource_type
+                        && lock.id.resource_id() == resource_id)
+            })
+            .map(advisory_lock_json)
+            .collect();
+        let lock_count = locks_json.len();
+        let response = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": "diag advisory-lock",
+                "action": "list",
+                "version": env!("CARGO_PKG_VERSION"),
+                "workspaceId": workspace_id,
+                "databasePath": database_path.display().to_string(),
+                "resourceType": args.resource_type,
+                "resourceId": resource_id,
+                "resourceFilterApplied": filter_resource,
+                "lockCount": lock_count,
+                "locks": locks_json,
+                "degraded": []
+            },
+            "degraded": []
+        });
+
+        return match cli.renderer() {
+            output::Renderer::Human | output::Renderer::Markdown => {
+                if lock_count == 0 {
+                    write_stdout(stdout, "no active advisory locks\n")
+                } else {
+                    let mut human = String::new();
+                    for lock in response["data"]["locks"].as_array().into_iter().flatten() {
+                        let canonical_key = lock["canonicalKey"].as_str().unwrap_or("<unknown>");
+                        let holder_id = lock["holderId"].as_str().unwrap_or("<unknown>");
+                        let status = lock["holderLiveness"]["status"]
+                            .as_str()
+                            .unwrap_or("unknown");
+                        human.push_str(&format!(
+                            "advisory lock held\n  resource: {canonical_key}\n  holder: {holder_id}\n  holder_liveness: {status}\n"
+                        ));
+                    }
+                    write_stdout(stdout, &human)
+                }
+            }
+            output::Renderer::Toon => write_stdout(
+                stdout,
+                &(output::render_toon_from_json(&response.to_string()) + "\n"),
+            ),
+            output::Renderer::Json
+            | output::Renderer::Jsonl
+            | output::Renderer::Compact
+            | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
+        };
+    }
+
+    if args.release {
+        let expected_holder =
+            (args.holder != "j6-diagnostic-holder").then_some(args.holder.as_str());
+        let release_result = if args.force {
+            conn.force_release_advisory_lock(
+                &lock_id,
+                expected_holder,
+                "diag advisory-lock",
+                &args.reason,
+            )
+        } else {
+            conn.release_reclaimable_advisory_lock(
+                &lock_id,
+                expected_holder,
+                "diag advisory-lock",
+                &args.reason,
+            )
+        };
+        let release_result = match release_result {
+            Ok(result) => result,
+            Err(error) => {
+                let domain_error = DomainError::Storage {
+                    message: format!("Failed to release advisory lock: {error}"),
+                    repair: Some(release_repair.clone()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        };
+
+        match release_result {
+            crate::db::AdvisoryLockReleaseOutcome::Released { lock, audit_id } => {
+                let status = if args.force {
+                    "force_released"
+                } else {
+                    "released"
+                };
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": {
+                        "command": "diag advisory-lock",
+                        "action": "release",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "workspaceId": workspace_id,
+                        "databasePath": database_path.display().to_string(),
+                        "resourceType": args.resource_type,
+                        "resourceId": resource_id,
+                        "canonicalKey": lock_id.canonical_key(),
+                        "status": status,
+                        "releasedLock": advisory_lock_json(&lock),
+                        "auditId": audit_id,
+                        "force": args.force,
+                        "degraded": []
+                    },
+                    "degraded": []
+                });
+                return match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                        stdout,
+                        &format!(
+                            "advisory lock {status}\n  resource: {}\n  holder: {}\n",
+                            lock_id.canonical_key(),
+                            lock.holder_id
+                        ),
+                    ),
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&response.to_string()) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(response.to_string() + "\n"))
+                    }
+                };
+            }
+            crate::db::AdvisoryLockReleaseOutcome::NotHeld => {
+                let response = serde_json::json!({
+                    "schema": crate::models::RESPONSE_SCHEMA_V2,
+                    "success": true,
+                    "data": {
+                        "command": "diag advisory-lock",
+                        "action": "release",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "workspaceId": workspace_id,
+                        "databasePath": database_path.display().to_string(),
+                        "resourceType": args.resource_type,
+                        "resourceId": resource_id,
+                        "canonicalKey": lock_id.canonical_key(),
+                        "status": "not_held",
+                        "force": args.force,
+                        "degraded": []
+                    },
+                    "degraded": []
+                });
+                return match cli.renderer() {
+                    output::Renderer::Human | output::Renderer::Markdown => write_stdout(
+                        stdout,
+                        &format!(
+                            "advisory lock not held\n  resource: {}\n",
+                            lock_id.canonical_key()
+                        ),
+                    ),
+                    output::Renderer::Toon => write_stdout(
+                        stdout,
+                        &(output::render_toon_from_json(&response.to_string()) + "\n"),
+                    ),
+                    output::Renderer::Json
+                    | output::Renderer::Jsonl
+                    | output::Renderer::Compact
+                    | output::Renderer::Hook => {
+                        write_stdout(stdout, &(response.to_string() + "\n"))
+                    }
+                };
+            }
+            crate::db::AdvisoryLockReleaseOutcome::HolderMismatch { held } => {
+                let domain_error = DomainError::Storage {
+                    message: format!(
+                        "advisory lock release refused: {} is held by {}, not {}",
+                        lock_id.canonical_key(),
+                        held.holder_id,
+                        args.holder
+                    ),
+                    repair: Some(list_repair.clone()),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            crate::db::AdvisoryLockReleaseOutcome::HolderAlive { held, pid } => {
+                let domain_error = DomainError::Storage {
+                    message: format!(
+                        "advisory lock release refused: holder {} is alive with PID {}",
+                        held.holder_id, pid
+                    ),
+                    repair: Some(format!(
+                        "Wait for the holder to finish, then retry {release_repair}"
+                    )),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+            crate::db::AdvisoryLockReleaseOutcome::HolderUnprobeable { held, reason } => {
+                let domain_error = DomainError::Storage {
+                    message: format!(
+                        "advisory lock release refused: holder {} cannot be safely probed: {}",
+                        held.holder_id, reason
+                    ),
+                    repair: Some(
+                        "Let the lock TTL expire or manually verify before using --force"
+                            .to_owned(),
+                    ),
+                };
+                return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+            }
+        }
+    }
 
     let lock_result = match conn.acquire_advisory_lock(
         &lock_id,
@@ -23029,7 +23366,7 @@ where
         Err(error) => {
             let domain_error = DomainError::Storage {
                 message: format!("Failed to acquire advisory lock: {error}"),
-                repair: Some("ee diag advisory-lock --workspace . --json".to_string()),
+                repair: Some(release_repair),
             };
             return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
         }
@@ -23068,7 +23405,8 @@ where
             "ttlSeconds": args.ttl_seconds,
             "reason": args.reason,
             "degraded": []
-        }
+        },
+        "degraded": []
     });
 
     match cli.renderer() {
@@ -23088,6 +23426,25 @@ where
         | output::Renderer::Compact
         | output::Renderer::Hook => write_stdout(stdout, &(response.to_string() + "\n")),
     }
+}
+
+fn advisory_lock_repair_command(
+    args: &DiagAdvisoryLockArgs,
+    resource_id: &str,
+    action_flag: &str,
+) -> String {
+    let mut command = format!(
+        "ee diag advisory-lock --workspace . --resource-type {}",
+        shell_quote_cli_arg(&args.resource_type)
+    );
+    if args.resource_id.is_some() {
+        command.push_str(" --resource-id ");
+        command.push_str(&shell_quote_cli_arg(resource_id));
+    }
+    command.push(' ');
+    command.push_str(action_flag);
+    command.push_str(" --json");
+    command
 }
 
 fn handle_diag_causal_edge<W, E>(
@@ -29181,14 +29538,29 @@ where
     let workspace_path = cli.resolve_workspace();
     let mut degraded = Vec::new();
 
-    let mut swarm_sources = default_swarm_brief_sources();
+    let mut swarm_sources = if args.fast {
+        [
+            SwarmBriefSourceKind::AgentInventory,
+            SwarmBriefSourceKind::AgentMail,
+            SwarmBriefSourceKind::Git,
+            SwarmBriefSourceKind::HostProfile,
+        ]
+        .into_iter()
+        .collect()
+    } else {
+        default_swarm_brief_sources()
+    };
     if args.include_rch {
         swarm_sources.insert(SwarmBriefSourceKind::Rch);
     }
     let mut swarm_options = SwarmBriefCollectOptions::for_workspace(workspace_path.clone());
     swarm_options.include_rch = args.include_rch;
     swarm_options.enabled_sources = swarm_sources;
-    swarm_options.command_timeout_ms = args.command_timeout_ms;
+    swarm_options.command_timeout_ms = if args.fast {
+        args.command_timeout_ms.min(250)
+    } else {
+        args.command_timeout_ms
+    };
     let swarm_report = collect_swarm_brief(&swarm_options, &SystemSwarmBriefCommandRunner);
     let swarm_brief = match render_swarm_brief_json(&swarm_report, output::FieldProfile::Summary) {
         Ok(raw) => orient_component_data_from_envelope(&raw),
@@ -29206,8 +29578,25 @@ where
         }
     };
 
-    let doctor_report = DoctorReport::gather_for_workspace(&workspace_path);
-    let doctor = orient_component_data_from_envelope(&doctor_robot_triage_json(&doctor_report));
+    let doctor = if args.fast {
+        degraded.push(orient_degradation_value(
+            "orient_doctor_skipped",
+            "info",
+            "Doctor triage was skipped because --fast was requested.".to_string(),
+            Some(format!(
+                "Run `{}` for full posture.",
+                orient_doctor_command(&workspace_path)
+            )),
+        ));
+        orient_skipped_component(
+            "doctor",
+            "fast_mode",
+            orient_doctor_command(&workspace_path),
+        )
+    } else {
+        let doctor_report = DoctorReport::gather_for_workspace(&workspace_path);
+        orient_component_data_from_envelope(&doctor_robot_triage_json(&doctor_report))
+    };
 
     let install_report = check_install(&InstallCheckOptions {
         current_binary: std::env::current_exe().ok(),
@@ -29245,60 +29634,85 @@ where
         }
     };
 
-    let filters = crate::models::QueryFilters::default();
-    let output_options = ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Standard)
-        .with_resource_profile(PackResourceProfile::Standard);
-    let pack_options = ContextPackOptions {
-        workspace_path: workspace_path.clone(),
-        database_path: None,
-        index_dir: None,
-        query: args.task.clone(),
-        speed: crate::search::SpeedMode::Default,
-        filters,
-        profile: Some(profile),
-        max_tokens: Some(args.max_tokens),
-        candidate_pool: Some(args.candidate_pool),
-        max_results: None,
-        include_tombstoned: false,
-        as_of: None,
-        include_expired: false,
-        include_future: false,
-        include_stale: false,
-        relevance_floor: None,
-        redaction_level: BackupRedaction::Minimal.to_model(),
-        memory_scope: MemoryScope::Swarm,
-        strict_scope: false,
-        ppr_weight: None,
-        changed_symbols: Vec::new(),
-        changed_symbols_from_git: false,
-        pagination: None,
-        coordination_snapshot_path: None,
-        coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
-        output_options,
-        persist_pack: false,
-    };
-    let pack = match run_context_pack_with_performance(&pack_options, "orient") {
-        Ok(run) => {
-            let raw = output::render_context_response_json_with_options(
-                &run.response,
-                output::ContextJsonRenderOptions::from(output_options),
-            );
-            orient_component_data_from_envelope(&raw)
-        }
-        Err(error) => {
-            degraded.push(orient_degradation_value(
-                "orient_pack_unavailable",
-                "warning",
-                format!("Read-only context pack could not be assembled: {error}"),
-                Some("Run `ee pack \"<task>\" --read-only --json` to isolate pack retrieval posture.".to_string()),
-            ));
-            serde_json::Value::Null
+    let pack = if args.fast {
+        degraded.push(orient_degradation_value(
+            "orient_pack_skipped",
+            "info",
+            "Embedded context pack was skipped because --fast was requested.".to_string(),
+            Some(orient_pack_command(
+                &workspace_path,
+                &args.task,
+                args.max_tokens,
+            )),
+        ));
+        orient_skipped_component(
+            "pack",
+            "fast_mode",
+            orient_pack_command(&workspace_path, &args.task, args.max_tokens),
+        )
+    } else {
+        let filters = crate::models::QueryFilters::default();
+        let output_options =
+            ContextPackOutputOptions::for_profile(ContextPackOutputProfile::Standard)
+                .with_resource_profile(PackResourceProfile::Standard);
+        let pack_options = ContextPackOptions {
+            workspace_path: workspace_path.clone(),
+            database_path: None,
+            index_dir: None,
+            query: args.task.clone(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
+            filters,
+            profile: Some(profile),
+            max_tokens: Some(args.max_tokens),
+            candidate_pool: Some(args.candidate_pool),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: BackupRedaction::Minimal.to_model(),
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options,
+            persist_pack: false,
+        };
+        match run_context_pack_with_performance(&pack_options, "orient") {
+            Ok(run) => {
+                let raw = output::render_context_response_json_with_options(
+                    &run.response,
+                    output::ContextJsonRenderOptions::from(output_options),
+                );
+                orient_component_data_from_envelope(&raw)
+            }
+            Err(error) => {
+                degraded.push(orient_degradation_value(
+                    "orient_pack_unavailable",
+                    "warning",
+                    format!("Read-only context pack could not be assembled: {error}"),
+                    Some(format!(
+                        "Run `{}` to isolate lexical retrieval posture.",
+                        orient_pack_command(&workspace_path, &args.task, args.max_tokens)
+                    )),
+                ));
+                serde_json::Value::Null
+            }
         }
     };
 
     let data = serde_json::json!({
         "schema": "ee.orient.v1",
         "command": "orient",
+        "mode": if args.fast { "fast" } else { "full" },
         "version": env!("CARGO_PKG_VERSION"),
         "workspace": workspace_path.display().to_string(),
         "task": &args.task,
@@ -29364,6 +29778,21 @@ fn orient_degradation_value(
     })
 }
 
+fn orient_skipped_component(
+    component: &'static str,
+    reason: &'static str,
+    next_command: String,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "ee.orient.component.v1",
+        "component": component,
+        "status": "skipped",
+        "reason": reason,
+        "posture": "skipped",
+        "nextCommand": next_command,
+    })
+}
+
 fn orient_workspace_hygiene_summary(
     report: &workspace_core::WorkspaceHygieneReport,
 ) -> serde_json::Value {
@@ -29396,14 +29825,36 @@ fn orient_workspace_hygiene_summary(
 }
 
 fn orient_next_commands(workspace: &Path, task: &str, max_tokens: u32) -> Vec<String> {
+    vec![
+        orient_pack_command(workspace, task, max_tokens),
+        orient_search_command(workspace, task),
+        orient_workspace_hygiene_command(workspace),
+        orient_doctor_command(workspace),
+    ]
+}
+
+fn orient_pack_command(workspace: &Path, task: &str, max_tokens: u32) -> String {
     let workspace = shell_quote_cli_arg(&workspace.display().to_string());
     let task = shell_quote_cli_arg(task);
-    vec![
-        format!("ee pack --workspace {workspace} --max-tokens {max_tokens} --json -- {task}"),
-        format!("ee search --workspace {workspace} --json -- {task}"),
-        format!("ee workspace hygiene --workspace {workspace} --json"),
-        format!("ee doctor --workspace {workspace} --robot-triage"),
-    ]
+    format!(
+        "ee pack --workspace {workspace} --read-only --source-mode lexical_only --max-tokens {max_tokens} --json -- {task}"
+    )
+}
+
+fn orient_search_command(workspace: &Path, task: &str) -> String {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    let task = shell_quote_cli_arg(task);
+    format!("ee search --workspace {workspace} --json -- {task}")
+}
+
+fn orient_workspace_hygiene_command(workspace: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    format!("ee workspace hygiene --workspace {workspace} --json")
+}
+
+fn orient_doctor_command(workspace: &Path) -> String {
+    let workspace = shell_quote_cli_arg(&workspace.display().to_string());
+    format!("ee doctor --workspace {workspace} --robot-triage")
 }
 
 fn shell_quote_cli_arg(value: &str) -> String {
@@ -29432,6 +29883,10 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .pointer("/doctor/posture")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("unknown");
+    let mode = data
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("full");
     let dirty_paths = data
         .pointer("/workspaceHygiene/dirtyPathCount")
         .and_then(serde_json::Value::as_u64)
@@ -29441,7 +29896,7 @@ fn render_orient_human(data: &serde_json::Value, degraded: &[serde_json::Value])
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
     let mut out = format!(
-        "Orientation: {task}\nWorkspace: {workspace}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\n"
+        "Orientation: {task}\nWorkspace: {workspace}\nMode: {mode}\nDoctor posture: {posture}\nDirty paths: {dirty_paths}\nPack items: {pack_items}\n"
     );
     if !degraded.is_empty() {
         out.push_str("\nDegraded:\n");
@@ -29536,6 +29991,8 @@ where
         index_dir: args.index_dir.clone(),
         query: args.query.clone(),
         speed: args.speed,
+        source_mode: args.source_mode,
+        strict_source_mode: args.strict_source_mode,
         profile: Some(profile),
         max_tokens: args.max_tokens,
         candidate_pool: Some(args.candidate_pool),
@@ -32456,6 +32913,8 @@ where
             max_tokens: args.max_tokens,
             candidate_pool: args.candidate_pool.unwrap_or(100),
             speed: args.speed.unwrap_or(crate::search::SpeedMode::Default),
+            source_mode: args.source_mode.unwrap_or(SearchSourceMode::Hybrid),
+            strict_source_mode: args.strict_source_mode,
             stream: false,
             profile: args
                 .profile
@@ -32611,6 +33070,8 @@ where
         index_dir: args.index_dir.clone(),
         query: request.query,
         speed: args.speed.unwrap_or(request.speed),
+        source_mode: args.source_mode.unwrap_or(SearchSourceMode::Hybrid),
+        strict_source_mode: args.strict_source_mode,
         filters,
         profile,
         max_tokens: args.max_tokens.or(request.max_tokens),
@@ -46236,6 +46697,26 @@ fn render_swarm_brief_json(
                 "inProgressCount": report.beads.in_progress.len(),
                 "deferredCount": report.beads.deferred.len(),
             },
+            "readyReservationPressure": {
+                "count": report.ready_reservation_pressure.len(),
+                "topReadyBeads": report.ready_reservation_pressure.iter().take(5).map(|pressure| {
+                    serde_json::json!({
+                        "beadId": &pressure.bead_id,
+                        "title": &pressure.title,
+                        "priority": pressure.priority,
+                        "action": &pressure.action,
+                        "severity": &pressure.severity,
+                        "likelySurfaces": &pressure.likely_surfaces,
+                        "reservationHolders": &pressure.reservation_holders,
+                        "exclusiveReservationCount": pressure.exclusive_reservation_count,
+                        "sharedReservationCount": pressure.shared_reservation_count,
+                        "earliestExpiresAt": &pressure.earliest_expires_at,
+                        "maxRiskScore": pressure.max_risk_score,
+                        "riskFactors": &pressure.risk_factors,
+                        "suggestedCommands": &pressure.suggested_commands,
+                    })
+                }).collect::<Vec<_>>(),
+            },
             "rchLocalCapability": report.rch_local_capability.as_ref().map(|capability| {
                 serde_json::json!({
                     "schema": capability.schema,
@@ -48110,7 +48591,7 @@ mod tests {
         TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
         WorkspaceCommand, WorkspaceHygieneArgs, WorkspaceHygieneMode, db_inspect_redact_source_uri,
         format_search_json_with_mesh_and_recalibration, hook_git_readiness_response_json,
-        json_with_data_result_path, mesh, orient_next_commands,
+        init_report_exit_code, json_with_data_result_path, mesh, orient_next_commands,
         parse_completion_audit_evidence_input, parse_context_profile,
         parse_lab_counterfactual_swap, parse_lab_counterfactual_swap_revision,
         parse_search_source_mode_arg, parse_verification_evidence_record_input,
@@ -48274,6 +48755,181 @@ mod tests {
         Ok(workspace)
     }
 
+    fn init_report_fixture(
+        status: crate::core::init::InitStatus,
+        action_errors: Vec<crate::core::init::InitActionError>,
+    ) -> crate::core::init::InitReport {
+        crate::core::init::InitReport {
+            version: "test",
+            status,
+            workspace: PathBuf::from("/test/workspace"),
+            ee_dir: PathBuf::from("/test/workspace/.ee"),
+            database_path: PathBuf::from("/test/workspace/.ee/ee.db"),
+            index_dir: PathBuf::from("/test/workspace/.ee/index"),
+            actions: Vec::new(),
+            action_errors,
+            dry_run: false,
+        }
+    }
+
+    #[test]
+    fn init_report_exit_code_maps_failed_reports() -> TestResult {
+        let created = init_report_fixture(crate::core::init::InitStatus::Created, Vec::new());
+        ensure_equal(
+            &init_report_exit_code(&created, ProcessExitCode::Success),
+            &ProcessExitCode::Success,
+            "successful init report exits success",
+        )?;
+
+        let symlink_refused = init_report_fixture(
+            crate::core::init::InitStatus::Failed,
+            vec![crate::core::init::InitActionError {
+                action: "check_workspace",
+                path: PathBuf::from("/tmp/linked"),
+                status: "symlink_refused",
+                message: "refused".to_owned(),
+            }],
+        );
+        ensure_equal(
+            &init_report_exit_code(&symlink_refused, ProcessExitCode::Success),
+            &ProcessExitCode::Configuration,
+            "path-safety init failure exits configuration",
+        )?;
+
+        let storage_failed = init_report_fixture(
+            crate::core::init::InitStatus::Failed,
+            vec![crate::core::init::InitActionError {
+                action: "create_file",
+                path: PathBuf::from("/test/workspace/.ee/ee.db"),
+                status: "failed",
+                message: "permission denied".to_owned(),
+            }],
+        );
+        ensure_equal(
+            &init_report_exit_code(&storage_failed, ProcessExitCode::Success),
+            &ProcessExitCode::Storage,
+            "filesystem init failure exits storage",
+        )?;
+        ensure_equal(
+            &init_report_exit_code(&created, ProcessExitCode::Usage),
+            &ProcessExitCode::Usage,
+            "renderer write failures pass through",
+        )
+    }
+
+    #[test]
+    fn advisory_lock_repair_command_preserves_selected_resource() -> TestResult {
+        let mut args = super::DiagAdvisoryLockArgs {
+            database: None,
+            resource_type: "workspace".to_owned(),
+            resource_id: None,
+            holder: "j6-diagnostic-holder".to_owned(),
+            list: false,
+            release: false,
+            force: false,
+            ttl_seconds: 3600,
+            reason: "diagnostic advisory lock".to_owned(),
+        };
+        ensure_equal(
+            &super::advisory_lock_repair_command(&args, "wsp_current", "--release"),
+            &"ee diag advisory-lock --workspace . --resource-type workspace --release --json"
+                .to_owned(),
+            "default resource id repair command",
+        )?;
+
+        args.resource_id = Some("wsp with'quote".to_owned());
+        ensure_equal(
+            &super::advisory_lock_repair_command(&args, "wsp with'quote", "--list"),
+            &"ee diag advisory-lock --workspace . --resource-type workspace --resource-id 'wsp with'\\''quote' --list --json"
+                .to_owned(),
+            "explicit resource id is shell quoted",
+        )
+    }
+
+    #[test]
+    fn workspace_response_helpers_emit_response_envelope_degraded() -> TestResult {
+        let report = serde_json::json!({
+            "command": "workspace list",
+            "workspaceCount": 0,
+        });
+
+        for (label, rendered) in [
+            (
+                "workspace_response_json",
+                super::workspace_response_json(&report),
+            ),
+            (
+                "workspace_response_json_v2",
+                super::workspace_response_json_v2(&report),
+            ),
+        ] {
+            let value: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|error| error.to_string())?;
+            ensure_equal(
+                &value["schema"],
+                &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+                &format!("{label} schema"),
+            )?;
+            ensure_equal(
+                &value["success"],
+                &serde_json::json!(true),
+                &format!("{label} success"),
+            )?;
+            ensure_equal(
+                &value["degraded"],
+                &serde_json::json!([]),
+                &format!("{label} degraded"),
+            )?;
+            ensure_equal(
+                &value["data"]["command"],
+                &serde_json::json!("workspace list"),
+                &format!("{label} data command"),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_acquire_json_uses_response_envelope_degraded() -> TestResult {
+        let workspace = init_cli_workspace("diag-advisory-lock-envelope")?;
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "--json",
+            "--workspace",
+            &workspace,
+            "diag",
+            "advisory-lock",
+        ]);
+
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "diag advisory-lock acquire exit",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "diag advisory-lock acquire JSON stderr clean",
+        )?;
+        let value: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &value["schema"],
+            &serde_json::json!(crate::models::RESPONSE_SCHEMA_V2),
+            "diag advisory-lock acquire response schema",
+        )?;
+        ensure_equal(
+            &value["degraded"],
+            &serde_json::json!([]),
+            "diag advisory-lock acquire top-level degraded",
+        )?;
+        ensure_equal(
+            &value["data"]["degraded"],
+            &serde_json::json!([]),
+            "diag advisory-lock acquire data degraded",
+        )
+    }
+
     #[cfg(unix)]
     #[test]
     fn init_json_symlink_refusal_marks_failure_and_degraded() -> TestResult {
@@ -48291,8 +48947,8 @@ mod tests {
 
         ensure_equal(
             &exit,
-            &ProcessExitCode::Success,
-            "init symlink refusal keeps CLI exit stable",
+            &ProcessExitCode::Configuration,
+            "init symlink refusal exits nonzero",
         )?;
         ensure(stderr.is_empty(), "init symlink refusal stderr clean")?;
         let value: serde_json::Value =
@@ -49892,7 +50548,7 @@ mod tests {
         let commands = orient_next_commands(Path::new("/tmp/ws"), "-fix quoted task", 1234);
         ensure_equal(
             &commands[0],
-            &"ee pack --workspace /tmp/ws --max-tokens 1234 --json -- '-fix quoted task'"
+            &"ee pack --workspace /tmp/ws --read-only --source-mode lexical_only --max-tokens 1234 --json -- '-fix quoted task'"
                 .to_string(),
             "orient pack next command",
         )?;
@@ -49907,6 +50563,9 @@ mod tests {
             "pack",
             "--workspace",
             "/tmp/ws",
+            "--read-only",
+            "--source-mode",
+            "lexical_only",
             "--max-tokens",
             "1234",
             "--json",
@@ -49920,6 +50579,12 @@ mod tests {
                     &args.query.as_deref(),
                     &Some("-fix quoted task"),
                     "orient pack task",
+                )?;
+                ensure_equal(&args.read_only, &true, "orient pack read-only")?;
+                ensure_equal(
+                    &args.source_mode,
+                    &Some(SearchSourceMode::LexicalOnly),
+                    "orient pack source mode",
                 )?;
             }
             other => return Err(format!("expected pack command, got {other:?}")),
@@ -49947,6 +50612,16 @@ mod tests {
                 "orient search task",
             ),
             other => Err(format!("expected search command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn orient_command_accepts_fast_alias() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "orient", "--quick", "resume release work"])
+            .map_err(|error| format!("orient quick flag parse failed: {:?}", error.kind()))?;
+        match parsed.command {
+            Some(Command::Orient(args)) => ensure_equal(&args.fast, &true, "orient fast alias"),
+            other => Err(format!("expected orient command, got {other:?}")),
         }
     }
 
@@ -53947,7 +54622,7 @@ mod tests {
                 .as_array()
                 .map(std::vec::Vec::len)
                 .unwrap_or_default(),
-            &7,
+            &8,
             "swarm brief source count",
         )
     }
@@ -54457,6 +55132,11 @@ mod tests {
         }
         ensure_contains(&stdout, "status", "help status subcommand")?;
         ensure_contains(&stdout, "insights", "help insights subcommand")?;
+        ensure_contains(
+            &stdout,
+            "may appear before or after subcommands",
+            "help documents --fields placement",
+        )?;
         ensure_contains(&stdout, "  note ", "help lists note shortcut")?;
         ensure_contains(&stdout, "  pack ", "help lists pack shortcut")?;
         let init_pos = stdout
@@ -54901,6 +55581,36 @@ mod tests {
             .map(|cli| cli.fields_level())
             .map_err(|error| format!("failed to parse fields flag: {:?}", error.kind()))?;
         ensure_equal(&parsed, &FieldsLevel::Minimal, "fields minimal")
+    }
+
+    #[test]
+    fn parser_accepts_fields_flag_after_status_subcommand() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "status", "--fields", "summary"])
+            .map(|cli| cli.fields_level())
+            .map_err(|error| {
+                format!(
+                    "failed to parse --fields after status subcommand: {:?}",
+                    error.kind()
+                )
+            })?;
+        ensure_equal(&parsed, &FieldsLevel::Summary, "post-status fields summary")
+    }
+
+    #[test]
+    fn parser_accepts_fields_flag_after_nested_swarm_brief_subcommand() -> TestResult {
+        let parsed = Cli::try_parse_from(["ee", "swarm", "brief", "--fields=summary"])
+            .map(|cli| cli.fields_level())
+            .map_err(|error| {
+                format!(
+                    "failed to parse --fields after swarm brief subcommand: {:?}",
+                    error.kind()
+                )
+            })?;
+        ensure_equal(
+            &parsed,
+            &FieldsLevel::Summary,
+            "post-swarm-brief fields summary",
+        )
     }
 
     #[test]
@@ -58087,6 +58797,31 @@ mod tests {
     }
 
     #[test]
+    fn pack_command_accepts_source_mode_and_strict_source_mode() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "pack",
+            "--source-mode",
+            "lexical-only",
+            "--strict-source-mode",
+            "prepare release",
+        ])
+        .map_err(|e| format!("failed to parse pack source-mode flags: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Pack(ref args)) => {
+                ensure_equal(
+                    &args.source_mode,
+                    &Some(SearchSourceMode::LexicalOnly),
+                    "pack source mode",
+                )?;
+                ensure_equal(&args.strict_source_mode, &true, "pack strict source mode")
+            }
+            _ => Err("expected Pack command".to_string()),
+        }
+    }
+
+    #[test]
     fn search_command_accepts_include_tombstoned() -> TestResult {
         let parsed = Cli::try_parse_from(["ee", "search", "test", "--include-tombstoned"])
             .map_err(|e| format!("failed to parse search with tombstones: {:?}", e.kind()))?;
@@ -58958,6 +59693,38 @@ mod tests {
             "provenance_uri field present",
         )?;
         ensure(stderr.is_empty(), "remember json stderr must be empty")
+    }
+
+    #[test]
+    fn remember_json_accepts_manual_provenance_uri() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&[
+            "ee",
+            "remember",
+            "Manual lived-audit memory",
+            "--source",
+            "manual://lived-audit/2026-06-02",
+            "--dry-run",
+            "--json",
+        ]);
+        ensure_equal(
+            &exit,
+            &ProcessExitCode::Success,
+            "remember with manual provenance exit",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"source\":\"manual://lived-audit/2026-06-02\"",
+            "manual source field present",
+        )?;
+        ensure_contains(
+            &stdout,
+            "\"provenance_uri\":\"manual://lived-audit/2026-06-02\"",
+            "manual provenance_uri field present",
+        )?;
+        ensure(
+            stderr.is_empty(),
+            "remember manual provenance stderr must be empty",
+        )
     }
 
     #[test]

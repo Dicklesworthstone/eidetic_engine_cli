@@ -98,6 +98,8 @@ fn build_persisted_pack() -> Result<PackFixture, String> {
         candidate_pool: Some(10),
         max_results: None,
         speed: SpeedMode::Default,
+        source_mode: ee::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: QueryFilters::default(),
         include_tombstoned: false,
         as_of: None,

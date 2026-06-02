@@ -523,7 +523,7 @@ schema, and the contract test for the extended candidate envelope passes.
   (all/as_str/FromStr roundtrip, parse-error expected-list message,
   requires_content, requires_target_memory exclusion).
 - ~~**Provenance URI contract test**~~ — pinned by
-  `provenance_uri_accepts_five_documented_schemes` and
+  `provenance_uri_accepts_registered_schemes` and
   `provenance_uri_rejects_unregistered_scheme_with_named_error` in
   `tests/derived_memory_candidate_contracts.rs`. The type-level
   guarantee follows because `PackProvenance::new` takes a typed

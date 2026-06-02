@@ -42,6 +42,7 @@ use ee::core::context::{
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
+use ee::core::search::SearchSourceMode;
 use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
     MemoryLinkRelation, MemoryLinkSource,
@@ -498,6 +499,8 @@ fn pack_dna_orchestration_options(
         index_dir: Some(index_dir.to_path_buf()),
         query: "Pack DNA orchestration graph release pipeline".to_string(),
         speed: SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(1_200),
@@ -618,6 +621,8 @@ fn tiered_recall_options(
         index_dir: Some(index_dir.to_path_buf()),
         query: TIERED_RECALL_QUERY.to_owned(),
         speed: SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(20_000),
@@ -855,6 +860,8 @@ fn bench_context(c: &mut Criterion) {
                         index_dir: None,
                         query: "prepare for release deployment and testing".to_string(),
                         speed: SpeedMode::Default,
+                        source_mode: SearchSourceMode::Hybrid,
+                        strict_source_mode: false,
                         filters: Default::default(),
                         profile: None,
                         max_tokens: Some(tokens),
@@ -911,6 +918,8 @@ fn bench_context_memory_scales(c: &mut Criterion) {
                     index_dir: None,
                     query: "release testing security".to_string(),
                     speed: SpeedMode::Default,
+                    source_mode: SearchSourceMode::Hybrid,
+                    strict_source_mode: false,
                     filters: Default::default(),
                     profile: None,
                     max_tokens: Some(4000),
@@ -965,6 +974,8 @@ fn bench_context_s4_resource_scales(c: &mut Criterion) {
                         index_dir: Some(index_dir.clone()),
                         query: "S4 resource benchmark release testing performance".to_string(),
                         speed: SpeedMode::Default,
+                        source_mode: SearchSourceMode::Hybrid,
+                        strict_source_mode: false,
                         filters: Default::default(),
                         profile: None,
                         max_tokens: Some(4000),

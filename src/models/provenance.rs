@@ -6,7 +6,7 @@
 //! and must be both round-trippable through JSON and stable across
 //! tool versions.
 //!
-//! Five schemes are recognised in v1:
+//! Ten schemes are recognised in v1:
 //!
 //! | Scheme            | Body shape                                          |
 //! |-------------------|-----------------------------------------------------|
@@ -15,13 +15,18 @@
 //! | `ee-mem://`       | A full [`MemoryId`] string (`mem_<26-char>`)        |
 //! | `https://` `http://` | Any RFC-3986 absolute URL with an authority    |
 //! | `agent-mail://`   | `<thread-id>` plus optional `/<message-id>`         |
+//! | `manual://`       | Opaque human/agent note source                      |
+//! | `bench-run://`    | Opaque benchmark-run identifier                     |
+//! | `git-sha://`      | Opaque commit/revision identifier                   |
+//! | `flamegraph://`   | Opaque profiler artifact reference                  |
 //!
 //! The parser is strict about scheme syntax but does not perform deep
-//! semantic validation of the body — the file path can be any
-//! non-empty string, and the CASS session id is treated as opaque. The
-//! [`MemoryId`] body for `ee-mem://` is fully validated by the typed
-//! ID parser from EE-060 so a mistyped reference fails fast at the
-//! provenance boundary, not later in the retrieval pipeline.
+//! semantic validation of opaque bodies — file paths, CASS session ids,
+//! and registered external evidence references can be any non-empty
+//! string accepted by their scheme parser. The [`MemoryId`] body for
+//! `ee-mem://` is fully validated by the typed ID parser from EE-060
+//! so a mistyped reference fails fast at the provenance boundary, not
+//! later in the retrieval pipeline.
 //!
 //! Round-trip is the contract: `ProvenanceUri::from_str(s)?.to_string()
 //! == canonical(s)`. Inputs that already match the canonical form are
@@ -111,12 +116,15 @@ pub enum ProvenanceUri {
         thread: String,
         message: Option<String>,
     },
+    /// Registered external evidence source that is preserved but not
+    /// locally freshness-checkable by the file verifier.
+    External { scheme: String, body: String },
 }
 
 impl ProvenanceUri {
     /// Stable scheme name as it appears in the canonical form.
     #[must_use]
-    pub fn scheme(&self) -> &'static str {
+    pub fn scheme(&self) -> &str {
         match self {
             Self::CassSession { .. } => "cass-session",
             Self::File { .. } => "file",
@@ -129,6 +137,7 @@ impl ProvenanceUri {
                 }
             }
             Self::AgentMail { .. } => "agent-mail",
+            Self::External { scheme, .. } => scheme.as_str(),
         }
     }
 }
@@ -168,6 +177,11 @@ impl fmt::Display for ProvenanceUri {
                 }
                 Ok(())
             }
+            Self::External { scheme, body } => {
+                formatter.write_str(scheme)?;
+                formatter.write_str("://")?;
+                formatter.write_str(body)
+            }
         }
     }
 }
@@ -196,6 +210,9 @@ impl FromStr for ProvenanceUri {
             "ee-mem" => parse_ee_memory(input, body),
             "http" | "https" => parse_web(input, scheme, body),
             "agent-mail" => parse_agent_mail(input, body),
+            "manual" | "bench-run" | "git-sha" | "flamegraph" => {
+                parse_external(input, scheme, body)
+            }
             other => Err(ProvenanceUriError::UnknownScheme {
                 input: input.to_owned(),
                 scheme: other.to_owned(),
@@ -294,6 +311,38 @@ fn parse_agent_mail(input: &str, body: &str) -> Result<ProvenanceUri, Provenance
     }
 }
 
+fn parse_external(
+    input: &str,
+    scheme: &str,
+    body: &str,
+) -> Result<ProvenanceUri, ProvenanceUriError> {
+    if body.is_empty() || !body.contains(|character: char| !character.is_whitespace()) {
+        return Err(ProvenanceUriError::EmptyBody {
+            input: input.to_owned(),
+            scheme: external_scheme_name(scheme),
+        });
+    }
+    if body.contains(|character: char| character.is_ascii_control()) {
+        return Err(ProvenanceUriError::InvalidExternalBody {
+            input: input.to_owned(),
+        });
+    }
+    Ok(ProvenanceUri::External {
+        scheme: scheme.to_owned(),
+        body: body.to_owned(),
+    })
+}
+
+fn external_scheme_name(scheme: &str) -> &'static str {
+    match scheme {
+        "manual" => "manual",
+        "bench-run" => "bench-run",
+        "git-sha" => "git-sha",
+        "flamegraph" => "flamegraph",
+        _ => "external",
+    }
+}
+
 /// Split a body into `(value, optional_line_span)` using `#` as the
 /// fragment separator.
 fn split_fragment<'a>(
@@ -359,6 +408,7 @@ pub enum ProvenanceUriError {
     EmptyBody { input: String, scheme: &'static str },
     InvalidWebBody { input: String },
     InvalidAgentMail { input: String },
+    InvalidExternalBody { input: String },
     InvalidFragment { input: String, fragment: String },
     ZeroLineNumber,
     InvertedLineRange { start: u64, end: u64 },
@@ -375,7 +425,7 @@ impl fmt::Display for ProvenanceUriError {
             ),
             Self::UnknownScheme { input, scheme } => write!(
                 formatter,
-                "unknown provenance scheme `{scheme}` in `{input}`; expected one of cass-session, file, ee-mem, http, https, agent-mail"
+                "unknown provenance scheme `{scheme}` in `{input}`; expected one of cass-session, file, ee-mem, http, https, agent-mail, manual, bench-run, git-sha, flamegraph"
             ),
             Self::EmptyBody { input, scheme } => write!(
                 formatter,
@@ -388,6 +438,10 @@ impl fmt::Display for ProvenanceUriError {
             Self::InvalidAgentMail { input } => write!(
                 formatter,
                 "agent-mail URI `{input}` must be `agent-mail://<thread>` or `agent-mail://<thread>/<message>`"
+            ),
+            Self::InvalidExternalBody { input } => write!(
+                formatter,
+                "external provenance URI `{input}` contains control characters"
             ),
             Self::InvalidFragment { input, fragment } => write!(
                 formatter,
@@ -613,6 +667,52 @@ mod tests {
     }
 
     #[test]
+    fn external_evidence_schemes_round_trip() {
+        for input in [
+            "manual://lived-audit/2026-06-02",
+            "bench-run://2026-09-12T14:23/oltp-mixed-small-n",
+            "git-sha://9af3c21-pre-revert",
+            "flamegraph://artifacts/9af3c21/cpu-prof.svg",
+        ] {
+            let parsed = must_parse(input);
+            match &parsed {
+                ProvenanceUri::External { scheme, body } => {
+                    let (expected_scheme, expected_body) =
+                        input.split_once("://").expect("fixture has scheme");
+                    assert_eq!(scheme, expected_scheme);
+                    assert_eq!(body, expected_body);
+                }
+                other => panic!("wrong variant for `{input}`: {other:?}"),
+            }
+            assert_eq!(parsed.to_string(), input);
+        }
+    }
+
+    #[test]
+    fn external_evidence_rejects_empty_or_control_body() {
+        for (input, expected_scheme) in [
+            ("manual://", "manual"),
+            ("bench-run://", "bench-run"),
+            ("git-sha://", "git-sha"),
+            ("flamegraph://", "flamegraph"),
+        ] {
+            let err = must_fail(input);
+            match err {
+                ProvenanceUriError::EmptyBody { scheme, .. } => {
+                    assert_eq!(scheme, expected_scheme);
+                }
+                other => panic!("wrong variant for `{input}`: {other:?}"),
+            }
+        }
+
+        let err = must_fail("manual://bad\u{0001}body");
+        assert!(matches!(
+            err,
+            ProvenanceUriError::InvalidExternalBody { .. }
+        ));
+    }
+
+    #[test]
     fn empty_input_returns_typed_error() {
         for bad in ["", "   ", "\t\n"] {
             let err = must_fail(bad);
@@ -644,6 +744,10 @@ mod tests {
             ("https://", "https"),
             ("http://", "http"),
             ("agent-mail://", "agent-mail"),
+            ("manual://", "manual"),
+            ("bench-run://", "bench-run"),
+            ("git-sha://", "git-sha"),
+            ("flamegraph://", "flamegraph"),
         ] {
             let err = must_fail(input);
             match err {
@@ -706,6 +810,13 @@ mod tests {
         assert_eq!(must_parse("https://example.com/").scheme(), "https");
         assert_eq!(must_parse("http://example.com/").scheme(), "http");
         assert_eq!(must_parse("agent-mail://thread").scheme(), "agent-mail");
+        assert_eq!(must_parse("manual://agent-note").scheme(), "manual");
+        assert_eq!(must_parse("bench-run://run-1").scheme(), "bench-run");
+        assert_eq!(must_parse("git-sha://abcdef0").scheme(), "git-sha");
+        assert_eq!(
+            must_parse("flamegraph://artifact.svg").scheme(),
+            "flamegraph"
+        );
     }
 
     fn uuid_with_seed(seed: u8) -> uuid::Uuid {

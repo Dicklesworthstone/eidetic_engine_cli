@@ -12,6 +12,7 @@ use tempfile::TempDir;
 
 use ee::core::context::{ContextPackOptions, run_context_pack};
 use ee::core::memory::{RememberMemoryOptions, remember_memory};
+use ee::core::search::SearchSourceMode;
 use ee::db::DbConnection;
 use ee::models::{MemoryScope, RedactionLevel};
 use ee::output::{render_context_response_json, render_context_response_markdown};
@@ -300,6 +301,8 @@ impl PackSizeFixture {
             index_dir: None,
             query: PACK_QUERY.to_string(),
             speed: SpeedMode::Default,
+            source_mode: SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             filters: Default::default(),
             profile: None,
             max_tokens: Some(max_tokens),

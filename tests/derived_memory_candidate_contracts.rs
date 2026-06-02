@@ -212,9 +212,9 @@ fn derived_memory_created_audit_schema_is_referenced_from_curate_source() -> Tes
 // --- 3. Provenance URI scheme registry --------------------------------
 
 #[test]
-fn provenance_uri_accepts_five_documented_schemes() -> TestResult {
-    // The v1 registry in src/models/provenance.rs accepts exactly:
-    // cass-session://, file://, ee-mem://, http(s)://, agent-mail://.
+fn provenance_uri_accepts_registered_schemes() -> TestResult {
+    // The v1 registry in src/models/provenance.rs accepts exactly the
+    // source schemes represented in this fixture list.
     // Derived-memory creation must never write an unregistered scheme;
     // the type system enforces this at the PackProvenance boundary
     // because PackProvenance::new takes a `ProvenanceUri`, not a raw
@@ -227,6 +227,10 @@ fn provenance_uri_accepts_five_documented_schemes() -> TestResult {
         "https://example.com/path",
         "http://example.com/path",
         "agent-mail://thread-id/message-id",
+        "manual://agent-note/2026-06-02",
+        "bench-run://2026-09-12T14:23/oltp-mixed-small-n",
+        "git-sha://9af3c21-pre-revert",
+        "flamegraph://artifacts/9af3c21/cpu-prof.svg",
     ];
     for input in accepted {
         ProvenanceUri::from_str(input)

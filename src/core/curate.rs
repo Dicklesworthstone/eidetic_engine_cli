@@ -11677,7 +11677,10 @@ fn create_derived_apply_injected_error(
                         "advisory lock timeout: unmapped create-derived apply phase {phase} for candidate {}.",
                         stored.id
                     ),
-                    repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                    repair: Some(
+                        "ee diag advisory-lock --workspace . --resource-type workspace --release --json"
+                            .to_owned(),
+                    ),
                 },
             )
         }

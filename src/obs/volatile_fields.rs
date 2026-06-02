@@ -16,6 +16,7 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "generatedAt",
     "generated_at",
     "created_at",
+    "captured_at",
     "computed_at",
     "last_accessed",
     "last_accessed_at",
@@ -37,11 +38,14 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "ee_binary_hash",
     // Handoff capsule determinism (bd-1um33): capsule_id and integrity are
     // freshly generated per create even for identical workspace state.
-    // swarm_brief_summary subtree redaction is handled specially in handoff.rs
-    // (value-dependent on "id" field) but its volatile children are covered here.
+    // swarm_brief_summary/swarm_incident_summary are runtime diagnostic
+    // subtrees; section-level swarm_brief_summary redaction is handled
+    // specially in handoff.rs (value-dependent on "id" field), but its
+    // volatile children are covered here.
     "capsule_id",
     "integrity",
     "swarm_brief_summary",
+    "swarm_incident_summary",
     "databasePath",
     "workspacePath",
     "indexDir",
@@ -229,10 +233,12 @@ mod tests {
     fn registry_predicate_matches_list() {
         assert!(is_volatile_field_name("generatedAt"));
         assert!(is_volatile_field_name("created_at"));
+        assert!(is_volatile_field_name("captured_at"));
         assert!(is_volatile_field_name("last_accessed_at"));
         assert!(is_volatile_field_name("capsule_id"));
         assert!(is_volatile_field_name("integrity"));
         assert!(is_volatile_field_name("swarm_brief_summary"));
+        assert!(is_volatile_field_name("swarm_incident_summary"));
         assert!(!is_volatile_field_name("content"));
     }
 
@@ -244,6 +250,8 @@ mod tests {
             "created_at": "2026-05-16T00:00:00Z",
             "integrity": {"hmac": "secret"},
             "swarm_brief_summary": {"hostname": "agent-host"},
+            "swarm_incident_summary": {"summaryHash": "blake3:volatile"},
+            "memory_snapshot": {"captured_at": "2026-05-16T00:00:00Z"},
             "sections": [
                 {
                     "id": "objective",
@@ -258,6 +266,8 @@ mod tests {
             "/created_at",
             "/integrity",
             "/swarm_brief_summary",
+            "/swarm_incident_summary",
+            "/memory_snapshot/captured_at",
         ] {
             if value.pointer(pointer).is_some() {
                 return Err(format!("{pointer} was not stripped: {value}"));
@@ -273,8 +283,10 @@ mod tests {
         for expected in [
             "capsule_id",
             "created_at",
+            "captured_at",
             "integrity",
             "swarm_brief_summary",
+            "swarm_incident_summary",
         ] {
             if !report.fields_stripped.contains(&expected) {
                 return Err(format!("report missing stripped capsule field {expected}"));

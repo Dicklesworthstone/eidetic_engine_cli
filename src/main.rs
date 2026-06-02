@@ -114,17 +114,35 @@ fn tracing_env_filter_from_env(raw: Option<String>) -> EnvFilter {
     }
 }
 
-fn tracing_filter_with_runtime_noise_defaults(value: String) -> String {
+const DEFAULT_TRACE_NOISE_TARGETS: &[&str] = &[
+    "fsqlite::runtime",
+    "ee::search::embedder_down",
+    "ee::output::error",
+];
+
+fn tracing_filter_with_runtime_noise_defaults(mut value: String) -> String {
     let trimmed = value.trim();
-    if trimmed.eq_ignore_ascii_case("off")
-        || trimmed
-            .split(',')
-            .any(|directive| directive.trim_start().starts_with("fsqlite::runtime"))
-    {
-        value
-    } else {
-        format!("{value},fsqlite::runtime=error")
+    if trimmed.eq_ignore_ascii_case("off") {
+        return value;
     }
+
+    for target in DEFAULT_TRACE_NOISE_TARGETS {
+        if !tracing_filter_has_target(&value, target) {
+            value.push(',');
+            value.push_str(target);
+            value.push_str("=error");
+        }
+    }
+    value
+}
+
+fn tracing_filter_has_target(value: &str, target: &str) -> bool {
+    value.split(',').any(|directive| {
+        let Some(remainder) = directive.trim_start().strip_prefix(target) else {
+            return false;
+        };
+        remainder.is_empty() || remainder.starts_with('=') || remainder.starts_with('[')
+    })
 }
 
 fn init_tracing_subscriber() {
@@ -224,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn tracing_filter_suppresses_fsqlite_runtime_warning_unless_explicit() {
+    fn tracing_filter_suppresses_default_noise_warnings_unless_explicit() {
         let output = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_env_filter_from_env(Some("warn".to_owned())))
@@ -235,18 +253,27 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(target: "fsqlite::runtime", event = "hidden", "runtime_warn");
+            tracing::warn!(target: "ee::search::embedder_down", event = "hidden", "embedder_warn");
+            tracing::warn!(target: "ee::output::error", event = "hidden", "error_envelope_warn");
             tracing::error!(target: "fsqlite::runtime", event = "visible", "runtime_error");
+            tracing::error!(target: "ee::search::embedder_down", event = "visible", "embedder_error");
+            tracing::error!(target: "ee::output::error", event = "visible", "error_envelope_error");
         });
 
         let captured = String::from_utf8(output.lock().expect("writer buffer poisoned").clone())
             .expect("tracing output is utf-8");
         assert!(!captured.contains("runtime_warn"));
+        assert!(!captured.contains("embedder_warn"));
+        assert!(!captured.contains("error_envelope_warn"));
         assert!(captured.contains("runtime_error"));
+        assert!(captured.contains("embedder_error"));
+        assert!(captured.contains("error_envelope_error"));
 
         let explicit = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(tracing_env_filter_from_env(Some(
-                "warn,fsqlite::runtime=warn".to_owned(),
+                "warn,fsqlite::runtime=warn,ee::search::embedder_down=warn,ee::output::error=warn"
+                    .to_owned(),
             )))
             .with_writer(SharedMakeWriter(Arc::clone(&explicit)))
             .with_ansi(false)
@@ -255,10 +282,29 @@ mod tests {
 
         tracing::subscriber::with_default(subscriber, || {
             tracing::warn!(target: "fsqlite::runtime", event = "visible", "runtime_warn");
+            tracing::warn!(target: "ee::search::embedder_down", event = "visible", "embedder_warn");
+            tracing::warn!(target: "ee::output::error", event = "visible", "error_envelope_warn");
         });
 
         let captured = String::from_utf8(explicit.lock().expect("writer buffer poisoned").clone())
             .expect("tracing output is utf-8");
         assert!(captured.contains("runtime_warn"));
+        assert!(captured.contains("embedder_warn"));
+        assert!(captured.contains("error_envelope_warn"));
+
+        let narrowed =
+            tracing_filter_with_runtime_noise_defaults("warn,ee::output::errorish=warn".to_owned());
+        assert!(
+            narrowed.contains("ee::output::error=error"),
+            "prefix-neighbor targets must not suppress the real default: {narrowed}"
+        );
+
+        let child_target = tracing_filter_with_runtime_noise_defaults(
+            "warn,ee::output::error::child=warn".to_owned(),
+        );
+        assert!(
+            child_target.contains("ee::output::error=error"),
+            "child targets must not suppress the parent default: {child_target}"
+        );
     }
 }

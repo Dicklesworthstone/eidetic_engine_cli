@@ -113,6 +113,9 @@ pub mod audit_actions {
     pub const CURATION_CANDIDATE_DISPOSITION: &str = "curation_candidate.disposition";
     pub const CURATION_CANDIDATE_RETIRE: &str = "curation_candidate.retire";
     pub const WORKFLOW_CREATE: &str = "workflow.create";
+    pub const ADVISORY_LOCK_RECLAIM: &str = "advisory_lock.reclaim";
+    pub const ADVISORY_LOCK_RELEASE: &str = "advisory_lock.release";
+    pub const ADVISORY_LOCK_FORCE_RELEASE: &str = "advisory_lock.force_release";
     pub const RULE_CREATE: &str = "rule.create";
     pub const RULE_MARK: &str = "rule.mark";
     pub const RULE_PROTECT: &str = "rule.protect";
@@ -16827,8 +16830,104 @@ impl AdvisoryLock {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdvisoryLockHolderLiveness {
+    Alive { pid: u32 },
+    Dead { pid: u32 },
+    Unknown { reason: String },
+}
+
+impl AdvisoryLockHolderLiveness {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Alive { .. } => "alive",
+            Self::Dead { .. } => "dead",
+            Self::Unknown { .. } => "unknown",
+        }
+    }
+
+    fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Alive { pid } | Self::Dead { pid } => Some(*pid),
+            Self::Unknown { .. } => None,
+        }
+    }
+
+    fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Unknown { reason } => Some(reason),
+            Self::Alive { .. } | Self::Dead { .. } => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdvisoryLockReleaseOutcome {
+    Released {
+        lock: AdvisoryLock,
+        audit_id: String,
+    },
+    NotHeld,
+    HolderMismatch {
+        held: AdvisoryLock,
+    },
+    HolderAlive {
+        held: AdvisoryLock,
+        pid: u32,
+    },
+    HolderUnprobeable {
+        held: AdvisoryLock,
+        reason: String,
+    },
+}
+
 fn advisory_lock_timestamp(instant: DateTime<Utc>) -> String {
     instant.to_rfc3339_opts(SecondsFormat::Nanos, true)
+}
+
+pub fn advisory_lock_holder_pid(holder_id: &str) -> Option<u32> {
+    let mut parts = holder_id.splitn(3, ':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("remember"), Some(pid), Some(_memory_id)) => {
+            pid.parse::<u32>().ok().filter(|pid| *pid > 0)
+        }
+        _ => None,
+    }
+}
+
+pub fn advisory_lock_holder_liveness(holder_id: &str) -> AdvisoryLockHolderLiveness {
+    let Some(pid) = advisory_lock_holder_pid(holder_id) else {
+        return AdvisoryLockHolderLiveness::Unknown {
+            reason: "holder id does not encode a same-host remember PID".to_owned(),
+        };
+    };
+    advisory_lock_process_liveness(pid)
+}
+
+fn advisory_lock_process_liveness(pid: u32) -> AdvisoryLockHolderLiveness {
+    let Ok(raw_pid) = i32::try_from(pid) else {
+        return AdvisoryLockHolderLiveness::Unknown {
+            reason: format!("holder PID {pid} exceeds platform pid range"),
+        };
+    };
+    let Some(pid_handle) = rustix::process::Pid::from_raw(raw_pid) else {
+        return AdvisoryLockHolderLiveness::Unknown {
+            reason: format!("holder PID {pid} is not a valid process id"),
+        };
+    };
+
+    match rustix::process::test_kill_process(pid_handle) {
+        Ok(()) => AdvisoryLockHolderLiveness::Alive { pid },
+        Err(error) if error == rustix::io::Errno::PERM => AdvisoryLockHolderLiveness::Alive { pid },
+        Err(error) if error == rustix::io::Errno::SRCH => AdvisoryLockHolderLiveness::Dead { pid },
+        Err(error) => AdvisoryLockHolderLiveness::Unknown {
+            reason: format!("process probe failed for PID {pid}: {error}"),
+        },
+    }
+}
+
+fn advisory_lock_workspace_id(lock_id: &AdvisoryLockId) -> Option<String> {
+    (lock_id.resource_type() == "workspace").then(|| lock_id.resource_id().to_owned())
 }
 
 fn advisory_lock_is_expired(expires_at: &str, now: &str) -> bool {
@@ -17100,7 +17199,7 @@ impl DbConnection {
     ) -> Result<AcquireLockResult> {
         let existing = self.query_for(
             DbOperation::Query,
-            "SELECT resource_key, holder_id, acquired_at, expires_at
+            "SELECT resource_key, holder_id, acquired_at, expires_at, reason
              FROM ee_advisory_locks
              WHERE resource_type = ?1 AND resource_id = ?2
              ORDER BY acquired_at DESC, resource_key ASC",
@@ -17112,13 +17211,39 @@ impl DbConnection {
 
         let mut previous_expired_holder = None;
         for row in &existing {
+            let existing_resource_key = required_text(row, 0, DbOperation::Query, "resource_key")?;
             let existing_holder = required_text(row, 1, DbOperation::Query, "holder_id")?;
             let existing_acquired = required_text(row, 2, DbOperation::Query, "acquired_at")?;
             let existing_expiry = optional_text(row, 3)?;
+            let existing_reason = optional_text(row, 4)?;
 
             let is_expired = existing_expiry.is_some_and(|exp| advisory_lock_is_expired(exp, now));
 
             if !is_expired {
+                let liveness = advisory_lock_holder_liveness(existing_holder);
+                if matches!(liveness, AdvisoryLockHolderLiveness::Dead { .. }) {
+                    let reclaimed = AdvisoryLock {
+                        id: lock_id.clone(),
+                        holder_id: existing_holder.to_owned(),
+                        acquired_at: existing_acquired.to_owned(),
+                        expires_at: existing_expiry.map(str::to_owned),
+                        reason: existing_reason.map(str::to_owned),
+                    };
+                    self.execute_for(
+                        DbOperation::Execute,
+                        "DELETE FROM ee_advisory_locks WHERE resource_key = ?1",
+                        &[Value::Text(existing_resource_key.to_owned())],
+                    )?;
+                    self.insert_advisory_lock_mutation_audit(
+                        audit_actions::ADVISORY_LOCK_RECLAIM,
+                        &reclaimed,
+                        holder_id,
+                        "dead holder auto-reclaimed during acquire",
+                        false,
+                        &liveness,
+                    )?;
+                    continue;
+                }
                 return Ok(AcquireLockResult::AlreadyHeld {
                     holder_id: existing_holder.to_string(),
                     acquired_at: existing_acquired.to_string(),
@@ -17187,6 +17312,47 @@ impl DbConnection {
         Ok(())
     }
 
+    fn insert_advisory_lock_mutation_audit(
+        &self,
+        action: &str,
+        lock: &AdvisoryLock,
+        actor: &str,
+        reason: &str,
+        force: bool,
+        liveness: &AdvisoryLockHolderLiveness,
+    ) -> Result<String> {
+        let audit_id = generate_audit_id();
+        let details = serde_json::json!({
+            "schema": "ee.advisory_lock_mutation.v1",
+            "resourceType": lock.id.resource_type(),
+            "resourceId": lock.id.resource_id(),
+            "canonicalKey": lock.id.canonical_key(),
+            "holderId": lock.holder_id.as_str(),
+            "acquiredAt": lock.acquired_at.as_str(),
+            "expiresAt": lock.expires_at.as_deref(),
+            "lockReason": lock.reason.as_deref(),
+            "mutationReason": reason,
+            "force": force,
+            "holderLiveness": {
+                "status": liveness.status(),
+                "pid": liveness.pid(),
+                "reason": liveness.reason(),
+            }
+        });
+        self.insert_audit(
+            &audit_id,
+            &CreateAuditInput {
+                workspace_id: advisory_lock_workspace_id(&lock.id),
+                actor: Some(actor.to_owned()),
+                action: action.to_owned(),
+                target_type: Some("advisory_lock".to_owned()),
+                target_id: Some(lock.id.canonical_key()),
+                details: Some(details.to_string()),
+            },
+        )?;
+        Ok(audit_id)
+    }
+
     /// Release an advisory lock held by the specified holder.
     ///
     /// Returns true if the lock was released, false if it was not held
@@ -17204,6 +17370,79 @@ impl DbConnection {
         )?;
 
         Ok(rows_affected > 0)
+    }
+
+    pub fn release_reclaimable_advisory_lock(
+        &self,
+        lock_id: &AdvisoryLockId,
+        expected_holder: Option<&str>,
+        actor: &str,
+        reason: &str,
+    ) -> Result<AdvisoryLockReleaseOutcome> {
+        self.release_advisory_lock_with_policy(lock_id, expected_holder, actor, reason, false)
+    }
+
+    pub fn force_release_advisory_lock(
+        &self,
+        lock_id: &AdvisoryLockId,
+        expected_holder: Option<&str>,
+        actor: &str,
+        reason: &str,
+    ) -> Result<AdvisoryLockReleaseOutcome> {
+        self.release_advisory_lock_with_policy(lock_id, expected_holder, actor, reason, true)
+    }
+
+    fn release_advisory_lock_with_policy(
+        &self,
+        lock_id: &AdvisoryLockId,
+        expected_holder: Option<&str>,
+        actor: &str,
+        reason: &str,
+        force: bool,
+    ) -> Result<AdvisoryLockReleaseOutcome> {
+        self.ensure_advisory_locks_table()?;
+        self.with_transaction(|| {
+            let Some(lock) = self.is_lock_held(lock_id)? else {
+                return Ok(AdvisoryLockReleaseOutcome::NotHeld);
+            };
+
+            if expected_holder.is_some_and(|holder| holder != lock.holder_id) {
+                return Ok(AdvisoryLockReleaseOutcome::HolderMismatch { held: lock });
+            }
+
+            let liveness = advisory_lock_holder_liveness(&lock.holder_id);
+            if !force {
+                match &liveness {
+                    AdvisoryLockHolderLiveness::Dead { .. } => {}
+                    AdvisoryLockHolderLiveness::Alive { pid } => {
+                        return Ok(AdvisoryLockReleaseOutcome::HolderAlive {
+                            held: lock,
+                            pid: *pid,
+                        });
+                    }
+                    AdvisoryLockHolderLiveness::Unknown { reason } => {
+                        return Ok(AdvisoryLockReleaseOutcome::HolderUnprobeable {
+                            held: lock,
+                            reason: reason.clone(),
+                        });
+                    }
+                }
+            }
+
+            if !self.release_advisory_lock(lock_id, &lock.holder_id)? {
+                return Ok(AdvisoryLockReleaseOutcome::NotHeld);
+            }
+
+            let action = if force {
+                audit_actions::ADVISORY_LOCK_FORCE_RELEASE
+            } else {
+                audit_actions::ADVISORY_LOCK_RELEASE
+            };
+            let audit_id = self.insert_advisory_lock_mutation_audit(
+                action, &lock, actor, reason, force, &liveness,
+            )?;
+            Ok(AdvisoryLockReleaseOutcome::Released { lock, audit_id })
+        })
     }
 
     /// Check if a lock is held (by anyone).
@@ -17268,6 +17507,42 @@ impl DbConnection {
                 })
             })
             .collect()
+    }
+
+    /// List all active advisory locks.
+    pub fn list_active_advisory_locks(&self) -> Result<Vec<AdvisoryLock>> {
+        self.ensure_advisory_locks_table()?;
+        let now = advisory_lock_timestamp(Utc::now());
+        let rows = self.query_for(
+            DbOperation::Query,
+            "SELECT resource_type, resource_id, holder_id, acquired_at, expires_at, reason
+             FROM ee_advisory_locks
+             ORDER BY resource_type ASC, resource_id ASC, acquired_at DESC, resource_key ASC",
+            &[],
+        )?;
+
+        let mut locks = Vec::new();
+        for row in rows {
+            let expires_at = optional_text(&row, 4)?.map(str::to_string);
+            if expires_at
+                .as_deref()
+                .is_some_and(|exp| advisory_lock_is_expired(exp, now.as_str()))
+            {
+                continue;
+            }
+            locks.push(AdvisoryLock {
+                id: AdvisoryLockId::new(
+                    required_text(&row, 0, DbOperation::Query, "resource_type")?,
+                    required_text(&row, 1, DbOperation::Query, "resource_id")?,
+                ),
+                holder_id: required_text(&row, 2, DbOperation::Query, "holder_id")?.to_string(),
+                acquired_at: required_text(&row, 3, DbOperation::Query, "acquired_at")?.to_string(),
+                expires_at,
+                reason: optional_text(&row, 5)?.map(str::to_string),
+            });
+        }
+
+        Ok(locks)
     }
 
     /// Clean up all expired locks.
@@ -23902,7 +24177,11 @@ mod tests {
         let spans_b =
             connection.list_evidence_spans_for_workspace("wsp_91234567890123456789012345")?;
         let cass_b: Vec<&str> = spans_b.iter().map(|s| s.cass_span_id.as_str()).collect();
-        ensure_equal(&cass_b, &vec!["b1-line5"], "workspace B isolated to its own span")?;
+        ensure_equal(
+            &cass_b,
+            &vec!["b1-line5"],
+            "workspace B isolated to its own span",
+        )?;
         ensure_equal(
             &connection.count_evidence_spans_for_workspace("wsp_91234567890123456789012345")?,
             &1_usize,
@@ -30630,6 +30909,222 @@ mod tests {
 
         let held = connection.is_lock_held(&lock_id)?;
         ensure(held.is_some(), "lock should still be held")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn advisory_lock_holder_pid_parses_remember_holder() -> TestResult {
+        ensure_equal(
+            &super::advisory_lock_holder_pid("remember:12345:mem_abc"),
+            &Some(12345),
+            "remember holder PID",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_holder_pid("remote:12345:mem_abc"),
+            &None,
+            "remote holder should not be treated as same-host PID",
+        )?;
+        ensure_equal(
+            &super::advisory_lock_holder_pid("remember:0:mem_abc"),
+            &None,
+            "zero PID is invalid",
+        )
+    }
+
+    #[test]
+    fn acquire_auto_reclaims_dead_remember_holder_and_audits() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_dead_reclaim");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            &lock_id.canonical_key(),
+            "remember:2147483647:mem_dead",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("orphaned remember write"),
+        )?;
+
+        let result =
+            connection.acquire_advisory_lock(&lock_id, "agent_new", Some(300), Some("retry"))?;
+        ensure(result.is_acquired(), "dead holder should be reclaimed")?;
+        let held = connection
+            .is_lock_held(&lock_id)?
+            .ok_or_else(|| TestFailure::new("replacement lock should be held"))?;
+        ensure_equal(
+            &held.holder_id,
+            &"agent_new".to_string(),
+            "replacement holder",
+        )?;
+
+        let audits =
+            connection.list_audit_by_action(super::audit_actions::ADVISORY_LOCK_RECLAIM, None)?;
+        ensure_equal(&audits.len(), &1_usize, "one reclaim audit")?;
+        let details = audits
+            .first()
+            .and_then(|entry| entry.details.as_deref())
+            .unwrap_or_default();
+        ensure(
+            details.contains("\"status\":\"dead\""),
+            "audit records dead holder",
+        )?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_does_not_reclaim_live_remember_holder() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_live_reclaim");
+        let holder = format!("remember:{}:mem_live", std::process::id());
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            &lock_id.canonical_key(),
+            &holder,
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("live remember write"),
+        )?;
+
+        let result =
+            connection.acquire_advisory_lock(&lock_id, "agent_new", Some(300), Some("retry"))?;
+        match result {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => {
+                ensure_equal(&holder_id, &holder, "live holder must remain authoritative")
+            }
+            _ => Err(TestFailure::new("live holder should block acquire")),
+        }?;
+
+        let audits =
+            connection.list_audit_by_action(super::audit_actions::ADVISORY_LOCK_RECLAIM, None)?;
+        ensure_equal(&audits.len(), &0_usize, "no reclaim audit for live holder")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn acquire_does_not_reclaim_unprobeable_holder() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_remote_reclaim");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            &lock_id.canonical_key(),
+            "remote-host:12345:mem_remote",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("remote remember write"),
+        )?;
+
+        let result =
+            connection.acquire_advisory_lock(&lock_id, "agent_new", Some(300), Some("retry"))?;
+        match result {
+            super::AcquireLockResult::AlreadyHeld { holder_id, .. } => ensure_equal(
+                &holder_id,
+                &"remote-host:12345:mem_remote".to_string(),
+                "unprobeable holder must remain authoritative",
+            ),
+            _ => Err(TestFailure::new("unprobeable holder should block acquire")),
+        }?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_reclaimable_advisory_lock_clears_dead_holder_and_audits() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_dead_release");
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            &lock_id.canonical_key(),
+            "remember:2147483647:mem_dead",
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("orphaned remember write"),
+        )?;
+
+        let outcome = connection.release_reclaimable_advisory_lock(
+            &lock_id,
+            None,
+            "diag advisory-lock",
+            "operator requested release",
+        )?;
+        match outcome {
+            super::AdvisoryLockReleaseOutcome::Released { lock, audit_id } => {
+                ensure_equal(
+                    &lock.holder_id,
+                    &"remember:2147483647:mem_dead".to_string(),
+                    "released holder",
+                )?;
+                ensure(audit_id.starts_with("audit_"), "audit id prefix")
+            }
+            other => Err(TestFailure::new(format!(
+                "expected released outcome, got {other:?}"
+            ))),
+        }?;
+        ensure(
+            connection.is_lock_held(&lock_id)?.is_none(),
+            "lock should be released",
+        )?;
+        let audits =
+            connection.list_audit_by_action(super::audit_actions::ADVISORY_LOCK_RELEASE, None)?;
+        ensure_equal(&audits.len(), &1_usize, "one release audit")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    #[test]
+    fn release_reclaimable_advisory_lock_refuses_live_holder() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+
+        let lock_id = super::AdvisoryLockId::workspace("wsp_live_release");
+        let holder = format!("remember:{}:mem_live", std::process::id());
+        insert_advisory_lock_fixture(
+            &connection,
+            &lock_id,
+            &lock_id.canonical_key(),
+            &holder,
+            "2026-01-01T00:00:00.000000000Z",
+            Some("2099-01-01T00:00:00.000000000Z"),
+            Some("live remember write"),
+        )?;
+
+        let outcome = connection.release_reclaimable_advisory_lock(
+            &lock_id,
+            None,
+            "diag advisory-lock",
+            "operator requested release",
+        )?;
+        match outcome {
+            super::AdvisoryLockReleaseOutcome::HolderAlive { held, pid } => {
+                ensure_equal(&held.holder_id, &holder, "live holder")?;
+                ensure_equal(&pid, &std::process::id(), "live holder PID")
+            }
+            other => Err(TestFailure::new(format!(
+                "expected live-holder refusal, got {other:?}"
+            ))),
+        }?;
+        ensure(
+            connection.is_lock_held(&lock_id)?.is_some(),
+            "live lock should remain held",
+        )?;
 
         connection.close()?;
         Ok(())

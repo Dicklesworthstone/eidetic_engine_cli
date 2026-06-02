@@ -80,9 +80,9 @@ warnings. Each item carries an evidence pointer and a score breakdown.
 For agent use, the core rhythm is small and repetitive:
 
 ```bash
-ee orient "<task>" --workspace . --json
+ee orient "<task>" --workspace . --fast --json
 ee swarm brief --workspace . --json
-ee pack "<task>" --workspace . --max-tokens 4000 --format markdown
+ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 ee search "<specific question>" --workspace . --limit 20 --explain --json
 ee why <memory-id> --workspace . --json
 ee preflight check --cmd "<risky shell command>" --workspace . --json
@@ -92,8 +92,8 @@ ee outcome <memory-id> --workspace . --signal helpful --reason "<what it changed
 
 | Situation | First `ee` command |
 |---|---|
-| Starting from a cold agent session | `ee orient "<task>" --workspace . --json` |
-| Starting substantive work | `ee pack "<task>" --workspace . --max-tokens 4000 --format markdown` |
+| Starting from a cold agent session | `ee orient "<task>" --workspace . --fast --json` |
+| Starting substantive work | `ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown` |
 | Joining a crowded checkout | `ee swarm brief --workspace . --json` |
 | Learning a durable rule | `ee remember "<text>" --workspace . --level procedural --kind rule --json` |
 | A memory helped or misled you | `ee outcome <id> --signal helpful\|harmful --reason "<one sentence>"` |
@@ -428,7 +428,7 @@ Current top-level groups:
 | `ee status [--json]` | DB generation, index generation, degraded capabilities, recent jobs |
 | `ee doctor [--json]` | Health checks with repair commands for every failure |
 | `ee capabilities [--json]` | Feature, schema, renderer, env-var, and capability posture |
-| `ee orient "<task>" --json` | Read-only session-start bundle: swarm brief, doctor triage, install/path posture, workspace hygiene, and a no-persist pack |
+| `ee orient "<task>" --fast --json` | Fast read-only session-start bundle: bounded swarm brief, install/path posture, workspace hygiene, and explicit follow-up commands for full doctor/pack surfaces |
 | `ee pack "<task>" [--profile <p>] [--max-tokens N] [--format <fmt>]` | Assemble a task-specific context pack (the headline command) |
 | `ee search "<query>" [--limit N] [--explain] [--json]` | Hybrid retrieval over memories, sessions, rules, evidence |
 | `ee remember "<text>" --level <l> [--kind <k>] [--tags a,b]` | Capture a durable memory |
@@ -536,6 +536,7 @@ Common red flags:
 | Retrieval profile | `--profile compact\|balanced\|grounding\|orientation\|thorough\|submodular` | Choose the memory mix and graph bias |
 | Output profile | `--pack-profile lean\|standard\|verbose` | Trim or expand JSON metadata |
 | Resource profile | `--resource-profile lean\|standard\|swarm_heavy` | Pick pack assembly SLO posture |
+| Retrieval source | `--source-mode lexical_only\|semantic_only\|hybrid`, `--strict-source-mode` | Force lexical-only, semantic-only, or hybrid retrieval before packing; strict mode fails instead of falling back |
 | Size | `--max-tokens N`, `--candidate-pool N` | Bound prompt budget and candidate pool |
 | Output format | `--format markdown\|json\|toon`, `--stream --json` | Token-tight prompt text (markdown), parser output (json), stable-field structured output (toon — not smaller than json for packs), or NDJSON frames |
 | JSON diet | `--no-rendered-text`, `--no-skipped`, `--no-meta`, `--no-pack-dna` | Suppress bulky sections for structured consumers |
@@ -710,7 +711,10 @@ ee swarm brief --workspace . --sources git,beads,bv,agent-mail --require-sources
 ```
 
 If live Agent Mail is unavailable, provide a redacted snapshot instead of raw
-mail bodies:
+mail bodies. When no snapshot is configured, `ee swarm brief` also does a tiny
+bounded probe of `127.0.0.1:8765/health`; a reachable probe means Agent Mail
+looks live, but `ee` still needs an explicit redacted snapshot for deterministic
+briefs.
 
 ```bash
 ee swarm brief --workspace . --agent-mail-snapshot <snapshot.json> --json
@@ -1001,7 +1005,7 @@ base retrieval signal dominant.
 |---|---|
 | `ee doctor --quick\|--robot-triage\|--capabilities\|--gc-plan <days>` | Focused repair and operator triage surfaces |
 | `ee preflight run "<task>"` / `show` / `close` | Task risk assessment, tripwire context, and post-run feedback |
-| `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks |
+| `ee preflight check --cmd "<command>" --json` | Command-facing policy guard for shell hooks; use `--stdin` or `--cmd-base64` when an outer harness may block risky argv text before `ee` can inspect it |
 | `ee tripwire list` / `check` | Inspect and check preflight tripwires |
 | `ee diag plan-cache` | EQL query plan-cache counters and integration posture |
 | `ee diag disk-pressure` / `build-admission` / `artifacts` | Storage, artifact, and build-admission diagnostics |
@@ -1420,13 +1424,14 @@ Add to your `AGENTS.md` or hook setup:
 ```text
 Before starting substantial work, run:
   ee swarm brief --workspace . --json
-  ee pack "<task>" --workspace . --max-tokens 4000 --format markdown
+  ee pack "<task>" --workspace . --read-only --source-mode lexical_only --max-tokens 4000 --format markdown
 
 When you discover a durable project convention:
   ee remember --workspace . --level procedural --kind rule "<rule>"
 
 Before risky shell commands:
   ee preflight check --cmd "<shell-command>" --workspace . --json
+  printf '%s' "$cmd" | ee preflight check --stdin --workspace . --json
 
 After a remembered rule helps or harms:
   ee outcome <id> --signal helpful
@@ -1754,6 +1759,7 @@ Inspect the policy result and follow the repair text:
 
 ```bash
 ee preflight check --cmd 'cargo test --all-targets' --json
+printf '%s' "$cmd" | ee preflight check --stdin --json
 ee preflight issue-bypass-token --reason "human approved exact command" --json
 ```
 

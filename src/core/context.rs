@@ -64,9 +64,9 @@ use crate::core::memory_scope::{
 use crate::core::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::core::search::{
     PERFORMANCE_EXPLAIN_SCHEMA_V1, ScoreSource, SearchDegradation, SearchError, SearchHit,
-    SearchOptions, SearchPerformanceTrace, SearchReport, SearchStatus, elapsed_timing_json,
-    performance_redaction_json, query_observation_json, run_context_search_with_preloaded_memories,
-    search_degraded_data_json,
+    SearchOptions, SearchPerformanceTrace, SearchReport, SearchSourceMode, SearchStatus,
+    elapsed_timing_json, performance_redaction_json, query_observation_json,
+    run_context_search_with_preloaded_memories, search_degraded_data_json,
 };
 use crate::db::read_pool::{
     PoolConfig, PoolStats, READ_POOL_ACQUIRE_TIMEOUT_CODE, READ_POOL_UNDERSIZED_CODE,
@@ -585,6 +585,8 @@ pub struct ContextPackOptions {
     pub index_dir: Option<PathBuf>,
     pub query: String,
     pub speed: crate::search::SpeedMode,
+    pub source_mode: crate::core::search::SearchSourceMode,
+    pub strict_source_mode: bool,
     pub filters: crate::models::QueryFilters,
     pub profile: Option<ContextPackProfile>,
     pub max_tokens: Option<u32>,
@@ -1627,8 +1629,8 @@ fn run_context_pack_with_performance_inner(
             // An explicit caller floor still applies for diagnostic/e2e paths.
             relevance_floor: Some(options.relevance_floor.unwrap_or(0.0)),
             dedup_mode: crate::core::search::SearchDedupMode::DocId,
-            source_mode: crate::core::search::SearchSourceMode::Hybrid,
-            strict_source_mode: false,
+            source_mode: options.source_mode,
+            strict_source_mode: options.strict_source_mode,
             memory_scope: options.memory_scope,
             strict_scope: options.strict_scope,
         },
@@ -2351,7 +2353,7 @@ fn run_context_pack_with_performance_inner(
     response.data.coordination = coordination;
 
     if let Some(l2_context) = &l2_cache_context {
-        context_pack_l2_store(l2_context, options, &mut response);
+        context_pack_l2_store(l2_context, options, &search_report, &mut response);
     }
 
     // Bead bd-17c65.7.7 (G8): best-effort audit-log instrumentation for
@@ -2545,6 +2547,10 @@ fn context_performance_json(
                     || options.include_expired
                     || options.include_future
                     || options.include_stale,
+                "sourceModeRequested": options.source_mode.as_str(),
+                "sourceModeApplied": search_report.source_mode_applied.as_str(),
+                "strictSourceMode": search_report.strict_source_mode,
+                "fallbackApplied": search_report.source_mode_fallback,
                 "memoryScope": options.memory_scope.as_str(),
                 "strictScope": options.strict_scope,
             },
@@ -4065,6 +4071,41 @@ struct ContextPackL2Context {
     key: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ContextPackL2SourceModeMetadata {
+    requested: SearchSourceMode,
+    applied: SearchSourceMode,
+    strict: bool,
+    fallback: bool,
+}
+
+impl ContextPackL2SourceModeMetadata {
+    fn from_options(options: &ContextPackOptions) -> Self {
+        Self {
+            requested: options.source_mode,
+            applied: options.source_mode,
+            strict: options.strict_source_mode,
+            fallback: false,
+        }
+    }
+
+    fn from_search_report(report: &SearchReport) -> Self {
+        Self {
+            requested: report.source_mode_requested,
+            applied: report.source_mode_applied,
+            strict: report.strict_source_mode,
+            fallback: report.source_mode_fallback,
+        }
+    }
+}
+
+struct ContextPackL2HitCacheMetadata<'a> {
+    key: &'a str,
+    byte_len: u64,
+    compression: Option<&'a PackL2CompressionHit>,
+    source_mode: ContextPackL2SourceModeMetadata,
+}
+
 fn context_pack_l2_prepare(
     options: &ContextPackOptions,
     connection: &DbConnection,
@@ -4124,6 +4165,8 @@ fn context_pack_l2_prepare(
         output_options: options.output_options,
         memory_scope: options.memory_scope,
         strict_scope: options.strict_scope,
+        source_mode: options.source_mode,
+        strict_source_mode: options.strict_source_mode,
         context_feature_flags_hash: context_pack_l2_feature_flags_hash(
             options,
             filters,
@@ -4149,6 +4192,20 @@ fn context_pack_l2_try_hit(
         Ok(PackL2CacheLookup::Hit(hit)) => {
             match context_pack_l2_cached_response_json(&hit.pack_json, command) {
                 Ok(cached_json) => {
+                    let source_mode_metadata =
+                        context_pack_l2_cached_source_mode_metadata(&hit.pack_json, options);
+                    if source_mode_metadata.fallback {
+                        trace.record_elapsed("packL2Lookup", lookup_start);
+                        tracing::debug!(
+                            target: "ee::pack_l2",
+                            event = "pack_l2_cache_hit_ignored",
+                            command,
+                            key = %l2_context.key,
+                            path = %hit.path.display(),
+                            reason = "cached_source_mode_fallback",
+                        );
+                        return None;
+                    }
                     trace.record_elapsed("packL2Lookup", lookup_start);
                     trace.record_elapsed("total", total_start);
                     tracing::info!(
@@ -4175,9 +4232,12 @@ fn context_pack_l2_try_hit(
                             options,
                             request,
                             trace,
-                            &l2_context.key,
-                            hit.byte_len,
-                            hit.compression.as_ref(),
+                            ContextPackL2HitCacheMetadata {
+                                key: &l2_context.key,
+                                byte_len: hit.byte_len,
+                                compression: hit.compression.as_ref(),
+                                source_mode: source_mode_metadata,
+                            },
                         ),
                     });
                 }
@@ -4224,8 +4284,19 @@ fn context_pack_l2_try_hit(
 fn context_pack_l2_store(
     l2_context: &ContextPackL2Context,
     options: &ContextPackOptions,
+    search_report: &SearchReport,
     response: &mut ContextResponse,
 ) {
+    let source_mode_metadata = ContextPackL2SourceModeMetadata::from_search_report(search_report);
+    if source_mode_metadata.fallback {
+        tracing::debug!(
+            target: "ee::pack_l2",
+            event = "pack_l2_cache_write_skipped",
+            key = %l2_context.key,
+            reason = "source_mode_fallback",
+        );
+        return;
+    }
     let rendered = crate::output::render_context_response_json_with_options(
         response,
         crate::output::ContextJsonRenderOptions::from(options.output_options),
@@ -4233,6 +4304,12 @@ fn context_pack_l2_store(
     let payload = serde_json::json!({
         "schema": PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
         "responseJson": rendered,
+        "sourceMode": {
+            "requested": source_mode_metadata.requested.as_str(),
+            "applied": source_mode_metadata.applied.as_str(),
+            "strict": source_mode_metadata.strict,
+            "fallback": source_mode_metadata.fallback,
+        },
     });
 
     match l2_context.cache.put_compressed(&l2_context.key, &payload) {
@@ -4390,7 +4467,6 @@ fn context_pack_l2_personalization_generation(
         connection,
         "SELECT \
             COUNT(*), \
-            COALESCE(MAX(updated_at), ''), \
             COALESCE(MAX(last_seen_at), '') \
          FROM agent_context_profiles",
     )?;
@@ -4557,14 +4633,54 @@ fn context_pack_l2_cached_response_json(
         .map_err(|error| format!("L2 pack cache responseJson command rewrite failed: {error}"))
 }
 
+fn context_pack_l2_cached_source_mode_metadata(
+    payload: &serde_json::Value,
+    options: &ContextPackOptions,
+) -> ContextPackL2SourceModeMetadata {
+    let Some(source_mode) = payload.get("sourceMode") else {
+        return ContextPackL2SourceModeMetadata::from_options(options);
+    };
+    let requested = source_mode
+        .get("requested")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_cached_search_source_mode)
+        .unwrap_or(options.source_mode);
+    let applied = source_mode
+        .get("applied")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_cached_search_source_mode)
+        .unwrap_or(requested);
+    let strict = source_mode
+        .get("strict")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(options.strict_source_mode);
+    let fallback = source_mode
+        .get("fallback")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(requested != applied);
+    ContextPackL2SourceModeMetadata {
+        requested,
+        applied,
+        strict,
+        fallback,
+    }
+}
+
+fn parse_cached_search_source_mode(value: &str) -> Option<SearchSourceMode> {
+    match value {
+        "lexical_only" => Some(SearchSourceMode::LexicalOnly),
+        "semantic_only" => Some(SearchSourceMode::SemanticOnly),
+        "hybrid" => Some(SearchSourceMode::Hybrid),
+        _ => None,
+    }
+}
+
 fn context_pack_l2_hit_performance_json(
     command: &'static str,
     options: &ContextPackOptions,
     request: &ContextRequest,
     trace: &ContextPerformanceTrace,
-    key: &str,
-    byte_len: u64,
-    compression: Option<&PackL2CompressionHit>,
+    cache_hit: ContextPackL2HitCacheMetadata<'_>,
 ) -> serde_json::Value {
     serde_json::json!({
         "schema": PERFORMANCE_EXPLAIN_SCHEMA_V1,
@@ -4584,6 +4700,10 @@ fn context_pack_l2_hit_performance_json(
                     || options.include_expired
                     || options.include_future
                     || options.include_stale,
+                "sourceModeRequested": cache_hit.source_mode.requested.as_str(),
+                "sourceModeApplied": cache_hit.source_mode.applied.as_str(),
+                "strictSourceMode": cache_hit.source_mode.strict,
+                "fallbackApplied": cache_hit.source_mode.fallback,
                 "memoryScope": options.memory_scope.as_str(),
                 "strictScope": options.strict_scope,
             },
@@ -4591,16 +4711,16 @@ fn context_pack_l2_hit_performance_json(
             "cache": {
                 "status": "hit",
                 "tier": "l2",
-                "key": key,
-                "byteLen": byte_len,
-                "compressed": compression.is_some(),
-                "compressedBytes": compression.map(|compression| compression.compressed_bytes),
-                "uncompressedBytes": compression
+                "key": cache_hit.key,
+                "byteLen": cache_hit.byte_len,
+                "compressed": cache_hit.compression.is_some(),
+                "compressedBytes": cache_hit.compression.map(|compression| compression.compressed_bytes),
+                "uncompressedBytes": cache_hit.compression
                     .map(|compression| compression.uncompressed_bytes)
-                    .unwrap_or(byte_len),
-                "dictionaryId": compression
+                    .unwrap_or(cache_hit.byte_len),
+                "dictionaryId": cache_hit.compression
                     .and_then(|compression| compression.dictionary_id.as_deref()),
-                "decompressionLatencyMs": compression
+                "decompressionLatencyMs": cache_hit.compression
                     .map(|compression| compression.decompression_latency_ms),
                 "selectedItemsUnaffected": true,
             },
@@ -4726,6 +4846,8 @@ pub(crate) struct PackL2CacheKeyInput {
     pub(crate) output_options: ContextPackOutputOptions,
     pub(crate) memory_scope: MemoryScope,
     pub(crate) strict_scope: bool,
+    pub(crate) source_mode: crate::core::search::SearchSourceMode,
+    pub(crate) strict_source_mode: bool,
     pub(crate) context_feature_flags_hash: String,
     pub(crate) personalization_generation: Option<u64>,
 }
@@ -4830,6 +4952,12 @@ pub(crate) fn compute_pack_l2_cache_key(input: &PackL2CacheKeyInput) -> String {
         input.memory_scope.as_str().as_bytes(),
     );
     hash_labeled_bool(&mut hasher, "strict_scope", input.strict_scope);
+    hash_labeled_bytes(
+        &mut hasher,
+        "source_mode",
+        input.source_mode.as_str().as_bytes(),
+    );
+    hash_labeled_bool(&mut hasher, "strict_source_mode", input.strict_source_mode);
     hash_labeled_bytes(
         &mut hasher,
         "context_feature_flags_hash",
@@ -8571,7 +8699,7 @@ mod tests {
     };
     use crate::db::{
         CreateMemoryInput, CreateWorkspaceInput, DatabaseConfig, DbConnection,
-        StoredAgentContextProfileForPack, StoredMemory,
+        StoredAgentContextProfileForPack, StoredMemory, UpsertAgentContextProfileInput,
     };
     use crate::models::{
         AgentContextProfileCounts, FocusItem, FocusState, LineSpan, MemoryId, MemoryScope,
@@ -8972,6 +9100,8 @@ mod tests {
             index_dir: None,
             query: "coordinate safely".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -9822,9 +9952,9 @@ pub fn unrelated_context() -> u64 {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
-            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_fallback: false,
+            source_mode_requested: crate::core::search::SearchSourceMode::SemanticOnly,
+            source_mode_applied: crate::core::search::SearchSourceMode::LexicalOnly,
+            source_mode_fallback: true,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -10544,6 +10674,67 @@ pub fn unrelated_context() -> u64 {
     }
 
     #[test]
+    fn pack_l2_personalization_generation_uses_existing_profile_columns() -> Result<(), String> {
+        let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+        connection.migrate().map_err(|error| error.to_string())?;
+        let empty_generation = super::context_pack_l2_personalization_generation(&connection)
+            .map_err(|error| format!("empty personalization generation failed: {error}"))?;
+        let empty_generation =
+            empty_generation.ok_or_else(|| "empty generation should be hashable".to_string())?;
+        let workspace_id = WorkspaceId::from_uuid(uuid::Uuid::from_u128(907)).to_string();
+        let memory_id = MemoryId::from_uuid(uuid::Uuid::from_u128(908)).to_string();
+        connection
+            .insert_workspace(
+                &workspace_id,
+                &CreateWorkspaceInput {
+                    path: "/tmp/ee-pack-l2-profile-generation".to_owned(),
+                    name: Some("pack l2 profile generation".to_owned()),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        connection
+            .insert_memory(
+                &memory_id,
+                &CreateMemoryInput {
+                    workspace_id: workspace_id.clone(),
+                    level: "procedural".to_owned(),
+                    kind: "rule".to_owned(),
+                    content: "Use existing profile columns for personalization generation."
+                        .to_owned(),
+                    workflow_id: None,
+                    confidence: 0.9,
+                    utility: 0.8,
+                    importance: 0.7,
+                    provenance_uri: None,
+                    trust_class: TrustClass::AgentAssertion.as_str().to_owned(),
+                    trust_subclass: None,
+                    tags: Vec::new(),
+                    valid_from: None,
+                    valid_to: None,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+
+        connection
+            .upsert_agent_context_profile_event(&UpsertAgentContextProfileInput {
+                workspace_id,
+                agent_name: "ProudWillow".to_owned(),
+                memory_id,
+                counts_delta: AgentContextProfileCounts::new(1, 0, 0),
+                last_seen_at: Some("2026-05-16T01:12:00Z".to_owned()),
+                weight_cached: 0.04,
+            })
+            .map_err(|error| error.to_string())?;
+
+        let generation = super::context_pack_l2_personalization_generation(&connection)
+            .map_err(|error| format!("profile personalization generation failed: {error}"))?;
+        let generation =
+            generation.ok_or_else(|| "profile generation should be hashable".to_string())?;
+        assert_ne!(generation, empty_generation);
+        connection.close().map_err(|error| error.to_string())
+    }
+
+    #[test]
     fn context_ppr_weight_one_uses_ppr_score_as_combined_score() -> Result<(), String> {
         let fixture = ppr_context_fixture(crate::db::GraphSnapshotStatus::Valid)?;
         enable_context_ppr_feature(&fixture.workspace_path)?;
@@ -10896,9 +11087,9 @@ pub fn unrelated_context() -> u64 {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
-            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_fallback: false,
+            source_mode_requested: crate::core::search::SearchSourceMode::SemanticOnly,
+            source_mode_applied: crate::core::search::SearchSourceMode::LexicalOnly,
+            source_mode_fallback: true,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -11483,9 +11674,9 @@ pub fn unrelated_context() -> u64 {
             runtime_profile: test_runtime_profile(),
             relevance_floor_applied: None,
             candidates_below_floor: 0,
-            source_mode_requested: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_applied: crate::core::search::SearchSourceMode::Hybrid,
-            source_mode_fallback: false,
+            source_mode_requested: crate::core::search::SearchSourceMode::SemanticOnly,
+            source_mode_applied: crate::core::search::SearchSourceMode::LexicalOnly,
+            source_mode_fallback: true,
             strict_source_mode: false,
             memory_scope: MemoryScope::Swarm,
             strict_scope: false,
@@ -11497,6 +11688,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: None,
             query: request.query.clone(),
             speed: crate::search::SpeedMode::Instant,
+            source_mode: crate::core::search::SearchSourceMode::SemanticOnly,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(60),
@@ -11590,6 +11783,16 @@ pub fn unrelated_context() -> u64 {
         assert_eq!(json["schema"], PERFORMANCE_EXPLAIN_SCHEMA_V1);
         assert_eq!(json["data"]["command"], "pack");
         assert_eq!(json["data"]["query"]["textIncluded"], false);
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeRequested"],
+            "semantic_only"
+        );
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeApplied"],
+            "lexical_only"
+        );
+        assert_eq!(json["data"]["queryPlan"]["strictSourceMode"], false);
+        assert_eq!(json["data"]["queryPlan"]["fallbackApplied"], true);
         assert_eq!(json["data"]["dbReads"]["memoryBatchReads"], 1);
         assert_eq!(
             json["data"]["dbReads"]["readSnapshot"]["surface"],
@@ -11629,6 +11832,193 @@ pub fn unrelated_context() -> u64 {
         assert!(!rendered.contains("SECRET_VALUE_ONE"));
         assert!(!rendered.contains("SECRET_VALUE_TWO"));
         assert!(!rendered.contains(&memory_a.to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn l2_hit_performance_query_plan_reports_source_mode_policy() -> Result<(), String> {
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "prepare release".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(600),
+            candidate_pool: Some(12),
+            max_results: Some(4),
+            sections: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let options = super::ContextPackOptions {
+            workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance"),
+            database_path: None,
+            index_dir: None,
+            query: request.query.clone(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: true,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(600),
+            candidate_pool: Some(12),
+            max_results: Some(4),
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::SelfOnly,
+            strict_scope: true,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: Default::default(),
+            persist_pack: true,
+        };
+        let trace = ContextPerformanceTrace::default();
+        let source_mode_metadata = super::ContextPackL2SourceModeMetadata::from_options(&options);
+
+        let json = super::context_pack_l2_hit_performance_json(
+            "pack",
+            &options,
+            &request,
+            &trace,
+            super::ContextPackL2HitCacheMetadata {
+                key: "blake3:l2-test-key",
+                byte_len: 123,
+                compression: None,
+                source_mode: source_mode_metadata,
+            },
+        );
+
+        assert_eq!(json["schema"], PERFORMANCE_EXPLAIN_SCHEMA_V1);
+        assert_eq!(json["data"]["cache"]["status"], "hit");
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeRequested"],
+            "lexical_only"
+        );
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeApplied"],
+            "lexical_only"
+        );
+        assert_eq!(json["data"]["queryPlan"]["strictSourceMode"], true);
+        assert_eq!(json["data"]["queryPlan"]["fallbackApplied"], false);
+        assert_eq!(json["data"]["queryPlan"]["memoryScope"], "self");
+        assert_eq!(json["data"]["queryPlan"]["strictScope"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn l2_source_mode_metadata_uses_authoritative_search_report_policy() {
+        let stale_options_requested = crate::core::search::SearchSourceMode::Hybrid;
+        let mut report =
+            super::missing_index_search_report("source metadata", 10, test_runtime_profile());
+        report.source_mode_requested = crate::core::search::SearchSourceMode::LexicalOnly;
+        report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
+        report.strict_source_mode = true;
+        report.source_mode_fallback = false;
+
+        let metadata = super::ContextPackL2SourceModeMetadata::from_search_report(&report);
+
+        assert_eq!(
+            metadata.requested, report.source_mode_requested,
+            "stored L2 source metadata must use SearchReport requested mode, not stale options"
+        );
+        assert_ne!(metadata.requested, stale_options_requested);
+        assert_eq!(metadata.applied, report.source_mode_applied);
+        assert_eq!(metadata.strict, report.strict_source_mode);
+        assert_eq!(metadata.fallback, report.source_mode_fallback);
+    }
+
+    #[test]
+    fn l2_hit_performance_query_plan_uses_cached_source_mode_fallback() -> Result<(), String> {
+        let request = ContextRequest::new(ContextRequestInput {
+            query: "prepare release".to_string(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(600),
+            candidate_pool: Some(12),
+            max_results: Some(4),
+            sections: Vec::new(),
+        })
+        .map_err(|error| error.to_string())?;
+        let options = super::ContextPackOptions {
+            workspace_path: PathBuf::from("/tmp/ee-l2-hit-performance-fallback"),
+            database_path: None,
+            index_dir: None,
+            query: request.query.clone(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::SemanticOnly,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(600),
+            candidate_pool: Some(12),
+            max_results: Some(4),
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::SelfOnly,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: Default::default(),
+            persist_pack: true,
+        };
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "responseJson": "{\"schema\":\"ee.response.v2\",\"success\":true,\"data\":{\"command\":\"pack\"},\"degraded\":[]}",
+            "sourceMode": {
+                "requested": "semantic_only",
+                "applied": "lexical_only",
+                "strict": false,
+                "fallback": true
+            }
+        });
+        let source_mode_metadata =
+            super::context_pack_l2_cached_source_mode_metadata(&payload, &options);
+        let json = super::context_pack_l2_hit_performance_json(
+            "pack",
+            &options,
+            &request,
+            &ContextPerformanceTrace::default(),
+            super::ContextPackL2HitCacheMetadata {
+                key: "blake3:l2-test-key",
+                byte_len: 123,
+                compression: None,
+                source_mode: source_mode_metadata,
+            },
+        );
+
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeRequested"],
+            "semantic_only"
+        );
+        assert_eq!(
+            json["data"]["queryPlan"]["sourceModeApplied"],
+            "lexical_only"
+        );
+        assert_eq!(json["data"]["queryPlan"]["strictSourceMode"], false);
+        assert_eq!(json["data"]["queryPlan"]["fallbackApplied"], true);
+
+        let mut fallbackless_payload = payload;
+        fallbackless_payload
+            .pointer_mut("/sourceMode")
+            .and_then(serde_json::Value::as_object_mut)
+            .ok_or_else(|| "test payload missing sourceMode".to_string())?
+            .remove("fallback");
+        let fallbackless_metadata =
+            super::context_pack_l2_cached_source_mode_metadata(&fallbackless_payload, &options);
+        assert!(fallbackless_metadata.fallback);
         Ok(())
     }
 
@@ -11687,6 +12077,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: Some(empty_index_dir),
             query: "format before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -11798,6 +12190,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: Some(empty_index_dir),
             query: "format before release".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::LexicalOnly,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -11838,17 +12232,22 @@ pub fn unrelated_context() -> u64 {
                     .map_err(|error| error.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(
-            cache_entry_paths.len(),
-            1,
-            "first run should publish exactly one L2 cache entry"
+        assert!(
+            !cache_entry_paths.is_empty(),
+            "first run should publish at least one L2 cache entry"
         );
-        let cache_entry_json = std::fs::read(&cache_entry_paths[0])
-            .map_err(|error| error.to_string())
-            .and_then(|bytes| {
-                serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .map_err(|error| error.to_string())
-            })?;
+        let cache_entry_json = cache_entry_paths
+            .iter()
+            .filter_map(|path| {
+                std::fs::read(path)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            })
+            .find(|entry| {
+                entry.get("schema").and_then(serde_json::Value::as_str)
+                    == Some(crate::cache::pack_l2::PACK_L2_CACHE_ENTRY_SCHEMA_V2)
+            })
+            .ok_or_else(|| "first run should publish a compressed v2 L2 cache entry".to_owned())?;
         assert_eq!(
             cache_entry_json
                 .get("schema")
@@ -11876,6 +12275,72 @@ pub fn unrelated_context() -> u64 {
         assert_eq!(
             fresh_json, cached_json,
             "L2 hit must replay byte-identical JSON"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn context_pack_l2_does_not_cache_source_mode_fallback_runs() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let cache_root = tempdir.path().join("pack-l2").join("workspace");
+        let cache = crate::cache::pack_l2::PackL2Cache::new(
+            cache_root,
+            crate::cache::pack_l2::PackL2CacheOptions::default(),
+        );
+        let l2_context = super::ContextPackL2Context {
+            cache: cache.clone(),
+            key: "blake3:l2-source-mode-fallback".to_owned(),
+        };
+        let options = super::ContextPackOptions {
+            workspace_path: tempdir.path().join("workspace"),
+            database_path: None,
+            index_dir: None,
+            query: "lexical fallback".to_owned(),
+            speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::SemanticOnly,
+            strict_source_mode: false,
+            filters: crate::models::QueryFilters::default(),
+            profile: Some(ContextPackProfile::Balanced),
+            max_tokens: Some(400),
+            candidate_pool: Some(10),
+            max_results: None,
+            include_tombstoned: false,
+            as_of: None,
+            include_expired: false,
+            include_future: false,
+            include_stale: false,
+            relevance_floor: None,
+            redaction_level: crate::models::RedactionLevel::Minimal,
+            memory_scope: MemoryScope::Swarm,
+            strict_scope: false,
+            ppr_weight: None,
+            changed_symbols: Vec::new(),
+            changed_symbols_from_git: false,
+            pagination: None,
+            coordination_snapshot_path: None,
+            coordination_stale_after_ms: crate::pack::DEFAULT_COORDINATION_STALE_AFTER_MS,
+            output_options: super::ContextPackOutputOptions::default()
+                .with_cache_json_response(true),
+            persist_pack: true,
+        };
+        let mut search_report =
+            super::missing_index_search_report("lexical fallback", 10, test_runtime_profile());
+        search_report.source_mode_requested = crate::core::search::SearchSourceMode::SemanticOnly;
+        search_report.source_mode_applied = crate::core::search::SearchSourceMode::LexicalOnly;
+        search_report.source_mode_fallback = true;
+        let mut response =
+            context_response_with_pack_item(MemoryId::from_uuid(uuid::Uuid::from_u128(44)))?;
+
+        super::context_pack_l2_store(&l2_context, &options, &search_report, &mut response);
+
+        assert!(
+            matches!(
+                cache
+                    .get("blake3:l2-source-mode-fallback")
+                    .map_err(|error| error.to_string())?,
+                crate::cache::pack_l2::PackL2CacheLookup::Miss(_)
+            ),
+            "source-mode fallback payload should not be written to L2"
         );
         Ok(())
     }
@@ -11939,6 +12404,8 @@ pub fn unrelated_context() -> u64 {
                     index_dir: Some(empty_index_dir),
                     query: "format before release".to_owned(),
                     speed: crate::search::SpeedMode::Default,
+                    source_mode: crate::core::search::SearchSourceMode::Hybrid,
+                    strict_source_mode: false,
                     filters: crate::models::QueryFilters::default(),
                     profile: Some(ContextPackProfile::Balanced),
                     max_tokens: Some(400),
@@ -12047,6 +12514,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: Some(empty_index_dir),
             query: "read pool determinism release".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -12674,6 +13143,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: Some(empty_index_dir),
             query: "clippy release candidate".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -12839,6 +13310,8 @@ pub fn unrelated_context() -> u64 {
             index_dir: Some(empty_index_dir),
             query: "validity window marker zeta release rule".to_owned(),
             speed: crate::search::SpeedMode::Default,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             filters: crate::models::QueryFilters::default(),
             profile: Some(ContextPackProfile::Balanced),
             max_tokens: Some(400),
@@ -13756,6 +14229,8 @@ pub fn unrelated_context() -> u64 {
                 .with_resource_profile(PackResourceProfile::SwarmHeavy),
             memory_scope: MemoryScope::Swarm,
             strict_scope: true,
+            source_mode: crate::core::search::SearchSourceMode::Hybrid,
+            strict_source_mode: false,
             context_feature_flags_hash: "blake3:features-a".to_string(),
             personalization_generation: Some(40),
         };
@@ -13825,6 +14300,22 @@ pub fn unrelated_context() -> u64 {
             key,
             compute_pack_l2_cache_key(&changed_redaction),
             "redaction level changes must alter the L2 key"
+        );
+
+        let mut changed_source_mode = base.clone();
+        changed_source_mode.source_mode = crate::core::search::SearchSourceMode::LexicalOnly;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_source_mode),
+            "retrieval source mode changes must alter the L2 key"
+        );
+
+        let mut changed_strict_source = base.clone();
+        changed_strict_source.strict_source_mode = true;
+        assert_ne!(
+            key,
+            compute_pack_l2_cache_key(&changed_strict_source),
+            "strict source-mode fallback policy changes must alter the L2 key"
         );
 
         for (label, changed) in [

@@ -1204,8 +1204,9 @@ fn process_one_index_job(
     // behind db_generation after `ee remember` wrote its audit rows, which
     // falsely tripped `search_index_stale` on the very next search even
     // though the job had already applied synchronously. (agent-UX item 5)
-    let published_generation =
-        get_db_stats(db)?.2.unwrap_or_else(|| u64::from(documents_total));
+    let published_generation = get_db_stats(db)?
+        .2
+        .unwrap_or_else(|| u64::from(documents_total));
 
     // Acquire index publish lock to prevent concurrent publish races.
     let holder_id = generate_index_holder_id();

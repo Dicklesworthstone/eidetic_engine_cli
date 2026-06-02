@@ -12,7 +12,7 @@
   "severity": "medium",
   "repair_present": true,
   "trigger": {
-    "description": "A multi-agent write path attempts to acquire a workspace advisory lock, but another live process holds the lock beyond the retry budget.",
+    "description": "A multi-agent write path attempts to acquire a workspace advisory lock, but another holder keeps the lock beyond the retry budget.",
     "setup_commands": [
       "ee init --workspace .",
       "ee diag advisory-lock --workspace . --resource-type workspace --holder held-by-agent --ttl-seconds 300 --json"
@@ -26,6 +26,6 @@
       "advisory lock",
       "timeout"
     ],
-    "repair_contains": "ee diag advisory-lock"
+    "repair_contains": "ee diag advisory-lock --workspace . --resource-type workspace --release --json"
   }
 }

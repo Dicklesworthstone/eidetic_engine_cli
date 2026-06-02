@@ -1500,7 +1500,7 @@ impl PackProvenance {
 #[serde(rename_all = "camelCase")]
 pub struct RenderedPackProvenance {
     pub uri: String,
-    pub scheme: &'static str,
+    pub scheme: String,
     pub label: String,
     pub locator: Option<String>,
     pub note: String,
@@ -1512,7 +1512,7 @@ impl From<&PackProvenance> for RenderedPackProvenance {
         let (label, locator) = rendered_provenance_label(&provenance.uri);
         Self {
             uri: redact_pack_provenance_text(&provenance.uri.to_string()),
-            scheme,
+            scheme: scheme.to_owned(),
             label: redact_pack_provenance_text(&label),
             locator: locator.map(|value| redact_pack_provenance_text(&value)),
             note: redact_pack_provenance_text(&provenance.note),
@@ -1611,7 +1611,7 @@ pub struct PackItemProvenance {
 pub struct PackProvenanceFooter {
     pub memory_count: usize,
     pub source_count: usize,
-    pub schemes: Vec<&'static str>,
+    pub schemes: Vec<String>,
     pub entries: Vec<PackItemProvenance>,
 }
 
@@ -1966,7 +1966,7 @@ impl PackDraft {
             memory_ids.insert(item.memory_id.to_string());
             for (index, provenance) in item.provenance.iter().enumerate() {
                 let source = provenance.rendered();
-                schemes.insert(source.scheme);
+                schemes.insert(source.scheme.clone());
                 entries.push(PackItemProvenance {
                     rank: item.rank,
                     memory_id: item.memory_id,
@@ -3826,7 +3826,7 @@ pub fn render_context_markdown_with_analysis(
                         output.push_str(&format!(
                             "- {} ({})\n",
                             markdown_inline_code(&prov.uri),
-                            escape_markdown_text(prov.scheme)
+                            escape_markdown_text(&prov.scheme)
                         ));
                     }
                     output.push('\n');
@@ -4931,6 +4931,7 @@ fn rendered_provenance_label(uri: &ProvenanceUri) -> (String, Option<String>) {
             };
             (label, locator)
         }
+        ProvenanceUri::External { scheme, body } => (format!("{scheme}://{body}"), None),
     }
 }
 
@@ -9793,7 +9794,7 @@ mod tests {
             &"file://src/lib.rs#L42",
             "rendered URI",
         )?;
-        ensure_equal(&rendered.scheme, &"file", "rendered scheme")?;
+        ensure_equal(&rendered.scheme.as_str(), &"file", "rendered scheme")?;
         ensure_equal(
             &rendered.label.as_str(),
             &"src/lib.rs:L42",
@@ -9926,7 +9927,7 @@ mod tests {
         ensure_equal(&footer.source_count, &2, "footer source count")?;
         ensure_equal(
             &footer.schemes,
-            &vec!["cass-session", "file"],
+            &vec!["cass-session".to_owned(), "file".to_owned()],
             "footer schemes",
         )?;
         ensure_equal(

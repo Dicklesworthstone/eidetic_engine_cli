@@ -115,6 +115,8 @@ fn context_options(
         index_dir: None,
         query: "structural reranking release seed".to_owned(),
         speed: SpeedMode::Default,
+        source_mode: ee::core::search::SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(1000),

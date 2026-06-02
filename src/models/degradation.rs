@@ -237,7 +237,7 @@ pub const ADVISORY_LOCK_TIMEOUT: DegradationCode = DegradationCode {
     description: "Advisory lock acquisition exceeded its retry budget",
     behavior_change: "Concurrent write operation could not prove exclusive ownership",
     auto_recoverable: true,
-    repair: Some("ee diag advisory-lock --workspace . --json"),
+    repair: Some("ee diag advisory-lock --workspace . --resource-type workspace --release --json"),
 };
 
 pub const SNAPSHOT_PIN_EXPIRED: DegradationCode = DegradationCode {

@@ -1444,11 +1444,7 @@ impl SearchReport {
             ));
             // Show a one-line body preview so a human/agent can tell what each
             // hit says without a follow-up `ee memory show`/`ee why`. (item 1)
-            if let Some(text) = hit
-                .metadata
-                .as_ref()
-                .and_then(search_hit_content_text)
-            {
+            if let Some(text) = hit.metadata.as_ref().and_then(search_hit_content_text) {
                 output.push_str(&format!(
                     "     {}\n",
                     search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS)

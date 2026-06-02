@@ -135,7 +135,7 @@ fn lab_generate_workload_emits_all_profiles_as_redaction_safe_json() -> TestResu
             format!("generator evidence profile mismatch for {profile}: {value}"),
         )?;
         ensure(
-            value["generatorEvidence"]["commandCount"].as_u64() == Some(command_count),
+            value["generatorEvidence"]["commandCount"].as_u64() == Some(command_count as u64),
             format!("generator evidence command count mismatch for {profile}: {value}"),
         )?;
         ensure(

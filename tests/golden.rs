@@ -392,6 +392,10 @@ mod tests {
             status: status.to_string(),
             priority: Some(1),
             assignee: None,
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
             source_bucket: status.to_string(),
         }
     }
@@ -476,6 +480,21 @@ mod tests {
         })
     }
 
+    fn swarm_liveness_evidence_case_json(evidence: &[String]) -> Vec<String> {
+        evidence
+            .iter()
+            .map(|item| {
+                if item.starts_with("last_activity_age_seconds:")
+                    && item != "last_activity_age_seconds:unknown"
+                {
+                    "last_activity_age_seconds:<present>".to_string()
+                } else {
+                    item.clone()
+                }
+            })
+            .collect()
+    }
+
     fn swarm_brief_contract_case(
         name: &str,
         report: SwarmBriefReport,
@@ -495,6 +514,24 @@ mod tests {
         ensure_sorted_strings(
             &recommendation_ids,
             &format!("{name} recommendation id ordering"),
+        )?;
+        let ready_pressure_ids = report
+            .ready_reservation_pressure
+            .iter()
+            .map(|pressure| pressure.bead_id.clone())
+            .collect::<Vec<_>>();
+        ensure_sorted_strings(
+            &ready_pressure_ids,
+            &format!("{name} ready reservation pressure ordering"),
+        )?;
+        let liveness_ids = report
+            .stalled_bead_liveness
+            .iter()
+            .map(|liveness| liveness.bead_id.clone())
+            .collect::<Vec<_>>();
+        ensure_sorted_strings(
+            &liveness_ids,
+            &format!("{name} stalled bead liveness ordering"),
         )?;
 
         let mut case = serde_json::json!({
@@ -534,6 +571,41 @@ mod tests {
                     "riskFactors": risk.risk_factors,
                     "evidence": risk.evidence,
                     "suggestedCommands": risk.suggested_commands,
+                })
+            }).collect::<Vec<_>>(),
+            "readyReservationPressure": report.ready_reservation_pressure.iter().map(|pressure| {
+                serde_json::json!({
+                    "beadId": pressure.bead_id,
+                    "title": pressure.title,
+                    "priority": pressure.priority,
+                    "action": pressure.action,
+                    "severity": pressure.severity,
+                    "likelySurfaces": pressure.likely_surfaces,
+                    "reservationHolders": pressure.reservation_holders,
+                    "exclusiveReservationCount": pressure.exclusive_reservation_count,
+                    "sharedReservationCount": pressure.shared_reservation_count,
+                    "earliestExpiresAt": pressure.earliest_expires_at,
+                    "maxRiskScore": pressure.max_risk_score,
+                    "riskFactors": pressure.risk_factors,
+                    "evidence": pressure.evidence,
+                    "suggestedCommands": pressure.suggested_commands,
+                })
+            }).collect::<Vec<_>>(),
+            "stalledBeadLiveness": report.stalled_bead_liveness.iter().map(|liveness| {
+                serde_json::json!({
+                    "beadId": liveness.bead_id,
+                    "title": liveness.title,
+                    "assignee": liveness.assignee,
+                    "priority": liveness.priority,
+                    "posture": liveness.posture,
+                    "action": liveness.action,
+                    "severity": liveness.severity,
+                    "lastActivityAt": liveness.last_activity_at,
+                    "ageSecondsPresent": liveness.age_seconds.is_some(),
+                    "evidenceSources": liveness.evidence_sources,
+                    "evidence": swarm_liveness_evidence_case_json(&liveness.evidence),
+                    "suggestedCommands": liveness.suggested_commands,
+                    "mustNotDo": liveness.must_not_do,
                 })
             }).collect::<Vec<_>>(),
             "recommendations": report
@@ -618,11 +690,15 @@ mod tests {
         });
 
         let mut stale_in_progress = base_swarm_brief_report();
-        stale_in_progress.beads.in_progress.push(swarm_bead(
+        let mut stale_bead = swarm_bead(
             "eidetic_engine_cli-w0xy",
             "[vision-coverage][graph] Implement graph centrality and graph refresh surfaces",
             "in_progress",
-        ));
+        );
+        stale_bead.updated_at = Some("2026-05-01T12:00:00.123456Z".to_string());
+        stale_bead.comment_count = 1;
+        stale_bead.latest_comment_at = Some("2026-05-01T13:00:00.654321Z".to_string());
+        stale_in_progress.beads.in_progress.push(stale_bead);
 
         let mut bv_unavailable = base_swarm_brief_report();
         replace_swarm_source(

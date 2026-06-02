@@ -1048,6 +1048,8 @@ fn remember_index_status(report: &IndexProcessingJobReport) -> String {
 
 const REMEMBER_CONTENTION_MAX_ATTEMPTS: usize = 64;
 const REMEMBER_WORKSPACE_LOCK_TTL_SECS: u64 = 300;
+const REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND: &str =
+    "ee diag advisory-lock --workspace . --resource-type workspace --release --json";
 
 struct RememberWorkspaceWriteLock<'a> {
     connection: &'a DbConnection,
@@ -1131,14 +1133,14 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
                         message: format!(
                             "advisory lock timeout while acquiring workspace write lock: {error}"
                         ),
-                        repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                        repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
                     });
                 }
             }
             Err(error) => {
                 return Err(DomainError::Storage {
                     message: format!("Failed to acquire workspace advisory lock: {error}"),
-                    repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+                    repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
                 });
             }
         }
@@ -1152,7 +1154,7 @@ fn acquire_remember_workspace_lock_with_retry<'a>(
         message: format!(
             "advisory lock timeout while waiting for workspace write lock held by {holder}"
         ),
-        repair: Some("ee diag advisory-lock --workspace . --json".to_owned()),
+        repair: Some(REMEMBER_ADVISORY_LOCK_REPAIR_COMMAND.to_owned()),
     })
 }
 
@@ -1624,7 +1626,8 @@ fn assess_memory_evidence_freshness_inner(
         ProvenanceUri::CassSession { .. }
         | ProvenanceUri::EeMemory(_)
         | ProvenanceUri::Web { .. }
-        | ProvenanceUri::AgentMail { .. } => EvidenceFreshness {
+        | ProvenanceUri::AgentMail { .. }
+        | ProvenanceUri::External { .. } => EvidenceFreshness {
             status: EvidenceFreshnessStatus::UnsupportedSource,
             provenance_uri: Some(provenance.to_string()),
             detail: format!(
@@ -7953,6 +7956,19 @@ mod tests {
             "unsupported source",
         )?;
 
+        let manual = assess_memory_evidence_freshness(
+            &freshness_memory(
+                "Freshness source release evidence line",
+                Some("manual://lived-audit/2026-06-02".to_owned()),
+            ),
+            Some(temp.path()),
+        );
+        ensure(
+            manual.status,
+            EvidenceFreshnessStatus::UnsupportedSource,
+            "manual source is accepted but not file-freshness-checkable",
+        )?;
+
         let unknown =
             assess_memory_evidence_freshness(&freshness_memory("No explicit source.", None), None);
         ensure(unknown.status, EvidenceFreshnessStatus::Unknown, "unknown")
@@ -11106,7 +11122,9 @@ mod tests {
             "error envelope carries advisory lock timeout code",
         )?;
         ensure(
-            json.contains("ee diag advisory-lock --workspace . --json"),
+            json.contains(
+                "ee diag advisory-lock --workspace . --resource-type workspace --release --json",
+            ),
             true,
             "error envelope carries recovery command",
         )?;

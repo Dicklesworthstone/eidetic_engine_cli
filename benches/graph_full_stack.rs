@@ -17,6 +17,7 @@ use ee::core::context::{
     ContextPackOptions, ContextPackOutputOptions, run_context_pack_with_performance,
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::search::SearchSourceMode;
 use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
     MemoryLinkRelation, MemoryLinkSource,
@@ -284,6 +285,8 @@ fn context_options(fixture: &BenchFixture, query: &str, mode: CacheMode) -> Cont
         index_dir: Some(fixture.index_dir.clone()),
         query: query.to_owned(),
         speed: SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(4000),

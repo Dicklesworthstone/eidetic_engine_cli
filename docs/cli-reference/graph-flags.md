@@ -42,6 +42,7 @@ owns `--ppr-weight`, `--explain`, and `--no-pack-dna`.
 | `ee context` | `--max-tokens`, `-t` | integer | `4000` | Sets the context pack token budget. |
 | `ee context`, `ee pack`, `ee pack build` | `--candidate-pool` | integer | `100` for `context`; query-file/default for `pack` | Caps candidates retrieved before packing. |
 | `ee context`, `ee pack`, `ee pack build` | `--speed` | `instant`, `default`, `quality` | `default` for `context`; query-file/default for `pack` | Selects retrieval speed versus quality budget. |
+| `ee context`, `ee pack`, `ee pack build` | `--source-mode`, `--strict-source-mode` | `lexical_only`, `semantic_only`, `hybrid`; boolean strict flag | `hybrid`; strict false | Selects lexical, semantic, or hybrid retrieval before packing; strict mode fails instead of falling back. |
 | `ee context`, `ee pack`, `ee pack build` | `--profile`, `-p` | `compact`, `balanced`, `grounding`, `orientation`, `thorough`, `submodular` | `balanced` for `context`; query-file/default for `pack` | Selects the context profile, section quota strategy, and HITS profile boosts when available. |
 | `ee context` | `--ppr-weight <WEIGHT>` | float; clamped to `0.0..=1.0` | omitted | Blends Personalized PageRank graph pull into context ranking. |
 | `ee context`, `ee pack`, `ee pack build` | `--pack-profile <PROFILE>` | `lean`, `standard`, `verbose` | `standard` for `context`; query-file/default for `pack` | Controls optional pack metadata volume. |
@@ -351,7 +352,7 @@ bead or runs an RCH-gated verification.
 | `ee swarm brief` | `--sources <LIST>` | comma-separated: `default`, `all`, `none`, `git`, `beads`, `bv`, `agent-mail`, `rch`, `host-profile`, `agent-inventory` | `default` | Selects read-only inputs for the coordination brief. |
 | `ee swarm next-action` | `--sources <LIST>` | same as `ee swarm brief` | `default`; includes RCH for next-action | Selects read-only inputs for work allocation. |
 | `ee swarm brief`, `ee swarm next-action` | `--include-rch` | boolean | false | Adds the optional RCH status probe; equivalent to including `rch` in `--sources`. |
-| `ee swarm brief`, `ee swarm next-action` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. |
+| `ee swarm brief`, `ee swarm next-action` | `--agent-mail-snapshot <PATH>` | JSON file path | omitted | Includes a redacted Agent Mail snapshot without mutating live mail. If omitted for brief, the Agent Mail source reports snapshot absence and a bounded `127.0.0.1:8765/health` probe result. |
 | `ee swarm next-action` | `--verifier-evidence <PATH>` | `ee.rch.verify.v1` proof JSON path | omitted | Includes recent compile-health evidence for work-allocation preflight. |
 | `ee swarm brief`, `ee swarm next-action` | `--agent-inventory-only <SLUGS>` | comma-separated connector slugs | omitted | Limits agent inventory inspection to selected connectors when inventory is enabled. |
 | `ee swarm brief`, `ee swarm next-action` | `--max-recent-commits <N>` | integer | `8` | Caps recent git commits included by the git source. |

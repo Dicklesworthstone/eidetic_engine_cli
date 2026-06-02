@@ -21,6 +21,7 @@ use ee::core::context::{
     run_context_pack_with_performance,
 };
 use ee::core::index::{IndexRebuildOptions, IndexRebuildStatus, rebuild_index};
+use ee::core::search::SearchSourceMode;
 use ee::db::{
     CreateMemoryInput, CreateMemoryLinkInput, CreateWorkspaceInput, DbConnection,
     MemoryLinkRelation, MemoryLinkSource,
@@ -204,6 +205,8 @@ fn options(
         index_dir: Some(index_dir.to_path_buf()),
         query: "structural reranking release seed".to_owned(),
         speed: SpeedMode::Default,
+        source_mode: SearchSourceMode::Hybrid,
+        strict_source_mode: false,
         filters: Default::default(),
         profile: None,
         max_tokens: Some(4000),

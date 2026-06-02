@@ -1112,7 +1112,7 @@ fn cargo_subcommand_is_heavy(word: &str) -> bool {
 fn cargo_global_option_takes_value(word: &str) -> bool {
     matches!(
         word,
-        "--color" | "--config" | "--lockfile-path" | "--manifest-path" | "--target-dir"
+        "-Z" | "--color" | "--config" | "--lockfile-path" | "--manifest-path" | "--target-dir"
     )
 }
 
@@ -3830,6 +3830,7 @@ action = "explode"
         for command in [
             "cargo check --lib",
             "cargo +nightly clippy --all-targets -- -D warnings",
+            "cargo -Z unstable-options check --all-targets",
             "cargo fix --allow-dirty",
             "cargo install --path .",
             "cargo rustc --lib",

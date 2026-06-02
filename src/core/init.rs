@@ -58,6 +58,15 @@ pub struct InitAction {
     pub status: &'static str,
 }
 
+/// Detailed reason for an init action that failed or was refused.
+#[derive(Clone, Debug)]
+pub struct InitActionError {
+    pub action: &'static str,
+    pub path: PathBuf,
+    pub status: &'static str,
+    pub message: String,
+}
+
 /// Options for the init command.
 #[derive(Clone, Debug)]
 pub struct InitOptions {
@@ -83,6 +92,7 @@ pub struct InitReport {
     pub database_path: PathBuf,
     pub index_dir: PathBuf,
     pub actions: Vec<InitAction>,
+    pub action_errors: Vec<InitActionError>,
     pub dry_run: bool,
 }
 
@@ -143,6 +153,19 @@ impl InitReport {
             }
         }
 
+        if !self.action_errors.is_empty() {
+            output.push_str("\nFailure details:\n");
+            for error in &self.action_errors {
+                output.push_str(&format!(
+                    "  {} {} ({}): {}\n",
+                    error.action,
+                    error.path.display(),
+                    error.status,
+                    error.message
+                ));
+            }
+        }
+
         output
     }
 
@@ -169,6 +192,18 @@ impl InitReport {
                 })
             })
             .collect();
+        let action_errors: Vec<serde_json::Value> = self
+            .action_errors
+            .iter()
+            .map(|error| {
+                serde_json::json!({
+                    "action": error.action,
+                    "path": error.path.display().to_string(),
+                    "status": error.status,
+                    "message": error.message,
+                })
+            })
+            .collect();
 
         serde_json::json!({
             "command": "init",
@@ -179,6 +214,7 @@ impl InitReport {
             "databasePath": self.database_path.display().to_string(),
             "indexDir": self.index_dir.display().to_string(),
             "actions": actions,
+            "actionErrors": action_errors,
             "dryRun": self.dry_run,
             // agent-UX item 6: onboarding-time semantic posture so harnesses
             // can branch on whether retrieval is full-hybrid or lexical-only.
@@ -222,6 +258,86 @@ fn normalize_workspace_path(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
+fn path_without_trailing_separators(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        out.push(component.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        out
+    }
+}
+
+/// Resolve harmless ancestor symlinks before applying no-follow init guards.
+///
+/// On macOS `/tmp` is normally a symlink to `/private/tmp`; agents naturally
+/// create scratch workspaces there. Refusing those paths forces `realpath`
+/// busywork even though init can safely operate on the canonical target. A
+/// final symlink remains refused unless `--allow-symlink` is explicit.
+fn canonicalize_init_workspace_for_no_follow(path: &Path, allow_symlink: bool) -> PathBuf {
+    if allow_symlink {
+        return path.to_path_buf();
+    }
+
+    let final_component_path = path_without_trailing_separators(path);
+    if matches!(
+        fs::symlink_metadata(&final_component_path),
+        Ok(metadata) if metadata.file_type().is_symlink()
+    ) {
+        return path.to_path_buf();
+    }
+
+    if path.exists() {
+        return path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    }
+
+    let mut ancestor = path;
+    let mut missing_suffix = Vec::new();
+    while let Some(parent) = ancestor.parent() {
+        let Some(leaf) = ancestor.file_name() else {
+            break;
+        };
+        missing_suffix.push(leaf.to_os_string());
+        ancestor = parent;
+        if ancestor.exists() {
+            return ancestor
+                .canonicalize()
+                .map(|mut canonical| {
+                    for component in missing_suffix.iter().rev() {
+                        canonical.push(component);
+                    }
+                    canonical
+                })
+                .unwrap_or_else(|_| path.to_path_buf());
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn record_failed_init_action(
+    actions: &mut Vec<InitAction>,
+    action_errors: &mut Vec<InitActionError>,
+    action: &'static str,
+    path: PathBuf,
+    status: &'static str,
+    message: impl Into<String>,
+) {
+    actions.push(InitAction {
+        action,
+        path: path.clone(),
+        status,
+    });
+    action_errors.push(InitActionError {
+        action,
+        path,
+        status,
+        message: message.into(),
+    });
+}
+
 /// Initialize the ee workspace.
 ///
 /// Creates the .ee directory, database file placeholder, and index directory
@@ -244,21 +360,26 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 .join(&options.workspace_path),
         )
     };
+    let workspace = canonicalize_init_workspace_for_no_follow(&workspace, options.allow_symlink);
 
     let ee_dir = workspace.join(".ee");
     let database_path = ee_dir.join("ee.db");
     let index_dir = ee_dir.join("index");
 
     let mut actions = Vec::new();
+    let mut action_errors = Vec::new();
     let mut any_created = false;
     let mut any_failed = false;
 
-    if let Some(status) = init_path_safety_status(&workspace, options.allow_symlink) {
-        actions.push(InitAction {
-            action: "check_workspace",
-            path: workspace.clone(),
-            status,
-        });
+    if let Some(issue) = init_path_safety_issue(&workspace, options.allow_symlink) {
+        record_failed_init_action(
+            &mut actions,
+            &mut action_errors,
+            "check_workspace",
+            workspace.clone(),
+            issue.status,
+            issue.message,
+        );
         return InitReport {
             version,
             status: InitStatus::Failed,
@@ -267,6 +388,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             database_path,
             index_dir,
             actions,
+            action_errors,
             dry_run: options.dry_run,
         };
     }
@@ -275,12 +397,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     if options.repair_plan {
         let mut repair_actions = Vec::new();
 
-        if let Some(status) = init_path_safety_status(&ee_dir, options.allow_symlink) {
-            repair_actions.push(InitAction {
-                action: "check_directory",
-                path: ee_dir.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&ee_dir, options.allow_symlink) {
+            record_failed_init_action(
+                &mut repair_actions,
+                &mut action_errors,
+                "check_directory",
+                ee_dir.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !ee_dir.exists() {
             repair_actions.push(InitAction {
                 action: "create_directory",
@@ -295,12 +420,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             });
         }
 
-        if let Some(status) = init_path_safety_status(&index_dir, options.allow_symlink) {
-            repair_actions.push(InitAction {
-                action: "check_directory",
-                path: index_dir.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
+            record_failed_init_action(
+                &mut repair_actions,
+                &mut action_errors,
+                "check_directory",
+                index_dir.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !index_dir.exists() {
             repair_actions.push(InitAction {
                 action: "create_directory",
@@ -315,12 +443,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             });
         }
 
-        if let Some(status) = init_path_safety_status(&database_path, options.allow_symlink) {
-            repair_actions.push(InitAction {
-                action: "check_file",
-                path: database_path.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&database_path, options.allow_symlink) {
+            record_failed_init_action(
+                &mut repair_actions,
+                &mut action_errors,
+                "check_file",
+                database_path.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !database_path.exists() {
             repair_actions.push(InitAction {
                 action: "create_file",
@@ -343,17 +474,21 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             database_path,
             index_dir,
             actions: repair_actions,
+            action_errors,
             dry_run: false,
         };
     }
 
     if options.dry_run {
-        if let Some(status) = init_path_safety_status(&ee_dir, options.allow_symlink) {
-            actions.push(InitAction {
-                action: "check_directory",
-                path: ee_dir.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&ee_dir, options.allow_symlink) {
+            record_failed_init_action(
+                &mut actions,
+                &mut action_errors,
+                "check_directory",
+                ee_dir.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !ee_dir.exists() {
             actions.push(InitAction {
                 action: "create_directory",
@@ -361,12 +496,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 status: "would_create",
             });
         }
-        if let Some(status) = init_path_safety_status(&index_dir, options.allow_symlink) {
-            actions.push(InitAction {
-                action: "check_directory",
-                path: index_dir.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
+            record_failed_init_action(
+                &mut actions,
+                &mut action_errors,
+                "check_directory",
+                index_dir.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !index_dir.exists() {
             actions.push(InitAction {
                 action: "create_directory",
@@ -374,12 +512,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 status: "would_create",
             });
         }
-        if let Some(status) = init_path_safety_status(&database_path, options.allow_symlink) {
-            actions.push(InitAction {
-                action: "check_file",
-                path: database_path.clone(),
-                status,
-            });
+        if let Some(issue) = init_path_safety_issue(&database_path, options.allow_symlink) {
+            record_failed_init_action(
+                &mut actions,
+                &mut action_errors,
+                "check_file",
+                database_path.clone(),
+                issue.status,
+                issue.message,
+            );
         } else if !database_path.exists() {
             actions.push(InitAction {
                 action: "create_file",
@@ -403,33 +544,45 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
             database_path,
             index_dir,
             actions,
+            action_errors,
             dry_run: true,
         };
     }
 
-    if let Some(status) = init_path_safety_status(&ee_dir, options.allow_symlink) {
-        actions.push(InitAction {
-            action: "check_directory",
-            path: ee_dir.clone(),
-            status,
-        });
+    if let Some(issue) = init_path_safety_issue(&ee_dir, options.allow_symlink) {
+        record_failed_init_action(
+            &mut actions,
+            &mut action_errors,
+            "check_directory",
+            ee_dir.clone(),
+            issue.status,
+            issue.message,
+        );
         any_failed = true;
     } else if !ee_dir.exists() {
         match fs::create_dir_all(&ee_dir) {
             Ok(()) => {
-                if let Some(status) = init_path_safety_status(&ee_dir, options.allow_symlink) {
-                    actions.push(InitAction {
-                        action: "create_directory",
-                        path: ee_dir.clone(),
-                        status,
-                    });
+                if let Some(issue) = init_path_safety_issue(&ee_dir, options.allow_symlink) {
+                    record_failed_init_action(
+                        &mut actions,
+                        &mut action_errors,
+                        "create_directory",
+                        ee_dir.clone(),
+                        issue.status,
+                        issue.message,
+                    );
                     any_failed = true;
-                } else if harden_init_directory_mode(&ee_dir, options.allow_symlink).is_err() {
-                    actions.push(InitAction {
-                        action: "create_directory",
-                        path: ee_dir.clone(),
-                        status: "failed",
-                    });
+                } else if let Err(error) =
+                    harden_init_directory_mode(&ee_dir, options.allow_symlink)
+                {
+                    record_failed_init_action(
+                        &mut actions,
+                        &mut action_errors,
+                        "create_directory",
+                        ee_dir.clone(),
+                        "failed",
+                        format!("failed to harden directory permissions: {error}"),
+                    );
                     any_failed = true;
                 } else {
                     actions.push(InitAction {
@@ -440,12 +593,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                     any_created = true;
                 }
             }
-            Err(_) => {
-                actions.push(InitAction {
-                    action: "create_directory",
-                    path: ee_dir.clone(),
-                    status: "failed",
-                });
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "create_directory",
+                    ee_dir.clone(),
+                    "failed",
+                    format!("failed to create directory: {error}"),
+                );
                 any_failed = true;
             }
         }
@@ -457,29 +613,40 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         });
     }
 
-    if let Some(status) = init_path_safety_status(&index_dir, options.allow_symlink) {
-        actions.push(InitAction {
-            action: "check_directory",
-            path: index_dir.clone(),
-            status,
-        });
+    if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
+        record_failed_init_action(
+            &mut actions,
+            &mut action_errors,
+            "check_directory",
+            index_dir.clone(),
+            issue.status,
+            issue.message,
+        );
         any_failed = true;
     } else if !index_dir.exists() {
         match fs::create_dir_all(&index_dir) {
             Ok(()) => {
-                if let Some(status) = init_path_safety_status(&index_dir, options.allow_symlink) {
-                    actions.push(InitAction {
-                        action: "create_directory",
-                        path: index_dir.clone(),
-                        status,
-                    });
+                if let Some(issue) = init_path_safety_issue(&index_dir, options.allow_symlink) {
+                    record_failed_init_action(
+                        &mut actions,
+                        &mut action_errors,
+                        "create_directory",
+                        index_dir.clone(),
+                        issue.status,
+                        issue.message,
+                    );
                     any_failed = true;
-                } else if harden_init_directory_mode(&index_dir, options.allow_symlink).is_err() {
-                    actions.push(InitAction {
-                        action: "create_directory",
-                        path: index_dir.clone(),
-                        status: "failed",
-                    });
+                } else if let Err(error) =
+                    harden_init_directory_mode(&index_dir, options.allow_symlink)
+                {
+                    record_failed_init_action(
+                        &mut actions,
+                        &mut action_errors,
+                        "create_directory",
+                        index_dir.clone(),
+                        "failed",
+                        format!("failed to harden directory permissions: {error}"),
+                    );
                     any_failed = true;
                 } else {
                     actions.push(InitAction {
@@ -490,12 +657,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                     any_created = true;
                 }
             }
-            Err(_) => {
-                actions.push(InitAction {
-                    action: "create_directory",
-                    path: index_dir.clone(),
-                    status: "failed",
-                });
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "create_directory",
+                    index_dir.clone(),
+                    "failed",
+                    format!("failed to create directory: {error}"),
+                );
                 any_failed = true;
             }
         }
@@ -507,12 +677,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         });
     }
 
-    if let Some(status) = init_path_safety_status(&database_path, options.allow_symlink) {
-        actions.push(InitAction {
-            action: "check_file",
-            path: database_path.clone(),
-            status,
-        });
+    if let Some(issue) = init_path_safety_issue(&database_path, options.allow_symlink) {
+        record_failed_init_action(
+            &mut actions,
+            &mut action_errors,
+            "check_file",
+            database_path.clone(),
+            issue.status,
+            issue.message,
+        );
         any_failed = true;
     } else if !database_path.exists() {
         match initialize_database(&database_path, &workspace, options.allow_symlink) {
@@ -524,12 +697,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 });
                 any_created = true;
             }
-            Err(_) => {
-                actions.push(InitAction {
-                    action: "create_file",
-                    path: database_path.clone(),
-                    status: "failed",
-                });
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "create_file",
+                    database_path.clone(),
+                    "failed",
+                    error,
+                );
                 any_failed = true;
             }
         }
@@ -540,11 +716,14 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                 path: database_path.clone(),
                 status: "exists",
             }),
-            Err(_) => actions.push(InitAction {
-                action: "check_file",
-                path: database_path.clone(),
-                status: "failed",
-            }),
+            Err(error) => record_failed_init_action(
+                &mut actions,
+                &mut action_errors,
+                "check_file",
+                database_path.clone(),
+                "failed",
+                error,
+            ),
         }
         if actions
             .last()
@@ -572,12 +751,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                     status: "exists",
                 });
             }
-            Err(_) => {
-                actions.push(InitAction {
-                    action: "create_file",
-                    path: agents_path,
-                    status: "failed",
-                });
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "create_file",
+                    agents_path,
+                    "failed",
+                    format!("failed to create AGENTS.md boilerplate: {error}"),
+                );
                 any_failed = true;
             }
         }
@@ -599,12 +781,15 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
                     status: "exists",
                 });
             }
-            Err(_) => {
-                actions.push(InitAction {
-                    action: "create_file",
-                    path: claude_path,
-                    status: "failed",
-                });
+            Err(error) => {
+                record_failed_init_action(
+                    &mut actions,
+                    &mut action_errors,
+                    "create_file",
+                    claude_path,
+                    "failed",
+                    format!("failed to create CLAUDE.md boilerplate: {error}"),
+                );
                 any_failed = true;
             }
         }
@@ -628,6 +813,7 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
         database_path,
         index_dir,
         actions,
+        action_errors,
         dry_run: false,
     }
 }
@@ -928,15 +1114,37 @@ fn ensure_existing_boilerplate_path_is_file(
     ))
 }
 
-fn init_path_safety_status(path: &Path, allow_symlink: bool) -> Option<&'static str> {
+#[derive(Clone, Debug)]
+struct InitPathSafetyIssue {
+    status: &'static str,
+    message: String,
+}
+
+fn init_path_safety_issue(path: &Path, allow_symlink: bool) -> Option<InitPathSafetyIssue> {
     if allow_symlink {
         return None;
     }
     match init_path_has_symlink_component(path) {
         Ok(false) => None,
-        Ok(true) => Some("symlink_refused"),
-        Err(_) => Some("inspect_failed"),
+        Ok(true) => Some(InitPathSafetyIssue {
+            status: "symlink_refused",
+            message: format!(
+                "refusing to initialize {} because the path traverses a symlink",
+                path.display()
+            ),
+        }),
+        Err(error) => Some(InitPathSafetyIssue {
+            status: "inspect_failed",
+            message: format!(
+                "failed to inspect init path {} for symlink safety: {error}",
+                path.display()
+            ),
+        }),
     }
+}
+
+fn init_path_safety_status(path: &Path, allow_symlink: bool) -> Option<&'static str> {
+    init_path_safety_issue(path, allow_symlink).map(|issue| issue.status)
 }
 
 fn ensure_init_path_has_no_symlink_components(
@@ -1370,6 +1578,7 @@ mod tests {
             database_path: PathBuf::from("/test/workspace/.ee/ee.db"),
             index_dir: PathBuf::from("/test/workspace/.ee/index"),
             actions: vec![],
+            action_errors: vec![],
             dry_run: false,
         };
 
@@ -1389,6 +1598,13 @@ mod tests {
             json.get("dryRun").and_then(|v| v.as_bool()),
             Some(false),
             "dryRun field",
+        )?;
+        ensure(
+            json.get("actionErrors")
+                .and_then(|value| value.as_array())
+                .map(Vec::is_empty),
+            Some(true),
+            "actionErrors field",
         )
     }
 
@@ -1402,6 +1618,7 @@ mod tests {
             database_path: PathBuf::from("/test/workspace/.ee/ee.db"),
             index_dir: PathBuf::from("/test/workspace/.ee/index"),
             actions: vec![],
+            action_errors: vec![],
             dry_run: false,
         };
 
@@ -1443,6 +1660,46 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_repair_plan_reports_symlink_action_errors() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let workspace = temp_dir.path().join("workspace");
+        let outside_metadata = temp_dir.path().join("outside-metadata");
+        std::fs::create_dir(&workspace).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&outside_metadata).map_err(|error| error.to_string())?;
+        symlink(&outside_metadata, workspace.join(".ee")).map_err(|error| error.to_string())?;
+        let options = InitOptions {
+            workspace_path: workspace,
+            dry_run: false,
+            repair_plan: true,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+
+        ensure(report.status, InitStatus::RepairPlan, "repair plan status")?;
+        ensure(
+            report
+                .actions
+                .iter()
+                .any(|action| action.status == "symlink_refused"),
+            true,
+            "repair plan reports symlink refusal action",
+        )?;
+        ensure(
+            report.action_errors.iter().any(|error| {
+                error.status == "symlink_refused" && error.message.contains("traverses a symlink")
+            }),
+            true,
+            "repair plan reports symlink refusal details",
+        )
     }
 
     #[test]
@@ -1634,6 +1891,103 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn init_canonicalizes_symlinked_workspace_ancestor() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let real_root = temp_dir.path().join("real-root");
+        let linked_root = temp_dir.path().join("linked-root");
+        let real_workspace = real_root.join("workspace");
+        let linked_workspace = linked_root.join("workspace");
+        std::fs::create_dir(&real_root).map_err(|error| error.to_string())?;
+        std::fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+        let options = InitOptions {
+            workspace_path: linked_workspace,
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+        let expected_workspace = real_workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status,
+            InitStatus::Created,
+            "ancestor symlink should be canonicalized",
+        )?;
+        ensure(
+            report.workspace,
+            expected_workspace,
+            "report should use canonical workspace path",
+        )?;
+        ensure(
+            real_workspace.join(".ee").join("ee.db").exists(),
+            true,
+            "init should write into the canonical workspace",
+        )?;
+        ensure(
+            report.action_errors.is_empty(),
+            true,
+            "canonicalized ancestor symlink should not produce action errors",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_canonicalizes_symlinked_workspace_ancestor_with_missing_parents() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let real_root = temp_dir.path().join("real-root");
+        let linked_root = temp_dir.path().join("linked-root");
+        let real_workspace = real_root.join("missing-parent").join("workspace");
+        let linked_workspace = linked_root.join("missing-parent").join("workspace");
+        std::fs::create_dir(&real_root).map_err(|error| error.to_string())?;
+        symlink(&real_root, &linked_root).map_err(|error| error.to_string())?;
+        let options = InitOptions {
+            workspace_path: linked_workspace,
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+        let expected_workspace = real_workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            report.status,
+            InitStatus::Created,
+            "missing parent under ancestor symlink should be canonicalized",
+        )?;
+        ensure(
+            report.workspace,
+            expected_workspace,
+            "report should use canonical nested workspace path",
+        )?;
+        ensure(
+            real_workspace.join(".ee").join("ee.db").exists(),
+            true,
+            "init should create nested missing parents under the canonical workspace",
+        )?;
+        ensure(
+            report.action_errors.is_empty(),
+            true,
+            "canonicalized nested ancestor symlink should not produce action errors",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn init_rejects_symlinked_workspace_by_default() -> TestResult {
         use std::os::unix::fs::symlink;
 
@@ -1661,6 +2015,18 @@ mod tests {
             "workspace check status",
         )?;
         ensure(
+            report.action_errors.len(),
+            1,
+            "symlink refusal has one action error",
+        )?;
+        ensure(
+            report.action_errors[0]
+                .message
+                .contains("traverses a symlink"),
+            true,
+            "symlink refusal explains the reason",
+        )?;
+        ensure(
             real_workspace.join(".ee").exists(),
             false,
             "init must not create metadata through a symlinked workspace",
@@ -1669,6 +2035,51 @@ mod tests {
             real_workspace.join("AGENTS.md").exists(),
             false,
             "init must not write boilerplate through a symlinked workspace",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_rejects_symlinked_workspace_with_trailing_separator_by_default() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let real_workspace = temp_dir.path().join("real-workspace");
+        let linked_workspace = temp_dir.path().join("linked-workspace");
+        std::fs::create_dir(&real_workspace).map_err(|error| error.to_string())?;
+        symlink(&real_workspace, &linked_workspace).map_err(|error| error.to_string())?;
+        let options = InitOptions {
+            workspace_path: PathBuf::from(format!("{}/", linked_workspace.display())),
+            dry_run: false,
+            repair_plan: false,
+            force: false,
+            allow_symlink: false,
+            skip_boilerplate: true,
+        };
+
+        let report = init_workspace(&options);
+
+        ensure(report.status, InitStatus::Failed, "symlink status")?;
+        ensure(report.actions.len(), 1, "only workspace check is reported")?;
+        ensure(
+            report.actions[0].status,
+            "symlink_refused",
+            "workspace check status",
+        )?;
+        ensure(
+            report.action_errors.len(),
+            1,
+            "trailing-separator symlink refusal has one action error",
+        )?;
+        ensure(
+            real_workspace.join(".ee").exists(),
+            false,
+            "init must not create metadata through a symlinked workspace with trailing separator",
+        )?;
+        ensure(
+            real_workspace.join("AGENTS.md").exists(),
+            false,
+            "init must not write boilerplate through a symlinked workspace with trailing separator",
         )
     }
 
