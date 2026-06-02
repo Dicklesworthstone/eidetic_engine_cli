@@ -19,6 +19,7 @@ ci_suitability = "normal_ci"
 workload_tier = "small"
 benches = [
   "status",
+  "daemon_round_trip",
   "pack_replay_freshness_smoke",
 ]
 sample_size = 10
@@ -56,6 +57,7 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "graph_full_stack",
+  "daemon_round_trip",
   "curate_candidates",
   "graph_refresh_cooperative",
 ]
@@ -94,6 +96,7 @@ benches = [
   "graph_gomory_hu",
   "graph_hits",
   "graph_full_stack",
+  "daemon_round_trip",
   "curate_candidates",
   "graph_refresh_cooperative",
 ]
@@ -303,3 +306,13 @@ description = "Read and validate a persisted pack replay ledger"
 p50_ms_max = 30.0
 p99_ms_max = 90.0
 description = "Compare two persisted pack replay ledgers"
+
+[operations.ee_daemon_dispatch]
+p50_ms_max = 1.0
+p99_ms_max = 5.0
+description = "Pure daemon dispatch table overhead for seed methods before UDS framing"
+
+[operations.ee_daemon_uds_round_trip]
+p50_ms_max = 5.0
+p99_ms_max = 25.0
+description = "Unix-domain socket request/response framing and dispatch round trip for seed daemon methods"

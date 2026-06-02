@@ -288,6 +288,10 @@ harness = false
 name = "cass_prefetch"
 harness = false
 
+[[bench]]
+name = "daemon_round_trip"
+harness = false
+
 [[test]]
 name = "cass_contracts"
 path = "tests/conformance/cass_contracts.rs"
