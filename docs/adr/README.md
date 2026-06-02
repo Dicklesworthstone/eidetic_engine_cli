@@ -56,3 +56,6 @@ including rejected alternatives and verification hooks.
 - [ADR 0048: N6 Persistent Homology on the Memory-Link Graph — Deferred to Research Backlog](0048-persistent-homology-N6.md)
 - [ADR 0049: Memory-Mapped Frankensearch Index for Zero-Copy Hot Reads — Deferred to Research Backlog](0049-mmap-frankensearch-N9.md)
 - [ADR 0050: Active-Learning Curate-Candidate Selection (N11) — Deferred to Research Backlog](0050-active-learning-curate-N11.md)
+- [ADR 0051: High-confidence co-tag auto-linking on `ee remember`](0051-remember-cotag-auto-linking.md)
+- [ADR 0052: Daemon round-trip benchmark baseline](0052-daemon-round-trip-benchmark.md)
+- [ADR 0053: Daemon Panic Supervision Boundary](0053-daemon-panic-supervision.md)
