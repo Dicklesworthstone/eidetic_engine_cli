@@ -89,6 +89,43 @@ const HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON: &str =
 const SEARCH_MI_DEDUP_MIN_COSINE_SIMILARITY: f64 = 0.85;
 const SEARCH_MI_DEDUP_MIN_NORMALIZED_MI: f64 = 0.72;
 
+/// Character cap for the top-level `contentPreview` field added to each search
+/// result. Agents previously had to dig into `metadata.content` (or make an
+/// `ee memory show`/`ee why` follow-up call) to learn what a hit actually said;
+/// a short preview at the top level removes that round-trip. (agent-UX item 1)
+const SEARCH_CONTENT_PREVIEW_MAX_CHARS: usize = 240;
+
+/// Extract the memory body text from a search hit's metadata, checking the
+/// public `content` field first and falling back to the analysis-side keys.
+fn search_hit_content_text(meta: &serde_json::Value) -> Option<String> {
+    for key in [
+        "content",
+        SEARCH_ANALYSIS_CONTENT_KEY,
+        "contentPreview",
+        "content_preview",
+    ] {
+        if let Some(text) = meta.get(key).and_then(serde_json::Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Truncate body text to a single-line preview on a char boundary, collapsing
+/// interior newlines so a multi-line memory still renders as one tidy line.
+fn search_content_preview(content: &str, max_chars: usize) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut preview = collapsed.chars().take(max_chars).collect::<String>();
+    preview.push('…');
+    preview
+}
+
 static SEARCH_INDEX_STATUS_CACHE: OnceLock<Mutex<HashMap<IndexStatusCacheKey, CachedIndexStatus>>> =
     OnceLock::new();
 // bd-2r38i: RwLock (was Mutex) so cache-hit reads via the
@@ -1405,6 +1442,18 @@ impl SearchReport {
                 hit.score,
                 hit.source.as_str()
             ));
+            // Show a one-line body preview so a human/agent can tell what each
+            // hit says without a follow-up `ee memory show`/`ee why`. (item 1)
+            if let Some(text) = hit
+                .metadata
+                .as_ref()
+                .and_then(search_hit_content_text)
+            {
+                output.push_str(&format!(
+                    "     {}\n",
+                    search_content_preview(&text, SEARCH_CONTENT_PREVIEW_MAX_CHARS)
+                ));
+            }
             if let Some(ref explanation) = hit.explanation {
                 output.push_str(&format!("     {}\n", explanation.summary));
                 for factor in &explanation.factors {
@@ -1513,6 +1562,19 @@ impl SearchReport {
                         let (metadata, mut redacted_patterns) =
                             public_search_metadata(meta, output_redaction_enabled);
                         redacted_patterns.extend(provenance_redacted_patterns.clone());
+                        // Promote a short, redaction-safe body preview to the top
+                        // level so agents don't have to reach into `metadata.content`
+                        // (or make a follow-up `ee memory show`). Derived from the
+                        // already-redacted public metadata. (agent-UX item 1)
+                        if let Some(text) = search_hit_content_text(&metadata) {
+                            obj_map.insert(
+                                "contentPreview".to_string(),
+                                serde_json::json!(search_content_preview(
+                                    &text,
+                                    SEARCH_CONTENT_PREVIEW_MAX_CHARS
+                                )),
+                            );
+                        }
                         obj_map.insert("metadata".to_string(), metadata);
                         if let Some(drift_hint) = meta.get("driftHint") {
                             obj_map.insert("driftHint".to_string(), drift_hint.clone());
@@ -5381,6 +5443,26 @@ fn resolve_source_mode_with_tiers(
 
 fn active_search_embedder_is_semantic() -> bool {
     HashEmbedder::default_256().is_semantic()
+}
+
+/// One-line, agent-actionable hint for turning on semantic retrieval.
+pub(crate) const SEMANTIC_ENABLE_HINT: &str = "point EE_EMBED_MODEL_PATH at a local embedding model, then run `ee index reembed --workspace .` (release builds ship with the embed-fast feature)";
+
+/// Posture probe for onboarding/diagnostic surfaces (e.g. `ee init`).
+/// Returns `None` when semantic retrieval is active, or `Some(reason)`
+/// describing why retrieval is degraded to lexical-only — either a missing
+/// `EE_EMBED_MODEL_PATH` model file or the hash-fallback embedder. The
+/// same condition surfaces per-query as the `embed_model_unavailable`
+/// degradation; this lets the one-time onboarding path nudge the agent
+/// before the first search. (agent-UX item 6)
+pub(crate) fn semantic_retrieval_unavailable_reason() -> Option<String> {
+    if active_search_embedder_is_semantic() {
+        return None;
+    }
+    Some(
+        embed_model_unavailable_reason_from_env()
+            .unwrap_or_else(|| HASH_FALLBACK_SEMANTIC_UNAVAILABLE_REASON.to_string()),
+    )
 }
 
 fn embed_model_unavailable_reason_from_env() -> Option<String> {

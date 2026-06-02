@@ -117,6 +117,20 @@ impl InitReport {
         output.push_str(&format!("  Database: {}\n", self.database_path.display()));
         output.push_str(&format!("  Index: {}\n", self.index_dir.display()));
 
+        // Tell the agent up front whether semantic retrieval is live; on a
+        // clean machine it degrades to lexical-only hash fallback, and the
+        // agent should know to enable it rather than silently getting weaker
+        // recall. (agent-UX item 6)
+        match crate::core::search::semantic_retrieval_unavailable_reason() {
+            Some(reason) => {
+                output.push_str(&format!(
+                    "  Semantic retrieval: OFF — lexical-only ({reason})\n    Enable: {}\n",
+                    crate::core::search::SEMANTIC_ENABLE_HINT
+                ));
+            }
+            None => output.push_str("  Semantic retrieval: ready\n"),
+        }
+
         if !self.actions.is_empty() {
             output.push_str("\nActions:\n");
             for action in &self.actions {
@@ -166,8 +180,46 @@ impl InitReport {
             "indexDir": self.index_dir.display().to_string(),
             "actions": actions,
             "dryRun": self.dry_run,
+            // agent-UX item 6: onboarding-time semantic posture so harnesses
+            // can branch on whether retrieval is full-hybrid or lexical-only.
+            "semanticRetrieval": crate::core::search::semantic_retrieval_unavailable_reason()
+                .map_or_else(
+                    || serde_json::json!({ "enabled": true }),
+                    |reason| serde_json::json!({
+                        "enabled": false,
+                        "reason": reason,
+                        "enable": crate::core::search::SEMANTIC_ENABLE_HINT,
+                    }),
+                ),
         })
     }
+}
+
+/// Lexically normalize a workspace path without touching the filesystem.
+///
+/// `--workspace .` joins to `current_dir()/.` which then renders as
+/// `/proj/./.ee`, `/proj/./ee.db`, etc. in init/status output. The dir may
+/// not exist yet during init, so we can't `canonicalize()`; instead we strip
+/// `CurDir` (`.`) components and collapse `ParentDir` (`..`) against a
+/// preceding normal component, preserving root/prefix semantics.
+fn normalize_workspace_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Initialize the ee workspace.
@@ -184,11 +236,13 @@ pub fn init_workspace(options: &InitOptions) -> InitReport {
     let version = build_info().version;
 
     let workspace = if options.workspace_path.is_absolute() {
-        options.workspace_path.clone()
+        normalize_workspace_path(&options.workspace_path)
     } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(&options.workspace_path)
+        normalize_workspace_path(
+            &std::env::current_dir()
+                .unwrap_or_default()
+                .join(&options.workspace_path),
+        )
     };
 
     let ee_dir = workspace.join(".ee");

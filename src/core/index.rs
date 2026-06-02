@@ -1197,6 +1197,16 @@ fn process_one_index_job(
         });
     }
 
+    // Publish the index at the database generation (the audit-inclusive
+    // max of source-document and audited-mutation counts), matching the
+    // full-rebuild path at write_index_metadata above. Writing only
+    // `documents_total` here left the incremental index one generation
+    // behind db_generation after `ee remember` wrote its audit rows, which
+    // falsely tripped `search_index_stale` on the very next search even
+    // though the job had already applied synchronously. (agent-UX item 5)
+    let published_generation =
+        get_db_stats(db)?.2.unwrap_or_else(|| u64::from(documents_total));
+
     // Acquire index publish lock to prevent concurrent publish races.
     let holder_id = generate_index_holder_id();
     acquire_index_publish_lock(db, &job.workspace_id, &holder_id)?;
@@ -1206,7 +1216,7 @@ fn process_one_index_job(
         let staging_dir = create_publish_staging_dir(index_dir)?;
         let build_result = build_index_sync(&staging_dir, default_embedder_stack(), indexable_docs)
             .and_then(|stats| {
-                write_index_metadata(&staging_dir, u64::from(documents_total), documents_total)
+                write_index_metadata(&staging_dir, published_generation, documents_total)
                     .and_then(|()| publish_staged_index(index_dir, &staging_dir))
                     .map_err(|error| error.to_string())?;
                 Ok(stats)
