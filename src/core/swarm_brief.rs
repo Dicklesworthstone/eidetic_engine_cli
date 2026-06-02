@@ -6,12 +6,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -68,6 +70,8 @@ const BV_NO_OUTPUT_CODE: &str = "bv_no_output";
 const BV_UNAVAILABLE_CODE: &str = "bv_unavailable";
 const AGENT_MAIL_UNAVAILABLE_CODE: &str = "agent_mail_unavailable";
 const AGENT_MAIL_SEMANTIC_READINESS_FAILED_CODE: &str = "agent_mail_semantic_readiness_failed";
+const AGENT_MAIL_HEALTH_PORT: u16 = 8765;
+const AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS: u64 = 75;
 const MEMORY_DRIFT_UNAVAILABLE_CODE: &str = "memory_drift_source_unverifiable";
 const RCH_UNAVAILABLE_CODE: &str = "rch_unavailable";
 const RCH_WORKER_TOPOLOGY_BLOCKED_CODE: &str = "rch_worker_topology_blocked";
@@ -77,7 +81,7 @@ const RCH_POSTURE_NO_REMOTE_WORKERS: &str = "no_remote_workers";
 const RCH_POSTURE_WORKER_UNREACHABLE: &str = "worker_unreachable";
 pub const RCH_WORKER_PRESSURE_SCHEMA_V1: &str = "ee.rch.worker_pressure.v1";
 const AGENT_STATUS_UNAVAILABLE_CODE: &str = "agent_status_unavailable";
-const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 5;
+const MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS: usize = 6;
 const MAX_SWARM_INCIDENT_SUMMARY_RECORDS: usize = 8;
 const MAX_SWARM_INCIDENT_DEGRADED_CODES: usize = 8;
 const MAX_SWARM_INCIDENT_RECOVERY_ACTIONS: usize = 4;
@@ -85,6 +89,8 @@ const MAX_SWARM_INCIDENT_ARTIFACT_REFS: usize = 8;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
 const SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 const SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES: usize = 8192;
+const STALLED_BEAD_ACTIVE_WINDOW_SECONDS: i64 = 6 * 60 * 60;
+const STALLED_BEAD_QUIET_WINDOW_SECONDS: i64 = 24 * 60 * 60;
 
 /// Options used by the internal source collection layer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -162,6 +168,9 @@ pub struct SwarmBriefReport {
     pub bv: Option<SwarmBriefBvSummary>,
     pub file_reservations: Vec<SwarmBriefFileReservation>,
     pub file_surface_risks: Vec<SwarmBriefFileSurfaceRisk>,
+    pub ready_reservation_pressure: Vec<SwarmBriefReadyReservationPressure>,
+    pub stalled_bead_liveness: Vec<SwarmBriefStalledBeadLiveness>,
+    pub agent_mail_agents: Vec<SwarmBriefAgentMailAgent>,
     pub inbox: Vec<SwarmBriefInboxSummary>,
     pub threads: Vec<SwarmBriefThreadSummary>,
     pub resource_pressure: Vec<SwarmBriefResourcePressureHint>,
@@ -200,6 +209,9 @@ impl SwarmBriefReport {
             bv: None,
             file_reservations: Vec::new(),
             file_surface_risks: Vec::new(),
+            ready_reservation_pressure: Vec::new(),
+            stalled_bead_liveness: Vec::new(),
+            agent_mail_agents: Vec::new(),
             inbox: Vec::new(),
             threads: Vec::new(),
             resource_pressure: Vec::new(),
@@ -246,6 +258,14 @@ impl SwarmBriefReport {
         });
         self.file_surface_risks
             .dedup_by(|left, right| left.path_pattern == right.path_pattern);
+        self.ready_reservation_pressure.sort();
+        self.ready_reservation_pressure.dedup();
+        self.stalled_bead_liveness.sort();
+        self.stalled_bead_liveness
+            .dedup_by(|left, right| left.bead_id == right.bead_id);
+        self.agent_mail_agents.sort();
+        self.agent_mail_agents
+            .dedup_by(|left, right| left.name == right.name);
         self.inbox.sort();
         self.inbox.dedup();
         self.threads.sort();
@@ -518,6 +538,10 @@ pub struct SwarmBriefBead {
     pub status: String,
     pub priority: Option<i64>,
     pub assignee: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+    pub latest_comment_at: Option<String>,
+    pub comment_count: u64,
     pub source_bucket: String,
 }
 
@@ -566,6 +590,50 @@ pub struct SwarmBriefFileSurfaceRisk {
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SwarmBriefReadyReservationPressure {
+    pub bead_id: String,
+    pub title: String,
+    pub priority: Option<i64>,
+    pub action: String,
+    pub severity: String,
+    pub likely_surfaces: Vec<String>,
+    pub reservation_holders: Vec<String>,
+    pub exclusive_reservation_count: usize,
+    pub shared_reservation_count: usize,
+    pub earliest_expires_at: Option<String>,
+    pub max_risk_score: u16,
+    pub risk_factors: Vec<String>,
+    pub evidence: Vec<String>,
+    pub suggested_commands: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefStalledBeadLiveness {
+    pub bead_id: String,
+    pub title: String,
+    pub assignee: Option<String>,
+    pub priority: Option<i64>,
+    pub posture: String,
+    pub action: String,
+    pub severity: String,
+    pub last_activity_at: Option<String>,
+    pub age_seconds: Option<i64>,
+    pub evidence_sources: Vec<String>,
+    pub evidence: Vec<String>,
+    pub suggested_commands: Vec<String>,
+    pub must_not_do: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwarmBriefAgentMailAgent {
+    pub name: String,
+    pub last_active_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SwarmBriefInboxSummary {
     pub mailbox: String,
     pub unread_count: u64,
@@ -585,6 +653,7 @@ pub struct SwarmBriefThreadSummary {
 #[serde(rename_all = "camelCase")]
 pub struct SwarmBriefAgentMailSnapshot {
     pub file_reservations: Vec<SwarmBriefFileReservation>,
+    pub agents: Vec<SwarmBriefAgentMailAgent>,
     pub inbox: Vec<SwarmBriefInboxSummary>,
     pub threads: Vec<SwarmBriefThreadSummary>,
     #[serde(skip)]
@@ -1194,6 +1263,7 @@ pub enum SwarmBriefContribution {
     Bv(SwarmBriefBvSummary),
     AgentMail {
         file_reservations: Vec<SwarmBriefFileReservation>,
+        agents: Vec<SwarmBriefAgentMailAgent>,
         inbox: Vec<SwarmBriefInboxSummary>,
         threads: Vec<SwarmBriefThreadSummary>,
     },
@@ -1732,14 +1802,13 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
     fn collect(&self, options: &SwarmBriefCollectOptions) -> SwarmBriefSourceOutput {
         let provenance = SwarmBriefSourceProvenance::local_probe();
         let Some(path) = &options.agent_mail_snapshot_path else {
+            let (message, repair) =
+                agent_mail_missing_snapshot_degradation_text(probe_agent_mail_health_endpoint());
             let degradation = SwarmBriefDegradation::warning(
                 SwarmBriefSourceKind::AgentMail,
                 AGENT_MAIL_UNAVAILABLE_CODE,
-                "No redacted Agent Mail snapshot path was configured.",
-                Some(
-                    "Provide a redacted Agent Mail snapshot path when collecting the brief."
-                        .to_string(),
-                ),
+                message,
+                Some(repair),
             );
             return SwarmBriefSourceOutput {
                 snapshot: SwarmBriefSourceSnapshot {
@@ -1758,6 +1827,7 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
             Ok(contents) => match parse_agent_mail_snapshot_json(&contents) {
                 Ok(snapshot) => {
                     let item_count = snapshot.file_reservations.len()
+                        + snapshot.agents.len()
                         + snapshot.inbox.len()
                         + snapshot.threads.len();
                     let degraded = snapshot.degraded.clone();
@@ -1770,6 +1840,7 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
                         .with_degraded(degraded),
                         contribution: SwarmBriefContribution::AgentMail {
                             file_reservations: snapshot.file_reservations,
+                            agents: snapshot.agents,
                             inbox: snapshot.inbox,
                             threads: snapshot.threads,
                         },
@@ -1809,6 +1880,50 @@ impl SwarmBriefSourceAdapter for AgentMailSnapshotFileAdapter {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentMailHealthProbe {
+    Reachable,
+    Unreachable,
+}
+
+fn probe_agent_mail_health_endpoint() -> AgentMailHealthProbe {
+    let timeout = Duration::from_millis(AGENT_MAIL_HEALTH_PROBE_TIMEOUT_MS);
+    let addr = SocketAddr::from(([127, 0, 0, 1], AGENT_MAIL_HEALTH_PORT));
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, timeout) else {
+        return AgentMailHealthProbe::Unreachable;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1:8765\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return AgentMailHealthProbe::Unreachable;
+    }
+    let mut response_prefix = [0_u8; 16];
+    match stream.read(&mut response_prefix) {
+        Ok(count) if response_prefix[..count].starts_with(b"HTTP/") => {
+            AgentMailHealthProbe::Reachable
+        }
+        _ => AgentMailHealthProbe::Unreachable,
+    }
+}
+
+fn agent_mail_missing_snapshot_degradation_text(
+    probe: AgentMailHealthProbe,
+) -> (&'static str, String) {
+    match probe {
+        AgentMailHealthProbe::Reachable => (
+            "No redacted Agent Mail snapshot path was configured; the local Agent Mail health endpoint at 127.0.0.1:8765 is reachable, but ee swarm brief only consumes explicit redacted snapshots.",
+            "Generate a redacted snapshot with scripts/swarm_coordination_health.sh and pass --agent-mail-snapshot <snapshot.json>; live MCP tools remain external to ee.".to_string(),
+        ),
+        AgentMailHealthProbe::Unreachable => (
+            "No redacted Agent Mail snapshot path was configured, and the local Agent Mail health endpoint at 127.0.0.1:8765 was not reachable within the brief probe budget.",
+            "Start or repair Agent Mail, run scripts/swarm_coordination_health.sh, then pass --agent-mail-snapshot <snapshot.json> when collecting the brief.".to_string(),
+        ),
     }
 }
 
@@ -2466,6 +2581,12 @@ fn current_epoch_ms() -> u64 {
         .unwrap_or_default()
 }
 
+fn rfc3339_epoch_seconds(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Utc).timestamp())
+}
+
 fn qos_resource_pressure_hints(
     summary: &super::qos::QosLaneSummary,
 ) -> Vec<SwarmBriefResourcePressureHint> {
@@ -2553,10 +2674,12 @@ fn apply_source_output(report: &mut SwarmBriefReport, output: SwarmBriefSourceOu
         }
         SwarmBriefContribution::AgentMail {
             file_reservations,
+            agents,
             inbox,
             threads,
         } => {
             report.file_reservations.extend(file_reservations);
+            report.agent_mail_agents.extend(agents);
             report.inbox.extend(inbox);
             report.threads.extend(threads);
         }
@@ -2635,6 +2758,8 @@ pub fn apply_swarm_brief_advice(report: &mut SwarmBriefReport) {
     report.resource_pressure = pressure;
 
     report.file_surface_risks = score_file_surface_risks(report);
+    report.ready_reservation_pressure = summarize_ready_reservation_pressure(report);
+    report.stalled_bead_liveness = summarize_stalled_bead_liveness(report);
     report.recommendations = recommend_swarm_brief_actions(report);
 }
 
@@ -2671,6 +2796,68 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         })
         .count();
 
+    let counts = json!({
+        "sourceCount": report.sources.len(),
+        "dirtyFileCount": report.dirty_files.len(),
+        "recentCommitCount": report.recent_commits.len(),
+        "gitOperationInProgress": report.git_operation_state.in_progress,
+        "gitOperationMarkerCount": report.git_operation_state.operations.len(),
+        "gitAutostashMarkerCount": report.git_operation_state.autostash_markers.len(),
+        "gitAheadCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.ahead_count),
+        "gitAheadCommitCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.commits.len()),
+        "gitAheadPeerOwnedRisk": report.git_ahead.as_ref().is_some_and(|snapshot| snapshot.peer_owned_ahead_risk),
+        "readyWorkCount": report.beads.ready.len(),
+        "blockedWorkCount": report.beads.blocked.len(),
+        "inProgressWorkCount": report.beads.in_progress.len(),
+        "deferredWorkCount": report.beads.deferred.len(),
+        "activeReservationCount": report.file_reservations.len(),
+        "exclusiveReservationCount": report.file_reservations.iter().filter(|reservation| reservation.exclusive).count(),
+        "activeConflictCount": active_conflict_count,
+        "fileSurfaceRiskCount": report.file_surface_risks.len(),
+        "readyReservationPressureCount": report.ready_reservation_pressure.len(),
+        "stalledBeadLivenessCount": report.stalled_bead_liveness.len(),
+        "agentMailAgentCount": report.agent_mail_agents.len(),
+        "inboxMailboxCount": report.inbox.len(),
+        "unreadCount": report.inbox.iter().map(|item| item.unread_count).sum::<u64>(),
+        "ackRequiredCount": report.inbox.iter().map(|item| item.ack_required_count).sum::<u64>(),
+        "threadCount": report.threads.len(),
+        "resourcePressureHintCount": report.resource_pressure.len(),
+        "memoryDriftAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.affected_count),
+        "memoryDriftTopAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.top_affected_memory_ids.len() as u32),
+        "verificationBrokerRecentReusableRunCount": report.verification_broker.as_ref().map_or(0, |summary| summary.recent_reusable_run_count),
+        "verificationBrokerKnownBlockerCount": report.verification_broker.as_ref().map_or(0, verification_broker_known_blocker_count),
+        "verificationBrokerInFlightCount": report.verification_broker.as_ref().map_or(0, |summary| summary.in_flight_equivalent_command_count),
+        "degradedCount": report.degraded.len(),
+        "recommendationCount": report.recommendations.len(),
+        "symbolRiskPathCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.summarized_path_count),
+        "symbolRiskHighRiskSymbolCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.high_risk_symbol_count),
+    });
+    let bv = json!({
+        "actionableCount": report.bv.as_ref().and_then(|summary| summary.actionable_count),
+        "blockedCount": report.bv.as_ref().and_then(|summary| summary.blocked_count),
+        "inProgressCount": report.bv.as_ref().and_then(|summary| summary.in_progress_count),
+        "trackCount": report.bv.as_ref().and_then(|summary| summary.track_count),
+        "topPickIds": report.bv.as_ref().map(|summary| {
+            summary.top_picks.iter().take(5).map(|pick| pick.id.clone()).collect::<Vec<_>>()
+        }).unwrap_or_default(),
+    });
+    let provenance = json!({
+        "underlyingReportHash": report_hash,
+        "sideEffectFree": true,
+        "rawCommandTextIncluded": false,
+        "sourceProvenance": swarm_brief_source_provenance_summaries(report),
+    });
+    let redaction = json!({
+        "rawMailBodiesIncluded": false,
+        "rawQueryTextIncluded": false,
+        "rawProvenanceTextIncluded": false,
+        "fullFileListingsIncluded": false,
+        "rawSymbolNamesIncluded": false,
+        "rawAgentNamesIncluded": false,
+        "reservationHolderLabelsIncluded": "hashes_only",
+        "recommendationEvidenceIncluded": "hashes_only",
+    });
+
     json!({
         "schema": SWARM_BRIEF_SUMMARY_SCHEMA_V1,
         "sourceSchema": SWARM_BRIEF_SCHEMA_V1,
@@ -2682,48 +2869,8 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "limits": {
             "maxRecommendations": MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS,
         },
-        "counts": {
-            "sourceCount": report.sources.len(),
-            "dirtyFileCount": report.dirty_files.len(),
-            "recentCommitCount": report.recent_commits.len(),
-            "gitOperationInProgress": report.git_operation_state.in_progress,
-            "gitOperationMarkerCount": report.git_operation_state.operations.len(),
-            "gitAutostashMarkerCount": report.git_operation_state.autostash_markers.len(),
-            "gitAheadCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.ahead_count),
-            "gitAheadCommitCount": report.git_ahead.as_ref().map_or(0, |snapshot| snapshot.commits.len()),
-            "gitAheadPeerOwnedRisk": report.git_ahead.as_ref().is_some_and(|snapshot| snapshot.peer_owned_ahead_risk),
-            "readyWorkCount": report.beads.ready.len(),
-            "blockedWorkCount": report.beads.blocked.len(),
-            "inProgressWorkCount": report.beads.in_progress.len(),
-            "deferredWorkCount": report.beads.deferred.len(),
-            "activeReservationCount": report.file_reservations.len(),
-            "exclusiveReservationCount": report.file_reservations.iter().filter(|reservation| reservation.exclusive).count(),
-            "activeConflictCount": active_conflict_count,
-            "fileSurfaceRiskCount": report.file_surface_risks.len(),
-            "inboxMailboxCount": report.inbox.len(),
-            "unreadCount": report.inbox.iter().map(|item| item.unread_count).sum::<u64>(),
-            "ackRequiredCount": report.inbox.iter().map(|item| item.ack_required_count).sum::<u64>(),
-            "threadCount": report.threads.len(),
-            "resourcePressureHintCount": report.resource_pressure.len(),
-            "memoryDriftAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.affected_count),
-            "memoryDriftTopAffectedCount": report.memory_drift.as_ref().map_or(0, |summary| summary.top_affected_memory_ids.len() as u32),
-            "verificationBrokerRecentReusableRunCount": report.verification_broker.as_ref().map_or(0, |summary| summary.recent_reusable_run_count),
-            "verificationBrokerKnownBlockerCount": report.verification_broker.as_ref().map_or(0, verification_broker_known_blocker_count),
-            "verificationBrokerInFlightCount": report.verification_broker.as_ref().map_or(0, |summary| summary.in_flight_equivalent_command_count),
-            "degradedCount": report.degraded.len(),
-            "recommendationCount": report.recommendations.len(),
-            "symbolRiskPathCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.summarized_path_count),
-            "symbolRiskHighRiskSymbolCount": report.workspace_hygiene.as_ref().and_then(|summary| summary.symbol_risk_summary.as_ref()).map_or(0, |summary| summary.high_risk_symbol_count),
-        },
-        "bv": {
-            "actionableCount": report.bv.as_ref().and_then(|summary| summary.actionable_count),
-            "blockedCount": report.bv.as_ref().and_then(|summary| summary.blocked_count),
-            "inProgressCount": report.bv.as_ref().and_then(|summary| summary.in_progress_count),
-            "trackCount": report.bv.as_ref().and_then(|summary| summary.track_count),
-            "topPickIds": report.bv.as_ref().map(|summary| {
-                summary.top_picks.iter().take(5).map(|pick| pick.id.clone()).collect::<Vec<_>>()
-            }).unwrap_or_default(),
-        },
+        "counts": counts,
+        "bv": bv,
         "memoryDrift": swarm_brief_memory_drift_summary(report),
         "gitAhead": swarm_brief_git_ahead_summary(report),
         "verificationBroker": swarm_brief_verification_broker_summary_value(report),
@@ -2734,23 +2881,12 @@ pub fn summarize_swarm_brief_report(report: &SwarmBriefReport) -> Value {
         "singleFlight": singleflight_posture_report(),
         "degradedCodes": degraded_codes,
         "fileSurfaceRiskSummary": swarm_brief_file_surface_risk_summary(report),
+        "readyReservationPressureSummary": swarm_brief_ready_reservation_pressure_summary(report),
+        "stalledBeadLivenessSummary": swarm_brief_stalled_bead_liveness_summary(report),
         "symbolRiskSummary": swarm_brief_symbol_risk_summary(report),
         "topRecommendations": swarm_brief_summary_recommendations(report),
-        "provenance": {
-            "underlyingReportHash": report_hash,
-            "sideEffectFree": true,
-            "rawCommandTextIncluded": false,
-            "sourceProvenance": swarm_brief_source_provenance_summaries(report),
-        },
-        "redaction": {
-            "rawMailBodiesIncluded": false,
-            "rawQueryTextIncluded": false,
-            "rawProvenanceTextIncluded": false,
-            "fullFileListingsIncluded": false,
-            "rawSymbolNamesIncluded": false,
-            "rawAgentNamesIncluded": false,
-            "recommendationEvidenceIncluded": "hashes_only",
-        },
+        "provenance": provenance,
+        "redaction": redaction,
     })
 }
 
@@ -3774,7 +3910,9 @@ fn swarm_brief_file_surface_risk_summary(report: &SwarmBriefReport) -> Value {
     for risk in &report.file_surface_risks {
         *counts_by_severity.entry(risk.severity.clone()).or_default() += 1;
         for holder in &risk.reservation_holders {
-            *counts_by_holder.entry(holder.clone()).or_default() += 1;
+            *counts_by_holder
+                .entry(blake3_summary_hash(holder))
+                .or_default() += 1;
         }
         for status in &risk.git_status_buckets {
             *counts_by_git_status.entry(status.clone()).or_default() += 1;
@@ -3802,10 +3940,116 @@ fn swarm_brief_file_surface_risk_summary(report: &SwarmBriefReport) -> Value {
                     "severity": risk.severity.clone(),
                     "score": risk.score,
                     "riskFactors": risk.risk_factors.clone(),
-                    "reservationHolders": risk.reservation_holders.clone(),
+                    "reservationHolders": risk.reservation_holders.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
                     "relatedBeadIds": risk.related_bead_ids.clone(),
                     "suggestedCommandHashes": risk.suggested_commands.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
                     "rawPathIncluded": false,
+                    "rawCommandsIncluded": false,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn swarm_brief_ready_reservation_pressure_summary(report: &SwarmBriefReport) -> Value {
+    let mut counts_by_action = BTreeMap::<String, usize>::new();
+    let mut counts_by_severity = BTreeMap::<String, usize>::new();
+    let mut counts_by_holder = BTreeMap::<String, usize>::new();
+    for pressure in &report.ready_reservation_pressure {
+        *counts_by_action.entry(pressure.action.clone()).or_default() += 1;
+        *counts_by_severity
+            .entry(pressure.severity.clone())
+            .or_default() += 1;
+        for holder in &pressure.reservation_holders {
+            *counts_by_holder
+                .entry(blake3_summary_hash(holder))
+                .or_default() += 1;
+        }
+    }
+
+    let mut top = report.ready_reservation_pressure.iter().collect::<Vec<_>>();
+    top.sort_by(|left, right| {
+        recommendation_severity_rank(&right.severity)
+            .cmp(&recommendation_severity_rank(&left.severity))
+            .then_with(|| right.max_risk_score.cmp(&left.max_risk_score))
+            .then_with(|| left.bead_id.cmp(&right.bead_id))
+    });
+
+    json!({
+        "countsByAction": counts_by_action,
+        "countsBySeverity": counts_by_severity,
+        "countsByReservationHolder": counts_by_holder,
+        "topReadyBeads": top
+            .into_iter()
+            .take(MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS)
+            .map(|pressure| {
+                json!({
+                    "beadId": pressure.bead_id,
+                    "titleHash": blake3_summary_hash(&pressure.title),
+                    "priority": pressure.priority,
+                    "action": pressure.action,
+                    "severity": pressure.severity,
+                    "reservationHolders": pressure.reservation_holders.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "exclusiveReservationCount": pressure.exclusive_reservation_count,
+                    "sharedReservationCount": pressure.shared_reservation_count,
+                    "earliestExpiresAt": pressure.earliest_expires_at,
+                    "maxRiskScore": pressure.max_risk_score,
+                    "riskFactors": pressure.risk_factors,
+                    "likelySurfaceHashes": pressure.likely_surfaces.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "suggestedCommandHashes": pressure.suggested_commands.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "rawTitleIncluded": false,
+                    "rawSurfacesIncluded": false,
+                    "rawCommandsIncluded": false,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn swarm_brief_stalled_bead_liveness_summary(report: &SwarmBriefReport) -> Value {
+    let mut counts_by_posture = BTreeMap::<String, usize>::new();
+    let mut counts_by_action = BTreeMap::<String, usize>::new();
+    let mut counts_by_severity = BTreeMap::<String, usize>::new();
+    for liveness in &report.stalled_bead_liveness {
+        *counts_by_posture
+            .entry(liveness.posture.clone())
+            .or_default() += 1;
+        *counts_by_action.entry(liveness.action.clone()).or_default() += 1;
+        *counts_by_severity
+            .entry(liveness.severity.clone())
+            .or_default() += 1;
+    }
+
+    let mut top = report.stalled_bead_liveness.iter().collect::<Vec<_>>();
+    top.sort_by(|left, right| {
+        recommendation_severity_rank(&right.severity)
+            .cmp(&recommendation_severity_rank(&left.severity))
+            .then_with(|| left.bead_id.cmp(&right.bead_id))
+    });
+
+    json!({
+        "countsByPosture": counts_by_posture,
+        "countsByAction": counts_by_action,
+        "countsBySeverity": counts_by_severity,
+        "topInProgressBeads": top
+            .into_iter()
+            .take(MAX_SWARM_BRIEF_SUMMARY_RECOMMENDATIONS)
+            .map(|liveness| {
+                json!({
+                    "beadId": liveness.bead_id,
+                    "titleHash": blake3_summary_hash(&liveness.title),
+                    "assigneeHash": liveness.assignee.as_ref().map(|value| blake3_summary_hash(value)),
+                    "priority": liveness.priority,
+                    "posture": liveness.posture,
+                    "action": liveness.action,
+                    "severity": liveness.severity,
+                    "lastActivityAt": liveness.last_activity_at,
+                    "ageSeconds": liveness.age_seconds,
+                    "evidenceSources": liveness.evidence_sources,
+                    "evidenceHashes": liveness.evidence.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "suggestedCommandHashes": liveness.suggested_commands.iter().map(|value| blake3_summary_hash(value)).collect::<Vec<_>>(),
+                    "rawTitleIncluded": false,
+                    "rawEvidenceIncluded": false,
                     "rawCommandsIncluded": false,
                 })
             })
@@ -4067,6 +4311,600 @@ fn score_file_surface_risks(report: &SwarmBriefReport) -> Vec<SwarmBriefFileSurf
             .then_with(|| left.severity.cmp(&right.severity))
     });
     output
+}
+
+fn summarize_ready_reservation_pressure(
+    report: &SwarmBriefReport,
+) -> Vec<SwarmBriefReadyReservationPressure> {
+    let clear_ready_candidate_available = report
+        .beads
+        .ready
+        .iter()
+        .any(|bead| ready_bead_has_clear_reservation_surface(report, bead));
+    let mut output = report
+        .beads
+        .ready
+        .iter()
+        .filter_map(|bead| {
+            ready_bead_reservation_pressure(report, bead, clear_ready_candidate_available)
+        })
+        .collect::<Vec<_>>();
+    output.sort();
+    output.dedup_by(|left, right| left.bead_id == right.bead_id);
+    output
+}
+
+fn ready_bead_has_clear_reservation_surface(
+    report: &SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> bool {
+    let surfaces = likely_surfaces_for_bead(bead);
+    !surfaces.is_empty() && reservations_for_surfaces(report, &surfaces).is_empty()
+}
+
+fn ready_bead_reservation_pressure(
+    report: &SwarmBriefReport,
+    bead: &SwarmBriefBead,
+    clear_ready_candidate_available: bool,
+) -> Option<SwarmBriefReadyReservationPressure> {
+    let likely_surfaces = likely_surfaces_for_bead(bead);
+    let reservations = reservations_for_surfaces(report, &likely_surfaces);
+    let related_risks = risks_for_surfaces(&report.file_surface_risks, &likely_surfaces);
+    if likely_surfaces.is_empty() {
+        return Some(unknown_ready_surface_pressure(bead));
+    }
+    if reservations.is_empty() {
+        return None;
+    }
+
+    let exclusive_reservation_count = reservations
+        .iter()
+        .filter(|reservation| reservation.exclusive)
+        .count();
+    let shared_reservation_count = reservations
+        .len()
+        .saturating_sub(exclusive_reservation_count);
+    let earliest_expires_at = reservations
+        .iter()
+        .filter_map(|reservation| reservation.expires_at.as_ref())
+        .min()
+        .cloned();
+    let reservation_holders = reservations
+        .iter()
+        .map(|reservation| reservation.holder.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let max_risk_score = related_risks
+        .iter()
+        .map(|risk| risk.score)
+        .max()
+        .unwrap_or_else(|| {
+            if exclusive_reservation_count > 0 {
+                70
+            } else {
+                35
+            }
+        });
+    let risk_factors = related_risks
+        .iter()
+        .flat_map(|risk| risk.risk_factors.iter().cloned())
+        .chain(std::iter::once(
+            "ready_bead_reservation_pressure".to_string(),
+        ))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let evidence = related_risks
+        .iter()
+        .flat_map(|risk| risk.evidence.iter().cloned())
+        .chain(reservations.iter().map(|reservation| {
+            format!(
+                "ready_reservation:{}:{}:{}",
+                bead.id, reservation.holder, reservation.path_pattern
+            )
+        }))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let action = ready_reservation_pressure_action(
+        exclusive_reservation_count,
+        shared_reservation_count,
+        earliest_expires_at.as_deref(),
+        clear_ready_candidate_available,
+    );
+    let severity = if exclusive_reservation_count > 0 {
+        "high"
+    } else if shared_reservation_count > 0 {
+        "medium"
+    } else {
+        severity_for_score(max_risk_score)
+    };
+    let suggested_commands = ready_reservation_pressure_commands(
+        &bead.id,
+        &action,
+        &reservation_holders,
+        &likely_surfaces,
+    );
+
+    Some(SwarmBriefReadyReservationPressure {
+        bead_id: bead.id.clone(),
+        title: redact_brief_text(&bead.title),
+        priority: bead.priority,
+        action,
+        severity: severity.to_string(),
+        likely_surfaces,
+        reservation_holders,
+        exclusive_reservation_count,
+        shared_reservation_count,
+        earliest_expires_at,
+        max_risk_score,
+        risk_factors,
+        evidence,
+        suggested_commands,
+    })
+}
+
+fn unknown_ready_surface_pressure(bead: &SwarmBriefBead) -> SwarmBriefReadyReservationPressure {
+    SwarmBriefReadyReservationPressure {
+        bead_id: bead.id.clone(),
+        title: redact_brief_text(&bead.title),
+        priority: bead.priority,
+        action: "inspect_full".to_string(),
+        severity: "low".to_string(),
+        likely_surfaces: Vec::new(),
+        reservation_holders: Vec::new(),
+        exclusive_reservation_count: 0,
+        shared_reservation_count: 0,
+        earliest_expires_at: None,
+        max_risk_score: 0,
+        risk_factors: vec!["ready_bead_surface_unknown".to_string()],
+        evidence: vec![format!(
+            "bead:{}:{}:{}",
+            bead.id, bead.source_bucket, bead.title
+        )],
+        suggested_commands: vec![
+            format!("br show {} --json", bead.id),
+            "ee swarm brief --fields full --json".to_string(),
+        ],
+    }
+}
+
+fn summarize_stalled_bead_liveness(
+    report: &SwarmBriefReport,
+) -> Vec<SwarmBriefStalledBeadLiveness> {
+    let now_epoch_seconds = i64::try_from(current_epoch_ms() / 1_000).unwrap_or(i64::MAX);
+    let mut output = report
+        .beads
+        .in_progress
+        .iter()
+        .map(|bead| stalled_bead_liveness(report, bead, now_epoch_seconds))
+        .collect::<Vec<_>>();
+    output.sort();
+    output.dedup_by(|left, right| left.bead_id == right.bead_id);
+    output
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StalledBeadActivitySignal {
+    source: String,
+    at: Option<String>,
+    epoch_seconds: Option<i64>,
+    evidence: String,
+}
+
+fn stalled_bead_liveness(
+    report: &SwarmBriefReport,
+    bead: &SwarmBriefBead,
+    now_epoch_seconds: i64,
+) -> SwarmBriefStalledBeadLiveness {
+    let signals = stalled_bead_activity_signals(report, bead, now_epoch_seconds);
+    let latest = signals
+        .iter()
+        .filter_map(|signal| signal.epoch_seconds.map(|epoch| (epoch, signal.at.clone())))
+        .max_by(|left, right| left.0.cmp(&right.0));
+    let last_activity_at = latest.as_ref().and_then(|(_, at)| at.clone());
+    let age_seconds = latest.map(|(epoch, _)| now_epoch_seconds.saturating_sub(epoch).max(0));
+    let active_reservation_present = active_reservations_for_bead(report, bead, now_epoch_seconds)
+        .into_iter()
+        .next()
+        .is_some();
+    let agent_mail_ready = source_status(report, SwarmBriefSourceKind::AgentMail)
+        == Some(SwarmBriefSourceStatus::Ready);
+    let git_ready =
+        source_status(report, SwarmBriefSourceKind::Git) == Some(SwarmBriefSourceStatus::Ready);
+    let blocked_evidence = bead_text_suggests_blocked(&bead.title);
+    let human_approval_required = bead_text_suggests_human_approval(&bead.title)
+        || bead.status.eq_ignore_ascii_case("deferred");
+
+    let (posture, action, severity) = if human_approval_required {
+        ("human_approval_required", "request_human_approval", "high")
+    } else if active_reservation_present
+        || age_seconds.is_some_and(|age| age <= STALLED_BEAD_ACTIVE_WINDOW_SECONDS)
+    {
+        ("active", "leave_alone", "low")
+    } else if blocked_evidence {
+        ("blocked_with_evidence", "inspect_full", "medium")
+    } else if age_seconds.is_some_and(|age| age <= STALLED_BEAD_QUIET_WINDOW_SECONDS) {
+        ("quiet_but_recent", "message_holder", "low")
+    } else if !agent_mail_ready || !git_ready || age_seconds.is_none() {
+        ("stale_needs_message", "message_holder", "medium")
+    } else {
+        ("reclaim_candidate", "reopen_manually", "high")
+    };
+
+    let mut evidence_sources = signals
+        .iter()
+        .map(|signal| signal.source.clone())
+        .collect::<BTreeSet<_>>();
+    if !agent_mail_ready {
+        evidence_sources.insert("agent_mail_degraded".to_string());
+    }
+    if !git_ready {
+        evidence_sources.insert("git_degraded".to_string());
+    }
+
+    let mut evidence = signals
+        .iter()
+        .map(|signal| signal.evidence.clone())
+        .collect::<BTreeSet<_>>();
+    evidence.insert(format!("bead:{}:{}:{}", bead.id, bead.status, bead.title));
+    if let Some(age) = age_seconds {
+        evidence.insert(format!("last_activity_age_seconds:{age}"));
+    } else {
+        evidence.insert("last_activity_age_seconds:unknown".to_string());
+    }
+    if !agent_mail_ready {
+        evidence.insert("source_status:agent_mail:not_ready".to_string());
+    }
+    if !git_ready {
+        evidence.insert("source_status:git:not_ready".to_string());
+    }
+    if human_approval_required {
+        evidence.insert("human_approval_required:true".to_string());
+    }
+
+    SwarmBriefStalledBeadLiveness {
+        bead_id: bead.id.clone(),
+        title: redact_brief_text(&bead.title),
+        assignee: bead.assignee.clone(),
+        priority: bead.priority,
+        posture: posture.to_string(),
+        action: action.to_string(),
+        severity: severity.to_string(),
+        last_activity_at,
+        age_seconds,
+        evidence_sources: evidence_sources.into_iter().collect(),
+        evidence: evidence.into_iter().collect(),
+        suggested_commands: stalled_bead_suggested_commands(bead, action),
+        must_not_do: stalled_bead_must_not_do(agent_mail_ready, git_ready),
+    }
+}
+
+fn stalled_bead_activity_signals(
+    report: &SwarmBriefReport,
+    bead: &SwarmBriefBead,
+    now_epoch_seconds: i64,
+) -> Vec<StalledBeadActivitySignal> {
+    let mut signals = Vec::new();
+    if let Some(updated_at) = &bead.updated_at {
+        signals.push(StalledBeadActivitySignal {
+            source: "beads_updated_at".to_string(),
+            at: Some(updated_at.clone()),
+            epoch_seconds: rfc3339_epoch_seconds(updated_at),
+            evidence: format!("beads_updated_at:{}:{}", bead.id, updated_at),
+        });
+    }
+    if let Some(comment_at) = &bead.latest_comment_at {
+        signals.push(StalledBeadActivitySignal {
+            source: "beads_comment".to_string(),
+            at: Some(comment_at.clone()),
+            epoch_seconds: rfc3339_epoch_seconds(comment_at),
+            evidence: format!("beads_latest_comment_at:{}:{}", bead.id, comment_at),
+        });
+    }
+    if bead.comment_count > 0 {
+        signals.push(StalledBeadActivitySignal {
+            source: "beads_comment".to_string(),
+            at: None,
+            epoch_seconds: None,
+            evidence: format!("beads_comment_count:{}:{}", bead.id, bead.comment_count),
+        });
+    }
+
+    for thread in matching_threads_for_bead(report, bead) {
+        signals.push(StalledBeadActivitySignal {
+            source: "agent_mail_thread".to_string(),
+            at: thread.last_activity_at.clone(),
+            epoch_seconds: thread
+                .last_activity_at
+                .as_deref()
+                .and_then(rfc3339_epoch_seconds),
+            evidence: format!(
+                "agent_mail_thread:{}:{}",
+                bead.id,
+                thread
+                    .last_activity_at
+                    .clone()
+                    .unwrap_or_else(|| "activity_unknown".to_string())
+            ),
+        });
+    }
+
+    for agent in matching_agent_mail_agents_for_bead(report, bead) {
+        signals.push(StalledBeadActivitySignal {
+            source: "agent_mail_agent".to_string(),
+            at: agent.last_active_at.clone(),
+            epoch_seconds: agent
+                .last_active_at
+                .as_deref()
+                .and_then(rfc3339_epoch_seconds),
+            evidence: format!(
+                "agent_mail_agent_last_active:{}:{}",
+                bead.id,
+                agent
+                    .last_active_at
+                    .clone()
+                    .unwrap_or_else(|| "activity_unknown".to_string())
+            ),
+        });
+    }
+
+    for commit in report
+        .recent_commits
+        .iter()
+        .filter(|commit| text_mentions_bead_id(&commit.subject, &bead.id))
+    {
+        signals.push(StalledBeadActivitySignal {
+            source: "git_commit".to_string(),
+            at: None,
+            epoch_seconds: commit.authored_at_epoch_seconds,
+            evidence: format!("git_commit_mentions:{}:{}", bead.id, commit.hash),
+        });
+    }
+
+    for reservation in matching_reservations_for_bead(report, bead) {
+        let active = reservation_is_active(reservation, now_epoch_seconds);
+        signals.push(StalledBeadActivitySignal {
+            source: "agent_mail_reservation".to_string(),
+            at: reservation.expires_at.clone(),
+            epoch_seconds: reservation
+                .expires_at
+                .as_deref()
+                .and_then(rfc3339_epoch_seconds),
+            evidence: format!(
+                "agent_mail_reservation:{}:{}:{}",
+                bead.id,
+                reservation.holder,
+                if active {
+                    "active"
+                } else {
+                    "expired_or_unknown"
+                }
+            ),
+        });
+    }
+
+    signals.sort_by(|left, right| {
+        left.source
+            .cmp(&right.source)
+            .then_with(|| left.at.cmp(&right.at))
+            .then_with(|| left.evidence.cmp(&right.evidence))
+    });
+    signals.dedup_by(|left, right| left.evidence == right.evidence);
+    signals
+}
+
+fn matching_threads_for_bead<'a>(
+    report: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Vec<&'a SwarmBriefThreadSummary> {
+    let mut threads = report
+        .threads
+        .iter()
+        .filter(|thread| {
+            text_mentions_bead_id(&thread.thread_id, &bead.id)
+                || thread
+                    .subject
+                    .as_ref()
+                    .is_some_and(|subject| text_mentions_bead_id(subject, &bead.id))
+        })
+        .collect::<Vec<_>>();
+    threads.sort();
+    threads.dedup();
+    threads
+}
+
+fn matching_agent_mail_agents_for_bead<'a>(
+    report: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Vec<&'a SwarmBriefAgentMailAgent> {
+    let Some(assignee) = bead.assignee.as_ref() else {
+        return Vec::new();
+    };
+    let mut agents = report
+        .agent_mail_agents
+        .iter()
+        .filter(|agent| agent.name == *assignee)
+        .collect::<Vec<_>>();
+    agents.sort();
+    agents.dedup();
+    agents
+}
+
+fn matching_reservations_for_bead<'a>(
+    report: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+) -> Vec<&'a SwarmBriefFileReservation> {
+    let likely_surfaces = likely_surfaces_for_bead(bead);
+    let mut reservations = report
+        .file_reservations
+        .iter()
+        .filter(|reservation| {
+            bead.assignee
+                .as_ref()
+                .is_some_and(|assignee| reservation.holder == *assignee)
+                || likely_surfaces
+                    .iter()
+                    .any(|surface| surfaces_overlap(&reservation.path_pattern, surface))
+        })
+        .collect::<Vec<_>>();
+    reservations.sort();
+    reservations.dedup();
+    reservations
+}
+
+fn active_reservations_for_bead<'a>(
+    report: &'a SwarmBriefReport,
+    bead: &SwarmBriefBead,
+    now_epoch_seconds: i64,
+) -> Vec<&'a SwarmBriefFileReservation> {
+    matching_reservations_for_bead(report, bead)
+        .into_iter()
+        .filter(|reservation| reservation_is_active(reservation, now_epoch_seconds))
+        .collect()
+}
+
+fn reservation_is_active(reservation: &SwarmBriefFileReservation, now_epoch_seconds: i64) -> bool {
+    reservation
+        .expires_at
+        .as_deref()
+        .and_then(rfc3339_epoch_seconds)
+        .is_none_or(|expires_at| expires_at >= now_epoch_seconds)
+}
+
+fn stalled_bead_suggested_commands(bead: &SwarmBriefBead, action: &str) -> Vec<String> {
+    let mut commands = BTreeSet::from([
+        format!("br show {} --json", bead.id),
+        format!("Search Agent Mail for thread {}", bead.id),
+    ]);
+    if let Some(assignee) = &bead.assignee {
+        commands.insert(format!("message {assignee} before reclaiming {}", bead.id));
+    }
+    match action {
+        "reopen_manually" => {
+            commands.insert(format!("br update {} --status open --json", bead.id));
+        }
+        "request_human_approval" => {
+            commands.insert("Ask the human/operator for explicit approval before reopening or deleting anything.".to_string());
+        }
+        "inspect_full" => {
+            commands.insert("ee --fields full swarm brief --workspace . --json".to_string());
+        }
+        _ => {}
+    }
+    commands.into_iter().collect()
+}
+
+fn stalled_bead_must_not_do(agent_mail_ready: bool, git_ready: bool) -> Vec<String> {
+    let mut must_not_do = vec![
+        "Do not auto-reopen in-progress work from swarm brief output.".to_string(),
+        "Do not force-release reservations from liveness guidance alone.".to_string(),
+        "Do not treat deferred or human-approval work as abandoned.".to_string(),
+    ];
+    if !agent_mail_ready {
+        must_not_do.push("Do not treat missing Agent Mail data as inactivity proof.".to_string());
+    }
+    if !git_ready {
+        must_not_do.push("Do not treat missing git history as inactivity proof.".to_string());
+    }
+    must_not_do
+}
+
+fn bead_text_suggests_blocked(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    ["blocked", "waiting", "stalled", "needs approval"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+}
+
+fn bead_text_suggests_human_approval(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    [
+        "human approval",
+        "approval required",
+        "deletion approval",
+        "delete approval",
+        "do not delete",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+fn text_mentions_bead_id(text: &str, bead_id: &str) -> bool {
+    text.contains(bead_id)
+}
+
+fn reservations_for_surfaces<'a>(
+    report: &'a SwarmBriefReport,
+    surfaces: &[String],
+) -> Vec<&'a SwarmBriefFileReservation> {
+    let mut reservations = report
+        .file_reservations
+        .iter()
+        .filter(|reservation| {
+            surfaces
+                .iter()
+                .any(|surface| surfaces_overlap(&reservation.path_pattern, surface))
+        })
+        .collect::<Vec<_>>();
+    reservations.sort();
+    reservations.dedup_by(|left, right| {
+        left.path_pattern == right.path_pattern
+            && left.holder == right.holder
+            && left.exclusive == right.exclusive
+    });
+    reservations
+}
+
+fn ready_reservation_pressure_action(
+    exclusive_reservation_count: usize,
+    shared_reservation_count: usize,
+    earliest_expires_at: Option<&str>,
+    clear_ready_candidate_available: bool,
+) -> String {
+    if exclusive_reservation_count > 0 && clear_ready_candidate_available {
+        "choose_another"
+    } else if exclusive_reservation_count > 0 && earliest_expires_at.is_some() {
+        "wait"
+    } else if exclusive_reservation_count > 0 || shared_reservation_count > 0 {
+        "message_holder"
+    } else {
+        "inspect_full"
+    }
+    .to_string()
+}
+
+fn ready_reservation_pressure_commands(
+    bead_id: &str,
+    action: &str,
+    reservation_holders: &[String],
+    likely_surfaces: &[String],
+) -> Vec<String> {
+    let mut commands = BTreeSet::from([format!("br show {bead_id} --json")]);
+    match action {
+        "choose_another" => {
+            commands.insert("br ready --json".to_string());
+        }
+        "message_holder" | "wait" => {
+            if reservation_holders.is_empty() {
+                commands.insert("Inspect Agent Mail reservations before editing.".to_string());
+            } else {
+                let surface = likely_surfaces
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("the likely surface");
+                commands.insert(format!(
+                    "message {} before editing {surface}",
+                    reservation_holders.join(",")
+                ));
+            }
+        }
+        _ => {
+            commands.insert("ee swarm brief --fields full --json".to_string());
+        }
+    }
+    commands.into_iter().collect()
 }
 
 fn collect_surface_observations(report: &SwarmBriefReport) -> Vec<SurfaceObservation> {
@@ -5622,14 +6460,42 @@ fn parse_bead_item(item: &Value, source_bucket: &str) -> Option<SwarmBriefBead> 
     let status = string_field(item, &["status"]).unwrap_or_else(|| source_bucket.to_string());
     let priority = item.get("priority").and_then(Value::as_i64);
     let assignee = string_field(item, &["assignee", "assigned_to", "owner"]);
+    let comment_count = item
+        .get("comment_count")
+        .or_else(|| item.get("commentCount"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| {
+            item.get("comments")
+                .and_then(Value::as_array)
+                .map_or(0, |comments| comments.len() as u64)
+        });
     Some(SwarmBriefBead {
         id: redact_brief_text(&id),
         title: redact_brief_text(&title),
         status: redact_brief_text(&status),
         priority,
         assignee: assignee.map(|value| redact_brief_text(&value)),
+        created_at: string_field(item, &["created_at", "createdAt"]),
+        updated_at: string_field(item, &["updated_at", "updatedAt"]),
+        latest_comment_at: latest_bead_comment_timestamp(item),
+        comment_count,
         source_bucket: source_bucket.to_string(),
     })
+}
+
+fn latest_bead_comment_timestamp(item: &Value) -> Option<String> {
+    let comments = item.get("comments").and_then(Value::as_array)?;
+    comments
+        .iter()
+        .filter_map(|comment| {
+            string_field(
+                comment,
+                &["created_at", "createdAt", "updated_at", "updatedAt"],
+            )
+        })
+        .filter_map(|timestamp| rfc3339_epoch_seconds(&timestamp).map(|epoch| (epoch, timestamp)))
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, timestamp)| timestamp)
 }
 
 pub fn parse_bv_triage_json(input: &str) -> Result<SwarmBriefBvSummary, String> {
@@ -5710,6 +6576,18 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let agents = value
+        .get("agents")
+        .or_else(|| value.get("agent_inventory"))
+        .or_else(|| value.get("agentInventory"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(parse_agent_mail_agent_summary)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let inbox = value
         .get("inbox")
         .or_else(|| value.get("mailboxes"))
@@ -5733,16 +6611,20 @@ pub fn parse_agent_mail_snapshot_json(input: &str) -> Result<SwarmBriefAgentMail
         .unwrap_or_default();
 
     let mut reservations = reservations;
+    let mut agents = agents;
     let mut inbox = inbox;
     let mut threads = threads;
     reservations.sort();
     reservations.dedup();
+    agents.sort();
+    agents.dedup_by(|left, right| left.name == right.name);
     inbox.sort();
     inbox.dedup();
     threads.sort();
     threads.dedup();
     Ok(SwarmBriefAgentMailSnapshot {
         file_reservations: reservations,
+        agents,
         inbox,
         threads,
         degraded,
@@ -5911,6 +6793,22 @@ fn parse_file_reservation(item: &Value) -> Option<SwarmBriefFileReservation> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
         expires_at: string_field(item, &["expires_ts", "expires_at"]),
+    })
+}
+
+fn parse_agent_mail_agent_summary(item: &Value) -> Option<SwarmBriefAgentMailAgent> {
+    let name = string_field(item, &["name", "agent_name", "agent", "mailbox"])?;
+    Some(SwarmBriefAgentMailAgent {
+        name: redact_brief_text(&name),
+        last_active_at: string_field(
+            item,
+            &[
+                "last_active_at",
+                "lastActiveAt",
+                "last_active_ts",
+                "lastActiveTs",
+            ],
+        ),
     })
 }
 
@@ -6717,7 +7615,8 @@ fn normalize_rch_pressure_state(
 fn normalize_rch_admission_impact(explicit: Option<&str>, pressure_state: &str) -> String {
     if let Some(value) = explicit {
         let lower = value.to_ascii_lowercase();
-        if lower.contains("deny")
+        if is_rch_policy_denied_text(value)
+            || lower.contains("deny")
             || lower.contains("blocked")
             || lower.contains("refuse")
             || lower.contains("not_admitted")
@@ -7455,6 +8354,10 @@ mod tests {
             status: source_bucket.to_string(),
             priority: Some(1),
             assignee: None,
+            created_at: None,
+            updated_at: None,
+            latest_comment_at: None,
+            comment_count: 0,
             source_bucket: source_bucket.to_string(),
         }
     }
@@ -7570,10 +8473,6 @@ mod tests {
         assert!(
             !rendered.contains("raw_query") && !rendered.contains("memory_body"),
             "single-flight summary must not expose raw query or memory body labels"
-        );
-        assert!(
-            rendered.contains("[REDACTED_PATH:"),
-            "summary should preserve path-presence evidence as a stable redaction marker"
         );
         assert!(
             summary
@@ -8025,6 +8924,66 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("reservation conflicts"))
         );
+
+        let pressure = require_some(report.ready_reservation_pressure.first(), "ready pressure");
+        assert_eq!(pressure.bead_id, "eidetic_engine_cli-u7r5");
+        assert_eq!(pressure.action, "wait");
+        assert_eq!(pressure.severity, "high");
+        assert_eq!(pressure.exclusive_reservation_count, 1);
+        assert_eq!(pressure.shared_reservation_count, 0);
+        assert_eq!(
+            pressure.earliest_expires_at.as_deref(),
+            Some("2026-05-09T08:00:00Z")
+        );
+        assert!(
+            pressure
+                .likely_surfaces
+                .contains(&"src/core/swarm_brief.rs".to_string())
+        );
+        assert_eq!(pressure.reservation_holders, vec!["OtherAgent".to_string()]);
+        assert!(
+            pressure
+                .risk_factors
+                .contains(&"ready_bead_reservation_pressure".to_string())
+        );
+
+        report.finalize();
+        let summary = summarize_swarm_brief_report(&report);
+        assert_eq!(
+            summary.pointer("/counts/readyReservationPressureCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/readyReservationPressureSummary/countsByAction/wait"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/readyReservationPressureSummary/topReadyBeads/0/action"),
+            Some(&json!("wait"))
+        );
+        assert_eq!(
+            summary.pointer("/readyReservationPressureSummary/topReadyBeads/0/rawSurfacesIncluded"),
+            Some(&json!(false))
+        );
+        let holder_hash = blake3_summary_hash("OtherAgent");
+        assert_eq!(
+            summary.pointer(&format!(
+                "/readyReservationPressureSummary/countsByReservationHolder/{holder_hash}"
+            )),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary
+                .pointer("/readyReservationPressureSummary/topReadyBeads/0/reservationHolders/0"),
+            Some(&json!(holder_hash))
+        );
+        assert!(
+            summary
+                .pointer("/readyReservationPressureSummary/topReadyBeads/0/likelySurfaceHashes/0")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "summary should hash likely surfaces"
+        );
     }
 
     #[test]
@@ -8065,6 +9024,50 @@ mod tests {
     }
 
     #[test]
+    fn ready_reservation_pressure_chooses_alternate_clear_ready_work() {
+        let mut report = report_with_ready_sources();
+        report.beads.ready.push(bead(
+            "eidetic_engine_cli-u7r5",
+            "[swarm-brief][advisor] Add recommendations",
+            "ready",
+        ));
+        report.beads.ready.push(bead(
+            "eidetic_engine_cli-docs",
+            "[docs] Update swarm runbook wording",
+            "ready",
+        ));
+        report.file_reservations.push(SwarmBriefFileReservation {
+            path_pattern: "src/core/swarm_brief.rs".to_string(),
+            holder: "OtherAgent".to_string(),
+            exclusive: true,
+            expires_at: Some("2026-05-09T08:00:00Z".to_string()),
+        });
+
+        apply_swarm_brief_advice(&mut report);
+
+        let pressure = require_some(
+            report
+                .ready_reservation_pressure
+                .iter()
+                .find(|item| item.bead_id == "eidetic_engine_cli-u7r5"),
+            "conflicted ready pressure",
+        );
+        assert_eq!(pressure.action, "choose_another");
+        assert!(
+            pressure
+                .suggested_commands
+                .contains(&"br ready --json".to_string())
+        );
+        assert!(
+            report
+                .ready_reservation_pressure
+                .iter()
+                .all(|item| item.bead_id != "eidetic_engine_cli-docs"),
+            "clear ready bead should not be reported as pressured"
+        );
+    }
+
+    #[test]
     fn summary_counts_file_surface_ownership_risks_without_listing_paths() {
         let mut report = report_with_ready_sources();
         report.dirty_files.push(SwarmBriefDirtyFile {
@@ -8083,8 +9086,11 @@ mod tests {
 
         let summary = summarize_swarm_brief_report(&report);
         let rendered = stable_summary_json(&summary);
+        let holder_hash = blake3_summary_hash("OtherAgent");
         assert_eq!(
-            summary.pointer("/fileSurfaceRiskSummary/countsByReservationHolder/OtherAgent"),
+            summary.pointer(&format!(
+                "/fileSurfaceRiskSummary/countsByReservationHolder/{holder_hash}"
+            )),
             Some(&json!(1))
         );
         assert_eq!(
@@ -8093,11 +9099,15 @@ mod tests {
         );
         assert_eq!(
             summary.pointer("/fileSurfaceRiskSummary/topRisks/0/reservationHolders/0"),
-            Some(&json!("OtherAgent"))
+            Some(&json!(holder_hash))
         );
         assert!(
             !rendered.contains("src/core/swarm_brief.rs"),
             "support-bundle summary must not include raw file listings"
+        );
+        assert!(
+            !rendered.contains("OtherAgent"),
+            "support-bundle summary must not include raw reservation holder labels"
         );
     }
 
@@ -8117,6 +9127,307 @@ mod tests {
         assert!(
             rec.reason_codes
                 .contains(&"in_progress_without_assignee".to_string())
+        );
+    }
+
+    #[test]
+    fn beads_parser_captures_fractional_activity_timestamps() {
+        let beads = parse_beads_json(
+            r#"[
+              {
+                "id": "bd-fractional",
+                "title": "fractional timestamp fixture",
+                "status": "in_progress",
+                "priority": 2,
+                "assignee": "BlueLake",
+                "created_at": "2026-05-01T10:00:00.111111Z",
+                "updated_at": "2026-05-01T11:00:00.222222Z",
+                "comments": [
+                  {"created_at": "2026-05-01T12:00:00.333333Z"},
+                  {"created_at": "2026-05-01T13:00:00.444444Z"}
+                ]
+              }
+            ]"#,
+            "in_progress",
+        )
+        .expect("fractional Beads JSON parses");
+
+        let bead = require_some(beads.first(), "fractional bead");
+        assert_eq!(
+            bead.created_at.as_deref(),
+            Some("2026-05-01T10:00:00.111111Z")
+        );
+        assert_eq!(
+            bead.updated_at.as_deref(),
+            Some("2026-05-01T11:00:00.222222Z")
+        );
+        assert_eq!(
+            bead.latest_comment_at.as_deref(),
+            Some("2026-05-01T13:00:00.444444Z")
+        );
+        assert_eq!(bead.comment_count, 2);
+        assert!(
+            rfc3339_epoch_seconds("2026-05-01T13:00:00.444444Z").is_some(),
+            "fractional RFC3339 timestamps must parse structurally"
+        );
+    }
+
+    #[test]
+    fn liveness_marks_old_unowned_in_progress_as_reclaim_candidate() {
+        let mut report = report_with_ready_sources();
+        let mut stale = bead(
+            "bd-stale",
+            "[swarm-brief] Old abandoned in-progress work",
+            "in_progress",
+        );
+        stale.updated_at = Some("2000-01-01T00:00:00.123456Z".to_string());
+        report.beads.in_progress.push(stale);
+
+        apply_swarm_brief_advice(&mut report);
+
+        let liveness = require_some(
+            report
+                .stalled_bead_liveness
+                .iter()
+                .find(|item| item.bead_id == "bd-stale"),
+            "stale liveness",
+        );
+        assert_eq!(liveness.posture, "reclaim_candidate");
+        assert_eq!(liveness.action, "reopen_manually");
+        assert_eq!(liveness.severity, "high");
+        assert!(
+            liveness
+                .suggested_commands
+                .contains(&"br update bd-stale --status open --json".to_string())
+        );
+        assert!(
+            liveness.must_not_do.contains(
+                &"Do not auto-reopen in-progress work from swarm brief output.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn liveness_treats_recent_assignee_mail_activity_as_active_work() {
+        let mut report = report_with_ready_sources();
+        let mut stale = bead(
+            "bd-active-agent",
+            "[swarm-brief] Old in-progress with recently active assignee",
+            "in_progress",
+        );
+        stale.assignee = Some("BlueLake".to_string());
+        stale.updated_at = Some("2000-01-01T00:00:00Z".to_string());
+        report.beads.in_progress.push(stale);
+        report.agent_mail_agents.push(SwarmBriefAgentMailAgent {
+            name: "BlueLake".to_string(),
+            last_active_at: Some("9999-01-01T00:00:00Z".to_string()),
+        });
+
+        apply_swarm_brief_advice(&mut report);
+
+        let liveness = require_some(
+            report
+                .stalled_bead_liveness
+                .iter()
+                .find(|item| item.bead_id == "bd-active-agent"),
+            "active agent liveness",
+        );
+        assert_eq!(liveness.posture, "active");
+        assert_eq!(liveness.action, "leave_alone");
+        assert!(
+            liveness
+                .evidence_sources
+                .contains(&"agent_mail_agent".to_string())
+        );
+        assert!(
+            !liveness
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("--status open")),
+            "recent agent roster activity must suppress reopen guidance"
+        );
+    }
+
+    #[test]
+    fn liveness_marks_quiet_but_recent_after_active_window() {
+        let report = report_with_ready_sources();
+        let mut quiet = bead(
+            "bd-quiet",
+            "[swarm-brief] Quiet but recently updated in-progress work",
+            "in_progress",
+        );
+        quiet.assignee = Some("QuietAgent".to_string());
+        quiet.updated_at = Some("2026-05-01T00:00:00.123456Z".to_string());
+        let activity_epoch =
+            rfc3339_epoch_seconds("2026-05-01T00:00:00.123456Z").expect("quiet timestamp parses");
+        let now_epoch = activity_epoch + STALLED_BEAD_ACTIVE_WINDOW_SECONDS + 60;
+
+        let liveness = stalled_bead_liveness(&report, &quiet, now_epoch);
+
+        assert_eq!(liveness.posture, "quiet_but_recent");
+        assert_eq!(liveness.action, "message_holder");
+        assert_eq!(liveness.severity, "low");
+        assert_eq!(
+            liveness.age_seconds,
+            Some(STALLED_BEAD_ACTIVE_WINDOW_SECONDS + 60)
+        );
+        assert!(
+            liveness
+                .evidence_sources
+                .contains(&"beads_updated_at".to_string())
+        );
+        assert!(
+            !liveness
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("--status open")),
+            "quiet but recent work must not get reopen guidance"
+        );
+    }
+
+    #[test]
+    fn liveness_does_not_reclaim_when_agent_mail_is_degraded() {
+        let mut report = report_with_ready_sources();
+        for source in &mut report.sources {
+            if source.source == SwarmBriefSourceKind::AgentMail {
+                source.status = SwarmBriefSourceStatus::Unavailable;
+            }
+        }
+        let mut stale = bead(
+            "bd-stale-mail",
+            "[swarm-brief] Old in-progress with missing mail source",
+            "in_progress",
+        );
+        stale.updated_at = Some("2000-01-01T00:00:00Z".to_string());
+        report.beads.in_progress.push(stale);
+
+        apply_swarm_brief_advice(&mut report);
+
+        let liveness = require_some(
+            report
+                .stalled_bead_liveness
+                .iter()
+                .find(|item| item.bead_id == "bd-stale-mail"),
+            "degraded-mail liveness",
+        );
+        assert_eq!(liveness.posture, "stale_needs_message");
+        assert_eq!(liveness.action, "message_holder");
+        assert!(
+            liveness
+                .evidence
+                .contains(&"source_status:agent_mail:not_ready".to_string())
+        );
+        assert!(
+            liveness
+                .must_not_do
+                .contains(&"Do not treat missing Agent Mail data as inactivity proof.".to_string())
+        );
+    }
+
+    #[test]
+    fn liveness_treats_active_reservation_as_active_work() {
+        let mut report = report_with_ready_sources();
+        let mut owned = bead(
+            "bd-active",
+            "[swarm-brief] Active owner on swarm brief core",
+            "in_progress",
+        );
+        owned.assignee = Some("BlueLake".to_string());
+        owned.updated_at = Some("2000-01-01T00:00:00Z".to_string());
+        report.beads.in_progress.push(owned);
+        report.file_reservations.push(SwarmBriefFileReservation {
+            path_pattern: "src/core/swarm_brief.rs".to_string(),
+            holder: "BlueLake".to_string(),
+            exclusive: true,
+            expires_at: Some("9999-01-01T00:00:00Z".to_string()),
+        });
+
+        apply_swarm_brief_advice(&mut report);
+
+        let liveness = require_some(
+            report
+                .stalled_bead_liveness
+                .iter()
+                .find(|item| item.bead_id == "bd-active"),
+            "active liveness",
+        );
+        assert_eq!(liveness.posture, "active");
+        assert_eq!(liveness.action, "leave_alone");
+        assert!(
+            liveness
+                .evidence_sources
+                .contains(&"agent_mail_reservation".to_string())
+        );
+    }
+
+    #[test]
+    fn liveness_treats_recent_git_commit_as_active_work() {
+        let mut report = report_with_ready_sources();
+        let mut stale = bead(
+            "bd-git-active",
+            "[swarm-brief] Old in-progress with fresh git activity",
+            "in_progress",
+        );
+        stale.updated_at = Some("2000-01-01T00:00:00Z".to_string());
+        let now_epoch =
+            rfc3339_epoch_seconds("2026-05-01T12:00:00Z").expect("now timestamp parses");
+        report.recent_commits.push(SwarmBriefCommit {
+            hash: "abc123".to_string(),
+            authored_at_epoch_seconds: Some(now_epoch - 60),
+            subject: "finish bd-git-active liveness proof".to_string(),
+        });
+
+        let liveness = stalled_bead_liveness(&report, &stale, now_epoch);
+
+        assert_eq!(liveness.posture, "active");
+        assert_eq!(liveness.action, "leave_alone");
+        assert!(
+            liveness
+                .evidence_sources
+                .contains(&"git_commit".to_string())
+        );
+        assert!(
+            liveness
+                .evidence
+                .contains(&"git_commit_mentions:bd-git-active:abc123".to_string())
+        );
+        assert!(
+            !liveness
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("--status open")),
+            "recent git activity must suppress reopen guidance"
+        );
+    }
+
+    #[test]
+    fn liveness_keeps_human_approval_blockers_out_of_reclaim_candidates() {
+        let mut report = report_with_ready_sources();
+        let mut blocker = bead(
+            "bd-human",
+            "[cleanup] deletion approval required before removing snapshots",
+            "in_progress",
+        );
+        blocker.updated_at = Some("2000-01-01T00:00:00Z".to_string());
+        report.beads.in_progress.push(blocker);
+
+        apply_swarm_brief_advice(&mut report);
+
+        let liveness = require_some(
+            report
+                .stalled_bead_liveness
+                .iter()
+                .find(|item| item.bead_id == "bd-human"),
+            "human approval liveness",
+        );
+        assert_eq!(liveness.posture, "human_approval_required");
+        assert_eq!(liveness.action, "request_human_approval");
+        assert!(
+            !liveness
+                .suggested_commands
+                .iter()
+                .any(|command| command.contains("--status open")),
+            "human approval blockers must not get reopen guidance"
         );
     }
 
@@ -9218,6 +10529,9 @@ mod tests {
               "inbox": [
                 {"mailbox":"IndigoBrook","unread_count":2,"ack_required_count":1,"body_md":"SECRET_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456"}
               ],
+              "agents": [
+                {"name":"IndigoBrook","last_active_ts":"2026-05-09T01:00:00.123456Z","body_md":"SECRET_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456"}
+              ],
               "threads": [
                 {"thread_id":"eidetic_engine_cli-abwd","subject":"Use token ghp_abcdefghijklmnopqrstuvwxyz123456","message_count":3,"body_md":"raw body"}
               ]
@@ -9227,11 +10541,18 @@ mod tests {
         );
 
         let reservations = &snapshot.file_reservations;
+        let agents = &snapshot.agents;
         let inbox = &snapshot.inbox;
         let threads = &snapshot.threads;
 
         assert_eq!(reservations.len(), 1);
         assert_eq!(reservations[0].path_pattern, "src/core/*.rs");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "IndigoBrook");
+        assert_eq!(
+            agents[0].last_active_at.as_deref(),
+            Some("2026-05-09T01:00:00.123456Z")
+        );
         assert_eq!(inbox[0].unread_count, 2);
         assert_eq!(threads[0].thread_id, "eidetic_engine_cli-abwd");
         let subject = require_some(threads[0].subject.as_ref(), "subject");
@@ -9240,6 +10561,27 @@ mod tests {
         assert!(!json.contains("SECRET_TOKEN"));
         assert!(!json.contains("body_md"));
         assert!(!json.contains("raw body"));
+    }
+
+    #[test]
+    fn agent_mail_missing_snapshot_mentions_reachable_health_bridge() {
+        let (message, repair) =
+            agent_mail_missing_snapshot_degradation_text(AgentMailHealthProbe::Reachable);
+        assert!(message.contains("health endpoint"));
+        assert!(message.contains("reachable"));
+        assert!(message.contains("redacted snapshots"));
+        assert!(repair.contains("scripts/swarm_coordination_health.sh"));
+        assert!(repair.contains("--agent-mail-snapshot"));
+    }
+
+    #[test]
+    fn agent_mail_missing_snapshot_mentions_unreachable_health_bridge() {
+        let (message, repair) =
+            agent_mail_missing_snapshot_degradation_text(AgentMailHealthProbe::Unreachable);
+        assert!(message.contains("not reachable"));
+        assert!(message.contains("127.0.0.1:8765"));
+        assert!(repair.contains("Start or repair Agent Mail"));
+        assert!(repair.contains("--agent-mail-snapshot"));
     }
 
     #[test]

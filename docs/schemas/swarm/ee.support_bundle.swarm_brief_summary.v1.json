@@ -16,12 +16,17 @@
     "counts",
     "bv",
     "memoryDrift",
+    "gitAhead",
+    "verificationBroker",
     "sourceStatusCounts",
     "sourceStatuses",
     "resourcePressurePosture",
     "singleFlight",
     "degradedCodes",
     "fileSurfaceRiskSummary",
+    "readyReservationPressureSummary",
+    "stalledBeadLivenessSummary",
+    "symbolRiskSummary",
     "topRecommendations",
     "provenance",
     "redaction"
@@ -39,6 +44,8 @@
     "counts": {"type": "object"},
     "bv": {"type": "object"},
     "memoryDrift": {"$ref": "#/definitions/memoryDriftSummary"},
+    "gitAhead": {"$ref": "#/definitions/gitAheadSummary"},
+    "verificationBroker": {"$ref": "#/definitions/verificationBrokerSummary"},
     "sourceStatusCounts": {"type": "object"},
     "sourceStatuses": {
       "type": "array",
@@ -52,6 +59,9 @@
       "items": {"type": "string"}
     },
     "fileSurfaceRiskSummary": {"$ref": "#/definitions/fileSurfaceRiskSummary"},
+    "readyReservationPressureSummary": {"$ref": "#/definitions/readyReservationPressureSummary"},
+    "stalledBeadLivenessSummary": {"$ref": "#/definitions/stalledBeadLivenessSummary"},
+    "symbolRiskSummary": {"$ref": "#/definitions/symbolRiskSummary"},
     "topRecommendations": {
       "type": "array",
       "items": {"type": "object"}
@@ -70,12 +80,121 @@
       "additionalProperties": false,
       "properties": {
         "countsBySeverity": {"type": "object"},
-        "countsByReservationHolder": {"type": "object"},
+        "countsByReservationHolder": {
+          "type": "object",
+          "description": "Counts keyed by BLAKE3 hashes of reservation-holder labels from the underlying swarm brief."
+        },
         "countsByGitStatus": {"type": "object"},
         "topRisks": {
           "type": "array",
           "items": {"$ref": "#/definitions/topRisk"}
         }
+      }
+    },
+    "readyReservationPressureSummary": {
+      "type": "object",
+      "required": ["countsByAction", "countsBySeverity", "countsByReservationHolder", "topReadyBeads"],
+      "additionalProperties": false,
+      "properties": {
+        "countsByAction": {"type": "object"},
+        "countsBySeverity": {"type": "object"},
+        "countsByReservationHolder": {
+          "type": "object",
+          "description": "Counts keyed by BLAKE3 hashes of reservation-holder labels from the underlying swarm brief."
+        },
+        "topReadyBeads": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/topReadyBead"}
+        }
+      }
+    },
+    "stalledBeadLivenessSummary": {
+      "type": "object",
+      "required": ["countsByPosture", "countsByAction", "countsBySeverity", "topInProgressBeads"],
+      "additionalProperties": false,
+      "properties": {
+        "countsByPosture": {"type": "object"},
+        "countsByAction": {"type": "object"},
+        "countsBySeverity": {"type": "object"},
+        "topInProgressBeads": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/topInProgressBead"}
+        }
+      }
+    },
+    "gitAheadSummary": {
+      "type": "object",
+      "required": [
+        "status",
+        "available",
+        "aheadCount",
+        "commitCount",
+        "peerOwnedAheadRisk",
+        "degradedCodes",
+        "rawCommitSubjectsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string"},
+        "status": {"type": "string"},
+        "available": {"type": "boolean"},
+        "headRef": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+        "upstreamRef": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+        "aheadCount": {"type": "integer", "minimum": 0},
+        "behindCount": {"type": "integer", "minimum": 0},
+        "commitCount": {"type": "integer", "minimum": 0},
+        "authorCount": {"type": "integer", "minimum": 0},
+        "beadRefCount": {"type": "integer", "minimum": 0},
+        "mixedAuthorAhead": {"type": "boolean"},
+        "mixedBeadAhead": {"type": "boolean"},
+        "ambiguousAhead": {"type": "boolean"},
+        "peerOwnedAheadRisk": {"type": "boolean"},
+        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "rawCommitSubjectsIncluded": {"const": false}
+      }
+    },
+    "verificationBrokerSummary": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "available",
+        "recentReusableRunCount",
+        "knownBlockerCount",
+        "inFlightEquivalentCommandCount",
+        "rchQueueStatus",
+        "rchWorkerPressureStatus",
+        "rawLogsIncluded",
+        "rawMailBodiesIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "ee.swarm.verification_broker_summary.v1"},
+        "sourceSchema": {"type": "string"},
+        "status": {"type": "string"},
+        "available": {"type": "boolean"},
+        "recordCount": {"type": "integer", "minimum": 0},
+        "recentRunCount": {"type": "integer", "minimum": 0},
+        "staleRunCount": {"type": "integer", "minimum": 0},
+        "unknownAgeCount": {"type": "integer", "minimum": 0},
+        "recentReusableRunCount": {"type": "integer", "minimum": 0},
+        "knownBlockerCount": {"type": "integer", "minimum": 0},
+        "inFlightEquivalentCommandCount": {"type": "integer", "minimum": 0},
+        "advisoryCounts": {"type": "object"},
+        "evidenceHealth": {"type": "object"},
+        "recoveryActionKinds": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/recoveryActionKind"}
+        },
+        "rchQueueStatus": {"type": "string"},
+        "rchSlotsAvailable": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "rchQueueHeadSlotsNeeded": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "rchWorkerPressureStatus": {"type": "string"},
+        "rchUsableWorkerCount": {"type": "integer", "minimum": 0},
+        "rchBlockedWorkerCount": {"type": "integer", "minimum": 0},
+        "rawLogsIncluded": {"const": false},
+        "rawMailBodiesIncluded": {"const": false},
+        "rawCommandsIncluded": {"const": false}
       }
     },
     "singleFlightPosture": {
@@ -161,6 +280,45 @@
         "graphGeneration": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]}
       }
     },
+    "symbolRiskSummary": {
+      "type": "object",
+      "required": [
+        "schema",
+        "status",
+        "dirtyPathCount",
+        "summarizedPathCount",
+        "omittedPathCount",
+        "touchedSymbolCount",
+        "highRiskSymbolCount",
+        "linkedEvidenceCount",
+        "recentAgentActivityCount",
+        "topPaths",
+        "degradedCodes",
+        "rawPathsIncluded",
+        "rawSymbolNamesIncluded",
+        "rawAgentNamesIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"type": "string"},
+        "status": {"type": "string"},
+        "dirtyPathCount": {"type": "integer", "minimum": 0},
+        "summarizedPathCount": {"type": "integer", "minimum": 0},
+        "omittedPathCount": {"type": "integer", "minimum": 0},
+        "touchedSymbolCount": {"type": "integer", "minimum": 0},
+        "highRiskSymbolCount": {"type": "integer", "minimum": 0},
+        "linkedEvidenceCount": {"type": "integer", "minimum": 0},
+        "recentAgentActivityCount": {"type": "integer", "minimum": 0},
+        "topPaths": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/symbolRiskPath"}
+        },
+        "degradedCodes": {"$ref": "#/definitions/stringArray"},
+        "rawPathsIncluded": {"const": false},
+        "rawSymbolNamesIncluded": {"const": false},
+        "rawAgentNamesIncluded": {"const": false}
+      }
+    },
     "memoryDriftSummary": {
       "type": "object",
       "required": [
@@ -195,6 +353,176 @@
         "rawSnippetsIncluded": {"const": false},
         "rawCommandBodiesIncluded": {"const": false},
         "fullListingsIncluded": {"const": false}
+      }
+    },
+    "topReadyBead": {
+      "type": "object",
+      "required": [
+        "beadId",
+        "titleHash",
+        "priority",
+        "action",
+        "severity",
+        "reservationHolders",
+        "exclusiveReservationCount",
+        "sharedReservationCount",
+        "earliestExpiresAt",
+        "maxRiskScore",
+        "riskFactors",
+        "likelySurfaceHashes",
+        "suggestedCommandHashes",
+        "rawTitleIncluded",
+        "rawSurfacesIncluded",
+        "rawCommandsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "titleHash": {"type": "string", "pattern": "^blake3:"},
+        "priority": {"oneOf": [{"type": "null"}, {"type": "integer"}]},
+        "action": {"type": "string", "enum": ["wait", "message_holder", "choose_another", "inspect_full"]},
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "reservationHolders": {
+          "$ref": "#/definitions/stringArray",
+          "description": "BLAKE3 hashes of reservation-holder labels from the underlying swarm brief."
+        },
+        "exclusiveReservationCount": {"type": "integer", "minimum": 0},
+        "sharedReservationCount": {"type": "integer", "minimum": 0},
+        "earliestExpiresAt": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+        "maxRiskScore": {"type": "integer", "minimum": 0},
+        "riskFactors": {"$ref": "#/definitions/stringArray"},
+        "likelySurfaceHashes": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommandHashes": {"$ref": "#/definitions/stringArray"},
+        "rawTitleIncluded": {"const": false},
+        "rawSurfacesIncluded": {"const": false},
+        "rawCommandsIncluded": {"const": false}
+      }
+    },
+    "topInProgressBead": {
+      "type": "object",
+      "required": [
+        "beadId",
+        "titleHash",
+        "assigneeHash",
+        "priority",
+        "posture",
+        "action",
+        "severity",
+        "lastActivityAt",
+        "ageSeconds",
+        "evidenceSources",
+        "evidenceHashes",
+        "suggestedCommandHashes",
+        "rawTitleIncluded",
+        "rawEvidenceIncluded",
+        "rawCommandsIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "titleHash": {"type": "string", "pattern": "^blake3:"},
+        "assigneeHash": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^blake3:"}]},
+        "priority": {"oneOf": [{"type": "null"}, {"type": "integer"}]},
+        "posture": {
+          "type": "string",
+          "enum": [
+            "active",
+            "quiet_but_recent",
+            "blocked_with_evidence",
+            "stale_needs_message",
+            "reclaim_candidate",
+            "human_approval_required"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "leave_alone",
+            "message_holder",
+            "inspect_full",
+            "reopen_manually",
+            "request_human_approval"
+          ]
+        },
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "lastActivityAt": {"oneOf": [{"type": "null"}, {"type": "string"}]},
+        "ageSeconds": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0}]},
+        "evidenceSources": {"$ref": "#/definitions/stringArray"},
+        "evidenceHashes": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommandHashes": {"$ref": "#/definitions/stringArray"},
+        "rawTitleIncluded": {"const": false},
+        "rawEvidenceIncluded": {"const": false},
+        "rawCommandsIncluded": {"const": false}
+      }
+    },
+    "recoveryActionKind": {
+      "type": "object",
+      "required": ["priority", "kind", "commandHash", "relatedBeadId"],
+      "additionalProperties": false,
+      "properties": {
+        "priority": {"type": "integer", "minimum": 0},
+        "kind": {"type": "string"},
+        "commandHash": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^blake3:"}]},
+        "relatedBeadId": {"oneOf": [{"type": "null"}, {"type": "string"}]}
+      }
+    },
+    "symbolRiskPath": {
+      "type": "object",
+      "required": [
+        "pathHash",
+        "symbolCount",
+        "highRiskSymbolCount",
+        "linkedEvidenceCount",
+        "recentAgentActivityCount",
+        "agentNameHashes",
+        "evidenceSourceKinds",
+        "symbols",
+        "rawPathIncluded",
+        "rawSymbolNamesIncluded",
+        "rawAgentNamesIncluded"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "pathHash": {"type": "string", "pattern": "^blake3:"},
+        "symbolCount": {"type": "integer", "minimum": 0},
+        "highRiskSymbolCount": {"type": "integer", "minimum": 0},
+        "linkedEvidenceCount": {"type": "integer", "minimum": 0},
+        "recentAgentActivityCount": {"type": "integer", "minimum": 0},
+        "agentNameHashes": {"$ref": "#/definitions/stringArray"},
+        "evidenceSourceKinds": {"$ref": "#/definitions/stringArray"},
+        "symbols": {
+          "type": "array",
+          "items": {"$ref": "#/definitions/symbolRiskSymbol"}
+        },
+        "rawPathIncluded": {"const": false},
+        "rawSymbolNamesIncluded": {"const": false},
+        "rawAgentNamesIncluded": {"const": false}
+      }
+    },
+    "symbolRiskSymbol": {
+      "type": "object",
+      "required": [
+        "symbolIdHash",
+        "canonicalNameHash",
+        "kind",
+        "visibility",
+        "publicSurface",
+        "startLine",
+        "endLine",
+        "linkedEvidenceCount",
+        "evidenceSourceKinds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "symbolIdHash": {"type": "string", "pattern": "^blake3:"},
+        "canonicalNameHash": {"type": "string", "pattern": "^blake3:"},
+        "kind": {"type": "string"},
+        "visibility": {"type": "string"},
+        "publicSurface": {"type": "boolean"},
+        "startLine": {"type": "integer", "minimum": 0},
+        "endLine": {"type": "integer", "minimum": 0},
+        "linkedEvidenceCount": {"type": "integer", "minimum": 0},
+        "evidenceSourceKinds": {"$ref": "#/definitions/stringArray"}
       }
     },
     "rchWorkerPressure": {
@@ -271,7 +599,10 @@
         "severity": {"type": "string", "enum": ["low", "medium", "high"]},
         "score": {"type": "integer", "minimum": 0},
         "riskFactors": {"$ref": "#/definitions/stringArray"},
-        "reservationHolders": {"$ref": "#/definitions/stringArray"},
+        "reservationHolders": {
+          "$ref": "#/definitions/stringArray",
+          "description": "BLAKE3 hashes of reservation-holder labels from the underlying swarm brief."
+        },
         "relatedBeadIds": {"$ref": "#/definitions/stringArray"},
         "suggestedCommandHashes": {"$ref": "#/definitions/stringArray"},
         "rawPathIncluded": {"const": false},
@@ -285,6 +616,9 @@
         "rawQueryTextIncluded",
         "rawProvenanceTextIncluded",
         "fullFileListingsIncluded",
+        "rawSymbolNamesIncluded",
+        "rawAgentNamesIncluded",
+        "reservationHolderLabelsIncluded",
         "recommendationEvidenceIncluded"
       ],
       "additionalProperties": false,
@@ -293,6 +627,9 @@
         "rawQueryTextIncluded": {"const": false},
         "rawProvenanceTextIncluded": {"const": false},
         "fullFileListingsIncluded": {"const": false},
+        "rawSymbolNamesIncluded": {"const": false},
+        "rawAgentNamesIncluded": {"const": false},
+        "reservationHolderLabelsIncluded": {"const": "hashes_only"},
         "recommendationEvidenceIncluded": {"const": "hashes_only"}
       }
     }
@@ -306,13 +643,24 @@
       "redactionStatus": "counts_hashes_codes_ids_only_no_mail_body_no_raw_queries_no_file_listings",
       "reportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111",
       "workspaceHash": "blake3:2222222222222222222222222222222222222222222222222222222222222222",
-      "limits": {"maxRecommendations": 5},
+      "limits": {"maxRecommendations": 6},
       "counts": {
         "fileSurfaceRiskCount": 1,
         "activeReservationCount": 1,
         "dirtyFileCount": 1,
+        "gitAheadCount": 0,
+        "gitAheadCommitCount": 0,
+        "gitAheadPeerOwnedRisk": false,
+        "readyReservationPressureCount": 1,
+        "stalledBeadLivenessCount": 6,
+        "agentMailAgentCount": 1,
         "memoryDriftAffectedCount": 2,
-        "memoryDriftTopAffectedCount": 2
+        "memoryDriftTopAffectedCount": 2,
+        "verificationBrokerRecentReusableRunCount": 0,
+        "verificationBrokerKnownBlockerCount": 0,
+        "verificationBrokerInFlightCount": 0,
+        "symbolRiskPathCount": 0,
+        "symbolRiskHighRiskSymbolCount": 0
       },
       "bv": {"topPickIds": []},
       "memoryDrift": {
@@ -333,6 +681,27 @@
         "rawSnippetsIncluded": false,
         "rawCommandBodiesIncluded": false,
         "fullListingsIncluded": false
+      },
+      "gitAhead": {
+        "status": "unknown",
+        "available": false,
+        "aheadCount": 0,
+        "commitCount": 0,
+        "peerOwnedAheadRisk": false,
+        "degradedCodes": [],
+        "rawCommitSubjectsIncluded": false
+      },
+      "verificationBroker": {
+        "schema": "ee.swarm.verification_broker_summary.v1",
+        "status": "not_collected",
+        "available": false,
+        "recentReusableRunCount": 0,
+        "knownBlockerCount": 0,
+        "inFlightEquivalentCommandCount": 0,
+        "rchQueueStatus": "not_collected",
+        "rchWorkerPressureStatus": "not_collected",
+        "rawLogsIncluded": false,
+        "rawMailBodiesIncluded": false
       },
       "sourceStatusCounts": {"ready": 1},
       "sourceStatuses": [],
@@ -392,7 +761,7 @@
       "degradedCodes": [],
       "fileSurfaceRiskSummary": {
         "countsBySeverity": {"medium": 1},
-        "countsByReservationHolder": {"OtherAgent": 1},
+        "countsByReservationHolder": {"blake3:a9794fb0c2dc": 1},
         "countsByGitStatus": {"M": 1},
         "topRisks": [
           {
@@ -400,13 +769,163 @@
             "severity": "medium",
             "score": 67,
             "riskFactors": ["dirty_worktree_path", "active_exclusive_reservation"],
-            "reservationHolders": ["OtherAgent"],
+            "reservationHolders": ["blake3:a9794fb0c2dc"],
             "relatedBeadIds": ["bd-1zb7k.16.4"],
             "suggestedCommandHashes": ["blake3:4444444444444444444444444444444444444444444444444444444444444444"],
             "rawPathIncluded": false,
             "rawCommandsIncluded": false
           }
         ]
+      },
+      "readyReservationPressureSummary": {
+        "countsByAction": {"wait": 1},
+        "countsBySeverity": {"high": 1},
+        "countsByReservationHolder": {"blake3:a9794fb0c2dc": 1},
+        "topReadyBeads": [
+          {
+            "beadId": "bd-1zb7k.16.4",
+            "titleHash": "blake3:7777777777777777777777777777777777777777777777777777777777777777",
+            "priority": 0,
+            "action": "wait",
+            "severity": "high",
+            "reservationHolders": ["blake3:a9794fb0c2dc"],
+            "exclusiveReservationCount": 1,
+            "sharedReservationCount": 0,
+            "earliestExpiresAt": "2026-06-02T12:00:00Z",
+            "maxRiskScore": 92,
+            "riskFactors": ["active_exclusive_reservation", "ready_work_overlap"],
+            "likelySurfaceHashes": ["blake3:8888888888888888888888888888888888888888888888888888888888888888"],
+            "suggestedCommandHashes": ["blake3:9999999999999999999999999999999999999999999999999999999999999999"],
+            "rawTitleIncluded": false,
+            "rawSurfacesIncluded": false,
+            "rawCommandsIncluded": false
+          }
+        ]
+      },
+      "stalledBeadLivenessSummary": {
+        "countsByPosture": {"active": 1, "blocked_with_evidence": 1, "human_approval_required": 1, "quiet_but_recent": 1, "reclaim_candidate": 1, "stale_needs_message": 1},
+        "countsByAction": {"inspect_full": 1, "leave_alone": 1, "message_holder": 2, "reopen_manually": 1, "request_human_approval": 1},
+        "countsBySeverity": {"high": 2, "low": 2, "medium": 2},
+        "topInProgressBeads": [
+          {
+            "beadId": "bd-active",
+            "titleHash": "blake3:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "assigneeHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "priority": 2,
+            "posture": "active",
+            "action": "leave_alone",
+            "severity": "low",
+            "lastActivityAt": "2026-05-15T15:45:00Z",
+            "ageSeconds": 60,
+            "evidenceSources": ["agent_mail_agent", "agent_mail_reservation"],
+            "evidenceHashes": ["blake3:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"],
+            "suggestedCommandHashes": ["blake3:1010101010101010101010101010101010101010101010101010101010101010"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          },
+          {
+            "beadId": "bd-quiet",
+            "titleHash": "blake3:2323232323232323232323232323232323232323232323232323232323232323",
+            "assigneeHash": "blake3:2424242424242424242424242424242424242424242424242424242424242424",
+            "priority": 2,
+            "posture": "quiet_but_recent",
+            "action": "message_holder",
+            "severity": "low",
+            "lastActivityAt": "2026-05-15T08:00:00Z",
+            "ageSeconds": 28800,
+            "evidenceSources": ["beads_updated_at"],
+            "evidenceHashes": ["blake3:2525252525252525252525252525252525252525252525252525252525252525"],
+            "suggestedCommandHashes": ["blake3:2626262626262626262626262626262626262626262626262626262626262626"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          },
+          {
+            "beadId": "bd-blocked",
+            "titleHash": "blake3:1212121212121212121212121212121212121212121212121212121212121212",
+            "assigneeHash": "blake3:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "priority": 1,
+            "posture": "blocked_with_evidence",
+            "action": "inspect_full",
+            "severity": "medium",
+            "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+            "ageSeconds": 2800000,
+            "evidenceSources": ["beads_updated_at"],
+            "evidenceHashes": ["blake3:1313131313131313131313131313131313131313131313131313131313131313"],
+            "suggestedCommandHashes": ["blake3:1414141414141414141414141414141414141414141414141414141414141414"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          },
+          {
+            "beadId": "bd-human",
+            "titleHash": "blake3:1515151515151515151515151515151515151515151515151515151515151515",
+            "assigneeHash": null,
+            "priority": 0,
+            "posture": "human_approval_required",
+            "action": "request_human_approval",
+            "severity": "high",
+            "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+            "ageSeconds": 2800000,
+            "evidenceSources": ["beads_updated_at"],
+            "evidenceHashes": ["blake3:1616161616161616161616161616161616161616161616161616161616161616"],
+            "suggestedCommandHashes": ["blake3:1717171717171717171717171717171717171717171717171717171717171717"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          },
+          {
+            "beadId": "bd-mail-degraded",
+            "titleHash": "blake3:1818181818181818181818181818181818181818181818181818181818181818",
+            "assigneeHash": "blake3:1919191919191919191919191919191919191919191919191919191919191919",
+            "priority": 2,
+            "posture": "stale_needs_message",
+            "action": "message_holder",
+            "severity": "medium",
+            "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+            "ageSeconds": 2800000,
+            "evidenceSources": ["agent_mail_degraded", "beads_updated_at"],
+            "evidenceHashes": ["blake3:2020202020202020202020202020202020202020202020202020202020202020"],
+            "suggestedCommandHashes": ["blake3:2121212121212121212121212121212121212121212121212121212121212121"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          },
+          {
+            "beadId": "bd-stale",
+            "titleHash": "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "assigneeHash": null,
+            "priority": 2,
+            "posture": "reclaim_candidate",
+            "action": "reopen_manually",
+            "severity": "high",
+            "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+            "ageSeconds": 2800000,
+            "evidenceSources": ["beads_updated_at", "agent_mail_thread", "git_commit"],
+            "evidenceHashes": ["blake3:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            "suggestedCommandHashes": ["blake3:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+            "rawTitleIncluded": false,
+            "rawEvidenceIncluded": false,
+            "rawCommandsIncluded": false
+          }
+        ]
+      },
+      "symbolRiskSummary": {
+        "schema": "ee.support_bundle.symbol_risk_summary.v1",
+        "status": "not_collected",
+        "dirtyPathCount": 0,
+        "summarizedPathCount": 0,
+        "omittedPathCount": 0,
+        "touchedSymbolCount": 0,
+        "highRiskSymbolCount": 0,
+        "linkedEvidenceCount": 0,
+        "recentAgentActivityCount": 0,
+        "topPaths": [],
+        "degradedCodes": [],
+        "rawPathsIncluded": false,
+        "rawSymbolNamesIncluded": false,
+        "rawAgentNamesIncluded": false
       },
       "topRecommendations": [],
       "provenance": {"underlyingReportHash": "blake3:1111111111111111111111111111111111111111111111111111111111111111", "sideEffectFree": true, "sourceProvenance": []},
@@ -415,6 +934,9 @@
         "rawQueryTextIncluded": false,
         "rawProvenanceTextIncluded": false,
         "fullFileListingsIncluded": false,
+        "rawSymbolNamesIncluded": false,
+        "rawAgentNamesIncluded": false,
+        "reservationHolderLabelsIncluded": "hashes_only",
         "recommendationEvidenceIncluded": "hashes_only"
       }
     }

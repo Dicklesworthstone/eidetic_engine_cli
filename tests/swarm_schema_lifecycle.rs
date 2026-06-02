@@ -2201,6 +2201,8 @@ fn swarm_brief_golden_ownership_risks_match_schema_contract() -> TestResult {
         .and_then(Value::as_array)
         .ok_or_else(|| "swarm brief golden missing cases array".to_string())?;
     let mut ownership_case_count = 0_usize;
+    let mut ready_pressure_case_count = 0_usize;
+    let mut liveness_case_count = 0_usize;
     for case in cases {
         let case_name = case
             .get("case")
@@ -2236,10 +2238,146 @@ fn swarm_brief_golden_ownership_risks_match_schema_contract() -> TestResult {
                 }
             }
         }
+        let pressures = case
+            .get("readyReservationPressure")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name} missing readyReservationPressure array"))?;
+        for (index, pressure) in pressures.iter().enumerate() {
+            ready_pressure_case_count += 1;
+            let context = format!("{case_name}.readyReservationPressure[{index}]");
+            for field in [
+                "beadId",
+                "title",
+                "priority",
+                "action",
+                "severity",
+                "likelySurfaces",
+                "reservationHolders",
+                "exclusiveReservationCount",
+                "sharedReservationCount",
+                "earliestExpiresAt",
+                "maxRiskScore",
+                "riskFactors",
+                "evidence",
+                "suggestedCommands",
+            ] {
+                if pressure.get(field).is_none() {
+                    return Err(format!("{context} missing {field}"));
+                }
+            }
+        }
+        let liveness_rows = case
+            .get("stalledBeadLiveness")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("{case_name} missing stalledBeadLiveness array"))?;
+        for (index, liveness) in liveness_rows.iter().enumerate() {
+            liveness_case_count += 1;
+            let context = format!("{case_name}.stalledBeadLiveness[{index}]");
+            for field in [
+                "beadId",
+                "title",
+                "assignee",
+                "priority",
+                "posture",
+                "action",
+                "severity",
+                "lastActivityAt",
+                "ageSecondsPresent",
+                "evidenceSources",
+                "evidence",
+                "suggestedCommands",
+                "mustNotDo",
+            ] {
+                if liveness.get(field).is_none() {
+                    return Err(format!("{context} missing {field}"));
+                }
+            }
+        }
     }
 
     if ownership_case_count == 0 {
         return Err("swarm brief golden must cover at least one file surface risk".into());
+    }
+    if ready_pressure_case_count == 0 {
+        return Err("swarm brief golden must cover at least one ready reservation pressure".into());
+    }
+    if liveness_case_count == 0 {
+        return Err("swarm brief golden must cover at least one stalled bead liveness row".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn swarm_brief_fixture_covers_stalled_liveness_posture_matrix() -> TestResult {
+    let fixtures = fixture_examples()?;
+    let swarm_brief = fixtures
+        .get("ee.swarm.brief.v1")
+        .ok_or_else(|| "fixture manifest missing ee.swarm.brief.v1".to_owned())?;
+    let rows = swarm_brief
+        .get("stalledBeadLiveness")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "ee.swarm.brief.v1 fixture missing stalledBeadLiveness".to_owned())?;
+    let postures = rows
+        .iter()
+        .filter_map(|row| row.get("posture").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "active",
+        "blocked_with_evidence",
+        "human_approval_required",
+        "quiet_but_recent",
+        "reclaim_candidate",
+        "stale_needs_message",
+    ] {
+        if !postures.contains(expected) {
+            return Err(format!(
+                "ee.swarm.brief.v1 fixture must cover stalled bead liveness posture {expected}"
+            ));
+        }
+    }
+
+    for row in rows {
+        let posture = row
+            .get("posture")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "stalledBeadLiveness fixture row missing posture".to_owned())?;
+        if matches!(
+            posture,
+            "blocked_with_evidence"
+                | "human_approval_required"
+                | "quiet_but_recent"
+                | "stale_needs_message"
+        ) {
+            let suggested_commands = row
+                .get("suggestedCommands")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("stalledBeadLiveness posture {posture} missing suggestedCommands")
+                })?;
+            if suggested_commands
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|command| command.contains("--status open"))
+            {
+                return Err(format!(
+                    "stalledBeadLiveness posture {posture} must not include reopen guidance"
+                ));
+            }
+        }
+    }
+
+    let support_bundle = fixtures
+        .get("ee.support_bundle.swarm_brief_summary.v1")
+        .ok_or_else(|| {
+            "fixture manifest missing ee.support_bundle.swarm_brief_summary.v1".to_owned()
+        })?;
+    if support_bundle
+        .pointer("/counts/stalledBeadLivenessCount")
+        .and_then(Value::as_u64)
+        != Some(rows.len() as u64)
+    {
+        return Err("support-bundle liveness count must match swarm brief fixture rows".into());
     }
 
     Ok(())

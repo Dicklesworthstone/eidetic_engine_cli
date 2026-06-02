@@ -14,6 +14,8 @@
     "beads",
     "fileReservations",
     "fileSurfaceRisks",
+    "readyReservationPressure",
+    "stalledBeadLiveness",
     "inbox",
     "threads",
     "resourcePressure",
@@ -55,6 +57,14 @@
       "type": "array",
       "items": {"$ref": "#/definitions/fileSurfaceRisk"}
     },
+    "readyReservationPressure": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/readyReservationPressure"}
+    },
+    "stalledBeadLiveness": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/stalledBeadLiveness"}
+    },
     "inbox": {
       "type": "array",
       "items": {"type": "object"}
@@ -62,6 +72,10 @@
     "threads": {
       "type": "array",
       "items": {"type": "object"}
+    },
+    "agentMailAgents": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/agentMailAgent"}
     },
     "resourcePressure": {
       "type": "array",
@@ -89,6 +103,12 @@
       "type": "array",
       "items": {"$ref": "#/definitions/degradation"}
     }
+  },
+  "field_presets": {
+    "minimal": ["schema", "workspace", "redactionStatus"],
+    "summary": ["schema", "workspace", "redactionStatus", "sources", "readyReservationPressure", "stalledBeadLiveness", "degraded"],
+    "standard": ["*"],
+    "full": ["*"]
   },
   "definitions": {
     "stringArray": {
@@ -134,6 +154,20 @@
         }
       }
     },
+    "agentMailAgent": {
+      "type": "object",
+      "required": ["name", "lastActiveAt"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "lastActiveAt": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        }
+      }
+    },
     "fileSurfaceRisk": {
       "type": "object",
       "required": [
@@ -158,6 +192,128 @@
         "riskFactors": {"$ref": "#/definitions/stringArray"},
         "evidence": {"$ref": "#/definitions/stringArray"},
         "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "readyReservationPressure": {
+      "type": "object",
+      "required": [
+        "beadId",
+        "title",
+        "priority",
+        "action",
+        "severity",
+        "likelySurfaces",
+        "reservationHolders",
+        "exclusiveReservationCount",
+        "sharedReservationCount",
+        "earliestExpiresAt",
+        "maxRiskScore",
+        "riskFactors",
+        "evidence",
+        "suggestedCommands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "title": {"type": "string"},
+        "priority": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer"}
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": ["wait", "message_holder", "choose_another", "inspect_full"]
+        },
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "likelySurfaces": {"$ref": "#/definitions/stringArray"},
+        "reservationHolders": {"$ref": "#/definitions/stringArray"},
+        "exclusiveReservationCount": {"type": "integer", "minimum": 0},
+        "sharedReservationCount": {"type": "integer", "minimum": 0},
+        "earliestExpiresAt": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        },
+        "maxRiskScore": {"type": "integer", "minimum": 0},
+        "riskFactors": {"$ref": "#/definitions/stringArray"},
+        "evidence": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommands": {"$ref": "#/definitions/stringArray"}
+      }
+    },
+    "stalledBeadLiveness": {
+      "type": "object",
+      "required": [
+        "beadId",
+        "title",
+        "assignee",
+        "priority",
+        "posture",
+        "action",
+        "severity",
+        "lastActivityAt",
+        "ageSeconds",
+        "evidenceSources",
+        "evidence",
+        "suggestedCommands",
+        "mustNotDo"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "beadId": {"type": "string"},
+        "title": {"type": "string"},
+        "assignee": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        },
+        "priority": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer"}
+          ]
+        },
+        "posture": {
+          "type": "string",
+          "enum": [
+            "active",
+            "quiet_but_recent",
+            "blocked_with_evidence",
+            "stale_needs_message",
+            "reclaim_candidate",
+            "human_approval_required"
+          ]
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "leave_alone",
+            "message_holder",
+            "inspect_full",
+            "reopen_manually",
+            "request_human_approval"
+          ]
+        },
+        "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "lastActivityAt": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "string"}
+          ]
+        },
+        "ageSeconds": {
+          "oneOf": [
+            {"type": "null"},
+            {"type": "integer", "minimum": 0}
+          ]
+        },
+        "evidenceSources": {"$ref": "#/definitions/stringArray"},
+        "evidence": {"$ref": "#/definitions/stringArray"},
+        "suggestedCommands": {"$ref": "#/definitions/stringArray"},
+        "mustNotDo": {"$ref": "#/definitions/stringArray"}
       }
     },
     "gitAheadSnapshot": {
@@ -339,8 +495,121 @@
           "suggestedCommands": ["message OtherAgent before editing src/core/swarm_brief.rs"]
         }
       ],
+      "readyReservationPressure": [
+        {
+          "beadId": "bd-1zb7k.16.4",
+          "title": "[swarm-brief] Add coordination advice",
+          "priority": 2,
+          "action": "wait",
+          "severity": "high",
+          "likelySurfaces": ["src/core/swarm_brief.rs"],
+          "reservationHolders": ["OtherAgent"],
+          "exclusiveReservationCount": 1,
+          "sharedReservationCount": 0,
+          "earliestExpiresAt": "2026-05-15T16:00:00Z",
+          "maxRiskScore": 67,
+          "riskFactors": ["active_exclusive_reservation", "bead_reservation_overlap"],
+          "evidence": ["ready_reservation:bd-1zb7k.16.4:OtherAgent:src/core/swarm_brief.rs"],
+          "suggestedCommands": ["message OtherAgent before editing src/core/swarm_brief.rs"]
+        }
+      ],
+      "stalledBeadLiveness": [
+        {
+          "beadId": "bd-active",
+          "title": "[swarm-brief] Active owner on swarm brief core",
+          "assignee": "OtherAgent",
+          "priority": 2,
+          "posture": "active",
+          "action": "leave_alone",
+          "severity": "low",
+          "lastActivityAt": "2026-05-15T15:45:00Z",
+          "ageSeconds": 60,
+          "evidenceSources": ["agent_mail_agent", "agent_mail_reservation"],
+          "evidence": ["agent_mail_agent_last_active:bd-active:2026-05-15T15:45:00Z", "agent_mail_reservation:bd-active:OtherAgent:active"],
+          "suggestedCommands": ["br show bd-active --json", "Search Agent Mail for thread bd-active", "message OtherAgent before reclaiming bd-active"],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+        },
+        {
+          "beadId": "bd-quiet",
+          "title": "[swarm-brief] Quiet but recently updated in-progress work",
+          "assignee": "QuietAgent",
+          "priority": 2,
+          "posture": "quiet_but_recent",
+          "action": "message_holder",
+          "severity": "low",
+          "lastActivityAt": "2026-05-15T08:00:00Z",
+          "ageSeconds": 28800,
+          "evidenceSources": ["beads_updated_at"],
+          "evidence": ["beads_updated_at:bd-quiet:2026-05-15T08:00:00Z", "last_activity_age_seconds:28800"],
+          "suggestedCommands": ["br show bd-quiet --json", "Search Agent Mail for thread bd-quiet", "message QuietAgent before reclaiming bd-quiet"],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+        },
+        {
+          "beadId": "bd-blocked",
+          "title": "[swarm-brief] blocked waiting on operator proof",
+          "assignee": "OtherAgent",
+          "priority": 1,
+          "posture": "blocked_with_evidence",
+          "action": "inspect_full",
+          "severity": "medium",
+          "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+          "ageSeconds": 2800000,
+          "evidenceSources": ["beads_updated_at"],
+          "evidence": ["beads_updated_at:bd-blocked:2026-05-01T12:00:00.123456Z", "bead:bd-blocked:in_progress:[swarm-brief] blocked waiting on operator proof"],
+          "suggestedCommands": ["br show bd-blocked --json", "Search Agent Mail for thread bd-blocked", "message OtherAgent before reclaiming bd-blocked", "ee --fields full swarm brief --workspace . --json"],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone."]
+        },
+        {
+          "beadId": "bd-human",
+          "title": "[cleanup] deletion approval required before removing snapshots",
+          "assignee": null,
+          "priority": 0,
+          "posture": "human_approval_required",
+          "action": "request_human_approval",
+          "severity": "high",
+          "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+          "ageSeconds": 2800000,
+          "evidenceSources": ["beads_updated_at"],
+          "evidence": ["beads_updated_at:bd-human:2026-05-01T12:00:00.123456Z", "human_approval_required:true"],
+          "suggestedCommands": ["br show bd-human --json", "Search Agent Mail for thread bd-human", "Ask the human/operator for explicit approval before reopening or deleting anything."],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not force-release reservations from liveness guidance alone.", "Do not treat deferred or human-approval work as abandoned."]
+        },
+        {
+          "beadId": "bd-mail-degraded",
+          "title": "[swarm-brief] Old in-progress work with missing mail",
+          "assignee": "QuietAgent",
+          "priority": 2,
+          "posture": "stale_needs_message",
+          "action": "message_holder",
+          "severity": "medium",
+          "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+          "ageSeconds": 2800000,
+          "evidenceSources": ["agent_mail_degraded", "beads_updated_at"],
+          "evidence": ["beads_updated_at:bd-mail-degraded:2026-05-01T12:00:00.123456Z", "source_status:agent_mail:not_ready"],
+          "suggestedCommands": ["br show bd-mail-degraded --json", "Search Agent Mail for thread bd-mail-degraded", "message QuietAgent before reclaiming bd-mail-degraded"],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output.", "Do not treat missing Agent Mail data as inactivity proof."]
+        },
+        {
+          "beadId": "bd-stale",
+          "title": "[swarm-brief] Old in-progress work",
+          "assignee": null,
+          "priority": 2,
+          "posture": "reclaim_candidate",
+          "action": "reopen_manually",
+          "severity": "high",
+          "lastActivityAt": "2026-05-01T12:00:00.123456Z",
+          "ageSeconds": 2800000,
+          "evidenceSources": ["beads_updated_at", "agent_mail_thread", "git_commit"],
+          "evidence": ["beads_updated_at:bd-stale:2026-05-01T12:00:00.123456Z"],
+          "suggestedCommands": ["br show bd-stale --json", "br update bd-stale --status open --json"],
+          "mustNotDo": ["Do not auto-reopen in-progress work from swarm brief output."]
+        }
+      ],
       "inbox": [],
       "threads": [],
+      "agentMailAgents": [
+        {"name": "OtherAgent", "lastActiveAt": "2026-05-15T15:45:00Z"}
+      ],
       "resourcePressure": [],
       "hostProfile": null,
       "agentInventory": null,
