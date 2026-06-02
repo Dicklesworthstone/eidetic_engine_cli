@@ -939,7 +939,7 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         // hash-table grow cost cannot scale with attacker input.
         let mut accumulator: HashMap<TopicId, f64> =
             HashMap::with_capacity(history.recent_first.len().min(MAX_PREFETCH_HISTORY));
-        let mut total_weight: f64 = 0.0;
+        let mut candidate_total_weight: f64 = 0.0;
         for (position, observation) in history.recent_first.iter().enumerate() {
             let topic_id = observation.topic_id.as_str();
             if topic_id.is_empty() {
@@ -949,10 +949,10 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             if !weight.is_finite() || weight < 0.0 {
                 continue;
             }
-            total_weight += weight;
             if Some(topic_id) == most_recent_topic {
                 continue;
             }
+            candidate_total_weight += weight;
             if let Some(existing_weight) = accumulator.get_mut(&observation.topic_id) {
                 *existing_weight += weight;
             } else {
@@ -960,7 +960,7 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             }
         }
 
-        if total_weight <= 0.0 || !total_weight.is_finite() {
+        if candidate_total_weight <= 0.0 || !candidate_total_weight.is_finite() {
             return Vec::new();
         }
 
@@ -971,7 +971,7 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
         let mut scored: Vec<CassPrefetchCandidate> = accumulator
             .into_iter()
             .map(|(topic_id, weighted_sum)| {
-                let normalized = (weighted_sum / total_weight).clamp(0.0, 1.0);
+                let normalized = (weighted_sum / candidate_total_weight).clamp(0.0, 1.0);
                 CassPrefetchCandidate::new(topic_id, normalized, self.name())
             })
             .filter(|candidate| {
@@ -981,22 +981,23 @@ impl SpeculativePrefetch for RecencyWeightedFrequencyPredictor {
             })
             .collect();
 
-        // Deterministic order: highest score first, lexicographic
-        // topic_id tie-break. `total_cmp` over `partial_cmp(...)
-        // .unwrap_or(Equal)` because the filter above already
-        // excluded NaNs but the contract is the determinism gate, not
-        // the absence-of-NaN guarantee, and a future caller that
-        // bypasses the filter must not silently break ordering.
-        scored.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.topic_id.cmp(&right.topic_id))
-        });
+        sort_prefetch_candidates_deterministically(&mut scored);
 
         scored.truncate(top_k);
         scored
     }
+}
+
+fn sort_prefetch_candidates_deterministically(scored: &mut [CassPrefetchCandidate]) {
+    // Deterministic order: highest score first, lexicographic topic_id
+    // tie-break. `total_cmp` keeps ordering total even if a future caller
+    // bypasses the normal finite-score filter.
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.topic_id.cmp(&right.topic_id))
+    });
 }
 
 /// Hit / miss / budget counter the daemon and the flight recorder
@@ -1240,18 +1241,27 @@ mod tests {
     }
 
     #[test]
-    fn predictions_are_deterministic_under_tied_scores() {
-        // Two distinct topics that BOTH appear once at the same
-        // recency offset. They must tie-break by topic_id ascending
-        // — not by HashMap iteration order — so the prediction list
-        // is byte-identical across runs.
+    fn predictions_are_deterministic_under_recency_scores() {
+        // Position 1 outranks position 2 under the recency-weighted
+        // heuristic. This still must be byte-identical across runs and
+        // independent of HashMap iteration order.
         let predictor = RecencyWeightedFrequencyPredictor::new();
         let h = history(&["current", "zeta", "alpha"]);
         let predictions = predictor.predict_next_n(&h, 3);
         assert_eq!(predictions.len(), 2);
-        // alpha and zeta tie; alpha wins the lex tie-break.
-        assert_eq!(predictions[0].topic_id, "alpha");
-        assert_eq!(predictions[1].topic_id, "zeta");
+        assert_eq!(predictions[0].topic_id, "zeta");
+        assert_eq!(predictions[1].topic_id, "alpha");
+    }
+
+    #[test]
+    fn equal_scores_tie_break_by_topic_id() {
+        let mut candidates = vec![
+            CassPrefetchCandidate::new("zeta", 0.5, "test_predictor"),
+            CassPrefetchCandidate::new("alpha", 0.5, "test_predictor"),
+        ];
+        sort_prefetch_candidates_deterministically(&mut candidates);
+        assert_eq!(candidates[0].topic_id, "alpha");
+        assert_eq!(candidates[1].topic_id, "zeta");
     }
 
     #[test]
