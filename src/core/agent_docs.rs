@@ -835,6 +835,12 @@ pub const CONTRACTS: &[ContractEntry] = &[
         description: "Standard error response with code, message, and repair hint",
         stability: "stable",
     },
+    ContractEntry {
+        name: "preflight_guard",
+        schema: crate::core::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
+        description: "Direct hook-safe guard response for ee preflight check/guard; intentionally not wrapped in ee.response.v2 so command hooks can branch on allowed/exitCode without envelope traversal",
+        stability: "stable",
+    },
 ];
 
 #[derive(Clone, Debug)]
@@ -899,6 +905,12 @@ pub const EXAMPLES: &[ExampleEntry] = &[
         description: "Get actionable repair steps for issues",
         command: "ee doctor --fix-plan --json",
         category: "diagnostics",
+    },
+    ExampleEntry {
+        title: "Preflight a shell command",
+        description: "Check a command against destructive-action guard rules; this example encodes `git status`, and --cmd-base64 or --stdin keeps intercepted literals off argv",
+        command: "ee preflight check --cmd-base64 Z2l0IHN0YXR1cw== --json",
+        category: "safety",
     },
     ExampleEntry {
         title: "Token-efficient status",
@@ -1458,6 +1470,24 @@ mod tests {
     }
 
     #[test]
+    fn contracts_catalog_lists_direct_preflight_guard_schema() -> TestResult {
+        let preflight_contract = CONTRACTS
+            .iter()
+            .find(|contract| contract.name == "preflight_guard")
+            .ok_or_else(|| "preflight guard contract is documented".to_string())?;
+
+        ensure_equal(
+            &preflight_contract.schema,
+            &crate::core::preflight_guard::PREFLIGHT_GUARD_SCHEMA_V1,
+            "preflight guard direct schema",
+        )?;
+        ensure(
+            preflight_contract.description.contains("not wrapped"),
+            "preflight guard docs explain the direct schema exception",
+        )
+    }
+
+    #[test]
     fn examples_are_non_empty() -> TestResult {
         ensure(!EXAMPLES.is_empty(), "examples exist")?;
         for example in EXAMPLES {
@@ -1468,6 +1498,31 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn examples_include_preflight_base64_and_stdin_escape_hatches() -> TestResult {
+        let preflight_example = EXAMPLES
+            .iter()
+            .find(|example| example.title == "Preflight a shell command")
+            .ok_or_else(|| "preflight command-transport example is documented".to_string())?;
+
+        ensure(
+            preflight_example.command.contains("--cmd-base64"),
+            "preflight example uses base64 transport",
+        )?;
+        ensure(
+            !preflight_example.command.contains('<'),
+            "preflight example avoids shell-redirection-shaped placeholders",
+        )?;
+        ensure(
+            preflight_example.description.contains("--stdin"),
+            "preflight example mentions stdin transport",
+        )?;
+        ensure(
+            preflight_example.description.contains("git status"),
+            "preflight example names the encoded command",
+        )
     }
 
     #[test]
