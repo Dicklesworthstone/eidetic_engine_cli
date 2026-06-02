@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # bd-3qs2i.4.6 — F4.6 e2e for `embed_model_unavailable`.
 #
-# Exercises the embedder-only-down path against a real ee binary in a fresh
+# Exercises embedder-degraded paths against a real ee binary in a fresh
 # workspace. The fault-injection knob is EE_EMBED_MODEL_PATH: pointing it at a
 # missing model should leave lexical search available while surfacing the more
-# precise embed_model_unavailable degraded code.
+# precise embed_model_unavailable degraded code. The default hash-fallback
+# embedder is also semantic=false, so search and pack must surface the same
+# degraded code instead of silently serving lexical-only rankings.
 
 set -euo pipefail
 
@@ -102,21 +104,42 @@ assert_jq "$search_out" \
     "true" "details.lexicalAvailable is true"
 
 # ---------------------------------------------------------------------------
-log_step "Context surfaces the same embedder degradation"
-context_out=$(ee_workspace_with_missing_embedder context "cargo workspace info" \
+log_step "Pack surfaces the same embedder degradation"
+missing_pack_out=$(ee_workspace_with_missing_embedder pack "cargo workspace info" \
     --max-tokens 2000 \
     --json)
-assert_jq "$context_out" '.success' "true" "context succeeds with missing embedder"
-assert_jq "$context_out" "$has_embed_model_unavailable" "true" \
-    "context carries embed_model_unavailable"
-assert_jq "$context_out" '((.data.pack.items // []) | length) > 0' "true" \
-    "context pack still has lexical fallback items"
+assert_jq "$missing_pack_out" '.success' "true" "pack succeeds with missing embedder"
+assert_jq "$missing_pack_out" "$has_embed_model_unavailable" "true" \
+    "pack carries embed_model_unavailable"
+assert_jq "$missing_pack_out" '((.data.pack.items // []) | length) > 0' "true" \
+    "pack still has lexical fallback items"
 
 # ---------------------------------------------------------------------------
-log_step "Restoring embedder path clears the degraded code"
-restored_out=$(ee_workspace search "cargo workspace" --json)
-assert_jq "$restored_out" "$has_embed_model_unavailable" "false" \
-    "embed_model_unavailable absent after restoring default embedder path"
+log_step "Default hash fallback is explicit in search degraded output"
+default_search_out=$(ee_workspace search "cargo workspace" --json)
+assert_jq "$default_search_out" '.success' "true" \
+    "search succeeds with default hash fallback"
+assert_jq "$default_search_out" '((.data.results // []) | length) > 0' "true" \
+    "default hash fallback still returns lexical results"
+assert_jq "$default_search_out" "$has_embed_model_unavailable" "true" \
+    "default hash fallback carries embed_model_unavailable"
+assert_jq "$default_search_out" \
+    '(.data.degraded[] | select(.code == "embed_model_unavailable") | .message | contains("hash fallback"))' \
+    "true" "default degraded message names hash fallback"
+
+# ---------------------------------------------------------------------------
+log_step "Pack surfaces lexical-only advisory for default hash fallback"
+pack_out=$(ee_workspace pack "cargo workspace info" \
+    --max-tokens 2000 \
+    --json)
+assert_jq "$pack_out" '.success' "true" "pack succeeds with default hash fallback"
+assert_jq "$pack_out" "$has_embed_model_unavailable" "true" \
+    "pack carries embed_model_unavailable"
+assert_jq "$pack_out" '((.data.pack.items // []) | length) > 0' "true" \
+    "pack still has lexical fallback items"
+assert_jq "$pack_out" \
+    '(.data.pack.advisoryBanner.summary // "" | contains("lexical-only"))' \
+    "true" "pack advisory banner names lexical-only ranking"
 
 # ---------------------------------------------------------------------------
 log_step "Tracing target fires under EE_LOG_JSON=1"
