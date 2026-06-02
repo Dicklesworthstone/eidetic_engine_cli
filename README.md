@@ -691,17 +691,20 @@ edits, run a fresh `ee swarm brief`.
 it before claiming a bead, after large dirty-state or reservation changes, and
 before using handoff or support-bundle evidence as the basis for new work.
 
-Start with the compact operator view:
+Start with a summary view when a routine agent preflight needs compact,
+budget-friendly output. The `--fields` flag may appear before the command or
+after `swarm brief`:
 
 ```bash
-ee swarm brief --workspace . --json
+ee swarm brief --fields summary --workspace . --json
 ```
 
-Use full output when a harness needs every source array, including file-surface
-risks and resource-pressure hints:
+Use the complete output when a harness needs every source array, including
+file-surface risks and resource-pressure hints. This output is intentionally
+larger; keep it behind an explicit `--fields full` in agent loops:
 
 ```bash
-ee --fields full swarm brief --workspace . --include-rch --json
+ee swarm brief --fields full --workspace . --include-rch --json
 ```
 
 Require selected live coordination sources when degraded output is unacceptable:
