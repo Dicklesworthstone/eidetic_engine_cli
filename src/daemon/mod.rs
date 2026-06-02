@@ -205,6 +205,8 @@ pub enum DaemonStartError {
     /// refuses to overwrite arbitrary files; the operator must remove
     /// the conflicting path explicitly.
     SocketPathOccupied { path: PathBuf },
+    /// A live listener is already bound at the daemon socket path.
+    AlreadyRunning { path: PathBuf },
     /// The `bind(2)` call failed.
     Bind {
         path: PathBuf,
@@ -230,6 +232,12 @@ impl std::fmt::Display for DaemonStartError {
                  remove it manually before retrying `ee daemon start`.",
                 path.display()
             ),
+            Self::AlreadyRunning { path } => write!(
+                formatter,
+                "A live daemon socket already exists at {}; stop the running daemon or choose a \
+                 different --socket path before retrying `ee daemon start`.",
+                path.display()
+            ),
             Self::Bind { path, source } => write!(
                 formatter,
                 "Failed to bind daemon socket at {}: {source}",
@@ -242,7 +250,9 @@ impl std::fmt::Display for DaemonStartError {
 impl std::error::Error for DaemonStartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::PlatformUnsupported | Self::SocketPathOccupied { .. } => None,
+            Self::PlatformUnsupported
+            | Self::SocketPathOccupied { .. }
+            | Self::AlreadyRunning { .. } => None,
             Self::SocketDirCreate { source, .. } | Self::Bind { source, .. } => Some(source),
         }
     }

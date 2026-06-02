@@ -22,7 +22,7 @@
 
 #![cfg(unix)]
 
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -31,6 +31,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use rustix::fs::{FlockOperation, flock};
 
 use crate::config::env_registry::{self, EnvVar};
 
@@ -82,6 +84,11 @@ pub const DAEMON_HANDLER_PANIC_CODE: &str = "daemon_handler_panic";
 /// huge memory body) cannot blow out the journal.
 const DAEMON_PANIC_LOG_MAX_BYTES: usize = 512;
 const DAEMON_WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug)]
+struct DaemonSocketPublishLock {
+    _file: File,
+}
 
 /// Bounded-pool permit. A clone-on-acquire counter that decrements on
 /// drop, used to cap the number of in-flight per-connection worker
@@ -365,6 +372,8 @@ pub fn start_server(
             })?;
     }
 
+    let _publish_lock = acquire_socket_publish_lock(&socket_path)?;
+
     // Refuse to clobber a non-socket file already occupying the
     // canonical path, but do NOT pre-`remove_file` it. The former
     // stat → remove_file → bind sequence had two TOCTOU windows: an
@@ -392,7 +401,10 @@ pub fn start_server(
                 let _ = metadata;
                 return Err(DaemonStartError::PlatformUnsupported);
             }
-            // A stale socket from a prior daemon: the `rename` below
+            if existing_socket_accepts_connection(&socket_path) {
+                return Err(DaemonStartError::AlreadyRunning { path: socket_path });
+            }
+            // A dead socket from a prior daemon: the `rename` below
             // atomically replaces it, so there is nothing to unlink.
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -522,6 +534,52 @@ fn temp_bind_path(socket_path: &Path) -> PathBuf {
     let mut tmp_path = socket_path.to_path_buf();
     tmp_path.set_file_name(file_name);
     tmp_path
+}
+
+fn acquire_socket_publish_lock(
+    socket_path: &Path,
+) -> Result<DaemonSocketPublishLock, DaemonStartError> {
+    let lock_path = socket_publish_lock_path(socket_path);
+    let file =
+        open_daemon_socket_lock_file(&lock_path).map_err(|source| DaemonStartError::Bind {
+            path: socket_path.to_path_buf(),
+            source,
+        })?;
+    flock(&file, FlockOperation::LockExclusive).map_err(|source| DaemonStartError::Bind {
+        path: socket_path.to_path_buf(),
+        source: io::Error::from(source),
+    })?;
+    Ok(DaemonSocketPublishLock { _file: file })
+}
+
+fn socket_publish_lock_path(socket_path: &Path) -> PathBuf {
+    let mut file_name = socket_path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("daemon.sock"));
+    file_name.push(".start.lock");
+    let mut lock_path = socket_path.to_path_buf();
+    lock_path.set_file_name(file_name);
+    lock_path
+}
+
+fn open_daemon_socket_lock_file(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    configure_daemon_socket_lock_options(&mut options);
+    options.open(path)
+}
+
+fn configure_daemon_socket_lock_options(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+fn existing_socket_accepts_connection(socket_path: &Path) -> bool {
+    UnixStream::connect(socket_path).is_ok()
 }
 
 fn run_accept_loop(
@@ -1683,6 +1741,34 @@ mod tests {
         assert!(path.exists());
     }
 
+    #[test]
+    fn start_server_refuses_live_existing_socket() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-live.sock");
+        let mut first = start_server(&socket_path).expect("first server must start");
+
+        let error = start_server(&socket_path).expect_err("second start must refuse live socket");
+        assert!(
+            matches!(error, DaemonStartError::AlreadyRunning { .. }),
+            "second start against a live daemon must return AlreadyRunning; got {error:?}",
+        );
+
+        let request = DaemonRequest::new(
+            "req-live-existing-001",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({"still": "first"}),
+        );
+        let response =
+            client_round_trip(first.socket_path(), &request).expect("first daemon remains live");
+        assert_eq!(response.request_id, "req-live-existing-001");
+        assert_eq!(response.agent_id, TEST_AGENT_ID);
+        let error = response.error.as_ref().expect("context stub error");
+        assert_eq!(error.code, DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE);
+
+        first.shutdown().expect("shutdown");
+    }
+
     /// Regression test for bd-3j0td. The UDS file must land on disk
     /// with mode 0o600 — owner-rw only — so that no other local UID
     /// can `connect(2)` even when the parent directory's 0o700 gate
@@ -1800,13 +1886,12 @@ mod tests {
         handle.shutdown().expect("shutdown");
     }
 
-    /// bd-3ik2d: two concurrent `start_server` calls on the same path
-    /// must never leave the canonical path in a corrupt state. The old
-    /// stat → remove_file → bind sequence could unlink a peer's fresh
-    /// socket or leave the path momentarily absent / a regular file (the
-    /// TOCTOU window). The atomic bind-temp → chmod → rename path
-    /// guarantees the canonical name always resolves to a valid 0o600
-    /// socket regardless of who wins the race, and neither bind errors.
+    /// bd-3ik2d + bd-14dmn: two concurrent `start_server` calls on the
+    /// same path must never leave the canonical path in a corrupt state
+    /// or split-brain two live daemons. The publish lock serializes the
+    /// inspect → bind-temp → chmod → rename window, then the follower
+    /// probes the now-live canonical socket and refuses with
+    /// `AlreadyRunning`.
     #[test]
     fn start_server_concurrent_binds_no_toctou() {
         use std::os::unix::fs::FileTypeExt;
@@ -1832,12 +1917,18 @@ mod tests {
             .map(|t| t.join().expect("bind thread must not panic"))
             .collect();
 
-        // The atomic rename replaces rather than racing on remove_file,
-        // so both concurrent binds succeed. If someone reintroduces the
-        // stat → remove → bind window, one bind will observe EADDRINUSE
-        // or unlink the other's socket and this count drops below two.
+        // Exactly one daemon owns the canonical socket. The follower
+        // must not replace it and create a split-brain listener.
         let ok_count = results.iter().filter(|r| r.is_ok()).count();
-        assert_eq!(ok_count, 2, "both concurrent atomic binds must succeed");
+        let already_running_count = results
+            .iter()
+            .filter(|result| matches!(result, Err(DaemonStartError::AlreadyRunning { .. })))
+            .count();
+        assert_eq!(ok_count, 1, "exactly one concurrent daemon start must win");
+        assert_eq!(
+            already_running_count, 1,
+            "exactly one concurrent daemon start must refuse the live winner",
+        );
 
         // The canonical path always resolves to a live 0o600 socket —
         // never absent, never a regular file, never world-open.
@@ -1852,18 +1943,11 @@ mod tests {
             "canonical socket must be 0o600 after a concurrent-bind race",
         );
 
-        // The losing bind's listener is orphaned: the winner's `rename`
-        // replaced the canonical path, so the loser's accept loop can no
-        // longer be woken (shutdown wakes by connecting to the canonical
-        // name, which now points at the winner). Joining it would
-        // deadlock, so we intentionally leak both handles and let the
-        // tempdir reap the socket file. The leak is bounded to this test
-        // process.
-        for result in results {
-            if let Ok(handle) = result {
-                std::mem::forget(handle);
-            }
-        }
+        let mut handle = results
+            .into_iter()
+            .find_map(Result::ok)
+            .expect("one daemon start must succeed");
+        handle.shutdown().expect("shutdown winning daemon");
     }
 
     /// bd-2z3e8: shutdown cleanup must never turn a swapped daemon

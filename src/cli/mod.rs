@@ -42152,6 +42152,30 @@ where
     }
 }
 
+#[cfg(unix)]
+const DAEMON_ALREADY_RUNNING_CODE: &str = "daemon_already_running";
+
+#[cfg(unix)]
+fn daemon_socket_accepts_connection(socket_path: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket_path).is_ok()
+}
+
+#[cfg(unix)]
+fn daemon_already_running_error(socket_path: &Path) -> DomainError {
+    DomainError::UnsatisfiedDegradedModeCode {
+        code: DAEMON_ALREADY_RUNNING_CODE,
+        message: format!(
+            "A live daemon socket already exists at {}; refusing to replace it.",
+            socket_path.display()
+        ),
+        repair: Some(
+            "Run `ee daemon status --json` to inspect the running daemon, `ee daemon stop` to \
+             stop it, or choose a different --socket path."
+                .to_owned(),
+        ),
+    }
+}
+
 /// Handler for `ee daemon start` (bd-oja31 skeleton, lifecycle fix
 /// bd-37o8k).
 ///
@@ -42180,7 +42204,7 @@ where
 {
     #[cfg(unix)]
     {
-        use crate::daemon::server::start_server;
+        use crate::daemon::{DaemonStartError, server::start_server};
         let socket_path = args
             .socket
             .clone()
@@ -42223,6 +42247,10 @@ where
                         std::thread::sleep(std::time::Duration::from_secs(60));
                     }
                 }
+                Err(DaemonStartError::AlreadyRunning { .. }) => {
+                    let domain_error = daemon_already_running_error(&socket_path);
+                    write_domain_error(&domain_error, cli.wants_json(), stdout, stderr)
+                }
                 Err(error) => {
                     let domain_error = DomainError::Configuration {
                         message: format!("Failed to start daemon: {error}"),
@@ -42256,6 +42284,11 @@ where
         // Poll cadence: small enough that startup latency is dominated
         // by the child itself, large enough not to busy-wait CPU.
         const PROBE_INTERVAL: Duration = Duration::from_millis(50);
+
+        if daemon_socket_accepts_connection(&socket_path) {
+            let domain_error = daemon_already_running_error(&socket_path);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
 
         let exe = match std::env::current_exe() {
             Ok(path) => path,
@@ -42350,6 +42383,10 @@ where
             let _ = child.kill();
         }
         let _ = child.wait();
+        if child_died_early && daemon_socket_accepts_connection(&socket_path) {
+            let domain_error = daemon_already_running_error(&socket_path);
+            return write_domain_error(&domain_error, cli.wants_json(), stdout, stderr);
+        }
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }

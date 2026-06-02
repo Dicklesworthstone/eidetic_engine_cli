@@ -19,6 +19,10 @@
 //!   when the child can never bind (parent dir is a regular file), the
 //!   envelope is `success:false` carrying the `daemon_start_failed`
 //!   degraded code instead of a lie.
+//! - `daemon_start_reports_daemon_already_running_when_socket_is_live`:
+//!   a repeated detached start against a live daemon refuses with an
+//!   `ee.error.v2` / `daemon_already_running` envelope instead of
+//!   replacing the first daemon's socket path.
 //!
 //! Cfg-gated to Unix because `ee daemon start` is Unix-only.
 
@@ -149,6 +153,41 @@ fn daemon_start_detached_socket_is_connectable_before_success() -> TestResult {
                 "UDS connect to the printed socketPath must succeed after success:true; \
                  last error: {last_err:?}"
             ),
+        )?;
+        Ok(())
+    })();
+
+    teardown_daemon(&socket_path);
+    result
+}
+
+#[test]
+fn daemon_start_reports_daemon_already_running_when_socket_is_live() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-already-running.sock");
+
+    let first = run_daemon_start(&socket_path)?;
+    let result: TestResult = (|| {
+        ensure(
+            first.pointer("/success").and_then(Value::as_bool) == Some(true),
+            format!("first detached start must report success:true; got {first}"),
+        )?;
+
+        let second = run_daemon_start(&socket_path)?;
+        ensure(
+            second.pointer("/schema").and_then(Value::as_str) == Some("ee.error.v2"),
+            format!("second detached start must emit ee.error.v2; got {second}"),
+        )?;
+        ensure(
+            second.pointer("/error/code").and_then(Value::as_str) == Some("daemon_already_running"),
+            format!("second detached start must report daemon_already_running; got {second}"),
+        )?;
+        ensure(
+            second
+                .pointer("/error/repair")
+                .and_then(Value::as_str)
+                .is_some(),
+            format!("daemon_already_running error must include repair guidance; got {second}"),
         )?;
         Ok(())
     })();
