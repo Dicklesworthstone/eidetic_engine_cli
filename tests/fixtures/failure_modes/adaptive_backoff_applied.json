@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "adaptive_backoff_applied",
+  "introduced_by": {
+    "bead": "bd-16pwc.2",
+    "epic_letter": "SRR5"
+  },
+  "surfaces": [
+    "daemon",
+    "swarm brief"
+  ],
+  "severity": "low",
+  "repair_present": false,
+  "trigger": {
+    "description": "The SRR5 adaptive scheduler observes a per-agent rolling p99 above swarm.adaptive.noisy_neighbor_p99_ms and applies a soft advisory delay to that agent only.",
+    "setup_commands": [
+      "ee daemon start --foreground",
+      "# drive one agent above the configured p99 threshold while other agents continue context requests"
+    ],
+    "invocation": "ee daemon request ee.daemon.context --json"
+  },
+  "expected_emission": {
+    "code": "adaptive_backoff_applied",
+    "severity": "low",
+    "message_contains": [
+      "adaptive backoff",
+      "noisy-neighbor"
+    ]
+  }
+}

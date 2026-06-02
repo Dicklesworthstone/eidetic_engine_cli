@@ -22,7 +22,7 @@ pub use file::{
     MeshRedactionPolicyConfig, MeshTrustLane, OutputRedactionConfig, PackConfig, PackL2CacheConfig,
     PolicyConfig, PrivacyConfig, ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig,
     RuntimeConfig, SearchConfig, SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig,
-    StorageConfig, TrustConfig,
+    StorageConfig, SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
 };
 pub use merge::{
     CACHE_PACK_L2_DIRECTORY_KEY, CACHE_PACK_L2_ENABLED_KEY, CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
@@ -58,8 +58,12 @@ pub use merge::{
     SEARCH_LEXICAL_WEIGHT_KEY, SEARCH_SEMANTIC_WEIGHT_KEY, STORAGE_DATABASE_PATH_KEY,
     STORAGE_INDEX_DIR_KEY, STORAGE_JSONL_EXPORT_KEY, STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY,
     STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY, STORAGE_READ_POOL_PIN_SNAPSHOT_KEY,
-    STORAGE_READ_POOL_SIZE_KEY, TRUST_DEFAULT_CLASS_KEY, TRUST_PROMPT_INJECTION_GUARD_KEY,
-    TRUST_TEAM_MEMBERS_KEY, built_in_config, config_from_env, merge_config,
+    STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
+    SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY, SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
+    SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
+    SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, TRUST_DEFAULT_CLASS_KEY,
+    TRUST_PROMPT_INJECTION_GUARD_KEY, TRUST_TEAM_MEMBERS_KEY, built_in_config, config_from_env,
+    merge_config,
 };
 pub use path::{PathExpander, PathExpansionError};
 pub use path_resolver::{

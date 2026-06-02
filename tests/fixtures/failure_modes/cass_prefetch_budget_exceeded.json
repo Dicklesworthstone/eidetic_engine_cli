@@ -1,0 +1,30 @@
+{
+  "schema": "ee.failure_mode_fixture.v1",
+  "code": "cass_prefetch_budget_exceeded",
+  "introduced_by": {
+    "bead": "bd-16pwc.2",
+    "epic_letter": "SRR5"
+  },
+  "surfaces": [
+    "daemon",
+    "swarm brief"
+  ],
+  "severity": "info",
+  "repair_present": false,
+  "trigger": {
+    "description": "A speculative CASS prefetch slot exceeds swarm.adaptive.prefetch_budget_ms and is cancelled without changing the canonical retrieval response.",
+    "setup_commands": [
+      "ee daemon start --foreground",
+      "# configure a small swarm.adaptive.prefetch_budget_ms and issue context requests that trigger speculative CASS evidence prefetch"
+    ],
+    "invocation": "ee daemon request ee.daemon.context --json"
+  },
+  "expected_emission": {
+    "code": "cass_prefetch_budget_exceeded",
+    "severity": "info",
+    "message_contains": [
+      "CASS prefetch",
+      "budget"
+    ]
+  }
+}

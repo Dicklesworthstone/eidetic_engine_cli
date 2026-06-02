@@ -56,6 +56,7 @@ pub struct ConfigFile {
     pub handoff: HandoffConfig,
     pub cache: CacheConfig,
     pub mesh: MeshConfig,
+    pub swarm: SwarmConfig,
     pub graph: GraphConfig,
     pub curation: CurationConfig,
     pub learn: LearnConfig,
@@ -110,6 +111,7 @@ impl ConfigFile {
             handoff: HandoffConfig::parse(&document)?,
             cache: CacheConfig::parse(&document, expander)?,
             mesh: MeshConfig::parse(&document)?,
+            swarm: SwarmConfig::parse(&document)?,
             graph: GraphConfig::parse(&document)?,
             curation: CurationConfig::parse(&document)?,
             learn: LearnConfig::parse(&document)?,
@@ -645,6 +647,52 @@ impl MeshLaneGrants {
             MeshLane::CurationSignal => self.curation_signal,
         }
         .unwrap_or(MeshLaneDecision::Deny)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SwarmConfig {
+    pub adaptive: SwarmAdaptiveConfig,
+}
+
+impl SwarmConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        Ok(Self {
+            adaptive: SwarmAdaptiveConfig::parse(document)?,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SwarmAdaptiveConfig {
+    pub enabled: Option<bool>,
+    pub prefetch_top_k: Option<u64>,
+    pub prefetch_budget_ms: Option<u64>,
+    pub similarity_threshold: Option<f64>,
+    pub noisy_neighbor_p99_ms: Option<u64>,
+    pub noisy_neighbor_backoff_ms: Option<u64>,
+}
+
+impl SwarmAdaptiveConfig {
+    fn parse(document: &DocumentMut) -> Result<Self, ConfigParseError> {
+        const SECTIONS: &[&str] = &["swarm", "adaptive"];
+
+        Ok(Self {
+            enabled: optional_bool_path(document, SECTIONS, "enabled")?,
+            prefetch_top_k: optional_u64_path(document, SECTIONS, "prefetch_top_k")?,
+            prefetch_budget_ms: optional_u64_path(document, SECTIONS, "prefetch_budget_ms")?,
+            similarity_threshold: optional_unit_float_path(
+                document,
+                SECTIONS,
+                "similarity_threshold",
+            )?,
+            noisy_neighbor_p99_ms: optional_u64_path(document, SECTIONS, "noisy_neighbor_p99_ms")?,
+            noisy_neighbor_backoff_ms: optional_u64_path(
+                document,
+                SECTIONS,
+                "noisy_neighbor_backoff_ms",
+            )?,
+        })
     }
 }
 
@@ -2164,6 +2212,14 @@ max_age_days = 30
 enabled = false
 command_mode = "off"
 
+[swarm.adaptive]
+enabled = true
+prefetch_top_k = 3
+prefetch_budget_ms = 50
+similarity_threshold = 0.10
+noisy_neighbor_p99_ms = 200
+noisy_neighbor_backoff_ms = 25
+
 [[mesh.peer_group_bindings]]
 workspace_id = "wsp_local_release_001"
 workspace_alias = "local-release"
@@ -2413,6 +2469,36 @@ prompt_injection_guard = true
             &config.mesh.command_mode,
             &Some(MeshCommandMode::Off),
             "mesh command mode",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.enabled,
+            &Some(true),
+            "swarm adaptive enabled",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.prefetch_top_k,
+            &Some(3),
+            "swarm adaptive prefetch top-k",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.prefetch_budget_ms,
+            &Some(50),
+            "swarm adaptive prefetch budget",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.similarity_threshold,
+            &Some(0.10),
+            "swarm adaptive similarity threshold",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.noisy_neighbor_p99_ms,
+            &Some(200),
+            "swarm adaptive noisy-neighbor p99",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.noisy_neighbor_backoff_ms,
+            &Some(25),
+            "swarm adaptive noisy-neighbor backoff",
         )?;
         let binding = config
             .mesh
@@ -2754,6 +2840,36 @@ prompt_injection_guard = true
         ensure_equal(&config.mesh.enabled, &None, "mesh enabled")?;
         ensure_equal(&config.mesh.command_mode, &None, "mesh command mode")?;
         ensure_equal(
+            &config.swarm.adaptive.enabled,
+            &None,
+            "swarm adaptive enabled",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.prefetch_top_k,
+            &None,
+            "swarm adaptive prefetch top-k",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.prefetch_budget_ms,
+            &None,
+            "swarm adaptive prefetch budget",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.similarity_threshold,
+            &None,
+            "swarm adaptive similarity threshold",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.noisy_neighbor_p99_ms,
+            &None,
+            "swarm adaptive noisy-neighbor p99",
+        )?;
+        ensure_equal(
+            &config.swarm.adaptive.noisy_neighbor_backoff_ms,
+            &None,
+            "swarm adaptive noisy-neighbor backoff",
+        )?;
+        ensure_equal(
             &config.mesh.peer_group_bindings,
             &None,
             "mesh peer-group bindings",
@@ -2850,6 +2966,20 @@ prompt_injection_guard = true
             matches!(
                 error,
                 ConfigParseError::InvalidValue { ref key, .. } if key == "pack.mmr_lambda"
+            ),
+            format!("unexpected error: {error:?}"),
+        )
+    }
+
+    #[test]
+    fn rejects_out_of_range_swarm_adaptive_threshold() -> TestResult {
+        let error = expect_config_error("[swarm.adaptive]\nsimilarity_threshold = 1.5\n")?;
+
+        ensure(
+            matches!(
+                error,
+                ConfigParseError::InvalidValue { ref key, .. }
+                    if key == "swarm.adaptive.similarity_threshold"
             ),
             format!("unexpected error: {error:?}"),
         )

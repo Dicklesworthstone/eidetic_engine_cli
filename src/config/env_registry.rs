@@ -14,6 +14,10 @@ pub enum EnvVar {
     AgentName,
     /// `EE_AGENT_MODE`
     AgentMode,
+    /// `EE_ADAPTIVE_BACKOFF_MS`
+    AdaptiveBackoffMs,
+    /// `EE_ADAPTIVE_NOISY_P99_MS`
+    AdaptiveNoisyP99Ms,
     /// `EE_AUDIT_LANE_BATCH_MAX`
     AuditLaneBatchMax,
     /// `EE_AUDIT_LANE_CAPACITY`
@@ -38,6 +42,8 @@ pub enum EnvVar {
     DemoEvidenceRoot,
     /// `EE_DIAG_FORCE_CAPABILITY_GAP`
     DiagForceCapabilityGap,
+    /// `EE_DISABLE_ADAPTIVE`
+    DisableAdaptive,
     /// `EE_DISABLE_TOON`
     DisableToon,
     /// `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS`
@@ -225,6 +231,8 @@ impl EnvVar {
         &[
             Self::AgentName,
             Self::AgentMode,
+            Self::AdaptiveBackoffMs,
+            Self::AdaptiveNoisyP99Ms,
             Self::AuditLaneBatchMax,
             Self::AuditLaneCapacity,
             Self::AuditLaneFlushMs,
@@ -237,6 +245,7 @@ impl EnvVar {
             Self::DatabasePath,
             Self::DemoEvidenceRoot,
             Self::DiagForceCapabilityGap,
+            Self::DisableAdaptive,
             Self::DisableToon,
             Self::DisableRememberSearchNeighbors,
             Self::E2eRetentionManifest,
@@ -335,6 +344,8 @@ impl EnvVar {
         match self {
             Self::AgentName => "EE_AGENT_NAME",
             Self::AgentMode => "EE_AGENT_MODE",
+            Self::AdaptiveBackoffMs => "EE_ADAPTIVE_BACKOFF_MS",
+            Self::AdaptiveNoisyP99Ms => "EE_ADAPTIVE_NOISY_P99_MS",
             Self::AuditLaneBatchMax => "EE_AUDIT_LANE_BATCH_MAX",
             Self::AuditLaneCapacity => "EE_AUDIT_LANE_CAPACITY",
             Self::AuditLaneFlushMs => "EE_AUDIT_LANE_FLUSH_MS",
@@ -347,6 +358,7 @@ impl EnvVar {
             Self::DatabasePath => "EE_DATABASE_PATH",
             Self::DemoEvidenceRoot => "EE_DEMO_EVIDENCE_ROOT",
             Self::DiagForceCapabilityGap => "EE_DIAG_FORCE_CAPABILITY_GAP",
+            Self::DisableAdaptive => "EE_DISABLE_ADAPTIVE",
             Self::DisableToon => "EE_DISABLE_TOON",
             Self::DisableRememberSearchNeighbors => "EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS",
             Self::E2eRetentionManifest => "EE_E2E_RETENTION_MANIFEST",
@@ -451,6 +463,12 @@ impl EnvVar {
         match self {
             Self::AgentName => "Identify the current agent for scoped memory retrieval.",
             Self::AgentMode => "Use agent-oriented output defaults.",
+            Self::AdaptiveBackoffMs => {
+                "Override the SRR5 noisy-neighbor soft backoff delay in milliseconds."
+            }
+            Self::AdaptiveNoisyP99Ms => {
+                "Override the SRR5 per-agent p99 latency threshold for noisy-neighbor backoff."
+            }
             Self::AuditLaneBatchMax => "Override the audit-lane writer batch size before flushing.",
             Self::AuditLaneCapacity => "Override the audit-lane producer queue capacity.",
             Self::AuditLaneFlushMs => {
@@ -479,6 +497,9 @@ impl EnvVar {
                 "Force selected capability probes to report build-gap diagnostics."
             }
             Self::DisableToon => "Disable TOON output capability reporting and auto-selection.",
+            Self::DisableAdaptive => {
+                "Disable SRR5 swarm adaptive prefetch and scheduling without editing config."
+            }
             Self::DisableRememberSearchNeighbors => {
                 "Disable Frankensearch neighbors during remember-time proposal."
             }
@@ -687,6 +708,8 @@ impl EnvVar {
     #[must_use]
     pub const fn default_value(self) -> Option<&'static str> {
         match self {
+            Self::AdaptiveBackoffMs => Some("25"),
+            Self::AdaptiveNoisyP99Ms => Some("200"),
             Self::MeshMode => Some("off"),
             Self::MeshEnabled => Some("false"),
             Self::ShardFanoutEnabled => Some("false"),
@@ -741,6 +764,7 @@ impl EnvVar {
             Self::McpMaxRequestBytes => Some("16777216"),
             Self::DaemonEnableEcho => Some("false"),
             Self::DaemonMaxInflight => Some("32"),
+            Self::DisableAdaptive => Some("false"),
             _ => None,
         }
     }
@@ -820,6 +844,8 @@ impl EnvVar {
             | Self::ReflectionRequestTtlSeconds
             | Self::ReflectionSourceBudgetBytes => "reflection",
             Self::HarmfulBurstWindowSeconds
+            | Self::AdaptiveBackoffMs
+            | Self::AdaptiveNoisyP99Ms
             | Self::AuditLaneBatchMax
             | Self::AuditLaneCapacity
             | Self::AuditLaneFlushMs
@@ -849,6 +875,7 @@ impl EnvVar {
             | Self::ReadPoolSize
             | Self::WalCheckpointBytesThreshold
             | Self::WorkspaceCloseDrainTimeoutSeconds
+            | Self::DisableAdaptive
             | Self::DisableRememberSearchNeighbors
             | Self::IndexPublishLockRetryAttempts => "tuning",
             Self::ScienceBackendPath => "integration",
@@ -1018,6 +1045,38 @@ mod tests {
             }
             if var.category() != "curation" {
                 return Err(format!("{name} must be categorized as curation"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_adaptive_env_vars_are_registered_with_defaults() -> TestResult {
+        let expected = [
+            (EnvVar::AdaptiveBackoffMs, "EE_ADAPTIVE_BACKOFF_MS", "25"),
+            (
+                EnvVar::AdaptiveNoisyP99Ms,
+                "EE_ADAPTIVE_NOISY_P99_MS",
+                "200",
+            ),
+            (EnvVar::DisableAdaptive, "EE_DISABLE_ADAPTIVE", "false"),
+        ];
+
+        for (var, name, default) in expected {
+            if !EnvVar::all().contains(&var) {
+                return Err(format!("{name} missing from registry order"));
+            }
+            if var.name() != name {
+                return Err(format!("unexpected env name for {var:?}: {}", var.name()));
+            }
+            if var.default_value() != Some(default) {
+                return Err(format!("{name} default drifted"));
+            }
+            if var.category() != "tuning" {
+                return Err(format!("{name} must be categorized as tuning"));
+            }
+            if !var.exposes_value() {
+                return Err(format!("{name} should expose non-secret effective values"));
             }
         }
         Ok(())

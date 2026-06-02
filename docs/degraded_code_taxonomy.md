@@ -266,9 +266,10 @@ when the applied candidate, audit row, and derived memory agree, `curate apply`
 returns the existing applied result. Missing, duplicate, or mismatched replay
 evidence is classified under the `create_derived_replay_*` conflict codes above.
 
-#### Search and pack quality (52)
+#### Search and pack quality (54)
 | Code | Severity (canonical) | Bead |
 |------|----------------------|------|
+| `adaptive_backoff_applied` | low | bd-16pwc.2 (SRR5) |
 | `conflict_direct` | medium | bd-1zb7k.9 (S8) |
 | `conflict_trust_mismatch` | high | bd-1zb7k.9 (S8) |
 | `consensus_no_clusters` | low | bd-1zb7k.9 (S8) |
@@ -282,6 +283,7 @@ evidence is classified under the `create_derived_replay_*` conflict codes above.
 | `context_delta_larger_than_full` | info | bd-muovx |
 | `context_profile_budget_capped` | info | bd-17c65.2.4 (B7) |
 | `context_stream_partial_emission` | warning | bd-17c65.10.18 |
+| `cass_prefetch_budget_exceeded` | info | bd-16pwc.2 (SRR5) |
 | `duplicates_collapsed` | low | bd-17c65.2.3 (B3) |
 | `expired_filtered` | low | bd-17c65.2.8 (B8) |
 | `future_validity_filtered` | low | bd-17c65.2.10 (B11) |

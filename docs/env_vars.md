@@ -12,6 +12,8 @@ must not expose their current value.
 |---|---|---|---|---|---|
 | `EE_AGENT_NAME` | output | string | none | Identify the current agent for scoped memory retrieval. | Used by agent-aware memory and context surfaces. |
 | `EE_AGENT_MODE` | output | boolean flag | none | Use agent-oriented output defaults. | Optimizes renderer auto-detection for agent consumption. |
+| `EE_ADAPTIVE_BACKOFF_MS` | tuning | integer milliseconds | `25` | Override the SRR5 noisy-neighbor soft backoff delay in milliseconds. | Applied only when swarm adaptive scheduling is enabled; backoff is advisory and must not alter retrieval results. |
+| `EE_ADAPTIVE_NOISY_P99_MS` | tuning | integer milliseconds | `200` | Override the SRR5 per-agent p99 latency threshold for noisy-neighbor backoff. | Used by the adaptive scheduler to decide when a single agent should receive advisory delay. |
 | `EE_AUDIT_LANE_BATCH_MAX` | tuning | integer count | `64` | Override the audit-lane writer batch size before flushing. | Used by the audit-lane writer once foreground audit emission is enabled; preserving the default keeps existing direct insert behavior unchanged. |
 | `EE_AUDIT_LANE_CAPACITY` | tuning | integer count | `1024` | Override the audit-lane producer queue capacity. | Capacity is normalized by the runtime config before queue construction; full queues report `audit_backpressure` instead of silently dropping events. |
 | `EE_AUDIT_LANE_FLUSH_MS` | tuning | integer milliseconds | `5` | Override the audit-lane time-based flush interval in milliseconds. | Bounds how long the audit writer waits before flushing a partial batch. |
@@ -24,6 +26,7 @@ must not expose their current value.
 | `EE_DATABASE_PATH` | paths | path | none | Override the configured storage database path. | Equivalent to overriding the storage database path in config. |
 | `EE_DEMO_EVIDENCE_ROOT` | paths | path | none | Override the demo evidence storage root. | Used by demo evidence capture surfaces. |
 | `EE_DIAG_FORCE_CAPABILITY_GAP` | diagnostics | comma-separated tokens | none | Force selected capability probes to report build-gap diagnostics. | Diagnostics-only fixture control; accepts `runtime`, `storage`, `search`, `graph`, `science`, or `all`. |
+| `EE_DISABLE_ADAPTIVE` | tuning | boolean flag | `false` | Disable SRR5 swarm adaptive prefetch and scheduling without editing config. | Set to `true` or `1` to opt out of `[swarm.adaptive].enabled`; disabled adaptive mode is a config/capability state, not a per-response degradation. |
 | `EE_DISABLE_TOON` | output | boolean flag | none | Disable TOON output capability reporting and auto-selection. | Forces TOON capability diagnostics to report unavailable and makes renderer auto-detection fall back to JSON. |
 | `EE_DISABLE_REMEMBER_SEARCH_NEIGHBORS` | tuning | boolean flag | none | Disable Frankensearch neighbors during remember-time proposal. | Forces remember-time curation proposal to use deterministic tag-overlap neighbors only. |
 | `EE_E2E_RETENTION_MANIFEST` | paths | path | none | Override the retained-artifact manifest path used by diagnostics. | Used by disk-pressure artifact-retention diagnostics when `EPIC_RETENTION_MANIFEST` is unset. |

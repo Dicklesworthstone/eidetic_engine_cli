@@ -122,6 +122,16 @@ pub const CASS_PREFETCH_DECISION_SCHEMA_V1: &str = "ee.cass_prefetch.decision.v1
 /// flight recorder.
 pub const CASS_PREFETCH_METRICS_SCHEMA_V1: &str = "ee.cass_prefetch.metrics.v1";
 
+/// Degraded code emitted when a speculative prefetch slot exceeds its
+/// configured soft budget and is cancelled without changing retrieval
+/// results (bd-16pwc.2). The daemon-wiring slice owns emission.
+pub const CASS_PREFETCH_BUDGET_EXCEEDED_CODE: &str = "cass_prefetch_budget_exceeded";
+
+/// Degraded code emitted when the adaptive scheduler applies a
+/// per-agent noisy-neighbor soft backoff (bd-16pwc.2). The scheduler
+/// slice owns emission.
+pub const ADAPTIVE_BACKOFF_APPLIED_CODE: &str = "adaptive_backoff_applied";
+
 /// Default per-call prefetch candidate cap. The bead specifies
 /// `top-3`; we expose it as a const so the daemon slice can tune it
 /// through `[swarm.adaptive].prefetch_top_k` without recompiling.

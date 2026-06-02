@@ -39,6 +39,8 @@ in the same commit, keeping the catalog complete by construction.
 | `redaction_level_invalid` | export, handoff create, context, support bundle | low | bd-17c65.11.6 (K6) |
 | `redaction_pattern_matched` | export, handoff create, context, support bundle | medium | bd-17c65.11.6 (K6) |
 | `redaction_round_trip_marker_preserved` | import jsonl | info | bd-17c65.11.6 (K6) |
+| `adaptive_backoff_applied` | daemon, swarm brief | low | bd-16pwc.2 (SRR5) |
+| `cass_prefetch_budget_exceeded` | daemon, swarm brief | info | bd-16pwc.2 (SRR5) |
 | `handoff_snapshot_stale` | handoff resume | medium | bd-17c65.13.5 (M4) |
 | `profile_search_limit_capped` | search, diag search | low | bd-17c65.2.4 (B7) |
 | `context_profile_budget_capped` | context | low | bd-17c65.10.6 (J6) |

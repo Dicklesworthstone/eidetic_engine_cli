@@ -23,7 +23,8 @@ use super::file::{
     GraphWitnessesConfig, HandoffConfig, LearnConfig, LearnDecayConfig, MeshCommandMode,
     MeshConfig, OutputRedactionConfig, PackConfig, PackL2CacheConfig, PolicyConfig, PrivacyConfig,
     ReadPoolConfig, RedactionConfig, RedactionDefaultsConfig, RuntimeConfig, SearchConfig,
-    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig, TrustConfig,
+    SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+    SwarmAdaptiveConfig, SwarmConfig, TrustConfig,
 };
 use super::path::{PathExpander, PathExpansionError};
 
@@ -67,6 +68,13 @@ pub const MESH_ENABLED_KEY: &str = "mesh.enabled";
 pub const MESH_COMMAND_MODE_KEY: &str = "mesh.command_mode";
 pub const MESH_PEER_GROUP_BINDINGS_KEY: &str = "mesh.peer_group_bindings";
 pub const MESH_PEER_POLICIES_KEY: &str = "mesh.peer_policies";
+pub const SWARM_ADAPTIVE_ENABLED_KEY: &str = "swarm.adaptive.enabled";
+pub const SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY: &str = "swarm.adaptive.prefetch_top_k";
+pub const SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY: &str = "swarm.adaptive.prefetch_budget_ms";
+pub const SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY: &str = "swarm.adaptive.similarity_threshold";
+pub const SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY: &str = "swarm.adaptive.noisy_neighbor_p99_ms";
+pub const SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY: &str =
+    "swarm.adaptive.noisy_neighbor_backoff_ms";
 pub const GRAPH_PPR_ALPHA_KEY: &str = "graph.ppr.alpha";
 pub const GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY: &str = "graph.health.contradiction_threshold";
 pub const GRAPH_CURATE_ONION_DECAY_MAX_KEY: &str = "graph.curate.onion_decay_max";
@@ -461,6 +469,50 @@ impl MergedConfig {
                 MESH_PEER_POLICIES_KEY,
                 policies.len().to_string(),
                 self.source(MESH_PEER_POLICIES_KEY),
+            ));
+        }
+
+        // Swarm adaptive section
+        if let Some(enabled) = self.values.swarm.adaptive.enabled {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_ENABLED_KEY,
+                enabled.to_string(),
+                self.source(SWARM_ADAPTIVE_ENABLED_KEY),
+            ));
+        }
+        if let Some(top_k) = self.values.swarm.adaptive.prefetch_top_k {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
+                top_k.to_string(),
+                self.source(SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY),
+            ));
+        }
+        if let Some(budget_ms) = self.values.swarm.adaptive.prefetch_budget_ms {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY,
+                budget_ms.to_string(),
+                self.source(SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY),
+            ));
+        }
+        if let Some(threshold) = self.values.swarm.adaptive.similarity_threshold {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY,
+                threshold.to_string(),
+                self.source(SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY),
+            ));
+        }
+        if let Some(p99_ms) = self.values.swarm.adaptive.noisy_neighbor_p99_ms {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
+                p99_ms.to_string(),
+                self.source(SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY),
+            ));
+        }
+        if let Some(backoff_ms) = self.values.swarm.adaptive.noisy_neighbor_backoff_ms {
+            entries.push(ConfigShowEntry::new(
+                SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY,
+                backoff_ms.to_string(),
+                self.source(SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY),
             ));
         }
 
@@ -960,6 +1012,16 @@ pub fn built_in_config(expander: &PathExpander) -> Result<ConfigFile, Environmen
             peer_group_bindings: Some(Vec::new()),
             peer_policies: Some(Vec::new()),
         },
+        swarm: SwarmConfig {
+            adaptive: SwarmAdaptiveConfig {
+                enabled: Some(false),
+                prefetch_top_k: Some(3),
+                prefetch_budget_ms: Some(50),
+                similarity_threshold: Some(0.10),
+                noisy_neighbor_p99_ms: Some(200),
+                noisy_neighbor_backoff_ms: Some(25),
+            },
+        },
         graph: GraphConfig {
             ppr: GraphPprConfig { alpha: Some(0.30) },
             health: GraphHealthConfig {
@@ -1084,6 +1146,9 @@ pub fn config_from_env(
     env: &BTreeMap<String, OsString>,
     expander: &PathExpander,
 ) -> Result<ConfigFile, EnvironmentConfigError> {
+    let adaptive_enabled = optional_env_bool_flag(env, EnvVar::DisableAdaptive.name())?
+        .and_then(|disabled| if disabled { Some(false) } else { None });
+
     Ok(ConfigFile {
         storage: StorageConfig {
             database_path: optional_env_path(env, EnvVar::DatabasePath.name(), expander)?,
@@ -1132,6 +1197,16 @@ pub fn config_from_env(
             command_mode: optional_env_mesh_command_mode(env, EnvVar::MeshMode.name())?,
             peer_group_bindings: None,
             peer_policies: None,
+        },
+        swarm: SwarmConfig {
+            adaptive: SwarmAdaptiveConfig {
+                enabled: adaptive_enabled,
+                prefetch_top_k: None,
+                prefetch_budget_ms: None,
+                similarity_threshold: None,
+                noisy_neighbor_p99_ms: optional_env_u64(env, EnvVar::AdaptiveNoisyP99Ms.name())?,
+                noisy_neighbor_backoff_ms: optional_env_u64(env, EnvVar::AdaptiveBackoffMs.name())?,
+            },
         },
         graph: GraphConfig {
             memory: GraphMemoryConfig {
@@ -1598,6 +1673,64 @@ pub fn merge_config(layers: &ConfigLayers) -> MergedConfig {
                 &layers.user.mesh.peer_policies,
                 &layers.defaults.mesh.peer_policies,
             ),
+        },
+        swarm: SwarmConfig {
+            adaptive: SwarmAdaptiveConfig {
+                enabled: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_ENABLED_KEY,
+                    &layers.cli.swarm.adaptive.enabled,
+                    &layers.environment.swarm.adaptive.enabled,
+                    &layers.project.swarm.adaptive.enabled,
+                    &layers.user.swarm.adaptive.enabled,
+                    &layers.defaults.swarm.adaptive.enabled,
+                ),
+                prefetch_top_k: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
+                    &layers.cli.swarm.adaptive.prefetch_top_k,
+                    &layers.environment.swarm.adaptive.prefetch_top_k,
+                    &layers.project.swarm.adaptive.prefetch_top_k,
+                    &layers.user.swarm.adaptive.prefetch_top_k,
+                    &layers.defaults.swarm.adaptive.prefetch_top_k,
+                ),
+                prefetch_budget_ms: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY,
+                    &layers.cli.swarm.adaptive.prefetch_budget_ms,
+                    &layers.environment.swarm.adaptive.prefetch_budget_ms,
+                    &layers.project.swarm.adaptive.prefetch_budget_ms,
+                    &layers.user.swarm.adaptive.prefetch_budget_ms,
+                    &layers.defaults.swarm.adaptive.prefetch_budget_ms,
+                ),
+                similarity_threshold: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY,
+                    &layers.cli.swarm.adaptive.similarity_threshold,
+                    &layers.environment.swarm.adaptive.similarity_threshold,
+                    &layers.project.swarm.adaptive.similarity_threshold,
+                    &layers.user.swarm.adaptive.similarity_threshold,
+                    &layers.defaults.swarm.adaptive.similarity_threshold,
+                ),
+                noisy_neighbor_p99_ms: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
+                    &layers.cli.swarm.adaptive.noisy_neighbor_p99_ms,
+                    &layers.environment.swarm.adaptive.noisy_neighbor_p99_ms,
+                    &layers.project.swarm.adaptive.noisy_neighbor_p99_ms,
+                    &layers.user.swarm.adaptive.noisy_neighbor_p99_ms,
+                    &layers.defaults.swarm.adaptive.noisy_neighbor_p99_ms,
+                ),
+                noisy_neighbor_backoff_ms: pick_field(
+                    &mut sources,
+                    SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY,
+                    &layers.cli.swarm.adaptive.noisy_neighbor_backoff_ms,
+                    &layers.environment.swarm.adaptive.noisy_neighbor_backoff_ms,
+                    &layers.project.swarm.adaptive.noisy_neighbor_backoff_ms,
+                    &layers.user.swarm.adaptive.noisy_neighbor_backoff_ms,
+                    &layers.defaults.swarm.adaptive.noisy_neighbor_backoff_ms,
+                ),
+            },
         },
         graph: GraphConfig {
             ppr: GraphPprConfig {
@@ -2294,8 +2427,10 @@ mod tests {
         SEARCH_LEXICAL_RAM_TIER_REQUEST_HUGEPAGES_KEY, STORAGE_DATABASE_PATH_KEY,
         STORAGE_INDEX_DIR_KEY, STORAGE_READ_POOL_ACQUIRE_TIMEOUT_MS_KEY,
         STORAGE_READ_POOL_IDLE_TIMEOUT_SECONDS_KEY, STORAGE_READ_POOL_MAX_PIN_DURATION_SECONDS_KEY,
-        STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, built_in_config,
-        config_from_env, merge_config,
+        STORAGE_READ_POOL_PIN_SNAPSHOT_KEY, STORAGE_READ_POOL_SIZE_KEY, SWARM_ADAPTIVE_ENABLED_KEY,
+        SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY, SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
+        SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY, SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
+        SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY, built_in_config, config_from_env, merge_config,
     };
     use crate::config::{
         CacheConfig, ConfigFile, CurationConfig, GraphConfig, GraphCurateConfig,
@@ -2303,6 +2438,7 @@ mod tests {
         GraphPprConfig, LearnConfig, LearnDecayConfig, MeshCommandMode, MeshConfig, PackConfig,
         PackL2CacheConfig, PathExpander, PolicyConfig, ReadPoolConfig, SearchConfig,
         SearchLexicalRamTierConfig, SearchSpeed, SecretDetectorConfig, StorageConfig,
+        SwarmAdaptiveConfig, SwarmConfig,
     };
 
     type TestResult = Result<(), String>;
@@ -2423,6 +2559,36 @@ mod tests {
             &Some(MeshCommandMode::Off),
             "mesh default command mode",
         )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.enabled,
+            &Some(false),
+            "swarm adaptive default off",
+        )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.prefetch_top_k,
+            &Some(3),
+            "swarm adaptive prefetch top-k default",
+        )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.prefetch_budget_ms,
+            &Some(50),
+            "swarm adaptive prefetch budget default",
+        )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.similarity_threshold,
+            &Some(0.10),
+            "swarm adaptive similarity threshold default",
+        )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.noisy_neighbor_p99_ms,
+            &Some(200),
+            "swarm adaptive noisy-neighbor p99 default",
+        )?;
+        ensure_equal(
+            &defaults.swarm.adaptive.noisy_neighbor_backoff_ms,
+            &Some(25),
+            "swarm adaptive noisy-neighbor backoff default",
+        )?;
         ensure_equal(&defaults.storage.read_pool.size, &Some(1), "read pool size")?;
         ensure_equal(
             &defaults.storage.read_pool.idle_timeout_seconds,
@@ -2542,6 +2708,12 @@ mod tests {
         );
         env.insert("EE_MESH_ENABLED".to_string(), OsString::from("true"));
         env.insert("EE_MESH_MODE".to_string(), OsString::from("cache"));
+        env.insert("EE_DISABLE_ADAPTIVE".to_string(), OsString::from("1"));
+        env.insert(
+            "EE_ADAPTIVE_NOISY_P99_MS".to_string(),
+            OsString::from("275"),
+        );
+        env.insert("EE_ADAPTIVE_BACKOFF_MS".to_string(), OsString::from("40"));
         env.insert(
             "EE_GRAPH_MEMORY_SNAPSHOT_CAP_MB".to_string(),
             OsString::from("384"),
@@ -2636,6 +2808,21 @@ mod tests {
             "env mesh command mode",
         )?;
         ensure_equal(
+            &parsed.swarm.adaptive.enabled,
+            &Some(false),
+            "env disable adaptive",
+        )?;
+        ensure_equal(
+            &parsed.swarm.adaptive.noisy_neighbor_p99_ms,
+            &Some(275),
+            "env adaptive noisy-neighbor p99",
+        )?;
+        ensure_equal(
+            &parsed.swarm.adaptive.noisy_neighbor_backoff_ms,
+            &Some(40),
+            "env adaptive backoff",
+        )?;
+        ensure_equal(
             &parsed.graph.memory.snapshot_cap_mb,
             &Some(384),
             "env graph memory snapshot cap",
@@ -2675,7 +2862,10 @@ mod tests {
     #[test]
     fn environment_layer_rejects_invalid_integer() -> TestResult {
         let mut env = BTreeMap::new();
-        env.insert("EE_MAX_TOKENS".to_string(), OsString::from("many"));
+        env.insert(
+            "EE_ADAPTIVE_NOISY_P99_MS".to_string(),
+            OsString::from("many"),
+        );
 
         let error = match config_from_env(&env, &expander()) {
             Ok(config) => return Err(format!("expected env error, got {config:?}")),
@@ -2685,7 +2875,7 @@ mod tests {
         ensure_equal(
             &error,
             &EnvironmentConfigError::InvalidUnsignedInteger {
-                variable: "EE_MAX_TOKENS",
+                variable: "EE_ADAPTIVE_NOISY_P99_MS",
                 value: "many".to_string(),
             },
             "invalid integer error",
@@ -2695,7 +2885,7 @@ mod tests {
     #[test]
     fn environment_layer_rejects_invalid_bool() -> TestResult {
         let mut env = BTreeMap::new();
-        env.insert("EE_MESH_ENABLED".to_string(), OsString::from("yes"));
+        env.insert("EE_DISABLE_ADAPTIVE".to_string(), OsString::from("maybe"));
 
         let error = match config_from_env(&env, &expander()) {
             Ok(config) => return Err(format!("expected env error, got {config:?}")),
@@ -2705,10 +2895,25 @@ mod tests {
         ensure_equal(
             &error,
             &EnvironmentConfigError::InvalidBoolean {
-                variable: "EE_MESH_ENABLED",
-                value: "yes".to_string(),
+                variable: "EE_DISABLE_ADAPTIVE",
+                value: "maybe".to_string(),
             },
             "invalid bool error",
+        )
+    }
+
+    #[test]
+    fn environment_disable_adaptive_false_is_noop() -> TestResult {
+        let mut env = BTreeMap::new();
+        env.insert("EE_DISABLE_ADAPTIVE".to_string(), OsString::from("0"));
+
+        let parsed =
+            config_from_env(&env, &expander()).map_err(|error| format!("env failed: {error}"))?;
+
+        ensure_equal(
+            &parsed.swarm.adaptive.enabled,
+            &None,
+            "false disable flag must not opt in adaptive scheduling",
         )
     }
 
@@ -2765,6 +2970,16 @@ mod tests {
                 adaptive_budget: Some(true),
                 memory_tier_admission: Some(true),
                 ..PackConfig::default()
+            },
+            swarm: SwarmConfig {
+                adaptive: SwarmAdaptiveConfig {
+                    enabled: Some(true),
+                    prefetch_top_k: Some(3),
+                    prefetch_budget_ms: Some(50),
+                    similarity_threshold: Some(0.20),
+                    noisy_neighbor_p99_ms: Some(200),
+                    noisy_neighbor_backoff_ms: Some(25),
+                },
             },
             graph: GraphConfig {
                 ppr: GraphPprConfig { alpha: Some(0.40) },
@@ -2837,6 +3052,14 @@ mod tests {
                 peer_group_bindings: None,
                 peer_policies: None,
             },
+            swarm: SwarmConfig {
+                adaptive: SwarmAdaptiveConfig {
+                    enabled: Some(false),
+                    noisy_neighbor_p99_ms: Some(275),
+                    noisy_neighbor_backoff_ms: Some(40),
+                    ..SwarmAdaptiveConfig::default()
+                },
+            },
             graph: GraphConfig {
                 memory: GraphMemoryConfig {
                     snapshot_cap_mb: Some(512),
@@ -2865,6 +3088,12 @@ mod tests {
                     ..SearchLexicalRamTierConfig::default()
                 },
                 ..SearchConfig::default()
+            },
+            swarm: SwarmConfig {
+                adaptive: SwarmAdaptiveConfig {
+                    prefetch_top_k: Some(5),
+                    ..SwarmAdaptiveConfig::default()
+                },
             },
             ..ConfigFile::default()
         };
@@ -3049,6 +3278,66 @@ mod tests {
             "mesh command mode source",
         )?;
         ensure_equal(
+            &merged.values.swarm.adaptive.enabled,
+            &Some(false),
+            "environment disables project adaptive opt-in",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_ENABLED_KEY),
+            &Some(ConfigValueSource::Environment),
+            "swarm adaptive enabled source",
+        )?;
+        ensure_equal(
+            &merged.values.swarm.adaptive.prefetch_top_k,
+            &Some(5),
+            "cli adaptive prefetch top-k",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY),
+            &Some(ConfigValueSource::Cli),
+            "swarm adaptive prefetch top-k source",
+        )?;
+        ensure_equal(
+            &merged.values.swarm.adaptive.prefetch_budget_ms,
+            &Some(50),
+            "project adaptive prefetch budget",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY),
+            &Some(ConfigValueSource::Project),
+            "swarm adaptive prefetch budget source",
+        )?;
+        ensure_equal(
+            &merged.values.swarm.adaptive.similarity_threshold,
+            &Some(0.20),
+            "project adaptive similarity threshold",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY),
+            &Some(ConfigValueSource::Project),
+            "swarm adaptive similarity threshold source",
+        )?;
+        ensure_equal(
+            &merged.values.swarm.adaptive.noisy_neighbor_p99_ms,
+            &Some(275),
+            "env adaptive noisy-neighbor p99",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "swarm adaptive noisy-neighbor p99 source",
+        )?;
+        ensure_equal(
+            &merged.values.swarm.adaptive.noisy_neighbor_backoff_ms,
+            &Some(40),
+            "env adaptive noisy-neighbor backoff",
+        )?;
+        ensure_equal(
+            &merged.source(SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY),
+            &Some(ConfigValueSource::Environment),
+            "swarm adaptive noisy-neighbor backoff source",
+        )?;
+        ensure_equal(
             &merged.values.graph.ppr.alpha,
             &Some(0.40),
             "project graph ppr alpha",
@@ -3205,6 +3494,12 @@ mod tests {
             CACHE_PACK_L2_DIRECTORY_KEY,
             CACHE_PACK_L2_MAX_BYTES_KEY,
             CACHE_PACK_L2_MAX_AGE_DAYS_KEY,
+            SWARM_ADAPTIVE_ENABLED_KEY,
+            SWARM_ADAPTIVE_PREFETCH_TOP_K_KEY,
+            SWARM_ADAPTIVE_PREFETCH_BUDGET_MS_KEY,
+            SWARM_ADAPTIVE_SIMILARITY_THRESHOLD_KEY,
+            SWARM_ADAPTIVE_NOISY_NEIGHBOR_P99_MS_KEY,
+            SWARM_ADAPTIVE_NOISY_NEIGHBOR_BACKOFF_MS_KEY,
             GRAPH_PPR_ALPHA_KEY,
             GRAPH_HEALTH_CONTRADICTION_THRESHOLD_KEY,
             GRAPH_CURATE_ONION_DECAY_MAX_KEY,
