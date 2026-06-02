@@ -107,9 +107,23 @@ fn write_start_log<W: Write>(args: &[OsString], stderr: &mut W) {
 fn tracing_env_filter_from_env(raw: Option<String>) -> EnvFilter {
     match raw {
         Some(value) if !value.trim().is_empty() => {
+            let value = tracing_filter_with_runtime_noise_defaults(value);
             EnvFilter::try_new(value).unwrap_or_else(|_| EnvFilter::new("off"))
         }
         _ => EnvFilter::new("off"),
+    }
+}
+
+fn tracing_filter_with_runtime_noise_defaults(value: String) -> String {
+    let trimmed = value.trim();
+    if trimmed.eq_ignore_ascii_case("off")
+        || trimmed
+            .split(',')
+            .any(|directive| directive.trim_start().starts_with("fsqlite::runtime"))
+    {
+        value
+    } else {
+        format!("{value},fsqlite::runtime=error")
     }
 }
 
@@ -207,5 +221,44 @@ mod tests {
             .expect("tracing output is utf-8");
         assert!(captured.contains("\"target\":\"ee_trace_test\""));
         assert!(captured.contains("trace_visible"));
+    }
+
+    #[test]
+    fn tracing_filter_suppresses_fsqlite_runtime_warning_unless_explicit() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_env_filter_from_env(Some("warn".to_owned())))
+            .with_writer(SharedMakeWriter(Arc::clone(&output)))
+            .with_ansi(false)
+            .json()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "fsqlite::runtime", event = "hidden", "runtime_warn");
+            tracing::error!(target: "fsqlite::runtime", event = "visible", "runtime_error");
+        });
+
+        let captured = String::from_utf8(output.lock().expect("writer buffer poisoned").clone())
+            .expect("tracing output is utf-8");
+        assert!(!captured.contains("runtime_warn"));
+        assert!(captured.contains("runtime_error"));
+
+        let explicit = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_env_filter_from_env(Some(
+                "warn,fsqlite::runtime=warn".to_owned(),
+            )))
+            .with_writer(SharedMakeWriter(Arc::clone(&explicit)))
+            .with_ansi(false)
+            .json()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "fsqlite::runtime", event = "visible", "runtime_warn");
+        });
+
+        let captured = String::from_utf8(explicit.lock().expect("writer buffer poisoned").clone())
+            .expect("tracing output is utf-8");
+        assert!(captured.contains("runtime_warn"));
     }
 }
