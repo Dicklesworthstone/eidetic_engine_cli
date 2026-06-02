@@ -28,10 +28,22 @@
       "pattern": "*rm -rf /*",
       "action": "halt",
       "message": "rm -rf targeting filesystem root is forbidden by AGENTS.md (\"Irreversible Git & Filesystem Actions\").",
-      "recovery": "Stop and obtain explicit human approval for the exact command before proceeding.",
+      "recovery": "Stop and obtain explicit written user approval for the exact deletion or cleanup command before proceeding.",
       "source": {
         "kind": "builtin",
         "name": "rm_rf_root"
+      },
+      "resolution": "enforced"
+    },
+    {
+      "ruleId": "builtin:file_deletion",
+      "pattern": "*",
+      "action": "halt",
+      "message": "Deleting files or folders requires explicit written user permission under AGENTS.md RULE NUMBER 1.",
+      "recovery": "Stop and obtain explicit written user approval for the exact deletion or cleanup command before proceeding.",
+      "source": {
+        "kind": "builtin",
+        "name": "file_deletion"
       },
       "resolution": "enforced"
     }

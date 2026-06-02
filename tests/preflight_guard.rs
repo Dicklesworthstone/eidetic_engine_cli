@@ -469,7 +469,6 @@ fn rm_rf_builtin_ignores_mentions_and_substrings() {
         "git log --grep=\"rm -rf /\"",
         "echo do not rm -rf / blindly",
         "confirm -rf /var/cache",
-        "rm --force --preserve-root /var/cache",
     ] {
         let report = run_preflight_guard(&registry, &opts(command));
         assert_eq!(
@@ -484,6 +483,28 @@ fn rm_rf_builtin_ignores_mentions_and_substrings() {
             "command `{command}` should not match rm_rf_root",
         );
     }
+
+    let command = "rm --force --preserve-root /var/cache";
+    let report = run_preflight_guard(&registry, &opts(command));
+    assert_eq!(
+        report.exit_code, 7,
+        "command `{command}` deletes a path and should hit the generic deletion guard",
+    );
+    assert!(
+        report.matches.iter().all(|matched| {
+            matched.rule_id != "builtin:rm_rf_root" && matched.rule_id != "builtin:rm_rf_home"
+        }),
+        "command `{command}` should not match recursive rm guards: {:?}",
+        report.matches
+    );
+    assert!(
+        report
+            .matches
+            .iter()
+            .any(|matched| matched.rule_id == "builtin:file_deletion"),
+        "command `{command}` should cite generic file deletion: {:?}",
+        report.matches
+    );
 }
 
 #[test]
@@ -888,6 +909,7 @@ fn bypass_token_invalid_keeps_halt_and_audits_invalid() {
 #[test]
 fn preflight_halt_audit_persists_hash_chained_guard_context() -> Result<(), String> {
     let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
+    connection.migrate().map_err(|error| error.to_string())?;
     let workspace_id = "wsp_preflight_halt_audit";
     connection
         .insert_workspace(
