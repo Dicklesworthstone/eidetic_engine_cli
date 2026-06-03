@@ -148,6 +148,9 @@ mod effect_manifest_completeness;
 #[path = "contracts/command_inventory.rs"]
 mod command_inventory;
 
+#[path = "contracts/durable_write_storage_panic.rs"]
+mod durable_write_storage_panic;
+
 #[path = "contracts/sqlmodel_frankensqlite.rs"]
 mod sqlmodel_frankensqlite;
 

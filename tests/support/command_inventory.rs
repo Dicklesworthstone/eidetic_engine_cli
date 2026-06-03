@@ -4,8 +4,6 @@ use clap::CommandFactory;
 use ee::core::effect::{EffectManifest, SideEffectClass};
 use ee::models::RESPONSE_SCHEMA_V2;
 
-const UNCLASSIFIED_SIDE_EFFECT_CLASS: &str = "class=unclassified";
-
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandInventoryEntry {
@@ -20,6 +18,7 @@ pub struct CommandInventoryEntry {
 struct ClapCommandPath {
     path: String,
     is_leaf: bool,
+    accepts_positional_args: bool,
 }
 
 /// Recursively collect every subcommand path in the clap tree, joined by spaces
@@ -49,6 +48,14 @@ pub fn ee_command_paths() -> BTreeSet<String> {
     collect_command_paths(ee::cli::Cli::command())
 }
 
+fn ee_command_paths_accepting_positionals() -> BTreeSet<String> {
+    collect_clap_command_paths(ee::cli::Cli::command())
+        .into_iter()
+        .filter(|command| command.accepts_positional_args)
+        .map(|command| command.path)
+        .collect()
+}
+
 #[allow(dead_code)]
 pub fn collect_command_inventory(root: clap::Command) -> Vec<CommandInventoryEntry> {
     let manifest = EffectManifest::build();
@@ -58,7 +65,7 @@ pub fn collect_command_inventory(root: clap::Command) -> Vec<CommandInventoryEnt
             let side_effect_class = match manifest.get(command.path.as_str()) {
                 Some(effect) => effect.mutation_contract.side_effect_class.as_str(),
                 None if !command.is_leaf => SideEffectClass::Mixed.as_str(),
-                None => UNCLASSIFIED_SIDE_EFFECT_CLASS,
+                None => fallback_side_effect_class(command.path.as_str(), &manifest),
             };
             CommandInventoryEntry {
                 path: command.path,
@@ -69,6 +76,18 @@ pub fn collect_command_inventory(root: clap::Command) -> Vec<CommandInventoryEnt
             }
         })
         .collect()
+}
+
+fn fallback_side_effect_class(path: &str, manifest: &EffectManifest) -> &'static str {
+    let mut parts = path.split_whitespace().collect::<Vec<_>>();
+    while parts.len() > 1 {
+        parts.pop();
+        let parent = parts.join(" ");
+        if let Some(effect) = manifest.get(parent.as_str()) {
+            return effect.mutation_contract.side_effect_class.as_str();
+        }
+    }
+    SideEffectClass::Mixed.as_str()
 }
 
 #[allow(dead_code)]
@@ -104,6 +123,7 @@ fn collect_clap_command_path(
     out.push(ClapCommandPath {
         path,
         is_leaf: subcommands.is_empty(),
+        accepts_positional_args: command.get_arguments().any(|arg| arg.is_positional()),
     });
     for subcommand in subcommands {
         collect_clap_command_path(prefix.clone(), subcommand, out);
@@ -114,6 +134,11 @@ fn collect_clap_command_path(
 /// stopping at the first flag, quoted argument, placeholder, or shell operator.
 #[allow(dead_code)]
 pub fn leading_ee_subcommand_path(command: &str) -> Option<String> {
+    let path = leading_ee_path_tokens(command)?;
+    Some(path.join(" "))
+}
+
+fn leading_ee_path_tokens(command: &str) -> Option<Vec<String>> {
     let rest = command.strip_prefix("ee ")?;
     let mut path = Vec::new();
     for token in rest.split_whitespace() {
@@ -125,13 +150,9 @@ pub fn leading_ee_subcommand_path(command: &str) -> Option<String> {
         {
             break;
         }
-        path.push(token);
+        path.push(token.to_string());
     }
-    if path.is_empty() {
-        None
-    } else {
-        Some(path.join(" "))
-    }
+    if path.is_empty() { None } else { Some(path) }
 }
 
 #[allow(dead_code)]
@@ -140,11 +161,23 @@ pub fn unresolved_ee_invocations<'a>(
     valid_paths: &BTreeSet<String>,
 ) -> Vec<String> {
     let mut unresolved = Vec::new();
+    let positional_paths = ee_command_paths_accepting_positionals();
     for advertised in commands {
-        let Some(path) = leading_ee_subcommand_path(advertised) else {
+        let Some(tokens) = leading_ee_path_tokens(advertised) else {
             continue;
         };
-        if !valid_paths.contains(&path) {
+        let mut resolved = false;
+        for end in (1..=tokens.len()).rev() {
+            let candidate = tokens[..end].join(" ");
+            if valid_paths.contains(&candidate)
+                && (end == tokens.len() || positional_paths.contains(&candidate))
+            {
+                resolved = true;
+                break;
+            }
+        }
+        if !resolved {
+            let path = tokens.join(" ");
             unresolved.push(format!("`{advertised}` -> unresolved subcommand `{path}`"));
         }
     }

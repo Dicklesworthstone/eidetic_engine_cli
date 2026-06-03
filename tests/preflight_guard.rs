@@ -910,7 +910,7 @@ fn bypass_token_invalid_keeps_halt_and_audits_invalid() {
 fn preflight_halt_audit_persists_hash_chained_guard_context() -> Result<(), String> {
     let connection = DbConnection::open_memory().map_err(|error| error.to_string())?;
     connection.migrate().map_err(|error| error.to_string())?;
-    let workspace_id = "wsp_preflight_halt_audit";
+    let workspace_id = "wsp_preflighthaltaudit00000000";
     connection
         .insert_workspace(
             workspace_id,

@@ -105,7 +105,10 @@ fn command_inventory_reports_broken_fixture() {
     let dangling = command_inventory::unresolved_ee_invocations(
         [
             "ee definitely-removed --json",
+            "ee install definitely-removed --json",
+            "ee agent-docs contracts --json",
             "ee pack \"real task\" --workspace . --json",
+            "ee search real task --workspace . --json",
             "cargo test",
         ],
         &valid,
@@ -113,7 +116,10 @@ fn command_inventory_reports_broken_fixture() {
 
     assert_eq!(
         dangling,
-        vec!["`ee definitely-removed --json` -> unresolved subcommand `definitely-removed`"],
+        vec![
+            "`ee definitely-removed --json` -> unresolved subcommand `definitely-removed`",
+            "`ee install definitely-removed --json` -> unresolved subcommand `install definitely-removed`",
+        ],
         "the reusable command-inventory harness must distinguish broken ee \
          references from valid ee commands and non-ee commands"
     );

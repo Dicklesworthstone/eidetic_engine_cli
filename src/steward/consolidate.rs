@@ -61,7 +61,7 @@ pub(super) fn plan_consolidation_candidates(
         if group.len() < 2 {
             continue;
         }
-        group.sort_by(|left, right| compare_consolidation_memory_preference(*left, *right));
+        group.sort_by(|left, right| compare_consolidation_memory_preference(left, right));
         let Some(source) = group.first().copied() else {
             continue;
         };

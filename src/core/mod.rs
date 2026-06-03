@@ -10,6 +10,7 @@ use crate::models::{
     UPDATE_PLAN_SCHEMA_V1,
 };
 
+pub mod adaptive_scheduler;
 pub mod agent_detect;
 pub mod agent_docs;
 pub mod artifact;

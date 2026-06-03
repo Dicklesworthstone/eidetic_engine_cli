@@ -2486,7 +2486,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -2525,6 +2525,54 @@ mod tests {
                     .map_err(|arg| format!("non-UTF-8 argument: {arg:?}"))
             })
             .collect()
+    }
+
+    fn arbitrary_json_key() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 0..16)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn json_object_value(map: BTreeMap<String, Value>) -> Value {
+        Value::Object(map.into_iter().collect())
+    }
+
+    fn arbitrary_json_value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            Just(Value::Null),
+            any::<bool>().prop_map(Value::Bool),
+            any::<i64>().prop_map(|number| Value::Number(number.into())),
+            proptest::collection::vec(any::<char>(), 0..32)
+                .prop_map(|chars| Value::String(chars.into_iter().collect())),
+        ];
+
+        leaf.prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                proptest::collection::btree_map(arbitrary_json_key(), inner, 0..8)
+                    .prop_map(json_object_value),
+            ]
+        })
+    }
+
+    fn without_dispatching_known_mcp_method(mut request: Value) -> Value {
+        let Some(object) = request.as_object_mut() else {
+            return request;
+        };
+        if object.get("id").is_none() {
+            return request;
+        }
+        let Some(method) = object.get("method").and_then(Value::as_str) else {
+            return request;
+        };
+        if matches!(McpMethod::parse(method), McpMethod::Unknown(_)) {
+            return request;
+        }
+
+        object.insert(
+            "method".to_owned(),
+            Value::String(format!("unknown/{method}")),
+        );
+        request
     }
 
     #[test]
@@ -2771,7 +2819,62 @@ mod tests {
                     "--profile".to_string(),
                     profile.to_string(),
                 ]
+                );
+        }
+
+        #[test]
+        fn mcp_json_rpc_handler_is_total_for_arbitrary_json(request in arbitrary_json_value()) {
+            // Known-method dispatch is covered by golden and E2E tests. Keep this
+            // property at the JSON-RPC validation boundary so generated inputs
+            // cannot accidentally run CLI-backed resources or tools.
+            let request = without_dispatching_known_mcp_method(request);
+            let response = handle_json_rpc_message(&request);
+
+            if request.is_object() && request.get("id").is_none() {
+                prop_assert!(
+                    response.is_none(),
+                    "notification-shaped requests must not receive a response: {request}"
+                );
+                return Ok(());
+            }
+
+            let Some(response) = response else {
+                return Ok(());
+            };
+
+            prop_assert!(response.is_object(), "response must be an object: {response}");
+            prop_assert_eq!(
+                response.get("jsonrpc").and_then(Value::as_str),
+                Some("2.0")
             );
+
+            let has_result = response.get("result").is_some();
+            let has_error = response.get("error").is_some();
+            prop_assert_ne!(
+                has_result,
+                has_error,
+                "response must contain exactly one of result or error: {response}"
+            );
+
+            let id = response
+                .get("id")
+                .ok_or_else(|| TestCaseError::fail(format!("response missing id: {response}")))?;
+            prop_assert!(
+                is_valid_json_rpc_id(id),
+                "response id must be a valid JSON-RPC id: {response}"
+            );
+
+            if let Some(error) = response.get("error") {
+                prop_assert!(error.is_object(), "error must be an object: {response}");
+                prop_assert!(
+                    error.get("code").and_then(Value::as_i64).is_some(),
+                    "error must contain integer code: {response}"
+                );
+                prop_assert!(
+                    error.get("message").and_then(Value::as_str).is_some(),
+                    "error must contain string message: {response}"
+                );
+            }
         }
     }
 
