@@ -812,8 +812,8 @@ and security rows respectively.
 | `lab_replay_unavailable` | medium | bd-17c65.14.15.5 (N15.4) — slated for retirement once N15 lands |
 | `legacy_memory` | info | (TBD) — legacy import marker |
 | `manual_heavy_strategy` | warning | bd-17c65.10.6 (J6) |
-| `profile_mismatch` | medium | (TBD) |
-| `profile_missing` | low | (TBD) |
+| `profile_mismatch` | medium | bd-17c65.10.6 (J6) |
+| `profile_missing` | medium | bd-17c65.10.6 (J6) |
 | `redaction_pattern_matched` | medium | bd-17c65.11.6 (K6) — emitted per redaction event |
 | `redaction_level_invalid` | low | bd-17c65.11.6 (K6) — error envelope; bad --redaction value |
 | `redaction_round_trip_marker_preserved` | info | bd-17c65.11.6 (K6) — import surfaces preserved markers |
@@ -821,13 +821,13 @@ and security rows respectively.
 | `derived_asset_corrupt` | high | bd-17c65.12.6 (derived backup assets) |
 | `derived_asset_hash_mismatch` | high | bd-1nxz4.2 (content-addressed derived asset store) |
 | `derived_asset_schema_mismatch` | high | bd-1nxz4.2 (content-addressed derived asset store) |
-| `semantic_dimension_exceeds_budget` | warning | (TBD) — composes with semantic-model gating |
+| `semantic_dimension_exceeds_budget` | medium | bd-17c65.10.6 (J6) — composes with semantic-model gating |
 | `tombstone_visibility_unavailable` | medium | bd-17c65.2.8 (B8) |
-| `tripwire_inputs_incomplete` | low | (TBD) |
+| `tripwire_inputs_incomplete` | warning | bd-17c65.10.6 (J6) |
 | `unknown_method` | medium | (TBD) |
-| `unsupported_artifact_kind` | medium | (TBD) |
-| `unsupported_condition` | medium | (TBD) |
-| `unsupported_schema` | medium | (TBD) |
+| `unsupported_artifact_kind` | high | bd-17c65.10.6 (J6) |
+| `unsupported_condition` | warning | bd-17c65.10.6 (J6) |
+| `unsupported_schema` | high | bd-17c65.10.6 (J6) |
 | `windows_appdata_unavailable` | medium | bd-3usjw.68 |
 | `workspace_nested_markers` | warning | bd-17c65.12.2 (L1) |
 | `workspace_symlink_refused` | medium | bd-2bbtw |

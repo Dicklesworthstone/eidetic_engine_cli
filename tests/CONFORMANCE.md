@@ -15,8 +15,8 @@ schema contracts defined in `docs/`.
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Implemented Features | 22 | Working features that should succeed |
-| Unimplemented Features | 0 | Features returning `ERR_UNSUPPORTED_FEATURE` |
+| Implemented Features | 23 | Working features that should succeed |
+| Unimplemented Features | 1 | Features returning `ERR_UNSUPPORTED_FEATURE` |
 | Error Cases | 11 | Invalid inputs returning appropriate error codes |
 | Combination Tests | 3 | Multiple features used together |
 | Determinism Tests | 1 | Same input produces identical output |
@@ -32,6 +32,7 @@ schema contracts defined in `docs/`.
 | `matrix_tags_exclude` | tags.exclude | docs/query-schema.md:90-100 |
 | `matrix_tags_combined_filters` | All tag filters together | docs/query-schema.md:69-102 |
 | `matrix_output_profile_balanced` | output.profile | docs/query-schema.md:265-267 |
+| `matrix_output_profile_wide_alias_succeeds` | output.profile wide alias | docs/query-schema.md:265-267 |
 | `matrix_output_explain_true` | output.explain | docs/query-schema.md:270 |
 | `matrix_budget_max_tokens` | budget.maxTokens | docs/query-schema.md:286 |
 | `matrix_budget_max_results` | budget.maxResults | docs/query-schema.md:287 |
@@ -51,9 +52,12 @@ schema contracts defined in `docs/`.
 
 ### Unimplemented Features (ERR_UNSUPPORTED_FEATURE)
 
-No `ee.query.v1` conformance tests currently assert `ERR_UNSUPPORTED_FEATURE` for
-recognized fields. Query modes other than `hybrid` still return
-`ERR_UNSUPPORTED_FEATURE` when requested directly.
+| Test | Feature | Schema Reference |
+|------|---------|------------------|
+| `matrix_output_profile_custom_is_recognized_but_unsupported` | output.profile custom | docs/query-schema.md:265-267 |
+
+Query modes other than `hybrid` still return `ERR_UNSUPPORTED_FEATURE` when
+requested directly.
 
 ### Error Cases
 

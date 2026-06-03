@@ -541,6 +541,69 @@ fn matrix_output_profile_balanced() -> TestResult {
 }
 
 #[test]
+fn matrix_output_profile_wide_alias_succeeds() -> TestResult {
+    let (tempdir, workspace) = setup_workspace_with_memories()?;
+    let query_file = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "release"},
+            "output": {"profile": "wide"}
+        }"#,
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+
+    ensure_equal(&output.status.code(), &Some(EXIT_SUCCESS), "wide profile")?;
+    let json = stdout_json(&output)?;
+    assert_response_envelope(&json, "wide profile")?;
+    assert_stderr_empty(&output, "wide profile")
+}
+
+#[test]
+fn matrix_output_profile_custom_is_recognized_but_unsupported() -> TestResult {
+    let (tempdir, workspace) = setup_workspace_with_memories()?;
+    let query_file = write_query_file(
+        &tempdir,
+        r#"{
+            "version": "ee.query.v1",
+            "query": {"text": "release"},
+            "output": {"profile": "custom"}
+        }"#,
+    )?;
+
+    let output = run_ee(&[
+        "--workspace",
+        &workspace,
+        "pack",
+        "--query-file",
+        &query_file,
+        "--json",
+    ])?;
+
+    ensure(
+        output.status.code() != Some(EXIT_SUCCESS),
+        "custom profile should fail before pack execution",
+    )?;
+    let json = stdout_json(&output)?;
+    assert_error_envelope(&json, "ERR_UNSUPPORTED_FEATURE", "custom profile")?;
+    ensure(
+        json["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("output.profile 'custom'")),
+        "custom profile: error message should name the unsupported profile",
+    )?;
+    assert_stderr_empty(&output, "custom profile")
+}
+
+#[test]
 fn matrix_output_explain_true() -> TestResult {
     let (tempdir, workspace) = setup_workspace_with_memories()?;
     let query_file = write_query_file(
