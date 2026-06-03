@@ -48,7 +48,8 @@ includes `selector_admission_probe`, a read-only
 selection reached a concrete remote worker before Cargo could start.
 
 `selector_admission_probe` is intended for Beads comments, proof capsules, and
-future replay ledgers. Stable fields include:
+future replay ledgers. Its standalone contract fixture is
+`docs/schemas/ee.rch.selector_admission_probe.v1.json`. Stable fields include:
 
 - `required_runtime`: currently `Rust` for Cargo-shaped verifier commands.
 - `workers_reported` and `daemon_workers_reported`: bounded worker IDs already

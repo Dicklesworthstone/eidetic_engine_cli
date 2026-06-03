@@ -1,0 +1,20 @@
+{
+  "schema": "ee.rch.selector_admission_probe.v1",
+  "status": "selection_failed",
+  "required_runtime": "Rust",
+  "workers_reported": [
+    "vmi1227854",
+    "vmi1264463"
+  ],
+  "daemon_workers_reported": [
+    "vmi1227854"
+  ],
+  "workers_reported_count": 2,
+  "daemon_workers_reported_count": 1,
+  "selected_worker": null,
+  "selection_failure_reason": "no_workers_with_rust_installed",
+  "workers_vs_selection_contradiction": true,
+  "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
+  "remote_required": true,
+  "local_fallback_refused": true
+}

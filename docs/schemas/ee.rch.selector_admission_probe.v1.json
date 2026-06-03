@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eidetic-engine/schemas/ee.rch.selector_admission_probe.v1.json",
+  "title": "ee.rch.selector_admission_probe.v1",
+  "description": "Read-only RCH selector/admission diagnostic block embedded in ee.rch.verify.v1 proofs. It classifies whether a remote-required Cargo-shaped verification command reached a concrete worker before Cargo could start, without allowing local Cargo fallback as proof.",
+  "type": "object",
+  "required": [
+    "schema",
+    "status",
+    "required_runtime",
+    "workers_reported",
+    "daemon_workers_reported",
+    "workers_reported_count",
+    "daemon_workers_reported_count",
+    "selected_worker",
+    "selection_failure_reason",
+    "workers_vs_selection_contradiction",
+    "path_normalization_warning",
+    "remote_required",
+    "local_fallback_refused"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "ee.rch.selector_admission_probe.v1"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "selected",
+        "selection_failed",
+        "not_applicable"
+      ]
+    },
+    "required_runtime": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "Rust",
+        null
+      ]
+    },
+    "workers_reported": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64
+    },
+    "daemon_workers_reported": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64
+    },
+    "workers_reported_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "daemon_workers_reported_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "selected_worker": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selection_failure_reason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "no_workers_with_rust_installed",
+            "topology_blocked",
+            "capacity_or_timeout",
+            "all_workers_preflight_failed",
+            "command_not_offloaded",
+            "remote_marker_missing",
+            "no_worker_selected"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "workers_vs_selection_contradiction": {
+      "type": "boolean"
+    },
+    "path_normalization_warning": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Redacted RCH project-root, alias-root, or path-normalization warning line when observed."
+    },
+    "remote_required": {
+      "type": "boolean"
+    },
+    "local_fallback_refused": {
+      "type": "boolean"
+    }
+  },
+  "examples": [
+    {
+      "schema": "ee.rch.selector_admission_probe.v1",
+      "status": "selection_failed",
+      "required_runtime": "Rust",
+      "workers_reported": [
+        "vmi1227854",
+        "vmi1264463"
+      ],
+      "daemon_workers_reported": [
+        "vmi1227854"
+      ],
+      "workers_reported_count": 2,
+      "daemon_workers_reported_count": 1,
+      "selected_worker": null,
+      "selection_failure_reason": "no_workers_with_rust_installed",
+      "workers_vs_selection_contradiction": true,
+      "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
+      "remote_required": true,
+      "local_fallback_refused": true
+    }
+  ]
+}

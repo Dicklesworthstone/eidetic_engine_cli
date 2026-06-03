@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -64,6 +65,32 @@ fn run_json(args: &[&str]) -> Result<Value, String> {
         ));
     }
     serde_json::from_str(&stdout).map_err(|error| format!("parse wrapper JSON: {error}"))
+}
+
+fn read_repo_json(relative: &str) -> Result<Value, String> {
+    let path = repo_root().join(relative);
+    let content =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_str(&content).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn string_set(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+fn string_set_at(value: &Value, pointer: &str) -> Result<BTreeSet<String>, String> {
+    let array = value
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("missing string array at {pointer}: {value}"))?;
+    let mut set = BTreeSet::new();
+    for item in array {
+        let text = item
+            .as_str()
+            .ok_or_else(|| format!("non-string enum item at {pointer}: {item}"))?;
+        set.insert(text.to_owned());
+    }
+    Ok(set)
 }
 
 fn degraded_contains(report: &Value, expected: &str) -> Result<bool, String> {
@@ -1582,6 +1609,87 @@ fn dry_run_json_is_deterministic_for_same_input() -> TestResult {
 }
 
 #[test]
+fn selector_admission_probe_schema_pins_required_fields_and_enums() -> TestResult {
+    let schema = read_repo_json("docs/schemas/ee.rch.selector_admission_probe.v1.json")?;
+    if schema["title"] != "ee.rch.selector_admission_probe.v1" {
+        return Err(format!(
+            "unexpected selector admission schema title: {schema}"
+        ));
+    }
+
+    let required = string_set_at(&schema, "/required")?;
+    let expected_required = string_set(&[
+        "schema",
+        "status",
+        "required_runtime",
+        "workers_reported",
+        "daemon_workers_reported",
+        "workers_reported_count",
+        "daemon_workers_reported_count",
+        "selected_worker",
+        "selection_failure_reason",
+        "workers_vs_selection_contradiction",
+        "path_normalization_warning",
+        "remote_required",
+        "local_fallback_refused",
+    ]);
+    if required != expected_required {
+        return Err(format!(
+            "selector admission required fields drifted:\nexpected={expected_required:?}\nactual={required:?}"
+        ));
+    }
+
+    let status_enum = string_set_at(&schema, "/properties/status/enum")?;
+    let expected_status = string_set(&["selected", "selection_failed", "not_applicable"]);
+    if status_enum != expected_status {
+        return Err(format!(
+            "selector admission status enum drifted:\nexpected={expected_status:?}\nactual={status_enum:?}"
+        ));
+    }
+
+    let failure_enum = string_set_at(&schema, "/properties/selection_failure_reason/oneOf/0/enum")?;
+    let expected_failures = string_set(&[
+        "no_workers_with_rust_installed",
+        "topology_blocked",
+        "capacity_or_timeout",
+        "all_workers_preflight_failed",
+        "command_not_offloaded",
+        "remote_marker_missing",
+        "no_worker_selected",
+    ]);
+    if failure_enum != expected_failures {
+        return Err(format!(
+            "selector admission failure enum drifted:\nexpected={expected_failures:?}\nactual={failure_enum:?}"
+        ));
+    }
+
+    let fixture = read_repo_json(
+        "tests/fixtures/rch_verify_control_plane/selector_admission_probe_selection_failed.json",
+    )?;
+    let fixture_object = fixture
+        .as_object()
+        .ok_or_else(|| format!("selector admission fixture must be an object: {fixture}"))?;
+    for field in &expected_required {
+        if !fixture_object.contains_key(field) {
+            return Err(format!(
+                "selector admission fixture missing required field {field}"
+            ));
+        }
+    }
+    if fixture["schema"] != "ee.rch.selector_admission_probe.v1"
+        || fixture["status"] != "selection_failed"
+        || fixture["selection_failure_reason"] != "no_workers_with_rust_installed"
+        || fixture["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector admission fixture has unexpected values: {fixture}"
+        ));
+    }
+
+    Ok(())
+}
+
+#[test]
 fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
     let (status, stdout, stderr) = run_script_with_env(
         &["--", "cargo", "test", "--test", "rch_verify_contract"],
@@ -2106,6 +2214,14 @@ fn selector_admission_probe_flags_reported_workers_without_selection() -> TestRe
     {
         return Err(format!(
             "selector admission probe did not capture selection failure: {probe}"
+        ));
+    }
+    let expected_probe = read_repo_json(
+        "tests/fixtures/rch_verify_control_plane/selector_admission_probe_selection_failed.json",
+    )?;
+    if probe != &expected_probe {
+        return Err(format!(
+            "selector admission probe does not match conformance fixture:\nexpected={expected_probe}\nactual={probe}"
         ));
     }
     if probe["workers_reported"][0] != "vmi1227854"
