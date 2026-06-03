@@ -100,6 +100,63 @@ const REQUIRED_REDACTION: &[&str] = &[
     "secretScanApplied",
 ];
 
+const SCENARIOS: &[&str] = &[
+    "healthy_small_checkout",
+    "crowded_checkout",
+    "agent_mail_unavailable",
+    "bv_timeout_no_output",
+    "rch_topology_blocked",
+];
+
+const DEGRADATION_POSTURES: &[&str] = &["none", "recoverable", "required", "blocked"];
+const CONCURRENCY_SHAPES: &[&str] = &[
+    "serial",
+    "bounded_parallel",
+    "wide_parallel",
+    "resource_limited",
+];
+const PROVENANCE_KINDS: &[&str] = &["synthetic", "recorded", "mixed"];
+const SOURCE_STATUSES: &[&str] = &[
+    "ok",
+    "degraded",
+    "unavailable",
+    "timeout",
+    "blocked",
+    "unknown",
+];
+const BUDGET_PROFILES: &[&str] = &[
+    "ci_smoke",
+    "developer_crowded_checkout",
+    "swarm_heavy_64_agent",
+    "stress_256gb_host",
+];
+const STAGES: &[&str] = &[
+    "coordination",
+    "context",
+    "search",
+    "why",
+    "record",
+    "agent_mail",
+    "beads",
+    "bv",
+    "rch",
+    "workspace",
+    "other",
+];
+const RESULT_STATUSES: &[&str] = &["pass", "warn", "fail", "blocked"];
+const SEVERITIES: &[&str] = &["info", "low", "warning", "medium", "high", "critical"];
+const FAILURE_SOURCES: &[&str] = &["budget", "coordination", "runner", "rch", "workspace"];
+const BUDGET_CATEGORIES: &[&str] = &["latency", "error", "degradation", "source", "stage"];
+const BUDGET_UNITS: &[&str] = &["ms", "count"];
+const REGRESSION_CODES: &[&str] = &[
+    "context_p99_over_budget",
+    "coordination_source_unavailable",
+    "rch_topology_blocked",
+    "budget_profile_missing",
+    "replay_nondeterministic",
+    "unsafe_mutation_in_replay",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -203,6 +260,13 @@ fn require_no_raw_sensitive_example_values(schema: &Value) -> TestResult {
         )?;
     }
     Ok(())
+}
+
+fn require_bool_const(schema: &Value, pointer: &str, expected: bool, label: &str) -> TestResult {
+    ensure(
+        schema.pointer(pointer).and_then(Value::as_bool) == Some(expected),
+        format!("{label} must stay const {expected}"),
+    )
 }
 
 #[test]
@@ -312,4 +376,114 @@ fn swarm_slo_scorecard_schema_nested_required_fields_are_pinned() -> TestResult 
         require_exact_strings(&schema, pointer, expected, label)?;
     }
     Ok(())
+}
+
+#[test]
+fn swarm_slo_scorecard_schema_enum_vocabularies_are_pinned() -> TestResult {
+    let schema = load_schema()?;
+    for (pointer, expected, label) in [
+        (
+            "/$defs/workload/properties/scenario/enum",
+            SCENARIOS,
+            "scorecard scenario enum",
+        ),
+        (
+            "/$defs/workload/properties/expectedDegradationPosture/enum",
+            DEGRADATION_POSTURES,
+            "scorecard expected degradation posture enum",
+        ),
+        (
+            "/$defs/concurrency/properties/shape/enum",
+            CONCURRENCY_SHAPES,
+            "scorecard concurrency shape enum",
+        ),
+        (
+            "/$defs/provenance/properties/kind/enum",
+            PROVENANCE_KINDS,
+            "scorecard provenance kind enum",
+        ),
+        (
+            "/$defs/sourcePosture/properties/status/enum",
+            SOURCE_STATUSES,
+            "scorecard source status enum",
+        ),
+        (
+            "/$defs/budgets/properties/profile/enum",
+            BUDGET_PROFILES,
+            "scorecard budget profile enum",
+        ),
+        ("/$defs/stage/enum", STAGES, "scorecard stage enum"),
+        (
+            "/$defs/stageAttribution/properties/verdict/enum",
+            RESULT_STATUSES,
+            "scorecard stage verdict enum",
+        ),
+        (
+            "/$defs/verdict/properties/status/enum",
+            RESULT_STATUSES,
+            "scorecard verdict status enum",
+        ),
+        (
+            "/$defs/failureReason/properties/severity/enum",
+            SEVERITIES,
+            "scorecard failure severity enum",
+        ),
+        (
+            "/$defs/failureReason/properties/source/enum",
+            FAILURE_SOURCES,
+            "scorecard failure source enum",
+        ),
+        (
+            "/$defs/budgetVerdict/properties/category/enum",
+            BUDGET_CATEGORIES,
+            "scorecard budget category enum",
+        ),
+        (
+            "/$defs/budgetVerdict/properties/unit/enum",
+            BUDGET_UNITS,
+            "scorecard budget unit enum",
+        ),
+        (
+            "/$defs/budgetVerdict/properties/status/enum",
+            RESULT_STATUSES,
+            "scorecard budget verdict status enum",
+        ),
+        (
+            "/$defs/regressionReason/properties/code/enum",
+            REGRESSION_CODES,
+            "scorecard regression code enum",
+        ),
+        (
+            "/$defs/regressionReason/properties/severity/enum",
+            SEVERITIES,
+            "scorecard regression severity enum",
+        ),
+    ] {
+        require_exact_strings(&schema, pointer, expected, label)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn swarm_slo_scorecard_schema_redaction_booleans_are_safe_consts() -> TestResult {
+    let schema = load_schema()?;
+    for field in [
+        "rawMailBodiesPresent",
+        "rawMemoryBodiesPresent",
+        "rawCommandOutputPresent",
+        "privatePathsPresent",
+    ] {
+        require_bool_const(
+            &schema,
+            &format!("/$defs/redaction/properties/{field}/const"),
+            false,
+            &format!("scorecard redaction {field}"),
+        )?;
+    }
+    require_bool_const(
+        &schema,
+        "/$defs/redaction/properties/secretScanApplied/const",
+        true,
+        "scorecard redaction secretScanApplied",
+    )
 }
