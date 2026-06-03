@@ -34,7 +34,7 @@
 //!   on disk; never a partial write.
 //! - 🔒 Lock-or-refuse: `RunContext::start` refuses with
 //!   `DoctorRuntimeError::ConcurrencyLost` if a sibling lock is held.
-//! - 🆔 Stable run-id: `run_id = blake3(target_sha || iso8601_utc_seconds)[..6]`.
+//! - 🆔 Unique run-id: timestamp + per-process sequence + hash witness.
 //! - 🔢 Hash-witnessed: blake3 before/after in `actions.jsonl`.
 //! - 🛡 Refuse-on-unsafe: `mutate()` validates `path` is inside the
 //!   declared blast radius before doing anything.
@@ -48,7 +48,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,8 @@ pub const ACTION_LINE_SCHEMA_V1: &str = "ee.doctor.action.v1";
 
 /// Public schema string for the run state file (`<run-dir>/state.json`).
 pub const RUN_STATE_SCHEMA_V1: &str = "ee.doctor.run_state.v1";
+
+static DOCTOR_RUN_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Canonical doctor-runtime errors. Every variant maps to a specific exit code
 /// in the CLI wiring layer:
@@ -1475,18 +1477,26 @@ pub fn default_blast_radius_roots(workspace: &Path) -> Vec<PathBuf> {
 // ---------- private helpers ----------
 
 fn derive_run_id(target_sha: &str) -> String {
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = Utc::now();
+    let sequence = DOCTOR_RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let timestamp_nanos = now.timestamp_nanos_opt().unwrap_or_default();
     let mut hasher = blake3::Hasher::new();
     hasher.update(target_sha.as_bytes());
     hasher.update(b"|");
-    hasher.update(seconds.to_string().as_bytes());
+    hasher.update(timestamp_nanos.to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(std::process::id().to_string().as_bytes());
+    hasher.update(b"|");
+    hasher.update(sequence.to_string().as_bytes());
     let hash = hasher.finalize();
     let hex = hash.to_hex();
     let short = &hex.as_str()[..6];
-    format!("{}__{}", Utc::now().format("%Y-%m-%dT%H-%M-%SZ"), short)
+    format!(
+        "{}__{}__{}",
+        now.format("%Y-%m-%dT%H-%M-%S%.9fZ"),
+        sequence,
+        short
+    )
 }
 
 fn hash_file(path: &Path) -> Result<String, DoctorRuntimeError> {
@@ -2271,6 +2281,20 @@ mod tests {
         assert!(json.contains("quarantine_by_rename"));
         assert!(json.contains("\"code\": 5"));
         assert!(json.contains("concurrency_lost"));
+    }
+
+    #[test]
+    fn derive_run_id_is_unique_for_fast_same_target_runs() {
+        let ids = (0..16)
+            .map(|_| derive_run_id("deadbeefcafe"))
+            .collect::<Vec<_>>();
+        let unique = ids.iter().collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "same-target doctor runs must not reuse run directories: {ids:?}"
+        );
     }
 
     #[test]

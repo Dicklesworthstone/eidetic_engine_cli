@@ -479,7 +479,8 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
             repair: Some("Create a new task frame for follow-up work.".to_owned()),
         });
     }
-    if let Some(parent_id) = &options.parent_id {
+    let parent_id = normalize_optional(options.parent_id.clone());
+    if let Some(parent_id) = &parent_id {
         if !frame
             .subgoals
             .iter()
@@ -498,7 +499,7 @@ pub fn add_task_subgoal(options: &TaskSubgoalAddOptions) -> Result<TaskFrameRepo
     let (blockers, blockers_redacted) = redact_task_strings(&options.blockers);
     let subgoal = TaskSubgoal {
         id: stable_id(TASK_SUBGOAL_ID_PREFIX, &[&frame.id, &options.title, &now]),
-        parent_id: normalize_optional(options.parent_id.clone()),
+        parent_id,
         title,
         status: options.status,
         blockers,
@@ -1475,6 +1476,69 @@ mod tests {
         .ok_or_else(|| "missing child subgoal".to_owned())?;
         assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
         assert_eq!(child.status, TaskFrameStatus::Blocked);
+        Ok(())
+    }
+
+    #[test]
+    fn subgoal_parent_lookup_uses_normalized_parent_id() -> TestResult {
+        let workspace = temp_workspace("subgoal-parent-normalized")?;
+        let created =
+            create_task_frame(&create_options(workspace.clone())).map_err(|e| e.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+        let parent = add_task_subgoal(&TaskSubgoalAddOptions {
+            workspace_path: workspace.clone(),
+            frame_id: frame_id.clone(),
+            parent_id: None,
+            title: "Define schema".to_owned(),
+            status: TaskFrameStatus::Open,
+            blockers: Vec::new(),
+            created_at: Some("2026-05-04T00:01:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?
+        .selected_subgoal
+        .ok_or_else(|| "missing parent subgoal".to_owned())?;
+
+        let child = add_task_subgoal(&TaskSubgoalAddOptions {
+            workspace_path: workspace,
+            frame_id,
+            parent_id: Some(format!(" {} ", parent.id)),
+            title: "Add stable JSON".to_owned(),
+            status: TaskFrameStatus::Open,
+            blockers: Vec::new(),
+            created_at: Some("2026-05-04T00:02:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?
+        .selected_subgoal
+        .ok_or_else(|| "missing child subgoal".to_owned())?;
+
+        assert_eq!(child.parent_id.as_deref(), Some(parent.id.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn whitespace_only_subgoal_parent_is_treated_as_absent() -> TestResult {
+        let workspace = temp_workspace("subgoal-parent-blank")?;
+        let created =
+            create_task_frame(&create_options(workspace.clone())).map_err(|e| e.message())?;
+        let frame_id = created.frame.ok_or_else(|| "missing frame".to_owned())?.id;
+
+        let subgoal = add_task_subgoal(&TaskSubgoalAddOptions {
+            workspace_path: workspace,
+            frame_id,
+            parent_id: Some("  \t ".to_owned()),
+            title: "Root subgoal".to_owned(),
+            status: TaskFrameStatus::Open,
+            blockers: Vec::new(),
+            created_at: Some("2026-05-04T00:01:00Z".to_owned()),
+            dry_run: false,
+        })
+        .map_err(|e| e.message())?
+        .selected_subgoal
+        .ok_or_else(|| "missing subgoal".to_owned())?;
+
+        assert_eq!(subgoal.parent_id, None);
         Ok(())
     }
 

@@ -146,8 +146,9 @@ pub struct WitnessPruneSummary {
 /// Top-level result of `classify_witnesses_for_pruning`.
 ///
 /// `classifications` is sorted by `(workspace_id, snapshot_id,
-/// algorithm, recorded_at)` so the rendered report is byte-stable
-/// across runs (J7 determinism).
+/// algorithm, recorded_at, snapshot_active)` so the rendered report is
+/// byte-stable across runs (J7 determinism), even if a caller supplies
+/// duplicate witness identifiers with conflicting active-snapshot flags.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WitnessPruneReport {
@@ -179,12 +180,14 @@ pub fn classify_witnesses_for_pruning(
             &a.0.snapshot_id,
             &a.0.algorithm,
             &a.0.recorded_at,
+            a.1,
         );
         let rhs = (
             &b.0.workspace_id,
             &b.0.snapshot_id,
             &b.0.algorithm,
             &b.0.recorded_at,
+            b.1,
         );
         lhs.cmp(&rhs)
     });
@@ -508,6 +511,36 @@ mod tests {
         );
         // Sanity: report includes all four rows.
         assert_eq!(report_a.summary.total_count, 4);
+    }
+
+    #[test]
+    fn duplicate_witness_keys_with_conflicting_snapshot_flags_are_byte_stable() {
+        let now = now_at_2026_05_15();
+        let policy = WitnessRetentionPolicy::defaults();
+        let row = witness("ws1", "snap_conflict", "ppr", "2026-04-01T12:00:00Z");
+        let rows = vec![(row.clone(), true), (row, false)];
+        let mut reversed = rows.clone();
+        reversed.reverse();
+
+        let report_a = classify_witnesses_for_pruning(&rows, &policy, now);
+        let report_b = classify_witnesses_for_pruning(&reversed, &policy, now);
+
+        let json_a = serde_json::to_string(&report_a).expect("report A serializes");
+        let json_b = serde_json::to_string(&report_b).expect("report B serializes");
+        assert_eq!(
+            json_a, json_b,
+            "duplicate visible keys must still render in deterministic action order"
+        );
+        assert!(matches!(
+            report_a.classifications[0].action,
+            WitnessAction::Prune { .. }
+        ));
+        assert!(matches!(
+            report_a.classifications[1].action,
+            WitnessAction::Keep {
+                reason: WitnessKeepReason::ActiveSnapshot
+            }
+        ));
     }
 
     /// `oldest_pruned_age_days` and `oldest_kept_age_days` track

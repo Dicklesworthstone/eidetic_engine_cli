@@ -3638,6 +3638,7 @@ fn memory_link_snapshot_shape(links: &[StoredMemoryLink]) -> (usize, usize) {
     (nodes.len(), edge_count)
 }
 
+#[cfg(test)]
 fn graph_snapshot_budget_preflight(
     node_count: usize,
     edge_count: usize,

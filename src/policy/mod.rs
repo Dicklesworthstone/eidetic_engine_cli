@@ -39,9 +39,8 @@ pub use trust_decay::{
     TrustDecayCalculator, summarize_peer_outcome_feedback,
 };
 
-use crate::models::{MemoryId, TrustClass};
+use crate::models::TrustClass;
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
 
 pub const SUBSYSTEM: &str = "policy";
 
@@ -51,6 +50,7 @@ pub const SUBSYSTEM: &str = "policy";
 /// Execution time depends on the longer input length, not on the position of
 /// the first differing byte.
 #[inline(never)]
+#[cfg(test)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let mut result = a.len() ^ b.len();
     let max_len = a.len().max(b.len());
@@ -65,6 +65,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Constant-time string equality wrapper.
 #[inline(never)]
+#[cfg(test)]
 fn ct_str_eq(a: &str, b: &str) -> bool {
     constant_time_eq(a.as_bytes(), b.as_bytes())
 }
@@ -72,6 +73,7 @@ fn ct_str_eq(a: &str, b: &str) -> bool {
 /// Parse trust class using constant-time comparison against all variants.
 /// Always compares against every variant to prevent timing oracle.
 #[inline(never)]
+#[cfg(test)]
 fn parse_trust_class_constant_time(input: &str) -> Option<TrustClass> {
     // Compare against all variants, accumulating matches
     let mut matched = None;

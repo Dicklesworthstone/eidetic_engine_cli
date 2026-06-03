@@ -779,7 +779,7 @@ fn read_pack_file_no_symlinks(pack_path: &Path, relative_path: &str) -> Result<V
             MAX_PACK_ARTIFACT_BYTES
         ));
     }
-    let mut file = open_pack_file_for_read_no_symlinks(&target_path)?;
+    let file = open_pack_file_for_read_no_symlinks(&target_path)?;
     // Cap the read at `MAX_PACK_ARTIFACT_BYTES + 1` so a peer that swaps
     // `target_path` for a multi-GiB payload between the metadata-based
     // size check above and this read cannot inflate the allocation past

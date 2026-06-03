@@ -183,7 +183,7 @@ impl PackL2Cache {
             }));
         }
 
-        let entry = match decode_pack_l2_cache_entry(&bytes) {
+        let entry = match decode_pack_l2_cache_entry(&bytes, self.options.max_entry_bytes) {
             Ok(entry) => entry,
             Err(reason) => {
                 remove_cache_entry_best_effort(&path);
@@ -837,6 +837,7 @@ fn record_eviction_candidate_removed(
 
 fn decode_pack_l2_cache_entry(
     bytes: &[u8],
+    max_decompressed_entry_bytes: u64,
 ) -> Result<DecodedPackL2CacheEntry, PackL2CacheMissReason> {
     let envelope = serde_json::from_slice::<PackL2CacheEntryEnvelope>(bytes)
         .map_err(|error| PackL2CacheMissReason::Corrupt(error.to_string()))?;
@@ -851,7 +852,9 @@ fn decode_pack_l2_cache_entry(
                 compression: None,
             })
         }
-        PACK_L2_CACHE_ENTRY_SCHEMA_V2 => decode_compressed_pack_l2_cache_entry(bytes),
+        PACK_L2_CACHE_ENTRY_SCHEMA_V2 => {
+            decode_compressed_pack_l2_cache_entry(bytes, max_decompressed_entry_bytes)
+        }
         schema => Err(PackL2CacheMissReason::Corrupt(format!(
             "unexpected schema {schema}"
         ))),
@@ -860,6 +863,7 @@ fn decode_pack_l2_cache_entry(
 
 fn decode_compressed_pack_l2_cache_entry(
     bytes: &[u8],
+    max_decompressed_entry_bytes: u64,
 ) -> Result<DecodedPackL2CacheEntry, PackL2CacheMissReason> {
     let entry = serde_json::from_slice::<PackL2CacheEntryV2>(bytes)
         .map_err(|error| PackL2CacheMissReason::Corrupt(error.to_string()))?;
@@ -884,6 +888,14 @@ fn decode_compressed_pack_l2_cache_entry(
         });
     }
     let dictionary_bytes = decode_pack_l2_dictionary_bytes(entry.compression.dictionary.as_ref())?;
+    if entry.compression.uncompressed_byte_len > max_decompressed_entry_bytes {
+        return Err(PackL2CacheMissReason::CompressionDecode {
+            message: format!(
+                "uncompressed byte length {} exceeds the {max_decompressed_entry_bytes}-byte decompression cap",
+                entry.compression.uncompressed_byte_len
+            ),
+        });
+    }
     let capacity = usize::try_from(entry.compression.uncompressed_byte_len).map_err(|_| {
         PackL2CacheMissReason::CompressionDecode {
             message: format!(
@@ -1233,7 +1245,7 @@ fn sync_directory(path: &Path) -> Result<(), PackL2CacheError> {
 }
 
 fn read_cache_entry_file(path: &Path, max_entry_bytes: u64) -> io::Result<Vec<u8>> {
-    let mut file = open_cache_entry_file_for_read(path)?;
+    let file = open_cache_entry_file_for_read(path)?;
     let mut bytes = Vec::new();
     // Cap the read at `max_entry_bytes + 1`. The post-read size check
     // in `get_candidate_at` (line 174) rejects entries whose byte_len
@@ -1843,6 +1855,54 @@ mod tests {
     }
 
     #[test]
+    fn compressed_v2_oversized_uncompressed_length_uses_configured_entry_cap() -> TestResult {
+        let key = "blake3:oversized-uncompressed";
+        let max_entry_bytes = 1024_u64;
+        let payload = PackL2CacheCompressionPayload {
+            algorithm: PACK_L2_COMPRESSION_ALGORITHM_ZSTD_V1.to_owned(),
+            compressed_payload_base64: BASE64_STANDARD.encode(b"not-a-zstd-frame"),
+            compressed_byte_len: b"not-a-zstd-frame".len() as u64,
+            uncompressed_byte_len: max_entry_bytes.saturating_add(1),
+            uncompressed_hash: blake3_hash(b"not-present"),
+            dictionary: None,
+        };
+        let bytes = raw_compressed_entry_bytes(key, payload, 100)?;
+        assert!(
+            bytes.len() as u64 <= max_entry_bytes,
+            "test fixture envelope must fit under max_entry_bytes so the decompression cap is exercised"
+        );
+        let (_temp, cache) = cache_with_options(
+            PackL2CacheOptions::new(4096, Duration::from_secs(60))
+                .with_max_entry_bytes(max_entry_bytes),
+        )?;
+        let path = write_raw_entry(&cache, key, &bytes)?;
+
+        let lookup = cache.get_at(key, 120).map_err(|error| error.to_string())?;
+
+        match lookup {
+            PackL2CacheLookup::Miss(PackL2CacheMiss {
+                reason: PackL2CacheMissReason::CompressionDecode { message },
+                ..
+            }) => {
+                assert!(
+                    message.contains("decompression cap"),
+                    "oversized compressed miss should cite decompression cap: {message}"
+                );
+            }
+            other => {
+                return Err(format!(
+                    "oversized compressed entry should return a typed miss; got {other:?}"
+                ));
+            }
+        }
+        assert!(
+            !path.exists(),
+            "oversized compressed entries should be invalidated"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn compressed_v2_corrupt_body_does_not_mask_valid_fallback() -> TestResult {
         let key = "blake3:compressed-multi-candidate";
         let pack = json!({"hash": "valid-fallback", "items": [{"id": "mem_valid"}]});
@@ -2390,7 +2450,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_eviction__enoent_treated_as_success() -> TestResult {
+    fn concurrent_eviction_enoent_treated_as_success() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let candidate = EvictionCandidate {
             path: temp.path().join("already-evicted.json"),

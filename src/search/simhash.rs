@@ -568,14 +568,14 @@ mod tests {
     }
 
     #[test]
-    fn happy_path__same_content_produces_identical_simhash() {
+    fn happy_path_same_content_produces_identical_simhash() {
         let a = simhash_128("Rust edition is 2024");
         let b = simhash_128("Rust edition is 2024");
         assert_eq!(a, b);
     }
 
     #[test]
-    fn happy_path__whitespace_only_variation_collapses_to_same_simhash() {
+    fn happy_path_whitespace_only_variation_collapses_to_same_simhash() {
         let baseline = simhash_128("rust edition is 2024");
         let extra_inner = simhash_128("rust    edition\tis\n2024");
         let leading_trailing = simhash_128("   rust edition is 2024   ");
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn happy_path__lowercase_normalization_collapses_case_only_variants() {
+    fn happy_path_lowercase_normalization_collapses_case_only_variants() {
         let lower = simhash_128("Rust Edition Is 2024");
         let upper = simhash_128("RUST EDITION IS 2024");
         let mixed = simhash_128("rUsT eDiTiOn Is 2024");
@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn happy_path__single_typo_yields_small_hamming_distance() {
+    fn happy_path_single_typo_yields_small_hamming_distance() {
         let baseline = simhash_128("the quick brown fox jumps over the lazy dog");
         let typo = simhash_128("the quick brown fix jumps over the lazy dog");
         let distance = hamming_distance(baseline, typo);
@@ -609,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_boundary__empty_content_is_stable_well_defined_fingerprint() {
+    fn empty_or_boundary_empty_content_is_stable_well_defined_fingerprint() {
         let empty = simhash_128("");
         let whitespace = simhash_128("   \t\n  ");
         assert_eq!(empty, SimHash128::from_u128(0));
@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_or_boundary__single_token_content_is_stable() {
+    fn empty_or_boundary_single_token_content_is_stable() {
         let once = simhash_128("rust");
         let twice = simhash_128("rust");
         assert_eq!(once, twice);
@@ -625,13 +625,13 @@ mod tests {
     }
 
     #[test]
-    fn hamming_distance__identical_inputs_yield_zero() {
+    fn hamming_distance_identical_inputs_yield_zero() {
         let fp = simhash_128("forbidden deps include tokio rusqlite petgraph");
         assert_eq!(hamming_distance(fp, fp), 0);
     }
 
     #[test]
-    fn hamming_distance__bitwise_inverse_yields_full_width() {
+    fn hamming_distance_bitwise_inverse_yields_full_width() {
         let zero = SimHash128::from_u128(0);
         let ones = SimHash128::from_u128(u128::MAX);
         assert_eq!(hamming_distance(zero, ones), SIMHASH_BITS as u32);
@@ -639,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn hamming_distance__symmetric_property_holds() {
+    fn hamming_distance_symmetric_property_holds() {
         let a = simhash_128("alpha beta gamma");
         let b = simhash_128("alpha beta delta");
         assert_eq!(hamming_distance(a, b), hamming_distance(b, a));

@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn empty_cache_misses() {
-        let mut cache = PprPrefetchCache::new(2);
+        let cache = PprPrefetchCache::new(2);
 
         assert_eq!(cache.get(&key("seed-a", 1)), None);
         assert!(cache.is_empty());
@@ -954,7 +954,7 @@ mod tests {
         }
 
         {
-            let mut guard = cache.write().expect("cache lock");
+            let guard = cache.write().expect("cache lock");
             for index in 0..8 {
                 let key = key(&format!("seed-{index}"), 1);
                 let expected_scores = scores(&[(&format!("mem-{index}"), index as f64)]);

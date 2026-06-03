@@ -2141,10 +2141,12 @@ struct SearchScoreCalibration {
 }
 
 impl SearchScoreCalibration {
+    #[cfg(test)]
     fn for_workspace(workspace_path: &Path) -> Self {
         Self::for_workspace_with_feedback_events(workspace_path, &[])
     }
 
+    #[cfg(test)]
     fn for_workspace_with_feedback_events(
         workspace_path: &Path,
         feedback_events: &[StoredFeedbackEvent],
@@ -4309,14 +4311,9 @@ fn kahan_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     sum
 }
 
-/// Best-effort audit append. Bead bd-17c65.7.7 (G8).
-///
-/// Read surfaces (search, context, why, memory show) call this after
-/// completing their primary work to record the access in the audit log
-/// for L3 decay (`last_accessed` signal) and G1 learn summary
-/// aggregation. Failures are silently swallowed — an audit append must
-/// never block or fail the user's primary operation. The audit log is
-/// best-effort enrichment, not part of the read response contract.
+/// Pre-batch best-effort audit append retained as a parity oracle for
+/// `SearchAuditBatch` tests. Production read surfaces use the batched path.
+#[cfg(test)]
 fn audit_append_best_effort(
     database_path: &Path,
     audit_ids: &mut SearchAuditIdSource,
@@ -9076,10 +9073,7 @@ mod tests {
 
         assert_eq!(recovery.len(), 2, "F4b chose the two-action rebuild recipe");
         assert_eq!(recovery[0]["command"], "ee index reembed --workspace .");
-        assert_eq!(
-            recovery[1]["command"],
-            "cargo build --features embed-quality"
-        );
+        assert_eq!(recovery[1]["command"], "cargo build --features embed-fast");
     }
 
     #[test]
@@ -11220,10 +11214,7 @@ mod tests {
         assert_eq!(recovery[0]["kind"], "rebuild");
         assert_eq!(recovery[0]["command"], "ee index reembed --workspace .");
         assert_eq!(recovery[1]["kind"], "rebuild");
-        assert_eq!(
-            recovery[1]["command"],
-            "cargo build --features embed-quality"
-        );
+        assert_eq!(recovery[1]["command"], "cargo build --features embed-fast");
         assert_eq!(
             rendered[0]["details"]["modelId"],
             EMBED_MODEL_UNAVAILABLE_MODEL_ID

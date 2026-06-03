@@ -319,12 +319,10 @@ impl CapabilitiesReport {
                 "BM25 lexical search is disabled in this build.",
             ));
         }
-        // bd-3qs2i.4.1: symmetric to lexical_unavailable above. When neither
-        // dense-embedding feature is compiled in, semantic search has no model
-        // and silently falls back to the hash-similarity path. Surfacing this
-        // as a build-time gap lets agents branch on the embedder-only-down
-        // case without having to infer it from the absence of embed-fast.
-        if !cfg!(feature = "embed-fast") && !cfg!(feature = "embed-quality") {
+        // bd-3qs2i.4.1: symmetric to lexical_unavailable above. When the
+        // exposed dense-embedding feature is not compiled in, semantic search
+        // has no model and falls back to the hash-similarity path.
+        if !cfg!(feature = "embed-fast") {
             unimplemented.push(UnimplementedCapabilityEntry::new(
                 "embed_model_unavailable",
                 "embed-fast",
@@ -601,12 +599,9 @@ mod tests {
                 "diagram backend gap should be in capabilities.unimplemented; got {codes:?}"
             ));
         }
-        if !cfg!(feature = "embed-fast")
-            && !cfg!(feature = "embed-quality")
-            && !codes.contains(&"embed_model_unavailable")
-        {
+        if !cfg!(feature = "embed-fast") && !codes.contains(&"embed_model_unavailable") {
             return Err(format!(
-                "embed_model_unavailable gap should be in capabilities.unimplemented when neither embed feature is built; got {codes:?}"
+                "embed_model_unavailable gap should be in capabilities.unimplemented when embed-fast is not built; got {codes:?}"
             ));
         }
         ensure(report.unimplemented_count(), codes.len(), "gap count")

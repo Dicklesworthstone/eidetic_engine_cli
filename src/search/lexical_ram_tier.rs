@@ -484,13 +484,11 @@ fn lexical_index_revision_entry(
     path: &Path,
     metadata: &fs::Metadata,
 ) -> LexicalIndexRevisionEntry {
-    let relative_path = path
-        .strip_prefix(root)
-        .ok()
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned();
+    let relative_path = match path.strip_prefix(root) {
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
+        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Err(_) => path.to_string_lossy().into_owned(),
+    };
     let file_type = metadata.file_type();
     let kind = if file_type.is_dir() {
         "dir"
@@ -579,7 +577,7 @@ pub fn pin_lexical_index_files(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{fs, path::Path};
 
     use super::{
         LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_DISABLED_CODE,
@@ -920,6 +918,27 @@ mod tests {
             "revision must be namespaced and opaque: {revision}"
         );
         assert_eq!(first.index_revision, second.index_revision);
+    }
+
+    #[test]
+    fn index_revision_entry_uses_path_independent_root_sentinel_bd_1eh60() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("index");
+        fs::create_dir(&root).expect("create root index dir");
+        let child = root.join("postings.bin");
+        fs::write(&child, b"posting-list").expect("write child index file");
+
+        let root_metadata = fs::symlink_metadata(&root).expect("root metadata");
+        let child_metadata = fs::symlink_metadata(&child).expect("child metadata");
+
+        let root_entry = super::lexical_index_revision_entry(&root, &root, &root_metadata);
+        let child_entry = super::lexical_index_revision_entry(&root, &child, &child_metadata);
+
+        assert_eq!(
+            root_entry.relative_path, ".",
+            "root entry must not encode the absolute index directory path"
+        );
+        assert_eq!(child_entry.relative_path, "postings.bin");
     }
 
     #[test]

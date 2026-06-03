@@ -545,7 +545,7 @@ fn read_registry_file_no_follow(path: &Path) -> std::io::Result<String> {
     // (0fe4a339), `src/cache/pack_l2.rs::read_cache_entry_file` (8ba93c0e),
     // `src/core/handoff.rs::ensure_handoff_key_material_within_cap`
     // (f067c32c), and the recent `src/core/claims.rs` cap (52276a68).
-    let mut file = open_registry_file_for_read(path)?;
+    let file = open_registry_file_for_read(path)?;
     let mut bytes = Vec::new();
     file.take(QOS_ACTIVE_LANE_REGISTRY_MAX_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;

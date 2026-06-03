@@ -2468,6 +2468,7 @@ struct AgentWorkloadReplayHashInput {
     duplicate_work_coalescing: AgentWorkloadDuplicateWorkCoalescing,
 }
 
+#[cfg(test)]
 fn replay_agent_workload_trace_jsonl(
     source_path_tail: &str,
     text: &str,
