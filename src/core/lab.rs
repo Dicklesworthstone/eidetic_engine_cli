@@ -66,6 +66,7 @@ const AGENT_WORKLOAD_TRACE_SCHEMA_V1: &str = "ee.agent_workload_trace.v1";
 pub const DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS: u16 = 64;
 const MAX_AGENT_WORKLOAD_REPLAY_AGENTS: u16 = 256;
 pub const MAX_SWARM_WORKLOAD_COMMANDS: usize = 1024;
+pub const MAX_SWARM_REPLAY_ARTIFACT_BYTES: usize = 256 * 1024;
 const SWARM_WORKLOAD_COMMAND_SEQUENCE_LIMIT_EXCEEDED: &str =
     "swarm_workload_command_sequence_limit_exceeded";
 const LAB_REPLAY_UNAVAILABLE_CODE: &str = "lab_replay_unavailable";
@@ -3393,6 +3394,19 @@ fn execute_swarm_replay_command(
         }
     };
 
+    let stdout = child.stdout.take().ok_or_else(|| {
+        lab_storage_error_message("capture swarm replay stdout", "stdout pipe unavailable")
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        lab_storage_error_message("capture swarm replay stderr", "stderr pipe unavailable")
+    })?;
+    let stdout_reader = thread::spawn(move || {
+        read_swarm_replay_pipe_bounded(stdout, MAX_SWARM_REPLAY_ARTIFACT_BYTES)
+    });
+    let stderr_reader = thread::spawn(move || {
+        read_swarm_replay_pipe_bounded(stderr, MAX_SWARM_REPLAY_ARTIFACT_BYTES)
+    });
+
     let mut timed_out = false;
     loop {
         if child
@@ -3410,12 +3424,13 @@ fn execute_swarm_replay_command(
         thread::sleep(Duration::from_millis(10));
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| lab_storage_error("collect swarm replay command output", error))?;
+    let status = child
+        .wait()
+        .map_err(|error| lab_storage_error("collect swarm replay command status", error))?;
+    let stdout = join_swarm_replay_pipe_reader(stdout_reader, "stdout")?;
+    let stderr = join_swarm_replay_pipe_reader(stderr_reader, "stderr")?;
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    let mut exit_code = output
-        .status
+    let mut exit_code = status
         .code()
         .and_then(|code| u8::try_from(code.clamp(0, i32::from(u8::MAX))).ok())
         .unwrap_or(1);
@@ -3453,7 +3468,7 @@ fn execute_swarm_replay_command(
         }
     }
     if let Some(expected_schema) = &step.expected_schema {
-        let actual_schema = swarm_replay_stdout_schema(&output.stdout);
+        let actual_schema = swarm_replay_stdout_schema(&stdout.bytes);
         if actual_schema.as_deref() != Some(expected_schema.as_str()) {
             degraded_codes.push(SWARM_REPLAY_EXPECTED_SCHEMA_MISMATCH_CODE.to_owned());
             if failure.is_none() {
@@ -3470,13 +3485,33 @@ fn execute_swarm_replay_command(
             }
         }
     }
+    if stdout.truncated || stderr.truncated {
+        degraded_codes.push(SWARM_REPLAY_SLO_BUDGET_FAILED_CODE.to_owned());
+        if failure.is_none() {
+            let streams = match (stdout.truncated, stderr.truncated) {
+                (true, true) => "stdout and stderr",
+                (true, false) => "stdout",
+                (false, true) => "stderr",
+                (false, false) => "output",
+            };
+            failure = Some(swarm_replay_command_observed_failure(
+                step,
+                SWARM_REPLAY_SLO_BUDGET_FAILED_CODE,
+                "high",
+                format!(
+                    "command {streams} exceeded the {MAX_SWARM_REPLAY_ARTIFACT_BYTES} byte replay artifact cap"
+                ),
+                "Reduce command output or inspect the capped replay artifacts.",
+            ));
+        }
+    }
 
-    let stdout_artifact = write_swarm_replay_artifact(state, step, "stdout", &output.stdout)?;
-    let stderr_artifact = write_swarm_replay_artifact(state, step, "stderr", &output.stderr)?;
+    let stdout_artifact = write_swarm_replay_artifact(state, step, "stdout", &stdout.bytes)?;
+    let stderr_artifact = write_swarm_replay_artifact(state, step, "stderr", &stderr.bytes)?;
     let mut result = swarm_replay_command_result(step, exit_code, degraded_codes);
     result.elapsed_ms = elapsed_ms;
-    result.stdout_bytes = output.stdout.len() as u64;
-    result.stderr_bytes = output.stderr.len() as u64;
+    result.stdout_bytes = stdout.total_bytes;
+    result.stderr_bytes = stderr.total_bytes;
     result.artifact_paths = vec![stdout_artifact, stderr_artifact];
     result.slo = swarm_replay_command_slo(
         step,
@@ -3487,7 +3522,7 @@ fn execute_swarm_replay_command(
     );
 
     if step.command.verbs.len() == 1 && step.command.verbs[0] == "remember" && exit_code == 0 {
-        if let Some(memory_id) = swarm_replay_remembered_memory_id(&output.stdout) {
+        if let Some(memory_id) = swarm_replay_remembered_memory_id(&stdout.bytes) {
             state.remembered_memory_id = Some(memory_id);
         }
         state.last_synthetic_content = invocation.synthetic_content;
@@ -3632,6 +3667,55 @@ fn swarm_replay_command_invocation(
     })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BoundedSwarmReplayPipe {
+    bytes: Vec<u8>,
+    total_bytes: u64,
+    truncated: bool,
+}
+
+fn read_swarm_replay_pipe_bounded<R: Read>(
+    mut reader: R,
+    byte_cap: usize,
+) -> std::io::Result<BoundedSwarmReplayPipe> {
+    let mut retained = Vec::with_capacity(byte_cap.min(8192));
+    let mut total_bytes = 0u64;
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        total_bytes = total_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        let remaining = byte_cap.saturating_sub(retained.len());
+        if remaining > 0 {
+            retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        }
+    }
+
+    Ok(BoundedSwarmReplayPipe {
+        truncated: total_bytes > u64::try_from(retained.len()).unwrap_or(u64::MAX),
+        bytes: retained,
+        total_bytes,
+    })
+}
+
+fn join_swarm_replay_pipe_reader(
+    reader: thread::JoinHandle<std::io::Result<BoundedSwarmReplayPipe>>,
+    kind: &str,
+) -> Result<BoundedSwarmReplayPipe, DomainError> {
+    reader
+        .join()
+        .map_err(|_| {
+            lab_storage_error_message(
+                "collect swarm replay command output",
+                format!("{kind} reader thread panicked"),
+            )
+        })?
+        .map_err(|error| lab_storage_error("read swarm replay command output", error))
+}
+
 fn swarm_replay_stdout_schema(stdout: &[u8]) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
     value
@@ -3680,13 +3764,18 @@ fn write_swarm_replay_artifact(
         kind
     );
     let path = state.artifact_root.join(&file_name);
-    fs::write(&path, bytes)
+    let capped_bytes = swarm_replay_cap_artifact_bytes(bytes);
+    fs::write(&path, capped_bytes)
         .map_err(|error| lab_storage_error("write swarm replay artifact", error))?;
     Ok(SwarmReplayArtifactRef {
         kind: kind.to_owned(),
         path_tail: format!("{}/{}", state.artifact_path_tail_prefix, file_name),
-        path_hash: format!("blake3:{}", hash_content(bytes)),
+        path_hash: format!("blake3:{}", hash_content(capped_bytes)),
     })
+}
+
+fn swarm_replay_cap_artifact_bytes(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes.len().min(MAX_SWARM_REPLAY_ARTIFACT_BYTES)]
 }
 
 fn safe_swarm_replay_step_file_stem(step_id: &str) -> String {
@@ -6202,6 +6291,8 @@ mod tests {
     use crate::testing::ensure_equal;
     use std::fs;
     use std::io::ErrorKind;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     type TestResult = Result<(), String>;
@@ -6514,6 +6605,124 @@ mod tests {
             aggregate.first_slo_failure_step_id.as_deref(),
             Some("step_slo_fail"),
             "first slo failure step",
+        )
+    }
+
+    #[test]
+    fn swarm_replay_bounded_pipe_reader_tracks_total_bytes_without_retaining_them() -> TestResult {
+        let pipe = read_swarm_replay_pipe_bounded(std::io::Cursor::new(b"abcdef"), 4)
+            .map_err(|error| error.to_string())?;
+
+        ensure(pipe.bytes, b"abcd".to_vec(), "retained bytes")?;
+        ensure(pipe.total_bytes, 6u64, "total bytes")?;
+        ensure(pipe.truncated, true, "truncated")
+    }
+
+    #[test]
+    fn swarm_replay_artifact_writer_caps_retained_bytes() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let trace =
+            generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::small("artifact_001"));
+        let step = trace
+            .command_sequence
+            .first()
+            .ok_or_else(|| "generated fixture missing command".to_owned())?;
+        let state = SwarmReplayExecutionState {
+            ee_binary_path: PathBuf::from("ee"),
+            workspace: workspace.path().to_path_buf(),
+            artifact_root: workspace.path().join(".ee/lab/swarm-replay/test"),
+            artifact_path_tail_prefix: ".ee/lab/swarm-replay/test".to_owned(),
+            remembered_memory_id: None,
+            last_synthetic_content: None,
+        };
+        let bytes = vec![b'x'; MAX_SWARM_REPLAY_ARTIFACT_BYTES + 17];
+
+        let artifact = write_swarm_replay_artifact(&state, step, "stdout", &bytes)
+            .map_err(|error| error.message())?;
+        let artifact_path = workspace.path().join(&artifact.path_tail);
+        let metadata = fs::metadata(&artifact_path).map_err(|error| error.to_string())?;
+
+        ensure(
+            metadata.len(),
+            MAX_SWARM_REPLAY_ARTIFACT_BYTES as u64,
+            "artifact byte length",
+        )?;
+        ensure(
+            artifact.path_hash,
+            format!(
+                "blake3:{}",
+                hash_content(swarm_replay_cap_artifact_bytes(&bytes))
+            ),
+            "artifact hash",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swarm_replay_executor_caps_stdout_artifact_and_records_budget_failure() -> TestResult {
+        let workspace = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let mut trace =
+            generate_swarm_workload_fixture(&SwarmWorkloadFixtureOptions::small("cap_exec_001"));
+        trace.command_sequence.truncate(1);
+        trace.generator_evidence.command_count = 1;
+        trace.resource_profile_hints.rch_required = false;
+        let trace_path = workspace.path().join("swarm-workload-output-cap.json");
+        fs::write(&trace_path, trace.to_json()).map_err(|error| error.to_string())?;
+        let script_path = workspace.path().join("huge-output-ee");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nhead -c {} /dev/zero | tr '\\0' x\n",
+                MAX_SWARM_REPLAY_ARTIFACT_BYTES + 17
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+        let mut permissions = fs::metadata(&script_path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script_path, permissions).map_err(|error| error.to_string())?;
+        let options = SwarmReplayOptions {
+            workspace: workspace.path().to_path_buf(),
+            trace_path,
+            dry_run: false,
+            host_observation: admitted_smoke_swarm_observation(),
+            ee_binary_path: Some(script_path),
+            rch_proof_path: None,
+        };
+
+        let report = replay_swarm_workload_trace(&options).map_err(|error| error.message())?;
+        let result = report
+            .command_results
+            .first()
+            .ok_or_else(|| "missing command result".to_owned())?;
+        let stdout_artifact = result
+            .artifact_paths
+            .iter()
+            .find(|artifact| artifact.kind == "stdout")
+            .ok_or_else(|| "missing stdout artifact".to_owned())?;
+        let stdout_path = workspace.path().join(&stdout_artifact.path_tail);
+
+        ensure(report.status, SwarmReplayStatus::Fail, "status")?;
+        ensure(
+            result.stdout_bytes,
+            (MAX_SWARM_REPLAY_ARTIFACT_BYTES + 17) as u64,
+            "observed stdout bytes",
+        )?;
+        ensure(
+            fs::metadata(stdout_path)
+                .map_err(|error| error.to_string())?
+                .len(),
+            MAX_SWARM_REPLAY_ARTIFACT_BYTES as u64,
+            "retained stdout artifact bytes",
+        )?;
+        ensure(
+            result
+                .degraded_codes
+                .iter()
+                .any(|code| code == SWARM_REPLAY_SLO_BUDGET_FAILED_CODE),
+            true,
+            "output cap degraded code",
         )
     }
 

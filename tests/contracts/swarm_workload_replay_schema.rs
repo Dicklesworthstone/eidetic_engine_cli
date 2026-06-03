@@ -51,6 +51,34 @@ const HASH_64_D: &str = "blake3:444444444444444444444444444444444444444444444444
 const HASH_16_A: &str = "blake3:aaaaaaaaaaaaaaaa";
 const HASH_16_B: &str = "blake3:bbbbbbbbbbbbbbbb";
 
+const WORKLOAD_CLOSED_OBJECT_DEFS: &[&str] = &[
+    "workspaceShape",
+    "commandStep",
+    "commandShape",
+    "redactionProbe",
+    "resourceProfileHints",
+    "generatorEvidence",
+    "provenance",
+];
+
+const RESULT_CLOSED_OBJECT_DEFS: &[&str] = &[
+    "hostProfileAdmission",
+    "commandResult",
+    "commandSlo",
+    "sloBudget",
+    "artifactRef",
+    "aggregate",
+    "redactionStatus",
+    "resourceUsage",
+    "firstFailure",
+    "verification",
+    "verificationCapsule",
+    "staticCheck",
+    "rchProofSummary",
+    "rchSelectorAdmission",
+    "knownBlocker",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -105,6 +133,49 @@ fn assert_required_fields(schema: &Value, value: &Value, ctx: &str) -> TestResul
             value.get(&field).is_some(),
             format!("{ctx}: serialized value missing schema-required field `{field}`: {value}"),
         )?;
+    }
+    Ok(())
+}
+
+fn assert_closed_object_defs(schema: &Value, def_names: &[&str], ctx: &str) -> TestResult {
+    ensure(
+        schema["additionalProperties"] == Value::Bool(false),
+        format!("{ctx}: top-level schema object must be closed"),
+    )?;
+
+    for def_name in def_names {
+        let def = &schema["$defs"][def_name];
+        ensure(
+            def["type"] == "object",
+            format!(
+                "{ctx}.$defs.{def_name}.type must be object; got {}",
+                def["type"]
+            ),
+        )?;
+        ensure(
+            def["additionalProperties"] == Value::Bool(false),
+            format!(
+                "{ctx}.$defs.{def_name} must be closed with additionalProperties=false; got {}",
+                def["additionalProperties"]
+            ),
+        )?;
+
+        let required = collect_strings(
+            &def["required"],
+            &format!("{ctx}.$defs.{def_name}.required"),
+        )?;
+        let properties = def["properties"]
+            .as_object()
+            .ok_or_else(|| format!("{ctx}.$defs.{def_name}.properties must be an object"))?;
+        for field in &required {
+            ensure(
+                properties.contains_key(field),
+                format!(
+                    "{ctx}.$defs.{def_name}.required includes `{field}` but properties are {:?}",
+                    properties.keys().collect::<Vec<_>>()
+                ),
+            )?;
+        }
     }
     Ok(())
 }
@@ -536,6 +607,15 @@ fn redaction_probe_result() -> SwarmReplayResult {
     result.verification.proof_capsule.rch = None;
     result.verification.deterministic = false;
     result
+}
+
+#[test]
+fn swarm_workload_and_replay_result_schemas_close_all_object_defs() -> TestResult {
+    let workload = read_json(WORKLOAD_SCHEMA_PATH)?;
+    assert_closed_object_defs(&workload, WORKLOAD_CLOSED_OBJECT_DEFS, "swarm workload")?;
+
+    let result = read_json(RESULT_SCHEMA_PATH)?;
+    assert_closed_object_defs(&result, RESULT_CLOSED_OBJECT_DEFS, "swarm replay result")
 }
 
 #[test]

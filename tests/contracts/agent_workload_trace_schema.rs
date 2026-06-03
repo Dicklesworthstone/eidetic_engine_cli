@@ -62,6 +62,51 @@ const OPTIONAL_REDACTION_POSTURE_FALSE: &[&str] = &[
     "fullFileListingPresent",
 ];
 
+const CLOSED_OBJECT_DEFS: &[&str] = &[
+    "commandShape",
+    "harnessIdentity",
+    "memoryHashRef",
+    "redactionPosture",
+    "retentionPosture",
+];
+
+const COMMAND_OUTPUT_FORMAT_ALLOWED: &[&str] = &[
+    "json", "human", "markdown", "toon", "jsonl", "compact", "hook",
+];
+
+const TOKEN_ESTIMATOR_ALLOWED: &[&str] = &["bytes_div_4", "tiktoken_cl100k_base", "approximate"];
+
+const HARNESS_PROGRAM_ALLOWED: &[&str] = &[
+    "claude-code",
+    "codex-cli",
+    "gemini-cli",
+    "cursor",
+    "windsurf",
+    "ee-cli-direct",
+    "unknown",
+];
+
+const HARNESS_MODEL_FAMILY_ALLOWED: &[&str] = &[
+    "claude-opus",
+    "claude-sonnet",
+    "claude-haiku",
+    "gpt-5",
+    "gpt-4",
+    "gemini-pro",
+    "other",
+    "unknown",
+];
+
+const MEMORY_KIND_ALLOWED: &[&str] = &[
+    "fact",
+    "decision",
+    "rule",
+    "anti_pattern",
+    "workflow_hint",
+    "session_evidence",
+    "other",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -94,6 +139,14 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
                 .ok_or_else(|| format!("{ctx}: non-string entry: {value}"))
         })
         .collect()
+}
+
+fn ensure_exact_string_enum(node: &Value, expected: &[&str], ctx: &str) -> TestResult {
+    let values = collect_strings(node, ctx)?;
+    ensure(
+        values.len() == expected.len() && expected.iter().all(|a| values.iter().any(|v| v == a)),
+        format!("{ctx} must be exactly {expected:?}; got: {values:?}"),
+    )
 }
 
 #[test]
@@ -130,6 +183,36 @@ fn agent_workload_trace_v1_schema_has_expected_envelope() -> TestResult {
 }
 
 #[test]
+fn agent_workload_trace_v1_closes_object_shapes_against_extra_fields() -> TestResult {
+    let schema = load_schema()?;
+    let additional_properties = &schema["additionalProperties"];
+    ensure(
+        additional_properties == &Value::Bool(false),
+        format!(
+            "top-level trace row must be closed with additionalProperties=false; got: {}",
+            additional_properties
+        ),
+    )?;
+
+    for def_name in CLOSED_OBJECT_DEFS {
+        let def = &schema["$defs"][def_name];
+        ensure(
+            def["type"] == "object",
+            format!("$defs.{def_name}.type must be object; got: {}", def["type"]),
+        )?;
+        let additional_properties = &def["additionalProperties"];
+        ensure(
+            additional_properties == &Value::Bool(false),
+            format!(
+                "$defs.{def_name} must be closed with additionalProperties=false; got: {}",
+                additional_properties
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn agent_workload_trace_v1_redaction_level_enum_is_pinned() -> TestResult {
     let schema = load_schema()?;
     let values = collect_strings(
@@ -147,6 +230,36 @@ fn agent_workload_trace_v1_redaction_level_enum_is_pinned() -> TestResult {
         ),
     )?;
     Ok(())
+}
+
+#[test]
+fn agent_workload_trace_v1_machine_facing_enums_are_pinned() -> TestResult {
+    let schema = load_schema()?;
+    ensure_exact_string_enum(
+        &schema["$defs"]["commandShape"]["properties"]["outputFormat"]["enum"],
+        COMMAND_OUTPUT_FORMAT_ALLOWED,
+        "commandShape.outputFormat.enum",
+    )?;
+    ensure_exact_string_enum(
+        &schema["properties"]["tokenEstimatorId"]["enum"],
+        TOKEN_ESTIMATOR_ALLOWED,
+        "tokenEstimatorId.enum",
+    )?;
+    ensure_exact_string_enum(
+        &schema["$defs"]["harnessIdentity"]["properties"]["program"]["enum"],
+        HARNESS_PROGRAM_ALLOWED,
+        "harnessIdentity.program.enum",
+    )?;
+    ensure_exact_string_enum(
+        &schema["$defs"]["harnessIdentity"]["properties"]["modelFamily"]["enum"],
+        HARNESS_MODEL_FAMILY_ALLOWED,
+        "harnessIdentity.modelFamily.enum",
+    )?;
+    ensure_exact_string_enum(
+        &schema["$defs"]["memoryHashRef"]["properties"]["kind"]["enum"],
+        MEMORY_KIND_ALLOWED,
+        "memoryHashRef.kind.enum",
+    )
 }
 
 #[test]

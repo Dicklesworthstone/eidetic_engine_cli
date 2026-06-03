@@ -24,6 +24,39 @@ const SCHEMA_ID: &str = "https://eidetic-engine/schemas/ee.agent_workload_replay
 const FIXTURE_PATH: &str = "tests/fixtures/agent_workloads/redacted_trace_minimal.jsonl";
 const DOC_PATH: &str = "docs/agent-ux/workload-replay.md";
 
+const REQUIRED_TOP_LEVEL: &[&str] = &[
+    "schema",
+    "sideEffectFree",
+    "command",
+    "playback",
+    "trace",
+    "commandCounts",
+    "schemasObserved",
+    "degradedCodeDeltas",
+    "byteTokenDeltas",
+    "latency",
+    "cachePosture",
+    "duplicateWorkCoalescing",
+    "replayHash",
+    "determinism",
+    "fixturePromotion",
+    "warnings",
+];
+
+const CLOSED_OBJECT_DEFS: &[&str] = &[
+    "playback",
+    "traceSummary",
+    "commandCount",
+    "schemaCount",
+    "degradedCodeDelta",
+    "byteTokenDeltas",
+    "latency",
+    "cachePosture",
+    "duplicateWorkCoalescing",
+    "determinism",
+    "fixturePromotion",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -93,20 +126,7 @@ fn agent_workload_replay_v1_schema_pins_side_effect_free_report_shape() -> TestR
     )?;
 
     let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in [
-        "playback",
-        "trace",
-        "commandCounts",
-        "schemasObserved",
-        "degradedCodeDeltas",
-        "byteTokenDeltas",
-        "latency",
-        "cachePosture",
-        "duplicateWorkCoalescing",
-        "replayHash",
-        "determinism",
-        "fixturePromotion",
-    ] {
+    for field in REQUIRED_TOP_LEVEL {
         ensure(
             required.iter().any(|entry| entry == field),
             format!("replay schema required fields missing `{field}`: {required:?}"),
@@ -118,6 +138,48 @@ fn agent_workload_replay_v1_schema_pins_side_effect_free_report_shape() -> TestR
             .is_some_and(|pattern| pattern.contains("blake3:")),
         "replay hashes must be explicit blake3-prefixed strings",
     )
+}
+
+#[test]
+fn agent_workload_replay_v1_closes_all_nested_object_shapes() -> TestResult {
+    let schema = read_json(SCHEMA_PATH)?;
+    ensure(
+        schema["additionalProperties"] == Value::Bool(false),
+        "replay schema top-level object must be closed with additionalProperties=false",
+    )?;
+
+    for def_name in CLOSED_OBJECT_DEFS {
+        let def = &schema["$defs"][def_name];
+        ensure(
+            def["type"] == "object",
+            format!("$defs.{def_name}.type must be object; got: {}", def["type"]),
+        )?;
+        ensure(
+            def["additionalProperties"] == Value::Bool(false),
+            format!(
+                "$defs.{def_name} must be closed with additionalProperties=false; got: {}",
+                def["additionalProperties"]
+            ),
+        )?;
+
+        let required = collect_strings(
+            &def["required"],
+            &format!("agent workload replay $defs.{def_name}.required"),
+        )?;
+        let properties = def["properties"]
+            .as_object()
+            .ok_or_else(|| format!("$defs.{def_name}.properties must be an object"))?;
+        for field in &required {
+            ensure(
+                properties.contains_key(field),
+                format!(
+                    "$defs.{def_name}.required includes `{field}` but properties are {:?}",
+                    properties.keys().collect::<Vec<_>>()
+                ),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[test]
