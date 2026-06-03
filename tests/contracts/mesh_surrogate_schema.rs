@@ -35,6 +35,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -106,7 +107,7 @@ fn collect_enum_strings(node: &Value) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn collect_required_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
+fn collect_required_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
     let array = node
         .as_array()
         .ok_or_else(|| format!("{ctx}: expected `required` array, got: {node}"))?;
@@ -119,6 +120,10 @@ fn collect_required_strings(node: &Value, ctx: &str) -> Result<Vec<String>, Stri
                 .ok_or_else(|| format!("{ctx}: non-string required entry: {value}"))
         })
         .collect()
+}
+
+fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
+    expected.iter().map(|value| (*value).to_owned()).collect()
 }
 
 #[test]
@@ -137,14 +142,14 @@ fn ee_mesh_surrogate_v1_schema_has_expected_envelope() -> TestResult {
         schema_const == SCHEMA_NAME,
         format!("expected properties.schema.const = {SCHEMA_NAME}; got: {schema_const}"),
     )?;
-    let required = collect_required_strings(&schema["required"], "top-level")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!("top-level `required` is missing `{field}`; got: {required:?}"),
-        )?;
-    }
-    Ok(())
+    let actual = collect_required_strings(&schema["required"], "top-level")?;
+    let expected = expected_string_set(REQUIRED_TOP_LEVEL);
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
 
 #[test]
@@ -188,18 +193,17 @@ fn ee_mesh_surrogate_v1_lists_all_documented_degraded_codes() -> TestResult {
 fn ee_mesh_surrogate_v1_policy_enforces_explicit_export_decision() -> TestResult {
     let schema = load_schema()?;
     let policy_def = &schema["$defs"]["policy"];
-    let required = collect_required_strings(&policy_def["required"], "policy")?;
-    for field in REQUIRED_POLICY_FIELDS {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!(
-                "policy.required is missing `{field}`; got: {required:?}. \
-                 bd-2irom default-deny posture requires `exportAllowed`, \
-                 `requiresLocalRecompute`, and `requiresCompatibilityCheck` \
-                 to be present explicitly so an absent value cannot \
-                 silently widen the export surface."
-            ),
-        )?;
-    }
-    Ok(())
+    let actual = collect_required_strings(&policy_def["required"], "policy")?;
+    let expected = expected_string_set(REQUIRED_POLICY_FIELDS);
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_POLICY_FIELDS drifted from schema policy.required array\n\
+             expected={expected:?}\nactual={actual:?}. \
+             bd-2irom default-deny posture requires `exportAllowed`, \
+             `requiresLocalRecompute`, and `requiresCompatibilityCheck` \
+             to be present explicitly so an absent value cannot \
+             silently widen the export surface."
+        ),
+    )
 }
