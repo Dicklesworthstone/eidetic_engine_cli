@@ -276,19 +276,12 @@ fn auto_status_discovery_ref_targets_tailscale_autodiscovery_def() -> TestResult
 #[test]
 fn auto_status_discovery_required_fields_match_tailscale_report() -> TestResult {
     let schema = load_schema()?;
-    let required = collect_strings(
-        schema
-            .pointer("/$defs/tailscaleAutodiscovery/required")
-            .unwrap_or(&Value::Null),
+    require_closed_set(
+        &schema,
+        "/$defs/tailscaleAutodiscovery/required",
+        TAILSCALE_AUTODISCOVERY_FIELDS,
         "tailscaleAutodiscovery.required",
-    )?;
-    for field in TAILSCALE_AUTODISCOVERY_FIELDS {
-        ensure(
-            required.contains(*field),
-            format!("tailscaleAutodiscovery.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    )
 }
 
 #[test]
@@ -361,19 +354,12 @@ fn auto_status_lane_decision_enum_matches_srr6_5_vocabulary() -> TestResult {
 #[test]
 fn auto_status_peer_state_breakdown_has_four_buckets() -> TestResult {
     let schema = load_schema()?;
-    let required = collect_strings(
-        schema
-            .pointer("/$defs/peerStateBreakdown/required")
-            .unwrap_or(&Value::Null),
+    require_closed_set(
+        &schema,
+        "/$defs/peerStateBreakdown/required",
+        PEER_STATE_BREAKDOWN_FIELDS,
         "peerStateBreakdown.required",
-    )?;
-    for field in PEER_STATE_BREAKDOWN_FIELDS {
-        ensure(
-            required.contains(*field),
-            format!("peerStateBreakdown.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    )
 }
 
 #[test]
@@ -404,19 +390,12 @@ fn auto_status_drift_required_fields_cover_v4_enrichment() -> TestResult {
     // transientUnreachable (drift partition). Pin all three so the v4
     // additions can't quietly disappear.
     let schema = load_schema()?;
-    let required = collect_strings(
-        schema
-            .pointer("/$defs/drift/required")
-            .unwrap_or(&Value::Null),
+    require_closed_set(
+        &schema,
+        "/$defs/drift/required",
+        DRIFT_REQUIRED_FIELDS,
         "drift.required",
-    )?;
-    for field in DRIFT_REQUIRED_FIELDS {
-        ensure(
-            required.contains(*field),
-            format!("drift.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    )
 }
 
 #[test]
@@ -425,17 +404,10 @@ fn auto_status_materialized_required_fields_cover_v4_enrichment() -> TestResult 
     // and enrollmentSource (v4, audit trail for auto_replaced_manual)
     // are both v4 additions; pin them so neither can be dropped.
     let schema = load_schema()?;
-    let required = collect_strings(
-        schema
-            .pointer("/$defs/materialized/required")
-            .unwrap_or(&Value::Null),
+    require_closed_set(
+        &schema,
+        "/$defs/materialized/required",
+        MATERIALIZED_REQUIRED_FIELDS,
         "materialized.required",
-    )?;
-    for field in MATERIALIZED_REQUIRED_FIELDS {
-        ensure(
-            required.contains(*field),
-            format!("materialized.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    )
 }
