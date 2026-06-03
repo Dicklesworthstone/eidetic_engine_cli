@@ -45,6 +45,63 @@ const REQUIRED_TOP_LEVEL: &[&str] = &[
 ];
 
 const REQUIRED_SURFACES: &[&str] = &["context", "packBuild", "remember", "search", "why"];
+const REQUIRED_SURFACE_FIELDS: &[&str] = &[
+    "surface",
+    "p50Ms",
+    "p95Ms",
+    "p99Ms",
+    "p999Ms",
+    "qps",
+    "inflight",
+    "qosClassCounts",
+];
+const READ_POOL_REQUIRED_FIELDS: &[&str] =
+    &["activePins", "expiredPins", "releaseFailures", "queueDepth"];
+const AUDIT_LANE_REQUIRED_FIELDS: &[&str] = &[
+    "batchCount",
+    "batchSizeP50",
+    "batchSizeP99",
+    "backpressureEvents",
+    "channelDepth",
+];
+const L2_CACHE_REQUIRED_FIELDS: &[&str] = &[
+    "status",
+    "hits",
+    "misses",
+    "hitRateBasisPoints",
+    "byteSize",
+    "evictions",
+];
+const RCH_REQUIRED_FIELDS: &[&str] = &[
+    "workersHealthy",
+    "slotsAvailable",
+    "queueDepth",
+    "headOfLineAgeMs",
+];
+const GRAPH_SNAPSHOT_REQUIRED_FIELDS: &[&str] =
+    &["ageMs", "refreshedCount", "refreshLockWaitMsP99"];
+const HOST_PRESSURE_REQUIRED_FIELDS: &[&str] = &[
+    "cpuUserPct",
+    "cpuIowaitPct",
+    "memoryRssMb",
+    "pageCacheMb",
+    "fsyncLatencyP99Ms",
+];
+const BEAD_ACTIVITY_REQUIRED_FIELDS: &[&str] = &[
+    "activeAgents",
+    "readyBeads",
+    "inProgressBeads",
+    "blockedBeads",
+];
+const OBSERVABILITY_BLOCKS: &[(&str, &[&str])] = &[
+    ("readPool", READ_POOL_REQUIRED_FIELDS),
+    ("auditLane", AUDIT_LANE_REQUIRED_FIELDS),
+    ("l2Cache", L2_CACHE_REQUIRED_FIELDS),
+    ("rch", RCH_REQUIRED_FIELDS),
+    ("graphSnapshot", GRAPH_SNAPSHOT_REQUIRED_FIELDS),
+    ("hostPressure", HOST_PRESSURE_REQUIRED_FIELDS),
+    ("beadActivity", BEAD_ACTIVITY_REQUIRED_FIELDS),
+];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -84,6 +141,22 @@ fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, Strin
     Ok(collect_strings(node, ctx)?.into_iter().collect())
 }
 
+fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
+    expected.iter().map(|field| (*field).to_owned()).collect()
+}
+
+fn ensure_exact_required_fields(schema: &Value, expected: &[&str], ctx: &str) -> TestResult {
+    let required_ctx = format!("{ctx}.required");
+    let actual = collect_string_set(&schema["required"], &required_ctx)?;
+    let expected = expected_string_set(expected);
+    ensure(
+        actual == expected,
+        format!(
+            "{ctx}.required drifted from expected fields\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
+}
+
 #[test]
 fn perf_live_v1_schema_has_expected_envelope() -> TestResult {
     let schema = load_schema()?;
@@ -95,17 +168,7 @@ fn perf_live_v1_schema_has_expected_envelope() -> TestResult {
         schema["properties"]["sideEffectFree"]["const"] == Value::Bool(true),
         "sideEffectFree must be const true (snapshot is read-only)",
     )?;
-    let actual = collect_string_set(&schema["required"], "top-level required")?;
-    let expected = REQUIRED_TOP_LEVEL
-        .iter()
-        .map(|field| (*field).to_owned())
-        .collect::<BTreeSet<_>>();
-    ensure(
-        actual == expected,
-        format!(
-            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
-        ),
-    )
+    ensure_exact_required_fields(&schema, REQUIRED_TOP_LEVEL, "top-level perf-live schema")
 }
 
 #[test]
@@ -124,6 +187,11 @@ fn perf_live_v1_surfaces_cover_five_instrumented_command_families() -> TestResul
             ),
         )?;
     }
+    ensure_exact_required_fields(
+        &schema["properties"]["surfaces"],
+        REQUIRED_SURFACES,
+        "surfaces",
+    )?;
     Ok(())
 }
 
@@ -152,25 +220,16 @@ fn perf_live_v1_each_surface_carries_latency_percentiles_and_qps() -> TestResult
     let surfaces = schema["properties"]["surfaces"]["properties"]
         .as_object()
         .ok_or_else(|| "surfaces.properties not an object".to_string())?;
-    let required_fields = ["p50Ms", "p95Ms", "p99Ms", "p999Ms", "qps", "inflight"];
     for surface in REQUIRED_SURFACES {
         let surface_schema = surfaces
             .get(*surface)
             .ok_or_else(|| format!("surface `{surface}` not present"))?;
         let resolved = resolve_ref(&schema, surface_schema);
-        let surface_required = collect_strings(
-            &resolved["required"],
-            &format!("surfaces.{surface}.required"),
+        ensure_exact_required_fields(
+            resolved,
+            REQUIRED_SURFACE_FIELDS,
+            &format!("surfaces.{surface}"),
         )?;
-        for field in &required_fields {
-            ensure(
-                surface_required.iter().any(|r| r == field),
-                format!(
-                    "surface `{surface}` must require `{field}` per the bead's latency-\
-                     percentile contract; got: {surface_required:?}"
-                ),
-            )?;
-        }
     }
     Ok(())
 }
@@ -178,55 +237,10 @@ fn perf_live_v1_each_surface_carries_latency_percentiles_and_qps() -> TestResult
 #[test]
 fn perf_live_v1_observability_subsurfaces_are_present() -> TestResult {
     let schema = load_schema()?;
-    let observability = [
-        (
-            "readPool",
-            &["activePins", "expiredPins", "releaseFailures", "queueDepth"][..],
-        ),
-        (
-            "auditLane",
-            &["batchCount", "backpressureEvents", "channelDepth"][..],
-        ),
-        (
-            "l2Cache",
-            // `hitRate` was renamed to `hitRateBasisPoints` (integer
-            // representation of the ratio, 0..=10_000) to avoid
-            // floating-point drift across runs.
-            &[
-                "hits",
-                "misses",
-                "hitRateBasisPoints",
-                "byteSize",
-                "evictions",
-            ][..],
-        ),
-        (
-            "rch",
-            &["workersHealthy", "slotsAvailable", "queueDepth"][..],
-        ),
-        ("graphSnapshot", &["ageMs", "refreshedCount"][..]),
-        ("hostPressure", &["cpuUserPct", "memoryRssMb"][..]),
-        (
-            "beadActivity",
-            &["activeAgents", "readyBeads", "inProgressBeads"][..],
-        ),
-    ];
-    for (block, required_fields) in observability {
+    for (block, required_fields) in OBSERVABILITY_BLOCKS {
         let block_schema = &schema["properties"][block];
         let resolved = resolve_ref(&schema, block_schema);
-        let block_required = collect_strings(
-            &resolved["required"],
-            &format!("properties.{block}.required"),
-        )?;
-        for field in required_fields {
-            ensure(
-                block_required.iter().any(|r| r == field),
-                format!(
-                    "properties.{block}.required must include `{field}` per the bead's \
-                     observability contract; got: {block_required:?}"
-                ),
-            )?;
-        }
+        ensure_exact_required_fields(resolved, required_fields, &format!("properties.{block}"))?;
     }
     Ok(())
 }
