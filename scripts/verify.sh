@@ -51,6 +51,7 @@ set -euo pipefail
 #   5.5. Proof Verification    - advisory Lean4/TLA+ proof artifact checks
 #   6. Unit/Contract/Golden    - cargo test --workspace --lib --bins --tests --examples
 #   6. Basic E2E               - scripts/e2e_test.sh
+#   6.05 Output Budget E2E     - scripts/e2e_output_budget.sh
 #   6.1. Agent Ergonomics E2E  - scripts/e2e_lib/run_agent_ergonomics_e2e.sh
 #   6.5. Overhaul Integration  - scripts/e2e_overhaul.sh  (gated by VERIFY_OVERHAUL)
 #   6.5.1. Swarm SLO Replay    - scripts/e2e_overhaul/swarm_slo_replay.sh
@@ -767,6 +768,9 @@ run_stage "Unit, Contract, and Golden Tests" "cargo test --workspace --lib --bin
 
 # Gate 6: Basic End-to-End
 run_stage "Basic E2E Scripts" "./scripts/e2e_test.sh"
+
+# Gate 6.05: Agent-facing output budget guard for status and swarm brief.
+run_stage "Output Budget E2E (bd-kua65)" "./scripts/e2e_output_budget.sh"
 
 # Heavy gate block: skipped under --ci-smoke for fast swarm-CI / agent
 # pre-push runs. bd-2dgn0.5: see docs/operator-swarm-slo.md for which

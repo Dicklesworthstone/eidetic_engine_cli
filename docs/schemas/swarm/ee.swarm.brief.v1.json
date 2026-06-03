@@ -106,7 +106,7 @@
   },
   "field_presets": {
     "minimal": ["schema", "workspace", "redactionStatus"],
-    "summary": ["schema", "workspace", "redactionStatus", "sources", "readyReservationPressure", "stalledBeadLiveness", "degraded"],
+    "summary": ["schema", "workspace", "redactionStatus", "sources", "dirtyFiles", "recentCommits", "beads", "fileReservations", "fileSurfaceRisks", "readyReservationPressure", "stalledBeadLiveness", "inbox", "threads", "resourcePressure", "hostProfile", "agentInventory", "recommendations", "degraded"],
     "standard": ["*"],
     "full": ["*"]
   },

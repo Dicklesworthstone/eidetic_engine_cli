@@ -538,6 +538,8 @@ pub struct SwarmBriefBead {
     pub status: String,
     pub priority: Option<i64>,
     pub assignee: Option<String>,
+    #[serde(skip)]
+    pub issue_type: Option<String>,
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub latest_comment_at: Option<String>,
@@ -6505,6 +6507,7 @@ fn parse_bead_item(item: &Value, source_bucket: &str) -> Option<SwarmBriefBead> 
     let status = string_field(item, &["status"]).unwrap_or_else(|| source_bucket.to_string());
     let priority = item.get("priority").and_then(Value::as_i64);
     let assignee = string_field(item, &["assignee", "assigned_to", "owner"]);
+    let issue_type = string_field(item, &["issue_type", "issueType"]);
     let comment_count = item
         .get("comment_count")
         .or_else(|| item.get("commentCount"))
@@ -6520,6 +6523,7 @@ fn parse_bead_item(item: &Value, source_bucket: &str) -> Option<SwarmBriefBead> 
         status: redact_brief_text(&status),
         priority,
         assignee: assignee.map(|value| redact_brief_text(&value)),
+        issue_type: issue_type.map(|value| redact_brief_text(&value)),
         created_at: string_field(item, &["created_at", "createdAt"]),
         updated_at: string_field(item, &["updated_at", "updatedAt"]),
         latest_comment_at: latest_bead_comment_timestamp(item),
@@ -8399,6 +8403,7 @@ mod tests {
             status: source_bucket.to_string(),
             priority: Some(1),
             assignee: None,
+            issue_type: None,
             created_at: None,
             updated_at: None,
             latest_comment_at: None,
@@ -9183,6 +9188,7 @@ mod tests {
                 "id": "bd-fractional",
                 "title": "fractional timestamp fixture",
                 "status": "in_progress",
+                "issue_type": "bug",
                 "priority": 2,
                 "assignee": "BlueLake",
                 "created_at": "2026-05-01T10:00:00.111111Z",
@@ -9211,9 +9217,35 @@ mod tests {
             Some("2026-05-01T13:00:00.444444Z")
         );
         assert_eq!(bead.comment_count, 2);
+        assert_eq!(bead.issue_type.as_deref(), Some("bug"));
         assert!(
             rfc3339_epoch_seconds("2026-05-01T13:00:00.444444Z").is_some(),
             "fractional RFC3339 timestamps must parse structurally"
+        );
+    }
+
+    #[test]
+    fn beads_parser_accepts_camel_case_issue_type_for_internal_routing() {
+        let beads = parse_beads_json(
+            r#"[
+              {
+                "id": "bd-epic",
+                "title": "Epic wrapper",
+                "status": "open",
+                "issueType": "epic"
+              }
+            ]"#,
+            "ready",
+        )
+        .expect("Beads JSON parses");
+
+        let bead = require_some(beads.first(), "camel-case issue type bead");
+        assert_eq!(bead.issue_type.as_deref(), Some("epic"));
+
+        let rendered = serde_json::to_value(bead).expect("bead serializes");
+        assert!(
+            rendered.get("issueType").is_none(),
+            "issue_type is internal routing metadata, not a swarm brief contract expansion"
         );
     }
 

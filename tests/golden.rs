@@ -392,6 +392,7 @@ mod tests {
             status: status.to_string(),
             priority: Some(1),
             assignee: None,
+            issue_type: None,
             created_at: None,
             updated_at: None,
             latest_comment_at: None,

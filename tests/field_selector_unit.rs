@@ -183,6 +183,66 @@ fn field_selector_presets_apply_to_every_matrix_row() -> TestResult {
 }
 
 #[test]
+fn status_and_swarm_brief_full_keys_are_preset_reachable() -> TestResult {
+    for coverage in [
+        FullKeyCoverage {
+            surface: "status",
+            schema_file: "ee.status.v1.json",
+            non_full_presets: &["minimal", "summary", "standard"],
+            full_only_fields: &[],
+        },
+        FullKeyCoverage {
+            surface: "swarm_brief",
+            schema_file: "swarm/ee.swarm.brief.v1.json",
+            non_full_presets: &["minimal", "summary", "standard"],
+            full_only_fields: &[],
+        },
+    ] {
+        let schema = read_json(schema_path(coverage.schema_file))?;
+        let full_fields = top_level_schema_keys(response_data_schema(&schema)?);
+        let reachable_fields = reachable_fields_from_presets(
+            &schema,
+            coverage.non_full_presets,
+            &full_fields,
+            coverage.surface,
+        )?;
+        let full_only_fields = coverage
+            .full_only_fields
+            .iter()
+            .copied()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+
+        let stale_full_only = full_only_fields
+            .difference(&full_fields)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !stale_full_only.is_empty() {
+            return Err(format!(
+                "{} full-only classification names fields absent from full schema: {stale_full_only:?}",
+                coverage.surface
+            ));
+        }
+
+        let accounted_for = reachable_fields
+            .union(&full_only_fields)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let missing = full_fields
+            .difference(&accounted_for)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "{} full schema keys are not reachable through non-full presets and are not classified full-only: {missing:?}",
+                coverage.surface
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn explicit_list_and_preset_additions_are_precise() -> TestResult {
     let schema = read_json(schema_path("ee.status.v1.json"))?;
     let response = synthetic_response(&schema, "status")?;
@@ -347,6 +407,14 @@ fn synthetic_response(schema: &Value, command: &str) -> Result<String, String> {
     Ok(response.to_string())
 }
 
+#[derive(Debug)]
+struct FullKeyCoverage {
+    surface: &'static str,
+    schema_file: &'static str,
+    non_full_presets: &'static [&'static str],
+    full_only_fields: &'static [&'static str],
+}
+
 fn response_data_schema(schema: &Value) -> Result<&Value, String> {
     if let Some(data_schema) = schema.pointer("/properties/data") {
         return Ok(data_schema);
@@ -359,6 +427,38 @@ fn response_data_schema(schema: &Value) -> Result<&Value, String> {
         return Ok(schema);
     }
     Err("schema missing /properties/data or data payload schema const".to_string())
+}
+
+fn top_level_schema_keys(schema: &Value) -> BTreeSet<String> {
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .map(|properties| properties.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn reachable_fields_from_presets(
+    schema: &Value,
+    presets: &[&str],
+    full_fields: &BTreeSet<String>,
+    surface: &str,
+) -> Result<BTreeSet<String>, String> {
+    let mut reachable = BTreeSet::new();
+    for preset in presets {
+        for field in schema_preset_fields(schema, preset)? {
+            if field == "*" {
+                reachable.extend(full_fields.iter().cloned());
+                continue;
+            }
+            if !full_fields.contains(&field) {
+                return Err(format!(
+                    "{surface} {preset} preset references field absent from full schema: {field}"
+                ));
+            }
+            reachable.insert(field);
+        }
+    }
+    Ok(reachable)
 }
 
 fn sample_object_from_schema(schema: &Value) -> Map<String, Value> {

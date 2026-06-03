@@ -46848,75 +46848,7 @@ fn render_swarm_brief_json(
             "recommendationCount": report.recommendations.len(),
             "degradedCount": report.degraded.len(),
         }),
-        output::FieldProfile::Summary => serde_json::json!({
-            "schema": report.schema,
-            "workspace": &report.workspace,
-            "redactionStatus": report.redaction_status,
-            "sources": report.sources.iter().map(|source| {
-                serde_json::json!({
-                    "source": source.source.as_str(),
-                    "status": source.status.as_str(),
-                    "itemCount": source.item_count,
-                })
-            }).collect::<Vec<_>>(),
-            "beads": {
-                "readyCount": report.beads.ready.len(),
-                "blockedCount": report.beads.blocked.len(),
-                "inProgressCount": report.beads.in_progress.len(),
-                "deferredCount": report.beads.deferred.len(),
-            },
-            "readyReservationPressure": {
-                "count": report.ready_reservation_pressure.len(),
-                "topReadyBeads": report.ready_reservation_pressure.iter().take(5).map(|pressure| {
-                    serde_json::json!({
-                        "beadId": &pressure.bead_id,
-                        "title": &pressure.title,
-                        "priority": pressure.priority,
-                        "action": &pressure.action,
-                        "severity": &pressure.severity,
-                        "likelySurfaces": &pressure.likely_surfaces,
-                        "reservationHolders": &pressure.reservation_holders,
-                        "exclusiveReservationCount": pressure.exclusive_reservation_count,
-                        "sharedReservationCount": pressure.shared_reservation_count,
-                        "earliestExpiresAt": &pressure.earliest_expires_at,
-                        "maxRiskScore": pressure.max_risk_score,
-                        "riskFactors": &pressure.risk_factors,
-                        "suggestedCommands": &pressure.suggested_commands,
-                    })
-                }).collect::<Vec<_>>(),
-            },
-            "rchLocalCapability": report.rch_local_capability.as_ref().map(|capability| {
-                serde_json::json!({
-                    "schema": capability.schema,
-                    "cliVersion": &capability.cli_version,
-                    "directExecAvailable": capability.direct_exec_available,
-                    "codexHook": &capability.codex_hook,
-                    "daemonStatusSocket": &capability.daemon_status_socket,
-                    "statusSocketConsistent": capability.status_socket_consistent,
-                    "dryRunWouldOffload": capability.dry_run_would_offload,
-                    "workerProbeSummary": &capability.worker_probe_summary,
-                    "queueHealth": &capability.queue_health,
-                    "workerPressure": &capability.worker_pressure,
-                    "remoteOnlyRequired": capability.remote_only_required,
-                    "remoteOnlySafe": capability.remote_only_safe,
-                    "degradedCodes": capability.degraded.iter().map(|degradation| {
-                        degradation.code.as_str()
-                    }).collect::<Vec<_>>(),
-                    "recovery": &capability.recovery,
-                })
-            }),
-            "topRecommendations": report.recommendations.iter().take(5).map(|recommendation| {
-                serde_json::json!({
-                    "id": &recommendation.id,
-                    "kind": &recommendation.kind,
-                    "severity": &recommendation.severity,
-                    "confidence": &recommendation.confidence,
-                    "reasonCodes": &recommendation.reason_codes,
-                    "suggestedCommands": &recommendation.suggested_commands,
-                })
-            }).collect::<Vec<_>>(),
-            "degraded": aggregate_swarm_brief_degraded_json(&report.degraded),
-        }),
+        output::FieldProfile::Summary => swarm_brief_summary_json(report)?,
         output::FieldProfile::Standard | output::FieldProfile::Full => {
             let mut data = serde_json::to_value(report).map_err(|error| DomainError::Storage {
                 message: format!("Failed to serialize swarm brief report: {error}."),
@@ -46935,6 +46867,69 @@ fn render_swarm_brief_json(
     Ok(output::ResponseEnvelope::success()
         .data_raw(&data.to_string())
         .finish())
+}
+
+fn swarm_brief_summary_json(report: &SwarmBriefReport) -> Result<serde_json::Value, DomainError> {
+    Ok(serde_json::json!({
+        "schema": report.schema,
+        "workspace": &report.workspace,
+        "redactionStatus": report.redaction_status,
+        "sources": swarm_brief_summary_array(&report.sources, 8, "sources")?,
+        "dirtyFiles": swarm_brief_summary_array(&report.dirty_files, 12, "dirtyFiles")?,
+        "recentCommits": swarm_brief_summary_array(&report.recent_commits, 5, "recentCommits")?,
+        "beads": {
+            "readyCount": report.beads.ready.len(),
+            "blockedCount": report.beads.blocked.len(),
+            "inProgressCount": report.beads.in_progress.len(),
+            "deferredCount": report.beads.deferred.len(),
+        },
+        "fileReservations": swarm_brief_summary_array(
+            &report.file_reservations,
+            10,
+            "fileReservations",
+        )?,
+        "fileSurfaceRisks": swarm_brief_summary_array(
+            &report.file_surface_risks,
+            10,
+            "fileSurfaceRisks",
+        )?,
+        "readyReservationPressure": swarm_brief_summary_array(
+            &report.ready_reservation_pressure,
+            5,
+            "readyReservationPressure",
+        )?,
+        "stalledBeadLiveness": swarm_brief_summary_array(
+            &report.stalled_bead_liveness,
+            5,
+            "stalledBeadLiveness",
+        )?,
+        "inbox": swarm_brief_summary_array(&report.inbox, 5, "inbox")?,
+        "threads": swarm_brief_summary_array(&report.threads, 5, "threads")?,
+        "resourcePressure": swarm_brief_summary_array(
+            &report.resource_pressure,
+            5,
+            "resourcePressure",
+        )?,
+        "hostProfile": &report.host_profile,
+        "agentInventory": &report.agent_inventory,
+        "recommendations": swarm_brief_summary_array(&report.recommendations, 5, "recommendations")?,
+        "degraded": aggregate_swarm_brief_degraded_json(&report.degraded),
+    }))
+}
+
+fn swarm_brief_summary_array<T>(
+    values: &[T],
+    limit: usize,
+    field_name: &str,
+) -> Result<serde_json::Value, DomainError>
+where
+    T: serde::Serialize,
+{
+    let capped = values.iter().take(limit).collect::<Vec<_>>();
+    serde_json::to_value(capped).map_err(|error| DomainError::Storage {
+        message: format!("Failed to serialize swarm brief summary field {field_name}: {error}."),
+        repair: Some("Fix the swarm brief summary serializer before emitting JSON.".to_string()),
+    })
 }
 
 fn aggregate_swarm_brief_degraded_json(
@@ -52642,7 +52637,7 @@ mod tests {
                 "rch_verify_local_fallback_refused"
             ],
             "source_state": {
-                "verification_attribution": "live_dirty_checkout",
+                "verification_attribution": "local_checkout_observed_remote_source_unknown",
                 "git_head": "29f6e4d8377cf19389594fba70fee2a61b6b22d8",
                 "git_tree": "a2f58a6888cddea0cd09c74a601a1317a5830d90",
                 "dirty_status_hash": "sha256:dc7764a78395ff854476eaf0618c4860d09c38c575c8385a6475762f2330aaad"
@@ -54838,12 +54833,12 @@ mod tests {
         let default_json: serde_json::Value =
             serde_json::from_str(&default_stdout).map_err(|error| error.to_string())?;
         ensure(
-            default_json.pointer("/data/topRecommendations").is_some(),
-            "default swarm brief JSON includes summary recommendations",
+            default_json.pointer("/data/recommendations").is_some(),
+            "default swarm brief JSON includes compact recommendations",
         )?;
         ensure(
-            default_json.pointer("/data/recommendations").is_none(),
-            "default swarm brief JSON excludes full recommendations",
+            default_json.pointer("/data/topRecommendations").is_none(),
+            "default swarm brief JSON uses the schema recommendations key",
         )?;
         ensure(
             default_stdout.len() < 8 * 1024,
@@ -54877,7 +54872,7 @@ mod tests {
         )?;
         ensure(
             full_json.pointer("/data/topRecommendations").is_none(),
-            "explicit full swarm brief JSON excludes summary projection",
+            "explicit full swarm brief JSON excludes legacy summary alias",
         )?;
         ensure(
             default_stdout.len() < full_stdout.len(),

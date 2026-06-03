@@ -95,6 +95,8 @@ pub struct SwarmNextActionCandidate {
     pub score_milli: Option<u32>,
     pub status: String,
     pub priority: Option<i64>,
+    #[serde(skip)]
+    pub issue_type: Option<String>,
     pub assignee: Option<String>,
     pub blocked_by: Vec<String>,
     pub blocked_by_compile_health: bool,
@@ -1432,6 +1434,9 @@ fn work_packet_candidate_decision(
     }
     if candidate.assignee.is_some() || card_decision == Some("blocked_by_owner") {
         return "already_owned";
+    }
+    if candidate_is_rollup(candidate) {
+        return "blocked_rollup";
     }
     if work_packet_candidate_conflict_present(brief, snapshot) {
         return "unsafe_due_to_conflict";
@@ -3025,6 +3030,7 @@ fn candidates_from_brief(
                 score_milli: pick.score_milli,
                 status: bead.map_or_else(|| "unknown".to_owned(), |bead| bead.status.clone()),
                 priority: bead.and_then(|bead| bead.priority),
+                issue_type: bead.and_then(|bead| bead.issue_type.clone()),
                 assignee: bead.and_then(|bead| bead.assignee.clone()),
                 blocked_by: pick.blocked_by.clone(),
                 blocked_by_compile_health,
@@ -3043,6 +3049,7 @@ fn candidates_from_brief(
             score_milli: None,
             status: bead.status.clone(),
             priority: bead.priority,
+            issue_type: bead.issue_type.clone(),
             assignee: bead.assignee.clone(),
             blocked_by: Vec::new(),
             blocked_by_compile_health,
@@ -3312,7 +3319,7 @@ fn recommendation_cards_from_snapshot(
 
 fn candidate_title_overlap_key(title: &str) -> String {
     title
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '.'))
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.'))
         .filter(|token| !token.is_empty())
         .map(str::to_ascii_lowercase)
         .collect::<Vec<_>>()
@@ -3407,6 +3414,8 @@ fn recommendation_card_for_candidate(
         "duplicate_rejected"
     } else if blocked_by_owner {
         "blocked_by_owner"
+    } else if candidate_is_rollup(candidate) {
+        "blocked_rollup"
     } else if has_reusable_verifier_evidence {
         "reuse_recent_evidence"
     } else if candidate.status == "unknown" {
@@ -3417,6 +3426,7 @@ fn recommendation_card_for_candidate(
     let fallback_decision = match decision {
         "duplicate_rejected" => Some("refine_existing_bead"),
         "blocked_by_owner" => Some("message_owner_before_editing"),
+        "blocked_rollup" => Some("choose_concrete_child_bead"),
         "reuse_recent_evidence" => Some("prefer_static_or_non_cargo_work"),
         _ => None,
     };
@@ -3474,9 +3484,21 @@ fn overlap_decision_for_candidate(
             "new_bead_recommended" => "new_child",
             "duplicate_rejected" | "refine_existing_bead" => "existing_bead",
             "blocked_by_owner" => "owner_coordination_required",
+            "blocked_rollup" => "rollup_not_claimable",
             _ => "none",
         },
     }
+}
+
+fn candidate_is_rollup(candidate: &SwarmNextActionCandidate) -> bool {
+    if let Some(issue_type) = &candidate.issue_type {
+        let normalized = issue_type.trim().to_ascii_lowercase();
+        if matches!(normalized.as_str(), "epic" | "theme" | "rollup") {
+            return true;
+        }
+    }
+    let title = candidate.title.to_ascii_lowercase();
+    title.starts_with("[theme]") || title.starts_with("[epic]")
 }
 
 fn recommendation_rank_milli(
@@ -3507,6 +3529,9 @@ fn recommendation_rank_milli(
     }
     if blocked_by_owner {
         score -= 500;
+    }
+    if candidate_is_rollup(candidate) {
+        score -= 1_000;
     }
     score -= i64::try_from(evidence_caveats.len()).unwrap_or(i64::MAX / 25) * 25;
     score
@@ -3560,7 +3585,7 @@ fn suggested_reservations_for_candidate(
 ) -> Vec<SwarmNextActionSuggestedReservation> {
     if matches!(
         decision,
-        "duplicate_rejected" | "blocked_by_owner" | "reuse_recent_evidence"
+        "duplicate_rejected" | "blocked_by_owner" | "reuse_recent_evidence" | "blocked_rollup"
     ) {
         return Vec::new();
     }
@@ -3632,7 +3657,17 @@ fn do_not_take_reasons_for_candidate(
     if candidate.blocked_by_compile_health {
         reasons.insert("dirty_compile_health_blocks_rch".to_owned());
     }
-    if matches!(decision, "duplicate_rejected" | "blocked_by_owner") {
+    if candidate_is_rollup(candidate) {
+        if let Some(issue_type) = &candidate.issue_type {
+            reasons.insert(format!("candidate_issue_type:{issue_type}"));
+        }
+        reasons.insert("rollup_candidate_not_claimable".to_owned());
+        reasons.insert("claim_concrete_child_bead_instead".to_owned());
+    }
+    if matches!(
+        decision,
+        "duplicate_rejected" | "blocked_by_owner" | "blocked_rollup"
+    ) {
         reasons.extend(evidence_caveats.iter().cloned());
     }
     if decision == "reuse_recent_evidence" {
@@ -3663,6 +3698,10 @@ fn recommendation_proof_obligations(
     if decision == "reuse_recent_evidence" {
         obligations.insert("record_reused_verification_hash_in_closeout".to_owned());
         obligations.insert("avoid_duplicate_rch_until_source_changes".to_owned());
+    }
+    if decision == "blocked_rollup" {
+        obligations.insert("inspect_claimable_child_bead_before_any_claim".to_owned());
+        obligations.insert("do_not_claim_epic_or_theme_rollup".to_owned());
     }
     obligations.into_iter().collect()
 }
@@ -3765,7 +3804,7 @@ fn recommendation_confidence(
 ) -> &'static str {
     if matches!(
         decision,
-        "duplicate_rejected" | "blocked_by_owner" | "no_action_recommended"
+        "duplicate_rejected" | "blocked_by_owner" | "blocked_rollup" | "no_action_recommended"
     ) || candidate.blocked_by_compile_health
     {
         return "low";
@@ -4093,6 +4132,61 @@ mod tests {
         assert_eq!(snapshot.candidates[1].blocked_by, vec!["bd-a"]);
         assert!(!snapshot.candidates[1].blocked_by_compile_health);
         assert_eq!(snapshot.candidates[1].action_hint, "Work on bd-a first");
+    }
+
+    #[test]
+    fn next_action_bv_pick_inherits_beads_issue_type_for_rollup_downgrade() {
+        let mut brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut epic = bead(
+            "bd-epic",
+            "[idea-wizard] Epic: parent wrapper with no implementation leaf",
+            1,
+        );
+        epic.issue_type = Some("epic".to_owned());
+        brief.beads.ready = vec![epic];
+        brief.bv = Some(SwarmBriefBvSummary {
+            actionable_count: Some(1),
+            blocked_count: Some(0),
+            in_progress_count: Some(0),
+            track_count: None,
+            top_picks: vec![SwarmBriefBvPick {
+                id: "bd-epic".to_owned(),
+                title: "[idea-wizard] Epic: parent wrapper with no implementation leaf".to_owned(),
+                score_milli: Some(925),
+                action_hint: Some("Inspect concrete children before claiming.".to_owned()),
+                blocked_by: Vec::new(),
+            }],
+        });
+
+        let snapshot = SwarmNextActionSnapshot::from_swarm_brief(&brief);
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(snapshot.candidates.len(), 1);
+        assert_eq!(snapshot.candidates[0].source, "bv_top_pick");
+        assert_eq!(snapshot.candidates[0].issue_type.as_deref(), Some("epic"));
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].decision, "blocked_rollup");
+        assert!(cards[0].suggested_reservations.is_empty());
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"candidate_issue_type:epic".to_owned())
+        );
+        assert!(
+            cards[0]
+                .do_not_take_because
+                .contains(&"claim_concrete_child_bead_instead".to_owned())
+        );
+
+        let json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        let candidate_json = json
+            .pointer("/candidates/0")
+            .and_then(Value::as_object)
+            .expect("candidate JSON object");
+        assert!(
+            !candidate_json.contains_key("issueType"),
+            "issue_type remains internal routing metadata"
+        );
     }
 
     #[test]
@@ -5251,6 +5345,54 @@ mod tests {
     }
 
     #[test]
+    fn recommendation_cards_downgrade_issue_type_epic_rollups() {
+        let mut rollup = candidate(
+            "bd-epic",
+            "SWA2 epic: coordinate crowded checkout fixes",
+            "beads_ready",
+            Some(1),
+        );
+        rollup.issue_type = Some("epic".to_owned());
+        let concrete = candidate(
+            "bd-child",
+            "SWA2 child: fix concrete next-action sorting case",
+            "beads_ready",
+            Some(2),
+        );
+        let snapshot = snapshot_with_candidates(vec![rollup, concrete]);
+
+        let cards = snapshot.recommendation_cards();
+
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].candidate_id.as_deref(), Some("bd-child"));
+        assert_eq!(cards[0].decision, "refine_existing_bead");
+        assert_eq!(cards[1].candidate_id.as_deref(), Some("bd-epic"));
+        assert_eq!(cards[1].decision, "blocked_rollup");
+        assert_eq!(cards[1].confidence, "low");
+        assert_eq!(
+            cards[1].fallback_decision,
+            Some("choose_concrete_child_bead")
+        );
+        assert!(cards[1].suggested_reservations.is_empty());
+        assert_eq!(cards[1].overlap.selected_relation, "rollup_not_claimable");
+        assert!(
+            cards[1]
+                .do_not_take_because
+                .contains(&"candidate_issue_type:epic".to_owned())
+        );
+        assert!(
+            cards[1]
+                .do_not_take_because
+                .contains(&"rollup_candidate_not_claimable".to_owned())
+        );
+        assert!(
+            cards[1]
+                .proof_obligations
+                .contains(&"inspect_claimable_child_bead_before_any_claim".to_owned())
+        );
+    }
+
+    #[test]
     fn wildcard_path_matching_covers_exact_glob_and_question_patterns() {
         assert!(path_matches_pattern("src/db/mod.rs", "src/db/mod.rs"));
         assert!(path_matches_pattern("src/db/mod.rs", "src/db/*.rs"));
@@ -5287,6 +5429,38 @@ mod tests {
         assert!(!packet.mutation_policy.runs_cargo);
         assert!(!packet.mutation_policy.stages_git);
         assert!(!packet.mutation_policy.deletes_files);
+    }
+
+    #[test]
+    fn work_packet_blocks_issue_type_rollup_candidates_without_claim_commands() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let mut rollup = candidate(
+            "bd-epic",
+            "SWA2 epic: coordinate crowded checkout fixes",
+            "beads_ready",
+            Some(1),
+        );
+        rollup.issue_type = Some("epic".to_owned());
+        let snapshot = snapshot_with_candidates(vec![rollup]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+
+        assert_eq!(packet.candidates.len(), 1);
+        assert_eq!(packet.candidates[0].decision, "blocked_rollup");
+        assert!(
+            packet.candidates[0]
+                .unsafe_reasons
+                .contains(&"rollup_candidate_not_claimable".to_owned())
+        );
+        assert_eq!(packet.recommended_action.action, "blocked_no_action");
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(false));
+        assert!(
+            packet
+                .recommended_action
+                .suggested_command_actions
+                .iter()
+                .all(|action| action.command_id != "bead_claim_candidate")
+        );
     }
 
     #[test]
@@ -5591,6 +5765,7 @@ mod tests {
             status: "in_progress".to_owned(),
             priority: Some(2),
             assignee: Some("BlueLake".to_owned()),
+            issue_type: None,
             created_at: None,
             updated_at: None,
             latest_comment_at: None,
@@ -5662,6 +5837,7 @@ mod tests {
             status: "in_progress".to_owned(),
             priority: Some(2),
             assignee: Some("BlueLake".to_owned()),
+            issue_type: None,
             created_at: None,
             updated_at: None,
             latest_comment_at: None,
@@ -6019,8 +6195,8 @@ mod tests {
         let tracker_integrity = compose_integrity_report(BeadsIntegrityInputs {
             jsonl_path: ".beads/issues.jsonl",
             db_path: ".beads/beads.db",
-            jsonl_record_count: 42,
-            db_record_count: 41,
+            jsonl_record_count: 41,
+            db_record_count: 42,
             auto_import_enabled: true,
             external_changes_pending_import: true,
             dirty_issue_count: 1,
@@ -6606,6 +6782,7 @@ mod tests {
             score_milli: None,
             status: "open".to_owned(),
             priority,
+            issue_type: None,
             assignee: None,
             blocked_by: Vec::new(),
             blocked_by_compile_health: false,
@@ -6619,6 +6796,7 @@ mod tests {
             title: title.to_owned(),
             status: "open".to_owned(),
             priority: Some(priority),
+            issue_type: None,
             assignee: None,
             created_at: None,
             updated_at: None,
