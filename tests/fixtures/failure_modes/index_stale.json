@@ -28,7 +28,7 @@
     ],
     "repair_contains": "ee index rebuild",
     "repair_string": "ee index rebuild --workspace .",
-    "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)",
+    "repair_command_regex": "(?<cmd>ee index rebuild --workspace \\.)",
     "repair_safety": [
       {
         "appliesTo": "ee index rebuild --workspace .",

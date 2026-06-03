@@ -112,6 +112,7 @@ fn collect_clap_command_path(
 
 /// Extract the leading `ee <subcommand path>` from an advertised command string,
 /// stopping at the first flag, quoted argument, placeholder, or shell operator.
+#[allow(dead_code)]
 pub fn leading_ee_subcommand_path(command: &str) -> Option<String> {
     let rest = command.strip_prefix("ee ")?;
     let mut path = Vec::new();
@@ -133,6 +134,7 @@ pub fn leading_ee_subcommand_path(command: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 pub fn unresolved_ee_invocations<'a>(
     commands: impl IntoIterator<Item = &'a str>,
     valid_paths: &BTreeSet<String>,

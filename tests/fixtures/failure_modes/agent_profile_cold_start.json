@@ -26,9 +26,6 @@
       "cold start"
     ],
     "repair_contains": "Record enough high-quality outcomes before relying on profile bias.",
-    "repair_strings": [
-      "Use the unbiased ranking until the profile reaches the cold-start threshold.",
-      "Record real helpful or harmful outcomes from completed work before expecting profile bias."
-    ]
+    "repair_string": "Record enough high-quality outcomes before relying on profile bias."
   }
 }

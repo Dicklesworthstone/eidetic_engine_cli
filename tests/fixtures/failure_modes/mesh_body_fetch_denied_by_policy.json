@@ -30,7 +30,7 @@
       "denied",
       "policy"
     ],
-    "repair_contains": "bodyFetchAllowed",
+    "repair_contains": "body material",
     "repair_string": "Grant the peer body lane only if the operator intends to expose remote body material; otherwise use metadata-only context."
   }
 }

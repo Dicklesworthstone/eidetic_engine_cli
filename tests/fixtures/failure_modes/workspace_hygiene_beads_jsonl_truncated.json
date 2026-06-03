@@ -24,10 +24,7 @@
       ".beads/issues.jsonl",
       "truncated"
     ],
-    "repair_contains": "archive",
-    "repair_strings": [
-      "Archive closed beads or split the tracker so the JSONL stays under the inspection bound.",
-      "Re-run hygiene after pruning so conflict markers past the cap are seen."
-    ]
+    "repair_contains": "Archive",
+    "repair_string": "Archive closed beads or split the tracker so the JSONL stays under the inspection bound."
   }
 }

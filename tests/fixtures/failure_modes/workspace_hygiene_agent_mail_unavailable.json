@@ -26,12 +26,12 @@
     "repair_contains": "Agent Mail",
     "repair_strings": [
       "Provide a redacted Agent Mail snapshot.",
-      "Run `am doctor check` and retry the hygiene report."
+      "Run `am doctor check` against Agent Mail and retry the hygiene report."
     ],
     "repair_command_regex": "Run `(?<cmd>am doctor check)`",
     "repair_safety": [
       {
-        "appliesTo": "Run `am doctor check` and retry the hygiene report.",
+        "appliesTo": "Run `am doctor check` against Agent Mail and retry the hygiene report.",
         "command": "am doctor check",
         "riskClass": "read_only_probe",
         "preflightCommand": null,

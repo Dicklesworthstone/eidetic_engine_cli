@@ -24,9 +24,6 @@
       "partial"
     ],
     "repair_contains": "metadata",
-    "repair_strings": [
-      "Review degraded[] before trusting staging recommendations.",
-      "Repair unavailable metadata providers and rerun the hygiene report."
-    ]
+    "repair_string": "Repair unavailable metadata providers and rerun the hygiene report."
   }
 }

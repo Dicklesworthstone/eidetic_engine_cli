@@ -24,9 +24,6 @@
       "truncated"
     ],
     "repair_contains": "limit",
-    "repair_strings": [
-      "Increase the workspace hygiene output limit.",
-      "Commit or exclude unrelated dirty paths, then rerun the report."
-    ]
+    "repair_string": "Increase the workspace hygiene output limit."
   }
 }

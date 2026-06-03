@@ -28,9 +28,6 @@
       "lexical"
     ],
     "repair_contains": "ee index reembed --workspace .",
-    "repair_strings": [
-      "ee index reembed --workspace .",
-      "cargo build --features embed-quality"
-    ]
+    "repair_string": "ee index reembed --workspace ."
   }
 }

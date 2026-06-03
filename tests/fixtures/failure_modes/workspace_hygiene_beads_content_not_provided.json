@@ -28,7 +28,7 @@
     "repair_contains": "readable",
     "repair_strings": [
       "Ensure .beads/issues.jsonl is readable by the agent so hygiene can scan it for conflict markers.",
-      "Re-run hygiene after restoring read access to the JSONL export."
+      "Re-run hygiene after restoring readable access to the JSONL export."
     ]
   }
 }

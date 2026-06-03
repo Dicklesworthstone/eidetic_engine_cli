@@ -45,9 +45,9 @@
           "beads_mutation_command"
         ],
         "preconditions": [
-          "bead_id_must_be_explicit"
+          "shared_state_coordination_required"
         ],
-        "manualStep": "Announce tracker mutation through the bead thread."
+        "manualStep": "Coordinate before mutating shared tracker state."
       }
     ]
   }

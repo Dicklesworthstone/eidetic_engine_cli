@@ -30,7 +30,7 @@
       "hash",
       "mismatch"
     ],
-    "repair_contains": "quarantine",
+    "repair_contains": "Quarantine",
     "repair_string": "Quarantine the cached peer body, re-sync from the peer, and verify the advertised content hash before using body material."
   }
 }

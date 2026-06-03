@@ -7897,7 +7897,7 @@ ee context 'peer body evidence' --workspace . --memory-scope swarm --json
 
 **Expected emission.** Message contains: `body fetch ... denied ... policy`
 
-**Repair hint.** `bodyFetchAllowed`
+**Repair hint.** `body material`
 
 **Fixture.** [`tests/fixtures/failure_modes/mesh_body_fetch_denied_by_policy.json`](../tests/fixtures/failure_modes/mesh_body_fetch_denied_by_policy.json)
 
@@ -7929,7 +7929,7 @@ ee context 'peer body evidence' --workspace . --memory-scope swarm --json
 
 **Expected emission.** Message contains: `cached body ... hash ... mismatch`
 
-**Repair hint.** `quarantine`
+**Repair hint.** `Quarantine`
 
 **Fixture.** [`tests/fixtures/failure_modes/mesh_cached_body_hash_mismatch.json`](../tests/fixtures/failure_modes/mesh_cached_body_hash_mismatch.json)
 

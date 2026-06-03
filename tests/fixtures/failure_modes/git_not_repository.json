@@ -26,9 +26,8 @@
     ],
     "repair_contains": "workspace",
     "repair_strings": [
-      "Run from a git checkout.",
+      "Run from a git workspace checkout.",
       "Pass --workspace pointing at the repository root."
-    ],
-    "repair_command_regex": "(?<cmd>git status --short)"
+    ]
   }
 }

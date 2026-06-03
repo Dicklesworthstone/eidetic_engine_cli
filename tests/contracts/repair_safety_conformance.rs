@@ -65,25 +65,62 @@ fn read_json(path: &Path) -> Result<Value, String> {
     serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+fn gitless_snapshot_paths(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let base = pattern
+        .strip_suffix("*.json")
+        .ok_or_else(|| {
+            format!("gitless fixture fallback only supports *.json patterns: {pattern}")
+        })?
+        .trim_end_matches('/');
+    let base = root.join(base);
+    let mut paths = Vec::new();
+    collect_json_paths(&base, &mut paths)?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn collect_json_paths(dir: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|error| format!("read {}: {error}", dir.display()))? {
+        let entry =
+            entry.map_err(|error| format!("read entry under {}: {error}", dir.display()))?;
+        let path = entry.path();
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        if metadata.is_dir() {
+            collect_json_paths(&path, paths)?;
+        } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "json") {
+            paths.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn tracked_paths(pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let root = repo_root();
     let output = Command::new("git")
         .arg("ls-files")
         .arg(pattern)
-        .current_dir(repo_root())
+        .current_dir(&root)
         .output()
-        .map_err(|error| format!("spawn git ls-files {pattern}: {error}"))?;
-    ensure(
-        output.status.success(),
-        format!(
-            "git ls-files {pattern} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ),
-    )?;
-    let mut paths = String::from_utf8(output.stdout)
-        .map_err(|error| format!("decode git ls-files {pattern}: {error}"))?
+        .map_err(|error| format!("run git ls-files {pattern}: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("not a git repository") {
+            return gitless_snapshot_paths(&root, pattern);
+        }
+        return Err(format!(
+            "git ls-files {pattern} failed with status {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("git ls-files {pattern} emitted non-UTF-8 stdout: {error}"))?;
+    let mut paths = stdout
         .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| repo_root().join(line))
+        .filter(|path| path.ends_with(".json"))
+        .map(|path| root.join(path))
         .collect::<Vec<_>>();
     paths.sort();
     Ok(paths)
@@ -130,6 +167,109 @@ fn string_array_field(value: &Value, field: &str, ctx: &str) -> TestResult {
         )?;
     }
     Ok(())
+}
+
+fn split_preflight_shell_words(input: &str) -> Result<Vec<String>, String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut in_word = false;
+
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            in_word = true;
+            continue;
+        }
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                    in_word = true;
+                }
+            }
+            Some('"') => {
+                if ch == '"' {
+                    quote = None;
+                } else if ch == '\\' {
+                    escaped = true;
+                    in_word = true;
+                } else {
+                    current.push(ch);
+                    in_word = true;
+                }
+            }
+            Some(other) => return Err(format!("unsupported shell quote `{other}`")),
+            None if ch.is_ascii_whitespace() => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            None if ch == '\'' || ch == '"' => {
+                quote = Some(ch);
+                in_word = true;
+            }
+            None if ch == '\\' => {
+                escaped = true;
+                in_word = true;
+            }
+            None => {
+                current.push(ch);
+                in_word = true;
+            }
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if let Some(quote) = quote {
+        return Err(format!("unterminated shell quote `{quote}`"));
+    }
+    if in_word {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+fn validate_preflight_command_matches(
+    preflight_command: &str,
+    command: &str,
+    ctx: &str,
+) -> TestResult {
+    let words = split_preflight_shell_words(preflight_command)
+        .map_err(|error| format!("{ctx}: invalid preflightCommand shell words: {error}"))?;
+    ensure(
+        words.first().is_some_and(|word| word == "ee")
+            && words.get(1).is_some_and(|word| word == "preflight")
+            && words.get(2).is_some_and(|word| word == "check"),
+        format!("{ctx}: preflightCommand must start with `ee preflight check`"),
+    )?;
+    let cmd_index = words
+        .iter()
+        .position(|word| word == "--cmd")
+        .ok_or_else(|| format!("{ctx}: preflightCommand lacks --cmd"))?;
+    let cmd_arg = words
+        .get(cmd_index + 1)
+        .ok_or_else(|| format!("{ctx}: preflightCommand --cmd lacks a value"))?;
+    ensure(
+        cmd_arg == command,
+        format!("{ctx}: preflightCommand --cmd `{cmd_arg}` does not match command `{command}`"),
+    )?;
+    ensure(
+        words
+            .windows(2)
+            .any(|window| window[0] == "--workspace" && window[1] == "."),
+        format!("{ctx}: preflightCommand must include `--workspace .`"),
+    )?;
+    ensure(
+        words.iter().any(|word| word == "--json"),
+        format!("{ctx}: preflightCommand must include --json"),
+    )
 }
 
 fn command_is_mutating_external(command: &str) -> bool {
@@ -182,6 +322,12 @@ fn validate_repair_safety(
         ),
         format!("{ctx}: source `{source}` is not a repair-safety source"),
     )?;
+
+    if let Some(preflight_command) = preflight_command {
+        let command = command
+            .ok_or_else(|| format!("{ctx}: preflightCommand requires a runnable command"))?;
+        validate_preflight_command_matches(preflight_command, command, ctx)?;
+    }
 
     match risk_class {
         "read_only_probe" => {
@@ -286,6 +432,28 @@ fn validate_repair_safety(
     }
 
     Ok(())
+}
+
+#[test]
+fn repair_safety_preflight_parser_handles_single_quote_escaped_commands() -> TestResult {
+    let command = "br comments add bd-docs.1 --message 'agent_mail timeout database_contention; coordinating via beads until repair'";
+    let preflight_command = r#"ee preflight check --cmd 'br comments add bd-docs.1 --message '\''agent_mail timeout database_contention; coordinating via beads until repair'\''' --workspace . --json"#;
+
+    validate_preflight_command_matches(preflight_command, command, "preflight parser fixture")
+}
+
+#[test]
+fn tracked_paths_include_nested_swarm_work_packet_fixtures() -> TestResult {
+    let paths = tracked_paths("tests/fixtures/swarm_work_packet/*.json")?;
+    let expected =
+        repo_root().join("tests/fixtures/swarm_work_packet/integrity/malformed_jsonl_tail.json");
+    ensure(
+        paths.iter().any(|path| path == &expected),
+        format!(
+            "tracked_paths omitted nested fixture {}",
+            expected.display()
+        ),
+    )
 }
 
 fn walk_fallback_actions(value: &Value, path: &str, errors: &mut Vec<String>) {

@@ -69,25 +69,81 @@
           "kind": "beads_comment",
           "summary": "Record that Agent Mail timed out under database contention and coordinate in Beads until reads recover.",
           "command": "br comments add bd-docs.1 --message 'agent_mail timeout database_contention; coordinating via beads until repair'",
-          "manualStep": null
+          "manualStep": null,
+          "repairSafety": {
+            "riskClass": "mutating_external_coordination_repair",
+            "preflightCommand": "ee preflight check --cmd 'br comments add bd-docs.1 --message '\\''agent_mail timeout database_contention; coordinating via beads until repair'\\''' --workspace . --json",
+            "requiresHumanApproval": false,
+            "mutatesExternalState": true,
+            "mutatesTrackerState": true,
+            "privacyClass": "tracker_metadata_only",
+            "nextAction": "coordinate_first",
+            "ruleId": "repair_safety:mutating_external_coordination_repair",
+            "source": "repair_action_safety",
+            "reasonCode": "beads_comment_coordination_fallback",
+            "evidence": ["agent_mail_database_contention_timeout", "beads_comment_command"],
+            "preconditions": ["shared_state_coordination_required", "bead_id_must_be_explicit"]
+          }
         },
         {
           "kind": "manual_coordination",
           "summary": "Coordinate file-level reservations out of band because inbox and reservation reads are unavailable.",
           "command": null,
-          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths."
+          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "manual_coordination_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command", "shared_state_coordination_required"]
+          }
         },
         {
           "kind": "retry_later",
           "summary": "Retry Agent Mail health and session bootstrap after bounded backoff or storage repair.",
           "command": null,
-          "manualStep": "Re-run Agent Mail health after database contention clears; do not loop while work can proceed through Beads."
+          "manualStep": "Re-run Agent Mail health after database contention clears; do not loop while work can proceed through Beads.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "retry_later_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         },
         {
           "kind": "switch_to_static_work",
           "summary": "Prefer static, docs, or fixture work while coordination authority is unavailable.",
           "command": null,
-          "manualStep": "Avoid claiming peer-touched source lanes until Agent Mail registration and inbox reads recover."
+          "manualStep": "Avoid claiming peer-touched source lanes until Agent Mail registration and inbox reads recover.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "static_work_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         }
       ],
       "semanticReadiness": {

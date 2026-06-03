@@ -962,7 +962,7 @@ pub const STATUS_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "database migration is required",
         jq: r#".. | objects | select(.code? == "migration_required")"#,
-        next_action: "Run `ee db migrate --workspace . --json` before mutating memory state.",
+        next_action: "Run `ee migrate run --workspace . --json` before mutating memory state.",
     },
     FailureBranchEntry {
         condition: "storage or index capability is unavailable",
@@ -1016,73 +1016,68 @@ pub const CONTRACT_RECIPE_FAILURES: &[FailureBranchEntry] = &[
 
 pub const INSTALL_CHECK_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
-        condition: "binary checksum does not match expected",
-        jq: r#".data.checks[]? | select(.code == "checksum_mismatch") | {expected: .expected, actual: .actual, repair}"#,
-        next_action: "Re-download the binary from the official release URL and verify the checksum before replacing.",
+        condition: "install directory cannot be written",
+        jq: r#".data.findings[]? | select(.code == "install_dir_not_writable") | {message, nextAction}"#,
+        next_action: "Choose a writable --install-dir or create the parent directory with appropriate permissions.",
     },
     FailureBranchEntry {
-        condition: "binary not found at expected path",
-        jq: r#".data.checks[]? | select(.code == "binary_not_found") | {path, repair}"#,
-        next_action: "Run `ee install --json` to install the binary or update PATH to include the install directory.",
+        condition: "multiple or shadowing ee binaries are found in PATH",
+        jq: r#".data.findings[]? | select(.code == "duplicate_path_binary" or .code == "current_binary_shadowed") | {message, nextAction}"#,
+        next_action: "Remove stale duplicates or make the intended install directory appear first in PATH.",
     },
     FailureBranchEntry {
-        condition: "multiple ee binaries found in PATH",
-        jq: r#".data.checks[]? | select(.code == "duplicate_binary") | {paths, primary, repair}"#,
-        next_action: "Remove or rename duplicate binaries, keeping only the primary installation.",
-    },
-    FailureBranchEntry {
-        condition: "binary version is outdated",
-        jq: r#".data.checks[]? | select(.code == "version_stale") | {current: .current, latest: .latest, repair}"#,
-        next_action: "Run `ee update --json` to upgrade to the latest version.",
+        condition: "no deterministic update source is configured",
+        jq: r#".data.findings[]? | select(.code == "no_update_source_configured" or .code == "offline_no_manifest") | {message, nextAction}"#,
+        next_action: "Pass --manifest for deterministic offline install or update planning.",
     },
 ];
 
 pub const UPDATE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
-        condition: "network unavailable for update check",
-        jq: r#".data.degraded[]? | select(.code == "network_unavailable") | {message, offlineAction: .repair}"#,
-        next_action: "Defer update until network is available or use `ee update --offline` to apply a cached update.",
+        condition: "manifest is missing in offline update planning",
+        jq: r#".data.findings[]? | select(.code == "manifest_missing" or .code == "offline_no_manifest") | {code, message, nextAction}"#,
+        next_action: "Pass --manifest pointing at a local release manifest and rerun `ee update --dry-run --offline --json`.",
     },
     FailureBranchEntry {
-        condition: "update download failed",
-        jq: r#".error | select(.code == "download_failed") | {url, reason: .message, repair}"#,
-        next_action: "Retry the download or manually fetch from the release URL and run `ee update --from-file`.",
+        condition: "artifact checksum cannot be verified yet",
+        jq: r#".data.findings[]? | select(.code == "checksum_verification_pending") | {message, nextAction}"#,
+        next_action: "Pass --artifact-root pointing at downloaded release artifacts before treating the plan as apply-ready.",
     },
     FailureBranchEntry {
-        condition: "update would break pinned version",
-        jq: r#".data.checks[]? | select(.code == "pinned_version") | {pinnedVersion: .pinned, targetVersion: .target, repair}"#,
-        next_action: "Remove the version pin with `ee config unset version-pin` or use `--force` to override.",
+        condition: "update would downgrade the installed binary",
+        jq: r#".data.findings[]? | select(.code == "would_downgrade") | {message, nextAction}"#,
+        next_action: "Rerun the install/update plan with an explicit --pin value and --allow-downgrade only when rollback is intentional.",
     },
     FailureBranchEntry {
-        condition: "post-update migration required",
-        jq: r#".data.postUpdate[]? | select(.action == "migrate") | {command, reason}"#,
-        next_action: "Run the listed migration command before using new features.",
+        condition: "target artifact is not available for this platform",
+        jq: r#".data.findings[]? | select(.code == "target_mismatch" or .code == "unsupported_target") | {code, message, nextAction}"#,
+        next_action: "Choose a supported --target from the manifest or publish the missing artifact before planning the update.",
     },
 ];
 
 pub const PIN_VERSION_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
-        condition: "specified version does not exist",
-        jq: r#".error | select(.code == "version_not_found") | {requestedVersion: .details.version, available: .details.availableVersions}"#,
-        next_action: "Choose a version from the available list or use `latest` for the most recent stable release.",
+        condition: "manifest or target artifact is unavailable",
+        jq: r#".data.findings[]? | select(.code == "manifest_missing" or .code == "target_mismatch" or .code == "artifact_missing") | {code, message, nextAction}"#,
+        next_action: "Pass --manifest and, when verifying artifacts, --artifact-root that contains the release files.",
     },
     FailureBranchEntry {
-        condition: "version pin already set",
-        jq: r#".data | select(.existingPin) | {existingPin, requestedPin: .newPin}"#,
-        next_action: "Use `--force` to override the existing pin or run `ee config unset version-pin` first.",
+        condition: "pinned version would downgrade the installed binary",
+        jq: r#".data.findings[]? | select(.code == "would_downgrade") | {message, nextAction}"#,
+        next_action: "Add --allow-downgrade only when the rollback is intentional and reviewed.",
     },
 ];
 
 pub const SUPPORT_BUNDLE_RECIPE_FAILURES: &[FailureBranchEntry] = &[
     FailureBranchEntry {
         condition: "bundle creation failed due to permissions",
-        jq: r#".error | select(.code == "permission_denied") | {path, reason: .message}"#,
-        next_action: "Ensure write permissions for the output directory or specify an alternate path with `--output`.",
+        jq: r#".error | select(.code == "storage" or .code == "configuration") | {message, repair}"#,
+        next_action: "Ensure write permissions for the output directory or specify an alternate path with `--out`.",
     },
     FailureBranchEntry {
-        condition: "bundle exceeds size limit",
-        jq: r#".data | select(.truncated) | {actualSize: .sizeBytes, limit: .limitBytes, excludedPaths: .excluded}"#,
-        next_action: "Use `--max-size` to increase the limit or `--exclude` to remove large artifacts.",
+        condition: "dry-run reports no output path",
+        jq: r#".data | select(.dryRun == true) | {filesCollected, totalSizeBytes, outputPath}"#,
+        next_action: "Rerun without --dry-run and pass --out <dir> when an actual bundle artifact is needed.",
     },
 ];
 
@@ -1144,8 +1139,8 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         description: "Check binary presence, checksum, version currency, and PATH conflicts before relying on ee.",
         category: "distribution",
         command: "ee install check --json",
-        jq: r#"{binaryPath: .data.binaryPath, version: .data.version, checksum: .data.checksumValid, pathConflicts: (.data.duplicates // [])}"#,
-        success_check: r#".schema == "ee.response.v2" and .success == true and .data.checksumValid == true"#,
+        jq: r#"{currentBinary: .data.currentBinary.path, version: .data.version, pathStatus: .data.path.status, findings: [.data.findings[]? | {code, message, nextAction}]}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and (.data.findings | map(select(.severity == "error")) | length == 0)"#,
         failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
@@ -1154,37 +1149,37 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         description: "Show what an update would change without modifying the installed binary.",
         category: "distribution",
         command: "ee update --dry-run --json",
-        jq: r#"{currentVersion: .data.current, targetVersion: .data.target, changes: .data.changelog, postUpdateActions: (.data.postUpdate // [])}"#,
+        jq: r#"{currentVersion: .data.currentVersion, targetVersion: .data.targetVersion, status: .data.status, verification: .data.verification, findings: [.data.findings[]? | {code, message, nextAction}]}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: UPDATE_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "version-pin",
         title: "Pin ee to a specific version",
-        description: "Lock the installation to a known version to prevent automatic updates.",
+        description: "Plan an install from a release manifest pinned to a known version.",
         category: "distribution",
-        command: "ee config set version-pin <version> --json",
-        jq: r#"{pinnedVersion: .data.version, pinnedAt: .data.pinnedAt, expiresAt: .data.expiresAt}"#,
+        command: "ee install plan --manifest <manifest> --pin <version> --json",
+        jq: r#"{currentVersion: .data.currentVersion, targetVersion: .data.targetVersion, pinnedVersion: .data.pinnedVersion, status: .data.status}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: PIN_VERSION_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "checksum-recovery",
         title: "Recover from checksum mismatch",
-        description: "Re-verify and reinstall ee binary when checksum validation fails.",
+        description: "Re-plan a verified install when artifact checksum validation fails.",
         category: "distribution",
-        command: "ee install --force --verify-checksum --json",
-        jq: r#"{reinstalled: .data.installed, newChecksum: .data.checksum, previousChecksum: .data.previousChecksum}"#,
-        success_check: r#".schema == "ee.response.v2" and .success == true and .data.checksumValid == true"#,
-        failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
+        command: "ee install plan --manifest <manifest> --artifact-root <artifacts> --json",
+        jq: r#"{status: .data.status, checksumStatus: .data.verification.checksumStatus, findings: [.data.findings[]? | {code, message, nextAction}]}"#,
+        success_check: r#".schema == "ee.response.v2" and .success == true and (.data.verification.checksumStatus == "verified" or .data.status == "idempotent")"#,
+        failure_branches: PIN_VERSION_RECIPE_FAILURES,
     },
     AgentDocsRecipeEntry {
         id: "duplicate-binary-fix",
         title: "Resolve duplicate ee binaries in PATH",
         description: "Identify and remove conflicting ee installations when multiple binaries are found.",
         category: "distribution",
-        command: "ee install diagnose --json",
-        jq: r#"{primaryPath: .data.primary, duplicates: [.data.duplicates[]? | {path, version, recommendation}], repairCommands: .data.repairCommands}"#,
+        command: "ee install check --json",
+        jq: r#"{firstBinary: .data.path.firstBinary, duplicateCount: .data.path.duplicateCount, findings: [.data.findings[]? | {code, message, nextAction}]}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: INSTALL_CHECK_RECIPE_FAILURES,
     },
@@ -1193,8 +1188,8 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         title: "Check offline update readiness",
         description: "Verify cached update availability when network is unavailable.",
         category: "distribution",
-        command: "ee update --offline --check --json",
-        jq: r#"{offlineReady: .data.cachedUpdateAvailable, cachedVersion: .data.cachedVersion, cacheAge: .data.cacheAgeHours, degraded: (.data.degraded // [])}"#,
+        command: "ee update --dry-run --offline --json",
+        jq: r#"{status: .data.status, currentVersion: .data.currentVersion, targetVersion: .data.targetVersion, updateSource: .data.verification.manifestStatus, findings: [.data.findings[]? | {code, message, nextAction}]}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: UPDATE_RECIPE_FAILURES,
     },
@@ -1203,8 +1198,8 @@ pub const AGENT_DOC_RECIPES: &[AgentDocsRecipeEntry] = &[
         title: "Collect support bundle for failed update",
         description: "Gather diagnostic evidence when an install or update fails for support handoff.",
         category: "distribution",
-        command: "ee support-bundle --scope update --json",
-        jq: r#"{bundlePath: .data.path, sizeBytes: .data.sizeBytes, includes: .data.artifacts, binaryProvenance: .data.provenance}"#,
+        command: "ee support bundle --dry-run --json",
+        jq: r#"{outputPath: .data.outputPath, totalSizeBytes: .data.totalSizeBytes, filesCollected: .data.filesCollected, redaction: .data.redactionSummary}"#,
         success_check: r#".schema == "ee.response.v2" and .success == true"#,
         failure_branches: SUPPORT_BUNDLE_RECIPE_FAILURES,
     },
@@ -1551,6 +1546,74 @@ mod tests {
                     "failure next action non-empty",
                 )?;
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn distribution_recipes_document_current_cli_surfaces() -> TestResult {
+        let find_recipe = |id: &str| {
+            AGENT_DOC_RECIPES
+                .iter()
+                .find(|recipe| recipe.id == id)
+                .ok_or_else(|| format!("recipe {id} exists"))
+        };
+
+        ensure_equal(
+            &find_recipe("install-check")?.command,
+            &"ee install check --json",
+            "install check recipe command",
+        )?;
+        ensure_equal(
+            &find_recipe("update-dry-run")?.command,
+            &"ee update --dry-run --json",
+            "update dry-run recipe command",
+        )?;
+        ensure_equal(
+            &find_recipe("duplicate-binary-fix")?.command,
+            &"ee install check --json",
+            "duplicate binary recipe command",
+        )?;
+        ensure_equal(
+            &find_recipe("offline-update-posture")?.command,
+            &"ee update --dry-run --offline --json",
+            "offline update recipe command",
+        )?;
+        ensure_equal(
+            &find_recipe("update-failure-bundle")?.command,
+            &"ee support bundle --dry-run --json",
+            "support bundle recipe command",
+        )?;
+
+        let mut rendered_parts = Vec::new();
+        for recipe in AGENT_DOC_RECIPES {
+            rendered_parts.push(format!(
+                "{}\n{}\n{}\n{}",
+                recipe.command, recipe.jq, recipe.success_check, recipe.description
+            ));
+            for branch in recipe.failure_branches {
+                rendered_parts.push(format!(
+                    "{}\n{}\n{}",
+                    branch.condition, branch.jq, branch.next_action
+                ));
+            }
+        }
+        let rendered = rendered_parts.join("\n");
+        for obsolete in [
+            "install diagnose",
+            "support-bundle",
+            "update --offline --check",
+            "config unset version-pin",
+            "checksumValid",
+            ".data.current,",
+            ".data.target,",
+            ".data.postUpdate",
+            ".data.duplicates",
+        ] {
+            ensure(
+                !rendered.contains(obsolete),
+                format!("agent docs recipes must not advertise obsolete surface `{obsolete}`"),
+            )?;
         }
         Ok(())
     }

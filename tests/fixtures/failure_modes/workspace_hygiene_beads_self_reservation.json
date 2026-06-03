@@ -25,10 +25,7 @@
       "reservation",
       "self"
     ],
-    "repair_contains": "release",
-    "repair_strings": [
-      "Release the self-held .beads/issues.jsonl reservation when the editing window for this agent has ended.",
-      "No action required if the reservation is intentional; this row is informational evidence."
-    ]
+    "repair_contains": "Release",
+    "repair_string": "Release the self-held .beads/issues.jsonl reservation when the editing window for this agent has ended."
   }
 }

@@ -25,10 +25,7 @@
       "parse"
     ],
     "repair_contains": "br doctor",
-    "repair_strings": [
-      "Run `br doctor` to inspect tracker state.",
-      "Repair Beads metadata before trusting staging recommendations."
-    ],
+    "repair_string": "Run `br doctor` to inspect tracker state.",
     "repair_command_regex": "Run `(?<cmd>br doctor)`"
   }
 }

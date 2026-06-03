@@ -67,13 +67,41 @@
           "kind": "manual_coordination",
           "summary": "Coordinate file-level reservations out of band because Agent Mail is unavailable.",
           "command": null,
-          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths."
+          "manualStep": "Confirm lane ownership in the active human coordination channel before touching shared paths.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "manual_coordination_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command", "shared_state_coordination_required"]
+          }
         },
         {
           "kind": "retry_later",
           "summary": "Retry Agent Mail after the storage or transport issue clears.",
           "command": null,
-          "manualStep": "Do not loop on Agent Mail while Beads fallback can still guide static work."
+          "manualStep": "Do not loop on Agent Mail while Beads fallback can still guide static work.",
+          "repairSafety": {
+            "riskClass": "unavailable_or_manual_only",
+            "preflightCommand": null,
+            "requiresHumanApproval": false,
+            "mutatesExternalState": false,
+            "mutatesTrackerState": false,
+            "privacyClass": "no_command",
+            "nextAction": "manual_only",
+            "ruleId": "repair_safety:unavailable_or_manual_only",
+            "source": "work_packet_manual_fallback",
+            "reasonCode": "retry_later_fallback",
+            "evidence": ["agent_mail_fallback_without_command"],
+            "preconditions": ["no_agent_runnable_command"]
+          }
         }
       ],
       "semanticReadiness": {

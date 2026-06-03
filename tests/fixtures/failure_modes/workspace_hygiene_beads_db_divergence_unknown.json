@@ -25,10 +25,30 @@
       "divergence"
     ],
     "repair_contains": "br sync",
-    "repair_strings": [
-      "Run `br sync --flush-only` to reconcile the Beads DB with the JSONL export.",
-      "Run `br doctor` to inspect tracker state and confirm DB/JSONL alignment."
-    ],
-    "repair_command_regex": "Run `(?<cmd>br (?:sync --flush-only|doctor))`"
+    "repair_string": "Run `br sync --flush-only` to reconcile the Beads DB with the JSONL export.",
+    "repair_command_regex": "Run `(?<cmd>br sync --flush-only)`",
+    "repair_safety": [
+      {
+        "appliesTo": "Run `br sync --flush-only` to reconcile the Beads DB with the JSONL export.",
+        "command": "br sync --flush-only",
+        "riskClass": "mutating_external_coordination_repair",
+        "preflightCommand": "ee preflight check --cmd 'br sync --flush-only' --workspace . --json",
+        "requiresHumanApproval": false,
+        "mutatesExternalState": true,
+        "mutatesTrackerState": true,
+        "privacyClass": "tracker_metadata_only",
+        "manualStep": "Coordinate before mutating shared tracker state.",
+        "nextAction": "coordinate_first",
+        "ruleId": "repair_safety:mutating_external_coordination_repair",
+        "source": "repair_action_safety",
+        "reasonCode": "external_coordination_repair_command",
+        "evidence": [
+          "beads_mutation_command"
+        ],
+        "preconditions": [
+          "shared_state_coordination_required"
+        ]
+      }
+    ]
   }
 }

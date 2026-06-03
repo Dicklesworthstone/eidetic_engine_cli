@@ -27,12 +27,12 @@
     "repair_contains": "Agent Mail",
     "repair_strings": [
       "Retry with a current Agent Mail snapshot.",
-      "Run `am doctor check` before collecting coordination overlays."
+      "Run `am doctor check` against Agent Mail before collecting coordination overlays."
     ],
     "repair_command_regex": "Run `(?<cmd>am doctor check)`",
     "repair_safety": [
       {
-        "appliesTo": "Run `am doctor check` before collecting coordination overlays.",
+        "appliesTo": "Run `am doctor check` against Agent Mail before collecting coordination overlays.",
         "command": "am doctor check",
         "riskClass": "read_only_probe",
         "preflightCommand": null,
