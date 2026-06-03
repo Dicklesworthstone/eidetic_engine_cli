@@ -134,9 +134,13 @@ use crate::core::lab::{
     CaptureOptions as LabCaptureOptions, CounterfactualOptions as LabCounterfactualOptions,
     DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS, InterventionSpec,
     LAB_COUNTERFACTUAL_MULTI_SWAP_UNSUPPORTED_CODE, ReplayOptions as LabReplayOptions,
-    SwapRevisionMode, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile, SwarmWorkloadTrace,
-    capture_episode, generate_swarm_workload_fixture, replay_agent_workload_trace, replay_episode,
-    run_counterfactual,
+    SwapRevisionMode, SwarmReplayHostPathPosture, SwarmReplayHostProfileObservation,
+    SwarmReplayOptions as LabSwarmReplayOptions, SwarmReplayResult, SwarmReplayStatus,
+    SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile,
+    SwarmWorkloadPromotionOptions as LabSwarmWorkloadPromotionOptions, SwarmWorkloadTrace,
+    capture_episode, generate_swarm_workload_fixture,
+    promote_agent_workload_trace_to_swarm_workload, replay_agent_workload_trace, replay_episode,
+    replay_swarm_workload_trace, run_counterfactual,
 };
 use crate::core::learn::{
     LearnCloseOptions, LearnExperimentProposeOptions, LearnExperimentRunOptions,
@@ -4262,8 +4266,13 @@ pub enum LabCommand {
     Capture(LabCaptureArgs),
     /// Replay a captured episode with the same memory state.
     Replay(LabReplayArgs),
+    /// Replay and admit redaction-safe swarm workload traces.
+    #[command(subcommand)]
+    Swarm(LabSwarmCommand),
     /// Generate a deterministic redaction-safe swarm workload fixture.
     GenerateWorkload(LabGenerateWorkloadArgs),
+    /// Promote redacted agent workload traces into recorded swarm workload fixtures.
+    PromoteWorkload(LabPromoteWorkloadArgs),
     /// Run a counterfactual replay with memory interventions.
     Counterfactual(LabCounterfactualArgs),
 }
@@ -4288,6 +4297,13 @@ impl From<LabSwarmWorkloadProfile> for SwarmWorkloadFixtureProfile {
             LabSwarmWorkloadProfile::Large => Self::Large,
         }
     }
+}
+
+/// Swarm lab subcommands.
+#[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
+pub enum LabSwarmCommand {
+    /// Replay a redaction-safe ee.swarm_workload.v1 trace.
+    Replay(LabSwarmReplayArgs),
 }
 
 /// Arguments for `ee lab capture`.
@@ -4352,6 +4368,38 @@ pub struct LabGenerateWorkloadArgs {
     /// Built-in workload profile to generate.
     #[arg(long, value_enum, default_value_t = LabSwarmWorkloadProfile::Small)]
     pub profile: LabSwarmWorkloadProfile,
+}
+
+/// Arguments for `ee lab promote-workload`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabPromoteWorkloadArgs {
+    /// Redacted ee.agent_workload_trace.v1 JSONL trace.
+    #[arg(long, value_name = "TRACE_JSONL")]
+    pub trace: PathBuf,
+
+    /// Agent count to encode in the promoted swarm workload.
+    #[arg(long, default_value_t = DEFAULT_AGENT_WORKLOAD_REPLAY_AGENTS)]
+    pub agents: u16,
+
+    /// Replay-admission profile for resource hints.
+    #[arg(long, value_enum, default_value_t = LabSwarmWorkloadProfile::Small)]
+    pub profile: LabSwarmWorkloadProfile,
+}
+
+/// Arguments for `ee lab swarm replay`.
+#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+pub struct LabSwarmReplayArgs {
+    /// Redaction-safe ee.swarm_workload.v1 JSON trace.
+    #[arg(long, value_name = "TRACE_JSON")]
+    pub trace: PathBuf,
+
+    /// Optional `scripts/rch_verify.sh` JSON proof to summarize in the replay ledger.
+    #[arg(long = "rch-proof", value_name = "RCH_VERIFY_JSON")]
+    pub rch_proof: Option<PathBuf>,
+
+    /// Build a deterministic admission ledger without executing commands.
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `ee lab counterfactual`.
@@ -10823,8 +10871,14 @@ where
         Some(Command::Lab(LabCommand::Replay(ref args))) => {
             handle_lab_replay(&cli, args, stdout, stderr)
         }
+        Some(Command::Lab(LabCommand::Swarm(LabSwarmCommand::Replay(ref args)))) => {
+            handle_lab_swarm_replay(&cli, args, stdout, stderr)
+        }
         Some(Command::Lab(LabCommand::GenerateWorkload(ref args))) => {
             handle_lab_generate_workload(&cli, args, stdout, stderr)
+        }
+        Some(Command::Lab(LabCommand::PromoteWorkload(ref args))) => {
+            handle_lab_promote_workload(&cli, args, stdout, stderr)
         }
         Some(Command::Lab(LabCommand::Counterfactual(ref args))) => {
             handle_lab_counterfactual(&cli, args, stdout, stderr)
@@ -17049,6 +17103,22 @@ where
     write_stdout(stdout, &(trace.to_json() + "\n"))
 }
 
+fn write_lab_swarm_replay_result<W>(
+    _cli: &Cli,
+    report: &SwarmReplayResult,
+    stdout: &mut W,
+) -> ProcessExitCode
+where
+    W: Write,
+{
+    let write_exit = write_stdout(stdout, &(report.to_json() + "\n"));
+    if write_exit == ProcessExitCode::Success && report.status != SwarmReplayStatus::Pass {
+        ProcessExitCode::UnsatisfiedDegradedMode
+    } else {
+        write_exit
+    }
+}
+
 fn write_lab_counterfactual_report<W>(
     cli: &Cli,
     report: &crate::core::lab::CounterfactualReport,
@@ -17160,6 +17230,66 @@ where
     }
 }
 
+fn handle_lab_swarm_replay<W, E>(
+    cli: &Cli,
+    args: &LabSwarmReplayArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LabSwarmReplayOptions {
+        workspace: lab_workspace(cli),
+        trace_path: args.trace.clone(),
+        dry_run: args.dry_run,
+        host_observation: lab_swarm_replay_host_observation(cli),
+        ee_binary_path: std::env::current_exe().ok(),
+        rch_proof_path: args.rch_proof.clone(),
+    };
+
+    match replay_swarm_workload_trace(&options) {
+        Ok(report) => write_lab_swarm_replay_result(cli, &report, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
+}
+
+fn lab_swarm_replay_host_observation(cli: &Cli) -> SwarmReplayHostProfileObservation {
+    let logical_cpu_count = std::thread::available_parallelism()
+        .ok()
+        .and_then(|count| u16::try_from(count.get()).ok());
+    let workspace = lab_workspace(cli);
+    SwarmReplayHostProfileObservation {
+        logical_cpu_count,
+        available_memory_mb: None,
+        target_dir_posture: lab_host_path_posture("CARGO_TARGET_DIR"),
+        tmpdir_posture: lab_host_path_posture("TMPDIR"),
+        rch_available: Some(
+            workspace.join("scripts").join("rch_verify.sh").is_file()
+                || Path::new("scripts/rch_verify.sh").is_file(),
+        ),
+        numa_available: None,
+        lexical_ram_tier_available: None,
+        path_tail_hashes: Vec::new(),
+    }
+}
+
+fn lab_host_path_posture(env_var: &str) -> SwarmReplayHostPathPosture {
+    let Some(value) = std::env::var_os(env_var) else {
+        return SwarmReplayHostPathPosture::Unknown;
+    };
+    if value.is_empty() {
+        return SwarmReplayHostPathPosture::Unknown;
+    }
+    let path = PathBuf::from(value);
+    if path.starts_with("/Volumes") {
+        SwarmReplayHostPathPosture::External
+    } else {
+        SwarmReplayHostPathPosture::Local
+    }
+}
+
 fn handle_lab_generate_workload<W, E>(
     cli: &Cli,
     args: &LabGenerateWorkloadArgs,
@@ -17177,6 +17307,28 @@ where
     let options = SwarmWorkloadFixtureOptions::new(args.profile.into(), args.fixture_seed.clone());
     let trace = generate_swarm_workload_fixture(&options);
     write_lab_swarm_workload_trace(cli, &trace, stdout)
+}
+
+fn handle_lab_promote_workload<W, E>(
+    cli: &Cli,
+    args: &LabPromoteWorkloadArgs,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> ProcessExitCode
+where
+    W: Write,
+    E: Write,
+{
+    let options = LabSwarmWorkloadPromotionOptions {
+        trace_path: args.trace.clone(),
+        agent_count: args.agents,
+        profile: args.profile.into(),
+    };
+
+    match promote_agent_workload_trace_to_swarm_workload(&options) {
+        Ok(trace) => write_lab_swarm_workload_trace(cli, &trace, stdout),
+        Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
+    }
 }
 
 fn validate_lab_swarm_fixture_seed(seed: &str) -> Result<(), DomainError> {
@@ -47649,7 +47801,11 @@ impl NormalizedInvocation {
                 Command::Lab(lab) => match lab {
                     LabCommand::Capture(_) => "lab capture".to_string(),
                     LabCommand::Replay(_) => "lab replay".to_string(),
+                    LabCommand::Swarm(swarm) => match swarm {
+                        LabSwarmCommand::Replay(_) => "lab swarm replay".to_string(),
+                    },
                     LabCommand::GenerateWorkload(_) => "lab generate-workload".to_string(),
+                    LabCommand::PromoteWorkload(_) => "lab promote-workload".to_string(),
                     LabCommand::Counterfactual(_) => "lab counterfactual".to_string(),
                 },
                 Command::Learn(learn) => match learn {
@@ -48598,10 +48754,11 @@ mod tests {
         COORDINATION_FALLBACK_INGEST_SCHEMA_V1, COORDINATION_FALLBACK_LEDGER_FILE, Cli, Command,
         ContextPackProfile, CurateCommand, DaemonCommand, DiagCommand, DiagQuarantineCommand,
         DomainError, EconomyCommand, EffectiveRedactionLevel, FieldsLevel, FocusCommand,
-        GraphCommand, GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand, LearnCommand,
-        LearnExperimentCommand, MIGRATION_REPAIR_COMMAND, MaintenanceCommand,
-        MaintenanceWalCheckpointArgs, MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat,
-        PackCommand, PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
+        GraphCommand, GraphSnapshotCommand, HandoffCommand, HookCommand, LabCommand,
+        LabSwarmCommand, LabSwarmWorkloadProfile, LearnCommand, LearnExperimentCommand,
+        MIGRATION_REPAIR_COMMAND, MaintenanceCommand, MaintenanceWalCheckpointArgs,
+        MaintenanceWalCheckpointMode, MemoryCommand, OutputFormat, PackCommand,
+        PackOutputProfileArg, PlaybookCommand, RedactionLevelSource, ReflectCommand,
         ReflectRequestLedgerCommand, RuleCommand, ShadowMode, SituationCommand, StatusArgs,
         SupportCommand, SwarmBriefArgs, SwarmCommand, SwarmWorkPacketArgs, TaskFrameCommand,
         TaskFrameSubgoalCommand, VerifyCommand, VerifyRchCommand, WorkflowCommand,
@@ -57297,6 +57454,72 @@ mod tests {
             }
             other => Err(format!(
                 "expected lab counterfactual command, got {other:?}"
+            )),
+        }
+    }
+
+    #[test]
+    fn lab_swarm_replay_trace_flags_parse() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "lab",
+            "swarm",
+            "replay",
+            "--trace",
+            "fixtures/swarm-workload.json",
+            "--rch-proof",
+            "fixtures/rch-proof.json",
+            "--dry-run",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse lab swarm replay: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Lab(LabCommand::Swarm(LabSwarmCommand::Replay(args)))) => {
+                ensure_equal(
+                    &args.trace,
+                    &PathBuf::from("fixtures/swarm-workload.json"),
+                    "trace path",
+                )?;
+                ensure_equal(
+                    &args.rch_proof,
+                    &Some(PathBuf::from("fixtures/rch-proof.json")),
+                    "rch proof path",
+                )?;
+                ensure_equal(&args.dry_run, &true, "dry-run flag")
+            }
+            other => Err(format!("expected lab swarm replay command, got {other:?}")),
+        }
+    }
+
+    #[test]
+    fn lab_promote_workload_flags_parse() -> TestResult {
+        let parsed = Cli::try_parse_from([
+            "ee",
+            "lab",
+            "promote-workload",
+            "--trace",
+            "fixtures/redacted-trace.jsonl",
+            "--agents",
+            "32",
+            "--profile",
+            "medium",
+            "--json",
+        ])
+        .map_err(|e| format!("failed to parse lab promote-workload: {:?}", e.kind()))?;
+
+        match parsed.command {
+            Some(Command::Lab(LabCommand::PromoteWorkload(args))) => {
+                ensure_equal(
+                    &args.trace,
+                    &PathBuf::from("fixtures/redacted-trace.jsonl"),
+                    "trace path",
+                )?;
+                ensure_equal(&args.agents, &32u16, "agents")?;
+                ensure_equal(&args.profile, &LabSwarmWorkloadProfile::Medium, "profile")
+            }
+            other => Err(format!(
+                "expected lab promote-workload command, got {other:?}"
             )),
         }
     }

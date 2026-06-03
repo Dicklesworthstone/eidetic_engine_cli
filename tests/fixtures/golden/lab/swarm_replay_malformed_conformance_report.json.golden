@@ -1,0 +1,544 @@
+{
+  "schema": "ee.swarm_replay_malformed_conformance_report.v1",
+  "beadId": "bd-ppbue.12",
+  "workloadSchema": "ee.swarm_workload.v1",
+  "replayResultSchema": "ee.swarm_replay_result.v1",
+  "supportBundleSafety": {
+    "rawTraceBodiesIncluded": false,
+    "rawCommandStringsIncluded": false,
+    "privateAbsolutePathsIncluded": false,
+    "dynamicHostFieldsIncluded": false
+  },
+  "coverage": {
+    "malformedCases": 16,
+    "refusalCases": 2,
+    "adversarialLedgerCases": 3,
+    "boundedFuzzCases": 36,
+    "totalEntries": 57
+  },
+  "guarantees": [
+    "no_panic",
+    "bounded_trace_bytes",
+    "bounded_command_count",
+    "deterministic_ordering",
+    "stable_error_or_degraded_codes",
+    "stdout_machine_data_only",
+    "support_bundle_safe",
+    "no_local_cargo_fallback"
+  ],
+  "entries": [
+    {
+      "requirementId": "swarm-trace-json-syntax",
+      "fixtureId": "malformed-json",
+      "fixturePath": "generated://swarm-replay/malformed-json",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "json_decode_failed",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-trace-top-level-object",
+      "fixtureId": "non-object-top-level",
+      "fixturePath": "generated://swarm-replay/non-object-top-level",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-trace-schema-required",
+      "fixtureId": "missing-schema",
+      "fixturePath": "generated://swarm-replay/missing-schema",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-trace-schema-version",
+      "fixtureId": "wrong-schema",
+      "fixturePath": "generated://swarm-replay/wrong-schema",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-generator-evidence-schema",
+      "fixtureId": "wrong-generator-evidence-schema",
+      "fixturePath": "generated://swarm-replay/wrong-generator-evidence-schema",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-generator-evidence-schema-id",
+      "fixtureId": "wrong-generator-schema-id",
+      "fixturePath": "generated://swarm-replay/wrong-generator-schema-id",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-side-effect-free",
+      "fixtureId": "side-effect-free-false",
+      "fixturePath": "generated://swarm-replay/side-effect-free-false",
+      "expectedOutcome": "error",
+      "expectedCode": "policy_denied",
+      "schemaValidationStatus": "schema_valid_policy_denied",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-agent-count-positive",
+      "fixtureId": "zero-agents",
+      "fixturePath": "generated://swarm-replay/zero-agents",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-command-sequence-nonempty",
+      "fixtureId": "empty-command-sequence",
+      "fixturePath": "generated://swarm-replay/empty-command-sequence",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-command-sequence-count-cap",
+      "fixtureId": "excessive-command-sequence",
+      "fixturePath": "generated://swarm-replay/excessive-command-sequence",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid_command_count_cap",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-step-id-nonempty",
+      "fixtureId": "empty-step-id",
+      "fixturePath": "generated://swarm-replay/empty-step-id",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-step-id-unique",
+      "fixtureId": "duplicate-step-id",
+      "fixturePath": "generated://swarm-replay/duplicate-step-id",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-agent-slot-range",
+      "fixtureId": "agent-slot-out-of-range",
+      "fixturePath": "generated://swarm-replay/agent-slot-out-of-range",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-command-verbs-nonempty",
+      "fixtureId": "empty-command-verbs",
+      "fixturePath": "generated://swarm-replay/empty-command-verbs",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-command-hash-nonempty",
+      "fixtureId": "empty-command-hash",
+      "fixturePath": "generated://swarm-replay/empty-command-hash",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-step-dependency-resolves",
+      "fixtureId": "unknown-step-dependency",
+      "fixturePath": "generated://swarm-replay/unknown-step-dependency",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-local-cargo-refused",
+      "fixtureId": "local-cargo-command-shape",
+      "fixturePath": "generated://swarm-replay/local-cargo-command-shape",
+      "expectedOutcome": "blocked-ledger",
+      "expectedCode": "swarm_replay_local_cargo_refused",
+      "schemaValidationStatus": "schema_valid_runner_refused",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-command-allowlist",
+      "fixtureId": "destructive-shell-command-shape",
+      "fixturePath": "generated://swarm-replay/destructive-shell-command-shape",
+      "expectedOutcome": "blocked-ledger",
+      "expectedCode": "swarm_replay_command_not_allowlisted",
+      "schemaValidationStatus": "schema_valid_runner_refused",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-redaction-probes-present",
+      "fixtureId": "empty-redaction-probes",
+      "fixturePath": "generated://swarm-replay/empty-redaction-probes",
+      "expectedOutcome": "degraded-ledger",
+      "expectedCode": "redaction_probes_passed_false",
+      "schemaValidationStatus": "schema_valid_static_check_failed",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-private-path-metadata-not-rendered",
+      "fixtureId": "private-path-tail-hash",
+      "fixturePath": "generated://swarm-replay/private-path-tail-hash",
+      "expectedOutcome": "degraded-ledger",
+      "expectedCode": "private_path_not_rendered",
+      "schemaValidationStatus": "schema_valid_support_bundle_redacted",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-redaction-probe-secret-hash-not-rendered",
+      "fixtureId": "secret-shaped-redaction-probe-hash",
+      "fixturePath": "generated://swarm-replay/secret-shaped-redaction-probe-hash",
+      "expectedOutcome": "degraded-ledger",
+      "expectedCode": "secret_probe_hash_not_rendered",
+      "schemaValidationStatus": "schema_valid_support_bundle_redacted",
+      "testSurface": "contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-00",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-00",
+      "expectedOutcome": "valid-ledger",
+      "expectedCode": "none",
+      "schemaValidationStatus": "schema_valid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-01",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-01",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "json_shape_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-02",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-02",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-03",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-03",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-04",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-04",
+      "expectedOutcome": "error",
+      "expectedCode": "policy_denied",
+      "schemaValidationStatus": "schema_valid_policy_denied",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-05",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-05",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-06",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-06",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-07",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-07",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-08",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-08",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-09",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-09",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-10",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-10",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-11",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-11",
+      "expectedOutcome": "blocked-ledger",
+      "expectedCode": "swarm_replay_command_not_allowlisted",
+      "schemaValidationStatus": "schema_valid_runner_refused",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-12",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-12",
+      "expectedOutcome": "valid-ledger",
+      "expectedCode": "none",
+      "schemaValidationStatus": "schema_valid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-13",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-13",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "json_shape_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-14",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-14",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-15",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-15",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-16",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-16",
+      "expectedOutcome": "error",
+      "expectedCode": "policy_denied",
+      "schemaValidationStatus": "schema_valid_policy_denied",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-17",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-17",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-18",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-18",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-19",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-19",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-20",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-20",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-21",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-21",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-22",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-22",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-23",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-23",
+      "expectedOutcome": "blocked-ledger",
+      "expectedCode": "swarm_replay_command_not_allowlisted",
+      "schemaValidationStatus": "schema_valid_runner_refused",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-24",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-24",
+      "expectedOutcome": "valid-ledger",
+      "expectedCode": "none",
+      "schemaValidationStatus": "schema_valid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-25",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-25",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "json_shape_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-26",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-26",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-27",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-27",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-28",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-28",
+      "expectedOutcome": "error",
+      "expectedCode": "policy_denied",
+      "schemaValidationStatus": "schema_valid_policy_denied",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-29",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-29",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-30",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-30",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-31",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-31",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-32",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-32",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-33",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-33",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-34",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-34",
+      "expectedOutcome": "error",
+      "expectedCode": "usage",
+      "schemaValidationStatus": "schema_invalid",
+      "testSurface": "bounded-fuzz-contract"
+    },
+    {
+      "requirementId": "swarm-structure-aware-parser-validator-fuzz",
+      "fixtureId": "bounded-structure-fuzz-35",
+      "fixturePath": "generated://swarm-replay/bounded-structure-fuzz-35",
+      "expectedOutcome": "blocked-ledger",
+      "expectedCode": "swarm_replay_command_not_allowlisted",
+      "schemaValidationStatus": "schema_valid_runner_refused",
+      "testSurface": "bounded-fuzz-contract"
+    }
+  ]
+}

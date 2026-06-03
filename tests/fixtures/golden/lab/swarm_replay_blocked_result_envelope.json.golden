@@ -1,0 +1,54 @@
+{
+  "aggregate": {
+    "commandCount": 1,
+    "degradedCount": 1,
+    "failureCount": 1,
+    "successCount": 0
+  },
+  "commandResults": [
+    {
+      "artifactPathCount": 0,
+      "commandHash": "[HASH]",
+      "degradedCodes": [
+        "swarm_replay_command_not_allowlisted"
+      ],
+      "exitCode": 1,
+      "redactionStatus": "clean",
+      "stepId": "[STEP_ID]"
+    }
+  ],
+  "expectedCode": "swarm_replay_command_not_allowlisted",
+  "expectedOutcome": "blocked-ledger",
+  "firstFailure": {
+    "agentSlotMatchesCommandResult": true,
+    "code": "swarm_replay_command_not_allowlisted",
+    "diagnosis": "command shape is outside the redaction-safe swarm replay allowlist",
+    "repairHint": "Regenerate the workload with supported ee command shapes.",
+    "severity": "medium",
+    "stepId": "[STEP_ID]"
+  },
+  "fixtureId": "destructive-shell-command-shape",
+  "fixturePath": "generated://swarm-replay/destructive-shell-command-shape",
+  "schema": "ee.swarm_replay_blocked_result_envelope_golden.v1",
+  "sideEffectFree": true,
+  "sourceSchema": "ee.swarm_replay_result.v1",
+  "status": "blocked",
+  "supportBundleSafety": {
+    "fullResultRedacted": true,
+    "privateAbsolutePathsIncluded": false,
+    "rawCommandStringsIncluded": false,
+    "rawTraceBodiesIncluded": false
+  },
+  "verification": {
+    "deterministic": true,
+    "proofLevel": "static_replay_only",
+    "rchRequired": false,
+    "rchStatus": "not_required",
+    "volatileFieldsStripped": [
+      "workspace",
+      "trace_path",
+      "wall_clock",
+      "elapsed_ms"
+    ]
+  }
+}

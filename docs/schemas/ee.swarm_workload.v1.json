@@ -254,6 +254,12 @@
           "type": ["integer", "null"],
           "minimum": 0
         },
+        "sloExemptionRationale": {
+          "description": "Optional rationale for commands intentionally exempted from default replay SLO enforcement. Use only for heavy support, lab, or verification surfaces where the trace must explain why normal agent-interactive budgets do not apply.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "maxLength": 120
+        },
         "dependsOn": {
           "type": "array",
           "uniqueItems": true,
@@ -376,7 +382,7 @@
       }
     },
     "generatorEvidence": {
-      "description": "Support-bundle-safe evidence emitted by deterministic fixture generation. Counts must be derived from the generated trace and hashes must not expose raw workspace paths or probe strings.",
+      "description": "Support-bundle-safe evidence emitted by deterministic fixture generation or redacted trace promotion. Counts must be derived from the emitted trace and hashes must not expose raw workspace paths, probe strings, raw prompts, raw query text, memory bodies, mail bodies, secrets, environment dumps, full file listings, or absolute host paths.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -402,7 +408,7 @@
         },
         "profile": {
           "type": "string",
-          "enum": ["small", "medium", "large"]
+          "enum": ["small", "medium", "large", "recorded", "mixed"]
         },
         "workspacePathHash": {
           "$ref": "#/$defs/blake3Hash"

@@ -204,6 +204,7 @@
       "expectedSchema": "ee.response.v2",
       "expectedExitCode": 0,
       "timeoutMs": 4000,
+      "sloExemptionRationale": "support_bundle_dry_run_is_intentionally_heavy",
       "dependsOn": [
         "step_008"
       ]

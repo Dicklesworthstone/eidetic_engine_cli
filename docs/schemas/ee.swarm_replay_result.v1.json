@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eidetic-engine/schemas/ee.swarm_replay_result.v1.json",
   "title": "ee.swarm_replay_result.v1",
-  "description": "Compact deterministic result ledger for a multi-agent swarm workload replay. It records host-profile admission, per-command latency, stdout/stderr byte counts, degraded codes, exit code, redaction status, optional resource measurements, command hashes, redacted artifact references, first-failure diagnosis, and verification posture without raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
+  "description": "Compact deterministic result ledger for a multi-agent swarm workload replay. It records host-profile admission, per-command latency, stdout/stderr byte counts, degraded codes, exit code, redaction status, agent-facing SLO budget classifications, optional resource measurements, command hashes, redacted artifact references, first-failure diagnosis, and verification posture with optional proof capsules. It does not carry raw task strings, raw query text, memory bodies, mail bodies, command output, secrets, environment dumps, full file listings, or absolute host paths.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -151,6 +151,29 @@
             }
           ],
           "redactionStatus": "clean",
+          "slo": {
+            "class": "interactive_agent",
+            "status": "pass",
+            "budget": {
+              "latencyWarningMs": 2500,
+              "latencyFailureMs": 7500,
+              "stdoutWarningBytes": 16384,
+              "stdoutFailureBytes": 65536,
+              "stderrWarningBytes": 4096,
+              "stderrFailureBytes": 16384,
+              "degradedWarningCount": 0,
+              "degradedFailureCount": 2
+            },
+            "latencyStatus": "pass",
+            "stdoutStatus": "pass",
+            "stderrStatus": "pass",
+            "degradedCountStatus": "pass",
+            "discoverabilityStatus": "pass",
+            "warningDimensions": [],
+            "failedDimensions": [],
+            "diagnosis": null,
+            "exemptionRationale": null
+          },
           "memoryRssBytes": 73400320,
           "cpuMs": 73
         }
@@ -160,6 +183,11 @@
         "successCount": 1,
         "failureCount": 0,
         "degradedCount": 0,
+        "sloPassCount": 1,
+        "sloWarningCount": 0,
+        "sloFailureCount": 0,
+        "sloExemptCount": 0,
+        "firstSloFailureStepId": null,
         "elapsedMsTotal": 184,
         "p50Ms": 184,
         "p95Ms": 184,
@@ -187,6 +215,43 @@
       "verification": {
         "rchRequired": true,
         "rchStatus": "passed",
+        "proofCapsule": {
+          "schema": "ee.swarm_replay.verification_capsule.v1",
+          "proofLevel": "remote_verified",
+          "staticChecks": [
+            {
+              "name": "workload_hash",
+              "status": "passed",
+              "evidence": "blake3:5555555555555555555555555555555555555555555555555555555555555555"
+            }
+          ],
+          "rch": {
+            "sourceSchema": "ee.rch.verify.v1",
+            "status": "remote_pass",
+            "commandHash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "commandKind": "cargo_test",
+            "workerId": "vmi1227854",
+            "remoteMarkerPresent": true,
+            "cargoStarted": true,
+            "localFallbackRefused": false,
+            "localFallbackDetected": false,
+            "localCargoProcessCount": 0,
+            "degradedCodes": [],
+            "selectorAdmission": {
+              "status": "selected",
+              "requiredRuntime": "Rust",
+              "selectedWorker": "vmi1227854",
+              "selectionFailureReason": null,
+              "workersVsSelectionContradiction": false,
+              "pathNormalizationWarning": null,
+              "remoteRequired": true,
+              "localFallbackRefused": false
+            },
+            "knownBlocker": null,
+            "rawOutputIncluded": false,
+            "localPathsRedacted": true
+          }
+        },
         "deterministic": true,
         "workloadHash": "blake3:5555555555555555555555555555555555555555555555555555555555555555",
         "replayHash": "blake3:6666666666666666666666666666666666666666666666666666666666666666",
@@ -203,6 +268,10 @@
     "blake3Hash": {
       "type": "string",
       "pattern": "^blake3:[A-Fa-f0-9]{16,128}$"
+    },
+    "verificationCommandHash": {
+      "type": "string",
+      "pattern": "^((blake3|sha256):)?[A-Fa-f0-9]{16,128}$"
     },
     "stepId": {
       "type": "string",
@@ -324,7 +393,8 @@
         "stderrBytes",
         "degradedCodes",
         "artifactPaths",
-        "redactionStatus"
+        "redactionStatus",
+        "slo"
       ],
       "properties": {
         "stepId": {
@@ -373,12 +443,145 @@
           "type": "string",
           "enum": ["clean", "redacted", "probe_failed"]
         },
+        "slo": {
+          "$ref": "#/$defs/commandSlo"
+        },
         "memoryRssBytes": {
           "type": ["integer", "null"],
           "minimum": 0
         },
         "cpuMs": {
           "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "commandSlo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "status",
+        "budget",
+        "latencyStatus",
+        "stdoutStatus",
+        "stderrStatus",
+        "degradedCountStatus",
+        "discoverabilityStatus",
+        "warningDimensions",
+        "failedDimensions",
+        "diagnosis",
+        "exemptionRationale"
+      ],
+      "properties": {
+        "class": {
+          "type": "string",
+          "enum": ["interactive_agent", "diagnostic", "heavy_lab"]
+        },
+        "status": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "budget": {
+          "$ref": "#/$defs/sloBudget"
+        },
+        "latencyStatus": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "stdoutStatus": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "stderrStatus": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "degradedCountStatus": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "discoverabilityStatus": {
+          "$ref": "#/$defs/sloStatus"
+        },
+        "warningDimensions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sloDimension"
+          }
+        },
+        "failedDimensions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sloDimension"
+          }
+        },
+        "diagnosis": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "exemptionRationale": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_.-]*$",
+          "maxLength": 120
+        }
+      }
+    },
+    "sloStatus": {
+      "type": "string",
+      "enum": ["pass", "warn", "fail", "exempt"]
+    },
+    "sloDimension": {
+      "type": "string",
+      "enum": [
+        "latency",
+        "stdout_bytes",
+        "stderr_bytes",
+        "degraded_count",
+        "discoverability"
+      ]
+    },
+    "sloBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "latencyWarningMs",
+        "latencyFailureMs",
+        "stdoutWarningBytes",
+        "stdoutFailureBytes",
+        "stderrWarningBytes",
+        "stderrFailureBytes",
+        "degradedWarningCount",
+        "degradedFailureCount"
+      ],
+      "properties": {
+        "latencyWarningMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "latencyFailureMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdoutWarningBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stdoutFailureBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stderrWarningBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stderrFailureBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degradedWarningCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degradedFailureCount": {
+          "type": "integer",
           "minimum": 0
         }
       }
@@ -416,6 +619,11 @@
         "successCount",
         "failureCount",
         "degradedCount",
+        "sloPassCount",
+        "sloWarningCount",
+        "sloFailureCount",
+        "sloExemptCount",
+        "firstSloFailureStepId",
         "elapsedMsTotal",
         "p50Ms",
         "p95Ms",
@@ -437,6 +645,32 @@
         "degradedCount": {
           "type": "integer",
           "minimum": 0
+        },
+        "sloPassCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sloWarningCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sloFailureCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sloExemptCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "firstSloFailureStepId": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/stepId"
+            }
+          ]
         },
         "elapsedMsTotal": {
           "type": "integer",
@@ -578,6 +812,7 @@
       "required": [
         "rchRequired",
         "rchStatus",
+        "proofCapsule",
         "deterministic",
         "workloadHash",
         "replayHash",
@@ -596,6 +831,9 @@
             "failed"
           ]
         },
+        "proofCapsule": {
+          "$ref": "#/$defs/verificationCapsule"
+        },
         "deterministic": {
           "type": "boolean"
         },
@@ -612,6 +850,228 @@
             "type": "string",
             "enum": ["elapsedMs", "cpuMs", "memoryRssBytes", "ioReadBytes", "ioWriteBytes"]
           }
+        }
+      }
+    },
+    "verificationCapsule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "proofLevel", "staticChecks", "rch"],
+      "properties": {
+        "schema": {
+          "type": "string",
+          "const": "ee.swarm_replay.verification_capsule.v1"
+        },
+        "proofLevel": {
+          "type": "string",
+          "enum": [
+            "static_replay_only",
+            "remote_verified",
+            "rch_blocked",
+            "remote_failed",
+            "local_cargo_contaminated"
+          ]
+        },
+        "staticChecks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/staticCheck"
+          }
+        },
+        "rch": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/rchProofSummary"
+            }
+          ]
+        }
+      }
+    },
+    "staticCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "evidence"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{1,80}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["passed", "degraded", "failed"]
+        },
+        "evidence": {
+          "type": "string",
+          "maxLength": 160
+        }
+      }
+    },
+    "rchProofSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceSchema",
+        "status",
+        "commandHash",
+        "commandKind",
+        "workerId",
+        "remoteMarkerPresent",
+        "cargoStarted",
+        "localFallbackRefused",
+        "localFallbackDetected",
+        "localCargoProcessCount",
+        "degradedCodes",
+        "selectorAdmission",
+        "knownBlocker",
+        "rawOutputIncluded",
+        "localPathsRedacted"
+      ],
+      "properties": {
+        "sourceSchema": {
+          "type": "string",
+          "const": "ee.rch.verify.v1"
+        },
+        "status": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "commandHash": {
+          "$ref": "#/$defs/verificationCommandHash"
+        },
+        "commandKind": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9_]{1,80}$"
+        },
+        "workerId": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9._-]{1,80}$"
+        },
+        "remoteMarkerPresent": {
+          "type": "boolean"
+        },
+        "cargoStarted": {
+          "type": ["boolean", "null"]
+        },
+        "localFallbackRefused": {
+          "type": "boolean"
+        },
+        "localFallbackDetected": {
+          "type": "boolean"
+        },
+        "localCargoProcessCount": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "degradedCodes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/degradedCode"
+          }
+        },
+        "selectorAdmission": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/rchSelectorAdmission"
+            }
+          ]
+        },
+        "knownBlocker": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/knownBlocker"
+            }
+          ]
+        },
+        "rawOutputIncluded": {
+          "type": "boolean",
+          "const": false
+        },
+        "localPathsRedacted": {
+          "type": "boolean",
+          "const": true
+        }
+      }
+    },
+    "rchSelectorAdmission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "requiredRuntime",
+        "selectedWorker",
+        "selectionFailureReason",
+        "workersVsSelectionContradiction",
+        "pathNormalizationWarning",
+        "remoteRequired",
+        "localFallbackRefused"
+      ],
+      "properties": {
+        "status": {
+          "type": ["string", "null"],
+          "maxLength": 80
+        },
+        "requiredRuntime": {
+          "type": ["string", "null"],
+          "maxLength": 80
+        },
+        "selectedWorker": {
+          "type": ["string", "null"],
+          "maxLength": 80
+        },
+        "selectionFailureReason": {
+          "type": ["string", "null"],
+          "maxLength": 120
+        },
+        "workersVsSelectionContradiction": {
+          "type": "boolean"
+        },
+        "pathNormalizationWarning": {
+          "type": ["string", "null"],
+          "maxLength": 240
+        },
+        "remoteRequired": {
+          "type": "boolean"
+        },
+        "localFallbackRefused": {
+          "type": "boolean"
+        }
+      }
+    },
+    "knownBlocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "blockerFingerprint",
+        "blockerKind",
+        "remediationBead",
+        "retryAfter"
+      ],
+      "properties": {
+        "blockerFingerprint": {
+          "type": "string",
+          "pattern": "^sha256:[A-Fa-f0-9]{64}$"
+        },
+        "blockerKind": {
+          "type": ["string", "null"],
+          "maxLength": 120
+        },
+        "remediationBead": {
+          "type": ["string", "null"],
+          "pattern": "^bd-[A-Za-z0-9_.-]+$"
+        },
+        "retryAfter": {
+          "type": ["string", "null"],
+          "format": "date-time"
         }
       }
     }

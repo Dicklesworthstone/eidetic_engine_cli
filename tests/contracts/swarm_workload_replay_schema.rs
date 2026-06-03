@@ -17,10 +17,12 @@ use ee::core::lab::{
     SWARM_WORKLOAD_SCHEMA_ID_V1, SWARM_WORKLOAD_SCHEMA_V1, SwarmExpectedDegradedPosture,
     SwarmRedactionProbeClass, SwarmRedactionProbeStatus, SwarmReplayAggregate,
     SwarmReplayArtifactRef, SwarmReplayCommandRedactionStatus, SwarmReplayCommandResult,
-    SwarmReplayFailure, SwarmReplayHostAdmissionStatus, SwarmReplayHostPathPosture,
-    SwarmReplayHostProfileClass, SwarmReplayHostProfileObservation, SwarmReplayHostProfileReport,
-    SwarmReplayRchStatus, SwarmReplayRedactionStatus, SwarmReplayResourceUsage, SwarmReplayResult,
-    SwarmReplayStatus, SwarmReplayVerification, SwarmWorkloadCommandShape,
+    SwarmReplayCommandSlo, SwarmReplayFailure, SwarmReplayHostAdmissionStatus,
+    SwarmReplayHostPathPosture, SwarmReplayHostProfileClass, SwarmReplayHostProfileObservation,
+    SwarmReplayHostProfileReport, SwarmReplayRchStatus, SwarmReplayRedactionStatus,
+    SwarmReplayResourceUsage, SwarmReplayResult, SwarmReplaySloBudget, SwarmReplaySloClass,
+    SwarmReplaySloStatus, SwarmReplayStaticCheck, SwarmReplayStatus, SwarmReplayVerification,
+    SwarmReplayVerificationCapsule, SwarmReplayVerificationProofLevel, SwarmWorkloadCommandShape,
     SwarmWorkloadCommandStep, SwarmWorkloadFixtureOptions, SwarmWorkloadFixtureProfile,
     SwarmWorkloadGeneratorEvidence, SwarmWorkloadPathPolicy, SwarmWorkloadProvenance,
     SwarmWorkloadProvenanceKind, SwarmWorkloadRedactionLevel, SwarmWorkloadRedactionProbe,
@@ -167,6 +169,7 @@ fn minimal_workload() -> SwarmWorkloadTrace {
             expected_schema: Some("ee.response.v2".to_owned()),
             expected_exit_code: Some(0),
             timeout_ms: None,
+            slo_exemption_rationale: None,
             depends_on: Vec::new(),
         }],
         expected_degraded_posture: SwarmExpectedDegradedPosture::NoneExpected,
@@ -221,6 +224,7 @@ fn full_workload() -> SwarmWorkloadTrace {
         expected_schema: Some("ee.response.v2".to_owned()),
         expected_exit_code: Some(0),
         timeout_ms: Some(3000),
+        slo_exemption_rationale: None,
         depends_on: vec!["step_001".to_owned()],
     });
     workload.expected_degraded_posture = SwarmExpectedDegradedPosture::Blocked;
@@ -285,8 +289,55 @@ fn command_result(
             path_hash: HASH_16_A.to_owned(),
         }],
         redaction_status,
+        slo: command_slo(exit_code),
         memory_rss_bytes: Some(73_400_320),
         cpu_ms: Some(73),
+    }
+}
+
+fn command_slo(exit_code: u8) -> SwarmReplayCommandSlo {
+    let failed = exit_code != 0;
+    SwarmReplayCommandSlo {
+        class: SwarmReplaySloClass::InteractiveAgent,
+        status: if failed {
+            SwarmReplaySloStatus::Fail
+        } else {
+            SwarmReplaySloStatus::Pass
+        },
+        budget: SwarmReplaySloBudget {
+            latency_warning_ms: 2500,
+            latency_failure_ms: 7500,
+            stdout_warning_bytes: 16 * 1024,
+            stdout_failure_bytes: 64 * 1024,
+            stderr_warning_bytes: 4 * 1024,
+            stderr_failure_bytes: 16 * 1024,
+            degraded_warning_count: 0,
+            degraded_failure_count: 2,
+        },
+        latency_status: SwarmReplaySloStatus::Pass,
+        stdout_status: SwarmReplaySloStatus::Pass,
+        stderr_status: SwarmReplaySloStatus::Pass,
+        degraded_count_status: if failed {
+            SwarmReplaySloStatus::Fail
+        } else {
+            SwarmReplaySloStatus::Pass
+        },
+        discoverability_status: SwarmReplaySloStatus::Pass,
+        warning_dimensions: Vec::new(),
+        failed_dimensions: if failed {
+            vec!["degraded_count".to_owned()]
+        } else {
+            Vec::new()
+        },
+        diagnosis: if failed {
+            Some(
+                "interactive_agent replay command exceeded failure budget dimensions: degraded_count"
+                    .to_owned(),
+            )
+        } else {
+            None
+        },
+        exemption_rationale: None,
     }
 }
 
@@ -350,6 +401,26 @@ fn refused_large_host_profile() -> SwarmReplayHostProfileReport {
     )
 }
 
+fn replay_proof_capsule() -> SwarmReplayVerificationCapsule {
+    SwarmReplayVerificationCapsule {
+        schema: "ee.swarm_replay.verification_capsule.v1".to_owned(),
+        proof_level: SwarmReplayVerificationProofLevel::RemoteVerified,
+        static_checks: vec![
+            SwarmReplayStaticCheck {
+                name: "workload_hash".to_owned(),
+                status: "passed".to_owned(),
+                evidence: HASH_64_C.to_owned(),
+            },
+            SwarmReplayStaticCheck {
+                name: "redaction_probes".to_owned(),
+                status: "passed".to_owned(),
+                evidence: "redactionProbesPassed=true".to_owned(),
+            },
+        ],
+        rch: None,
+    }
+}
+
 fn result_base(status: SwarmReplayStatus) -> SwarmReplayResult {
     SwarmReplayResult {
         schema: SWARM_REPLAY_RESULT_SCHEMA_V1.to_owned(),
@@ -370,6 +441,11 @@ fn result_base(status: SwarmReplayStatus) -> SwarmReplayResult {
             success_count: 1,
             failure_count: 0,
             degraded_count: 0,
+            slo_pass_count: 1,
+            slo_warning_count: 0,
+            slo_failure_count: 0,
+            slo_exempt_count: 0,
+            first_slo_failure_step_id: None,
             elapsed_ms_total: 184,
             p50_ms: 184,
             p95_ms: 184,
@@ -387,6 +463,7 @@ fn result_base(status: SwarmReplayStatus) -> SwarmReplayResult {
         verification: SwarmReplayVerification {
             rch_required: true,
             rch_status: SwarmReplayRchStatus::Passed,
+            proof_capsule: replay_proof_capsule(),
             deterministic: true,
             workload_hash: HASH_64_C.to_owned(),
             replay_hash: HASH_64_D.to_owned(),
@@ -410,6 +487,11 @@ fn failure_result() -> SwarmReplayResult {
         success_count: 0,
         failure_count: 1,
         degraded_count: 1,
+        slo_pass_count: 0,
+        slo_warning_count: 0,
+        slo_failure_count: 1,
+        slo_exempt_count: 0,
+        first_slo_failure_step_id: Some("step_001".to_owned()),
         elapsed_ms_total: 44,
         p50_ms: 44,
         p95_ms: 44,
@@ -425,6 +507,7 @@ fn failure_result() -> SwarmReplayResult {
     });
     result.host_profile_admission = refused_large_host_profile();
     result.verification.rch_status = SwarmReplayRchStatus::BlockedBeforeCargo;
+    result.verification.proof_capsule.proof_level = SwarmReplayVerificationProofLevel::RchBlocked;
     result.warnings = vec!["RCH did not reach Cargo.".to_owned()];
     result
 }
@@ -448,6 +531,9 @@ fn redaction_probe_result() -> SwarmReplayResult {
         repair_hint: Some("Regenerate the fixture with strict redaction.".to_owned()),
     });
     result.verification.rch_status = SwarmReplayRchStatus::NotRequired;
+    result.verification.proof_capsule.proof_level =
+        SwarmReplayVerificationProofLevel::StaticReplayOnly;
+    result.verification.proof_capsule.rch = None;
     result.verification.deterministic = false;
     result
 }
@@ -589,6 +675,27 @@ fn swarm_replay_result_schema_structurally_forbids_raw_content() -> TestResult {
         schema["$defs"]["hostProfileAdmission"]["properties"]["pathTailHashes"]["items"]["$ref"]
             == "#/$defs/blake3Hash",
         "hostProfileAdmission.pathTailHashes must be hash-only",
+    )?;
+    ensure(
+        collect_strings(
+            &schema["$defs"]["verification"]["required"],
+            "verification.required",
+        )?
+        .iter()
+        .any(|entry| entry == "proofCapsule"),
+        "verification schema must require proofCapsule",
+    )?;
+    ensure(
+        schema["$defs"]["rchProofSummary"]["properties"]
+            .get("stdoutTail")
+            .is_none()
+            && schema["$defs"]["rchProofSummary"]["properties"]
+                .get("stderrTail")
+                .is_none()
+            && schema["$defs"]["rchProofSummary"]["properties"]
+                .get("remoteProjectRoot")
+                .is_none(),
+        "RCH proof summary must not include raw output or absolute root fields",
     )
 }
 
@@ -861,7 +968,9 @@ fn swarm_replay_contract_docs_pin_security_and_rch_posture() -> TestResult {
         "host-profile admission",
         "large-host",
         "local Cargo fallback",
-        "do not include timestamps",
+        "do not include replay execution timestamps",
+        "proofCapsule",
+        "whether Cargo started",
     ] {
         ensure(
             doc.contains(expected),

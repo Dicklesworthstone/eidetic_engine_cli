@@ -412,6 +412,12 @@ mod agent_workload_replay_schema;
 #[path = "contracts/swarm_workload_replay_schema.rs"]
 mod swarm_workload_replay_schema;
 
+#[path = "contracts/swarm_replay_malformed_trace_conformance.rs"]
+mod swarm_replay_malformed_trace_conformance;
+
+#[path = "contracts/swarm_replay_selector_admission_conformance.rs"]
+mod swarm_replay_selector_admission_conformance;
+
 #[path = "contracts/qos_lanes_e2e_contract.rs"]
 mod qos_lanes_e2e_contract;
 
