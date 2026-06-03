@@ -93,7 +93,7 @@
       "gitHead": null,
       "gitTree": null,
       "dirtyStatusHash": null,
-      "verificationAttribution": "live_dirty_checkout",
+      "verificationAttribution": "local_checkout_observed_remote_source_unknown",
       "degradedCodes": [],
       "errorCodes": [],
       "environmentBlockerCodes": [],
@@ -113,7 +113,7 @@
       "gitHead": null,
       "gitTree": null,
       "dirtyStatusHash": null,
-      "verificationAttribution": "live_dirty_checkout",
+      "verificationAttribution": "local_checkout_observed_remote_source_unknown",
       "degradedCodes": [
         "rch_verify_build_admission_unavailable",
         "rch_verify_remote_command_failed",

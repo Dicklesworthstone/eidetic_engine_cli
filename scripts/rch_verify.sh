@@ -564,9 +564,21 @@ compute_local_cargo_processes_json() {
     python3 - <<'PY'
 import json
 import os
+import re
 
 raw = os.environ.get("LOCAL_CARGO_PROCESSES_OUTPUT", "")
 exit_code = int(os.environ.get("LOCAL_CARGO_PROCESSES_EXIT_CODE") or "0")
+user_path = re.compile(r"/Users/[^\\s\"'`,;:]+")
+
+def redact_local_paths(value):
+    if isinstance(value, str):
+        return user_path.sub("<redacted-user-path>", value)
+    if isinstance(value, list):
+        return [redact_local_paths(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_local_paths(item) for key, item in value.items()}
+    return value
+
 try:
     payload = json.loads(raw)
 except Exception:
@@ -586,6 +598,7 @@ else:
     payload.setdefault("processes", [])
     payload.setdefault("detectedLocalBuilds", [])
     payload["exit_code"] = exit_code
+payload = redact_local_paths(payload)
 print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -1533,9 +1546,7 @@ for line in sorted(status_lines):
             item["unstaged"] = unstaged
         sample.append(item)
 
-source_codes = []
-if require_clean and summary["total"]:
-    source_codes.append("rch_verify_dirty_tree_refused")
+def add_dirty_shape_codes():
     if summary["tracked"]:
         source_codes.append("rch_verify_dirty_tracked_paths")
     if summary["tracked_staged"]:
@@ -1549,13 +1560,28 @@ if require_clean and summary["total"]:
     if summary["untracked"] or summary["secret_risk"] or summary["unknown"]:
         source_codes.append("rch_verify_dirty_untracked_paths")
 
+source_codes = []
+if require_clean and summary["total"]:
+    attribution = "source_state_refused"
+    source_codes.append("rch_verify_dirty_tree_refused")
+    add_dirty_shape_codes()
+elif require_clean:
+    attribution = "strict_clean_tree"
+else:
+    attribution = "local_checkout_observed_remote_source_unknown"
+    if summary["total"]:
+        source_codes.append("rch_verify_dirty_source_not_materialized")
+        add_dirty_shape_codes()
+
 print(json.dumps({
-    "verification_attribution": "strict_clean_tree" if require_clean and not summary["total"] else "live_dirty_checkout",
+    "verification_attribution": attribution,
     "git_head": head,
     "git_tree": tree,
     "dirty_status_hash": dirty_hash,
     "dirty_summary": summary,
     "dirty_paths_sample": sample,
+    "remote_source_materialized": False,
+    "source_materialization": "remote_checkout_unverified",
     "source_state_degraded_codes": source_codes,
 }, sort_keys=True, separators=(",", ":")))
 PY
@@ -1603,6 +1629,8 @@ def empty_state(codes):
             "unknown": 0,
         },
         "dirty_paths_sample": [],
+        "remote_source_materialized": False,
+        "source_materialization": "none",
         "source_state_degraded_codes": codes,
         "requested_treeish": treeish,
         "resolved_commit": None,
@@ -1685,6 +1713,8 @@ print(json.dumps({
         "unknown": 0,
     },
     "dirty_paths_sample": [],
+    "remote_source_materialized": True,
+    "source_materialization": "git_archive",
     "source_state_degraded_codes": codes,
     "requested_treeish": treeish,
     "resolved_commit": commit,
@@ -1863,7 +1893,7 @@ emit_json() {
     if [ -n "${SOURCE_STATE_JSON:-}" ]; then
         source_state_json="$SOURCE_STATE_JSON"
     else
-        source_state_json='{"verification_attribution":"live_dirty_checkout","git_head":null,"git_tree":null,"dirty_status_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","dirty_summary":{"total":0,"tracked":0,"untracked":0,"beads":0,"scratch":0,"secret_risk":0,"ignored":0,"unknown":0},"dirty_paths_sample":[],"source_state_degraded_codes":[]}'
+        source_state_json='{"verification_attribution":"source_state_not_computed","git_head":null,"git_tree":null,"dirty_status_hash":"sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","dirty_summary":{"total":0,"tracked":0,"untracked":0,"beads":0,"scratch":0,"secret_risk":0,"ignored":0,"unknown":0},"dirty_paths_sample":[],"remote_source_materialized":false,"source_materialization":"none","source_state_degraded_codes":["rch_verify_source_state_not_computed"]}'
     fi
     local json_payload
     local artifacts_json artifact_args=() artifact_index
@@ -1909,6 +1939,8 @@ for key in (
     "dirty_status_hash",
     "dirty_summary",
     "dirty_paths_sample",
+    "remote_source_materialized",
+    "source_materialization",
     "source_state_degraded_codes",
     "requested_treeish",
     "resolved_commit",
@@ -2393,6 +2425,8 @@ summary_lines = [
     f"- git_head: `{proof.get('git_head') or 'unknown'}`",
     f"- git_tree: `{proof.get('git_tree') or 'unknown'}`",
     f"- dirty_status_hash: `{proof.get('dirty_status_hash') or 'unknown'}`",
+    f"- source_materialization: `{proof.get('source_materialization') or 'unknown'}`",
+    f"- remote_source_materialized: `{str(bool(proof.get('remote_source_materialized'))).lower()}`",
     f"- remote_env: `{', '.join(proof.get('remote_env') or []) or 'none'}`",
     f"- remote_required: `{str(proof.get('remote_required')).lower()}`",
     f"- would_offload: `{str(proof.get('would_offload')).lower()}`",
@@ -2544,6 +2578,8 @@ if event_log_path:
             "git_tree": proof.get("git_tree"),
             "dirty_status_hash": proof.get("dirty_status_hash"),
             "verification_attribution": proof.get("verification_attribution"),
+            "source_materialization": proof.get("source_materialization"),
+            "remote_source_materialized": proof.get("remote_source_materialized"),
             "source_state_degraded_codes": proof.get("source_state_degraded_codes") or [],
             "worker_state_degraded_codes": proof.get("worker_state_degraded_codes") or [],
             "build_admission_status": build_admission.get("status"),

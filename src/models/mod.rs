@@ -293,8 +293,8 @@ pub use trust::{ParseTrustClassError, TrustClass};
 pub use verification::{
     CompileBlockerCacheEntry, CompileBlockerCacheInput, CompileBlockerCacheStatus,
     CompileBlockerLookup, CompileBlockerLookupRequest, GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1,
-    GithubActionsVerificationEvidenceParseError, RCH_VERIFY_SCHEMA_V1,
-    RchVerificationEvidenceParseError, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
+    GithubActionsVerificationEvidenceParseError, RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1,
+    RCH_VERIFY_SCHEMA_V1, RchVerificationEvidenceParseError, VERIFICATION_BROKER_VIEW_SCHEMA_V1,
     VERIFICATION_CLOSEOUT_CAPSULE_SCHEMA_V1, VERIFICATION_CLOSURE_GUIDANCE_SCHEMA_V1,
     VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1, VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1,
     VERIFICATION_EVIDENCE_SCHEMA_V1, VERIFICATION_REUSE_ADVISORY_SCHEMA_V1,

@@ -174,6 +174,8 @@ fn rch_runbook_beads_comment_template_names_source_attribution_fields() -> TestR
         "git_head",
         "git_tree",
         "dirty_status_hash",
+        "source_materialization",
+        "remote_source_materialized",
         "source_manifest_hash",
         "worker_id",
         "exit_code",
@@ -255,7 +257,7 @@ fn rch_runbook_names_handoff_attribution_buckets() -> TestResult {
     // proof JSON.
     let required_buckets = [
         "strict_clean_tree",
-        "live_dirty_checkout",
+        "local_checkout_observed_remote_source_unknown",
         "committed_tree",
         "source_state_refused",
         "committed_tree_unsupported",

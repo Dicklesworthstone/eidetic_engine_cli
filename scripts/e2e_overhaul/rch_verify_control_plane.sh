@@ -500,8 +500,8 @@ if report.get("schema") != "ee.rch.verify.v1":
     raise SystemExit(f"unexpected schema: {report}")
 if report.get("status") != "source_state_refused":
     raise SystemExit(f"expected source_state_refused: {report}")
-if report.get("verification_attribution") != "live_dirty_checkout":
-    raise SystemExit(f"expected live_dirty_checkout: {report}")
+if report.get("verification_attribution") != "source_state_refused":
+    raise SystemExit(f"expected source_state_refused attribution: {report}")
 if report.get("exit_code") != 1:
     raise SystemExit(f"expected exit_code=1: {report}")
 if report.get("rch_invocation") != []:
@@ -534,6 +534,44 @@ if expected_scratch and not any(item.get("kind") == "scratch" for item in report
 print(json.dumps({
     "command_hash": report.get("command_hash", ""),
     "degraded_codes": sorted(codes),
+}, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+assert_dirty_unmaterialized_json() {
+    local path="${1:?json path required}"
+    python3 - "$path" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    report = json.load(handle)
+source_codes = set(report.get("source_state_degraded_codes") or [])
+if report.get("schema") != "ee.rch.verify.v1":
+    raise SystemExit(f"unexpected schema: {report}")
+if report.get("status") != "remote_pass":
+    raise SystemExit(f"expected remote_pass: {report}")
+if report.get("verification_attribution") != "local_checkout_observed_remote_source_unknown":
+    raise SystemExit(f"expected remote-source-unknown attribution: {report}")
+if report.get("remote_source_materialized") is not False:
+    raise SystemExit(f"dirty ordinary proof must not claim remote materialization: {report}")
+if report.get("source_materialization") != "remote_checkout_unverified":
+    raise SystemExit(f"unexpected source materialization mode: {report}")
+if report.get("source_manifest_hash") is not None:
+    raise SystemExit(f"ordinary dirty proof should not have a source manifest hash: {report}")
+summary = report.get("dirty_summary") or {}
+if summary.get("tracked") != 1 or summary.get("tracked_unstaged") != 1:
+    raise SystemExit(f"dirty tracked counters drifted: {report}")
+required = {
+    "rch_verify_dirty_source_not_materialized",
+    "rch_verify_dirty_tracked_paths",
+    "rch_verify_dirty_unstaged_paths",
+}
+if not required.issubset(source_codes):
+    raise SystemExit(f"missing dirty unmaterialized source codes: {report}")
+print(json.dumps({
+    "command_hash": report.get("command_hash", ""),
+    "degraded_codes": report.get("degraded_codes") or [],
 }, sort_keys=True, separators=(",", ":")))
 PY
 }
@@ -804,7 +842,7 @@ strict_assert="$(assert_source_refusal_json \
     0 \
     rch_verify_dirty_tracked_paths \
     rch_verify_dirty_unstaged_paths)"
-assert_event_log_json "$strict_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
+assert_event_log_json "$strict_event_log" "source_state_refused" "source_state_refused" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "strict_dirty_refusal_validated" \
@@ -814,6 +852,47 @@ emit_event \
     "$(printf '%s' "$strict_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
     "real git dirty fixture refused before fake RCH" \
     "strict_dirty_source"
+
+start="$(started_ms)"
+dirty_unknown_repo="$WORK_DIR/dirty-source-unknown-repo"
+init_fixture_repo "$dirty_unknown_repo"
+printf '%s\n' "dirty source that fake RCH will not read" > "$dirty_unknown_repo/tracked.txt"
+dirty_unknown_before="$WORK_DIR/dirty-source-unknown.before-status"
+git_status_v2 "$dirty_unknown_repo" > "$dirty_unknown_before"
+dirty_unknown_fake_rch="$WORK_DIR/fake-rch-dirty-source-unknown"
+dirty_unknown_invocations="$WORK_DIR/dirty-source-unknown-rch-invocations.txt"
+dirty_unknown_json="$WORK_DIR/dirty-source-unknown.json"
+dirty_unknown_event_log="$WORK_DIR/dirty-source-unknown-events.jsonl"
+write_fake_rch "$dirty_unknown_fake_rch"
+FAKE_RCH_INVOCATIONS="$dirty_unknown_invocations" \
+RCH_VERIFY_NOW="2026-05-16T06:40:02.500000Z" \
+RCH_VERIFY_CONFIGURED_WORKERS="css" \
+RCH_VERIFY_DAEMON_WORKERS="css" \
+RCH_VERIFY_STATUS_JSON='{"data":{"daemon":{"recent_builds":[]}}}' \
+bash "$RCH_VERIFY" \
+    --bead-id bd-9ygik.3 \
+    --project-root "$dirty_unknown_repo" \
+    --event-log "$dirty_unknown_event_log" \
+    --rch-bin "$dirty_unknown_fake_rch" \
+    -- \
+    cargo test --lib rch_verify_dirty_source_unknown_e2e > "$dirty_unknown_json"
+assert_status_unchanged "$dirty_unknown_repo" "$dirty_unknown_before" "dirty-source-unknown"
+if [ "$(wc -l < "$dirty_unknown_invocations" | tr -d ' ')" != "1" ]; then
+    printf 'dirty source unknown fixture should invoke fake RCH once:\n' >&2
+    sed -n '1,120p' "$dirty_unknown_invocations" >&2
+    exit 1
+fi
+dirty_unknown_assert="$(assert_dirty_unmaterialized_json "$dirty_unknown_json")"
+assert_event_log_json "$dirty_unknown_event_log" "remote_pass" "local_checkout_observed_remote_source_unknown" 1 0 "absent" >/dev/null
+emit_event \
+    "assert" \
+    "dirty_source_unmaterialized_validated" \
+    "$(elapsed_since "$start")" \
+    "$(printf '%s' "$dirty_unknown_assert" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command_hash"])')" \
+    "css" \
+    "$(printf '%s' "$dirty_unknown_assert" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["degraded_codes"]))')" \
+    "dirty ordinary fixture ran fake RCH but reported source was not materialized" \
+    "dirty_source_unknown"
 
 start="$(started_ms)"
 staged_repo="$WORK_DIR/staged-change-repo"
@@ -863,7 +942,7 @@ staged_assert="$(assert_source_refusal_json \
     0 \
     rch_verify_dirty_tracked_paths \
     rch_verify_dirty_staged_paths)"
-assert_event_log_json "$staged_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
+assert_event_log_json "$staged_event_log" "source_state_refused" "source_state_refused" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "staged_dirty_refusal_validated" \
@@ -920,7 +999,7 @@ secret_assert="$(assert_source_refusal_json \
     0 \
     0 \
     rch_verify_dirty_untracked_paths)"
-assert_event_log_json "$secret_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
+assert_event_log_json "$secret_event_log" "source_state_refused" "source_state_refused" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "secret_risk_refusal_validated" \
@@ -978,7 +1057,7 @@ beads_assert="$(assert_source_refusal_json \
     1 \
     0 \
     rch_verify_dirty_beads_metadata)"
-assert_event_log_json "$beads_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
+assert_event_log_json "$beads_event_log" "source_state_refused" "source_state_refused" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "beads_export_refusal_validated" \
@@ -1036,7 +1115,7 @@ scratch_assert="$(assert_source_refusal_json \
     0 \
     2 \
     rch_verify_dirty_untracked_scratch)"
-assert_event_log_json "$scratch_event_log" "source_state_refused" "live_dirty_checkout" 0 1 "absent" >/dev/null
+assert_event_log_json "$scratch_event_log" "source_state_refused" "source_state_refused" 0 1 "absent" >/dev/null
 emit_event \
     "assert" \
     "scratch_artifacts_refusal_validated" \
@@ -1199,7 +1278,7 @@ known_blocker_fingerprint="$(
     printf '%s' "$known_blocker_first_assert" \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["blocker_fingerprint"])'
 )"
-assert_event_log_json "$known_blocker_first_event_log" "rch_environment_failure" "live_dirty_checkout" 1 101 "absent" >/dev/null
+assert_event_log_json "$known_blocker_first_event_log" "rch_environment_failure" "local_checkout_observed_remote_source_unknown" 1 101 "absent" >/dev/null
 
 set +e
 FAKE_RCH_INVOCATIONS="$known_blocker_second_invocations" \
@@ -1276,7 +1355,7 @@ if [ "$(wc -l < "$worker_filter_invocations" | tr -d ' ')" != "1" ]; then
     exit 1
 fi
 worker_filter_assert="$(assert_worker_filter_ignored_json "$worker_filter_json")"
-assert_event_log_json "$worker_filter_event_log" "rch_environment_failure" "live_dirty_checkout" 1 101 "absent" >/dev/null
+assert_event_log_json "$worker_filter_event_log" "rch_environment_failure" "local_checkout_observed_remote_source_unknown" 1 101 "absent" >/dev/null
 emit_event \
     "assert" \
     "worker_filter_ignored_validated" \
@@ -1326,7 +1405,7 @@ if [ "$(wc -l < "$timeout_invocations" | tr -d ' ')" != "1" ]; then
     exit 1
 fi
 timeout_assert="$(assert_timeout_json "$timeout_json" 150)"
-assert_event_log_json "$timeout_event_log" "capacity_or_timeout" "live_dirty_checkout" 1 124 "absent" >/dev/null
+assert_event_log_json "$timeout_event_log" "capacity_or_timeout" "local_checkout_observed_remote_source_unknown" 1 124 "absent" >/dev/null
 emit_event \
     "assert" \
     "timeout_watchdog_validated" \

@@ -10,7 +10,7 @@
   "status": "remote_pass",
   "remote_required": true,
   "would_offload": true,
-  "verification_attribution": "live_dirty_checkout",
+  "verification_attribution": "local_checkout_observed_remote_source_unknown",
   "degraded_codes": [],
   "source_state_degraded_codes": [],
   "worker_state_degraded_codes": []

@@ -531,7 +531,7 @@ printf '[RCH] remote css (0.1s)\n'
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse dirty tracked: {error}"))?;
     if report["status"] != "source_state_refused"
-        || report["verification_attribution"] != "live_dirty_checkout"
+        || report["verification_attribution"] != "source_state_refused"
         || report["exit_code"] != 1
         || report["elapsed_ms"] != 0
     {
@@ -571,6 +571,92 @@ printf '[RCH] remote css (0.1s)\n'
         .ok_or_else(|| "missing stdout tail".to_owned())?;
     if stdout_tail.contains("REMOTE SHOULD NOT RUN") {
         return Err(format!("strict refusal invoked fake RCH: {report}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn dirty_checkout_remote_run_reports_unmaterialized_source() -> TestResult {
+    let workspace = seed_git_workspace("rch-dirty-unmaterialized")?;
+    fs::write(workspace.join("tracked.txt"), "dirty local patch\n")
+        .map_err(|error| format!("dirty tracked fixture: {error}"))?;
+    let before_status = git_status_porcelain_v2(&workspace)?;
+    let invocation_log = unique_tmp_path("rch-dirty-unmaterialized-invocations");
+    let fake_rch = write_fake_rch(
+        "fake-rch-dirty-unmaterialized.sh",
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_RCH_INVOCATIONS:?}"
+printf 'remote command passed from configured checkout\n'
+printf '[RCH] remote trj (0.1s)\n'
+"#,
+    )?;
+    let fake_rch_arg = fake_rch
+        .to_str()
+        .ok_or_else(|| "fake rch path is not utf-8".to_owned())?;
+    let invocation_log_arg = invocation_log
+        .to_str()
+        .ok_or_else(|| "invocation log path is not utf-8".to_owned())?;
+
+    let (status, stdout, stderr) = run_script_with_env_in_dir(
+        &[
+            "--rch-bin",
+            fake_rch_arg,
+            "--",
+            "cargo",
+            "test",
+            "--lib",
+            "dirty_unmaterialized_smoke",
+        ],
+        &[
+            ("FAKE_RCH_INVOCATIONS", invocation_log_arg),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "trj"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "trj"),
+            (
+                "RCH_VERIFY_STATUS_JSON",
+                r#"{"data":{"daemon":{"recent_builds":[]}}}"#,
+            ),
+        ],
+        &workspace,
+    )?;
+    assert_git_status_unchanged(&workspace, &before_status, "dirty unmaterialized fake RCH")?;
+    if !status.success() {
+        return Err(format!(
+            "dirty non-strict fake RCH should preserve remote status\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        ));
+    }
+    let report: Value =
+        serde_json::from_str(&stdout).map_err(|error| format!("parse dirty remote: {error}"))?;
+    if report["status"] != "remote_pass"
+        || report["verification_attribution"] != "local_checkout_observed_remote_source_unknown"
+        || report["remote_source_materialized"] != false
+        || report["source_materialization"] != "remote_checkout_unverified"
+        || !report["source_manifest_hash"].is_null()
+    {
+        return Err(format!(
+            "dirty run should not claim local source was materialized remotely: {report}"
+        ));
+    }
+    if report["dirty_summary"]["tracked"] != 1 || report["dirty_summary"]["total"] != 1 {
+        return Err(format!("dirty source counts were not precise: {report}"));
+    }
+    for expected in [
+        "rch_verify_dirty_source_not_materialized",
+        "rch_verify_dirty_tracked_paths",
+        "rch_verify_dirty_unstaged_paths",
+    ] {
+        if !source_degraded_contains(&report, expected)? {
+            return Err(format!(
+                "missing {expected} in dirty source state: {report}"
+            ));
+        }
+    }
+    let invocations = fs::read_to_string(&invocation_log)
+        .map_err(|error| format!("read dirty invocation log: {error}"))?;
+    if invocations.lines().count() != 1 {
+        return Err(format!(
+            "dirty non-strict run should invoke fake RCH once: {invocations:?}"
+        ));
     }
     Ok(())
 }
@@ -1014,7 +1100,7 @@ printf '[RCH] remote trj (0.1s)\n'
     let report: Value =
         serde_json::from_str(&stdout).map_err(|error| format!("parse report: {error}"))?;
     if report["status"] != "source_state_refused"
-        || report["verification_attribution"] != "live_dirty_checkout"
+        || report["verification_attribution"] != "source_state_refused"
         || report["exit_code"] != 1
         || report["dirty_summary"]["tracked_unstaged"] != 1
     {
@@ -1053,7 +1139,7 @@ printf '[RCH] remote trj (0.1s)\n'
     let fields = &event["fields"];
     if fields["status"] != "source_state_refused"
         || fields["bead_id"] != "bd-9ygik.3"
-        || fields["verification_attribution"] != "live_dirty_checkout"
+        || fields["verification_attribution"] != "source_state_refused"
         || fields["fake_rch_invoked"] != false
         || fields["fake_rch_invocation_count"] != 0
         || fields["deterministic_rerun_hash"] != report["dirty_status_hash"]
@@ -3412,11 +3498,12 @@ exit 2
     }
     let first: Value = serde_json::from_str(&first_stdout)
         .map_err(|error| format!("parse first verifier-mode known-blocker run: {error}"))?;
-    if first["verification_attribution"] != "live_dirty_checkout"
-        || first["known_blocker"]["verifier_source_mode"] != "live_dirty_checkout"
+    if first["verification_attribution"] != "local_checkout_observed_remote_source_unknown"
+        || first["known_blocker"]["verifier_source_mode"]
+            != "local_checkout_observed_remote_source_unknown"
     {
         return Err(format!(
-            "first run should record a live-checkout blocker: {first}"
+            "first run should record a remote-source-unknown blocker: {first}"
         ));
     }
 

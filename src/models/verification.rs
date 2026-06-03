@@ -23,6 +23,7 @@ pub const VERIFICATION_COMPILE_BLOCKER_CACHE_SCHEMA_V1: &str =
 pub const VERIFICATION_COMPILE_BLOCKER_LOOKUP_SCHEMA_V1: &str =
     "ee.verification.compile_blocker_lookup.v1";
 pub const RCH_VERIFY_SCHEMA_V1: &str = "ee.rch.verify.v1";
+pub const RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1: &str = "ee.rch.selector_admission_probe.v1";
 pub const GITHUB_ACTIONS_CHECK_RUN_SCHEMA_V1: &str = "ee.github_actions.check_run.v1";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2049,6 +2050,10 @@ fn rch_artifacts(value: &JsonValue) -> Vec<VerificationArtifactRef> {
 
 fn rch_selector_admission(value: &JsonValue) -> Option<VerificationSelectorAdmission> {
     let probe = value.get("selector_admission_probe")?.as_object()?;
+    let schema = probe.get("schema")?.as_str()?;
+    if schema != RCH_SELECTOR_ADMISSION_PROBE_SCHEMA_V1 {
+        return None;
+    }
     Some(VerificationSelectorAdmission {
         status: probe
             .get("status")
@@ -3548,6 +3553,37 @@ mod tests {
 
         let record: VerificationEvidenceRecord = serde_json::from_value(raw)
             .map_err(|error| format!("deserialize old record: {error}"))?;
+        assert!(record.selector_admission.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_ignores_selector_admission_probe_with_wrong_schema() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib selector_probe",
+            "command_hash": "sha256:selector-wrong-schema",
+            "status": "rch_environment_failure",
+            "exit_code": 1,
+            "remote_required": true,
+            "degraded_codes": ["rch_verify_local_fallback_refused"],
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v0",
+                "status": "selection_failed",
+                "required_runtime": "Rust",
+                "workers_reported": ["vmi1227854"],
+                "daemon_workers_reported": ["vmi1227854"],
+                "selected_worker": null,
+                "selection_failure_reason": "no_workers_with_rust_installed",
+                "workers_vs_selection_contradiction": true,
+                "path_normalization_warning": null,
+                "remote_required": true,
+                "local_fallback_refused": true
+            }
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
         assert!(record.selector_admission.is_none());
         Ok(())
     }

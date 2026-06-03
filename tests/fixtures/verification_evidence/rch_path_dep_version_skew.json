@@ -10,7 +10,7 @@
   "status": "rch_environment_failure",
   "remote_required": true,
   "would_offload": true,
-  "verification_attribution": "live_dirty_checkout",
+  "verification_attribution": "local_checkout_observed_remote_source_unknown",
   "cargo_path_dependency_version": {
     "candidate_versions": ["0.1.2"],
     "crate": "franken-agent-detection",

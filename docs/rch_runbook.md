@@ -244,6 +244,8 @@ RCH proof:
 - git_head: <git_head>
 - git_tree: <git_tree>
 - dirty_status_hash: <dirty_status_hash>
+- source_materialization: <source_materialization>
+- remote_source_materialized: <true|false>
 - source_manifest_hash: <source_manifest_hash or none>
 - worker_id: <worker_id or none>
 - exit_code: <exit_code>
@@ -260,7 +262,8 @@ RCH proof:
 Use precise Agent Mail wording:
 
 - `strict_clean_tree` + `remote_pass`: closeout-quality proof.
-- `live_dirty_checkout` + `remote_pass`: useful signal, but not clean proof.
+- `local_checkout_observed_remote_source_unknown` + `remote_pass`: useful
+  remote signal, but the remote source was not materialized by the wrapper.
 - `committed_tree` + `remote_pass`: remote run passed from the committed-tree
   export named by `resolved_commit`, `git_tree`, and `source_manifest_hash`.
 - `build_admission_refused`: remote run did not start because local disk or

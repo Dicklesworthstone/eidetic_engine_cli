@@ -916,7 +916,7 @@ mod tests {
             "elapsed_ms": 11000,
             "status": "remote_pass",
             "degraded_codes": [],
-            "verification_attribution": "live_dirty_checkout"
+            "verification_attribution": "local_checkout_observed_remote_source_unknown"
         })
     }
 
@@ -959,7 +959,7 @@ mod tests {
             "worker_state_degraded_codes": [
                 "rch_verify_cargo_path_dependency_version_blocked"
             ],
-            "verification_attribution": "live_dirty_checkout"
+            "verification_attribution": "local_checkout_observed_remote_source_unknown"
         }))
         .expect("parses");
 

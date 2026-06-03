@@ -40,8 +40,10 @@ and [`docs/rch_runbook.md`](rch_runbook.md). Agent-to-agent messages should name
 the RCH proof status and source attribution explicitly:
 
 - `strict_clean_tree` means the remote proof came from a clean checkout.
-- `live_dirty_checkout` means the remote proof included the current shared
-  checkout state; include `dirty_status_hash` and relevant `dirty_paths_sample`.
+- `local_checkout_observed_remote_source_unknown` means the wrapper fingerprinted
+  the local checkout but did not materialize that source for the remote command;
+  include `dirty_status_hash`, `remote_source_materialized`, and relevant
+  `dirty_paths_sample`.
 - `source_state_refused` means the wrapper refused before RCH because strict
   proof would be ambiguous.
 - `committed_tree_unsupported` means the committed source manifest was computed,

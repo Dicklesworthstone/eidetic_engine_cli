@@ -103,12 +103,12 @@ admission guard; the proof records `rch_verify_build_admission_skipped`.
 
 ## Source Attribution Modes
 
-The wrapper has three source-attribution modes. Pick the weakest mode that is
+The wrapper has four source-attribution modes. Pick the weakest mode that is
 honest for the claim you need to make.
 
 | Mode | Command shape | Runs RCH? | Use when | Proof status to expect |
 |---|---|---:|---|---|
-| Live checkout | `scripts/rch_verify.sh -- cargo test ...` | yes | The current checkout state is the thing being verified, including any dirty paths. | `verification_attribution=live_dirty_checkout`; may still pass remotely. |
+| Local checkout observed; remote source unknown | `scripts/rch_verify.sh -- cargo test ...` | yes | You need a remote signal but have not exported source through the wrapper. Dirty paths are fingerprinted locally, not proven to have run remotely. | `verification_attribution=local_checkout_observed_remote_source_unknown`; dirty runs include `remote_source_materialized=false` and `rch_verify_dirty_source_not_materialized`. |
 | Strict clean checkout | `scripts/rch_verify.sh --require-clean-tree -- cargo test ...` | only if clean | You need proof that no tracked, Beads, scratch, or unsafe untracked paths influenced the run. | Clean: `strict_clean_tree`; dirty: `source_state_refused` before RCH. |
 | Committed tree export | `scripts/rch_verify.sh --committed-tree --treeish HEAD -- cargo test ...` | yes for safe trees | You need to verify committed source while the shared checkout is dirty. | Safe no-path-dependency trees run from a generated export with `verification_attribution=committed_tree`; unsupported refs/path dependencies refuse before RCH. |
 
@@ -275,7 +275,7 @@ RCH proof stored for bd-123:
 - git_head: <commit>
 - git_tree: <tree>
 - source_state_hash: sha256:<hash>
-- verification_attribution: live_dirty_checkout
+- verification_attribution: local_checkout_observed_remote_source_unknown
 - note: Proof was ingested from `ee.rch.verify.v1`; consult `ee verify rch runs --bead-id bd-123 --json` for the full durable row.
 ```
 
@@ -496,8 +496,9 @@ Agent Mail handoff phrasing should distinguish proof quality:
 
 - `remote_pass` + `strict_clean_tree`: "Committed implementation verified from
   a clean checkout."
-- `remote_pass` + `live_dirty_checkout`: "Remote run passed, but attribution is
-  live dirty checkout; inspect `dirty_paths_sample` before closing."
+- `remote_pass` + `local_checkout_observed_remote_source_unknown`: "Remote run
+  passed, but the wrapper did not materialize local source remotely; inspect
+  `dirty_paths_sample` and `remote_source_materialized` before closing."
 - `source_state_refused`: "Code may be implemented, but clean proof is blocked
   by dirty source state."
 - `committed_tree_unsupported`: "Committed source manifest was computed, but no
