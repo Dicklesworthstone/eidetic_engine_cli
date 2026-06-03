@@ -36,6 +36,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -140,6 +141,10 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    Ok(collect_strings(node, ctx)?.into_iter().collect())
+}
+
 #[test]
 fn host_class_schema_has_expected_envelope_and_side_effect_free_const() -> TestResult {
     let schema = load_schema(HOST_CLASS_SCHEMA_PATH)?;
@@ -169,13 +174,17 @@ fn host_class_schema_has_expected_envelope_and_side_effect_free_const() -> TestR
             "host_class schema must declare sideEffectFree const true; got: {side_effect_const}"
         ),
     )?;
-    let required = collect_strings(&schema["required"], "host_class.required")?;
-    for field in REQUIRED_HOST_CLASS_TOP_LEVEL {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!("host_class top-level `required` is missing `{field}`; got: {required:?}"),
-        )?;
-    }
+    let actual = collect_string_set(&schema["required"], "host_class.required")?;
+    let expected = REQUIRED_HOST_CLASS_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_HOST_CLASS_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )?;
     Ok(())
 }
 
@@ -283,12 +292,15 @@ fn recommendation_schema_has_expected_envelope_and_read_only_consts() -> TestRes
              H4 status/doctor/support-bundle integration depends on the recommender never mutating config."
         ),
     )?;
-    let required = collect_strings(&schema["required"], "recommendation.required")?;
-    for field in REQUIRED_RECOMMENDATION_TOP_LEVEL {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!("recommendation top-level `required` is missing `{field}`; got: {required:?}"),
-        )?;
-    }
-    Ok(())
+    let actual = collect_string_set(&schema["required"], "recommendation.required")?;
+    let expected = REQUIRED_RECOMMENDATION_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_RECOMMENDATION_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
