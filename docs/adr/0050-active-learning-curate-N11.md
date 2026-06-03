@@ -82,7 +82,7 @@ What becomes harder:
 - The N11 spike — when it runs — has to re-derive its own offline-eval
   fixture rather than inheriting one that grew naturally from production.
 
-## Rejected alternatives
+## Rejected Alternatives
 
 1. **Ship a minimal active-learning queue today.** The ≥ 30 % reduction
    acceptance bar cannot be measured against the current ledger size, so
