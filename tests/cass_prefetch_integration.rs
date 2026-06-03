@@ -151,14 +151,28 @@ fn default_predictor_emits_ranked_unique_finite_candidates() -> TestResult {
         }
     }
 
-    // The most-recent topic ("refactor" at position 0) should NOT be
-    // a candidate — predicting an immediate repeat provides no
-    // prefetch value. Other refactor occurrences (positions 2, 3)
-    // promote it back into the candidate pool with high recency.
-    assert!(
-        predictions.iter().any(|c| c.topic_id == "refactor"),
-        "refactor (positions 2 + 3) should outrank the lone-position-1 debug; got {predictions:?}"
-    );
+    // The most-recent topic ("refactor" at position 0) is excluded as a
+    // candidate everywhere in the retained history: predicting an immediate
+    // repeat provides no prefetch value, even when older repeats exist.
+    if predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "refactor")
+    {
+        return Err(format!(
+            "current topic must stay excluded from candidates; got {predictions:?}"
+        ));
+    }
+    if !predictions
+        .iter()
+        .any(|candidate| candidate.topic_id == "debug")
+        || !predictions
+            .iter()
+            .any(|candidate| candidate.topic_id == "doc-update")
+    {
+        return Err(format!(
+            "synthetic history should emit debug and doc-update candidates; got {predictions:?}"
+        ));
+    }
 
     // Predictor name is surfaced on each candidate.
     for candidate in &predictions {
@@ -287,12 +301,17 @@ fn history_exceeding_default_window_still_emits_finite_normalized_scores() -> Te
 
 #[test]
 fn tied_score_predictions_use_lex_tie_break_at_integration_boundary() -> TestResult {
-    let predictor = RecencyWeightedFrequencyPredictor::new();
+    let predictor = RecencyWeightedFrequencyPredictor::new().with_half_life(1.0e308);
     let history = CassPrefetchHistory::from_topics(TEST_AGENT_SCOPE, ["current", "zeta", "alpha"]);
     let predictions = predictor.predict_next_n(&history, DEFAULT_PREFETCH_TOP_K);
     if predictions.len() != 2 {
         return Err(format!(
             "tie fixture should emit two candidates; got {predictions:?}"
+        ));
+    }
+    if predictions[0].score.total_cmp(&predictions[1].score) != std::cmp::Ordering::Equal {
+        return Err(format!(
+            "huge half-life fixture should produce tied scores; got {predictions:?}"
         ));
     }
     if predictions[0].topic_id != "alpha" || predictions[1].topic_id != "zeta" {
