@@ -141,6 +141,23 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+fn ensure_required_fields_have_properties(schema: &Value, ctx: &str) -> TestResult {
+    let required = collect_strings(&schema["required"], &format!("{ctx}.required"))?;
+    let properties = schema["properties"]
+        .as_object()
+        .ok_or_else(|| format!("{ctx}.properties must be an object"))?;
+    for field in &required {
+        ensure(
+            properties.contains_key(field),
+            format!(
+                "{ctx}.required includes `{field}` but properties are {:?}",
+                properties.keys().collect::<Vec<_>>()
+            ),
+        )?;
+    }
+    Ok(())
+}
+
 fn ensure_exact_string_enum(node: &Value, expected: &[&str], ctx: &str) -> TestResult {
     let values = collect_strings(node, ctx)?;
     ensure(
@@ -179,6 +196,7 @@ fn agent_workload_trace_v1_schema_has_expected_envelope() -> TestResult {
             format!("top-level `required` is missing `{field}`; got: {required:?}"),
         )?;
     }
+    ensure_required_fields_have_properties(&schema, "top-level trace schema")?;
     Ok(())
 }
 
@@ -208,6 +226,7 @@ fn agent_workload_trace_v1_closes_object_shapes_against_extra_fields() -> TestRe
                 additional_properties
             ),
         )?;
+        ensure_required_fields_have_properties(def, &format!("$defs.{def_name}"))?;
     }
     Ok(())
 }
