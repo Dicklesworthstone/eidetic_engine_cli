@@ -63,6 +63,11 @@ const OPTIONAL_REDACTION_POSTURE_FALSE: &[&str] = &[
     "fullFileListingPresent",
 ];
 
+const COMMAND_SHAPE_REQUIRED_FIELDS: &[&str] = &["verbs", "flagNames"];
+const HARNESS_IDENTITY_REQUIRED_FIELDS: &[&str] = &["program"];
+const MEMORY_HASH_REF_REQUIRED_FIELDS: &[&str] = &["hash"];
+const RETENTION_POSTURE_REQUIRED_FIELDS: &[&str] = &["retainedUntil"];
+
 const CLOSED_OBJECT_DEFS: &[&str] = &[
     "commandShape",
     "harnessIdentity",
@@ -146,6 +151,22 @@ fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, Strin
     Ok(collect_strings(node, ctx)?.into_iter().collect())
 }
 
+fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
+    expected.iter().map(|field| (*field).to_owned()).collect()
+}
+
+fn ensure_exact_required_fields(schema: &Value, expected: &[&str], ctx: &str) -> TestResult {
+    let required_ctx = format!("{ctx}.required");
+    let actual = collect_string_set(&schema["required"], &required_ctx)?;
+    let expected = expected_string_set(expected);
+    ensure(
+        actual == expected,
+        format!(
+            "{ctx}.required drifted from expected fields\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
+}
+
 fn ensure_required_fields_have_properties(schema: &Value, ctx: &str) -> TestResult {
     let required = collect_strings(&schema["required"], &format!("{ctx}.required"))?;
     let properties = schema["properties"]
@@ -194,17 +215,7 @@ fn agent_workload_trace_v1_schema_has_expected_envelope() -> TestResult {
             "flight-recorder schema must declare sideEffectFree const true; got: {side_effect_const}"
         ),
     )?;
-    let actual = collect_string_set(&schema["required"], "top-level required")?;
-    let expected = REQUIRED_TOP_LEVEL
-        .iter()
-        .map(|field| (*field).to_owned())
-        .collect::<BTreeSet<_>>();
-    ensure(
-        actual == expected,
-        format!(
-            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
-        ),
-    )?;
+    ensure_exact_required_fields(&schema, REQUIRED_TOP_LEVEL, "top-level trace schema")?;
     ensure_required_fields_have_properties(&schema, "top-level trace schema")?;
     Ok(())
 }
@@ -235,6 +246,15 @@ fn agent_workload_trace_v1_closes_object_shapes_against_extra_fields() -> TestRe
                 additional_properties
             ),
         )?;
+        let expected_required = match *def_name {
+            "commandShape" => COMMAND_SHAPE_REQUIRED_FIELDS,
+            "harnessIdentity" => HARNESS_IDENTITY_REQUIRED_FIELDS,
+            "memoryHashRef" => MEMORY_HASH_REF_REQUIRED_FIELDS,
+            "redactionPosture" => REQUIRED_REDACTION_POSTURE_FALSE,
+            "retentionPosture" => RETENTION_POSTURE_REQUIRED_FIELDS,
+            _ => unreachable!("CLOSED_OBJECT_DEFS contains an unmapped schema def"),
+        };
+        ensure_exact_required_fields(def, expected_required, &format!("$defs.{def_name}"))?;
         ensure_required_fields_have_properties(def, &format!("$defs.{def_name}"))?;
     }
     Ok(())
@@ -300,15 +320,12 @@ fn agent_workload_trace_v1_redaction_posture_forbids_raw_content_structurally() 
     // memory body). The schema makes these REQUIRED and `const:
     // false` so a serializer cannot omit them and cannot ever set
     // them true.
-    let required = collect_strings(&posture["required"], "redactionPosture.required")?;
+    ensure_exact_required_fields(
+        posture,
+        REQUIRED_REDACTION_POSTURE_FALSE,
+        "$defs.redactionPosture",
+    )?;
     for field in REQUIRED_REDACTION_POSTURE_FALSE {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!(
-                "redactionPosture.required must include `{field}` so trace rows \
-                 cannot omit the redaction assertion; got: {required:?}"
-            ),
-        )?;
         let const_value = &posture["properties"][field]["const"];
         ensure(
             const_value == &Value::Bool(false),
@@ -358,13 +375,7 @@ fn agent_workload_trace_v1_command_shape_omits_raw_argument_values() -> TestResu
             ),
         )?;
     }
-    let required = collect_strings(&command["required"], "commandShape.required")?;
-    for field in &["verbs", "flagNames"] {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!("commandShape.required must include `{field}`; got: {required:?}"),
-        )?;
-    }
+    ensure_exact_required_fields(command, COMMAND_SHAPE_REQUIRED_FIELDS, "$defs.commandShape")?;
     Ok(())
 }
 
@@ -372,10 +383,10 @@ fn agent_workload_trace_v1_command_shape_omits_raw_argument_values() -> TestResu
 fn agent_workload_trace_v1_memory_references_carry_hashes_not_raw_ids() -> TestResult {
     let schema = load_schema()?;
     let entry = &schema["$defs"]["memoryHashRef"];
-    let required = collect_strings(&entry["required"], "memoryHashRef.required")?;
-    ensure(
-        required.iter().any(|r| r == "hash"),
-        format!("memoryHashRef.required must include `hash`; got: {required:?}"),
+    ensure_exact_required_fields(
+        entry,
+        MEMORY_HASH_REF_REQUIRED_FIELDS,
+        "$defs.memoryHashRef",
     )?;
     let pattern = entry["properties"]["hash"]["pattern"]
         .as_str()
