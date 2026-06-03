@@ -220,14 +220,12 @@ fn closeout_audit_schema_identity_is_consistent() -> TestResult {
 fn closeout_audit_required_top_level_matches_runner_assertion() -> TestResult {
     // Mirrors assert_envelope_shape at tests/closeout_audit_runner_unit.rs:121.
     let schema = load_schema()?;
-    let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.contains(*field),
-            format!("required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    require_required_fields(
+        &schema,
+        "/required",
+        REQUIRED_TOP_LEVEL,
+        "top-level required",
+    )
 }
 
 #[test]
@@ -255,19 +253,12 @@ fn closeout_audit_evidence_required_matches_runner_assertion() -> TestResult {
     // Mirrors assert_envelope_shape's required_evidence list at
     // tests/closeout_audit_runner_unit.rs:144.
     let schema = load_schema()?;
-    let required = collect_strings(
-        schema
-            .pointer("/$defs/evidence/required")
-            .unwrap_or(&Value::Null),
+    require_required_fields(
+        &schema,
+        "/$defs/evidence/required",
+        REQUIRED_EVIDENCE,
         "evidence.required",
-    )?;
-    for field in REQUIRED_EVIDENCE {
-        ensure(
-            required.contains(*field),
-            format!("evidence.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    )
 }
 
 #[test]
