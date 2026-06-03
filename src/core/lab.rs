@@ -2715,7 +2715,7 @@ fn swarm_workload_command_count_limit_error(observed: Option<usize>) -> DomainEr
             "swarm workload trace declares {count} commandSequence entries, exceeding the {MAX_SWARM_WORKLOAD_COMMANDS} entry limit"
         ),
         None => format!(
-            "swarm workload trace commandSequence exceeds the {MAX_SWARM_WORKLOAD_COMMANDS} entry limit"
+            "swarm workload trace commandSequence entries exceed the {MAX_SWARM_WORKLOAD_COMMANDS} entry limit"
         ),
     };
     DomainError::Usage {
