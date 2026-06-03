@@ -1848,6 +1848,7 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
                 "redactionStatus",
                 "sources",
                 "readyReservationPressure",
+                "stalledBeadLiveness",
                 "degraded",
             ],
             FieldProfile::Standard | FieldProfile::Full => &["*"],
@@ -8623,6 +8624,13 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             definition: host_profile_schema_definition,
         },
         SchemaEntry {
+            id: "ee.rch.selector_admission_probe.v1",
+            version: "1",
+            description: "Read-only RCH selector/admission diagnostic block embedded in verification proofs",
+            category: "ops",
+            definition: rch_selector_admission_probe_schema_definition,
+        },
+        SchemaEntry {
             id: crate::core::swarm_next_action::SWARM_NEXT_ACTION_SCHEMA_V1,
             version: "1",
             description: "Read-only swarm next-action input snapshot for agent work selection",
@@ -9054,13 +9062,6 @@ pub const fn public_schemas() -> &'static [SchemaEntry] {
             description: "Read-only per-file classification for oversized agent-harness logs found by ee diag disk-pressure.",
             category: "ops",
             definition: disk_pressure_agent_harness_log_classifier_schema_definition,
-        },
-        SchemaEntry {
-            id: "ee.error.v1",
-            version: "1",
-            description: "Legacy error envelope retained for v0/v1 consumers; v2 is canonical (see ee.error.v2).",
-            category: "envelope",
-            definition: error_v1_schema_definition,
         },
         SchemaEntry {
             id: "ee.graph.rule_provenance_ego.v1",
@@ -9598,6 +9599,10 @@ fn host_profile_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.host_profile.v1.json").to_string()
 }
 
+fn rch_selector_admission_probe_schema_definition() -> String {
+    include_str!("../../docs/schemas/ee.rch.selector_admission_probe.v1.json").to_string()
+}
+
 fn swarm_next_action_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.swarm_next_action.v1.json").to_string()
 }
@@ -10131,10 +10136,6 @@ fn diag_plan_cache_schema_definition() -> String {
 fn disk_pressure_agent_harness_log_classifier_schema_definition() -> String {
     include_str!("../../docs/schemas/ee.disk_pressure.agent_harness_log_classifier.v1.json")
         .to_string()
-}
-
-fn error_v1_schema_definition() -> String {
-    include_str!("../../docs/schemas/ee.error.v1.json").to_string()
 }
 
 fn graph_rule_provenance_ego_schema_definition() -> String {

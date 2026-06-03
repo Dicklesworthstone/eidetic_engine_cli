@@ -46167,11 +46167,12 @@ where
         | output::Renderer::Jsonl
         | output::Renderer::Compact
         | output::Renderer::Hook => {
-            let profile = if matches!(cli.renderer(), output::Renderer::Compact) {
-                output::FieldProfile::Summary
-            } else {
-                cli.fields_level().to_field_profile()
-            };
+            let profile =
+                if !cli.fields_explicit || matches!(cli.renderer(), output::Renderer::Compact) {
+                    output::FieldProfile::Summary
+                } else {
+                    cli.fields_level().to_field_profile()
+                };
             match render_swarm_brief_json(&report, profile) {
                 Ok(json) => write_stdout(stdout, &(json + "\n")),
                 Err(error) => write_domain_error(&error, cli.wants_json(), stdout, stderr),
@@ -54660,6 +54661,69 @@ mod tests {
                 .unwrap_or_default(),
             &8,
             "swarm brief source count",
+        )
+    }
+
+    #[test]
+    fn swarm_brief_json_default_uses_compact_summary_fields() -> TestResult {
+        let (default_exit, default_stdout, default_stderr) =
+            invoke(&["ee", "--json", "swarm", "brief", "--sources", "none"]);
+        ensure_equal(
+            &default_exit,
+            &ProcessExitCode::Success,
+            "default swarm brief JSON exit",
+        )?;
+        ensure(
+            default_stderr.is_empty(),
+            "default swarm brief JSON stderr must be empty",
+        )?;
+        let default_json: serde_json::Value =
+            serde_json::from_str(&default_stdout).map_err(|error| error.to_string())?;
+        ensure(
+            default_json.pointer("/data/topRecommendations").is_some(),
+            "default swarm brief JSON includes summary recommendations",
+        )?;
+        ensure(
+            default_json.pointer("/data/recommendations").is_none(),
+            "default swarm brief JSON excludes full recommendations",
+        )?;
+        ensure(
+            default_stdout.len() < 8 * 1024,
+            "default swarm brief JSON stays below 8 KiB-byte budget",
+        )?;
+
+        let (full_exit, full_stdout, full_stderr) = invoke(&[
+            "ee",
+            "--json",
+            "swarm",
+            "brief",
+            "--sources",
+            "none",
+            "--fields",
+            "full",
+        ]);
+        ensure_equal(
+            &full_exit,
+            &ProcessExitCode::Success,
+            "full swarm brief JSON exit",
+        )?;
+        ensure(
+            full_stderr.is_empty(),
+            "full swarm brief JSON stderr must be empty",
+        )?;
+        let full_json: serde_json::Value =
+            serde_json::from_str(&full_stdout).map_err(|error| error.to_string())?;
+        ensure(
+            full_json.pointer("/data/recommendations").is_some(),
+            "explicit full swarm brief JSON preserves full recommendations",
+        )?;
+        ensure(
+            full_json.pointer("/data/topRecommendations").is_none(),
+            "explicit full swarm brief JSON excludes summary projection",
+        )?;
+        ensure(
+            default_stdout.len() < full_stdout.len(),
+            "default swarm brief JSON is smaller than explicit full output",
         )
     }
 

@@ -2372,6 +2372,15 @@ fn golden_schema_contract_runner_validates_current_stage() -> TestResult {
 }
 
 #[test]
+fn schema_list_golden_matches_public_schema_registry() -> TestResult {
+    assert_golden(
+        "schema",
+        "schema_list_json",
+        &ee::output::render_schema_list_json(),
+    )
+}
+
+#[test]
 fn contract_failure_report_includes_debugging_context() -> TestResult {
     let case = ContractCase {
         name: "status_json",

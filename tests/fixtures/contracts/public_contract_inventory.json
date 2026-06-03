@@ -244,7 +244,7 @@
       "schemaId": "ee.error.v1",
       "status": "legacy",
       "surface": "response_error_envelope",
-      "owner": "src/output/mod.rs::public_schemas",
+      "owner": "docs/schemas/ee.error.v1.json",
       "schemaFile": "docs/schemas/ee.error.v1.json",
       "canonicalDocs": [
         "docs/migration_v0_1_to_v0_2.md"
@@ -266,14 +266,6 @@
         {
           "pathPattern": "tests/**",
           "reason": "Fixtures and regression tests may preserve old schema IDs while asserting migration behavior."
-        },
-        {
-          "pathPattern": "src/output/mod.rs",
-          "reason": "Legacy error envelope is intentionally registered by public_schemas() for v0/v1 consumers."
-        },
-        {
-          "pathPattern": "src/models/mod.rs",
-          "reason": "Legacy error constant may live alongside response envelope constants."
         }
       ],
       "forbiddenCurrentClaims": [

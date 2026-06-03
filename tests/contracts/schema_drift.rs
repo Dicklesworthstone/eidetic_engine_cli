@@ -3947,14 +3947,19 @@ mod tests {
             let Some(registered) = registry.get(entry.schema_id.as_str()) else {
                 continue;
             };
+            if envelope_categories.contains(&registered.category) && entry.status != "current" {
+                mismatched.push(RegistryMismatch {
+                    schema_id: entry.schema_id.clone(),
+                    inventory_status: entry.status.clone(),
+                    registry_description: registered.description.to_owned(),
+                });
+                continue;
+            }
             let description_lower = registered.description.to_ascii_lowercase();
             let registry_signals_legacy = description_lower.contains("legacy")
                 || description_lower.contains("deprecated")
                 || description_lower.contains("retained");
-            let inventory_legacy = entry.status == "legacy";
-            if inventory_legacy != registry_signals_legacy
-                && envelope_categories.contains(&registered.category)
-            {
+            if registry_signals_legacy && envelope_categories.contains(&registered.category) {
                 mismatched.push(RegistryMismatch {
                     schema_id: entry.schema_id.clone(),
                     inventory_status: entry.status.clone(),
