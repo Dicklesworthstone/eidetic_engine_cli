@@ -27,6 +27,9 @@
 //! 10. `previewSampleStrategy` enum is the closed three-strategy set.
 //! 11. `previewRow` required fields match the bead's documented row
 //!    shape.
+//! 12. `caution` and `policySnapshot` nested required fields stay
+//!    exact, so renderers and pure-decision callers cannot drift the
+//!    supporting object shapes quietly.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -90,6 +93,10 @@ const REQUIRED_CAUTION_SEVERITIES: &[&str] = &["info", "warning"];
 
 const REQUIRED_SAMPLE_STRATEGIES: &[&str] = &["random", "highest-trust", "most-recent"];
 
+const REQUIRED_CAUTION_FIELDS: &[&str] = &["kind", "message", "severity"];
+
+const REQUIRED_POLICY_SNAPSHOT_FIELDS: &[&str] = &["lane", "decision"];
+
 const REQUIRED_PREVIEW_ROW_FIELDS: &[&str] = &[
     "memoryId",
     "level",
@@ -146,6 +153,20 @@ fn require_closed_set(schema: &Value, pointer: &str, expected: &[&str], label: &
     ensure(
         actual == want,
         format!("{label} drifted from closed set; expected {want:?}, got {actual:?}"),
+    )
+}
+
+fn require_required_fields(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    label: &str,
+) -> TestResult {
+    let actual = collect_strings(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
+    let expected = expected_string_set(expected);
+    ensure(
+        actual == expected,
+        format!("{label} drifted from required field set; expected {expected:?}, got {actual:?}"),
     )
 }
 
@@ -256,6 +277,28 @@ fn lane_grant_preview_caution_severity_excludes_error_per_read_only_invariant() 
 }
 
 #[test]
+fn lane_grant_preview_caution_required_fields_match_schema_contract() -> TestResult {
+    let schema = load_schema()?;
+    require_required_fields(
+        &schema,
+        "/$defs/caution/required",
+        REQUIRED_CAUTION_FIELDS,
+        "caution.required",
+    )
+}
+
+#[test]
+fn lane_grant_preview_policy_snapshot_required_fields_match_schema_contract() -> TestResult {
+    let schema = load_schema()?;
+    require_required_fields(
+        &schema,
+        "/$defs/policySnapshot/required",
+        REQUIRED_POLICY_SNAPSHOT_FIELDS,
+        "policySnapshot.required",
+    )
+}
+
+#[test]
 fn lane_grant_preview_sample_strategy_enum_is_three_strategies() -> TestResult {
     let schema = load_schema()?;
     require_closed_set(
@@ -269,17 +312,10 @@ fn lane_grant_preview_sample_strategy_enum_is_three_strategies() -> TestResult {
 #[test]
 fn lane_grant_preview_row_required_fields_match_bead_spec() -> TestResult {
     let schema = load_schema()?;
-    let actual = collect_strings(
-        schema
-            .pointer("/$defs/previewRow/required")
-            .unwrap_or(&Value::Null),
+    require_required_fields(
+        &schema,
+        "/$defs/previewRow/required",
+        REQUIRED_PREVIEW_ROW_FIELDS,
         "previewRow.required",
-    )?;
-    let expected = expected_string_set(REQUIRED_PREVIEW_ROW_FIELDS);
-    ensure(
-        actual == expected,
-        format!(
-            "REQUIRED_PREVIEW_ROW_FIELDS drifted from schema previewRow.required array\nexpected={expected:?}\nactual={actual:?}"
-        ),
     )
 }
