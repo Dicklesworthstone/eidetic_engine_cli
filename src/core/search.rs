@@ -47,8 +47,9 @@ use super::profile::{RuntimeProfileReport, runtime_profile_for_workspace};
 use crate::search::TantivyIndex;
 use crate::search::lexical_ram_tier::{
     LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
-    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
-    LexicalRamTierResult, pin_lexical_index_files, trace_lexical_ram_tier,
+    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV,
+    LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE, LexicalRamTierConfig, LexicalRamTierResult,
+    pin_lexical_index_files, trace_lexical_ram_tier,
 };
 use crate::search::plan_cache::{
     CompiledPlan, DEFAULT_PLAN_CACHE_ENTRIES, PlanCacheKey, compute_eql_hash,
@@ -1109,6 +1110,16 @@ impl SearchDegradation {
             severity: "info".to_string(),
             message: "Lexical RAM-tier pinning is enabled, but the safe mmap/mlock adapter is not installed; search results are unchanged.".to_string(),
             repair: Some("Keep EE_LEXICAL_INDEX_PIN_RAM unset until the lexical RAM-tier syscall adapter lands.".to_string()),
+        }
+    }
+
+    #[must_use]
+    fn lexical_ram_unavailable_on_macos() -> Self {
+        Self {
+            code: LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE.to_string(),
+            severity: "info".to_string(),
+            message: "Lexical RAM-tier pinning is enabled on macOS, where the Linux RAM-tier optimization is unavailable; search results are unchanged.".to_string(),
+            repair: Some("Run ee on a Linux 256GB+ host for lexical posting-list RAM-tier pinning.".to_string()),
         }
     }
 
@@ -5281,15 +5292,24 @@ fn push_lexical_ram_tier_search_degradations(
         return;
     }
     for code in &report.degraded_codes {
-        match code.as_str() {
-            LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => {
-                degraded.push(SearchDegradation::lexical_hugepages_unavailable());
-            }
-            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => {
-                degraded.push(SearchDegradation::lexical_ram_tier_not_implemented());
-            }
-            _ => {}
+        if let Some(degradation) = lexical_ram_tier_search_degradation_for_code(code) {
+            degraded.push(degradation);
         }
+    }
+}
+
+fn lexical_ram_tier_search_degradation_for_code(code: &str) -> Option<SearchDegradation> {
+    match code {
+        LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => {
+            Some(SearchDegradation::lexical_hugepages_unavailable())
+        }
+        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => {
+            Some(SearchDegradation::lexical_ram_tier_not_implemented())
+        }
+        LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE => {
+            Some(SearchDegradation::lexical_ram_unavailable_on_macos())
+        }
+        _ => None,
     }
 }
 
@@ -11994,6 +12014,24 @@ mod tests {
             ));
         }
         Ok(())
+    }
+
+    #[test]
+    fn lexical_ram_tier_search_routes_macos_unavailable_code() {
+        let degradation =
+            lexical_ram_tier_search_degradation_for_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE)
+                .expect("macOS lexical RAM-tier code must become a search degradation");
+
+        assert_eq!(degradation.code, LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE);
+        assert_eq!(degradation.severity, "info");
+        assert!(degradation.message.contains("Lexical RAM-tier"));
+        assert!(degradation.message.contains("macOS"));
+        assert!(
+            degradation
+                .repair
+                .as_deref()
+                .is_some_and(|repair| repair.contains("Linux"))
+        );
     }
 
     #[test]

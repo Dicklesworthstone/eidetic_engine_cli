@@ -42,9 +42,9 @@ This bead is intentionally distinct from three other pinning surfaces:
 | Linux 2-socket (256GB+) with THP enabled | Optimization fires by default once the syscall slice ships. Expected p99 search-latency improvement: ≥ 30% on a fixture workspace with ≥ 10 MB lexical index. |
 | Linux 1-socket | Optimization fires; hugepages still apply if THP is enabled. |
 | Linux without THP | Pinning works at regular page size; `lexical_hugepages_unavailable` emitted iff `request_hugepages=true`. |
-| macOS | `madvise(MADV_WILLNEED)` + optional `mlock` only (no THP). Emits `lexical_hugepages_unavailable` iff hugepages requested. |
+| macOS | No Linux-equivalent THP path. Emits `lexical_ram_unavailable_on_macos`, plus `lexical_hugepages_unavailable` iff hugepages are requested. |
 | Windows | No equivalent syscall; loader falls through to plain page-cache deserialization. |
-| Any platform while scaffold ships without syscalls | Loader records the lexical index was not pinned. Emits `lexical_ram_tier_not_implemented`. |
+| Linux / Windows / other unsupported hosts while scaffold ships without syscalls | Loader records the lexical index was not pinned. Emits `lexical_ram_tier_not_implemented`. |
 
 ## Configuration
 
@@ -109,6 +109,7 @@ current scaffold vocabulary have landed:
 - [`lexical_ram_tier_disabled`](../../tests/fixtures/failure_modes/lexical_ram_tier_disabled.json) — operator turned the optimization off.
 - [`lexical_hugepages_unavailable`](../../tests/fixtures/failure_modes/lexical_hugepages_unavailable.json) — hugepages requested but platform/kernel cannot honor them.
 - [`lexical_ram_tier_not_implemented`](../../tests/fixtures/failure_modes/lexical_ram_tier_not_implemented.json) — scaffold ships ahead of the syscall slice.
+- [`lexical_ram_unavailable_on_macos`](../../tests/fixtures/failure_modes/lexical_ram_unavailable_on_macos.json) — macOS host class cannot reproduce the Linux RAM-tier posture.
 
 ## Determinism contract
 

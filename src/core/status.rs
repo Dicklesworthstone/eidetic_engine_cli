@@ -42,8 +42,9 @@ use crate::obs::flight_recorder::{FlightRecorderPosture, classify_flight_recorde
 use crate::policy::{MEMORY_DECAY_SOURCE, MemoryDecayThresholds, evaluate_memory_decay};
 use crate::search::lexical_ram_tier::{
     LEXICAL_HUGEPAGES_UNAVAILABLE_CODE, LEXICAL_RAM_TIER_HUGEPAGES_ENV,
-    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV, LexicalRamTierConfig,
-    LexicalRamTierResult, pin_lexical_index_files, trace_lexical_ram_tier,
+    LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE, LEXICAL_RAM_TIER_PIN_RAM_ENV,
+    LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE, LexicalRamTierConfig, LexicalRamTierResult,
+    pin_lexical_index_files, trace_lexical_ram_tier,
 };
 
 use super::agent_detect::AgentInventoryReport;
@@ -2209,21 +2210,33 @@ fn push_lexical_ram_tier_degradations(
         return;
     }
     for code in &report.degraded_codes {
-        match code.as_str() {
-            LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => degradations.push(DegradationReport {
-                code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
-                severity: "info",
-                message: "Lexical RAM-tier hugepages were requested but this host cannot grant them.",
-                repair: "Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.",
-            }),
-            LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => degradations.push(DegradationReport {
-                code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE,
-                severity: "info",
-                message: "Lexical RAM-tier pinning is enabled, but the safe syscall adapter has not been installed; search results are unchanged.",
-                repair: "Keep EE_LEXICAL_INDEX_PIN_RAM unset until the mmap/mlock adapter slice lands.",
-            }),
-            _ => {}
+        if let Some(report) = lexical_ram_tier_degradation_report_for_code(code) {
+            degradations.push(report);
         }
+    }
+}
+
+fn lexical_ram_tier_degradation_report_for_code(code: &str) -> Option<DegradationReport> {
+    match code {
+        LEXICAL_HUGEPAGES_UNAVAILABLE_CODE => Some(DegradationReport {
+            code: LEXICAL_HUGEPAGES_UNAVAILABLE_CODE,
+            severity: "info",
+            message: "Lexical RAM-tier hugepages were requested but this host cannot grant them.",
+            repair: "Disable EE_LEXICAL_INDEX_HUGEPAGES or move the workspace to a Linux host with transparent hugepages available.",
+        }),
+        LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE => Some(DegradationReport {
+            code: LEXICAL_RAM_TIER_NOT_IMPLEMENTED_CODE,
+            severity: "info",
+            message: "Lexical RAM-tier pinning is enabled, but the safe syscall adapter has not been installed; search results are unchanged.",
+            repair: "Keep EE_LEXICAL_INDEX_PIN_RAM unset until the mmap/mlock adapter slice lands.",
+        }),
+        LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE => Some(DegradationReport {
+            code: LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+            severity: "info",
+            message: "Lexical RAM-tier pinning is enabled on macOS, where the Linux RAM-tier optimization is unavailable; search results are unchanged.",
+            repair: "Run ee on a Linux 256GB+ host for lexical posting-list RAM-tier pinning.",
+        }),
+        _ => None,
     }
 }
 
@@ -6131,6 +6144,39 @@ mod tests {
 
         let config = lexical_ram_tier_config_for_status(Some(temp.path()));
         ensure(config.populate_on_open, false, "workspace config populate")
+    }
+
+    #[test]
+    fn lexical_ram_tier_status_routes_macos_unavailable_code() -> TestResult {
+        let report =
+            lexical_ram_tier_degradation_report_for_code(LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE)
+                .ok_or_else(|| {
+                    format!(
+                        "expected status degradation for {LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE}"
+                    )
+                })?;
+
+        ensure(
+            report.code,
+            LEXICAL_RAM_UNAVAILABLE_ON_MACOS_CODE,
+            "macos code",
+        )?;
+        ensure(report.severity, "info", "macos severity")?;
+        ensure(
+            report.message.contains("Lexical RAM-tier"),
+            true,
+            "message mentions lexical RAM-tier",
+        )?;
+        ensure(
+            report.message.contains("macOS"),
+            true,
+            "message mentions macOS",
+        )?;
+        ensure(
+            report.repair.contains("Linux"),
+            true,
+            "repair mentions Linux",
+        )
     }
 
     #[test]
