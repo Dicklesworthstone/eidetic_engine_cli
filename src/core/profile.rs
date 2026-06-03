@@ -2237,10 +2237,11 @@ fn read_profile_config_if_regular(
     // `src/core/memory.rs::read_workspace_config_if_present`,
     // `src/core/curate.rs::structural_decay_config_contents`, and
     // `src/core/config_surface.rs::read_optional_config_contents`. The
-    // metadata pre-check at stat time is layer 1; the
-    // `file.take(LIMIT + 1).read_to_end` inside
-    // `read_profile_config_file_no_follow` is layer 2, closing the
-    // TOCTOU growth window between the stat above and the open below.
+    // metadata pre-check at stat time is layer 1; the no-follow open
+    // and opened-metadata checks inside
+    // `read_profile_config_file_no_follow` are layer 2; the bounded
+    // `file.take(LIMIT + 1).read_to_end` is layer 3, closing the
+    // TOCTOU growth window after the opened-handle inspection.
     if metadata.len() > PROFILE_CONFIG_MAX_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -2259,6 +2260,25 @@ fn read_profile_config_file_no_follow(
     operation: &'static str,
 ) -> Result<String, io::Error> {
     let file = open_profile_config_file_for_read(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to {operation} profile config `{}` because it is not a regular file after open",
+                path.display()
+            ),
+        ));
+    }
+    if opened_metadata.len() > PROFILE_CONFIG_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to {operation} profile config `{}`: file grew past the {PROFILE_CONFIG_MAX_BYTES}-byte cap after open",
+                path.display()
+            ),
+        ));
+    }
     let mut bytes = Vec::new();
     file.take(PROFILE_CONFIG_MAX_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;
@@ -3441,6 +3461,33 @@ mod tests {
             fs::read_to_string(&original_config).map_err(|error| error.to_string())?,
             original_text.to_owned(),
             "validated profile config copy must remain untouched",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_config_final_read_rejects_non_regular_opened_file() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_path = temp.path().join("config-dir.toml");
+        fs::create_dir(&config_path).map_err(|error| error.to_string())?;
+
+        let error = match read_profile_config_file_no_follow(&config_path, "read") {
+            Ok(_) => {
+                return Err(
+                    "final profile config read must reject non-regular opened files".to_string(),
+                );
+            }
+            Err(error) => error,
+        };
+
+        ensure(
+            error.kind(),
+            io::ErrorKind::InvalidInput,
+            "non-regular opened profile config error kind",
+        )?;
+        ensure_true(
+            error.to_string().contains("not a regular file after open"),
+            "non-regular opened profile config error message",
         )
     }
 

@@ -1947,6 +1947,15 @@ fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {
             ),
         ));
     }
+    if metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' exceeds the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
     // bd-1sdr5: bounded read. Open + take(LIMIT+1) so an oversized
     // file reads LIMIT+1 bytes and we detect the overrun without
     // ever materializing more than ~8 MiB. Mirrors the
@@ -1961,7 +1970,26 @@ fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {
                 "Agent Mail snapshot read cap overflowed usize",
             )
         })?;
-    let file = fs::File::open(path)?;
+    let file = open_agent_mail_snapshot_file_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Agent Mail snapshot path '{}' is not a regular file after open",
+                path.display()
+            ),
+        ));
+    }
+    if opened_metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' exceeds the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap; refusing to read",
+                path.display()
+            ),
+        ));
+    }
     let mut bytes = Vec::new();
     file.take(read_limit as u64).read_to_end(&mut bytes)?;
     if bytes.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES {
@@ -1975,6 +2003,23 @@ fn read_agent_mail_snapshot_file(path: &Path) -> io::Result<String> {
     }
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
+
+fn open_agent_mail_snapshot_file_for_read_no_follow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_agent_mail_snapshot_file_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_agent_mail_snapshot_file_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_agent_mail_snapshot_file_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn first_existing_snapshot_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
     let mut current = PathBuf::new();
@@ -10675,6 +10720,37 @@ mod tests {
             output.snapshot.degraded
         );
         assert!(matches!(output.contribution, SwarmBriefContribution::None));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn swarm_brief_agent_mail_snapshot_final_open_rejects_symlink_leaf() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let outside_snapshot = outside.path().join("agent-mail.json");
+        fs::write(
+            &outside_snapshot,
+            r#"{"file_reservations":[],"inbox":[],"threads":[]}"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let snapshot_path = tempdir.path().join("agent-mail.json");
+        std::os::unix::fs::symlink(&outside_snapshot, &snapshot_path)
+            .map_err(|error| error.to_string())?;
+
+        let error = match open_agent_mail_snapshot_file_for_read_no_follow(&snapshot_path) {
+            Ok(_) => return Err("symlinked Agent Mail snapshot unexpectedly opened".to_string()),
+            Err(error) => error,
+        };
+
+        assert_ne!(
+            error.kind(),
+            io::ErrorKind::NotFound,
+            "O_NOFOLLOW rejection should not be masked as a missing snapshot"
+        );
+        let outside_contents =
+            fs::read_to_string(&outside_snapshot).map_err(|error| error.to_string())?;
+        assert!(outside_contents.contains("file_reservations"));
         Ok(())
     }
 

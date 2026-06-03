@@ -1259,7 +1259,14 @@ fn read_memory_scope_config(config_path: &Path) -> Option<String> {
         // helper deliberately stays quiet.
         return None;
     }
-    let file = std::fs::File::open(config_path).ok()?;
+    let file = open_memory_scope_config_for_read_no_follow(config_path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.file_type().is_file() {
+        return None;
+    }
+    if opened_metadata.len() > MEMORY_SCOPE_CONFIG_MAX_BYTES {
+        return None;
+    }
     let mut bytes = Vec::new();
     file.take(MEMORY_SCOPE_CONFIG_MAX_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -1271,6 +1278,23 @@ fn read_memory_scope_config(config_path: &Path) -> Option<String> {
     }
     String::from_utf8(bytes).ok()
 }
+
+fn open_memory_scope_config_for_read_no_follow(config_path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    configure_memory_scope_config_open_no_follow(&mut options);
+    options.open(config_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_memory_scope_config_open_no_follow(options: &mut std::fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_memory_scope_config_open_no_follow(_options: &mut std::fs::OpenOptions) {}
 
 fn memory_scope_path_has_symlink_component(path: &Path) -> io::Result<bool> {
     let mut current = PathBuf::new();
@@ -1887,6 +1911,43 @@ team_members = ["OutsideAgent"]
         let context = MemoryScopeContext::for_workspace(tempdir.path(), MemoryScope::Team, false);
 
         assert!(context.team_members.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn memory_scope_config_final_open_rejects_symlink_leaf() -> Result<(), String> {
+        let tempdir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let config_dir = tempdir.path().join(".ee");
+        let outside_dir = tempdir.path().join("outside");
+        std::fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&outside_dir).map_err(|error| error.to_string())?;
+        let outside_config = outside_dir.join("config.toml");
+        std::fs::write(
+            &outside_config,
+            r#"
+[trust]
+team_members = ["OutsideAgent"]
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_config = config_dir.join("config.toml");
+        std::os::unix::fs::symlink(&outside_config, &linked_config)
+            .map_err(|error| error.to_string())?;
+
+        let result = super::open_memory_scope_config_for_read_no_follow(&linked_config);
+
+        assert!(
+            result.is_err(),
+            "final memory-scope config open must reject a symlink leaf"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            r#"
+[trust]
+team_members = ["OutsideAgent"]
+"#
+        );
         Ok(())
     }
 

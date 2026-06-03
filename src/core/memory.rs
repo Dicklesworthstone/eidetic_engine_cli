@@ -2218,13 +2218,14 @@ fn read_workspace_config_if_present(
     // (`PREFLIGHT_RUN_STORE_MAX_BYTES`) just closed for the parallel
     // workspace-local `.ee/` files.
     //
-    // Two layers of defense, matching the peer's
+    // Three layers of defense, matching the peer's
     // `read_preflight_rules_file_no_follow` shape:
     //  1. `metadata.len() > LIMIT` pre-check at stat time, before any
     //     open or allocation.
-    //  2. `file.take(LIMIT + 1).read_to_end` for the actual read,
-    //     closing the TOCTOU growth window where a peer could grow
-    //     the file between the stat and the read itself.
+    //  2. No-follow open plus opened-metadata checks close the
+    //     leaf-symlink and race-grown-file windows between stat and read.
+    //  3. `file.take(LIMIT + 1).read_to_end` bounds allocation if the
+    //     opened file grows while it is being read.
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.len() > WORKSPACE_CONFIG_MAX_BYTES => {
             return Err(DomainError::Configuration {
@@ -2246,7 +2247,7 @@ fn read_workspace_config_if_present(
         Err(_) => {}
     }
 
-    let file = match fs::File::open(&path) {
+    let file = match open_workspace_config_file_for_read_no_follow(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -2256,6 +2257,36 @@ fn read_workspace_config_if_present(
             });
         }
     };
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to inspect opened {purpose} {}: {error}",
+                path.display()
+            ),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read {purpose} {} because it is not a regular file after open.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/config.toml with a regular TOML file.".to_owned()),
+        });
+    }
+    if opened_metadata.len() > WORKSPACE_CONFIG_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read {purpose} {}: file grew past the {WORKSPACE_CONFIG_MAX_BYTES}-byte cap after open.",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {WORKSPACE_CONFIG_MAX_BYTES} bytes.",
+                path.display()
+            )),
+        });
+    }
     let mut bytes = Vec::new();
     if let Err(error) = file
         .take(WORKSPACE_CONFIG_MAX_BYTES.saturating_add(1))
@@ -2287,6 +2318,23 @@ fn read_workspace_config_if_present(
     })?;
     Ok(Some((path, contents)))
 }
+
+fn open_workspace_config_file_for_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_workspace_config_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_workspace_config_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_workspace_config_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn ensure_workspace_config_path_is_regular_file(
     path: &Path,
@@ -11000,6 +11048,40 @@ mod tests {
         assert!(
             error.to_string().contains("symlinked path component"),
             "unexpected error: {error}"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_config_final_open_rejects_symlink_leaf() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let metadata = temp.path().join(".ee");
+        fs::create_dir_all(&metadata).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        let outside_text = "[learn]\ncluster_coherence_threshold = 0.9\n";
+        fs::write(&outside_config, outside_text).map_err(|error| error.to_string())?;
+        let linked_config = metadata.join("config.toml");
+        symlink(&outside_config, &linked_config).map_err(|error| error.to_string())?;
+
+        let error = match super::open_workspace_config_file_for_read_no_follow(&linked_config) {
+            Ok(_) => {
+                return Err("final workspace config read open must reject symlinks".to_string());
+            }
+            Err(error) => error,
+        };
+
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "final symlink read should fail because the path is a symlink"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_config).map_err(|error| error.to_string())?,
+            outside_text,
+            "workspace config read helper must not follow the symlink target"
         );
         Ok(())
     }

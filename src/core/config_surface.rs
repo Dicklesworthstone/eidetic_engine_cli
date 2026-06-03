@@ -471,14 +471,16 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
     // invocation. Same defect class that e1499deb closed for the
     // parallel `src/core/memory.rs::read_workspace_config_if_present`
     // and 0fe4a339 closed for
-    // `src/core/curate.rs::structural_decay_config_contents`. Two
+    // `src/core/curate.rs::structural_decay_config_contents`. Three
     // layers of defense, matching the peer's
     // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
     // shape:
     //  1. `metadata.len() > LIMIT` pre-check at stat time, before the
     //     File::open or allocation.
-    //  2. `file.take(LIMIT + 1).read_to_end` closes the TOCTOU growth
-    //     window between the stat above and the open below.
+    //  2. No-follow open plus opened-metadata checks close the
+    //     leaf-symlink and race-grown-file windows between stat and read.
+    //  3. `file.take(LIMIT + 1).read_to_end` bounds allocation if the
+    //     opened file grows while it is being read.
     if metadata.len() > CONFIG_SURFACE_MAX_BYTES {
         return Err(ConfigSurfaceError::Read {
             path: path.to_path_buf(),
@@ -492,10 +494,37 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
             ),
         });
     }
-    let file = fs::File::open(path).map_err(|source| ConfigSurfaceError::Read {
+    let file = open_config_surface_file_for_read_no_follow(path).map_err(|source| {
+        ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    let opened_metadata = file.metadata().map_err(|source| ConfigSurfaceError::Read {
         path: path.to_path_buf(),
         source,
     })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "config path is not a regular file after open",
+            ),
+        });
+    }
+    if opened_metadata.len() > CONFIG_SURFACE_MAX_BYTES {
+        return Err(ConfigSurfaceError::Read {
+            path: path.to_path_buf(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to read config `{}`: file grew past the {CONFIG_SURFACE_MAX_BYTES}-byte cap after open",
+                    path.display()
+                ),
+            ),
+        });
+    }
     let mut bytes = Vec::new();
     if let Err(source) = file
         .take(CONFIG_SURFACE_MAX_BYTES.saturating_add(1))
@@ -530,6 +559,23 @@ fn read_optional_config_contents(path: &Path) -> Result<Option<String>, ConfigSu
     })?;
     Ok(Some(contents))
 }
+
+fn open_config_surface_file_for_read_no_follow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_config_surface_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_config_surface_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_config_surface_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn ensure_config_write_path_is_regular_or_missing(path: &Path) -> Result<(), io::Error> {
     match fs::symlink_metadata(path) {
@@ -1116,6 +1162,37 @@ mod tests {
         } else {
             Err(format!("unexpected symlink error: {error}"))
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graph_get_final_read_open_rejects_symlink_leaf() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = workspace()?;
+        let config_dir = temp.path().join(".ee");
+        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
+        let outside_config = temp.path().join("outside-config.toml");
+        fs::write(
+            &outside_config,
+            "[graph.ppr]\nalpha = 0.9\n[graph.feature.ppr]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let linked_config = config_dir.join("config.toml");
+        symlink(&outside_config, &linked_config).map_err(|error| error.to_string())?;
+
+        let result = super::open_config_surface_file_for_read_no_follow(&linked_config);
+
+        assert!(
+            result.is_err(),
+            "final config-surface read open must reject a symlink leaf"
+        );
+        if fs::read_to_string(&outside_config).map_err(|error| error.to_string())?
+            != "[graph.ppr]\nalpha = 0.9\n[graph.feature.ppr]\nenabled = true\n"
+        {
+            return Err("symlink target should remain untouched".to_string());
+        }
+        Ok(())
     }
 
     #[test]

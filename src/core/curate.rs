@@ -4620,14 +4620,15 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
     // `src/core/memory.rs::read_workspace_config_if_present`) just
     // closed for the parallel workspace-local `.ee/` reads.
     //
-    // Two layers of defense, matching the peer's
+    // Three layers of defense, matching the peer's
     // `src/core/preflight_guard.rs::read_preflight_rules_file_no_follow`
     // shape:
     //  1. `metadata.len() > LIMIT` pre-check rejects an oversized file
     //     at stat time, before any `File::open` or allocation.
-    //  2. `file.take(LIMIT + 1).read_to_end` closes the TOCTOU growth
-    //     window where a peer could grow the file between the stat
-    //     above and the open below.
+    //  2. No-follow open plus opened-metadata checks close the
+    //     leaf-symlink and race-grown-file windows between stat and read.
+    //  3. `file.take(LIMIT + 1).read_to_end` bounds allocation if the
+    //     opened file grows while it is being read.
     if metadata.len() > CURATE_CONFIG_MAX_BYTES {
         return Err(DomainError::Configuration {
             message: format!(
@@ -4642,13 +4643,45 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
         });
     }
 
-    let file = fs::File::open(path).map_err(|error| DomainError::Configuration {
-        message: format!(
-            "Failed to read workspace curation config {}: {error}",
-            path.display()
-        ),
-        repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+    let file = open_structural_decay_config_for_read_no_follow(path).map_err(|error| {
+        DomainError::Configuration {
+            message: format!(
+                "Failed to read workspace curation config {}: {error}",
+                path.display()
+            ),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        }
     })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to inspect opened workspace curation config {}: {error}",
+                path.display()
+            ),
+            repair: Some("Fix or remove .ee/config.toml.".to_owned()),
+        })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read workspace curation config {} because it is not a regular file after open.",
+                path.display()
+            ),
+            repair: Some("Replace .ee/config.toml with a regular TOML file.".to_owned()),
+        });
+    }
+    if opened_metadata.len() > CURATE_CONFIG_MAX_BYTES {
+        return Err(DomainError::Configuration {
+            message: format!(
+                "Refusing to read workspace curation config {}: file grew past the {CURATE_CONFIG_MAX_BYTES}-byte cap after open.",
+                path.display()
+            ),
+            repair: Some(format!(
+                "Trim or remove {} so it is under {CURATE_CONFIG_MAX_BYTES} bytes.",
+                path.display()
+            )),
+        });
+    }
     let mut bytes = Vec::new();
     if let Err(error) = file
         .take(CURATE_CONFIG_MAX_BYTES.saturating_add(1))
@@ -4683,6 +4716,23 @@ fn structural_decay_config_contents(path: &Path) -> Result<Option<String>, Domai
     })?;
     Ok(Some(contents))
 }
+
+fn open_structural_decay_config_for_read_no_follow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_structural_decay_config_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_structural_decay_config_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_structural_decay_config_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn first_existing_structural_decay_config_symlink_component(
     path: &Path,
@@ -7831,7 +7881,7 @@ fn evaluate_candidate_for_validation(
     prompt_injection_guard: bool,
 ) -> ValidationDecision {
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
     let current_status = parse_stored_status(&stored.status, &mut errors);
 
     if let Some(status) = current_status
@@ -15283,6 +15333,39 @@ mod tests {
         };
 
         assert!(error.message().contains("symlinked path component"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structural_decay_config_final_open_rejects_symlink_leaf() -> TestResult {
+        let tempdir = tempfile::tempdir_in("/tmp").map_err(|error| error.to_string())?;
+        let workspace_path = tempdir.path().join("workspace");
+        let outside_path = tempdir.path().join("outside.toml");
+        let linked_config = workspace_path.join(".ee").join("config.toml");
+        fs::create_dir_all(workspace_path.join(".ee")).map_err(|error| error.to_string())?;
+        fs::write(
+            &outside_path,
+            "[graph.feature.structural_decay]\nenabled = true\n",
+        )
+        .map_err(|error| error.to_string())?;
+        std::os::unix::fs::symlink(&outside_path, &linked_config)
+            .map_err(|error| error.to_string())?;
+
+        let error = match super::open_structural_decay_config_for_read_no_follow(&linked_config) {
+            Ok(_) => return Err("final open followed a symlinked config leaf".to_owned()),
+            Err(error) => error,
+        };
+
+        assert_ne!(
+            error.kind(),
+            std::io::ErrorKind::NotFound,
+            "final open should reject the symlink leaf, not report the config as absent"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_path).map_err(|error| error.to_string())?,
+            "[graph.feature.structural_decay]\nenabled = true\n"
+        );
         Ok(())
     }
 

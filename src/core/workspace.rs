@@ -1321,18 +1321,19 @@ fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
     // file's metadata length) as the only allocation gate. A 4 GiB
     // peer-planted file would force a 4 GiB String allocation before
     // the downstream `parse_agent_mail_snapshot_json` could reject
-    // it. Two layers of defense:
+    // it. Three layers of defense:
     //
     //  1. The `metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES`
     //     pre-check rejects at stat time with a friendly repair
     //     hint (same as the regular-file gate above).
-    //  2. `file.take(LIMIT + 1).read_to_end(...)` closes the TOCTOU
-    //     growth window between the stat and the read — if the file
-    //     grew past the cap after the stat, the bounded read still
-    //     pins peak allocation to LIMIT + 1 bytes and the post-read
-    //     check trips. Same defensive shape as the WORKTREE_GITFILE
-    //     cap added by c8f33694 and the PREFLIGHT_RULES /
-    //     PREFLIGHT_RUN_STORE caps added by 7f56d89b / aac04adb.
+    //  2. The final open uses O_NOFOLLOW and re-checks the opened file
+    //     metadata, closing the leaf-symlink and growth windows between
+    //     stat and read.
+    //  3. `file.take(LIMIT + 1).read_to_end(...)` bounds the allocation
+    //     even if the file grows while it is being read. Same defensive
+    //     shape as the WORKTREE_GITFILE cap added by c8f33694 and the
+    //     PREFLIGHT_RULES / PREFLIGHT_RUN_STORE caps added by 7f56d89b /
+    //     aac04adb.
     if metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1342,7 +1343,26 @@ fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
             ),
         ));
     }
-    let file = fs::File::open(path)?;
+    let file = open_agent_mail_snapshot_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Agent Mail snapshot path '{}' is not a file after open",
+                path.display()
+            ),
+        ));
+    }
+    if opened_metadata.len() > AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Agent Mail snapshot '{}' grew past the {AGENT_MAIL_SNAPSHOT_MAX_BYTES}-byte cap after open; refusing to read",
+                path.display()
+            ),
+        ));
+    }
     let read_limit = (AGENT_MAIL_SNAPSHOT_MAX_BYTES as u64).saturating_add(1);
     let mut bytes = Vec::new();
     file.take(read_limit).read_to_end(&mut bytes)?;
@@ -1357,6 +1377,23 @@ fn read_agent_mail_snapshot(path: &Path) -> io::Result<String> {
     }
     String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
+
+fn open_agent_mail_snapshot_for_read_no_follow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_agent_mail_snapshot_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_agent_mail_snapshot_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_agent_mail_snapshot_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn first_existing_symlink_component(path: &Path) -> io::Result<Option<PathBuf>> {
     let mut current = PathBuf::new();
@@ -1462,13 +1499,39 @@ fn workspace_hygiene_classifier_config() -> Result<HygieneClassifierConfig, Doma
 }
 
 fn read_bounded_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
-    let mut file = fs::File::open(path)?;
+    let file = open_workspace_file_for_read_no_follow(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "workspace hygiene path '{}' is not a file after open",
+                path.display()
+            ),
+        ));
+    }
     let mut buffer = Vec::new();
-    file.by_ref()
-        .take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
+    file.take(u64::try_from(max_bytes).unwrap_or(u64::MAX))
         .read_to_end(&mut buffer)?;
     Ok(buffer)
 }
+
+fn open_workspace_file_for_read_no_follow(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_workspace_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_workspace_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_workspace_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn workspace_hygiene_secret_evidence_with_budget(
     workspace_path: &Path,
@@ -2791,6 +2854,63 @@ mod tests {
         assert!(
             matches!(input, AgentMailCoordinationInput::Unavailable),
             "oversized snapshot must surface as Unavailable at the coordination layer; got {input:?}",
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn agent_mail_snapshot_final_open_rejects_symlink_leaf() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = unique_dir("ee-agent-mail-snapshot-symlink")?;
+        let outside = unique_dir("ee-agent-mail-snapshot-symlink-target")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&outside).map_err(|error| error.to_string())?;
+        let outside_snapshot = outside.join("snapshot.json");
+        let linked_snapshot = workspace.join("snapshot.json");
+        fs::write(&outside_snapshot, r#"{"file_reservations":[]}"#)
+            .map_err(|error| error.to_string())?;
+        symlink(&outside_snapshot, &linked_snapshot).map_err(|error| error.to_string())?;
+
+        let result = open_agent_mail_snapshot_for_read_no_follow(&linked_snapshot);
+
+        assert!(
+            result.is_err(),
+            "final Agent Mail snapshot open must reject a symlink leaf"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_snapshot).map_err(|error| error.to_string())?,
+            r#"{"file_reservations":[]}"#,
+            "symlink target should remain untouched"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_bounded_file_reader_rejects_symlink_leaf() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let workspace = unique_dir("ee-workspace-bounded-reader-symlink")?;
+        let outside = unique_dir("ee-workspace-bounded-reader-target")?;
+        fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+        fs::create_dir_all(&outside).map_err(|error| error.to_string())?;
+        let outside_file = outside.join("payload.txt");
+        let linked_file = workspace.join("payload.txt");
+        fs::write(&outside_file, "outside payload").map_err(|error| error.to_string())?;
+        symlink(&outside_file, &linked_file).map_err(|error| error.to_string())?;
+
+        let result = read_bounded_file(&linked_file, 64);
+
+        assert!(
+            result.is_err(),
+            "workspace bounded reader must reject a symlink leaf"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_file).map_err(|error| error.to_string())?,
+            "outside payload",
+            "symlink target should remain untouched"
         );
         Ok(())
     }

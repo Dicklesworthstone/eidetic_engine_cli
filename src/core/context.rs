@@ -3731,6 +3731,7 @@ fn compare_optional_f32_desc(left: Option<f32>, right: Option<f32>) -> std::cmp:
     }
 }
 
+#[cfg(test)]
 fn persist_pack_record(
     connection: &DbConnection,
     workspace_path: &Path,
@@ -5974,15 +5975,17 @@ fn context_workspace_config(
             ));
         }
     }
-    // Two layers of defense against an oversized `.ee/config.toml`,
+    // Three layers of defense against an oversized `.ee/config.toml`,
     // matching the `read_workspace_config_if_present` shape landed in
     // e1499deb for the parallel `ee remember` hot path:
     //  1. `symlink_metadata().len()` pre-check at stat time, before any
     //     allocation. Refuses with a structured error naming the path
     //     and the ceiling.
-    //  2. `file.take(LIMIT + 1).read_to_end(...)` for the actual read,
-    //     closing the TOCTOU growth window where a peer could grow the
-    //     file between stat and read. Post-read length re-check
+    //  2. No-follow open plus opened-metadata checks close the leaf-symlink
+    //     and race-grown-file windows between stat and read.
+    //  3. `file.take(LIMIT + 1).read_to_end(...)` for the actual read,
+    //     bounding allocation if the opened file grows while being read.
+    //     Post-read length re-check
     //     converts the bounded read to a TOCTOU-specific error.
     if let Ok(metadata) = fs::symlink_metadata(&config_path) {
         if metadata.len() > CONTEXT_WORKSPACE_CONFIG_MAX_BYTES {
@@ -6003,6 +6006,24 @@ fn context_workspace_config(
             ));
         }
     };
+    let opened_metadata = file.metadata().map_err(|error| {
+        format!(
+            "{surface} skipped because workspace config {} could not be inspected after open: {error}",
+            config_path.display()
+        )
+    })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(format!(
+            "{surface} skipped because workspace config {} is not a regular file after open.",
+            config_path.display()
+        ));
+    }
+    if opened_metadata.len() > CONTEXT_WORKSPACE_CONFIG_MAX_BYTES {
+        return Err(format!(
+            "{surface} skipped because workspace config {} grew past the {CONTEXT_WORKSPACE_CONFIG_MAX_BYTES}-byte cap after open.",
+            config_path.display()
+        ));
+    }
     let mut bytes = Vec::new();
     if let Err(error) = (&mut file)
         .take(CONTEXT_WORKSPACE_CONFIG_MAX_BYTES.saturating_add(1))
