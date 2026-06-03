@@ -2,7 +2,7 @@
 source: tests/renderer_parity_matrix.rs
 expression: "render_context_response_for_format(&response, case.format)"
 ---
-ee context "renderer parity release"
+ee pack "renderer parity release"
 
 Profile: compact | Budget: 21/500 tokens | Pack hash: blake3:renderer-parity
 
@@ -21,4 +21,4 @@ Degraded:
     Sources: context
 
 Next:
-  ee context --json "<query>"
+  ee pack --json "<query>"

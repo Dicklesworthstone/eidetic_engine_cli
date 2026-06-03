@@ -2653,10 +2653,7 @@ fn build_conflict_entry(obj: &mut JsonBuilder, entry: &ConflictEntry) {
 #[must_use]
 pub fn render_context_response_human(response: &ContextResponse) -> String {
     let mut output = String::new();
-    output.push_str(&format!(
-        "ee context \"{}\"\n\n",
-        response.data.request.query
-    ));
+    output.push_str(&format!("ee pack \"{}\"\n\n", response.data.request.query));
     output.push_str(&format!(
         "Profile: {} | Budget: {}/{} tokens | Pack hash: {}\n\n",
         response.data.request.profile.as_str(),
@@ -2712,7 +2709,7 @@ pub fn render_context_response_human(response: &ContextResponse) -> String {
         }
     }
 
-    output.push_str("\nNext:\n  ee context --json \"<query>\"\n");
+    output.push_str("\nNext:\n  ee pack --json \"<query>\"\n");
     output
 }
 

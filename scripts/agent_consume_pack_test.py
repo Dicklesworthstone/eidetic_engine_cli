@@ -15,6 +15,8 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 _SPEC = importlib.util.spec_from_file_location(
     "agent_consume_pack",
@@ -31,7 +33,7 @@ class ConsumeHappyPath(unittest.TestCase):
 
     def test_pack_text_is_used_verbatim_when_present(self) -> None:
         resp = {
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": True,
             "data": {
                 "pack": {
@@ -47,7 +49,7 @@ class ConsumeHappyPath(unittest.TestCase):
         # An empty string is falsy, so consume() must drop through to the
         # items[] renderer so an agent never sees a zero-byte fragment.
         resp = {
-            "schema": "ee.response.v1",
+            "schema": "ee.response.v2",
             "success": True,
             "data": {"pack": {"text": "", "query": "q", "items": []}},
         }
@@ -174,6 +176,33 @@ class ConsumeErrorEnvelope(unittest.TestCase):
         out = consume(resp)
         self.assertIn("<!-- ee error:", out)
         self.assertNotIn("should not appear", out)
+
+
+class LoadResponseCommand(unittest.TestCase):
+    """Live command mode uses the canonical `ee pack` surface."""
+
+    def test_load_response_invokes_canonical_pack_command(self) -> None:
+        args = SimpleNamespace(
+            from_stdin=False,
+            query="prepare release",
+            workspace=".",
+            max_tokens=1000,
+            ee="ee",
+        )
+        with mock.patch.object(
+            agent_consume_pack.subprocess,
+            "check_output",
+            return_value=(
+                '{"schema":"ee.response.v2","success":true,'
+                '"data":{"pack":{"text":"# Pack\\n"}}}'
+            ),
+        ) as check_output:
+            response = agent_consume_pack.load_response(args)
+
+        self.assertEqual(response["data"]["pack"]["text"], "# Pack\n")
+        command = check_output.call_args.args[0]
+        self.assertEqual(command[:2], ["ee", "pack"])
+        self.assertNotIn("context", command[:2])
 
 
 class ConsumePromptFragmentDiscipline(unittest.TestCase):

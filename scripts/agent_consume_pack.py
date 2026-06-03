@@ -33,16 +33,7 @@ def load_response(args):
         if args.from_stdin or not args.query:
             return json.load(sys.stdin)
 
-        command = [
-            args.ee,
-            "context",
-            args.query,
-            "--workspace",
-            args.workspace,
-            "--max-tokens",
-            str(args.max_tokens),
-            "--json",
-        ]
+        command = [args.ee, "pack", args.query, "--workspace", args.workspace, "--max-tokens", str(args.max_tokens), "--json"]
         output = subprocess.check_output(command, text=True)
         return json.loads(output)
     except json.JSONDecodeError as e:

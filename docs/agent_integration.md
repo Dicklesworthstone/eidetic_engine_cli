@@ -1,13 +1,13 @@
 # Agent Integration
 
-`scripts/agent_consume_pack.py` is the reference consumer for `ee context --json`.
-It reads a context response from stdin, prefers `data.pack.text` when present,
+`scripts/agent_consume_pack.py` is the reference consumer for `ee pack --json`.
+It reads a pack response from stdin, prefers `data.pack.text` when present,
 and falls back to rendering `data.pack.items[]` into a prompt fragment.
 
 Example:
 
 ```bash
-ee context "prepare release" --workspace . --max-tokens 1000 --json \
+ee pack "prepare release" --workspace . --max-tokens 1000 --json \
   | scripts/agent_consume_pack.py --from-stdin
 ```
 

@@ -161,7 +161,9 @@ ee causal promote-plan --workspace . --json
 # The skill consumes ee causal JSON and produces recommendations
 ```
 
-**Degraded outputs:**
+**Degraded output excerpt:** this is an abbreviated command payload, not the
+canonical JSON Schema document for the causal command family.
+<!-- contract-drift-allow: abbreviated causal promote-plan runtime excerpt; not a docs/schemas contract -->
 ```json
 {
   "schema": "ee.causal.promote_plan.v1",
@@ -244,10 +246,12 @@ ee learn experiment run --id exp_database_contract_fixture --dry-run --json
 
 **Skill:** `skills/preflight-risk-review/SKILL.md`
 
-**Degraded outputs:**
+**Degraded output excerpt:** this is an abbreviated command payload, not the
+canonical JSON Schema document for the preflight command family.
+<!-- contract-drift-allow: abbreviated preflight runtime excerpt; not a docs/schemas contract -->
 ```json
 {
-  "schema": "ee.preflight.run.v1",
+  "schema": "ee.preflight.report.v1",
   "status": "degraded",
   "degraded": [{
     "code": "preflight_evidence_unavailable",

@@ -51,11 +51,11 @@ fi
 "$EE_BINARY" init --workspace "$WORKSPACE" --json >/dev/null
 CORPUS_TOLERATE_REJECT=1 EE_BINARY="$EE_BINARY" "$CORPUS_SEED" "$WORKSPACE" >/dev/null 2>&1 || true
 
-if "$EE_BINARY" context "prepare release" \
-    --workspace "$WORKSPACE" --max-tokens 1000 --json > "$PACK_JSON" 2>"$WORKSPACE/context.stderr"; then
-    e2e_log_assert_eq "0" "0" "j8_context_json_command_succeeded" || true
+if "$EE_BINARY" pack "prepare release" \
+    --workspace "$WORKSPACE" --max-tokens 1000 --json > "$PACK_JSON" 2>"$WORKSPACE/pack.stderr"; then
+    e2e_log_assert_eq "0" "0" "j8_pack_json_command_succeeded" || true
 else
-    fail "context_failed" "ok" "j8_context_json_command_succeeded"
+    fail "pack_failed" "ok" "j8_pack_json_command_succeeded"
 fi
 
 if "$CONSUMER" --from-stdin < "$PACK_JSON" > "$PROMPT_FRAGMENT"; then
