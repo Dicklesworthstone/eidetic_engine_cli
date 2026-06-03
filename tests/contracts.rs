@@ -415,6 +415,9 @@ mod agent_workload_replay_schema;
 #[path = "contracts/swarm_workload_replay_schema.rs"]
 mod swarm_workload_replay_schema;
 
+#[path = "contracts/swarm_slo_event_schema.rs"]
+mod swarm_slo_event_schema;
+
 #[path = "contracts/swarm_replay_malformed_trace_conformance.rs"]
 mod swarm_replay_malformed_trace_conformance;
 
