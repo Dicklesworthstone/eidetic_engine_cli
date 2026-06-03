@@ -27,6 +27,28 @@ fn ensure_success(output: &Output, context: &str) -> TestResult {
     }
 }
 
+fn ensure_success_envelope(value: &serde_json::Value, context: &str) -> TestResult {
+    if value["schema"] != "ee.response.v2" {
+        return Err(format!(
+            "{context}: expected ee.response.v2 schema, got {:?}",
+            value["schema"]
+        ));
+    }
+    if value["success"] != true {
+        return Err(format!(
+            "{context}: expected success=true, got {:?}",
+            value["success"]
+        ));
+    }
+    if !value["degraded"].as_array().is_some_and(Vec::is_empty) {
+        return Err(format!(
+            "{context}: expected top-level degraded=[] in success envelope, got {:?}",
+            value["degraded"]
+        ));
+    }
+    Ok(())
+}
+
 #[test]
 fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResult {
     let workspace = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
@@ -48,6 +70,7 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
     ])?;
     ensure_success(&issued, "issue token")?;
     let issued_json = parse_stdout(&issued)?;
+    ensure_success_envelope(&issued_json, "issue token")?;
     let token = issued_json["data"]["report"]["token"]
         .as_str()
         .ok_or_else(|| "issued token should be present".to_owned())?
@@ -133,6 +156,7 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
         return Err("list-bypass-tokens output leaked raw token".to_owned());
     }
     let listed_json = parse_stdout(&listed)?;
+    ensure_success_envelope(&listed_json, "list tokens")?;
     assert_eq!(listed_json["data"]["report"]["tokens"][0]["used_count"], 1);
     assert_eq!(
         listed_json["data"]["report"]["tokens"][0]["token_hash_prefix"],
@@ -167,6 +191,7 @@ fn preflight_bypass_token_cli_is_one_shot_and_redacts_list_output() -> TestResul
     ])?;
     ensure_success(&revoked, "revoke token")?;
     let revoked_json = parse_stdout(&revoked)?;
+    ensure_success_envelope(&revoked_json, "revoke token")?;
     assert_eq!(
         revoked_json["data"]["report"]["token_hash_prefix"],
         revocation_json["data"]["report"]["token_hash_prefix"]
@@ -220,6 +245,7 @@ fn override_token_records_bypass_audit_with_blocking_memory_provenance() -> Test
     ])?;
     ensure_success(&issued, "issue token")?;
     let issued_json = parse_stdout(&issued)?;
+    ensure_success_envelope(&issued_json, "issue token")?;
     let token = issued_json["data"]["report"]["token"]
         .as_str()
         .ok_or_else(|| "issued token should be present".to_owned())?

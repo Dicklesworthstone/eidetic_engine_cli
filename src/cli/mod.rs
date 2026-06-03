@@ -18429,6 +18429,7 @@ where
                     "version": env!("CARGO_PKG_VERSION"),
                     "report": report,
                 },
+                "degraded": [],
             });
             write_stdout(stdout, &(json.to_string() + "\n"))
         }
