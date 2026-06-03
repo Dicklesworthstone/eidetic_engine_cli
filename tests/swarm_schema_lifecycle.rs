@@ -297,7 +297,7 @@ const DRIFT_CASES: &[DriftCase] = &[
     },
     DriftCase {
         schema_id: "ee.support_bundle.swarm_brief_summary.v1",
-        command: "ee support-bundle create --redacted --json",
+        command: "ee support bundle --workspace . --redacted --out <dir> --json",
         json_path: "swarm_brief_summary.json",
         fixture_manifest_key: "ee.support_bundle.swarm_brief_summary.v1",
     },

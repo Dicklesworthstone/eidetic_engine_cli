@@ -324,13 +324,11 @@ pub fn pattern_matches_path(pattern: &str, path: &str) -> bool {
     // byte-level glob matcher (which already crosses '/' for *).
     // We do not change the glob language itself (used by tripwire preflight)
     // because that must stay small and deterministic.
-    let mut normalized = pattern.replace("**", "*");
-    // A second replace handles degenerate cases like "src/***" (becomes "src/**" then "src/*").
-    // This is sufficient for any realistic file path patterns.
-    if normalized.contains("**") {
-        normalized = normalized.replace("**", "*");
+    let normalized = collapse_repeated_stars(pattern);
+    if glob_match(&normalized, path) {
+        return true;
     }
-    glob_match(&normalized, path)
+    double_star_zero_depth_matches(pattern, path, 0)
 }
 
 #[must_use]
@@ -482,15 +480,81 @@ fn parse_rust_error_header(header: &str) -> (Option<String>, Option<String>) {
 }
 
 fn parse_rust_location(location: &str) -> Option<(String, Option<u32>, Option<u32>)> {
-    let location = location.split_whitespace().next()?;
-    let mut parts = location.rsplitn(3, ':').collect::<Vec<_>>();
-    if parts.len() < 3 {
+    let location = location.split_whitespace().next()?.trim();
+    if location.is_empty() {
+        return None;
+    }
+
+    let mut parts = location.rsplitn(3, ':');
+    let last = parts.next()?;
+    let middle = parts.next();
+    let head = parts.next();
+
+    if let (Some(line_raw), Some(path_raw)) = (middle, head) {
+        if let (Ok(line), Ok(column)) = (line_raw.parse::<u32>(), last.parse::<u32>())
+            && !path_raw.is_empty()
+        {
+            return Some((path_raw.to_owned(), Some(line), Some(column)));
+        }
         return Some((location.to_owned(), None, None));
     }
-    let column = parts[0].parse::<u32>().ok();
-    let line = parts[1].parse::<u32>().ok();
-    parts.reverse();
-    Some((parts[0].to_owned(), line, column))
+
+    if let Some(path_raw) = middle
+        && let Ok(line) = last.parse::<u32>()
+        && !path_raw.is_empty()
+    {
+        return Some((path_raw.to_owned(), Some(line), None));
+    }
+
+    Some((location.to_owned(), None, None))
+}
+
+fn collapse_repeated_stars(pattern: &str) -> String {
+    let mut normalized = String::with_capacity(pattern.len());
+    let mut previous_star = false;
+    for ch in pattern.chars() {
+        if ch == '*' {
+            if !previous_star {
+                normalized.push(ch);
+            }
+            previous_star = true;
+        } else {
+            normalized.push(ch);
+            previous_star = false;
+        }
+    }
+    normalized
+}
+
+fn double_star_zero_depth_matches(pattern: &str, path: &str, depth: usize) -> bool {
+    if depth >= 8 {
+        return false;
+    }
+
+    if let Some(rest) = pattern.strip_prefix("**/") {
+        if glob_match(&collapse_repeated_stars(rest), path)
+            || double_star_zero_depth_matches(rest, path, depth + 1)
+        {
+            return true;
+        }
+    }
+
+    let mut search_start = 0;
+    while let Some(relative_index) = pattern[search_start..].find("/**/") {
+        let index = search_start + relative_index;
+        let mut zero_depth = String::with_capacity(pattern.len().saturating_sub(3));
+        zero_depth.push_str(&pattern[..index]);
+        zero_depth.push('/');
+        zero_depth.push_str(&pattern[index + 4..]);
+        if glob_match(&collapse_repeated_stars(&zero_depth), path)
+            || double_star_zero_depth_matches(&zero_depth, path, depth + 1)
+        {
+            return true;
+        }
+        search_start = index + 1;
+    }
+
+    false
 }
 
 fn strip_ansi_codes(input: &str) -> String {
@@ -679,6 +743,71 @@ mod tests {
         );
         assert_eq!(report.candidates[2].owner, "OtherAgent");
         assert!(report.candidates[2].expired);
+    }
+
+    #[test]
+    fn recursive_path_patterns_match_zero_or_more_directories() {
+        assert!(pattern_matches_path(
+            "src/**/mod.rs",
+            "src/core/graph/mod.rs"
+        ));
+        assert!(pattern_matches_path("src/**/mod.rs", "src/core/mod.rs"));
+        assert!(pattern_matches_path("src/**/mod.rs", "src/mod.rs"));
+        assert!(pattern_matches_path(
+            "**/ownership_snapshot.rs",
+            "src/core/ownership_snapshot.rs"
+        ));
+        assert!(pattern_matches_path(
+            "**/ownership_snapshot.rs",
+            "ownership_snapshot.rs"
+        ));
+    }
+
+    #[test]
+    fn degenerate_star_runs_collapse_completely() {
+        assert!(pattern_matches_path(
+            "src/****/ownership_snapshot.rs",
+            "src/core/ownership_snapshot.rs"
+        ));
+        assert!(pattern_matches_path(
+            "src/*****/ownership_snapshot.rs",
+            "src/core/ownership_snapshot.rs"
+        ));
+    }
+
+    #[test]
+    fn malformed_rust_location_does_not_truncate_to_owned_path() {
+        let excerpt = r#"
+error[E0425]: cannot find value `snapshot` in this scope
+ --> src/core/ownership_snapshot.rs:not_a_line:not_a_column
+"#;
+
+        let report = attribute_compile_blocker(excerpt, &sample_snapshot(), as_of());
+
+        assert_eq!(report.status, CompileBlockerAttributionStatus::Unattributed);
+        assert!(report.owner_candidates.is_empty());
+        let diagnostic = report.diagnostic.expect("diagnostic should parse");
+        assert_eq!(
+            diagnostic.path,
+            "src/core/ownership_snapshot.rs:not_a_line:not_a_column"
+        );
+        assert_eq!(diagnostic.line, None);
+        assert_eq!(diagnostic.column, None);
+    }
+
+    #[test]
+    fn rust_location_accepts_line_without_column() {
+        let excerpt = r#"
+error[E0425]: cannot find value `snapshot` in this scope
+ --> src/core/ownership_snapshot.rs:112
+"#;
+
+        let diagnostic =
+            parse_first_rust_compile_diagnostic(excerpt).expect("diagnostic should parse");
+
+        assert_eq!(diagnostic.path, "src/core/ownership_snapshot.rs");
+        assert_eq!(diagnostic.line, Some(112));
+        assert_eq!(diagnostic.column, None);
     }
 
     #[test]

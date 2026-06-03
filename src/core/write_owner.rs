@@ -1106,7 +1106,7 @@ impl WriteSpoolBackpressureError {
             max_pending_bytes: config.max_pending_bytes,
             oldest_queued_age_ms: status.oldest_queued_age_ms,
             repair: "ee daemon status --json",
-            next: "ee support-bundle create --include write-queue --json",
+            next: "ee support bundle --workspace . --redacted --out <dir> --json",
         }
     }
 }
@@ -3423,7 +3423,7 @@ mod tests {
         assert_eq!(err.repair, "ee daemon status --json");
         assert_eq!(
             err.next,
-            "ee support-bundle create --include write-queue --json"
+            "ee support bundle --workspace . --redacted --out <dir> --json"
         );
 
         let json = serde_json::to_value(&err).map_err(|error| error.to_string())?;

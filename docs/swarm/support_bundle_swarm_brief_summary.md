@@ -49,7 +49,7 @@ are not allowed.
 Example:
 
 ```bash
-ee support-bundle create --redacted --json
+ee support bundle --workspace . --redacted --out <dir> --json
 ```
 
 Fixture catalog: `tests/fixtures/swarm/ownership_posture_cases.json` covers the

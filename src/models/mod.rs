@@ -744,6 +744,10 @@ fn command_matches_any(command: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| command.contains(needle))
 }
 
+fn command_has_flag(command: &str, flag: &str) -> bool {
+    command.split_whitespace().any(|part| part == flag)
+}
+
 #[must_use]
 pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> RepairActionSafety {
     let Some(command) = command else {
@@ -887,7 +891,8 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("rch status")
         || command_lower.starts_with("rch check")
         || command_lower.starts_with("rch queue")
-        || command_lower.starts_with("am support-bundle")
+        || (command_lower.starts_with("ee support bundle")
+            && command_has_flag(&command_lower, "--dry-run"))
         || command_lower.starts_with("cargo fmt --check")
         || command_lower.starts_with("cargo metadata")
         || command_lower.starts_with("cargo tree")
@@ -926,6 +931,7 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
         || command_lower.starts_with("ee curate propose-derived")
         || command_lower.starts_with("ee curate apply")
         || command_lower.starts_with("ee reflect propose")
+        || command_lower.starts_with("ee support bundle")
     {
         RepairActionSafety {
             risk_class: RepairActionRiskClass::MutatingLocalRepair,
@@ -2371,7 +2377,7 @@ mod tests {
 
         let support_bundle = super::repair_action_safety(
             super::RecoveryKind::Command,
-            Some("am support-bundle --workspace . --redact paths,offsets"),
+            Some("ee support bundle --workspace . --redacted --dry-run --json"),
         );
         assert_eq!(
             support_bundle.risk_class,
@@ -2379,6 +2385,17 @@ mod tests {
         );
         assert!(!support_bundle.requires_human_approval);
         assert!(!support_bundle.mutates_external_state);
+
+        let support_bundle_create = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("ee support bundle --workspace . --redacted --out /tmp/ee-bundle --json"),
+        );
+        assert_eq!(
+            support_bundle_create.risk_class,
+            super::RepairActionRiskClass::MutatingLocalRepair
+        );
+        assert!(!support_bundle_create.requires_human_approval);
+        assert!(!support_bundle_create.mutates_external_state);
 
         let agent_mail_repair = super::repair_action_safety(
             super::RecoveryKind::Command,

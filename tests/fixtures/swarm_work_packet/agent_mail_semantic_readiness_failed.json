@@ -129,18 +129,18 @@
         },
         {
           "kind": "support_bundle",
-          "summary": "Capture a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
-          "command": "am support-bundle --workspace . --redact paths,offsets",
+          "summary": "Plan a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
+          "command": "ee support bundle --workspace . --redacted --dry-run --json",
           "commandAction": {
             "commandId": "agent_mail_support_bundle",
-            "displayCommand": "am support-bundle --workspace . --redact paths,offsets",
-            "argv": ["am", "support-bundle", "--workspace", ".", "--redact", "paths,offsets"],
+            "displayCommand": "ee support bundle --workspace . --redacted --dry-run --json",
+            "argv": ["ee", "support", "bundle", "--workspace", ".", "--redacted", "--dry-run", "--json"],
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
-            "mutatesState": true,
-            "requiredSubstrate": "agent_mail",
+            "mutatesState": false,
+            "requiredSubstrate": "ee_cli",
             "when": "after_semantic_readiness_failure",
-            "rationale": "Capture bounded Agent Mail diagnostics without shell evaluation."
+            "rationale": "Plan bounded support diagnostics without shell evaluation."
           },
           "manualStep": null,
           "repairSafety": {

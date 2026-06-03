@@ -494,16 +494,18 @@ pub fn admission_status(decisions: &[MeshAdmissionDecision]) -> MeshAdmissionSta
         .iter()
         .filter(|peer| peer.reason == MeshAdmissionReason::BudgetExhausted)
         .count();
-    let local_tier1_unaffected = decisions
-        .iter()
-        .all(|decision| decision.local_tier1_unaffected);
+    let peer_count = per_peer.len();
+    let local_tier1_unaffected = !decisions.is_empty()
+        && decisions
+            .iter()
+            .all(|decision| decision.local_tier1_unaffected);
     if local_tier1_unaffected {
         degraded.insert(degraded_codes::LOCAL_TIER1_UNAFFECTED, ());
     }
 
     MeshAdmissionStatus {
         schema: MESH_ADMISSION_STATUS_SCHEMA_V1,
-        peer_count: decisions.len(),
+        peer_count,
         throttled_peer_count,
         rejected_peer_count,
         budget_exhausted_peer_count,
@@ -801,6 +803,22 @@ mod tests {
         let json = serde_json::to_string(&status).expect("serialize status");
         assert!(json.contains("peer_"));
         assert!(!json.contains("peer-secret-node-key"));
+    }
+
+    #[test]
+    fn empty_status_reports_no_peer_pressure() {
+        let status = admission_status(&[]);
+        let doctor = admission_doctor_report(&status);
+
+        assert_eq!(status.peer_count, 0);
+        assert_eq!(status.throttled_peer_count, 0);
+        assert_eq!(status.rejected_peer_count, 0);
+        assert_eq!(status.budget_exhausted_peer_count, 0);
+        assert!(!status.local_tier1_unaffected);
+        assert!(status.degraded.is_empty());
+        assert_eq!(doctor.peer_count, 0);
+        assert_eq!(doctor.posture, MeshAdmissionDoctorPosture::Ok);
+        assert!(doctor.signals.is_empty());
     }
 
     #[test]

@@ -1800,26 +1800,28 @@ fn agent_mail_fallback_actions(status: &str) -> Vec<SwarmWorkPacketAgentMailFall
                 "Add a Beads comment before claiming work so peers can see the coordination fallback.",
             ),
         ));
-        let support_bundle_command = "am support-bundle --workspace . --redact paths,offsets";
+        let support_bundle_command = "ee support bundle --workspace . --redacted --dry-run --json";
         actions.push(agent_mail_fallback_action(
             "support_bundle",
-            "Capture a redacted support bundle so the storage class can be triaged without raw paths or page offsets.",
+            "Plan a redacted support bundle so the storage class and reason can be triaged without raw paths or page offsets.",
             Some(support_bundle_command.to_owned()),
             Some(work_packet_command_action(
                 "agent_mail_support_bundle",
                 support_bundle_command,
                 &[
-                    "am",
-                    "support-bundle",
+                    "ee",
+                    "support",
+                    "bundle",
                     "--workspace",
                     ".",
-                    "--redact",
-                    "paths,offsets",
+                    "--redacted",
+                    "--dry-run",
+                    "--json",
                 ],
-                true,
-                "agent_mail",
+                false,
+                "ee_cli",
                 "after_semantic_readiness_failure",
-                "Capture bounded Agent Mail diagnostics without shell evaluation.",
+                "Plan bounded support diagnostics without shell evaluation.",
             )),
             None,
         ));
@@ -5437,17 +5439,19 @@ mod tests {
         assert_eq!(
             command_action.argv,
             argv(&[
-                "am",
-                "support-bundle",
+                "ee",
+                "support",
+                "bundle",
                 "--workspace",
                 ".",
-                "--redact",
-                "paths,offsets"
+                "--redacted",
+                "--dry-run",
+                "--json"
             ])
         );
         assert_eq!(command_action.copy_safety, "safe_structured_argv");
         assert!(!command_action.shell_required);
-        assert!(command_action.mutates_state);
+        assert!(!command_action.mutates_state);
         assert_eq!(support_bundle.repair_safety.risk_class, "read_only_probe");
         assert_eq!(support_bundle.repair_safety.next_action, "run_directly");
         assert!(!support_bundle.repair_safety.mutates_external_state);
