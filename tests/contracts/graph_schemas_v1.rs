@@ -1,5 +1,6 @@
 //! Contract checks for the graph-accretion schema governance bead.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -120,6 +121,39 @@ fn read_json(path: &Path) -> Result<Value, String> {
     let text =
         fs::read_to_string(path).map_err(|error| format!("read {}: {error}", path.display()))?;
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn collect_string_set(value: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    value
+        .as_array()
+        .ok_or_else(|| format!("{ctx} must be an array"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{ctx} contains non-string value {item}"))
+        })
+        .collect()
+}
+
+fn require_required_fields(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    ctx: &str,
+) -> TestResult {
+    let actual = collect_string_set(schema.pointer(pointer).unwrap_or(&Value::Null), ctx)?;
+    let expected = expected
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{ctx} required fields drifted; expected {expected:?}, got {actual:?}"
+        ))
+    }
 }
 
 #[test]
@@ -383,28 +417,21 @@ fn insights_bridges_schema_documents_cluster_disconnection_items() -> TestResult
         .join("schemas")
         .join("ee.insights.v1.json");
     let schema = read_json(&schema_path)?;
-    let bridge_item = schema
-        .pointer("/$defs/bridgeItem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "ee.insights.v1 missing $defs.bridgeItem".to_owned())?;
-    let required = bridge_item
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "$defs.bridgeItem.required must be an array".to_owned())?;
-    for field in [
-        "rank",
-        "memoryId",
-        "articulationPoint",
-        "clusterDisconnectionMagnitude",
-        "disconnectedComponents",
-        "affectedMemoryCount",
-        "largestComponentSize",
-        "evidence",
-    ] {
-        if !required.iter().any(|value| value.as_str() == Some(field)) {
-            return Err(format!("bridgeItem.required missing {field}"));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/bridgeItem/required",
+        &[
+            "rank",
+            "memoryId",
+            "articulationPoint",
+            "clusterDisconnectionMagnitude",
+            "disconnectedComponents",
+            "affectedMemoryCount",
+            "largestComponentSize",
+            "evidence",
+        ],
+        "$defs.bridgeItem.required",
+    )?;
 
     ensure_eq(
         schema
@@ -451,27 +478,20 @@ fn insights_revision_frontiers_schema_documents_dominance_items() -> TestResult 
         .join("schemas")
         .join("ee.insights.v1.json");
     let schema = read_json(&schema_path)?;
-    let frontier_item = schema
-        .pointer("/$defs/revisionFrontierItem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "ee.insights.v1 missing $defs.revisionFrontierItem".to_owned())?;
-    let required = frontier_item
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "$defs.revisionFrontierItem.required must be an array".to_owned())?;
-    for field in [
-        "rank",
-        "memoryId",
-        "logicalId",
-        "dominanceFrontierSize",
-        "affectedMemoryCount",
-        "recentRevisionAt",
-        "evidence",
-    ] {
-        if !required.iter().any(|value| value.as_str() == Some(field)) {
-            return Err(format!("revisionFrontierItem.required missing {field}"));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/revisionFrontierItem/required",
+        &[
+            "rank",
+            "memoryId",
+            "logicalId",
+            "dominanceFrontierSize",
+            "affectedMemoryCount",
+            "recentRevisionAt",
+            "evidence",
+        ],
+        "$defs.revisionFrontierItem.required",
+    )?;
 
     ensure_eq(
         schema
@@ -522,27 +542,20 @@ fn insights_proximity_hotspots_schema_documents_min_cut_items() -> TestResult {
         .join("schemas")
         .join("ee.insights.v1.json");
     let schema = read_json(&schema_path)?;
-    let hotspot_item = schema
-        .pointer("/$defs/proximityHotspotItem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "ee.insights.v1 missing $defs.proximityHotspotItem".to_owned())?;
-    let required = hotspot_item
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "$defs.proximityHotspotItem.required must be an array".to_owned())?;
-    for field in [
-        "rank",
-        "memoryA",
-        "memoryB",
-        "minCut",
-        "interpretation",
-        "treePath",
-        "evidence",
-    ] {
-        if !required.iter().any(|value| value.as_str() == Some(field)) {
-            return Err(format!("proximityHotspotItem.required missing {field}"));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/proximityHotspotItem/required",
+        &[
+            "rank",
+            "memoryA",
+            "memoryB",
+            "minCut",
+            "interpretation",
+            "treePath",
+            "evidence",
+        ],
+        "$defs.proximityHotspotItem.required",
+    )?;
 
     ensure_eq(
         schema
@@ -599,26 +612,19 @@ fn insights_load_bearing_schema_documents_bipartite_items() -> TestResult {
         .join("schemas")
         .join("ee.insights.v1.json");
     let schema = read_json(&schema_path)?;
-    let item = schema
-        .pointer("/$defs/loadBearingItem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "ee.insights.v1 missing $defs.loadBearingItem".to_owned())?;
-    let required = item
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "$defs.loadBearingItem.required must be an array".to_owned())?;
-    for field in [
-        "rank",
-        "memoryId",
-        "loadBearingScore",
-        "citingRuleCount",
-        "interpretation",
-        "evidence",
-    ] {
-        if !required.iter().any(|value| value.as_str() == Some(field)) {
-            return Err(format!("loadBearingItem.required missing {field}"));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/loadBearingItem/required",
+        &[
+            "rank",
+            "memoryId",
+            "loadBearingScore",
+            "citingRuleCount",
+            "interpretation",
+            "evidence",
+        ],
+        "$defs.loadBearingItem.required",
+    )?;
 
     ensure_eq(
         schema
@@ -701,29 +707,22 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
         .join("schemas")
         .join("ee.insights.v1.json");
     let schema = read_json(&schema_path)?;
-    let item = schema
-        .pointer("/$defs/knowledgeGapItem")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "ee.insights.v1 missing $defs.knowledgeGapItem".to_owned())?;
-    let required = item
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "$defs.knowledgeGapItem.required must be an array".to_owned())?;
-    for field in [
-        "rank",
-        "gapId",
-        "category",
-        "priority",
-        "confidence",
-        "sourceMemoryIds",
-        "metricEvidence",
-        "explanation",
-        "recommendation",
-    ] {
-        if !required.iter().any(|value| value.as_str() == Some(field)) {
-            return Err(format!("knowledgeGapItem.required missing {field}"));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/knowledgeGapItem/required",
+        &[
+            "rank",
+            "gapId",
+            "category",
+            "priority",
+            "confidence",
+            "sourceMemoryIds",
+            "metricEvidence",
+            "explanation",
+            "recommendation",
+        ],
+        "$defs.knowledgeGapItem.required",
+    )?;
 
     ensure_eq(
         schema
@@ -741,34 +740,18 @@ fn insights_knowledge_gaps_schema_documents_reflection_recommendations() -> Test
         "ee.insights.v1 knowledgeGapRecommendation",
         "kind.const",
     )?;
-    let compact = schema
-        .pointer("/$defs/knowledgeGapCompactRecommendation")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            "ee.insights.v1 missing $defs.knowledgeGapCompactRecommendation".to_owned()
-        })?;
-    let compact_required = compact
-        .get("required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            "$defs.knowledgeGapCompactRecommendation.required must be an array".to_owned()
-        })?;
-    for field in [
-        "id",
-        "severity",
-        "reason",
-        "suggested_query",
-        "recommendation_kind",
-    ] {
-        if !compact_required
-            .iter()
-            .any(|value| value.as_str() == Some(field))
-        {
-            return Err(format!(
-                "knowledgeGapCompactRecommendation.required missing {field}"
-            ));
-        }
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/knowledgeGapCompactRecommendation/required",
+        &[
+            "id",
+            "severity",
+            "reason",
+            "suggested_query",
+            "recommendation_kind",
+        ],
+        "$defs.knowledgeGapCompactRecommendation.required",
+    )?;
     ensure_eq(
         schema
             .pointer(
