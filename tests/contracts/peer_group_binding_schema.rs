@@ -1,5 +1,6 @@
 //! Contract checks for workspace-scoped mesh peer-group bindings.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -9,6 +10,17 @@ use serde_json::Value;
 
 type TestResult = Result<(), String>;
 
+const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.peer_group_binding.v1.json";
+const REQUIRED_TOP_LEVEL: &[&str] = &[
+    "schema",
+    "workspaceId",
+    "workspaceAlias",
+    "peerGroupId",
+    "peerIds",
+    "originWorkspaceIds",
+    "lanes",
+    "defaultAction",
+];
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/peer_group_binding_valid.json",
     "tests/fixtures/mesh/peer_group_binding_deny_body.json",
@@ -38,9 +50,24 @@ where
     }
 }
 
+fn collect_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    let array = node
+        .as_array()
+        .ok_or_else(|| format!("{ctx}: expected array, got: {node}"))?;
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{ctx}: non-string entry: {value}"))
+        })
+        .collect()
+}
+
 #[test]
 fn peer_group_binding_schema_is_documented_and_registered() -> TestResult {
-    let schema = read_json("docs/schemas/ee.mesh.peer_group_binding.v1.json")?;
+    let schema = read_json(SCHEMA_PATH)?;
 
     ensure_equal(
         &schema.pointer("/$schema").and_then(Value::as_str),
@@ -78,6 +105,20 @@ fn peer_group_binding_schema_is_documented_and_registered() -> TestResult {
         &supported.contains(&MESH_PEER_GROUP_BINDING_SCHEMA_V1),
         &true,
         "supported schema registry",
+    )?;
+
+    let required = collect_strings(
+        schema.pointer("/required").unwrap_or(&Value::Null),
+        "top-level required",
+    )?;
+    let expected = REQUIRED_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure_equal(
+        &required,
+        &expected,
+        "top-level required fields must match peer-group binding contract",
     )
 }
 
