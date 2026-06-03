@@ -4,6 +4,7 @@
 //! bd-3cwdd pins real Rust-serialized daemon envelopes against the published
 //! schema files so Rust type drift cannot silently diverge from the docs.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -37,6 +38,25 @@ fn read_request_schema() -> Result<Value, String> {
 
 fn read_response_schema() -> Result<Value, String> {
     read_schema(RESPONSE_SCHEMA_PATH)
+}
+
+fn collect_string_set(value: &Value, context: &str) -> Result<BTreeSet<String>, String> {
+    let array = value
+        .as_array()
+        .ok_or_else(|| format!("{context} must be an array, got {value}"))?;
+    array
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{context} contains non-string value {entry}"))
+        })
+        .collect()
+}
+
+fn string_set(fields: &[&str]) -> BTreeSet<String> {
+    fields.iter().map(|field| (*field).to_owned()).collect()
 }
 
 fn serialized_request() -> Result<Value, String> {
@@ -146,6 +166,13 @@ fn daemon_schema_cross_validation_accepts_serialized_rust_error_response() -> Te
 #[test]
 fn daemon_response_schema_structurally_requires_result_xor_error() -> TestResult {
     let schema = read_response_schema()?;
+    let root_required = collect_string_set(&schema["required"], "schema root required")?;
+    let expected_root_required = string_set(&["schema", "request_id", "agent_id"]);
+    if root_required != expected_root_required {
+        return Err(format!(
+            "schema root required drifted; expected {expected_root_required:?}, got {root_required:?}"
+        ));
+    }
 
     let one_of = schema
         .pointer("/oneOf")
@@ -158,17 +185,23 @@ fn daemon_response_schema_structurally_requires_result_xor_error() -> TestResult
         ));
     }
 
-    for field in ["result", "error"] {
-        if !one_of.iter().any(|branch| {
-            branch
-                .pointer("/required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| required.iter().any(|value| value.as_str() == Some(field)))
-        }) {
-            return Err(format!(
-                "schema root oneOf missing required branch for {field}"
-            ));
-        }
+    let actual_branch_required = one_of
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            collect_string_set(
+                &branch["required"],
+                &format!("schema root oneOf[{index}].required"),
+            )
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let expected_branch_required = [string_set(&["result"]), string_set(&["error"])]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if actual_branch_required != expected_branch_required {
+        return Err(format!(
+            "schema root oneOf required branches drifted; expected {expected_branch_required:?}, got {actual_branch_required:?}"
+        ));
     }
 
     Ok(())
