@@ -1267,6 +1267,14 @@ impl EffectManifest {
             CommandEffect::read_only("introspect", "Introspect ee metadata"),
             CommandEffect::read_only_db("job list", "List available steward job types"),
             CommandEffect::read_only_db("job show", "Show steward job row details"),
+            CommandEffect::read_only(
+                "lab replay",
+                "Re-assembles a pack against a previously captured frozen episode and reports whether the captured inputs still produce a matching pack hash (N15.4 / bd-17c65.14.15.5)",
+            ),
+            CommandEffect::read_only(
+                "lab counterfactual",
+                "Replays a frozen episode with single-input swaps and surfaces the pack diff between the captured pack and the counterfactual pack (N15.5 / bd-17c65.14.15.6)",
+            ),
             CommandEffect::read_only_db(
                 "learn agenda",
                 "Show learning agenda with prioritized gaps",
@@ -1314,6 +1322,13 @@ impl EffectManifest {
                 "preflight show",
                 "Read a persisted preflight run from the workspace-local store",
             ),
+            CommandEffect::read_only(
+                "preflight guard",
+                "Checks command against preflight guard rules",
+            ),
+            CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
+            CommandEffect::read_only("plan explain", "Explains recipe selection"),
+            CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),
             CommandEffect::read_only_db("playbook list", "List procedural rules in playbook form"),
             CommandEffect::read_only_db(
                 "procedure drift",
@@ -1331,15 +1346,41 @@ impl EffectManifest {
             ),
             CommandEffect::read_only_db("rationale list", "List safe rationale traces"),
             CommandEffect::read_only_db("rationale show", "Show a safe rationale trace"),
-            CommandEffect::append_only_write(
-                "reflect propose",
-                vec!["reflection_request_ledger"],
-                "requestHash",
-                "Create an external reflection request artifact and non-secret replay ledger row",
-            ),
             CommandEffect::read_only_db(
                 "reflect request-ledger diagnostics",
                 "Inspect reflection request ledger diagnostics without exposing secret payloads",
+            ),
+            CommandEffect::read_only(
+                "profile config plan",
+                "Plan operating profile configuration without writing files",
+            ),
+            CommandEffect::read_only(
+                "recorder tail",
+                "Recorder tail reads persisted recorder events without mutation",
+            ),
+            CommandEffect::read_only(
+                "recorder follow",
+                "Recorder follow streams persisted recorder events without mutation",
+            ),
+            CommandEffect::read_only(
+                "recorder import",
+                "Recorder import planning is read-only unless explicitly promoted to execution",
+            ),
+            CommandEffect::read_only(
+                "recorder events list",
+                "List persisted recorder events without mutation",
+            ),
+            CommandEffect::read_only(
+                "rehearse plan",
+                "Rehearsal planning validates command specs and estimates side-path artifacts",
+            ),
+            CommandEffect::read_only(
+                "rehearse inspect",
+                "Rehearsal inspection reads a prior manifest and verifies hashes",
+            ),
+            CommandEffect::read_only(
+                "rehearse promote-plan",
+                "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
             ),
             CommandEffect::read_only(
                 "review session",
@@ -1423,71 +1464,6 @@ impl EffectManifest {
                 "Non-decay foreground daemon jobs abstain until real steward handlers are wired",
             )
             .with_runtime_contract(CommandRuntimeContract::supervised_unavailable()),
-            CommandEffect::workspace_file_write(
-                "lab capture",
-                vec![".ee/lab/episodes"],
-                "Writes a frozen episode artifact under .ee/lab/episodes/<EPISODE_ID>/ — task input, policy ids, evidence ids, pack hash, repository fingerprint (N15.3 / bd-17c65.14.15.4)",
-            ),
-            CommandEffect::read_only(
-                "lab replay",
-                "Re-assembles a pack against a previously captured frozen episode and reports whether the captured inputs still produce a matching pack hash (N15.4 / bd-17c65.14.15.5)",
-            ),
-            CommandEffect::read_only(
-                "lab counterfactual",
-                "Replays a frozen episode with single-input swaps and surfaces the pack diff between the captured pack and the counterfactual pack (N15.5 / bd-17c65.14.15.6)",
-            ),
-            CommandEffect::durable_write(
-                "memory revise",
-                vec!["memories", "audit_log"],
-                "Inserts a new memory row with the same logical_id as the original, sets the prior row's valid_to, and emits a memory.revise audit entry (N15.2 / bd-17c65.14.15.3)",
-            ),
-            CommandEffect::read_only(
-                "preflight guard",
-                "Checks command against preflight guard rules",
-            ),
-            CommandEffect::read_only("plan goal", "Recommends recipes for goals"),
-            CommandEffect::read_only("plan explain", "Explains recipe selection"),
-            CommandEffect::read_only("plan recommend", "Recommends recipes for tasks"),
-            CommandEffect::read_only(
-                "profile config plan",
-                "Plan operating profile configuration without writing files",
-            ),
-            CommandEffect::read_only(
-                "recorder tail",
-                "Recorder tail reads persisted recorder events without mutation",
-            ),
-            CommandEffect::read_only(
-                "recorder follow",
-                "Recorder follow streams persisted recorder events without mutation",
-            ),
-            CommandEffect::read_only(
-                "recorder import",
-                "Recorder import planning is read-only unless explicitly promoted to execution",
-            ),
-            CommandEffect::read_only(
-                "recorder events list",
-                "List persisted recorder events without mutation",
-            ),
-            CommandEffect::read_only(
-                "rehearse plan",
-                "Rehearsal planning validates command specs and estimates side-path artifacts",
-            ),
-            CommandEffect::workspace_file_write(
-                "rehearse run",
-                vec![
-                    "rehearsal artifact root",
-                    "tempfile-backed sandbox workspace",
-                ],
-                "Rehearsal execution writes side-path sandbox artifacts without mutating the source workspace",
-            ),
-            CommandEffect::read_only(
-                "rehearse inspect",
-                "Rehearsal inspection reads a prior manifest and verifies hashes",
-            ),
-            CommandEffect::read_only(
-                "rehearse promote-plan",
-                "Rehearsal promotion planning reads a manifest and emits a conservative checklist",
-            ),
         ]
     }
 
@@ -1520,13 +1496,6 @@ impl EffectManifest {
                 "maintenance run",
                 vec!["memories", "feedback_events", "audit_log"],
                 "Run an explicit bounded maintenance job through the steward backend",
-            ),
-            CommandEffect::durable_state_write(
-                "maintenance graph-witnesses-prune",
-                vec!["graph_algorithm_witnesses"],
-                "workspace id plus retention policy plus witness row identity",
-                "graph_algorithm_witnesses",
-                "Classify graph algorithm witnesses and delete only rows older than policy TTL that are not tied to active snapshots",
             ),
         ]
     }
@@ -1570,6 +1539,12 @@ impl EffectManifest {
                 "Persist a context pack keyed by deterministic pack hash",
             ),
             CommandEffect::append_only_write(
+                "reflect propose",
+                vec!["reflection_request_ledger"],
+                "requestHash",
+                "Create an external reflection request artifact and non-secret replay ledger row",
+            ),
+            CommandEffect::append_only_write(
                 "share preview",
                 vec!["audit_log"],
                 "target peer id plus preview hash plus actor",
@@ -1588,7 +1563,7 @@ impl EffectManifest {
             CommandEffect::durable_write(
                 "daemon start",
                 Vec::new(),
-                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or $TMPDIR/ee-daemon.sock); creates the parent directory and writes a UDS file outside the workspace. RPC dispatch is same-uid auth-required, and workspace-bound methods such as ee.daemon.context reject missing or mismatched workspace_id values.",
+                "Bind the optional UDS RPC socket at $XDG_RUNTIME_DIR/ee/daemon.sock (or ${TMPDIR:-/tmp}/ee-<uid>/daemon.sock); creates the parent directory and writes a UDS file outside the workspace. RPC dispatch is same-uid auth-required, and workspace-bound methods such as ee.daemon.context reject missing or mismatched workspace_id values.",
             ),
             CommandEffect::durable_write(
                 "daemon stop",
@@ -1710,6 +1685,11 @@ impl EffectManifest {
                 "Store a new memory with direct or audit-lane-backed audit_log provenance",
             ),
             CommandEffect::durable_write(
+                "memory revise",
+                vec!["memories", "audit_log"],
+                "Inserts a new memory row with the same logical_id as the original, sets the prior row's valid_to, and emits a memory.revise audit entry (N15.2 / bd-17c65.14.15.3)",
+            ),
+            CommandEffect::durable_write(
                 "memory expire",
                 vec!["memories", "search_index_jobs", "audit_log"],
                 "Expire a memory through an audited tombstone without deleting data",
@@ -1799,6 +1779,13 @@ impl EffectManifest {
                 "tripwire check event store",
                 "Evaluate a persisted tripwire and record the check event unless --dry-run is used",
             ),
+            CommandEffect::durable_state_write(
+                "maintenance graph-witnesses-prune",
+                vec!["graph_algorithm_witnesses"],
+                "workspace id plus retention policy plus witness row identity",
+                "graph_algorithm_witnesses",
+                "Classify graph algorithm witnesses and delete only rows older than policy TTL that are not tied to active snapshots",
+            ),
             CommandEffect::schema_migration_run(),
         ]
     }
@@ -1857,6 +1844,11 @@ impl EffectManifest {
                 "Export redacted JSONL records as side-path artifacts",
             ),
             CommandEffect::workspace_file_write(
+                "lab capture",
+                vec![".ee/lab/episodes"],
+                "Writes a frozen episode artifact under .ee/lab/episodes/<EPISODE_ID>/ — task input, policy ids, evidence ids, pack hash, repository fingerprint (N15.3 / bd-17c65.14.15.4)",
+            ),
+            CommandEffect::workspace_file_write(
                 "focus add",
                 vec![".ee/focus/state.json"],
                 "Add explicit memories to passive focus state without eviction",
@@ -1887,6 +1879,14 @@ impl EffectManifest {
                 "support bundle",
                 vec!["<--out path>/"],
                 "Create a redacted support bundle side-path artifact",
+            ),
+            CommandEffect::workspace_file_write(
+                "rehearse run",
+                vec![
+                    "rehearsal artifact root",
+                    "tempfile-backed sandbox workspace",
+                ],
+                "Rehearsal execution writes side-path sandbox artifacts without mutating the source workspace",
             ),
             CommandEffect::workspace_file_write(
                 "focus clear",
@@ -2003,6 +2003,24 @@ mod tests {
                 "{ctx}: expected at least {minimum:?}, got {actual:?}"
             ))
         }
+    }
+
+    fn ensure_category<F>(category: &str, entries: Vec<CommandEffect>, accepts: F) -> TestResult
+    where
+        F: Fn(&CommandEffect) -> bool,
+    {
+        for entry in entries {
+            if !accepts(&entry) {
+                return Err(format!(
+                    "{} builder contains `{}` with default_effect={} side_effect_class={}",
+                    category,
+                    entry.command_path,
+                    entry.default_effect.as_str(),
+                    entry.mutation_contract.side_effect_class.as_str()
+                ));
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -2466,6 +2484,64 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn manifest_category_builders_match_declared_effect_classes() -> TestResult {
+        ensure_category("read_only", EffectManifest::read_only_commands(), |entry| {
+            entry.default_effect == EffectClass::ReadOnly
+                && entry.mutation_contract.side_effect_class != SideEffectClass::DegradedUnavailable
+        })?;
+        ensure_category(
+            "degraded_unavailable",
+            EffectManifest::degraded_unavailable_commands(),
+            |entry| {
+                entry.default_effect == EffectClass::ReadOnly
+                    && entry.mutation_contract.side_effect_class
+                        == SideEffectClass::DegradedUnavailable
+                    && entry.write_surfaces.is_empty()
+                    && !entry.requires_audit
+                    && entry.mutation_contract.degraded_code.is_some()
+            },
+        )?;
+        ensure_category(
+            "derived_write",
+            EffectManifest::derived_write_commands(),
+            |entry| entry.default_effect == EffectClass::DerivedArtifactWrite,
+        )?;
+        ensure_category(
+            "external_io_write",
+            EffectManifest::external_io_write_commands(),
+            |entry| entry.default_effect == EffectClass::ExternalIo,
+        )?;
+        ensure_category(
+            "supervised_job",
+            EffectManifest::supervised_job_commands(),
+            |entry| entry.mutation_contract.side_effect_class == SideEffectClass::SupervisedJobs,
+        )?;
+        ensure_category(
+            "append_only_write",
+            EffectManifest::append_only_write_commands(),
+            |entry| entry.mutation_contract.side_effect_class == SideEffectClass::AppendOnly,
+        )?;
+        ensure_category(
+            "durable_write",
+            EffectManifest::durable_write_commands(),
+            |entry| {
+                entry.default_effect == EffectClass::DurableMemoryWrite
+                    && entry.mutation_contract.side_effect_class == SideEffectClass::AuditedMutation
+            },
+        )?;
+        ensure_category(
+            "config_write",
+            EffectManifest::config_write_commands(),
+            |entry| entry.default_effect == EffectClass::ConfigWrite,
+        )?;
+        ensure_category(
+            "workspace_file_write",
+            EffectManifest::workspace_file_write_commands(),
+            |entry| entry.default_effect == EffectClass::WorkspaceFileWrite,
+        )
     }
 
     #[test]
