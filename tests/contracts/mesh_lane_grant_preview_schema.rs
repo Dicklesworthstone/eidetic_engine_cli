@@ -136,9 +136,13 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> 
         .collect()
 }
 
+fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
+    expected.iter().map(|value| (*value).to_owned()).collect()
+}
+
 fn require_closed_set(schema: &Value, pointer: &str, expected: &[&str], label: &str) -> TestResult {
     let actual = collect_strings(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
-    let want: BTreeSet<String> = expected.iter().map(|s| (*s).to_owned()).collect();
+    let want = expected_string_set(expected);
     ensure(
         actual == want,
         format!("{label} drifted from closed set; expected {want:?}, got {actual:?}"),
@@ -172,14 +176,14 @@ fn lane_grant_preview_schema_identity_is_consistent() -> TestResult {
 #[test]
 fn lane_grant_preview_required_top_level_fields_match_spec() -> TestResult {
     let schema = load_schema()?;
-    let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.contains(*field),
-            format!("required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    let actual = collect_strings(&schema["required"], "top-level required")?;
+    let expected = expected_string_set(REQUIRED_TOP_LEVEL);
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
 
 #[test]
@@ -265,17 +269,17 @@ fn lane_grant_preview_sample_strategy_enum_is_three_strategies() -> TestResult {
 #[test]
 fn lane_grant_preview_row_required_fields_match_bead_spec() -> TestResult {
     let schema = load_schema()?;
-    let required = collect_strings(
+    let actual = collect_strings(
         schema
             .pointer("/$defs/previewRow/required")
             .unwrap_or(&Value::Null),
         "previewRow.required",
     )?;
-    for field in REQUIRED_PREVIEW_ROW_FIELDS {
-        ensure(
-            required.contains(*field),
-            format!("previewRow.required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    let expected = expected_string_set(REQUIRED_PREVIEW_ROW_FIELDS);
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_PREVIEW_ROW_FIELDS drifted from schema previewRow.required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
