@@ -637,7 +637,14 @@ fn cli_loop_status_reports_workspace_health() -> TestResult {
     persist_artifact("status_remember", &remember);
     ensure_equal(&remember.status.code(), &Some(0), "remember exit code")?;
 
-    let status = run_ee(&["--workspace", &workspace, "status", "--json"])?;
+    let status = run_ee(&[
+        "--workspace",
+        &workspace,
+        "--fields",
+        "standard",
+        "status",
+        "--json",
+    ])?;
     persist_artifact("status_check", &status);
     let status_stderr = String::from_utf8_lossy(&status.stderr);
     ensure_equal(

@@ -152,9 +152,9 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     ensure_string_array_contains(&schema, "/properties/data/required", "wal")?;
     ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
 
-    // The `standard` field profile (`ee status --json` default) must
-    // emit `read_pool`, so the per-profile registry stays consistent
-    // with the schema's required-set.
+    // The explicit `standard` field profile must emit `read_pool`, so the
+    // per-profile registry stays consistent with the schema's required-set
+    // even though bare `ee status --json` uses a compact default.
     ensure_string_array_contains(&schema, "/field_presets/standard", "read_pool")?;
     ensure_string_array_contains(&schema, "/field_presets/standard", "wal")?;
     ensure_string_array_contains(&schema, "/field_presets/summary", "qos")?;

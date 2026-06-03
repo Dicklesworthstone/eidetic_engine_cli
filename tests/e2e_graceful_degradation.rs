@@ -342,7 +342,11 @@ fn stale_index_search_degrades_to_lexical_fallback_and_recovers_after_rebuild() 
         "staleindex bravo lexical fallback target appears only after the stale index is rebuilt",
     )?;
 
-    let stale_status = run_ee_json(&workspace, ["status"], "stale workspace status")?;
+    let stale_status = run_ee_json(
+        &workspace,
+        ["--fields", "standard", "status"],
+        "stale workspace status",
+    )?;
     assert_success(&stale_status, "stale workspace status")?;
     ensure_equal(
         &derived_asset_status(&stale_status.json, "search_index"),

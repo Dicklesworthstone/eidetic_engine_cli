@@ -668,6 +668,8 @@ fn memory_revise_and_status_health_emit_logged_honest_contracts() -> TestResult 
             args: vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
+                "--fields".to_owned(),
+                "standard".to_owned(),
                 "--json".to_owned(),
                 "status".to_owned(),
             ],

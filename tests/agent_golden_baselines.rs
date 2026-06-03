@@ -562,7 +562,14 @@ fn current_stage_contract_cases() -> &'static [ContractCase] {
         },
         ContractCase {
             name: "status_json",
-            args: &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"],
+            args: &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "--fields",
+                "standard",
+                "status",
+                "--json",
+            ],
             category: "status",
             golden_name: "status_json",
             format: ContractFormat::Json,
@@ -2016,15 +2023,25 @@ fn doctor_degradation_projection(report: &DoctorReport) -> Result<String, String
 
 #[test]
 fn status_json_output_matches_golden() -> TestResult {
-    let output = run_ee(&["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"])?;
+    let output = run_ee(&[
+        "--workspace",
+        DOCTOR_GOLDEN_WORKSPACE,
+        "--fields",
+        "standard",
+        "status",
+        "--json",
+    ])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     ensure(
         output.status.success(),
-        format!("status --json should succeed; stderr: {stderr}"),
+        format!("status --fields standard --json should succeed; stderr: {stderr}"),
     )?;
-    ensure(stderr.is_empty(), "status --json stderr must be empty")?;
+    ensure(
+        stderr.is_empty(),
+        "status --fields standard --json stderr must be empty",
+    )?;
     ensure_starts_with(
         &stdout,
         "{\"schema\":\"ee.response.v2\"",

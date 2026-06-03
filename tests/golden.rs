@@ -1782,7 +1782,14 @@ mod tests {
     #[test]
     fn agent_status_json_matches_golden() -> TestResult {
         assert_agent_stdout_golden(
-            &["--workspace", DOCTOR_GOLDEN_WORKSPACE, "status", "--json"],
+            &[
+                "--workspace",
+                DOCTOR_GOLDEN_WORKSPACE,
+                "--fields",
+                "standard",
+                "status",
+                "--json",
+            ],
             "status.json",
             true,
         )

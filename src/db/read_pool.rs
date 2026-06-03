@@ -2576,7 +2576,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_primitive__documented_source_paths_match_current_adapter() {
+    fn snapshot_primitive_documented_source_paths_match_current_adapter() {
         let read_pool = read_repo_file("src/db/read_pool.rs");
         let db_mod = read_repo_file("src/db/mod.rs");
         let storage_docs = read_repo_file("docs/configuration/storage.md");
@@ -2653,7 +2653,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_same_process_write_during_read_pin__write_commits_read_unaffected() {
+    fn concurrent_same_process_write_during_read_pin_write_commits_read_unaffected() {
         let (_tempdir, database_path, pool) = file_pool(2);
         let pin = must(pool.pin_snapshot(), "reader pin opens");
         let writer_start = Arc::new(Barrier::new(2));

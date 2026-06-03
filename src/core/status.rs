@@ -5752,8 +5752,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(non_snake_case)]
-    fn maintenance_wal_checkpoint__clears_growth_degradation() -> TestResult {
+    fn maintenance_wal_checkpoint_clears_growth_degradation() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let ee_dir = temp.path().join(".ee");
         std::fs::create_dir_all(&ee_dir).map_err(|error| error.to_string())?;

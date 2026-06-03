@@ -38,7 +38,7 @@ fn run_ee(args: &[&str]) -> Result<std::process::Output, String> {
 
 #[test]
 fn asupersync_runtime_bootstrap_is_available() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    let output = run_ee(&["--fields", "standard", "status", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(output.status.success(), "ee status should succeed")?;

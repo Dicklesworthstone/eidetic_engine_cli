@@ -1593,20 +1593,44 @@ fn preset_fields_for_command(command: &str, preset: FieldProfile) -> &'static [&
         },
         "status" => match preset {
             FieldProfile::Minimal => &["command", "version", "workspace"],
-            FieldProfile::Summary => {
-                &["command", "version", "workspace", "posture", "capabilities"]
-            }
+            FieldProfile::Summary => &[
+                "command",
+                "version",
+                "workspace",
+                "posture",
+                "singleFlight",
+                "flightRecorder",
+                "qos",
+                "rchWorkerPressure",
+                "verificationPosture",
+                "verificationLedger",
+                "hostCalibration",
+                "capabilities",
+            ],
             FieldProfile::Standard => &[
                 "command",
                 "version",
                 "workspace",
                 "posture",
+                "singleFlight",
+                "flightRecorder",
+                "qos",
+                "rchWorkerPressure",
+                "verificationPosture",
+                "verificationLedger",
+                "hostCalibration",
                 "capabilities",
                 "runtime",
+                "read_pool",
+                "wal",
+                "shardFanout",
                 "packBudgetBuckets",
                 "memoryHealth",
                 "curationHealth",
                 "feedbackHealth",
+                "graphCompute",
+                "graphSnapshotArtifact",
+                "search",
                 "derivedAssets",
                 "agentInventory",
                 "degraded",
@@ -12549,7 +12573,7 @@ pub fn escape_json_string(s: &str) -> String {
 // verbosity. Each level progressively includes more fields:
 // - minimal: command, version, status only
 // - summary: + top-level metrics and summary counts
-// - standard: + arrays with items (default behavior)
+// - standard: + arrays with items
 // - full: + verbose details like provenance, why, debug info
 // ============================================================================
 
@@ -16711,7 +16735,7 @@ mod tests {
         ensure_equal(
             &recovery[0]["resultsIn"].as_str(),
             &Some(
-                "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag.",
+                "Rebuilds the embedding index against the current embed-fast feature and model configuration.",
             ),
             "first recovery resultsIn",
         )?;
@@ -16722,7 +16746,7 @@ mod tests {
         )?;
         ensure_equal(
             &recovery[1]["command"].as_str(),
-            &Some("cargo build --features embed-quality"),
+            &Some("cargo build --features embed-fast"),
             "second recovery command",
         )
     }

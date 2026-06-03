@@ -74,14 +74,14 @@ use crate::core::context_delta::{
     ContextDeltaOptions, ContextDeltaPackSnapshot, compute_context_delta,
 };
 use crate::core::curate::{
-    CurateApplyOptions, CurateApplyReport, CurateAutoPromoteOptions, CurateAutoPromoteReport,
-    CurateCandidatesOptions, CurateCandidatesReport, CurateDispositionOptions,
-    CurateDispositionReport, CurateRetireOptions, CurateReviewAction, CurateReviewOptions,
-    CurateReviewReport, CurateShowOptions, CurateShowReport, CurateTombstoneOptions,
-    CurateUntombstoneOptions, CurateValidateOptions, CurateValidateReport, ReflectionIngestOptions,
-    ReflectionProposeOptions, ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions,
-    ReviewSessionReport, ReviewWorkspaceOptions, apply_curation_candidate,
-    ingest_reflection_result, list_curation_candidates, list_reflection_request_ledger_diagnostics,
+    CurateApplyOptions, CurateApplyReport, CurateAutoPromoteOptions, CurateCandidatesOptions,
+    CurateCandidatesReport, CurateDispositionOptions, CurateDispositionReport, CurateRetireOptions,
+    CurateReviewAction, CurateReviewOptions, CurateReviewReport, CurateShowOptions,
+    CurateShowReport, CurateTombstoneOptions, CurateUntombstoneOptions, CurateValidateOptions,
+    CurateValidateReport, ReflectionIngestOptions, ReflectionProposeOptions,
+    ReflectionRequestLedgerDiagnosticsOptions, ReviewSessionOptions, ReviewSessionReport,
+    ReviewWorkspaceOptions, apply_curation_candidate, ingest_reflection_result,
+    list_curation_candidates, list_reflection_request_ledger_diagnostics,
     propose_reflection_request, review_curation_candidate, review_session_proposals,
     run_curate_auto_promote, run_curate_retire, run_curate_tombstone, run_curate_untombstone,
     run_curation_disposition, run_review_workspace, show_curation_candidate,
@@ -11289,7 +11289,18 @@ where
                 StatusReport::gather_for_workspace(&workspace_path)
             };
             let timing = timing_capture.finish();
-            let profile = cli.fields_level().to_field_profile();
+            let profile = if !cli.fields_explicit
+                && matches!(
+                    cli.renderer(),
+                    output::Renderer::Json
+                        | output::Renderer::Jsonl
+                        | output::Renderer::Compact
+                        | output::Renderer::Hook
+                ) {
+                output::FieldProfile::Summary
+            } else {
+                cli.fields_level().to_field_profile()
+            };
             match cli.renderer() {
                 output::Renderer::Human | output::Renderer::Markdown => {
                     write_stdout(stdout, &output::render_status_human(&report))
@@ -35202,6 +35213,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn format_search_json(report: &SearchReport) -> String {
     format_search_json_with_mesh(report, MeshCommandMode::Off)
 }
@@ -35244,6 +35256,7 @@ fn format_search_json_with_mesh_and_recalibration(
     .to_string()
 }
 
+#[cfg(test)]
 fn format_search_toon(report: &SearchReport) -> String {
     format_search_toon_with_mesh(report, MeshCommandMode::Off)
 }
@@ -43697,6 +43710,7 @@ fn serve_startup_options_from_args(args: &ServeArgs) -> crate::serve::ServeStart
     }
 }
 
+#[cfg(test)]
 fn serve_startup_response_json(
     options: &crate::serve::ServeStartupOptions,
     token: Option<&str>,
@@ -54548,6 +54562,28 @@ mod tests {
     }
 
     #[test]
+    fn status_json_default_uses_compact_summary_fields() -> TestResult {
+        let (exit, stdout, stderr) = invoke(&["ee", "status", "--json"]);
+        ensure_equal(&exit, &ProcessExitCode::Success, "status JSON exit")?;
+        ensure(stderr.is_empty(), "status JSON stderr must be empty")?;
+        let json: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|error| error.to_string())?;
+        ensure_equal(
+            &json["fields"],
+            &serde_json::json!("summary"),
+            "summary fields",
+        )?;
+        ensure(
+            json.pointer("/data/runtime").is_none(),
+            "default status JSON excludes runtime details",
+        )?;
+        ensure(
+            json.pointer("/data/degraded").is_none(),
+            "default status JSON excludes data degraded array",
+        )
+    }
+
+    #[test]
     fn status_format_json_writes_machine_data_to_stdout_only() -> TestResult {
         let (exit, stdout, stderr) = invoke(&["ee", "status", "--format", "json"]);
         ensure_equal(&exit, &ProcessExitCode::Success, "status format JSON exit")?;
@@ -55720,7 +55756,7 @@ mod tests {
     // These tests verify that --fields affects JSON output:
     // - minimal: command, version, status only
     // - summary: + top-level metrics and summary counts
-    // - standard: + arrays with items (default)
+    // - standard: + arrays with items
     // - full: + verbose details like provenance, why, repair
     // ========================================================================
 

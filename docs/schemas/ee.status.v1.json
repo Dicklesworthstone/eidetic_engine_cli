@@ -71,8 +71,8 @@
   },
   "field_presets": {
     "minimal": ["command", "version", "workspace"],
-    "summary": ["command", "version", "workspace", "posture", "capabilities"],
-    "standard": ["command", "version", "workspace", "posture", "capabilities", "runtime", "packBudgetBuckets", "memoryHealth", "curationHealth", "feedbackHealth", "derivedAssets", "agentInventory", "degraded"],
+    "summary": ["command", "version", "workspace", "posture", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities"],
+    "standard": ["command", "version", "workspace", "posture", "singleFlight", "flightRecorder", "qos", "rchWorkerPressure", "verificationPosture", "verificationLedger", "hostCalibration", "capabilities", "runtime", "read_pool", "wal", "shardFanout", "packBudgetBuckets", "memoryHealth", "curationHealth", "feedbackHealth", "graphCompute", "graphSnapshotArtifact", "search", "derivedAssets", "agentInventory", "degraded"],
     "full": ["*"]
   },
   "$defs": {

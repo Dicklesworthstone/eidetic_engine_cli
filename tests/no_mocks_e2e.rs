@@ -2164,6 +2164,8 @@ fn no_mocks_status_json_conformance_logs_capabilities_and_degradations() -> Test
             args: vec![
                 "--workspace".to_owned(),
                 workspace_arg.clone(),
+                "--fields".to_owned(),
+                "standard".to_owned(),
                 "--json".to_owned(),
                 "status".to_owned(),
             ],

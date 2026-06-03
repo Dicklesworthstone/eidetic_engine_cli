@@ -270,7 +270,8 @@ fn toon_format_uses_bracket_notation_for_arrays() -> TestResult {
 #[test]
 fn toon_uses_fewer_bytes_than_json_for_status() -> TestResult {
     let workspace = isolated_workspace("size")?;
-    let json_output = run_ee_in_workspace(&workspace, &["status", "--json"])?;
+    let json_output =
+        run_ee_in_workspace(&workspace, &["--fields", "standard", "status", "--json"])?;
     let toon_output = run_ee_in_workspace(&workspace, &["status", "--format", "toon"])?;
 
     ensure(json_output.status.success(), "JSON output should succeed")?;

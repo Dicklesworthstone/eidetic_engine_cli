@@ -7855,7 +7855,7 @@ fn integration_foundation_response_envelope_schema() -> TestResult {
 
 #[test]
 fn integration_foundation_asupersync_runtime_reports_correctly() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    let output = run_ee(&["--fields", "standard", "status", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(
@@ -7918,7 +7918,7 @@ fn integration_foundation_capability_status_structure() -> TestResult {
 
 #[test]
 fn integration_foundation_degradation_codes_present_when_unimplemented() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    let output = run_ee(&["--fields", "standard", "status", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(
@@ -8053,7 +8053,7 @@ fn integration_foundation_version_reported_in_status() -> TestResult {
 
 #[test]
 fn integration_foundation_memory_health_structure() -> TestResult {
-    let output = run_ee(&["status", "--json"])?;
+    let output = run_ee(&["--fields", "standard", "status", "--json"])?;
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     ensure(
