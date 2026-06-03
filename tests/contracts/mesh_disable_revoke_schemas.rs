@@ -156,13 +156,11 @@ fn require_envelope_identity(schema: &Value, id: &str, name: &str) -> TestResult
 
 fn require_top_level_required(schema: &Value, expected: &[&str], label: &str) -> TestResult {
     let required = collect_strings(&schema["required"], label)?;
-    for field in expected {
-        ensure(
-            required.contains(*field),
-            format!("{label} missing required field {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    let want: BTreeSet<String> = expected.iter().map(|field| (*field).to_owned()).collect();
+    ensure(
+        required == want,
+        format!("{label} drifted from exact required set; expected {want:?}, got {required:?}"),
+    )
 }
 
 fn require_closed_top_level(schema: &Value, label: &str) -> TestResult {
