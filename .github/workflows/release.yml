@@ -480,6 +480,15 @@ jobs:
           PY
 
       - name: Sign with Sigstore
+        # Sigstore keyless signing needs a GitHub Actions OIDC identity token,
+        # which is unavailable under `act` (used by the dsr fallback release
+        # path) — cosign then falls back to interactive device-flow and fails
+        # with `expired_token`. The dsr fallback signs artifacts with minisign
+        # instead, so skip the in-workflow Sigstore step under act. Hosted
+        # GitHub Actions runs (ACT unset) still sign normally; the build job's
+        # Upload artifacts step uses if-no-files-found=warn, so the missing
+        # .sigstore.json bundles do not fail the upload under act.
+        if: ${{ env.ACT != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
