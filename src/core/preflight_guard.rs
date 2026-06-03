@@ -883,6 +883,13 @@ fn command_contains_active_command_substitution(
 
     while index < chars.len() {
         let ch = chars[index];
+        if quote == Some('\'') {
+            if ch == '\'' {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
         if escaped {
             escaped = false;
             index += 1;
@@ -890,13 +897,6 @@ fn command_contains_active_command_substitution(
         }
         if ch == '\\' {
             escaped = true;
-            index += 1;
-            continue;
-        }
-        if quote == Some('\'') {
-            if ch == '\'' {
-                quote = None;
-            }
             index += 1;
             continue;
         }
@@ -972,8 +972,48 @@ fn dollar_paren_command_substitution_body(chars: &[char], start: usize) -> Optio
     let mut body = String::new();
     let mut depth = 1usize;
     let mut index = start;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
     while index < chars.len() {
         let ch = chars[index];
+        if quote == Some('\'') {
+            body.push(ch);
+            if ch == '\'' {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if escaped {
+            body.push(ch);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            body.push(ch);
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if ch == '\'' && quote.is_none() {
+            quote = Some('\'');
+            body.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == '"' {
+            quote = if quote == Some('"') {
+                None
+            } else if quote.is_none() {
+                Some('"')
+            } else {
+                quote
+            };
+            body.push(ch);
+            index += 1;
+            continue;
+        }
         if ch == '$' && chars.get(index + 1) == Some(&'(') {
             depth += 1;
             body.push(ch);
@@ -981,7 +1021,13 @@ fn dollar_paren_command_substitution_body(chars: &[char], start: usize) -> Optio
             index += 2;
             continue;
         }
-        if ch == ')' {
+        if ch == '(' {
+            depth += 1;
+            body.push(ch);
+            index += 1;
+            continue;
+        }
+        if ch == ')' && quote.is_none() {
             depth -= 1;
             if depth == 0 {
                 return Some((body, index));
@@ -1712,6 +1758,9 @@ fn git_push_option_is_force(word: &str) -> bool {
 }
 
 fn matches_script_code_rewrite(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_script_code_rewrite) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| script_rewrite_segment_matches(segment))
@@ -1857,6 +1906,9 @@ fn quoted_string_literals(body: &str) -> Vec<String> {
 }
 
 fn matches_unsafe_cleanup(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_unsafe_cleanup) {
+        return true;
+    }
     shell_command_segments(command)
         .iter()
         .any(|segment| unsafe_cleanup_segment_matches(segment))
@@ -1938,6 +1990,9 @@ fn rm_target_matches_class(target: &str, target_class: RmTargetClass) -> bool {
 }
 
 fn matches_kubectl_mass_delete(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_kubectl_mass_delete) {
+        return true;
+    }
     shell_command_segments(command).iter().any(|segment| {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
@@ -2005,6 +2060,9 @@ fn matches_drop_table_sql(command: &str) -> bool {
 }
 
 fn matches_terraform_destroy(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_terraform_destroy) {
+        return true;
+    }
     shell_command_segments(command).iter().any(|segment| {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
@@ -2023,6 +2081,9 @@ fn matches_terraform_destroy(command: &str) -> bool {
 }
 
 fn matches_raw_block_device_write(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_raw_block_device_write) {
+        return true;
+    }
     shell_command_segments(command).iter().any(|segment| {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
@@ -2042,6 +2103,9 @@ fn matches_raw_block_device_write(command: &str) -> bool {
 }
 
 fn matches_filesystem_create(command: &str) -> bool {
+    if command_contains_active_command_substitution(command, matches_filesystem_create) {
+        return true;
+    }
     shell_command_segments(command).iter().any(|segment| {
         let Some(command_index) = shell_segment_command_index(segment) else {
             return false;
@@ -2104,7 +2168,7 @@ fn parse_shell_command_segments(command: &str) -> Vec<Vec<String>> {
         }
         match ch {
             '\'' | '"' => quote = Some(ch),
-            ';' | '|' | '&' => {
+            ';' | '|' | '&' | '(' | ')' => {
                 finish_shell_word(&mut current_word, &mut current_segment);
                 finish_shell_segment(&mut current_segment, &mut segments);
             }
@@ -3689,6 +3753,65 @@ action = "explode"
                 "builtin:unsafe_cleanup",
             ),
             ("rg TODO src | xargs rm", "builtin:unsafe_cleanup"),
+        ] {
+            let report = run_preflight_guard(&registry, &opts(command));
+            assert_eq!(report.exit_code, 7, "command `{command}` should halt");
+            assert!(
+                report
+                    .matches
+                    .iter()
+                    .any(|matched| matched.rule_id == rule_id),
+                "command `{command}` did not cite {rule_id}: {:?}",
+                report.matches,
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_builtins_recurse_through_active_command_substitution() {
+        let registry = PreflightGuardRegistry::with_builtins();
+
+        for (command, rule_id) in [
+            (
+                "echo \"$(sed -i '' 's/old/new/' src/lib.rs)\"",
+                "builtin:script_code_rewrite",
+            ),
+            (
+                "printf '%s\\n' \"$(find src -name '*.rs' -delete)\"",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "echo \"$( (find src -name '*.rs' -delete) )\"",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "echo 'literal \\' $(find src -name '*.rs' -delete)",
+                "builtin:unsafe_cleanup",
+            ),
+            (
+                "echo $(kubectl delete pods --all=true --all-namespaces=true)",
+                "builtin:kubectl_mass_delete",
+            ),
+            (
+                "echo $(terraform destroy -auto-approve)",
+                "builtin:terraform_destroy",
+            ),
+            (
+                "echo \"$(printf ')' ; terraform destroy -auto-approve)\"",
+                "builtin:terraform_destroy",
+            ),
+            (
+                "echo \"$( (printf hi) ; terraform destroy -auto-approve)\"",
+                "builtin:terraform_destroy",
+            ),
+            (
+                "echo $(dd if=/tmp/disk.img of=/dev/disk2)",
+                "builtin:raw_block_device_write",
+            ),
+            (
+                "echo $(mkfs.ext4 /dev/nvme0n1)",
+                "builtin:filesystem_create",
+            ),
         ] {
             let report = run_preflight_guard(&registry, &opts(command));
             assert_eq!(report.exit_code, 7, "command `{command}` should halt");

@@ -264,7 +264,7 @@ fn bash_snippet_source_defines_hook_function_and_activation_flag() -> TestResult
         return Ok(());
     };
     let temp = worker_local_tempdir("ee-preflight-bash-")?;
-    let stub_path = write_stub_ee_binary(temp.path(), "high", 7)?;
+    let stub_path = write_stub_ee_binary(temp.path(), "high", 0)?;
     let (snippet_path, _) = write_snippet_to_temp(temp.path(), &stub_path)?;
 
     // Forcing PS1 makes the interactive-shell guard inside the snippet pass,
@@ -338,7 +338,7 @@ exit 7
     // unreadable) the default-block path.
     let script = format!(
         "PS1=test\nsource {snippet}\nBASH_COMMAND='rm -rf /tmp/test' \
-         __ee_preflight_hook_check; echo rc=$?",
+         __ee_preflight_hook_check",
         snippet = snippet_path.display(),
     );
     let output = Command::new(&bash)
@@ -359,11 +359,10 @@ exit 7
             "snippet did not surface the stub-ee message; stderr={stderr}"
         ));
     }
-    // rc=1 means the hook function returned 1 (the "block" exit code) after
-    // the /dev/tty read failed and defaulted to N.
-    if !stdout.contains("rc=1") {
+    if output.status.code() != Some(1) {
         return Err(format!(
-            "expected hook function to return 1 on prompt-default-N; stdout={stdout}, stderr={stderr}"
+            "expected hook function to return 1 on prompt-default-N; status={:?}, stdout={stdout}, stderr={stderr}",
+            output.status.code()
         ));
     }
 
@@ -409,7 +408,7 @@ exit 7
 
     let script = format!(
         "PS1=test\nsource {snippet}\nBASH_COMMAND='echo $(rm -rf /tmp/test)' \
-         __ee_preflight_hook_check; echo rc=$?",
+         __ee_preflight_hook_check",
         snippet = snippet_path.display(),
     );
     let output = Command::new(&bash)
@@ -425,9 +424,10 @@ exit 7
             "expected echo command substitution to reach ee preflight; stderr={stderr}, stdout={stdout}"
         ));
     }
-    if !stdout.contains("rc=1") {
+    if output.status.code() != Some(1) {
         return Err(format!(
-            "expected echo command substitution to default-block; stdout={stdout}, stderr={stderr}"
+            "expected echo command substitution to default-block; status={:?}, stdout={stdout}, stderr={stderr}",
+            output.status.code()
         ));
     }
 
@@ -460,7 +460,7 @@ fn bash_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
 
     let script = format!(
         "PS1=test\nsource {snippet}\nBASH_COMMAND='rm -rf /tmp/test' \
-         __ee_preflight_hook_check; echo rc=$?",
+         __ee_preflight_hook_check",
         snippet = snippet_path.display(),
     );
     let output = Command::new(&bash)
@@ -477,9 +477,10 @@ fn bash_snippet_treats_preflight_exit_7_as_authoritative() -> TestResult {
             "expected medium-severity exit-7 result to be surfaced; stderr={stderr}, stdout={stdout}"
         ));
     }
-    if !stdout.contains("rc=1") {
+    if output.status.code() != Some(1) {
         return Err(format!(
-            "expected hook function to return 1 for any policy-denied exit 7; stdout={stdout}, stderr={stderr}"
+            "expected hook function to return 1 for any policy-denied exit 7; status={:?}, stdout={stdout}, stderr={stderr}",
+            output.status.code()
         ));
     }
     Ok(())
