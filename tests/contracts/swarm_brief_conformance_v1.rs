@@ -55,6 +55,7 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::collections::BTreeSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -131,6 +132,14 @@ fn init_workspace() -> Result<PathBuf, String> {
     Ok(workspace)
 }
 
+fn read_repo_json(relative_path: &str) -> Result<JsonValue, String> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path);
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("read repository JSON fixture {}: {error}", path.display()))?;
+    serde_json::from_str(&text)
+        .map_err(|error| format!("parse repository JSON fixture {}: {error}", path.display()))
+}
+
 const SWARM_BRIEF_SCHEMA_V1: &str = "ee.swarm.brief.v1";
 const SWARM_BRIEF_REDACTION_STATUS_CONST: &str = "paths_counts_subjects_only_no_content";
 
@@ -149,6 +158,8 @@ const SWARM_BRIEF_REQUIRED_KEYS: &[&str] = &[
     "beads",
     "fileReservations",
     "fileSurfaceRisks",
+    "readyReservationPressure",
+    "stalledBeadLiveness",
     "inbox",
     "threads",
     "resourcePressure",
@@ -157,6 +168,13 @@ const SWARM_BRIEF_REQUIRED_KEYS: &[&str] = &[
     "recommendations",
     "degraded",
 ];
+
+fn required_key_set() -> BTreeSet<String> {
+    SWARM_BRIEF_REQUIRED_KEYS
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect()
+}
 
 fn assert_required_keys_present(envelope: &JsonValue, context: &str) -> TestResult {
     let object = envelope
@@ -172,6 +190,30 @@ fn assert_required_keys_present(envelope: &JsonValue, context: &str) -> TestResu
         return Err(format!(
             "{context}: missing required keys per ee.swarm.brief.v1: {missing:?}\nactual top-level keys: {:?}",
             object.keys().collect::<Vec<_>>(),
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn swarm_brief_required_key_matrix_matches_schema_required_array() -> TestResult {
+    let schema = read_repo_json("docs/schemas/swarm/ee.swarm.brief.v1.json")?;
+    let required = schema
+        .get("required")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| format!("swarm brief schema required array missing: {schema}"))?;
+    let mut schema_required = BTreeSet::new();
+    for field in required {
+        let field = field
+            .as_str()
+            .ok_or_else(|| format!("swarm brief schema required entry is not a string: {field}"))?;
+        schema_required.insert(field.to_string());
+    }
+
+    let expected = required_key_set();
+    if schema_required != expected {
+        return Err(format!(
+            "SWARM_BRIEF_REQUIRED_KEYS drifted from schema required array\nexpected={expected:?}\nactual={schema_required:?}",
         ));
     }
     Ok(())
