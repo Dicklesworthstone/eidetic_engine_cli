@@ -81,7 +81,7 @@ e2e_log_note "g9_load_bearing_surface=why graph.loadBearing"
 if [ -n "${LOAD_BEARING_MEMORY_ID:-}" ]; then
     WHY_JSON=$(ee_workspace why "$LOAD_BEARING_MEMORY_ID" --json 2>/dev/null || true)
     if printf '%s' "$WHY_JSON" | jq . >/dev/null 2>&1; then
-        assert_jq "$WHY_JSON" '.schema // empty' "ee.response.v1" "g9_load_bearing_why_envelope_schema"
+        assert_jq "$WHY_JSON" '.schema // empty' "ee.response.v2" "g9_load_bearing_why_envelope_schema"
         assert_jq "$WHY_JSON" '.success // false' "true" "g9_load_bearing_why_success"
         assert_jq "$WHY_JSON" '.data.graph.loadBearing.isLoadBearing // false' "true" "g9_load_bearing_why_flag"
         assert_jq "$WHY_JSON" '.data.graph.loadBearing.interpretation // empty' "load_bearing" "g9_load_bearing_why_interpretation"

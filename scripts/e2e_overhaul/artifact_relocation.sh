@@ -48,7 +48,7 @@ fi
 
 printf '%s\n' "$plan_report" |
     jq -e '
-      .schema == "ee.response.v1"
+      .schema == "ee.response.v2"
       and .success == true
       and .data.schema == "ee.artifact.relocation.v1"
       and .data.mode == "plan"
@@ -70,7 +70,7 @@ fi
 
 printf '%s\n' "$audit_plan_report" |
     jq -e --arg original "$WORKSPACE/tests/audit_artifacts/evidence.json" '
-      .schema == "ee.response.v1"
+      .schema == "ee.response.v2"
       and .success == true
       and .data.mode == "plan"
       and .data.sourceAllowed == true
@@ -106,7 +106,7 @@ fi
 printf '%s\n' "$apply_report" |
     jq -e --arg original "$WORKSPACE/target/debug/sample.o" \
           --arg destination "$applied_destination" '
-      .schema == "ee.response.v1"
+      .schema == "ee.response.v2"
       and .success == true
       and .data.mode == "apply"
       and .data.applied == true
@@ -164,7 +164,7 @@ fi
 
 printf '%s\n' "$restore_report" |
     jq -e '
-      .schema == "ee.response.v1"
+      .schema == "ee.response.v2"
       and .success == true
       and .data.mode == "restore"
       and .data.restored == true

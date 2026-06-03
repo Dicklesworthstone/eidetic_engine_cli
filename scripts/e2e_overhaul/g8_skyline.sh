@@ -43,21 +43,24 @@ seed_status_skyline_fixture
 e2e_log_note "g8_skyline_surface=status --skyline"
 SKYLINE_JSON=$(ee_workspace status --skyline --json 2>/dev/null || true)
 if printf '%s' "$SKYLINE_JSON" | jq . >/dev/null 2>&1; then
-    assert_jq "$SKYLINE_JSON" '.schema' "ee.status.skyline.v1" "g8_skyline_schema_exact"
-    assert_jq "$SKYLINE_JSON" '[has("schema"), has("snapshotVersion"), has("skyline"), has("summary"), has("degraded")] | all' "true" "g8_skyline_required_fields"
-    assert_jq "$SKYLINE_JSON" '(.skyline | type)' "array" "g8_skyline_array"
-    assert_jq "$SKYLINE_JSON" '(.summary | type)' "object" "g8_skyline_summary_object"
-    assert_jq "$SKYLINE_JSON" '(.degraded | type)' "array" "g8_skyline_degraded_array"
-    assert_jq "$SKYLINE_JSON" '(.summary | has("communityCount") and has("loadBearingMemoryCount") and has("staleCommunityCount"))' "true" "g8_skyline_summary_counters"
-    SKYLINE_ITEM_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '.skyline | length' 2>/dev/null || echo 0)
+    assert_jq "$SKYLINE_JSON" '.schema' "ee.response.v2" "g8_skyline_response_schema"
+    assert_jq "$SKYLINE_JSON" '.success // false' "true" "g8_skyline_success"
+    assert_jq "$SKYLINE_JSON" '.data.schema // empty' "ee.status.skyline.v1" "g8_skyline_schema_exact"
+    assert_jq "$SKYLINE_JSON" '.data.command // empty' "status --skyline" "g8_skyline_command"
+    assert_jq "$SKYLINE_JSON" '(.data | has("schema") and has("snapshotVersion") and has("skyline") and has("summary") and has("degraded"))' "true" "g8_skyline_required_fields"
+    assert_jq "$SKYLINE_JSON" '(.data.skyline | type)' "array" "g8_skyline_array"
+    assert_jq "$SKYLINE_JSON" '(.data.summary | type)' "object" "g8_skyline_summary_object"
+    assert_jq "$SKYLINE_JSON" '(.data.degraded | type)' "array" "g8_skyline_degraded_array"
+    assert_jq "$SKYLINE_JSON" '(.data.summary | has("communityCount") and has("loadBearingMemoryCount") and has("staleCommunityCount"))' "true" "g8_skyline_summary_counters"
+    SKYLINE_ITEM_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '.data.skyline | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$SKYLINE_ITEM_COUNT" -ge 1 "g8_skyline_items_present"
-    PERIPHERY_HEAVY_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '[.skyline[]? | select(.structuralHealth == "periphery_heavy")] | length' 2>/dev/null || echo 0)
+    PERIPHERY_HEAVY_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '[.data.skyline[]? | select(.structuralHealth == "periphery_heavy")] | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$PERIPHERY_HEAVY_COUNT" -ge 1 "g8_skyline_periphery_heavy_label"
-    DEGENERATE_DIAGNOSTIC_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '[.degraded[]? | select(.code == "graph_skyline_degenerate_communities" and .severity == "info" and ((.message // "") | contains("degenerate")))] | length' 2>/dev/null || echo 0)
+    DEGENERATE_DIAGNOSTIC_COUNT=$(printf '%s' "$SKYLINE_JSON" | jq '[.data.degraded[]? | select(.code == "graph_skyline_degenerate_communities" and .severity == "info" and ((.message // "") | contains("degenerate")))] | length' 2>/dev/null || echo 0)
     e2e_log_assert_num "$DEGENERATE_DIAGNOSTIC_COUNT" -ge 1 "g8_skyline_degenerate_diagnostic"
-    SNAPSHOT_VERSION=$(printf '%s' "$SKYLINE_JSON" | jq -r '.snapshotVersion // empty' 2>/dev/null | head -n 1)
+    SNAPSHOT_VERSION=$(printf '%s' "$SKYLINE_JSON" | jq -r '.data.snapshotVersion // empty' 2>/dev/null | head -n 1)
 else
-    todo_assert "g8_skyline_surface_available" "bd-mhc1.4" "ee status --skyline is not fully available yet."
+    e2e_log_assert_eq "parseable-json" "invalid-json" "g8_skyline_parseable"
     SNAPSHOT_VERSION="unavailable"
 fi
 

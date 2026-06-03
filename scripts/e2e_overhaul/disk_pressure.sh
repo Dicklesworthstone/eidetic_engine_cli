@@ -237,7 +237,7 @@ e2e_log_assert_eq "$source_hash_after" "$source_hash_before" \
 e2e_log_assert_eq "$harness_logs_after" "$harness_logs_before" \
     "agent_harness_log_metadata_preserved_no_delete"
 
-assert_jq "$report" '.schema' "ee.response.v1" "disk_pressure_response_schema"
+assert_jq "$report" '.schema' "ee.response.v2" "disk_pressure_response_schema"
 assert_jq "$report" '.success' "true" "disk_pressure_response_success"
 assert_jq "$report" '.data.schema' "ee.disk_pressure.diagnostics.v1" \
     "disk_pressure_data_schema"
@@ -311,7 +311,7 @@ _e2e_emit_event "repair_plan_checked" \
     "posture" "$(printf '%s\n' "$report" | jq -r '.data.posture')" \
     "recovery_action_count" "$(printf '%s\n' "$report" | jq -r '.data.recoveryActions | length')"
 
-assert_jq "$artifacts_report" '.schema' "ee.response.v1" "artifact_retention_response_schema"
+assert_jq "$artifacts_report" '.schema' "ee.response.v2" "artifact_retention_response_schema"
 assert_jq "$artifacts_report" '.success' "true" "artifact_retention_response_success"
 assert_jq "$artifacts_report" '.data.schema' "ee.artifact_retention.diagnostics.v1" \
     "artifact_retention_data_schema"
@@ -343,7 +343,7 @@ assert_jq "$artifacts_report" '(.data.roots | all(
     and (.budget.degradedBytes >= .budget.warningBytes)))' "true" \
     "artifact_retention_budget_metadata"
 
-assert_jq "$build_admission_report" '.schema' "ee.response.v1" \
+assert_jq "$build_admission_report" '.schema' "ee.response.v2" \
     "build_admission_response_schema"
 assert_jq "$build_admission_report" '.success' "true" \
     "build_admission_response_success"
@@ -388,13 +388,13 @@ if [ "$(cat "$restore_original")" != "restored artifact bytes" ]; then
     echo "disk_pressure: artifact relocation restore did not copy preserved artifact back" >&2
     exit 1
 fi
-assert_jq "$plan_report" '.schema' "ee.response.v1" "relocation_plan_response_schema"
+assert_jq "$plan_report" '.schema' "ee.response.v2" "relocation_plan_response_schema"
 assert_jq "$plan_report" '.success' "true" "relocation_plan_response_success"
 assert_jq "$plan_report" '.data.mode' "plan" "relocation_plan_mode"
 assert_jq "$plan_report" '.data.applied' "false" "relocation_plan_not_applied"
 assert_jq "$plan_report" '.data.preservationPolicy' \
     "copy_preserve_no_delete_no_overwrite" "relocation_plan_preservation_policy"
-assert_jq "$apply_report" '.schema' "ee.response.v1" "relocation_apply_response_schema"
+assert_jq "$apply_report" '.schema' "ee.response.v2" "relocation_apply_response_schema"
 assert_jq "$apply_report" '.success' "true" "relocation_apply_response_success"
 assert_jq "$apply_report" '.data.mode' "apply" "relocation_apply_mode"
 assert_jq "$apply_report" '.data.applied' "true" "relocation_apply_applied"
@@ -403,7 +403,7 @@ assert_jq "$apply_report" '.data.manifestHash != null' \
     "true" "relocation_apply_manifest_hash"
 assert_jq "$apply_report" '.data.preservationPolicy' \
     "copy_preserve_no_delete_no_overwrite" "relocation_apply_preservation_policy"
-assert_jq "$restore_report" '.schema' "ee.response.v1" "relocation_restore_response_schema"
+assert_jq "$restore_report" '.schema' "ee.response.v2" "relocation_restore_response_schema"
 assert_jq "$restore_report" '.success' "true" "relocation_restore_response_success"
 assert_jq "$restore_report" '.data.mode' "restore" "relocation_restore_mode"
 assert_jq "$restore_report" '.data.restored' "true" "relocation_restore_restored"

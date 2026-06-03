@@ -43,7 +43,7 @@ if [[ -n "${EE_BIN:-}" && -x "${EE_BIN:-}" ]]; then
   tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/ee-hello-responder.XXXXXX")"
   "$EE_BIN" init --workspace "$tmpdir" --json >/dev/null
   output="$(EE_MESH_ENABLED=1 "$EE_BIN" mesh hello-responder status --workspace "$tmpdir" --json)"
-  printf '%s\n' "$output" | grep -q '"schema":"ee.response.v1"'
+  printf '%s\n' "$output" | grep -q '"schema":"ee.response.v2"'
   printf '%s\n' "$output" | grep -q '"schema":"ee.mesh.hello_responder.status.v1"'
   printf '%s\n' "$output" | grep -q '"hello_responder_not_running"'
   emit pass "cli_probe" "EE_BIN"

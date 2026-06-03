@@ -73,7 +73,7 @@ DEFAULT_PROBE="unavailable"
 if printf '%s' "$CURATE_JSON" | jq . >/dev/null 2>&1; then
     DEFAULT_PROBE=$(printf '%s' "$CURATE_JSON" | jq -c '{decisionCount: ((.data.decisions // []) | length), structuralCount: ((.data.structuralAdjustments // []) | length), degradedCodes: [(.data.degraded // [])[]?.code]}' 2>/dev/null || echo "unavailable")
     e2e_log_note "g5_curate_decay_default_probe=${DEFAULT_PROBE}"
-    assert_jq "$CURATE_JSON" '.schema // empty' "ee.response.v1" "g5_curate_decay_envelope_schema"
+    assert_jq "$CURATE_JSON" '.schema // empty' "ee.response.v2" "g5_curate_decay_envelope_schema"
     assert_jq "$CURATE_JSON" '.success // false' "true" "g5_curate_decay_success"
     assert_jq "$CURATE_JSON" '.data.schema // empty' "ee.curate.disposition.v1" "g5_curate_decay_data_schema"
     assert_jq "$CURATE_JSON" '.data | has("schema") and has("command") and has("version") and has("workspaceId") and has("workspacePath") and has("databasePath") and has("dryRun") and has("apply") and has("durableMutation") and has("summary") and has("policies") and has("decisions") and has("structuralAdjustments") and has("degraded") and has("nextAction")' "true" "g5_curate_decay_required_fields"
@@ -94,7 +94,7 @@ if printf '%s' "$CURATE_JSON" | jq . >/dev/null 2>&1; then
 
     CURATE_NO_STRUCTURAL_JSON=$(ee_workspace curate disposition --json --no-structural-decay 2>/dev/null || true)
     if printf '%s' "$CURATE_NO_STRUCTURAL_JSON" | jq . >/dev/null 2>&1; then
-        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.schema // empty' "ee.response.v1" "g5_curate_decay_opt_out_envelope_schema"
+        assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.schema // empty' "ee.response.v2" "g5_curate_decay_opt_out_envelope_schema"
         assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.success // false' "true" "g5_curate_decay_opt_out_success"
         assert_jq "$CURATE_NO_STRUCTURAL_JSON" '.data.command // empty' "curate disposition" "g5_curate_decay_opt_out_command"
         STRUCTURAL_OPT_OUT_COUNT=$(printf '%s' "$CURATE_NO_STRUCTURAL_JSON" | jq '(.data.structuralAdjustments // []) | length' 2>/dev/null || echo 0)

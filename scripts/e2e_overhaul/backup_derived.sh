@@ -58,7 +58,7 @@ seed_backup_derived_fixture
 
 BACKUP_ROOT="$EPIC_WORKSPACE/backups"
 CREATE_JSON="$(create_backup_with_derived "derived-e2e-a")"
-assert_jq "$CREATE_JSON" '.schema' "ee.response.v1" "backup_derived_create_response_schema"
+assert_jq "$CREATE_JSON" '.schema' "ee.response.v2" "backup_derived_create_response_schema"
 assert_jq "$CREATE_JSON" '.success' "true" "backup_derived_create_success"
 assert_jq "$CREATE_JSON" '.data.schema' "ee.backup.create.v1" "backup_derived_create_schema"
 assert_jq "$CREATE_JSON" '.data.includeDerived' "true" "backup_derived_create_include_derived"

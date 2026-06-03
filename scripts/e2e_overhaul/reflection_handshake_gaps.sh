@@ -28,14 +28,22 @@ if printf '%s' "$REFLECT_HELP" | grep -q "reflect"; then
     drh_capture_request_identity "$PROPOSE_JSON"
     drh_extract_degraded_codes "$PROPOSE_JSON"
     drh_extract_recovery_actions "$PROPOSE_JSON"
-    assert_jq_nonempty "$PROPOSE_JSON" '.data.requestId // .requestId // empty' "reflection_request_id_present"
-    assert_jq_nonempty "$PROPOSE_JSON" '.data.requestHash // .requestHash // empty' "reflection_request_hash_present"
-    assert_jq "$PROPOSE_JSON" '.data.request.challenge.keyId // empty' "reflect-e2e-key" "reflection_request_challenge_key_id"
-    assert_jq "$PROPOSE_JSON" '.data.ledgerOutcome.status // empty' "inserted" "reflection_request_ledger_inserted"
-    if printf '%s' "$PROPOSE_JSON" | grep -Fq "$REFLECT_KEY_PATH"; then
-        e2e_log_assert_eq "hmac-key-path-leaked" "redacted" "reflection_request_redacts_hmac_key_path"
+    if printf '%s' "$PROPOSE_JSON" | jq . >/dev/null 2>&1; then
+        assert_jq "$PROPOSE_JSON" '.schema // empty' "ee.response.v2" "reflection_reflect_propose_response_schema"
+        assert_jq "$PROPOSE_JSON" '.success // false' "true" "reflection_reflect_propose_success"
+        assert_jq "$PROPOSE_JSON" '.data.schema // empty' "ee.reflect.propose.v1" "reflection_reflect_propose_data_schema"
+        assert_jq "$PROPOSE_JSON" '.data.command // empty' "reflect propose" "reflection_reflect_propose_command"
+        assert_jq_nonempty "$PROPOSE_JSON" '.data.requestId // .requestId // empty' "reflection_request_id_present"
+        assert_jq_nonempty "$PROPOSE_JSON" '.data.requestHash // .requestHash // empty' "reflection_request_hash_present"
+        assert_jq "$PROPOSE_JSON" '.data.request.challenge.keyId // empty' "reflect-e2e-key" "reflection_request_challenge_key_id"
+        assert_jq "$PROPOSE_JSON" '.data.ledgerOutcome.status // empty' "inserted" "reflection_request_ledger_inserted"
+        if printf '%s' "$PROPOSE_JSON" | grep -Fq "$REFLECT_KEY_PATH"; then
+            e2e_log_assert_eq "hmac-key-path-leaked" "redacted" "reflection_request_redacts_hmac_key_path"
+        else
+            e2e_log_assert_eq "redacted" "redacted" "reflection_request_redacts_hmac_key_path"
+        fi
     else
-        e2e_log_assert_eq "redacted" "redacted" "reflection_request_redacts_hmac_key_path"
+        e2e_log_assert_eq "parseable-json" "invalid-json" "reflection_reflect_propose_parseable"
     fi
 else
     DRH_RECOVERY_ACTIONS='["implement bd-ogqf6 request ledger before accepting reflection results","run ee reflect propose after the CLI surface exists"]'

@@ -72,7 +72,10 @@ if printf '%s' "$REFLECT_HELP" | grep -q "reflect"; then
     if printf '%s' "$PROPOSE_JSON" | jq . >/dev/null 2>&1; then
         REFLECT_SUCCESS=$(printf '%s' "$PROPOSE_JSON" | jq -r '.success // false' 2>/dev/null || echo false)
         if [ "$REFLECT_SUCCESS" = "true" ]; then
+            assert_jq "$PROPOSE_JSON" '.schema // empty' "ee.response.v2" "readiness_reflect_propose_response_schema"
             assert_jq "$PROPOSE_JSON" '.success // false' "true" "readiness_reflect_propose_dry_run_success"
+            assert_jq "$PROPOSE_JSON" '.data.schema // empty' "ee.reflect.propose.v1" "readiness_reflect_propose_data_schema"
+            assert_jq "$PROPOSE_JSON" '.data.command // empty' "reflect propose" "readiness_reflect_propose_command"
             assert_jq_nonempty "$PROPOSE_JSON" '.data.requestId // .requestId // empty' "readiness_reflection_request_id_present"
             assert_jq_nonempty "$PROPOSE_JSON" '.data.requestHash // .requestHash // empty' "readiness_reflection_request_hash_present"
             CHALLENGE_KEY_ID=$(printf '%s' "$PROPOSE_JSON" | jq -r '.data.request.challenge.keyId // empty' 2>/dev/null || true)
@@ -256,14 +259,11 @@ DB_INSPECT_JSON=$(ee_workspace db inspect --json 2>/dev/null || true)
 drh_extract_degraded_codes "$DB_INSPECT_JSON"
 drh_extract_recovery_actions "$DB_INSPECT_JSON"
 if printf '%s' "$DB_INSPECT_JSON" | jq . >/dev/null 2>&1; then
-    DBI_OK=$(printf '%s' "$DB_INSPECT_JSON" | jq -r '.success // false' 2>/dev/null || echo false)
-    if [ "$DBI_OK" = "true" ]; then
-        e2e_log_assert_eq "$DBI_OK" "true" "readiness_db_inspect_success"
-    else
-        todo_assert "readiness_db_inspect_success" "bd-3usjw.1" "ee db inspect surface stays pending until db_inspect lands."
-    fi
+    assert_jq "$DB_INSPECT_JSON" '.schema // empty' "ee.response.v2" "readiness_db_inspect_schema"
+    assert_jq "$DB_INSPECT_JSON" '.success // false' "true" "readiness_db_inspect_success"
+    assert_jq "$DB_INSPECT_JSON" '.data.command // empty' "db inspect" "readiness_db_inspect_command"
 else
-    todo_assert "readiness_db_inspect_success" "bd-3usjw.1" "ee db inspect remains intentionally unimplemented in current binary."
+    e2e_log_assert_eq "parseable-json" "invalid-json" "readiness_db_inspect_parseable"
 fi
 drh_log_state "external_derivation_db_inspect" "db_inspect" "recorded"
 

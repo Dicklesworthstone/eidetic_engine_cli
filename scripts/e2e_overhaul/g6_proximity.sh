@@ -25,7 +25,7 @@ if [ -n "${MEM_A:-}" ] && [ -n "${MEM_B:-}" ]; then
         --confidence 0.91 \
         --json 2>/dev/null || true)
     if printf '%s' "$LINK_JSON" | jq . >/dev/null 2>&1; then
-        assert_jq "$LINK_JSON" '.schema' "ee.response.v1" "g6_proximity_link_schema"
+        assert_jq "$LINK_JSON" '.schema' "ee.response.v2" "g6_proximity_link_schema"
         assert_jq "$LINK_JSON" '.data.status' "created" "g6_proximity_link_created"
         assert_jq "$LINK_JSON" '.data.link.source_memory_id' "$MEM_A" "g6_proximity_link_source"
         assert_jq "$LINK_JSON" '.data.link.target_memory_id' "$MEM_B" "g6_proximity_link_target"
@@ -50,7 +50,7 @@ if printf '%s' "$PROXIMITY_JSON" | jq . >/dev/null 2>&1; then
     assert_jq "$PROXIMITY_JSON" '(.minCut >= 0.90 and .minCut <= 0.92)' "true" "g6_proximity_min_cut_seeded_weight"
     HOTSPOTS_JSON=$(ee_workspace insights --section proximityHotspots --json 2>/dev/null || true)
     if printf '%s' "$HOTSPOTS_JSON" | jq . >/dev/null 2>&1; then
-        assert_jq "$HOTSPOTS_JSON" '.schema' "ee.response.v1" "g6_proximity_hotspots_response_schema"
+        assert_jq "$HOTSPOTS_JSON" '.schema' "ee.response.v2" "g6_proximity_hotspots_response_schema"
         assert_jq "$HOTSPOTS_JSON" '.data.selectedSection' "proximityHotspots" "g6_proximity_hotspots_selected_section"
         assert_jq "$HOTSPOTS_JSON" '(.data.degradedSignals | type)' "array" "g6_proximity_hotspots_degraded_array"
         assert_jq "$HOTSPOTS_JSON" '(.data.degradedSignals | length)' "0" "g6_proximity_hotspots_no_degraded"
