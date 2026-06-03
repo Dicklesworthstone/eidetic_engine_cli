@@ -18,6 +18,7 @@ use ee::models::{
     sample_verification_run_records, verification_closeout_capsule, verification_reuse_advisory,
     verification_run_records_from_j1_jsonl,
 };
+use serde::Serialize;
 
 type TestResult = Result<(), String>;
 
@@ -35,6 +36,36 @@ fn broker_view_schema_path() -> PathBuf {
         .join("schemas")
         .join("swarm")
         .join("ee.verification.broker_view.v1.json")
+}
+
+fn swarm_schema_path(file_name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docs")
+        .join("schemas")
+        .join("swarm")
+        .join(file_name)
+}
+
+fn read_swarm_schema(file_name: &str) -> Result<serde_json::Value, String> {
+    let path = swarm_schema_path(file_name);
+    let schema_text =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    serde_json::from_str(&schema_text).map_err(|error| format!("parse {}: {error}", path.display()))
+}
+
+fn assert_serialized_samples_validate_schema<T: Serialize>(
+    schema_file_name: &str,
+    samples: &[T],
+    context: &str,
+) -> TestResult {
+    let schema = read_swarm_schema(schema_file_name)?;
+
+    for (index, sample) in samples.iter().enumerate() {
+        let value = serde_json::to_value(sample)
+            .map_err(|error| format!("serialize {context}[{index}]: {error}"))?;
+        validate_json_schema_subset(&schema, &value, &format!("{context}[{index}]"))?;
+    }
+    Ok(())
 }
 
 fn read_repo_file(relative: &str) -> Result<String, String> {
@@ -288,6 +319,31 @@ fn verification_broker_views_validate_against_declared_schema() -> TestResult {
             &format!("sample_verification_broker_views[{index}]"),
         )?;
     }
+    Ok(())
+}
+
+#[test]
+fn verification_evidence_samples_validate_against_declared_schemas() -> TestResult {
+    assert_serialized_samples_validate_schema(
+        "ee.verification.evidence.v1.json",
+        &sample_verification_evidence_records(),
+        "sample_verification_evidence_records",
+    )?;
+    assert_serialized_samples_validate_schema(
+        "ee.verification.run.v1.json",
+        &sample_verification_run_records(),
+        "sample_verification_run_records",
+    )?;
+    assert_serialized_samples_validate_schema(
+        "ee.verification.reuse_advisory.v1.json",
+        &sample_verification_reuse_advisories(),
+        "sample_verification_reuse_advisories",
+    )?;
+    assert_serialized_samples_validate_schema(
+        "ee.verification.closeout_capsule.v1.json",
+        &sample_verification_closeout_capsules(),
+        "sample_verification_closeout_capsules",
+    )?;
     Ok(())
 }
 
