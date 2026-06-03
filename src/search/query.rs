@@ -152,9 +152,8 @@ fn parse_bare(chars: &mut Peekable<Chars<'_>>) -> String {
 }
 
 fn remaining_contains_closing_quote(chars: &Peekable<Chars<'_>>) -> bool {
-    let mut probe = chars.clone();
     let mut escaped = false;
-    while let Some(next) = probe.next() {
+    for next in chars.clone() {
         if escaped {
             escaped = false;
             continue;

@@ -1,7 +1,7 @@
 //! C5 real-world secret-pattern corpus checks.
 //!
 //! Fixture names are frozen subsets from upstream public catalogs:
-//! - gitleaks config: https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+//! - gitleaks config: https://github.com/gitleaks/gitleaks/blob/HEAD/config/gitleaks.toml
 //! - trufflehog detectors: https://github.com/trufflesecurity/trufflehog/tree/main/pkg/detectors
 //!
 //! Values are synthetic and intentionally non-production. The test exercises the

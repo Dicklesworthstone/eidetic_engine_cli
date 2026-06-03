@@ -1448,7 +1448,10 @@ pub fn detect_instruction_like_content(content: &str) -> InstructionLikeReport {
 #[must_use]
 pub fn redact_secret_like_content(content: &str) -> SecretRedactionReport {
     let matches = detect_secret_like_matches(content);
-    let mut reasons = Vec::new();
+    let mut reasons = matches
+        .iter()
+        .map(|secret_match| secret_match.pattern_id)
+        .collect::<Vec<_>>();
     let (without_key_values, key_value_redacted) = redact_secret_key_values(content, &mut reasons);
     let (without_url_passwords, url_password_redacted) =
         redact_url_passwords(&without_key_values, &mut reasons);
@@ -3412,6 +3415,48 @@ mod tests {
                     first.redacted_reasons,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn secret_redactor_preserves_specific_reasons_when_generic_context_labels_match() {
+        let cases = [
+            (
+                "gitleaks synthetic airtable-personnal-access-token: personal_access_token = \"fake-airtable-pat-0008\"",
+                "fake-airtable-pat-0008",
+                "personal_access_token",
+            ),
+            (
+                "gitleaks synthetic aws-access-token: AWS_SECRET_ACCESS_KEY=\"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE020\"",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLE020",
+                "aws_secret_access_key",
+            ),
+            (
+                "gitleaks synthetic cloudflare-global-api-key: master_key = \"fake-cloudflare-global-api-key-0033\"",
+                "fake-cloudflare-global-api-key-0033",
+                "master_key",
+            ),
+            (
+                "gitleaks synthetic anthropic-api-key: sk-ant-api03-fakeanthropicstandard0000000000000000000000000000013",
+                "sk-ant-api03-fakeanthropicstandard0000000000000000000000000000013",
+                "anthropic_api_key",
+            ),
+        ];
+
+        for (input, raw_value, reason) in cases {
+            let report = redact_secret_like_content(input);
+
+            assert!(report.redacted);
+            assert!(
+                report.redacted_reasons.contains(&reason),
+                "missing redaction reason {reason}; got {:?}",
+                report.redacted_reasons
+            );
+            assert!(
+                !report.content.contains(raw_value),
+                "redacted output leaked raw value {raw_value}: {}",
+                report.content
+            );
         }
     }
 
