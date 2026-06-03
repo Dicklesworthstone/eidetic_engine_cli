@@ -5,6 +5,7 @@
 //! away from the public contract described in ADR 0041 and
 //! `docs/mesh/anti_entropy.md`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -16,6 +17,15 @@ const SCHEMA_PATH: &str = "docs/schemas/ee.mesh.anti_entropy.v1.json";
 const ADR_PATH: &str = "docs/adr/0041-mesh-anti-entropy-model.md";
 const PROTOCOL_DOC_PATH: &str = "docs/mesh/anti_entropy.md";
 const ANTI_ENTROPY_SCHEMA_ID: &str = "ee.mesh.anti_entropy.v1";
+const REQUIRED_TOP_LEVEL: &[&str] = &[
+    "schema",
+    "lastRoundCompletedAt",
+    "originsTracked",
+    "peerCount",
+    "perPeerCounts",
+    "backoffPosture",
+    "degraded",
+];
 const FIXTURES: &[&str] = &[
     "tests/fixtures/mesh/anti_entropy_idle.json",
     "tests/fixtures/mesh/anti_entropy_blocked_range.json",
@@ -54,6 +64,25 @@ where
     } else {
         Err(format!("{context}: expected {expected:?}, got {actual:?}"))
     }
+}
+
+fn collect_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    let array = node
+        .as_array()
+        .ok_or_else(|| format!("{ctx}: expected array, got: {node}"))?;
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{ctx}: non-string entry: {value}"))
+        })
+        .collect()
+}
+
+fn expected_string_set(expected: &[&str]) -> BTreeSet<String> {
+    expected.iter().map(|value| (*value).to_owned()).collect()
 }
 
 #[test]
@@ -95,24 +124,17 @@ fn anti_entropy_schema_pins_redaction_safe_surface() -> TestResult {
         "schema discriminator",
     )?;
 
-    let required = schema
-        .pointer("/required")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "schema required[] missing".to_string())?;
-    for field in [
-        "schema",
-        "lastRoundCompletedAt",
-        "originsTracked",
-        "peerCount",
-        "perPeerCounts",
-        "backoffPosture",
-        "degraded",
-    ] {
-        ensure(
-            required.iter().any(|value| value.as_str() == Some(field)),
-            format!("required[] missing {field}"),
-        )?;
-    }
+    let actual = collect_strings(
+        schema.pointer("/required").unwrap_or(&Value::Null),
+        "top-level required",
+    )?;
+    let expected = expected_string_set(REQUIRED_TOP_LEVEL);
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )?;
 
     let degraded_codes = schema
         .pointer("/properties/degraded/items/enum")
