@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::Serialize;
+#[cfg(unix)]
+use std::os::unix::{fs::FileTypeExt, net::UnixStream};
 
 use crate::config::{EnvVar, read_env_var, read_env_var_os, workspace_config};
 use crate::core::agent_detect::{AgentInventoryReport, AgentInventoryStatus};
@@ -289,6 +291,7 @@ impl DoctorReport {
             check_search_index(workspace_path),
             check_lexical_ram_tier(workspace_path),
             check_graph_numa_pin(workspace_path),
+            check_daemon_socket_reachable(),
             check_rch_worker_pressure(&rch_worker_pressure),
             check_rch_verify_ledger(&verification_ledger),
             check_cass(),
@@ -2868,6 +2871,77 @@ fn graph_numa_pin_snapshot_path(workspace_path: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".ee").join("graph"))
 }
 
+fn check_daemon_socket_reachable() -> CheckResult {
+    check_daemon_socket_reachable_at(&crate::daemon::default_daemon_socket_path())
+}
+
+#[cfg(unix)]
+fn check_daemon_socket_reachable_at(socket_path: &Path) -> CheckResult {
+    match std::fs::symlink_metadata(socket_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_socket() {
+                return CheckResult {
+                    name: "daemon_socket_reachable",
+                    severity: CheckSeverity::Warning,
+                    message: format!(
+                        "Daemon socket path exists but is not a Unix-domain socket at {}.",
+                        socket_path.display()
+                    ),
+                    error_code: None,
+                    repair: Some("Inspect `ee daemon status --json` and restart the daemon."),
+                };
+            }
+
+            match UnixStream::connect(socket_path) {
+                Ok(_stream) => CheckResult::ok(
+                    "daemon_socket_reachable",
+                    format!(
+                        "Daemon socket accepts local connections at {}.",
+                        socket_path.display()
+                    ),
+                ),
+                Err(error) => CheckResult {
+                    name: "daemon_socket_reachable",
+                    severity: CheckSeverity::Warning,
+                    message: format!(
+                        "Daemon socket exists but did not accept a local connection at {}: {error}.",
+                        socket_path.display()
+                    ),
+                    error_code: None,
+                    repair: Some("Inspect `ee daemon status --json` and restart the daemon."),
+                },
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CheckResult::ok(
+            "daemon_socket_reachable",
+            format!(
+                "Optional daemon socket is not present at {}; in-process CLI execution remains authoritative.",
+                socket_path.display()
+            ),
+        ),
+        Err(error) => CheckResult {
+            name: "daemon_socket_reachable",
+            severity: CheckSeverity::Warning,
+            message: format!(
+                "Daemon socket path could not be inspected at {}: {error}.",
+                socket_path.display()
+            ),
+            error_code: None,
+            repair: Some(
+                "Inspect `ee daemon status --json` and the daemon socket parent directory.",
+            ),
+        },
+    }
+}
+
+#[cfg(not(unix))]
+fn check_daemon_socket_reachable_at(_socket_path: &Path) -> CheckResult {
+    CheckResult::ok(
+        "daemon_socket_reachable",
+        "Unix-domain daemon sockets are not supported on this platform.",
+    )
+}
+
 fn format_string_codes(codes: &[String]) -> String {
     if codes.is_empty() {
         "none".to_owned()
@@ -3681,6 +3755,84 @@ mod tests {
                 .any(|check| check.name == "graph_numa_pin"),
             true,
             "graph NUMA pin doctor check exists",
+        )?;
+        ensure(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "daemon_socket_reachable"),
+            true,
+            "daemon socket doctor check exists",
+        )
+    }
+
+    #[test]
+    fn daemon_socket_check_is_ok_when_socket_is_absent() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp.path().join("missing-daemon.sock");
+
+        let check = check_daemon_socket_reachable_at(&socket_path);
+
+        ensure(check.name, "daemon_socket_reachable", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "absent optional daemon is ok",
+        )?;
+        ensure(
+            check.message.contains("not present"),
+            true,
+            "message explains absent optional daemon",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_socket_check_warns_when_path_is_not_socket() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp.path().join("daemon.sock");
+        std::fs::write(&socket_path, b"not a socket").map_err(|error| error.to_string())?;
+
+        let check = check_daemon_socket_reachable_at(&socket_path);
+
+        ensure(check.name, "daemon_socket_reachable", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Warning,
+            "non-socket daemon path warns",
+        )?;
+        ensure(
+            check.message.contains("not a Unix-domain socket"),
+            true,
+            "message explains non-socket path",
+        )?;
+        ensure(check.repair.is_some(), true, "warning has repair guidance")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_socket_check_is_ok_when_socket_accepts_connection() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let socket_path = temp.path().join("daemon.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket_path).map_err(|error| {
+            format!(
+                "bind daemon socket fixture {}: {error}",
+                socket_path.display()
+            )
+        })?;
+
+        let check = check_daemon_socket_reachable_at(&socket_path);
+
+        ensure(check.name, "daemon_socket_reachable", "check name")?;
+        ensure(
+            check.severity,
+            CheckSeverity::Ok,
+            "connectable daemon socket is ok",
+        )?;
+        ensure(
+            check.message.contains("accepts local connections"),
+            true,
+            "message explains reachable daemon socket",
         )
     }
 
