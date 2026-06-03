@@ -5643,6 +5643,35 @@ CREATE INDEX idx_reflection_request_ledger_v064_consumed_result_hash
     "blake3:v064_reflection_request_result_replay_hash_2026_05_24",
 );
 
+/// V065: Canonicalize cass-imported evidence-span content hashes (issue #10).
+///
+/// Before this migration the CASS importer wrote `evidence_spans.content_hash`
+/// as a BARE BLAKE3 hex digest (no `blake3:` prefix). The V009 CHECK only
+/// enforces non-empty, so the un-prefixed value persisted, then failed the
+/// derivation-source-package validation on the persist path
+/// (`ee review session --propose`), which requires a canonical `blake3:<64-hex>`
+/// content hash. The importer now writes the prefix directly; this backfill
+/// repairs rows written by older binaries.
+///
+/// The rewrite is lossless: `content_hash == blake3(excerpt)` for these rows and
+/// the excerpt lives on the same row, so prefixing a bare 64-char lowercase-hex
+/// value reconstructs the canonical form without recomputation. It is idempotent
+/// because the `length(content_hash) = 64` + hex GLOB guard never matches an
+/// already-prefixed (`blake3:` + 64-hex = 71-char) value. Sessions are
+/// deliberately left untouched: `sessions.content_hash` can carry provided
+/// hashes of other schemes.
+pub const V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX: Migration = Migration::new(
+    65,
+    "evidence_span_content_hash_blake3_prefix",
+    r#"
+UPDATE evidence_spans
+SET content_hash = 'blake3:' || content_hash
+WHERE length(content_hash) = 64
+    AND content_hash NOT GLOB '*[^0-9a-f]*';
+"#,
+    "blake3:v065_evidence_span_content_hash_blake3_prefix_2026_06_03",
+);
+
 /// All migrations in version order.
 pub const MIGRATIONS: &[Migration] = &[
     V001_INIT_SCHEMA,
@@ -5709,6 +5738,7 @@ pub const MIGRATIONS: &[Migration] = &[
     V062_CREATE_DERIVED_CURATION_CANDIDATES,
     V063_REFLECTION_REQUEST_LEDGER,
     V064_REFLECTION_REQUEST_RESULT_REPLAY_HASH,
+    V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX,
 ];
 
 fn compiled_migration(version: u32) -> Option<&'static Migration> {
@@ -23956,6 +23986,60 @@ mod tests {
         let by_memory =
             connection.list_evidence_spans_for_memory("mem_01234567890123456789012345")?;
         ensure_equal(&by_memory, &vec![span], "linked memory evidence list")?;
+
+        connection.close()?;
+        Ok(())
+    }
+
+    /// Issue #10: the V065 backfill must prefix bare-hex evidence-span content
+    /// hashes with `blake3:` losslessly, leave already-canonical and
+    /// other-scheme rows alone, and be safe to apply repeatedly.
+    #[test]
+    fn v065_backfill_canonicalizes_bare_blake3_content_hash_idempotently() -> TestResult {
+        let connection = DbConnection::open_memory()?;
+        connection.migrate()?;
+        setup_workspace(&connection)?;
+        connection.insert_session(
+            "sess_01234567890123456789012345",
+            &session_input("cass-session-v065-backfill"),
+        )?;
+
+        // A 64-char lowercase-hex digest with no `blake3:` prefix — exactly what
+        // older importer binaries persisted. The V009 CHECK only enforces
+        // non-empty, so this is insertable.
+        let bare_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let mut bare = evidence_span_input("sess_01234567890123456789012345", "span-bare", 10);
+        bare.content_hash = bare_hex.to_string();
+        connection.insert_evidence_span("ev_0123456789barehex000000001", &bare)?;
+
+        // An already-canonical row must be left untouched (idempotence guard).
+        let already = evidence_span_input("sess_01234567890123456789012345", "span-canon", 20);
+        let canonical_before = already.content_hash.clone();
+        connection.insert_evidence_span("ev_0123456789canonical0000001", &already)?;
+
+        let backfill_sql = super::V065_EVIDENCE_SPAN_CONTENT_HASH_BLAKE3_PREFIX.sql();
+
+        // Run the backfill twice to prove idempotence.
+        connection.execute_raw(backfill_sql)?;
+        connection.execute_raw(backfill_sql)?;
+
+        let repaired = connection
+            .get_evidence_span("ev_0123456789barehex000000001")?
+            .ok_or_else(|| TestFailure::new("bare-hex evidence span not found"))?;
+        ensure_equal(
+            &repaired.content_hash.as_str(),
+            &format!("blake3:{bare_hex}").as_str(),
+            "bare-hex content_hash is canonicalized exactly once",
+        )?;
+
+        let untouched = connection
+            .get_evidence_span("ev_0123456789canonical0000001")?
+            .ok_or_else(|| TestFailure::new("canonical evidence span not found"))?;
+        ensure_equal(
+            &untouched.content_hash,
+            &canonical_before,
+            "already-canonical content_hash is left unchanged",
+        )?;
 
         connection.close()?;
         Ok(())

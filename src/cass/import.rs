@@ -1406,7 +1406,11 @@ fn parse_view_line_value(
         start_line: line_number,
         end_line: line_number,
         role,
-        content_hash: blake3_hex(&excerpt),
+        // Evidence-span content hashes must be canonical `blake3:<64-hex>` so the
+        // derivation-source-package validation (curate::is_canonical_blake3_content_hash)
+        // accepts them on the persist path (`ee review session --propose`). `blake3_hex`
+        // returns a BARE hex digest, so prefix it here. See issue #10.
+        content_hash: format!("blake3:{}", blake3_hex(&excerpt)),
         excerpt,
         redacted,
         redacted_reasons,
@@ -2383,6 +2387,47 @@ mod tests {
             &json["sessions"][0]["missingMetadata"],
             &json!(expected_missing),
             "reported missing metadata",
+        )
+    }
+
+    #[test]
+    fn cass_view_span_content_hash_is_canonical_blake3(/* issue #10 */) -> TestResult {
+        let excerpt = "assistant: applied the patch and verified the build";
+        let line = json!({
+            "line": 7,
+            "content": excerpt,
+        });
+
+        let span = parse_view_line_value(&line, "/tmp/session.jsonl")
+            .map_err(|error| error.to_string())?;
+
+        ensure(
+            span.content_hash.starts_with("blake3:"),
+            format!(
+                "evidence-span content_hash must carry the blake3: prefix, got {:?}",
+                span.content_hash
+            ),
+        )?;
+        // 7-char prefix + 64 hex chars.
+        ensure_equal(
+            &span.content_hash.len(),
+            &71,
+            "canonical content_hash length",
+        )?;
+        // Lossless: the prefix wraps the bare blake3 hex of the stored excerpt.
+        let expected = format!("blake3:{}", blake3_hex(&span.excerpt));
+        ensure_equal(
+            &span.content_hash,
+            &expected,
+            "content_hash equals blake3:<hex(excerpt)>",
+        )?;
+        let bare = span
+            .content_hash
+            .strip_prefix("blake3:")
+            .ok_or_else(|| "content_hash missing blake3: prefix".to_string())?;
+        ensure(
+            bare.len() == 64 && bare.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "stripped content_hash must be 64 lowercase hex chars",
         )
     }
 
