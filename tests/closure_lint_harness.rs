@@ -274,6 +274,60 @@ fn closure_lint_reports_each_taxonomy_violation() -> TestResult {
 }
 
 #[test]
+fn closure_lint_reports_non_cli_sentinel_families() -> TestResult {
+    let temp = closure_lint_worker_local_tempdir("closure-lint-non-cli-sentinel-")?;
+    write_workspace(
+        temp.path(),
+        &[
+            r#"{"id":"closed-daemon-warmload","title":"[implements-surface:daemon-ann-warmload] closed with non-CLI sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:daemon-ann-warmload"]}"#,
+            r#"{"id":"closed-numa-pin","title":"[implements-surface:numa-pin] closed with non-CLI sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:numa-pin"]}"#,
+            r#"{"id":"closed-clean-non-cli","title":"[implements-surface:clean-non-cli] closed with no sentinel","status":"closed","close_reason":"implemented with durable evidence","labels":["implements-surface:clean-non-cli"]}"#,
+        ],
+        "",
+        &["daemon-ann-warmload", "numa-pin", "clean-non-cli"],
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/daemon/mod.rs",
+        "pub const DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE: &str = \"daemon_ann_warmload_not_yet_implemented\";\n",
+    )?;
+    write_text_file(
+        temp.path(),
+        "src/graph/numa_pin.rs",
+        "pub const NUMA_PIN_NOT_IMPLEMENTED_CODE: &str = \"numa_pin_not_implemented\";\n",
+    )?;
+
+    let (output, report) = run_linter(temp.path())?;
+    ensure(
+        !output.status.success(),
+        format!(
+            "linter should fail closed surfaces with non-CLI sentinels\n{}",
+            output_excerpt(&output)
+        ),
+    )?;
+    ensure_eq(report_status(&report)?, "fail", "report status")?;
+    ensure_eq(report_count(&report)?, 2, "report count")?;
+    ensure_eq(
+        violation_keys(&report)?,
+        vec![
+            (
+                "closed-daemon-warmload".to_owned(),
+                "daemon-ann-warmload".to_owned(),
+                "DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE (src/daemon/mod.rs) sentinel still exists"
+                    .to_owned(),
+            ),
+            (
+                "closed-numa-pin".to_owned(),
+                "numa-pin".to_owned(),
+                "NUMA_PIN_NOT_IMPLEMENTED_CODE (src/graph/numa_pin.rs) sentinel still exists"
+                    .to_owned(),
+            ),
+        ],
+        "closure-lint must scan the full sentinel suffix family outside src/cli/mod.rs",
+    )
+}
+
+#[test]
 fn closure_lint_accepts_clean_implementation_and_honesty_sibling() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     write_workspace(
