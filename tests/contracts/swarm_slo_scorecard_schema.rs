@@ -100,6 +100,31 @@ const REQUIRED_REDACTION: &[&str] = &[
     "secretScanApplied",
 ];
 
+const PRESET_MINIMAL: &[&str] = &["schema", "workload", "verdict"];
+const PRESET_SUMMARY: &[&str] = &[
+    "schema",
+    "workload",
+    "budgets",
+    "measurements",
+    "verdict",
+    "failureReasons",
+    "budgetVerdicts",
+    "regressionReasons",
+];
+const PRESET_STANDARD: &[&str] = &[
+    "schema",
+    "workload",
+    "sourceHealth",
+    "budgets",
+    "measurements",
+    "verdict",
+    "failureReasons",
+    "budgetVerdicts",
+    "regressionReasons",
+    "determinism",
+];
+const PRESET_FULL: &[&str] = &["*"];
+
 const SCENARIOS: &[&str] = &[
     "healthy_small_checkout",
     "crowded_checkout",
@@ -177,6 +202,14 @@ fn load_schema() -> Result<Value, String> {
 }
 
 fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    Ok(collect_string_vec(node, ctx)?.into_iter().collect())
+}
+
+fn expected_string_set(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn collect_string_vec(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
     let array = node
         .as_array()
         .ok_or_else(|| format!("{ctx}: expected array, got {node}"))?;
@@ -191,10 +224,6 @@ fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, Strin
         .collect()
 }
 
-fn expected_string_set(values: &[&str]) -> BTreeSet<String> {
-    values.iter().map(|value| (*value).to_owned()).collect()
-}
-
 fn require_exact_strings(
     schema: &Value,
     pointer: &str,
@@ -206,6 +235,20 @@ fn require_exact_strings(
     ensure(
         actual == expected,
         format!("{label} drifted from exact set; expected {expected:?}, got {actual:?}"),
+    )
+}
+
+fn require_exact_ordered_strings(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    label: &str,
+) -> TestResult {
+    let actual = collect_string_vec(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
+    let expected: Vec<String> = expected.iter().map(|value| (*value).to_owned()).collect();
+    ensure(
+        actual == expected,
+        format!("{label} drifted from exact ordered list; expected {expected:?}, got {actual:?}"),
     )
 }
 
@@ -244,6 +287,29 @@ fn require_example_fields(schema: &Value, required: &[&str]) -> TestResult {
             example.contains_key(*field),
             format!("scorecard example missing required field `{field}`"),
         )?;
+    }
+    Ok(())
+}
+
+fn require_preset_fields_are_top_level_or_wildcard(schema: &Value) -> TestResult {
+    let top_level_fields: BTreeSet<String> = schema
+        .pointer("/properties")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "scorecard schema properties must be an object".to_string())?
+        .keys()
+        .cloned()
+        .collect();
+    let presets = schema
+        .pointer("/field_presets")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "scorecard schema field_presets must be an object".to_string())?;
+    for (preset_name, preset) in presets {
+        for field in collect_string_vec(preset, &format!("scorecard {preset_name} preset"))? {
+            ensure(
+                field == "*" || top_level_fields.contains(&field),
+                format!("scorecard {preset_name} preset references non-top-level field `{field}`"),
+            )?;
+        }
     }
     Ok(())
 }
@@ -376,6 +442,36 @@ fn swarm_slo_scorecard_schema_nested_required_fields_are_pinned() -> TestResult 
         require_exact_strings(&schema, pointer, expected, label)?;
     }
     Ok(())
+}
+
+#[test]
+fn swarm_slo_scorecard_schema_field_presets_are_pinned() -> TestResult {
+    let schema = load_schema()?;
+    for (pointer, expected, label) in [
+        (
+            "/field_presets/minimal",
+            PRESET_MINIMAL,
+            "scorecard minimal field preset",
+        ),
+        (
+            "/field_presets/summary",
+            PRESET_SUMMARY,
+            "scorecard summary field preset",
+        ),
+        (
+            "/field_presets/standard",
+            PRESET_STANDARD,
+            "scorecard standard field preset",
+        ),
+        (
+            "/field_presets/full",
+            PRESET_FULL,
+            "scorecard full field preset",
+        ),
+    ] {
+        require_exact_ordered_strings(&schema, pointer, expected, label)?;
+    }
+    require_preset_fields_are_top_level_or_wildcard(&schema)
 }
 
 #[test]
