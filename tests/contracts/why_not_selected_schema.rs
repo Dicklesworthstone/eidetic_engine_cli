@@ -1,5 +1,6 @@
 //! Contract coverage for `ee.why_not_selected.v1`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -82,21 +83,37 @@ fn why_not_selected_schema_pins_read_only_counterfactual_fields() -> TestResult 
     )?;
     let required = schema["required"]
         .as_array()
-        .ok_or_else(|| "schema required must be an array".to_string())?;
-    for field in [
+        .ok_or_else(|| "schema required must be an array".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .ok_or_else(|| format!("schema required contains non-string value {value}"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let expected_required = [
+        "schema",
         "memoryId",
         "taskHash",
+        "selected",
+        "retrievalStageReached",
         "primaryReason",
         "filtersApplied",
+        "redactionScopeExclusions",
+        "degraded",
+        "scores",
         "tokenBudgetFrontier",
+        "freshnessPenalty",
+        "trustPenalty",
         "counterfactualHints",
         "provenance",
-    ] {
-        ensure(
-            required.iter().any(|value| value.as_str() == Some(field)),
-            format!("schema required fields should include {field}"),
-        )?;
-    }
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    ensure(
+        required == expected_required,
+        format!("schema required fields drifted; expected {expected_required:?}, got {required:?}"),
+    )?;
     ensure(
         schema["properties"].get("task").is_none(),
         "schema must expose taskHash, not raw task text",
