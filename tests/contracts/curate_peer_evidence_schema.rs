@@ -181,17 +181,19 @@ fn ee_curate_peer_evidence_v1_promotion_block_reason_taxonomy_is_present() -> Te
 fn ee_curate_peer_evidence_v1_peer_entry_audits_provenance_without_body() -> TestResult {
     let schema = load_schema()?;
     let entry = &schema["$defs"]["peerEvidenceEntry"];
-    let required = collect_strings(&entry["required"], "peerEvidenceEntry.required")?;
-    for field in PEER_ENTRY_REQUIRED {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!(
-                "peerEvidenceEntry.required is missing `{field}`; got: {required:?}. \
-                 bd-1fjhu requires deterministic score replay from peerId + \
-                 memoryRef + scoreDelta + recordedAt."
-            ),
-        )?;
-    }
+    let actual_required = collect_string_set(&entry["required"], "peerEvidenceEntry.required")?;
+    let expected_required = PEER_ENTRY_REQUIRED
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual_required == expected_required,
+        format!(
+            "peerEvidenceEntry.required drifted; expected {expected_required:?}, got: {actual_required:?}. \
+             bd-1fjhu requires deterministic score replay from peerId + \
+             memoryRef + scoreDelta + recordedAt."
+        ),
+    )?;
     let properties = entry["properties"]
         .as_object()
         .ok_or_else(|| format!("peerEvidenceEntry.properties is not an object: {entry}"))?;
