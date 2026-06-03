@@ -761,6 +761,28 @@ fn markdown_pack_metadata_does_not_leak_query_in_comments() -> TestResult {
 }
 
 #[test]
+fn json_context_pack_carries_inner_pack_schema() -> TestResult {
+    let response = multi_section_fixture();
+    let json_str = render_context_response_json(&response);
+    let json: Value = serde_json::from_str(&json_str)
+        .map_err(|error| format!("context JSON did not parse: {error}"))?;
+
+    if json.pointer("/schema").and_then(Value::as_str) != Some("ee.response.v2") {
+        return Err(format!(
+            "context JSON must keep the ee.response.v2 response envelope, got {:?}",
+            json.pointer("/schema")
+        ));
+    }
+    if json.pointer("/data/pack/schema").and_then(Value::as_str) != Some("ee.pack.v2") {
+        return Err(format!(
+            "context JSON must carry the inner ee.pack.v2 payload schema, got {:?}",
+            json.pointer("/data/pack/schema")
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn dual_render_with_empty_pack_still_parses_consistently() -> TestResult {
     // Edge case: a request that produces zero items. The markdown render
     // should not panic, and the JSON projection must report an empty items

@@ -44,6 +44,7 @@
         "pack": {
           "type": "object",
           "required": [
+            "schema",
             "query",
             "budget",
             "items",
@@ -56,6 +57,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "schema": {"type": "string", "const": "ee.pack.v2"},
             "query": {"type": "string"},
             "text": {"type": "string"},
             "meta": {"type": "object", "additionalProperties": {"$ref": "#/$defs/jsonValue"}},

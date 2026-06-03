@@ -82,8 +82,8 @@ use crate::models::degradation::{
 };
 use crate::models::{
     AGENT_CONTEXT_PROFILE_SCHEMA_V1, AGENT_PROFILE_BIAS_CAP, AGENT_PROFILE_COLD_START_OUTCOMES,
-    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, PackId, ProvenanceUri,
-    RedactionLevel, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
+    AgentContextProfileCounts, MemoryId, MemoryScope, MemoryScopeStats, PACK_SCHEMA_V2, PackId,
+    ProvenanceUri, RedactionLevel, TrustClass, UnitScore, WorkspaceId, posture_for_trust_class,
 };
 use crate::pack::{
     ConflictKind, ConflictRecommendedAction, ConsensusConflictReport, ContextPackProfile,
@@ -4612,11 +4612,15 @@ fn context_pack_l2_cached_response_json(
         .ok_or_else(|| "L2 pack cache payload is missing responseJson".to_string())?;
     let parsed = serde_json::from_str::<serde_json::Value>(response_json)
         .map_err(|error| format!("L2 pack cache responseJson is malformed: {error}"))?;
-    if parsed
+    let command_matches = parsed
         .pointer("/data/command")
         .and_then(serde_json::Value::as_str)
-        == Some(command)
-    {
+        == Some(command);
+    let pack_schema_matches = parsed
+        .pointer("/data/pack/schema")
+        .and_then(serde_json::Value::as_str)
+        == Some(PACK_SCHEMA_V2);
+    if command_matches && pack_schema_matches {
         return Ok(response_json.to_owned());
     }
     let mut adjusted = parsed;
@@ -4626,12 +4630,26 @@ fn context_pack_l2_cached_response_json(
     else {
         return Err("L2 pack cache responseJson is missing data.command".to_string());
     };
-    data.insert(
-        "command".to_string(),
-        serde_json::Value::String(command.to_string()),
-    );
+    if !command_matches {
+        data.insert(
+            "command".to_string(),
+            serde_json::Value::String(command.to_string()),
+        );
+    }
+    if !pack_schema_matches {
+        let Some(pack) = data
+            .get_mut("pack")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            return Err("L2 pack cache responseJson is missing data.pack".to_string());
+        };
+        pack.insert(
+            "schema".to_string(),
+            serde_json::Value::String(PACK_SCHEMA_V2.to_string()),
+        );
+    }
     serde_json::to_string(&adjusted)
-        .map_err(|error| format!("L2 pack cache responseJson command rewrite failed: {error}"))
+        .map_err(|error| format!("L2 pack cache responseJson rewrite failed: {error}"))
 }
 
 fn context_pack_l2_cached_source_mode_metadata(
@@ -11951,6 +11969,70 @@ pub fn unrelated_context() -> u64 {
         assert_eq!(metadata.applied, report.source_mode_applied);
         assert_eq!(metadata.strict, report.strict_source_mode);
         assert_eq!(metadata.fallback, report.source_mode_fallback);
+    }
+
+    #[test]
+    fn l2_cached_response_json_preserves_current_payload_bytes() -> Result<(), String> {
+        let response_json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": "pack",
+                "pack": {
+                    "schema": crate::models::PACK_SCHEMA_V2,
+                    "query": "prepare release"
+                }
+            },
+            "degraded": []
+        })
+        .to_string();
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "responseJson": response_json,
+        });
+
+        let replayed = super::context_pack_l2_cached_response_json(&payload, "pack")?;
+
+        assert_eq!(
+            replayed,
+            payload
+                .get("responseJson")
+                .and_then(serde_json::Value::as_str)
+                .unwrap(),
+            "current cached responses should replay byte-identically"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn l2_cached_response_json_backfills_inner_pack_schema() -> Result<(), String> {
+        let response_json = serde_json::json!({
+            "schema": crate::models::RESPONSE_SCHEMA_V2,
+            "success": true,
+            "data": {
+                "command": "pack",
+                "pack": {
+                    "query": "prepare release"
+                }
+            },
+            "degraded": []
+        })
+        .to_string();
+        let payload = serde_json::json!({
+            "schema": super::PACK_L2_CONTEXT_RESPONSE_SCHEMA_V1,
+            "responseJson": response_json,
+        });
+
+        let replayed = super::context_pack_l2_cached_response_json(&payload, "pack")?;
+        let replayed_json = serde_json::from_str::<serde_json::Value>(&replayed)
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            replayed_json.pointer("/data/pack/schema"),
+            Some(&serde_json::json!(crate::models::PACK_SCHEMA_V2)),
+            "stale cached responses should be normalized to the documented inner pack schema"
+        );
+        Ok(())
     }
 
     #[test]

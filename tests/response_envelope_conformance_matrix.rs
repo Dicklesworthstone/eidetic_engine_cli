@@ -227,7 +227,12 @@ fn schema_cases() -> Result<Vec<SchemaCase>, String> {
                             "priority": 1,
                             "kind": "seed",
                             "rationale": "Initialize the workspace database.",
-                            "command": "ee init --workspace ."
+                            "command": "ee init --workspace .",
+                            "riskClass": "mutating_local_repair",
+                            "requiresHumanApproval": false,
+                            "mutatesExternalState": false,
+                            "mutatesTrackerState": false,
+                            "privacyClass": "workspace_metadata_only"
                         }]
                     }
                 }
@@ -317,6 +322,7 @@ fn context_pack_sample() -> Value {
                 "sections": ["procedural_rules"]
             },
             "pack": {
+                "schema": "ee.pack.v2",
                 "query": "response envelope conformance",
                 "budget": {
                     "maxTokens": 4000,

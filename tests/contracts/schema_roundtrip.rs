@@ -140,6 +140,14 @@ fn context_response_fixture() -> ContextResponse {
 fn context_response_json_roundtrips() -> TestResult {
     let response = context_response_fixture();
     let rendered = render_context_response_json(&response);
+    let parsed: Value = serde_json::from_str(&rendered)
+        .map_err(|error| format!("context_response_json: rendered JSON did not parse: {error}"))?;
+    if parsed.pointer("/data/pack/schema").and_then(Value::as_str) != Some("ee.pack.v2") {
+        return Err(format!(
+            "context_response_json: data.pack.schema must be ee.pack.v2, got {:?}",
+            parsed.pointer("/data/pack/schema")
+        ));
+    }
     assert_roundtrip("context_response_json", &rendered, "ee.response.v2")
 }
 

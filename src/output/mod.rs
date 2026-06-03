@@ -47,8 +47,8 @@ use crate::core::{BuildProvenanceDegradation, VERSION_PROVENANCE_SCHEMA_V1, Vers
 use crate::eval::{EvaluationReport, EvaluationStatus, FixtureListEntry, ScenarioValidationResult};
 use crate::models::decision::{DecisionPlane, DecisionPlaneMetadata, DecisionRecord};
 use crate::models::{
-    DomainError, ERROR_SCHEMA_V2, InstallCheckReport, InstallPlanReport, ProducerMetadata,
-    RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V2, RecoveryAction, RecoveryKind,
+    DomainError, ERROR_SCHEMA_V2, InstallCheckReport, InstallPlanReport, PACK_SCHEMA_V2,
+    ProducerMetadata, RESPONSE_SCHEMA_V0, RESPONSE_SCHEMA_V2, RecoveryAction, RecoveryKind,
     degraded_recovery_actions,
 };
 use crate::pack::{
@@ -2288,6 +2288,7 @@ pub fn render_context_response_json_with_options(
         d.field_array_of_objects("consensus", &response.data.consensus, build_consensus_entry);
         d.field_array_of_objects("conflicts", &response.data.conflicts, build_conflict_entry);
         d.field_object("pack", |pack| {
+            pack.field_str("schema", PACK_SCHEMA_V2);
             pack.field_str("query", &response.data.pack.query);
             match &response.data.pack.hash {
                 Some(hash) => pack.field_str("hash", hash),
