@@ -2003,7 +2003,20 @@ pub(crate) fn local_cargo_tripwire_process_scan_json(workspace: &Path) -> Value 
     // symlink_metadata inspects the link itself; refusing
     // file_type().is_symlink() before `Command::new` closes the
     // attack without affecting workspaces that ship the real
-    // regular file at the documented path.
+    // regular file at the documented path. The component walk below
+    // closes the sibling parent-symlink variant
+    // (`scripts/ -> outside-dir`) before `symlink_metadata` can
+    // observe a regular final file through that parent.
+    if reject_existing_symlink_component(&script, "local cargo tripwire script").is_err() {
+        return unavailable_local_cargo_process_scan_json(
+            "tripwire_script_symlink_refused",
+            Some(
+                "Refusing to execute scripts/check-local-cargo-tripwire.sh because the path \
+                 includes a symlinked component; replace it with a real regular file to enable \
+                 the process scan.",
+            ),
+        );
+    }
     let metadata = match fs::symlink_metadata(&script) {
         Ok(metadata) => metadata,
         Err(_) => {
@@ -6665,6 +6678,46 @@ mod tests {
         let _ = fs::remove_file(&attack_target);
         let _ = fs::remove_dir(&scripts_dir);
         let _ = fs::remove_dir(&workspace);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_cargo_tripwire_process_scan_refuses_symlinked_script_parent() -> TestResult {
+        let root = unique_test_path("local-tripwire-parent-symlink-attack");
+        let workspace = root.join("workspace");
+        let outside_scripts = root.join("outside-scripts");
+        fs::create_dir_all(&workspace)
+            .map_err(|error| format!("failed to create workspace dir: {error}"))?;
+        fs::create_dir_all(&outside_scripts)
+            .map_err(|error| format!("failed to create outside scripts dir: {error}"))?;
+        fs::write(
+            outside_scripts.join("check-local-cargo-tripwire.sh"),
+            "#!/bin/sh\necho '{\"status\":\"attacker-controlled\"}'\n",
+        )
+        .map_err(|error| format!("failed to write outside tripwire script: {error}"))?;
+        std::os::unix::fs::symlink(&outside_scripts, workspace.join("scripts"))
+            .map_err(|error| format!("failed to create symlinked scripts dir: {error}"))?;
+
+        let value = local_cargo_tripwire_process_scan_json(&workspace);
+
+        assert_eq!(
+            value.pointer("/status"),
+            Some(&json!("unavailable")),
+            "symlinked parent workspace must report status=unavailable; got: {value}",
+        );
+        assert_eq!(
+            value.pointer("/reason"),
+            Some(&json!("tripwire_script_symlink_refused")),
+            "symlinked parent workspace must surface the specific refusal reason; got: {value}",
+        );
+        assert!(
+            value
+                .pointer("/detail")
+                .and_then(Value::as_str)
+                .is_some_and(|detail| detail.contains("symlinked component")),
+            "refusal envelope must explain the symlinked parent component; got: {value}",
+        );
         Ok(())
     }
 }
