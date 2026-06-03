@@ -2712,7 +2712,7 @@ ee context 'J6 context task' --workspace . --json
 
 **Severity:** warning
 
-**Surfaces:** context --stream
+**Surfaces:** pack --stream
 
 **Introduced by:** bd-17c65.10.18 (epic J)
 
@@ -2723,7 +2723,7 @@ ee context 'J6 context task' --workspace . --json
 ```bash
 ee init --workspace .
 ee remember 'Partial stream terminal fixture.' --workspace . --level procedural --kind rule --json
-ee context 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson
+ee pack 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson
 ```
 
 **Invocation.**
@@ -2734,7 +2734,7 @@ validate /tmp/ee-partial-context-stream.ndjson with StreamSequenceValidator::fin
 
 **Expected emission.** Message contains: `Context stream ended ... terminal frame`
 
-**Repair hint.** `Retry `ee context --stream``
+**Repair hint.** `Retry `ee pack --stream``
 
 **Fixture.** [`tests/fixtures/failure_modes/context_stream_partial_emission.json`](../tests/fixtures/failure_modes/context_stream_partial_emission.json)
 

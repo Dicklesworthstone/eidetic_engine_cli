@@ -136,14 +136,61 @@ fn assert_golden(name: &str, actual: &str) -> TestResult {
         )
     })?;
 
-    if actual == expected {
+    let expected_cmp = if name == "status" {
+        normalize_status_toon(&expected, Path::new("$STATUS_WORKSPACE"))
+    } else {
+        expected
+    };
+    let actual_cmp = if name == "status" {
+        normalize_status_toon(actual, Path::new("$STATUS_WORKSPACE"))
+    } else {
+        actual.to_owned()
+    };
+    let expected_cmp = canonicalize_toon_comparison(&expected_cmp);
+    let actual_cmp = canonicalize_toon_comparison(&actual_cmp);
+
+    if actual_cmp == expected_cmp {
         Ok(())
     } else {
+        let diagnosis = comparison_diagnosis(&expected_cmp, &actual_cmp);
         Err(format!(
-            "Golden test '{name}' failed.\nGolden file: {}\nRun with UPDATE_GOLDEN=1 to update.\n\n--- expected\n{expected}\n+++ actual\n{actual}",
-            path.display()
+            "Golden test '{name}' failed.\nGolden file: {}\nRun with UPDATE_GOLDEN=1 to update.\n{diagnosis}\n\n--- expected\n{expected}\n+++ actual\n{actual}",
+            path.display(),
+            expected = expected_cmp,
+            actual = actual_cmp
         ))
     }
+}
+
+fn comparison_diagnosis(expected: &str, actual: &str) -> String {
+    let expected_bytes = expected.as_bytes();
+    let actual_bytes = actual.as_bytes();
+    let max_shared = expected_bytes.len().min(actual_bytes.len());
+    let first_diff = (0..max_shared)
+        .find(|idx| expected_bytes[*idx] != actual_bytes[*idx])
+        .or_else(|| (expected_bytes.len() != actual_bytes.len()).then_some(max_shared));
+
+    match first_diff {
+        Some(idx) => format!(
+            "first_diff_byte={idx}, expected_len={}, actual_len={}, expected_byte={:?}, actual_byte={:?}",
+            expected_bytes.len(),
+            actual_bytes.len(),
+            expected_bytes.get(idx),
+            actual_bytes.get(idx),
+        ),
+        None => format!(
+            "no byte difference detected after canonicalization; expected_len={}, actual_len={}",
+            expected_bytes.len(),
+            actual_bytes.len()
+        ),
+    }
+}
+
+fn canonicalize_toon_comparison(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
@@ -153,15 +200,32 @@ fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
         .replace(env!("CARGO_MANIFEST_DIR"), "$STATUS_REPOSITORY");
     let mut normalized = String::new();
     let mut in_agent_inventory = false;
+    let mut skip_block_indent: Option<usize> = None;
     for line in path_normalized.lines() {
         let trimmed = line.trim_start();
         let indent_len = line.len() - trimmed.len();
         let indent = &line[..indent_len];
+
+        if let Some(block_indent) = skip_block_indent {
+            if trimmed.is_empty() || indent_len > block_indent {
+                continue;
+            }
+            skip_block_indent = None;
+        }
+
         if trimmed == "agentInventory:" {
             in_agent_inventory = true;
         }
 
-        let replacement = if trimmed.starts_with("fingerprint: ") {
+        let replacement = if matches!(trimmed, "hostCalibration:" | "qos:" | "rchWorkerPressure:") {
+            skip_block_indent = Some(indent_len);
+            Some(match trimmed {
+                "hostCalibration:" => "hostCalibration: <scrubbed:hostCalibration>",
+                "qos:" => "qos: <scrubbed:qos>",
+                "rchWorkerPressure:" => "rchWorkerPressure: <scrubbed:rchWorkerPressure>",
+                _ => unreachable!("matched known volatile status block"),
+            })
+        } else if trimmed.starts_with("fingerprint: ") {
             Some("fingerprint: <workspace-fingerprint>")
         } else if trimmed.starts_with("scopeKind: ") {
             Some("scopeKind: <workspace-scope-kind>")
@@ -171,6 +235,28 @@ fn normalize_status_toon(raw: &str, workspace: &Path) -> String {
             Some("repositoryFingerprint: <repository-fingerprint>")
         } else if trimmed.starts_with("subprojectPath: ") {
             Some("subprojectPath: <subproject-path>")
+        } else if trimmed.starts_with("version: ") {
+            Some("version: <ee-version>")
+        } else if trimmed.starts_with("catalogPath: ") {
+            Some("catalogPath: <catalog-path>")
+        } else if trimmed.starts_with("configHash: ") {
+            Some("configHash: <derived-asset-hash>")
+        } else if trimmed.starts_with("dataRoot: ") {
+            Some("dataRoot: <data-root>")
+        } else if trimmed.starts_with("dependencyHash: ") {
+            Some("dependencyHash: <derived-asset-hash>")
+        } else if trimmed.starts_with("featureFlagsHash: ") {
+            Some("featureFlagsHash: <derived-asset-hash>")
+        } else if trimmed.starts_with("shardId: ") {
+            Some("shardId: <shard-id>")
+        } else if trimmed.starts_with("shardPath: ") {
+            Some("shardPath: <shard-path>")
+        } else if trimmed.starts_with("shardRoot: ") {
+            Some("shardRoot: <shard-root>")
+        } else if trimmed.starts_with("sourceDependencyHash: ") {
+            Some("sourceDependencyHash: <derived-asset-hash>")
+        } else if trimmed.starts_with("workspaceId: ") {
+            Some("workspaceId: <workspace-id>")
         } else if in_agent_inventory && trimmed.starts_with("totalCount: ") {
             Some("totalCount: <agent-source-count>")
         } else {

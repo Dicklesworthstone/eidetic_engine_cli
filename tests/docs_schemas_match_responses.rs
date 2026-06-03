@@ -1866,7 +1866,7 @@ fn canonical_response_fixtures_match_docs_schemas() -> TestResult {
     let fixture_cases = [
         (
             "ee.response.v2",
-            read_json(&fixture_path("golden/agent/status.json.golden"))?,
+            read_json(&fixture_path("golden/status/status_json.golden"))?,
         ),
         (
             "ee.pack.v2",
@@ -1974,7 +1974,7 @@ fn machine_surface_conformance_matrix_validates_declared_schemas() -> TestResult
             "status",
             RESPONSE_SCHEMA_V2,
             "ee.response.v2.json",
-            read_json(&fixture_path("golden/agent/status.json.golden"))?,
+            read_json(&fixture_path("golden/status/status_json.golden"))?,
         ),
         MachineSurfaceConformanceCase::new(
             "doctor",

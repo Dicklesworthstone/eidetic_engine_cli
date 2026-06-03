@@ -17,7 +17,7 @@ pub const CONTEXT_STREAM_PARTIAL_EMISSION_CODE: &str = "context_stream_partial_e
 const CONTEXT_STREAM_PARTIAL_EMISSION_MESSAGE: &str =
     "Context stream ended before a terminal frame arrived.";
 const CONTEXT_STREAM_PARTIAL_EMISSION_REPAIR: &str =
-    "Retry `ee context --stream`; treat the partial stream as incomplete.";
+    "Retry `ee pack --stream`; treat the partial stream as incomplete.";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

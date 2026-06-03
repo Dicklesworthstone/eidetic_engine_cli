@@ -223,6 +223,114 @@ mod tests {
         }
     }
 
+    fn mask_worker_counts(s: &str) -> String {
+        let mut result = String::with_capacity(s.len());
+        let mut chars = s.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if c.is_ascii_digit() {
+                let start = i;
+                let mut end = i + c.len_utf8();
+                while let Some(&(_, nc)) = chars.peek() {
+                    if nc.is_ascii_digit() {
+                        let (j, _) = chars.next().expect("peeked digit");
+                        end = j + nc.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                let tail = &s[end..];
+                if tail.starts_with(" of ") || tail.starts_with(" worker(s)") {
+                    result.push_str("<n>");
+                    continue;
+                }
+                result.push_str(&s[start..end]);
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    }
+
+    fn scrub_status_volatile_fields(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("command").and_then(serde_json::Value::as_str) == Some("status") {
+                    if let Some(version) = map.get_mut("version") {
+                        *version = serde_json::Value::String("<scrubbed:eeVersion>".to_owned());
+                    }
+                }
+                for key in [
+                    "hostCalibration",
+                    "qos",
+                    "rchWorkerPressure",
+                    "sizeDiagnostics",
+                ] {
+                    if let Some(entry) = map.get_mut(key) {
+                        *entry = serde_json::Value::String(format!("<scrubbed:{key}>"));
+                    }
+                }
+                if let Some(summary) = map
+                    .get_mut("agentInventory")
+                    .and_then(|inventory| inventory.get_mut("summary"))
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    if let Some(total_count) = summary.get_mut("totalCount") {
+                        *total_count =
+                            serde_json::Value::String("<scrubbed:agentSourceCount>".to_owned());
+                    }
+                }
+                for key in [
+                    "configHash",
+                    "dependencyHash",
+                    "featureFlagsHash",
+                    "sourceDependencyHash",
+                ] {
+                    if let Some(hash) = map.get_mut(key).filter(|value| value.is_string()) {
+                        *hash = serde_json::Value::String(format!("<scrubbed:{key}>"));
+                    }
+                }
+                for child in map.values_mut() {
+                    scrub_status_volatile_fields(child);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    scrub_status_volatile_fields(child);
+                }
+            }
+            serde_json::Value::String(s) if s.contains("worker(s) usable") => {
+                *s = mask_worker_counts(s);
+            }
+            _ => {}
+        }
+    }
+
+    fn normalize_status_json_for_golden(text: &str) -> String {
+        let trimmed = text.trim();
+        if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            scrub_status_volatile_fields(&mut value);
+            return serde_json::to_string(&value).unwrap_or_else(|_| trimmed.to_owned());
+        }
+        trimmed.to_owned()
+    }
+
+    fn assert_status_json_golden(category: &str, name: &str, actual: &str) -> TestResult {
+        let test = GoldenTest::new(category, name);
+        if env::var("UPDATE_GOLDEN").is_ok() {
+            test.update_golden(actual)?;
+            return Ok(());
+        }
+
+        let expected = test.load_golden()?;
+        let expected_normalized = normalize_status_json_for_golden(&expected);
+        let actual_normalized = normalize_status_json_for_golden(actual);
+        if expected_normalized == actual_normalized {
+            Ok(())
+        } else {
+            Err(test.format_diff(&expected_normalized, &actual_normalized))
+        }
+    }
+
     #[test]
     fn bayes_golden_fixtures_pin_backfill_and_outcome_contracts() -> TestResult {
         let fixtures = [
@@ -986,7 +1094,11 @@ mod tests {
             format!("ee {} stdout must end with a newline", args.join(" ")),
         )?;
 
-        assert_golden("agent", name, &stdout)
+        if name == "status.json" {
+            assert_status_json_golden("status", "status_json", &stdout)
+        } else {
+            assert_golden("agent", name, &stdout)
+        }
     }
 
     fn run_json_stdout(args: &[&str], expect_success: bool) -> Result<serde_json::Value, String> {

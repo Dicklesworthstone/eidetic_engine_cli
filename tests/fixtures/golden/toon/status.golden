@@ -311,6 +311,7 @@ data:
       pageFaultsPost: 0
       fallbackPath: disabled_by_operator
       indexPath: $STATUS_WORKSPACE/.ee/index/lexical
+      indexRevision: null
       degradedCodes[1]: lexical_ram_tier_disabled
   derivedAssets[3]:
     - name: search_index
@@ -370,7 +371,7 @@ data:
         featureFlagsHash: "blake3:428f554144a34f636adab9e088c836c14d1bd663357383a33c280d128cf98515"
         inputManifestHash: null
         invalidates[0]:
-        repairAction: ee context --workspace . --json
+        repairAction: ee pack --workspace . --json
   agentInventory:
     schema: ee.agent.status.v1
     status: not_inspected

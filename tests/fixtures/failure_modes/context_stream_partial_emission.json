@@ -6,7 +6,7 @@
     "epic_letter": "J"
   },
   "surfaces": [
-    "context --stream"
+    "pack --stream"
   ],
   "severity": "warning",
   "repair_present": true,
@@ -15,7 +15,7 @@
     "setup_commands": [
       "ee init --workspace .",
       "ee remember 'Partial stream terminal fixture.' --workspace . --level procedural --kind rule --json",
-      "ee context 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson"
+      "ee pack 'Partial stream terminal fixture' --workspace . --stream --format json | sed '$d' > /tmp/ee-partial-context-stream.ndjson"
     ],
     "invocation": "validate /tmp/ee-partial-context-stream.ndjson with StreamSequenceValidator::finish"
   },
@@ -26,8 +26,8 @@
       "Context stream ended",
       "terminal frame"
     ],
-    "repair_contains": "Retry `ee context --stream`",
-    "repair_string": "Retry `ee context --stream`; treat the partial stream as incomplete.",
+    "repair_contains": "Retry `ee pack --stream`",
+    "repair_string": "Retry `ee pack --stream`; treat the partial stream as incomplete.",
     "repair_command_regex": "(?<cmd>ee [a-z][a-z0-9 -]*(?:--[a-z][a-z0-9-]*(?:[= ][^ ]+)?)*)"
   }
 }

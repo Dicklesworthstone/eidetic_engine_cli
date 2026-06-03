@@ -252,9 +252,29 @@ fn scrub_volatile_text(text: &str) -> String {
 fn scrub_volatile_fields(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            for key in ["rchWorkerPressure", "sizeDiagnostics"] {
+            if map.get("command").and_then(Value::as_str) == Some("status") {
+                if let Some(version) = map.get_mut("version") {
+                    *version = Value::String("<scrubbed:eeVersion>".to_owned());
+                }
+            }
+            for key in [
+                "hostCalibration",
+                "qos",
+                "rchWorkerPressure",
+                "sizeDiagnostics",
+            ] {
                 if let Some(entry) = map.get_mut(key) {
                     *entry = Value::String(format!("<scrubbed:{key}>"));
+                }
+            }
+            for key in [
+                "configHash",
+                "dependencyHash",
+                "featureFlagsHash",
+                "sourceDependencyHash",
+            ] {
+                if let Some(hash) = map.get_mut(key).filter(|value| value.is_string()) {
+                    *hash = Value::String(format!("<scrubbed:{key}>"));
                 }
             }
             for child in map.values_mut() {
