@@ -9,6 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -79,6 +80,101 @@ const RESULT_CLOSED_OBJECT_DEFS: &[&str] = &[
     "knownBlocker",
 ];
 
+const WORKLOAD_REQUIRED_FIELDS: &[&str] = &[
+    "schema",
+    "workloadId",
+    "fixtureSeed",
+    "sideEffectFree",
+    "redactionLevel",
+    "workspaceShape",
+    "agentCount",
+    "commandSequence",
+    "expectedDegradedPosture",
+    "redactionProbes",
+    "resourceProfileHints",
+    "generatorEvidence",
+    "provenance",
+];
+
+const GENERATOR_EVIDENCE_REQUIRED_FIELDS: &[&str] = &[
+    "schema",
+    "fixtureSeed",
+    "profile",
+    "workspacePathHash",
+    "commandCount",
+    "generatedMemoryCount",
+    "redactionProbeCount",
+    "schemaId",
+    "fixtureHash",
+];
+
+const RESULT_REQUIRED_FIELDS: &[&str] = &[
+    "schema",
+    "workloadId",
+    "runId",
+    "sideEffectFree",
+    "status",
+    "hostProfileAdmission",
+    "commandResults",
+    "aggregate",
+    "redactionStatus",
+    "resourceUsage",
+    "firstFailure",
+    "verification",
+    "warnings",
+];
+
+const HOST_PROFILE_ADMISSION_REQUIRED_FIELDS: &[&str] = &[
+    "declaredProfile",
+    "requestedParallelAgents",
+    "requiredClass",
+    "observedClass",
+    "status",
+    "logicalCpuCount",
+    "availableMemoryMb",
+    "targetDirPosture",
+    "tmpdirPosture",
+    "rchAvailable",
+    "numaAvailable",
+    "lexicalRamTierAvailable",
+    "pathTailHashes",
+    "degradedCodes",
+    "refusalReasons",
+];
+
+const REDACTION_STATUS_REQUIRED_FIELDS: &[&str] = &[
+    "rawTaskStringPresent",
+    "rawQueryTextPresent",
+    "rawMemoryBodyPresent",
+    "rawMailBodyPresent",
+    "absoluteHostPathPresent",
+    "secretsPresent",
+    "environmentDumpPresent",
+    "fullFileListingPresent",
+    "redactionProbesPassed",
+];
+
+const REDACTION_STATUS_FALSE_FIELDS: &[&str] = &[
+    "rawTaskStringPresent",
+    "rawQueryTextPresent",
+    "rawMemoryBodyPresent",
+    "rawMailBodyPresent",
+    "absoluteHostPathPresent",
+    "secretsPresent",
+    "environmentDumpPresent",
+    "fullFileListingPresent",
+];
+
+const VERIFICATION_REQUIRED_FIELDS: &[&str] = &[
+    "rchRequired",
+    "rchStatus",
+    "proofCapsule",
+    "deterministic",
+    "workloadHash",
+    "replayHash",
+    "volatileFieldsStripped",
+];
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -125,6 +221,26 @@ fn collect_strings(value: &Value, ctx: &str) -> Result<Vec<String>, String> {
                 .ok_or_else(|| format!("{ctx}: non-string entry {entry}"))
         })
         .collect()
+}
+
+fn expected_string_set(values: &[&str]) -> BTreeSet<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
+}
+
+fn assert_required_set(schema: &Value, pointer: &str, expected: &[&str], ctx: &str) -> TestResult {
+    let required = collect_strings(
+        schema
+            .pointer(pointer)
+            .ok_or_else(|| format!("{ctx}: missing schema pointer {pointer}"))?,
+        ctx,
+    )?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let expected = expected_string_set(expected);
+    ensure(
+        required == expected,
+        format!("{ctx} required fields drifted; expected {expected:?}, got {required:?}"),
+    )
 }
 
 fn assert_required_fields(schema: &Value, value: &Value, ctx: &str) -> TestResult {
@@ -636,26 +752,13 @@ fn swarm_workload_schema_pins_redacted_orchestration_shape() -> TestResult {
         schema["properties"]["sideEffectFree"]["const"] == Value::Bool(true),
         "workload schema must be side-effect-free",
     )?;
-
-    for field in [
-        "workloadId",
-        "fixtureSeed",
-        "workspaceShape",
-        "agentCount",
-        "commandSequence",
-        "expectedDegradedPosture",
-        "redactionProbes",
-        "resourceProfileHints",
+    assert_required_set(&schema, "/required", WORKLOAD_REQUIRED_FIELDS, "workload")?;
+    assert_required_set(
+        &schema,
+        "/$defs/generatorEvidence/required",
+        GENERATOR_EVIDENCE_REQUIRED_FIELDS,
         "generatorEvidence",
-        "provenance",
-    ] {
-        ensure(
-            collect_strings(&schema["required"], "workload.required")?
-                .iter()
-                .any(|entry| entry == field),
-            format!("workload schema missing required field `{field}`"),
-        )?;
-    }
+    )?;
 
     let generator_props = schema["$defs"]["generatorEvidence"]["properties"]
         .as_object()
@@ -718,23 +821,16 @@ fn swarm_replay_result_schema_structurally_forbids_raw_content() -> TestResult {
         schema["properties"]["sideEffectFree"]["const"] == Value::Bool(true),
         "result schema must be side-effect-free",
     )?;
+    assert_required_set(&schema, "/required", RESULT_REQUIRED_FIELDS, "result")?;
 
     let redaction = &schema["$defs"]["redactionStatus"];
-    let required = collect_strings(&redaction["required"], "redactionStatus.required")?;
-    for field in [
-        "rawTaskStringPresent",
-        "rawQueryTextPresent",
-        "rawMemoryBodyPresent",
-        "rawMailBodyPresent",
-        "absoluteHostPathPresent",
-        "secretsPresent",
-        "environmentDumpPresent",
-        "fullFileListingPresent",
-    ] {
-        ensure(
-            required.iter().any(|entry| entry == field),
-            format!("redactionStatus.required missing `{field}`"),
-        )?;
+    assert_required_set(
+        &schema,
+        "/$defs/redactionStatus/required",
+        REDACTION_STATUS_REQUIRED_FIELDS,
+        "redactionStatus",
+    )?;
+    for field in REDACTION_STATUS_FALSE_FIELDS {
         ensure(
             redaction["properties"][field]["const"] == Value::Bool(false),
             format!("redactionStatus.{field} must be const false"),
@@ -751,19 +847,22 @@ fn swarm_replay_result_schema_structurally_forbids_raw_content() -> TestResult {
             .any(|entry| entry == "hostProfileAdmission"),
         "result schema must require hostProfileAdmission",
     )?;
+    assert_required_set(
+        &schema,
+        "/$defs/hostProfileAdmission/required",
+        HOST_PROFILE_ADMISSION_REQUIRED_FIELDS,
+        "hostProfileAdmission",
+    )?;
     ensure(
         schema["$defs"]["hostProfileAdmission"]["properties"]["pathTailHashes"]["items"]["$ref"]
             == "#/$defs/blake3Hash",
         "hostProfileAdmission.pathTailHashes must be hash-only",
     )?;
-    ensure(
-        collect_strings(
-            &schema["$defs"]["verification"]["required"],
-            "verification.required",
-        )?
-        .iter()
-        .any(|entry| entry == "proofCapsule"),
-        "verification schema must require proofCapsule",
+    assert_required_set(
+        &schema,
+        "/$defs/verification/required",
+        VERIFICATION_REQUIRED_FIELDS,
+        "verification",
     )?;
     ensure(
         schema["$defs"]["rchProofSummary"]["properties"]
