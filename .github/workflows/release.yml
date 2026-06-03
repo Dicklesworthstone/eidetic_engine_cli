@@ -355,6 +355,13 @@ jobs:
           if ! command -v b3sum >/dev/null 2>&1; then
             cargo install b3sum --locked
           fi
+          # Ensure the cargo install bin dir is on PATH for later steps. Hosted
+          # GitHub runners already have ~/.cargo/bin on PATH, but the dsr fallback
+          # release path runs this workflow under `act`, where it is not — which
+          # made the "Generate SLSA provenance" step below fail with
+          # `b3sum: command not found` (exit 127). Appending to GITHUB_PATH is the
+          # canonical cross-runner fix and is a no-op when the dir is already present.
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
 
       - name: Generate SLSA provenance
         shell: bash
