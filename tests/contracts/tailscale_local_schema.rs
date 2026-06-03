@@ -1,5 +1,6 @@
 //! Contract checks for the SRR6.46.1 Tailscale local-probe status block.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -13,6 +14,21 @@ use serde_json::Value;
 type TestResult = Result<(), String>;
 
 const SCHEMA_PATH: &str = "docs/schemas/ee.tailscale.local.v1.json";
+const REQUIRED_TOP_LEVEL: &[&str] = &[
+    "schema",
+    "installed",
+    "daemonReachable",
+    "authenticated",
+    "binaryAuthentic",
+    "selfAdvertisedTags",
+    "peers",
+    "probeMethod",
+    "probeElapsedMs",
+    "platform",
+    "degraded",
+];
+const REQUIRED_PEER_FIELDS: &[&str] = &["peerNodeKey", "peerTailscaleIps", "peerAdvertisedTags"];
+const REQUIRED_DEGRADATION_FIELDS: &[&str] = &["code", "severity", "message", "repair"];
 const FAILURE_FIXTURES: &[(&str, &str, &str)] = &[
     (
         "tests/fixtures/failure_modes/tailscale_not_installed.json",
@@ -78,6 +94,38 @@ fn ensure_str(value: Option<&str>, expected: &str, context: &str) -> TestResult 
     }
 }
 
+fn collect_strings(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    let array = node
+        .as_array()
+        .ok_or_else(|| format!("{ctx}: expected array, got: {node}"))?;
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{ctx}: non-string entry: {value}"))
+        })
+        .collect()
+}
+
+fn require_required_fields(
+    schema: &Value,
+    pointer: &str,
+    expected: &[&str],
+    label: &str,
+) -> TestResult {
+    let actual = collect_strings(schema.pointer(pointer).unwrap_or(&Value::Null), label)?;
+    let want = expected
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == want,
+        format!("{label} drifted from exact required set; expected {want:?}, got {actual:?}"),
+    )
+}
+
 #[test]
 fn tailscale_local_schema_pins_mesh_safe_status_shape() -> TestResult {
     let schema = read_json(SCHEMA_PATH)?;
@@ -94,20 +142,11 @@ fn tailscale_local_schema_pins_mesh_safe_status_shape() -> TestResult {
         TAILSCALE_LOCAL_SCHEMA_V1,
         "schema const",
     )?;
-    ensure(
-        schema
-            .pointer("/required")
-            .and_then(Value::as_array)
-            .is_some_and(|required| {
-                required
-                    .iter()
-                    .any(|field| field.as_str() == Some("binaryAuthentic"))
-                    && required
-                        .iter()
-                        .any(|field| field.as_str() == Some("degraded"))
-                    && required.iter().any(|field| field.as_str() == Some("peers"))
-            }),
-        "schema must require binaryAuthentic, peers, and degraded",
+    require_required_fields(
+        &schema,
+        "/required",
+        REQUIRED_TOP_LEVEL,
+        "top-level required",
     )?;
     ensure_str(
         schema
@@ -123,15 +162,18 @@ fn tailscale_local_schema_pins_mesh_safe_status_shape() -> TestResult {
             == Some(false),
         "peer schema must reject additional properties",
     )?;
-    for field in ["peerNodeKey", "peerTailscaleIps", "peerAdvertisedTags"] {
-        ensure(
-            schema
-                .pointer("/$defs/peer/required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| required.iter().any(|item| item.as_str() == Some(field))),
-            format!("peer schema missing required field {field}"),
-        )?;
-    }
+    require_required_fields(
+        &schema,
+        "/$defs/peer/required",
+        REQUIRED_PEER_FIELDS,
+        "peer required",
+    )?;
+    require_required_fields(
+        &schema,
+        "/$defs/degradation/required",
+        REQUIRED_DEGRADATION_FIELDS,
+        "degradation required",
+    )?;
 
     let degraded_codes = schema
         .pointer("/$defs/degradation/properties/code/enum")
