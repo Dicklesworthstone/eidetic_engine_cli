@@ -101,6 +101,21 @@ impl VerificationOffload {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct VerificationSelectorAdmission {
+    pub status: Option<String>,
+    pub required_runtime: Option<String>,
+    pub workers_reported: Vec<String>,
+    pub daemon_workers_reported: Vec<String>,
+    pub selected_worker: Option<String>,
+    pub selection_failure_reason: Option<String>,
+    pub workers_vs_selection_contradiction: bool,
+    pub path_normalization_warning: Option<String>,
+    pub remote_required: bool,
+    pub local_fallback_refused: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VerificationEnvironment {
     pub workspace_fingerprint: Option<String>,
     pub cwd: Option<String>,
@@ -185,6 +200,8 @@ pub struct VerificationEvidenceRecord {
     pub duration_ms: Option<u64>,
     pub environment: VerificationEnvironment,
     pub offload: VerificationOffload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector_admission: Option<VerificationSelectorAdmission>,
     pub output_summary: VerificationOutputSummary,
     pub artifacts: Vec<VerificationArtifactRef>,
     pub producer: ProducerMetadata,
@@ -659,6 +676,7 @@ impl VerificationEvidenceRecord {
             duration_ms: input.duration_ms,
             environment: input.environment,
             offload: input.offload,
+            selector_admission: None,
             output_summary: input.output_summary,
             artifacts: input.artifacts,
             producer: input.producer,
@@ -721,6 +739,23 @@ pub fn verification_evidence_beads_summary(record: &VerificationEvidenceRecord) 
             "fallback_reason={}",
             shell_safe_beads_summary_value(reason)
         ));
+    }
+    if let Some(selector) = record.selector_admission.as_ref() {
+        if let Some(status) = selector.status.as_deref() {
+            parts.push(format!(
+                "selector_admission={}",
+                shell_safe_beads_summary_value(status)
+            ));
+        }
+        if let Some(reason) = selector.selection_failure_reason.as_deref() {
+            parts.push(format!(
+                "selector_failure_reason={}",
+                shell_safe_beads_summary_value(reason)
+            ));
+        }
+        if selector.local_fallback_refused {
+            parts.push("selector_local_fallback_refused=true".to_owned());
+        }
     }
     if let Some(workspace) = record.environment.workspace_fingerprint.as_deref() {
         parts.push(format!(
@@ -832,6 +867,7 @@ pub fn verification_evidence_record_from_rch_verify(
             rch_toolchain(value).as_deref(),
         ),
         offload,
+        selector_admission: rch_selector_admission(value),
         output_summary: VerificationOutputSummary {
             stdout_tail: rch_string(value, "stdout_tail"),
             stderr_tail: rch_string(value, "stderr_tail"),
@@ -929,6 +965,7 @@ pub fn verification_evidence_record_from_github_actions_check_run(
             fallback_detected: false,
             fallback_reason: None,
         },
+        selector_admission: None,
         output_summary: gha_output_summary(value, conclusion.as_deref()),
         artifacts: gha_artifacts(value),
         producer: ProducerMetadata::unknown_agent(
@@ -1006,6 +1043,7 @@ pub fn verification_evidence_record_from_run_record(
             record.cargo_target_dir_hash_or_class.as_deref(),
         ),
         offload: run_record_offload(record),
+        selector_admission: None,
         output_summary: run_record_output_summary(record),
         artifacts: run_record_artifacts(record),
         producer: ProducerMetadata::known_agent(
@@ -2007,6 +2045,57 @@ fn rch_artifacts(value: &JsonValue) -> Vec<VerificationArtifactRef> {
         ));
     }
     artifacts
+}
+
+fn rch_selector_admission(value: &JsonValue) -> Option<VerificationSelectorAdmission> {
+    let probe = value.get("selector_admission_probe")?.as_object()?;
+    Some(VerificationSelectorAdmission {
+        status: probe
+            .get("status")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| normalized_non_empty(Some(raw))),
+        required_runtime: probe
+            .get("required_runtime")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| normalized_non_empty(Some(raw))),
+        workers_reported: rch_string_array(probe.get("workers_reported")),
+        daemon_workers_reported: rch_string_array(probe.get("daemon_workers_reported")),
+        selected_worker: probe
+            .get("selected_worker")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| normalized_non_empty(Some(raw))),
+        selection_failure_reason: probe
+            .get("selection_failure_reason")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| normalized_non_empty(Some(raw))),
+        workers_vs_selection_contradiction: probe
+            .get("workers_vs_selection_contradiction")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        path_normalization_warning: probe
+            .get("path_normalization_warning")
+            .and_then(JsonValue::as_str)
+            .and_then(|raw| normalized_non_empty(Some(raw))),
+        remote_required: probe
+            .get("remote_required")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+        local_fallback_refused: probe
+            .get("local_fallback_refused")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn rch_string_array(value: Option<&JsonValue>) -> Vec<String> {
+    let Some(JsonValue::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(JsonValue::as_str)
+        .filter_map(|raw| normalized_non_empty(Some(raw)))
+        .collect()
 }
 
 fn gha_string(value: &JsonValue, key: &str) -> Option<String> {
@@ -3253,6 +3342,19 @@ mod tests {
             "remote_project_root": "/data/projects/eidetic_engine_cli",
             "source_manifest_hash": "blake3:manifest",
             "stdout_tail": "test result: ok",
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v1",
+                "status": "selected",
+                "required_runtime": "Rust",
+                "workers_reported": ["vmi123", "vmi456"],
+                "daemon_workers_reported": ["vmi123"],
+                "selected_worker": "vmi123",
+                "selection_failure_reason": null,
+                "workers_vs_selection_contradiction": false,
+                "path_normalization_warning": null,
+                "remote_required": true,
+                "local_fallback_refused": false
+            },
             "rch_runtime": {
                 "client_version": "1.0.24",
                 "daemon_version": "0.1.3"
@@ -3272,6 +3374,19 @@ mod tests {
         assert!(record.offload.required_remote);
         assert!(!record.offload.fallback_detected);
         assert_eq!(record.offload.worker.as_deref(), Some("vmi123"));
+        let selector = record
+            .selector_admission
+            .as_ref()
+            .ok_or_else(|| "selector admission probe should parse".to_owned())?;
+        assert_eq!(selector.status.as_deref(), Some("selected"));
+        assert_eq!(selector.required_runtime.as_deref(), Some("Rust"));
+        assert_eq!(selector.workers_reported, ["vmi123", "vmi456"]);
+        assert_eq!(selector.daemon_workers_reported, ["vmi123"]);
+        assert_eq!(selector.selected_worker.as_deref(), Some("vmi123"));
+        assert_eq!(selector.selection_failure_reason, None);
+        assert!(!selector.workers_vs_selection_contradiction);
+        assert!(selector.remote_required);
+        assert!(!selector.local_fallback_refused);
         assert_eq!(
             record.environment.workspace_fingerprint.as_deref(),
             Some("git_tree:tree123;dirty_status:dirty456")
@@ -3302,6 +3417,71 @@ mod tests {
         assert_eq!(record.status, VerificationStatus::Blocked);
         assert!(!record.is_authoritative_pass());
         assert!(record.offload.required_remote);
+        Ok(())
+    }
+
+    #[test]
+    fn rch_verify_selector_admission_failure_maps_to_typed_metadata() -> TestResult {
+        let proof = serde_json::json!({
+            "schema": RCH_VERIFY_SCHEMA_V1,
+            "command_text": "cargo test --lib selector_probe",
+            "command_hash": "sha256:selector-blocked",
+            "status": "rch_environment_failure",
+            "exit_code": 1,
+            "remote_required": true,
+            "worker_id": null,
+            "degraded_codes": [
+                "rch_verify_remote_command_failed",
+                "rch_verify_local_fallback_refused",
+                "rch_verify_capacity_or_timeout",
+                "rch_verify_remote_marker_missing"
+            ],
+            "selector_admission_probe": {
+                "schema": "ee.rch.selector_admission_probe.v1",
+                "status": "selection_failed",
+                "required_runtime": "Rust",
+                "workers_reported": ["vmi1227854", "vmi1264463"],
+                "daemon_workers_reported": ["vmi1227854"],
+                "selected_worker": null,
+                "selection_failure_reason": "no_workers_with_rust_installed",
+                "workers_vs_selection_contradiction": true,
+                "path_normalization_warning": "[RCH] project root normalization warning: canonical /Users/<redacted>/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli",
+                "remote_required": true,
+                "local_fallback_refused": true
+            }
+        });
+
+        let record = verification_evidence_record_from_rch_verify(&proof)?;
+
+        assert_eq!(record.status, VerificationStatus::Blocked);
+        assert!(!record.is_authoritative_pass());
+        assert!(record.offload.required_remote);
+        assert!(!record.offload.fallback_detected);
+        let selector = record
+            .selector_admission
+            .as_ref()
+            .ok_or_else(|| "selector admission probe should parse".to_owned())?;
+        assert_eq!(selector.status.as_deref(), Some("selection_failed"));
+        assert_eq!(
+            selector.selection_failure_reason.as_deref(),
+            Some("no_workers_with_rust_installed")
+        );
+        assert_eq!(selector.workers_reported, ["vmi1227854", "vmi1264463"]);
+        assert_eq!(selector.daemon_workers_reported, ["vmi1227854"]);
+        assert!(selector.workers_vs_selection_contradiction);
+        assert!(selector.remote_required);
+        assert!(selector.local_fallback_refused);
+        assert!(
+            selector
+                .path_normalization_warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("/Users/<redacted>"))
+        );
+
+        let summary = verification_evidence_beads_summary(&record);
+        assert!(summary.contains("selector_admission=selection_failed"));
+        assert!(summary.contains("selector_failure_reason=no_workers_with_rust_installed"));
+        assert!(summary.contains("selector_local_fallback_refused=true"));
         Ok(())
     }
 
@@ -3351,6 +3531,24 @@ mod tests {
             record.offload.fallback_reason.as_deref(),
             Some("remote marker missing")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn verification_evidence_deserializes_old_records_without_selector_admission() -> TestResult {
+        let sample = sample_verification_evidence_records()
+            .into_iter()
+            .find(|record| record.status == VerificationStatus::Blocked)
+            .ok_or_else(|| "blocked sample exists".to_owned())?;
+        let mut raw = serde_json::to_value(sample)
+            .map_err(|error| format!("serialize sample record: {error}"))?;
+        raw.as_object_mut()
+            .ok_or_else(|| "sample record serializes as object".to_owned())?
+            .remove("selectorAdmission");
+
+        let record: VerificationEvidenceRecord = serde_json::from_value(raw)
+            .map_err(|error| format!("deserialize old record: {error}"))?;
+        assert!(record.selector_admission.is_none());
         Ok(())
     }
 

@@ -42,7 +42,36 @@ remote-required flag, planned or actual RCH invocation, worker id when observed,
 remote project root, remote target dir, exit code, elapsed time, command hash,
 first Rust compiler error location, output tail, source attribution, dirty-state
 hashes, local build-admission summary, degradation codes, and the
-source-state/worker-state degraded-code partitions described below.
+source-state/worker-state degraded-code partitions described below. It also
+includes `selector_admission_probe`, a read-only
+`ee.rch.selector_admission_probe.v1` block that summarizes whether worker
+selection reached a concrete remote worker before Cargo could start.
+
+`selector_admission_probe` is intended for Beads comments, proof capsules, and
+future replay ledgers. Stable fields include:
+
+- `required_runtime`: currently `Rust` for Cargo-shaped verifier commands.
+- `workers_reported` and `daemon_workers_reported`: bounded worker IDs already
+  reported by RCH metadata/status probes.
+- `selected_worker`: the worker observed in the transcript, or `null` when no
+  worker was selected.
+- `selection_failure_reason`: one of the coarse pre-Cargo reasons such as
+  `no_workers_with_rust_installed`, `topology_blocked`,
+  `capacity_or_timeout`, `all_workers_preflight_failed`,
+  `command_not_offloaded`, `remote_marker_missing`, or
+  `no_worker_selected`.
+- `workers_vs_selection_contradiction`: true when workers were reported but no
+  worker was selected for a Rust command.
+- `path_normalization_warning`: a redacted transcript line when RCH reports a
+  project-root, alias-root, or path-normalization warning.
+- `remote_required` and `local_fallback_refused`: policy posture flags. A true
+  `local_fallback_refused` means no local Cargo fallback was accepted.
+
+Rust consumers that ingest `ee.rch.verify.v1` through
+`verification_evidence_record_from_rch_verify` expose this block as
+`selectorAdmission` on `ee.verification.evidence.v1`, so support bundles and
+closeout summaries can classify selector/admission failures without scraping
+`stderr_tail` or `summary_markdown`.
 
 ## Local Build-Admission Preflight
 

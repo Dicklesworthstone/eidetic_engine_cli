@@ -2063,6 +2063,74 @@ def blocker_kind_for(degraded_codes):
         return "local_fallback_refused"
     return None
 
+def selector_admission_probe(proof, degraded_codes, combined_tail):
+    command_kind = proof.get("command_kind") or ""
+    required_runtime = "Rust" if command_kind.startswith("cargo_") else None
+    workers_reported = [str(item) for item in proof.get("configured_workers") or []]
+    daemon_workers_reported = [str(item) for item in proof.get("daemon_workers") or []]
+    selected_worker = proof.get("worker_id")
+    local_fallback_refused = (
+        "rch_verify_local_fallback_refused" in degraded_codes
+        or "remote required; refusing local fallback" in combined_tail
+    )
+    path_warning = None
+    for line in combined_tail.splitlines():
+        lowered = line.lower()
+        if (
+            ("normaliz" in lowered or "canonical" in lowered or "alias" in lowered or "project root" in lowered)
+            and ("rch" in lowered or "project" in lowered or "path" in lowered)
+        ):
+            path_warning = redact(line.strip())
+            break
+
+    selection_failure_reason = None
+    if required_runtime is None:
+        status = "not_applicable"
+    elif selected_worker:
+        status = "selected"
+    else:
+        status = "selection_failed"
+        lowered_tail = combined_tail.lower()
+        if "no workers with rust installed" in lowered_tail:
+            selection_failure_reason = "no_workers_with_rust_installed"
+        elif "rch_verify_topology_blocked" in degraded_codes or "RCH-E327" in combined_tail:
+            selection_failure_reason = "topology_blocked"
+        elif "rch_verify_all_workers_preflight_failed" in degraded_codes:
+            selection_failure_reason = "all_workers_preflight_failed"
+        elif "rch_verify_capacity_or_timeout" in degraded_codes:
+            selection_failure_reason = "capacity_or_timeout"
+        elif "rch_verify_not_offloaded" in degraded_codes:
+            selection_failure_reason = "command_not_offloaded"
+        elif "rch_verify_remote_marker_missing" in degraded_codes:
+            selection_failure_reason = "remote_marker_missing"
+        else:
+            selection_failure_reason = "no_worker_selected"
+
+    return {
+        "schema": "ee.rch.selector_admission_probe.v1",
+        "status": status,
+        "required_runtime": required_runtime,
+        "workers_reported": workers_reported,
+        "daemon_workers_reported": daemon_workers_reported,
+        "workers_reported_count": len(workers_reported),
+        "daemon_workers_reported_count": len(daemon_workers_reported),
+        "selected_worker": selected_worker,
+        "selection_failure_reason": selection_failure_reason,
+        "workers_vs_selection_contradiction": bool(
+            required_runtime
+            and not selected_worker
+            and (workers_reported or daemon_workers_reported)
+            and selection_failure_reason in {
+                "no_workers_with_rust_installed",
+                "no_worker_selected",
+                "remote_marker_missing",
+            }
+        ),
+        "path_normalization_warning": path_warning,
+        "remote_required": proof.get("remote_required") is True,
+        "local_fallback_refused": bool(local_fallback_refused),
+    }
+
 def remediation_bead_for(blocker_kind):
     mapping = {
         "cargo_workspace_inheritance": "bd-17c65.10.17.1.3",
@@ -2256,6 +2324,7 @@ worker_state_degraded = [
     for code in degraded
     if code in worker_state_code_set and code not in source_state_code_set
 ]
+proof["selector_admission_probe"] = selector_admission_probe(proof, degraded, combined_tail)
 if proof.get("success") is not True:
     status = "refused"
 elif "rch_verify_known_blocker_active" in degraded:
@@ -2361,6 +2430,15 @@ for key in ("requested_workers", "configured_workers", "daemon_workers"):
     workers = proof.get(key) or []
     if workers:
         summary_lines.append(f"- {key}: `{', '.join(workers)}`")
+selector_probe = proof.get("selector_admission_probe") or {}
+if selector_probe.get("status") not in (None, "not_applicable"):
+    summary_lines.append(
+        f"- selector_admission: `{selector_probe.get('status')}`"
+        f" required_runtime=`{selector_probe.get('required_runtime') or 'none'}`"
+        f" selected_worker=`{selector_probe.get('selected_worker') or 'none'}`"
+        f" failure_reason=`{selector_probe.get('selection_failure_reason') or 'none'}`"
+        f" local_fallback_refused=`{str(bool(selector_probe.get('local_fallback_refused'))).lower()}`"
+    )
 if bead_id:
     summary_lines.insert(1, f"- bead_id: `{bead_id}`")
 if first_error_file:
@@ -2471,6 +2549,7 @@ if event_log_path:
             "build_admission_status": build_admission.get("status"),
             "build_admission_admitted": build_admission.get("admitted"),
             "rch_runtime": proof.get("rch_runtime"),
+            "selector_admission_probe": proof.get("selector_admission_probe"),
             "local_cargo_process_status": local_cargo_processes.get("status"),
             "local_cargo_process_count": local_cargo_process_count,
             "fake_rch_invoked": fake_invocation_count > 0,

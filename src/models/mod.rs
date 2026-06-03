@@ -307,12 +307,12 @@ pub use verification::{
     VerificationOffload, VerificationOutputSummary, VerificationReuseAdvisory,
     VerificationReuseRepairAction, VerificationReuseRequest, VerificationReuseStatus,
     VerificationRunImportError, VerificationRunInput, VerificationRunProvenance,
-    VerificationRunRecord, VerificationStatus, command_hash, compile_blocker_cache_entry,
-    compile_blocker_lookup, rch_cargo_closure_requirements, sample_verification_broker_views,
-    sample_verification_closeout_capsules, sample_verification_evidence_records,
-    sample_verification_reuse_advisories, sample_verification_run_records,
-    verification_broker_view, verification_closeout_capsule, verification_closure_guidance,
-    verification_evidence_beads_summary,
+    VerificationRunRecord, VerificationSelectorAdmission, VerificationStatus, command_hash,
+    compile_blocker_cache_entry, compile_blocker_lookup, rch_cargo_closure_requirements,
+    sample_verification_broker_views, sample_verification_closeout_capsules,
+    sample_verification_evidence_records, sample_verification_reuse_advisories,
+    sample_verification_run_records, verification_broker_view, verification_closeout_capsule,
+    verification_closure_guidance, verification_evidence_beads_summary,
     verification_evidence_record_from_github_actions_check_run,
     verification_evidence_record_from_rch_verify, verification_evidence_record_from_run_record,
     verification_reuse_advisory, verification_run_records_from_j1_jsonl,
@@ -837,8 +837,19 @@ pub fn repair_action_safety(kind: RecoveryKind, command: Option<&str>) -> Repair
             evidence: vec!["beads_status_probe_command"],
             preconditions: Vec::new(),
         }
-    } else if command_lower.starts_with("br sync")
-        || command_lower.starts_with("br update")
+    } else if command_lower.starts_with("br sync") {
+        RepairActionSafety {
+            risk_class: RepairActionRiskClass::MutatingExternalCoordinationRepair,
+            preflight_command: Some(preflight_command_for(command)),
+            requires_human_approval: false,
+            mutates_external_state: true,
+            mutates_tracker_state: true,
+            privacy_class: "tracker_metadata_only",
+            manual_step: Some("Coordinate before mutating shared tracker state."),
+            evidence: vec!["beads_mutation_command"],
+            preconditions: vec!["shared_state_coordination_required"],
+        }
+    } else if command_lower.starts_with("br update")
         || command_lower.starts_with("br close")
         || command_lower.starts_with("br reopen")
         || command_lower.starts_with("br comments add")
@@ -1229,7 +1240,7 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
                 flag_name: None,
                 command: Some("ee index reembed --workspace .".to_owned()),
                 results_in: Some(
-                    "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+                    "Rebuilds the embedding index against the current embed-fast feature and model configuration."
                         .to_owned(),
                 ),
                 example: None,
@@ -1237,14 +1248,14 @@ pub fn degraded_recovery_actions(code: &str) -> Vec<RecoveryAction> {
             RecoveryAction {
                 priority: 2,
                 kind: RecoveryKind::Rebuild,
-                rationale: "If the embed-fast model is corrupt and the binary was built with embed-fast, rebuild with the alternate model."
+                rationale: "If this binary was built without the dense embedder, rebuild with the supported embed-fast feature."
                     .to_owned(),
                 env_name: None,
                 value_hint: None,
                 config_path: None,
                 config_key: None,
                 flag_name: None,
-                command: Some("cargo build --features embed-quality".to_owned()),
+                command: Some("cargo build --features embed-fast".to_owned()),
                 results_in: None,
                 example: None,
             },
@@ -2400,6 +2411,16 @@ mod tests {
         );
         assert!(beads_sync.mutates_external_state);
         assert!(beads_sync.mutates_tracker_state);
+        assert_eq!(
+            beads_sync.preconditions,
+            vec!["shared_state_coordination_required"]
+        );
+
+        let beads_close = super::repair_action_safety(
+            super::RecoveryKind::Command,
+            Some("br close bd-123 --reason done"),
+        );
+        assert_eq!(beads_close.preconditions, vec!["bead_id_must_be_explicit"]);
 
         let index_status = super::repair_action_safety(
             super::RecoveryKind::Command,
@@ -2530,14 +2551,14 @@ mod tests {
         assert_eq!(
             actions[0].results_in.as_deref(),
             Some(
-                "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+                "Rebuilds the embedding index against the current embed-fast feature and model configuration."
             )
         );
         assert_eq!(actions[1].priority, 2);
         assert_eq!(actions[1].kind, super::RecoveryKind::Rebuild);
         assert_eq!(
             actions[1].command.as_deref(),
-            Some("cargo build --features embed-quality")
+            Some("cargo build --features embed-fast")
         );
         assert!(actions[1].results_in.is_none());
 
@@ -2550,7 +2571,7 @@ mod tests {
         assert_eq!(first_json["mutatesTrackerState"], false);
         assert_eq!(
             first_json["resultsIn"],
-            "Rebuilds the embedding index against the current embed-fast / embed-quality feature flag."
+            "Rebuilds the embedding index against the current embed-fast feature and model configuration."
         );
     }
 

@@ -90,6 +90,16 @@ fn worker_degraded_contains(report: &Value, expected: &str) -> Result<bool, Stri
         .any(|code| code == expected))
 }
 
+fn selector_probe(report: &Value) -> Result<&Value, String> {
+    let probe = report
+        .get("selector_admission_probe")
+        .ok_or_else(|| format!("missing selector admission probe: {report}"))?;
+    if probe["schema"] != "ee.rch.selector_admission_probe.v1" {
+        return Err(format!("unexpected selector admission schema: {probe}"));
+    }
+    Ok(probe)
+}
+
 fn workspace_inheritance_transcript() -> &'static str {
     r#"error: failed to load manifest for dependency `frankensearch`
 
@@ -1595,6 +1605,18 @@ fn synthetic_remote_transcript_extracts_worker_id() -> TestResult {
     if report["worker_id"] != "trj" {
         return Err(format!("worker id was not extracted: {report}"));
     }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selected"
+        || probe["required_runtime"] != "Rust"
+        || probe["selected_worker"] != "trj"
+        || !probe["selection_failure_reason"].is_null()
+        || probe["workers_vs_selection_contradiction"] != false
+        || probe["local_fallback_refused"] != false
+    {
+        return Err(format!(
+            "selector admission probe did not preserve selected worker: {probe}"
+        ));
+    }
     if report["elapsed_ms"] != 123 {
         return Err("fake elapsed_ms was not preserved".to_owned());
     }
@@ -2035,6 +2057,77 @@ fn synthetic_local_fallback_refusal_is_not_worker_id() -> TestResult {
         if !degraded.iter().any(|code| code == expected) {
             return Err(format!("missing {expected} in degraded codes: {report}"));
         }
+    }
+    let probe = selector_probe(&report)?;
+    if probe["selected_worker"].is_null()
+        && probe["selection_failure_reason"] == "topology_blocked"
+        && probe["local_fallback_refused"] == true
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "selector admission probe did not capture fallback refusal: {probe}"
+    ))
+}
+
+#[test]
+fn selector_admission_probe_flags_reported_workers_without_selection() -> TestResult {
+    let (status, stdout, stderr) = run_script_with_env(
+        &["--summary", "--no-write", "--", "cargo", "test", "--lib"],
+        &[
+            (
+                "RCH_VERIFY_FAKE_OUTPUT",
+                "[RCH] project root normalization warning: canonical /Users/jemanuel/projects/eidetic_engine_cli -> /data/projects/eidetic_engine_cli\n[RCH] local (no workers with Rust installed)\n[RCH] remote required; refusing local fallback (no worker assigned)\n",
+            ),
+            ("RCH_VERIFY_FAKE_EXIT_CODE", "1"),
+            ("RCH_VERIFY_FAKE_ELAPSED_MS", "42"),
+            ("RCH_VERIFY_CONFIGURED_WORKERS", "vmi1227854,vmi1264463"),
+            ("RCH_VERIFY_DAEMON_WORKERS", "vmi1227854"),
+        ],
+    )?;
+    if status.success() {
+        return Err("selector admission failure should preserve non-zero exit".to_owned());
+    }
+    let report: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("parse selector admission report: {error}\nstderr:\n{stderr}"))?;
+    if report["status"] != "rch_environment_failure" {
+        return Err(format!(
+            "selector admission failure should be an environment failure: {report}"
+        ));
+    }
+    let probe = selector_probe(&report)?;
+    if probe["status"] != "selection_failed"
+        || probe["required_runtime"] != "Rust"
+        || !probe["selected_worker"].is_null()
+        || probe["selection_failure_reason"] != "no_workers_with_rust_installed"
+        || probe["workers_vs_selection_contradiction"] != true
+        || probe["remote_required"] != true
+        || probe["local_fallback_refused"] != true
+    {
+        return Err(format!(
+            "selector admission probe did not capture selection failure: {probe}"
+        ));
+    }
+    if probe["workers_reported"][0] != "vmi1227854"
+        || probe["workers_reported"][1] != "vmi1264463"
+        || probe["daemon_workers_reported"][0] != "vmi1227854"
+    {
+        return Err(format!(
+            "selector admission probe did not preserve worker reports: {probe}"
+        ));
+    }
+    let path_warning = probe["path_normalization_warning"]
+        .as_str()
+        .ok_or_else(|| format!("missing path normalization warning: {probe}"))?;
+    if !path_warning.contains("/Users/<redacted>") || path_warning.contains("/Users/jemanuel") {
+        return Err(format!(
+            "path normalization warning was not redacted: {path_warning}"
+        ));
+    }
+    if !stdout.contains("selector_admission: `selection_failed`") {
+        return Err(format!(
+            "summary did not include selector admission line:\n{stdout}"
+        ));
     }
     Ok(())
 }
