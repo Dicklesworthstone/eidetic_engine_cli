@@ -331,10 +331,10 @@ impl<S> Deterministic<S> {
 
     fn next_counter(&mut self) -> u64 {
         let current = self.counter;
-        self.counter = self
-            .counter
-            .checked_add(1)
-            .expect("deterministic token counter exhausted");
+        self.counter = match self.counter.checked_add(1) {
+            Some(next) => next,
+            None => panic!("deterministic token counter exhausted"),
+        };
         current
     }
 
