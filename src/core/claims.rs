@@ -668,23 +668,26 @@ fn parse_one_claim_evidence(
             "missing evidence target at claims[{claim_index}].evidence[{evidence_index}]"
         )));
     }
+    let target = target.trim().to_owned();
+    let mut expected_hash = raw.expected_hash.map(|hash| hash.trim().to_owned());
     if kind == ClaimEvidenceKind::FileHash {
-        let expected_hash = raw.expected_hash.as_deref().ok_or_else(|| {
+        let hash = expected_hash.as_mut().ok_or_else(|| {
             ClaimParseError::new(format!(
                 "missing expected_hash for file-hash evidence at claims[{claim_index}].evidence[{evidence_index}]"
             ))
         })?;
-        if !crate::models::is_valid_blake3_hex(expected_hash) {
+        if !crate::models::is_valid_blake3_hex(hash) {
             return Err(ClaimParseError::new(format!(
-                "invalid expected_hash `{expected_hash}` at claims[{claim_index}].evidence[{evidence_index}]"
+                "invalid expected_hash `{hash}` at claims[{claim_index}].evidence[{evidence_index}]"
             )));
         }
+        *hash = hash.to_ascii_lowercase();
     }
 
     Ok(ParsedClaimEvidence {
         kind,
         target,
-        expected_hash: raw.expected_hash,
+        expected_hash,
         expected_exit: raw.expected_exit,
         expected_status: raw.expected_status,
     })
@@ -796,7 +799,8 @@ fn convert_raw_manifest_artifact(
         raw_artifact.blake3_hash,
         "artifact blake3Hash",
         artifact_index,
-    )?;
+    )?
+    .to_ascii_lowercase();
     let size_bytes = raw_artifact.size_bytes.ok_or_else(|| {
         ClaimParseError::new(format!(
             "missing artifact sizeBytes at artifacts[{artifact_index}]"
@@ -967,7 +971,7 @@ fn read_claim_file_bytes_no_follow(path: &Path, max_bytes: u64) -> io::Result<Ve
     // (0fe4a339), `src/cache/pack_l2.rs::read_cache_entry_file` (8ba93c0e),
     // and `src/core/handoff.rs::ensure_handoff_key_material_within_cap`
     // (f067c32c).
-    let mut file = open_claim_file_for_read_no_follow(path)?;
+    let file = open_claim_file_for_read_no_follow(path)?;
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)?;
@@ -2170,5 +2174,83 @@ claims:
         } else {
             Err(format!("missing artifact_not_regular error: {report:?}"))
         }
+    }
+
+    #[test]
+    fn claim_file_hash_evidence_normalizes_valid_mixed_case_hashes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let evidence_dir = temp.path().join("evidence");
+        std::fs::create_dir_all(&evidence_dir).map_err(|error| error.to_string())?;
+        let payload = b"claim evidence payload";
+        std::fs::write(evidence_dir.join("payload.txt"), payload)
+            .map_err(|error| error.to_string())?;
+        let expected_hash = blake3::hash(payload)
+            .to_hex()
+            .to_string()
+            .to_ascii_uppercase();
+        std::fs::write(
+            temp.path().join("claims.yaml"),
+            format!(
+                "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: File evidence claim\n    status: active\n    frequency: weekly\n    evidence:\n      kind: file-hash\n      target: \" evidence/payload.txt \"\n      expected_hash: \" {expected_hash} \"\n"
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = build_claim_verify_report(&ClaimVerifyOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.verified_count, &1, "verified count")?;
+        ensure_equal(&report.failed_count, &0, "failed count")
+    }
+
+    #[test]
+    fn claim_manifest_artifact_normalizes_valid_mixed_case_hashes() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        std::fs::write(
+            temp.path().join("claims.yaml"),
+            "schema: ee.claims_file.v1\nversion: 1\nclaims:\n  - id: claim_fixture_001\n    title: Manifest artifact claim\n    status: active\n    frequency: weekly\n",
+        )
+        .map_err(|error| error.to_string())?;
+        let claim_dir = temp.path().join("artifacts").join("claim_fixture_001");
+        std::fs::create_dir_all(&claim_dir).map_err(|error| error.to_string())?;
+        let payload = b"manifest artifact payload";
+        std::fs::write(claim_dir.join("stdout.json"), payload)
+            .map_err(|error| error.to_string())?;
+        let manifest_hash = blake3::hash(payload)
+            .to_hex()
+            .to_string()
+            .to_ascii_uppercase();
+        let manifest = serde_json::json!({
+            "schema": "ee.claim_manifest.v1",
+            "claimId": "claim_fixture_001",
+            "artifacts": [
+                {
+                    "path": "stdout.json",
+                    "artifactType": "report",
+                    "blake3Hash": manifest_hash,
+                    "sizeBytes": payload.len(),
+                    "createdAt": "2026-01-02T03:04:05Z"
+                }
+            ]
+        });
+        std::fs::write(
+            claim_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+
+        let report = build_claim_verify_report(&ClaimVerifyOptions {
+            workspace_path: temp.path().to_path_buf(),
+            claim_id: "claim_fixture_001".to_owned(),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())?;
+
+        ensure_equal(&report.verified_count, &1, "verified count")?;
+        ensure_equal(&report.failed_count, &0, "failed count")
     }
 }

@@ -1087,13 +1087,12 @@ fn collect_snapshot(
         if metadata.is_dir() {
             collect_snapshot(root, &path, skip_root, snapshot)?;
         } else if metadata.is_file() {
-            let bytes = fs::read(&path)
-                .map_err(|error| storage_error("read rehearsal workspace file", error))?;
+            let (hash, bytes) = hash_workspace_file_no_follow(&path)?;
             let relative = relative_path(root, &path)?;
             let file = SnapshotFile {
                 path: relative.clone(),
-                hash: hash_bytes(&bytes),
-                bytes: bytes.len() as u64,
+                hash,
+                bytes,
             };
             snapshot.total_bytes = snapshot.total_bytes.saturating_add(file.bytes);
             snapshot.files.insert(relative, file);
@@ -1159,8 +1158,7 @@ fn copy_workspace_inner(
                 fs::create_dir_all(parent)
                     .map_err(|error| storage_error("create rehearsal sandbox parent", error))?;
             }
-            fs::copy(&source_path, &destination_path)
-                .map_err(|error| storage_error("copy rehearsal source file", error))?;
+            copy_workspace_file_no_follow(&source_path, &destination_path)?;
         }
     }
     Ok(())
@@ -1223,6 +1221,97 @@ where
 fn hash_bytes(bytes: &[u8]) -> String {
     format!("blake3:{}", blake3::hash(bytes).to_hex())
 }
+
+fn hash_workspace_file_no_follow(path: &Path) -> Result<(String, u64), DomainError> {
+    let mut file = open_rehearsal_file_for_read_no_follow(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes = 0_u64;
+    let mut buffer = [0_u8; 8192];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| storage_error("read rehearsal workspace file", error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        bytes = bytes.saturating_add(read as u64);
+    }
+
+    Ok((format!("blake3:{}", hasher.finalize().to_hex()), bytes))
+}
+
+fn copy_workspace_file_no_follow(
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<(), DomainError> {
+    let mut source = open_rehearsal_file_for_read_no_follow(source_path)?;
+    let source_metadata = source
+        .metadata()
+        .map_err(|error| storage_error("inspect rehearsal source file", error))?;
+    if !source_metadata.is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to copy rehearsal source `{}` because it is not a regular file.",
+                source_path.display()
+            ),
+            repair: Some(
+                "Replace the workspace entry with a regular file before rehearsal.".to_string(),
+            ),
+        });
+    }
+
+    let mut destination_options = fs::OpenOptions::new();
+    destination_options.write(true).create_new(true);
+    configure_rehearsal_open_no_follow(&mut destination_options);
+    let mut destination = destination_options
+        .open(destination_path)
+        .map_err(|error| storage_error("create rehearsal sandbox file", error))?;
+    io::copy(&mut source, &mut destination)
+        .map_err(|error| storage_error("copy rehearsal source file", error))?;
+    destination
+        .set_permissions(source_metadata.permissions())
+        .map_err(|error| storage_error("set rehearsal sandbox file permissions", error))?;
+    destination
+        .sync_all()
+        .map_err(|error| storage_error("sync rehearsal sandbox file", error))
+}
+
+fn open_rehearsal_file_for_read_no_follow(path: &Path) -> Result<fs::File, DomainError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_rehearsal_open_no_follow(&mut options);
+    let file = options
+        .open(path)
+        .map_err(|error| storage_error("open rehearsal workspace file", error))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| storage_error("inspect rehearsal workspace file", error))?;
+    if metadata.is_file() {
+        Ok(file)
+    } else {
+        Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read rehearsal workspace `{}` because it is not a regular file.",
+                path.display()
+            ),
+            repair: Some(
+                "Replace the workspace entry with a regular file before rehearsal.".to_string(),
+            ),
+        })
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_rehearsal_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_rehearsal_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn write_snapshot_manifest(
     path: &Path,
@@ -1499,17 +1588,30 @@ fn storage_error(context: &str, error: io::Error) -> DomainError {
 /// before `serde_json::from_slice` could reject it. The two-layer
 /// defense matches the recipe used by the convergence pass:
 ///
-/// 1. `fs::metadata(...)` rejects an oversized file at stat time.
-/// 2. `file.take(MAX + 1).read_to_end(...)` closes the TOCTOU growth
-///    window: if the file grew between the stat and the open, the
-///    bounded read still pins peak allocation to `MAX + 1` bytes.
+/// 1. `fs::symlink_metadata(...)` rejects non-regular and oversized files
+///    at stat time without following the final component.
+/// 2. `O_NOFOLLOW` on the open closes the final-component symlink swap
+///    window after the stat check.
+/// 3. `file.take(MAX + 1).read_to_end(...)` closes the TOCTOU growth
+///    window: if the file grew between the stat and the open, the bounded
+///    read still pins peak allocation to `MAX + 1` bytes.
 ///
 /// Both rejections route through `DomainError::Storage` with the
 /// matching repair hint, so the agent-facing failure shape is the same
 /// for the stat-time and read-time cases.
 fn read_rehearse_manifest_bounded(manifest_path: &Path) -> Result<Vec<u8>, DomainError> {
-    let metadata = fs::metadata(manifest_path)
+    ensure_no_rehearsal_artifact_symlink_components(manifest_path, "read rehearsal manifest")?;
+    let metadata = fs::symlink_metadata(manifest_path)
         .map_err(|error| storage_error("read rehearsal manifest", error))?;
+    if !metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Refusing to read rehearsal manifest `{}` because it is not a regular file.",
+                manifest_path.display()
+            ),
+            repair: Some("ee rehearse run --json to regenerate the manifest.".to_string()),
+        });
+    }
     if metadata.len() > MAX_REHEARSE_MANIFEST_BYTES {
         return Err(DomainError::Storage {
             message: format!(
@@ -1521,7 +1623,11 @@ fn read_rehearse_manifest_bounded(manifest_path: &Path) -> Result<Vec<u8>, Domai
             repair: Some("ee rehearse run --json to regenerate the manifest.".to_string()),
         });
     }
-    let file = fs::File::open(manifest_path)
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_rehearsal_open_no_follow(&mut options);
+    let file = options
+        .open(manifest_path)
         .map_err(|error| storage_error("read rehearsal manifest", error))?;
     let mut buffer = Vec::new();
     file.take(MAX_REHEARSE_MANIFEST_BYTES.saturating_add(1))
@@ -1579,9 +1685,10 @@ fn ensure_rehearsal_artifact_temp_path_missing(path: &Path) -> Result<(), Domain
 }
 
 fn write_rehearsal_artifact_temp_file(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_rehearsal_open_no_follow(&mut options);
+    let mut file = options
         .open(path)
         .map_err(|error| storage_error("create rehearsal artifact temp file", error))?;
     file.write_all(bytes)
@@ -1960,6 +2067,51 @@ mod tests {
         assert!(Path::new(&report.artifact_paths["source_snapshot"]).is_file());
         assert!(Path::new(&report.artifact_paths["sandbox_snapshot"]).is_file());
         assert_eq!(report.overall_result, "passed");
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_hashes_workspace_files_with_streaming_reader() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-streaming-snapshot")?;
+        let body = vec![b'x'; 128 * 1024];
+        fs::write(workspace.join("large.bin"), &body).map_err(|error| error.to_string())?;
+
+        let snapshot = snapshot_workspace(&workspace, None).map_err(|error| error.message())?;
+        let file = snapshot
+            .files
+            .get("large.bin")
+            .ok_or_else(|| "missing large.bin snapshot entry".to_string())?;
+
+        assert_eq!(file.bytes, body.len() as u64);
+        assert_eq!(file.hash, hash_bytes(&body));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_reader_rejects_symlink_even_when_called_directly() -> TestResult {
+        let workspace = kept_temp_dir("ee-rehearse-direct-symlink")?;
+        let outside = kept_temp_dir("ee-rehearse-direct-symlink-target")?;
+        let outside_file = outside.join("outside.txt");
+        fs::write(&outside_file, "outside").map_err(|error| error.to_string())?;
+        let link = workspace.join("link.txt");
+        std::os::unix::fs::symlink(&outside_file, &link).map_err(|error| error.to_string())?;
+
+        let error = match open_rehearsal_file_for_read_no_follow(&link) {
+            Ok(_) => return Err("symlinked workspace file reader was accepted".to_string()),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            fs::read_to_string(&outside_file).map_err(|error| error.to_string())?,
+            "outside"
+        );
+        assert!(
+            error.message().contains("open rehearsal workspace file")
+                || error.message().contains("not a regular file"),
+            "unexpected error: {}",
+            error.message()
+        );
         Ok(())
     }
 

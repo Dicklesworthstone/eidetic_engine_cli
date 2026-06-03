@@ -282,7 +282,7 @@ fn extract_invariants(path: &Path) -> io::Result<Vec<String>> {
 }
 
 fn read_proof_artifact_file(path: &Path) -> io::Result<String> {
-    let mut file = open_proof_artifact_file_for_read(path)?;
+    let file = open_proof_artifact_file_for_read(path)?;
     // Early-bail before `read_to_string` so a malformed or hostile
     // workspace cannot trigger an unbounded allocation by staging a huge
     // file under `proofs/lean4/` or `proofs/tla/`. `read_to_string`
@@ -304,6 +304,15 @@ fn read_proof_artifact_file(path: &Path) -> io::Result<String> {
     let mut body = String::new();
     file.take(PROOF_ARTIFACT_MAX_BYTES.saturating_add(1))
         .read_to_string(&mut body)?;
+    if u64::try_from(body.len()).unwrap_or(u64::MAX) > PROOF_ARTIFACT_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "refusing to read proof artifact `{}`: exceeded the {PROOF_ARTIFACT_MAX_BYTES}-byte cap after the metadata check (TOCTOU)",
+                path.display(),
+            ),
+        ));
+    }
     Ok(body)
 }
 
@@ -384,7 +393,11 @@ fn command_for_artifact(artifact: &ProofArtifact) -> Vec<String> {
 
 fn tla_config_for_artifact(artifact: &ProofArtifact) -> Option<PathBuf> {
     let config_path = artifact.path.parent()?.join("MC.cfg");
-    config_path.is_file().then_some(config_path)
+    ensure_no_proof_path_symlink_components(&config_path, "read TLA+ model config").ok()?;
+    match fs::symlink_metadata(&config_path) {
+        Ok(metadata) if metadata.file_type().is_file() => Some(config_path),
+        _ => None,
+    }
 }
 
 #[allow(dead_code)]
@@ -577,6 +590,25 @@ mod tests {
     }
 
     #[test]
+    fn proof_artifact_read_rejects_oversized_file_before_allocation() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let proof_path = temp.path().join("too-large.lean");
+        let file = fs::File::create(&proof_path).map_err(|error| error.to_string())?;
+        file.set_len(PROOF_ARTIFACT_MAX_BYTES.saturating_add(1))
+            .map_err(|error| error.to_string())?;
+
+        let error = read_proof_artifact_file(&proof_path)
+            .expect_err("oversized proof artifact should reject before reading")
+            .to_string();
+
+        if error.contains("exceeds the") {
+            Ok(())
+        } else {
+            Err(format!("unexpected oversized artifact error: {error}"))
+        }
+    }
+
+    #[test]
     fn invariant_extraction_rejects_non_regular_artifact_path() -> TestResult {
         let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
         let artifact_dir = temp.path().join("proof.lean");
@@ -615,6 +647,39 @@ mod tests {
         assert!(command.windows(2).any(|window| {
             window[0].as_str() == "-config" && window[1].as_str() == config_path.as_ref()
         }));
+        assert_eq!(command.last().map(String::as_str), spec_path.to_str());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tla_command_ignores_symlinked_sibling_model_config() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let tla_dir = temp.path().join("tla");
+        fs::create_dir_all(&tla_dir).map_err(|error| error.to_string())?;
+        let spec_path = tla_dir.join("spec.tla");
+        let outside_config = temp.path().join("outside.cfg");
+        fs::write(&spec_path, "---- MODULE spec ----\n====\n")
+            .map_err(|error| error.to_string())?;
+        fs::write(&outside_config, "INIT Init\n").map_err(|error| error.to_string())?;
+        symlink(&outside_config, tla_dir.join("MC.cfg")).map_err(|error| error.to_string())?;
+        let artifact = ProofArtifact {
+            path: spec_path.clone(),
+            kind: ProofArtifactKind::TlaPlus,
+            invariants: Vec::new(),
+        };
+
+        let command = command_for_artifact(&artifact);
+
+        assert_eq!(command[0], "tlc");
+        assert!(
+            !command
+                .windows(2)
+                .any(|window| window[0].as_str() == "-config"),
+            "symlinked TLA+ config must not be passed to tlc: {command:?}"
+        );
         assert_eq!(command.last().map(String::as_str), spec_path.to_str());
         Ok(())
     }

@@ -8,8 +8,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -34,6 +34,8 @@ const BODY_FILE: &str = "body.bin";
 const METADATA_FILE: &str = "metadata.json";
 const OBJECTS_DIR: &str = "objects";
 const REFS_DIR: &str = "refs";
+const DERIVED_ASSET_BODY_MAX_BYTES: u64 = 256 * 1024 * 1024;
+const DERIVED_ASSET_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -407,23 +409,25 @@ impl DerivedAssetStore {
 
         let body_path = self.body_path(&key);
         let metadata_path = self.object_metadata_path(&key);
-        let reused_existing = match fs::read(&body_path) {
+        ensure_bytes_within_cap(
+            &body_path,
+            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            DERIVED_ASSET_BODY_MAX_BYTES,
+            "write_body",
+        )?;
+        let reused_existing = match read_body_file(&body_path, "read_body") {
             Ok(existing) => {
                 descriptor.validate_body(&existing)?;
                 true
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(DerivedAssetStoreError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
                 write_create_only(&body_path, bytes)?;
                 set_read_only(&body_path)?;
                 false
             }
-            Err(source) => {
-                return Err(DerivedAssetStoreError::Io {
-                    path: body_path,
-                    operation: "read_body",
-                    source,
-                });
-            }
+            Err(error) => return Err(error),
         };
 
         match read_object_manifest(&metadata_path) {
@@ -473,21 +477,26 @@ impl DerivedAssetStore {
         ensure_parent_directory(destination_path)?;
         ensure_no_symlink_components(destination_path, "inspect_destination")?;
 
-        if let Ok(existing) = fs::read(destination_path) {
-            let existing_hash = blake3_body_hash(&existing);
-            if existing_hash != descriptor.body_hash {
-                return Err(DerivedAssetStoreError::DestinationExists {
-                    path: destination_path.to_path_buf(),
-                    existing_hash,
+        match read_body_file(destination_path, "read_destination") {
+            Ok(existing) => {
+                let existing_hash = blake3_body_hash(&existing);
+                if existing_hash != descriptor.body_hash {
+                    return Err(DerivedAssetStoreError::DestinationExists {
+                        path: destination_path.to_path_buf(),
+                        existing_hash,
+                    });
+                }
+                return Ok(DerivedAssetAttachOutcome {
+                    key,
+                    object_path,
+                    destination_path: destination_path.to_path_buf(),
+                    mode: DerivedAssetAttachMode::AlreadyPresent,
+                    bytes: existing.len() as u64,
                 });
             }
-            return Ok(DerivedAssetAttachOutcome {
-                key,
-                object_path,
-                destination_path: destination_path.to_path_buf(),
-                mode: DerivedAssetAttachMode::AlreadyPresent,
-                bytes: existing.len() as u64,
-            });
+            Err(DerivedAssetStoreError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
 
         let mode = match fs::hard_link(&object_path, destination_path) {
@@ -523,11 +532,7 @@ impl DerivedAssetStore {
         let metadata_path = self.object_metadata_path(&key);
         let manifest = read_object_manifest(&metadata_path)?;
         validate_object_manifest(&manifest, &key, descriptor, &metadata_path)?;
-        let body = fs::read(&body_path).map_err(|source| DerivedAssetStoreError::Io {
-            path: body_path,
-            operation: "read_body",
-            source,
-        })?;
+        let body = read_body_file(&body_path, "read_body")?;
         descriptor.validate_body(&body)
     }
 
@@ -586,7 +591,10 @@ impl DerivedAssetStore {
             summary.object_count = summary.object_count.saturating_add(1);
             let body_path = object_dir.join(BODY_FILE);
             let metadata_path = object_dir.join(METADATA_FILE);
-            let object_bytes = fs::metadata(&body_path).map_or(0, |metadata| metadata.len());
+            let object_bytes = fs::symlink_metadata(&body_path)
+                .ok()
+                .filter(|metadata| metadata.file_type().is_file())
+                .map_or(0, |metadata| metadata.len());
             summary.total_bytes = summary.total_bytes.saturating_add(object_bytes);
 
             let refs_dir = self.refs_dir(key);
@@ -612,7 +620,7 @@ impl DerivedAssetStore {
                     schema_mismatch_count = schema_mismatch_count.saturating_add(1);
                     true
                 }
-                Ok(manifest) => match fs::read(&body_path) {
+                Ok(manifest) => match read_body_file(&body_path, "read_body") {
                     Ok(bytes) => match manifest.descriptor.validate_body(&bytes) {
                         Ok(()) => false,
                         Err(DerivedAssetStoreError::HashMismatch { .. }) => {
@@ -815,11 +823,7 @@ fn validate_ref_manifest(
 }
 
 fn read_object_manifest(path: &Path) -> Result<DerivedAssetObjectManifest, DerivedAssetStoreError> {
-    let bytes = fs::read(path).map_err(|source| DerivedAssetStoreError::Io {
-        path: path.to_path_buf(),
-        operation: "read_manifest",
-        source,
-    })?;
+    let bytes = read_manifest_file(path, "read_manifest")?;
     serde_json::from_slice(&bytes).map_err(|source| DerivedAssetStoreError::Serialize {
         path: path.to_path_buf(),
         operation: "parse_manifest",
@@ -828,11 +832,7 @@ fn read_object_manifest(path: &Path) -> Result<DerivedAssetObjectManifest, Deriv
 }
 
 fn read_ref_manifest(path: &Path) -> Result<DerivedAssetRefManifest, DerivedAssetStoreError> {
-    let bytes = fs::read(path).map_err(|source| DerivedAssetStoreError::Io {
-        path: path.to_path_buf(),
-        operation: "read_ref",
-        source,
-    })?;
+    let bytes = read_manifest_file(path, "read_ref")?;
     serde_json::from_slice(&bytes).map_err(|source| DerivedAssetStoreError::Serialize {
         path: path.to_path_buf(),
         operation: "parse_ref",
@@ -856,9 +856,10 @@ fn write_json_create_only<T: Serialize>(
 fn write_create_only(path: &Path, bytes: &[u8]) -> Result<(), DerivedAssetStoreError> {
     ensure_parent_directory(path)?;
     ensure_no_symlink_components(path, "inspect_write_path")?;
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_derived_asset_open_no_follow(&mut options);
+    let mut file = options
         .open(path)
         .map_err(|source| DerivedAssetStoreError::Io {
             path: path.to_path_buf(),
@@ -881,13 +882,122 @@ fn copy_create_only(
     ensure_parent_directory(destination_path)?;
     ensure_no_symlink_components(source_path, "inspect_copy_source")?;
     ensure_no_symlink_components(destination_path, "inspect_copy_destination")?;
-    let bytes = fs::read(source_path).map_err(|source| DerivedAssetStoreError::Io {
-        path: source_path.to_path_buf(),
-        operation: "read_copy_source",
-        source,
-    })?;
+    let bytes = read_body_file(source_path, "read_copy_source")?;
     write_create_only(destination_path, &bytes)
 }
+
+fn read_body_file(path: &Path, operation: &'static str) -> Result<Vec<u8>, DerivedAssetStoreError> {
+    read_regular_file_bounded_no_follow(path, DERIVED_ASSET_BODY_MAX_BYTES, operation)
+}
+
+fn read_manifest_file(
+    path: &Path,
+    operation: &'static str,
+) -> Result<Vec<u8>, DerivedAssetStoreError> {
+    read_regular_file_bounded_no_follow(path, DERIVED_ASSET_MANIFEST_MAX_BYTES, operation)
+}
+
+fn read_regular_file_bounded_no_follow(
+    path: &Path,
+    max_bytes: u64,
+    operation: &'static str,
+) -> Result<Vec<u8>, DerivedAssetStoreError> {
+    ensure_no_symlink_components(path, operation)?;
+    let metadata = fs::symlink_metadata(path).map_err(|source| DerivedAssetStoreError::Io {
+        path: path.to_path_buf(),
+        operation,
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "derived asset path is not a regular file",
+            ),
+        });
+    }
+    ensure_bytes_within_cap(path, metadata.len(), max_bytes, operation)?;
+
+    let file = open_derived_asset_file_for_read_no_follow(path).map_err(|source| {
+        DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source,
+        }
+    })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|source| DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source,
+        })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                "opened derived asset path is not a regular file",
+            ),
+        });
+    }
+    ensure_bytes_within_cap(path, opened_metadata.len(), max_bytes, operation)?;
+
+    let mut bytes = Vec::new();
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source,
+        })?;
+    ensure_bytes_within_cap(
+        path,
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        max_bytes,
+        operation,
+    )?;
+    Ok(bytes)
+}
+
+fn ensure_bytes_within_cap(
+    path: &Path,
+    byte_len: u64,
+    max_bytes: u64,
+    operation: &'static str,
+) -> Result<(), DerivedAssetStoreError> {
+    if byte_len > max_bytes {
+        return Err(DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation,
+            source: io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("derived asset file exceeds the {max_bytes}-byte cap"),
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn open_derived_asset_file_for_read_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_derived_asset_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_derived_asset_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_derived_asset_open_no_follow(_options: &mut OpenOptions) {}
 
 fn ensure_directory(path: &Path) -> Result<(), DerivedAssetStoreError> {
     ensure_no_symlink_components(path, "inspect_directory")?;
@@ -918,7 +1028,16 @@ fn ensure_parent_directory(path: &Path) -> Result<(), DerivedAssetStoreError> {
 }
 
 fn set_read_only(path: &Path) -> Result<(), DerivedAssetStoreError> {
-    let mut permissions = fs::metadata(path)
+    ensure_no_symlink_components(path, "set_read_only")?;
+    let file = open_derived_asset_file_for_read_no_follow(path).map_err(|source| {
+        DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation: "open_set_read_only",
+            source,
+        }
+    })?;
+    let mut permissions = file
+        .metadata()
         .map_err(|source| DerivedAssetStoreError::Io {
             path: path.to_path_buf(),
             operation: "metadata_permissions",
@@ -928,11 +1047,12 @@ fn set_read_only(path: &Path) -> Result<(), DerivedAssetStoreError> {
     permissions.set_readonly(true);
     #[cfg(unix)]
     permissions.set_mode(0o400);
-    fs::set_permissions(path, permissions).map_err(|source| DerivedAssetStoreError::Io {
-        path: path.to_path_buf(),
-        operation: "set_read_only",
-        source,
-    })
+    file.set_permissions(permissions)
+        .map_err(|source| DerivedAssetStoreError::Io {
+            path: path.to_path_buf(),
+            operation: "set_read_only",
+            source,
+        })
 }
 
 fn ensure_no_symlink_components(
@@ -1029,7 +1149,8 @@ fn workspace_ref_file_stem(workspace_fingerprint: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        DERIVED_ASSET_HASH_MISMATCH_CODE, DERIVED_ASSET_REF_SCHEMA_V1,
+        DERIVED_ASSET_BODY_MAX_BYTES, DERIVED_ASSET_HASH_MISMATCH_CODE,
+        DERIVED_ASSET_MANIFEST_MAX_BYTES, DERIVED_ASSET_REF_SCHEMA_V1,
         DERIVED_ASSET_SCHEMA_MISMATCH_CODE, DerivedAssetDescriptor, DerivedAssetObjectManifest,
         DerivedAssetStore, DerivedAssetStoreError, blake3_body_hash,
         default_derived_asset_store_root_from_env,
@@ -1269,6 +1390,115 @@ mod tests {
             "schema mismatch variant",
         )?;
         Ok(())
+    }
+
+    #[test]
+    fn validate_object_rejects_oversized_body_before_hashing() -> TestResult {
+        let root = unique_test_path("oversized-body");
+        let store = DerivedAssetStore::new(root.join("store"));
+        let body = b"small-body";
+        let descriptor = descriptor(
+            "graph_snapshot",
+            "ee.test.graph_snapshot.v1",
+            "blake3:source",
+            "blake3:config",
+            "blake3:binary",
+            &blake3_body_hash(body),
+        );
+        let key = descriptor.key();
+        let object_dir = store.root().join("objects").join(&key);
+        fs::create_dir_all(&object_dir).map_err(|error| error.to_string())?;
+        let body_path = object_dir.join("body.bin");
+        fs::File::create(&body_path)
+            .and_then(|file| file.set_len(DERIVED_ASSET_BODY_MAX_BYTES.saturating_add(1)))
+            .map_err(|error| error.to_string())?;
+        let manifest = DerivedAssetObjectManifest::new(&key, &descriptor, body.len() as u64);
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("serialize manifest: {error}"))?;
+        fs::write(object_dir.join("metadata.json"), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let error = match store.validate_object(&descriptor) {
+            Ok(()) => return Err("oversized body should fail validation".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("exceeds"),
+            "oversized body error cites cap",
+        )
+    }
+
+    #[test]
+    fn validate_object_rejects_oversized_manifest_before_parse() -> TestResult {
+        let root = unique_test_path("oversized-manifest");
+        let store = DerivedAssetStore::new(root.join("store"));
+        let body = b"small-body";
+        let descriptor = descriptor(
+            "graph_snapshot",
+            "ee.test.graph_snapshot.v1",
+            "blake3:source",
+            "blake3:config",
+            "blake3:binary",
+            &blake3_body_hash(body),
+        );
+        let key = descriptor.key();
+        let object_dir = store.root().join("objects").join(&key);
+        fs::create_dir_all(&object_dir).map_err(|error| error.to_string())?;
+        fs::write(object_dir.join("body.bin"), body).map_err(|error| error.to_string())?;
+        fs::File::create(object_dir.join("metadata.json"))
+            .and_then(|file| file.set_len(DERIVED_ASSET_MANIFEST_MAX_BYTES.saturating_add(1)))
+            .map_err(|error| error.to_string())?;
+
+        let error = match store.validate_object(&descriptor) {
+            Ok(()) => return Err("oversized manifest should fail validation".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("exceeds"),
+            "oversized manifest error cites cap",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_object_rejects_symlinked_body() -> TestResult {
+        use std::os::unix::fs as unix_fs;
+
+        let root = unique_test_path("symlinked-body");
+        let store = DerivedAssetStore::new(root.join("store"));
+        let body = b"small-body";
+        let descriptor = descriptor(
+            "graph_snapshot",
+            "ee.test.graph_snapshot.v1",
+            "blake3:source",
+            "blake3:config",
+            "blake3:binary",
+            &blake3_body_hash(body),
+        );
+        let key = descriptor.key();
+        let object_dir = store.root().join("objects").join(&key);
+        fs::create_dir_all(&object_dir).map_err(|error| error.to_string())?;
+        let outside = root.join("outside-body.bin");
+        fs::write(&outside, body).map_err(|error| error.to_string())?;
+        unix_fs::symlink(&outside, object_dir.join("body.bin"))
+            .map_err(|error| error.to_string())?;
+        let manifest = DerivedAssetObjectManifest::new(&key, &descriptor, body.len() as u64);
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|error| format!("serialize manifest: {error}"))?;
+        fs::write(object_dir.join("metadata.json"), manifest_bytes)
+            .map_err(|error| error.to_string())?;
+
+        let error = match store.validate_object(&descriptor) {
+            Ok(()) => return Err("symlinked body should fail validation".to_owned()),
+            Err(error) => error,
+        };
+
+        ensure(
+            error.to_string().contains("symbolic link"),
+            "symlinked body error cites symlink",
+        )
     }
 
     #[test]

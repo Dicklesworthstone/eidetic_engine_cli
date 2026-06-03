@@ -96,6 +96,15 @@ const MAX_PERFORMANCE_EXPLAIN_SAMPLES: usize = 16;
 /// (same file, sibling sample reader) and the convergence-pass shape
 /// at `EVALUATION_SNAPSHOT_MAX_BYTES` (`src/science/mod.rs`).
 const MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
+/// Hard upper bound on support-bundle members read during inspection.
+///
+/// `ee support bundle inspect` reads the manifest plus manifest-listed
+/// files from an operator-provided bundle path. Without a cap, a corrupt
+/// or hostile bundle can point at a multi-GB regular file and force an
+/// unbounded `String` allocation before hash/size validation can reject it.
+/// 16 MiB is generous for the JSON diagnostics in current bundles while
+/// keeping inspection bounded.
+const MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
@@ -2324,7 +2333,10 @@ fn collect_coordination_fallback_summary(workspace: &Path) -> Value {
     if !ledger_path.exists() {
         return coordination_fallback_summary_value("ledger_missing", ledger, Vec::new());
     }
-    if !regular_file_no_symlink(&ledger_path) {
+    let Ok(metadata) = fs::symlink_metadata(&ledger_path) else {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    };
+    if !metadata.file_type().is_file() {
         return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
     }
 
@@ -2338,9 +2350,15 @@ fn collect_coordination_fallback_summary(workspace: &Path) -> Value {
     // Matches the parallel cap on the same file in
     // `src/core/why.rs::fetch_coordination_fallback_evidence`.
     let mut content = String::new();
-    let Ok(mut file) = fs::File::open(&ledger_path) else {
+    let Ok(mut file) = open_support_bundle_file_for_read_no_follow(&ledger_path) else {
         return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
     };
+    let Ok(opened_metadata) = file.metadata() else {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    };
+    if !opened_metadata.file_type().is_file() {
+        return coordination_fallback_summary_value("ledger_unreadable", ledger, Vec::new());
+    }
     if (&mut file)
         .take(COORDINATION_FALLBACK_LEDGER_MAX_BYTES)
         .read_to_string(&mut content)
@@ -2513,11 +2531,17 @@ struct SupportDiagnosticRedaction {
 /// not surfaced as a hard error, since the summary already truncates to
 /// 16 samples per directory).
 fn read_support_bundle_sample_file_bounded(path: &Path) -> Option<String> {
-    let metadata = fs::metadata(path).ok()?;
-    if metadata.len() > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES {
         return None;
     }
-    let file = fs::File::open(path).ok()?;
+    let file = open_support_bundle_file_for_read_no_follow(path).ok()?;
+    let opened_metadata = file.metadata().ok()?;
+    if !opened_metadata.file_type().is_file()
+        || opened_metadata.len() > MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES
+    {
+        return None;
+    }
     let mut content = String::new();
     let mut limited = file.take(MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES.saturating_add(1));
     limited.read_to_string(&mut content).ok()?;
@@ -3502,7 +3526,14 @@ fn regular_file_no_symlink(path: &Path) -> bool {
 }
 
 fn read_regular_file_no_symlinks(path: &Path) -> Result<String, DomainError> {
-    if !regular_file_no_symlink(path) {
+    let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to inspect support bundle file {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check support bundle file permissions.".to_owned()),
+    })?;
+    if !metadata.file_type().is_file() {
         return Err(DomainError::Storage {
             message: format!(
                 "Support bundle file is not a regular non-symlink file: {}.",
@@ -3511,7 +3542,73 @@ fn read_regular_file_no_symlinks(path: &Path) -> Result<String, DomainError> {
             repair: Some("Regenerate the support bundle.".to_owned()),
         });
     }
-    fs::read_to_string(path).map_err(|error| DomainError::Storage {
+    if metadata.len() > MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Support bundle file {} exceeds the {}-byte inspect read cap.",
+                path.display(),
+                MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES
+            ),
+            repair: Some("Regenerate the support bundle without oversized files.".to_owned()),
+        });
+    }
+
+    let file = open_support_bundle_file_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata().map_err(|error| DomainError::Storage {
+        message: format!(
+            "Failed to inspect opened support bundle file {}: {error}",
+            path.display()
+        ),
+        repair: Some("Check support bundle file permissions.".to_owned()),
+    })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Support bundle file is not a regular non-symlink file after open: {}.",
+                path.display()
+            ),
+            repair: Some("Regenerate the support bundle.".to_owned()),
+        });
+    }
+    if opened_metadata.len() > MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Support bundle file {} exceeded the {}-byte inspect read cap after open.",
+                path.display(),
+                MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES
+            ),
+            repair: Some("Regenerate the support bundle without oversized files.".to_owned()),
+        });
+    }
+
+    let mut content = String::new();
+    file.take(MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES.saturating_add(1))
+        .read_to_string(&mut content)
+        .map_err(|error| DomainError::Storage {
+            message: format!(
+                "Failed to read support bundle file {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check support bundle file permissions.".to_owned()),
+        })?;
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES {
+        return Err(DomainError::Storage {
+            message: format!(
+                "Support bundle file {} exceeded the {}-byte inspect read cap while reading.",
+                path.display(),
+                MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES
+            ),
+            repair: Some("Regenerate the support bundle without oversized files.".to_owned()),
+        });
+    }
+    Ok(content)
+}
+
+fn open_support_bundle_file_for_read_no_follow(path: &Path) -> Result<fs::File, DomainError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_support_bundle_open_no_follow(&mut options);
+    options.open(path).map_err(|error| DomainError::Storage {
         message: format!(
             "Failed to read support bundle file {}: {error}",
             path.display()
@@ -3519,6 +3616,16 @@ fn read_regular_file_no_symlinks(path: &Path) -> Result<String, DomainError> {
         repair: Some("Check support bundle file permissions.".to_owned()),
     })
 }
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_support_bundle_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_support_bundle_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn compute_hash(content: &str) -> String {
     let mut hasher = Hasher::new();
@@ -4452,6 +4559,27 @@ mod tests {
         assert!(
             !report.files_found.contains(&"leak.json".to_owned()),
             "symlinked entry must not count as collected bundle evidence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_regular_file_no_symlinks_rejects_oversized_bundle_member() -> TestResult {
+        let root = unique_test_path("inspect-oversized-member");
+        fs::create_dir_all(&root).map_err(|error| format!("failed to create test dir: {error}"))?;
+        let oversized_path = root.join("oversized.json");
+        let file = fs::File::create(&oversized_path)
+            .map_err(|error| format!("failed to create oversized file: {error}"))?;
+        file.set_len(MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES.saturating_add(1))
+            .map_err(|error| format!("failed to size oversized file: {error}"))?;
+
+        let error = read_regular_file_no_symlinks(&oversized_path)
+            .expect_err("oversized support bundle member should be rejected before reading");
+
+        assert!(
+            error.message().contains("inspect read cap"),
+            "unexpected error: {}",
+            error.message()
         );
         Ok(())
     }

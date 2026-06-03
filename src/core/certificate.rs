@@ -122,6 +122,8 @@ pub const ED25519_ALGORITHM_V1: &str = "ee.ed25519.v1";
 
 /// Default key directory relative to user config.
 const KEY_DIR_NAME: &str = "ee/keys";
+const CERTIFICATE_MANIFEST_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const CERTIFICATE_PAYLOAD_MAX_BYTES: u64 = 100 * 1024 * 1024;
 
 thread_local! {
     /// Test-only override for [`CertificateVerifyReport::checked_at`] (bd-1jvge).
@@ -1371,12 +1373,13 @@ fn read_certificate_manifest(
             manifest_path.display()
         )));
     }
-    let input = fs::read_to_string(manifest_path).map_err(|error| {
-        CertificateManifestError::new(format!(
-            "failed to read certificate manifest {}: {error}",
+    if metadata.len() > CERTIFICATE_MANIFEST_MAX_BYTES {
+        return Err(CertificateManifestError::new(format!(
+            "certificate manifest {} exceeds the {CERTIFICATE_MANIFEST_MAX_BYTES}-byte cap",
             manifest_path.display()
-        ))
-    })?;
+        )));
+    }
+    let input = read_certificate_manifest_file_no_follow(manifest_path)?;
     let raw: RawCertificateManifest = serde_json::from_str(&input).map_err(|error| {
         CertificateManifestError::new(format!(
             "failed to parse certificate manifest {}: {error}",
@@ -1437,6 +1440,70 @@ fn reject_certificate_manifest_symlink_chain(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+fn read_certificate_manifest_file_no_follow(
+    manifest_path: &Path,
+) -> Result<String, CertificateManifestError> {
+    let file =
+        open_certificate_manifest_file_for_read_no_follow(manifest_path).map_err(|error| {
+            CertificateManifestError::new(format!(
+                "failed to read certificate manifest {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    let opened_metadata = file.metadata().map_err(|error| {
+        CertificateManifestError::new(format!(
+            "failed to inspect opened certificate manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(CertificateManifestError::new(format!(
+            "certificate manifest {} is not a regular file after open",
+            manifest_path.display()
+        )));
+    }
+    if opened_metadata.len() > CERTIFICATE_MANIFEST_MAX_BYTES {
+        return Err(CertificateManifestError::new(format!(
+            "certificate manifest {} exceeded the {CERTIFICATE_MANIFEST_MAX_BYTES}-byte cap after open",
+            manifest_path.display()
+        )));
+    }
+
+    let mut input = String::new();
+    file.take(CERTIFICATE_MANIFEST_MAX_BYTES.saturating_add(1))
+        .read_to_string(&mut input)
+        .map_err(|error| {
+            CertificateManifestError::new(format!(
+                "failed to read certificate manifest {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    if u64::try_from(input.len()).unwrap_or(u64::MAX) > CERTIFICATE_MANIFEST_MAX_BYTES {
+        return Err(CertificateManifestError::new(format!(
+            "certificate manifest {} exceeded the {CERTIFICATE_MANIFEST_MAX_BYTES}-byte cap while reading",
+            manifest_path.display()
+        )));
+    }
+    Ok(input)
+}
+
+fn open_certificate_manifest_file_for_read_no_follow(manifest_path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_certificate_manifest_open_no_follow(&mut options);
+    options.open(manifest_path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_certificate_manifest_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_certificate_manifest_open_no_follow(_options: &mut OpenOptions) {}
 
 fn convert_raw_certificate(
     index: usize,
@@ -1763,8 +1830,7 @@ fn database_payload_hash_matches(record: &StoredCertificateRecord) -> Result<boo
         return Ok(false);
     };
     let payload_path = resolve_database_payload_path_no_symlinks(record, Path::new(payload_path))?;
-    ensure_certificate_payload_regular_file(&payload_path)?;
-    let payload = fs::read(payload_path)?;
+    let payload = read_certificate_payload_file_no_follow(&payload_path)?;
     let actual = match record.hash_algo.as_str() {
         "blake3" => format!("blake3:{}", blake3::hash(&payload).to_hex()),
         "sha256" => {
@@ -1779,11 +1845,57 @@ fn database_payload_hash_matches(record: &StoredCertificateRecord) -> Result<boo
 
 fn read_manifest_payload(manifest_dir: &Path, payload_path: &Path) -> io::Result<Vec<u8>> {
     let payload_path = resolve_manifest_payload_path_no_symlinks(manifest_dir, payload_path)?;
-    ensure_certificate_payload_regular_file(&payload_path)?;
-    fs::read(payload_path)
+    read_certificate_payload_file_no_follow(&payload_path)
 }
 
-fn ensure_certificate_payload_regular_file(path: &Path) -> io::Result<()> {
+fn read_certificate_payload_file_no_follow(path: &Path) -> io::Result<Vec<u8>> {
+    let metadata = ensure_certificate_payload_regular_file(path)?;
+    if metadata.len() > CERTIFICATE_PAYLOAD_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "certificate payload path exceeds the {CERTIFICATE_PAYLOAD_MAX_BYTES}-byte cap: {}",
+                path.display()
+            ),
+        ));
+    }
+    let file = open_certificate_payload_file_for_read_no_follow(path)?;
+    let opened_metadata = file.metadata()?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "certificate payload path is not a regular file after open: {}",
+                path.display()
+            ),
+        ));
+    }
+    if opened_metadata.len() > CERTIFICATE_PAYLOAD_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "certificate payload path exceeded the {CERTIFICATE_PAYLOAD_MAX_BYTES}-byte cap after open: {}",
+                path.display()
+            ),
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    file.take(CERTIFICATE_PAYLOAD_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > CERTIFICATE_PAYLOAD_MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "certificate payload path exceeded the {CERTIFICATE_PAYLOAD_MAX_BYTES}-byte cap while reading: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn ensure_certificate_payload_regular_file(path: &Path) -> io::Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(io::Error::new(
@@ -1794,8 +1906,25 @@ fn ensure_certificate_payload_regular_file(path: &Path) -> io::Result<()> {
             ),
         ));
     }
-    Ok(())
+    Ok(metadata)
 }
+
+fn open_certificate_payload_file_for_read_no_follow(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_certificate_payload_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_certificate_payload_open_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_certificate_payload_open_no_follow(_options: &mut OpenOptions) {}
 
 fn resolve_database_payload_path_no_symlinks(
     record: &StoredCertificateRecord,
@@ -3228,6 +3357,23 @@ mod tests {
     }
 
     #[test]
+    fn manifest_backed_certificate_rejects_oversized_manifest_before_read() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let manifest_path = dir.path().join("certificates.json");
+        let file = fs::File::create(&manifest_path).map_err(|error| error.to_string())?;
+        file.set_len(CERTIFICATE_MANIFEST_MAX_BYTES.saturating_add(1))
+            .map_err(|error| error.to_string())?;
+
+        let error = read_certificate_manifest(&manifest_path)
+            .expect_err("oversized certificate manifest should be rejected before parsing");
+
+        ensure(
+            error.message.contains("byte cap"),
+            "oversized manifest error cites byte cap",
+        )
+    }
+
+    #[test]
     fn manifest_backed_certificate_verifies_local_content_attestation() -> TestResult {
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let payload = r#"{"packHash":"signed","selected":["mem_01"]}"#;
@@ -3455,6 +3601,28 @@ mod tests {
         ensure(
             error.to_string().contains("not a regular file"),
             "non-regular manifest payload message",
+        )
+    }
+
+    #[test]
+    fn manifest_payload_read_rejects_oversized_payload_before_allocation() -> TestResult {
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let payload_path = dir.path().join("payload.json");
+        let file = fs::File::create(&payload_path).map_err(|error| error.to_string())?;
+        file.set_len(CERTIFICATE_PAYLOAD_MAX_BYTES.saturating_add(1))
+            .map_err(|error| error.to_string())?;
+
+        let error = read_manifest_payload(dir.path(), Path::new("payload.json"))
+            .expect_err("oversized manifest payload should be rejected before reading");
+
+        ensure_equal(
+            &error.kind(),
+            &io::ErrorKind::InvalidData,
+            "oversized manifest payload error kind",
+        )?;
+        ensure(
+            error.to_string().contains("byte cap"),
+            "oversized manifest payload message cites byte cap",
         )
     }
 

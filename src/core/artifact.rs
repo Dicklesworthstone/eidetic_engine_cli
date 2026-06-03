@@ -772,13 +772,45 @@ fn prepare_file_artifact(
     // grown). Same defense-in-depth pattern as `read_cache_entry_file`
     // in src/cache/pack_l2.rs (8ba93c0e) and `read_limited_utf8_file`
     // in src/hooks/installer.rs.
-    let mut file = fs::File::open(&canonical_path).map_err(|error| DomainError::Storage {
+    let file = open_artifact_file_for_read_no_follow(&canonical_path).map_err(|error| {
+        DomainError::Storage {
+            message: format!(
+                "Failed to open artifact {}: {error}",
+                canonical_path.display()
+            ),
+            repair: Some("Check artifact file permissions and retry.".to_string()),
+        }
+    })?;
+    let opened_metadata = file.metadata().map_err(|error| DomainError::Storage {
         message: format!(
-            "Failed to open artifact {}: {error}",
+            "Failed to inspect opened artifact {}: {error}",
             canonical_path.display()
         ),
         repair: Some("Check artifact file permissions and retry.".to_string()),
     })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Artifact path is not a regular file after open: {}",
+                canonical_path.display()
+            ),
+            repair: Some(
+                "Register a regular file, log, command output, fixture, or bundle artifact."
+                    .to_string(),
+            ),
+        });
+    }
+    if opened_metadata.len() > max_bytes {
+        return Err(DomainError::PolicyDenied {
+            message: format!(
+                "Artifact grew past the {max_bytes} byte limit between stat and open."
+            ),
+            repair: Some(
+                "Register a smaller log/snippet artifact or raise --max-bytes intentionally."
+                    .to_string(),
+            ),
+        });
+    }
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1))
         .read_to_end(&mut bytes)
@@ -859,6 +891,23 @@ fn prepare_file_artifact(
         snippet_hash,
     ))
 }
+
+fn open_artifact_file_for_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_artifact_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_artifact_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_artifact_open_no_follow(_options: &mut fs::OpenOptions) {}
 
 fn prepare_external_artifact(
     external_ref: &str,
@@ -1651,6 +1700,32 @@ mod tests {
         ensure(
             error.message().contains("regular file"),
             "non-regular artifact error",
+        )
+    }
+
+    #[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+    #[test]
+    fn artifact_final_open_rejects_symlink_target_swap() -> TestResult {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let target = dir.path().join("target.txt");
+        let link = dir.path().join("artifact.txt");
+        std::fs::write(&target, "artifact content").map_err(|error| error.to_string())?;
+        symlink(&target, &link).map_err(|error| error.to_string())?;
+
+        let result = open_artifact_file_for_read_no_follow(&link);
+
+        ensure(
+            result.is_err(),
+            "final artifact open must reject symlink paths",
+        )?;
+        ensure(
+            std::fs::symlink_metadata(&link)
+                .map_err(|error| error.to_string())?
+                .file_type()
+                .is_symlink(),
+            "symlink should remain available for inspection",
         )
     }
 

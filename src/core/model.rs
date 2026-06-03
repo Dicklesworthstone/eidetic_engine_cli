@@ -7,7 +7,7 @@
 //! without scraping `ee index status`.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -56,6 +56,14 @@ const DEFAULT_RERANK_MODEL_ARTIFACT_NAME: &str = "rerank-default-v1.tar.zst";
 
 pub const RERANK_MODEL_MANIFEST_SCHEMA_V1: &str = "ee.model_manifest.v1";
 pub const MODEL_FETCH_SCHEMA_V1: &str = "ee.model_fetch.v1";
+
+#[derive(Debug)]
+struct VerifiedRerankArtifact {
+    bytes: Vec<u8>,
+    content_length_bytes: u64,
+    hash_blake3: String,
+    hash_sha256: String,
+}
 
 /// Options for `ee model status`.
 #[derive(Clone, Debug)]
@@ -958,41 +966,11 @@ pub fn fetch_rerank_model(
 
     let workspace_path = resolve_workspace_path(options.workspace_path)?;
     let database_path = resolved_database_path(&workspace_path, options.database_path)?;
-    let source_bytes = fs::read(source_path).map_err(|error| DomainError::Configuration {
-        message: format!(
-            "Failed to read rerank model artifact {}: {error}",
-            source_path.display()
-        ),
-        repair: Some("Pass a readable artifact path to --from-file.".to_string()),
-    })?;
-    let content_length_bytes =
-        u64::try_from(source_bytes.len()).map_err(|error| DomainError::Configuration {
-            message: format!("Rerank model artifact is too large to measure: {error}"),
-            repair: Some("Use the manifest-sized rerank artifact.".to_string()),
-        })?;
-    let hash_blake3 = blake3_hash_hex(&source_bytes);
-    let hash_sha256 = sha256_hash_hex(&source_bytes);
-    if content_length_bytes != manifest.content_length_bytes {
-        return Err(DomainError::Configuration {
-            message: format!(
-                "Rerank model artifact length mismatch: expected {}, found {}",
-                manifest.content_length_bytes, content_length_bytes
-            ),
-            repair: Some(format!(
-                "Use the artifact documented in src/data/rerank_model_manifest.json for {}.",
-                manifest.model_id
-            )),
-        });
-    }
-    if hash_blake3 != manifest.hash_blake3 || hash_sha256 != manifest.hash_sha256 {
-        return Err(DomainError::Configuration {
-            message: "Rerank model artifact hash mismatch against bundled manifest.".to_string(),
-            repair: Some(format!(
-                "Re-fetch {} from the manifest source and rerun with --from-file.",
-                manifest.model_id
-            )),
-        });
-    }
+    let source_artifact =
+        read_verified_rerank_model_artifact(source_path, &manifest, "rerank model artifact")?;
+    let content_length_bytes = source_artifact.content_length_bytes;
+    let hash_blake3 = source_artifact.hash_blake3.clone();
+    let hash_sha256 = source_artifact.hash_sha256.clone();
 
     let store_root = options
         .model_store_root
@@ -1001,6 +979,7 @@ pub fn fetch_rerank_model(
         .unwrap_or_else(default_model_store_root)?;
     let stored_dir = store_root.join("rerank").join(&manifest.model_id);
     let stored_path = stored_dir.join(DEFAULT_RERANK_MODEL_ARTIFACT_NAME);
+    ensure_no_model_artifact_symlink_components(&stored_dir, "model store directory")?;
     fs::create_dir_all(&stored_dir).map_err(|error| DomainError::Configuration {
         message: format!(
             "Failed to create rerank model store {}: {error}",
@@ -1008,34 +987,38 @@ pub fn fetch_rerank_model(
         ),
         repair: Some("Check model store permissions.".to_string()),
     })?;
-    let copied = if stored_path.exists() {
-        let existing_bytes =
-            fs::read(&stored_path).map_err(|error| DomainError::Configuration {
-                message: format!(
-                    "Failed to read existing rerank model artifact {}: {error}",
-                    stored_path.display()
-                ),
-                repair: Some("Move the bad artifact aside and rerun model fetch.".to_string()),
-            })?;
-        if blake3_hash_hex(&existing_bytes) != manifest.hash_blake3 {
+    ensure_no_model_artifact_symlink_components(&stored_dir, "model store directory")?;
+    let copied = match fs::symlink_metadata(&stored_path) {
+        Ok(_) => {
+            let existing_artifact = read_verified_rerank_model_artifact(
+                &stored_path,
+                &manifest,
+                "existing rerank model artifact",
+            )?;
+            if existing_artifact.hash_blake3 != manifest.hash_blake3 {
+                return Err(DomainError::Configuration {
+                    message: format!(
+                        "Existing rerank model artifact {} does not match the bundled manifest",
+                        stored_path.display()
+                    ),
+                    repair: Some("Move the bad artifact aside and rerun model fetch.".to_string()),
+                });
+            }
+            false
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            write_rerank_model_artifact(&stored_path, &source_artifact.bytes)?;
+            true
+        }
+        Err(error) => {
             return Err(DomainError::Configuration {
                 message: format!(
-                    "Existing rerank model artifact {} does not match the bundled manifest",
-                    stored_path.display()
+                    "Failed to inspect existing rerank model artifact {}: {error}",
+                    stored_path.display(),
                 ),
                 repair: Some("Move the bad artifact aside and rerun model fetch.".to_string()),
             });
         }
-        false
-    } else {
-        fs::copy(source_path, &stored_path).map_err(|error| DomainError::Configuration {
-            message: format!(
-                "Failed to copy rerank model artifact to {}: {error}",
-                stored_path.display()
-            ),
-            repair: Some("Check model store permissions and free space.".to_string()),
-        })?;
-        true
     };
 
     let connection = DbConnection::open_file(&database_path).map_err(|error| {
@@ -1179,6 +1162,198 @@ pub fn fetch_rerank_model(
         hash_sha256,
         registry_entry: ModelRegistryEntryView::from_stored(registry_entry),
     })
+}
+
+fn read_verified_rerank_model_artifact(
+    path: &Path,
+    manifest: &RerankModelManifest,
+    label: &str,
+) -> Result<VerifiedRerankArtifact, DomainError> {
+    ensure_no_model_artifact_symlink_components(path, label)?;
+    let metadata = fs::symlink_metadata(path).map_err(|error| DomainError::Configuration {
+        message: format!("Failed to inspect {label} {}: {error}", path.display()),
+        repair: Some("Pass a readable artifact path to --from-file.".to_string()),
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(DomainError::Configuration {
+            message: format!("{label} {} is not a regular file", path.display()),
+            repair: Some("Pass a regular model artifact file.".to_string()),
+        });
+    }
+    if metadata.len() != manifest.content_length_bytes {
+        return Err(rerank_artifact_length_mismatch(
+            path,
+            manifest,
+            metadata.len(),
+        ));
+    }
+
+    let file = open_model_artifact_file_for_read_no_follow(path).map_err(|error| {
+        DomainError::Configuration {
+            message: format!("Failed to read {label} {}: {error}", path.display()),
+            repair: Some("Pass a readable artifact path to --from-file.".to_string()),
+        }
+    })?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to inspect opened {label} {}: {error}",
+                path.display()
+            ),
+            repair: Some("Pass a readable artifact path to --from-file.".to_string()),
+        })?;
+    if !opened_metadata.file_type().is_file() {
+        return Err(DomainError::Configuration {
+            message: format!("Opened {label} {} is not a regular file", path.display()),
+            repair: Some("Pass a regular model artifact file.".to_string()),
+        });
+    }
+    if opened_metadata.len() != manifest.content_length_bytes {
+        return Err(rerank_artifact_length_mismatch(
+            path,
+            manifest,
+            opened_metadata.len(),
+        ));
+    }
+
+    let mut bytes = Vec::new();
+    file.take(manifest.content_length_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| DomainError::Configuration {
+            message: format!("Failed to read {label} {}: {error}", path.display()),
+            repair: Some("Pass a readable artifact path to --from-file.".to_string()),
+        })?;
+    let content_length_bytes =
+        u64::try_from(bytes.len()).map_err(|error| DomainError::Configuration {
+            message: format!("Rerank model artifact is too large to measure: {error}"),
+            repair: Some("Use the manifest-sized rerank artifact.".to_string()),
+        })?;
+    if content_length_bytes != manifest.content_length_bytes {
+        return Err(rerank_artifact_length_mismatch(
+            path,
+            manifest,
+            content_length_bytes,
+        ));
+    }
+
+    let hash_blake3 = blake3_hash_hex(&bytes);
+    let hash_sha256 = sha256_hash_hex(&bytes);
+    if hash_blake3 != manifest.hash_blake3 || hash_sha256 != manifest.hash_sha256 {
+        return Err(DomainError::Configuration {
+            message: "Rerank model artifact hash mismatch against bundled manifest.".to_string(),
+            repair: Some(format!(
+                "Re-fetch {} from the manifest source and rerun with --from-file.",
+                manifest.model_id
+            )),
+        });
+    }
+
+    Ok(VerifiedRerankArtifact {
+        bytes,
+        content_length_bytes,
+        hash_blake3,
+        hash_sha256,
+    })
+}
+
+fn rerank_artifact_length_mismatch(
+    path: &Path,
+    manifest: &RerankModelManifest,
+    actual_len: u64,
+) -> DomainError {
+    DomainError::Configuration {
+        message: format!(
+            "Rerank model artifact length mismatch for {}: expected {}, found {}",
+            path.display(),
+            manifest.content_length_bytes,
+            actual_len
+        ),
+        repair: Some(format!(
+            "Use the artifact documented in src/data/rerank_model_manifest.json for {}.",
+            manifest.model_id
+        )),
+    }
+}
+
+fn write_rerank_model_artifact(path: &Path, bytes: &[u8]) -> Result<(), DomainError> {
+    ensure_no_model_artifact_symlink_components(path, "model artifact destination")?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    configure_model_artifact_open_no_follow(&mut options);
+    let mut file = options
+        .open(path)
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to copy rerank model artifact to {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check model store permissions and free space.".to_string()),
+        })?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| DomainError::Configuration {
+            message: format!(
+                "Failed to write rerank model artifact to {}: {error}",
+                path.display()
+            ),
+            repair: Some("Check model store permissions and free space.".to_string()),
+        })
+}
+
+fn open_model_artifact_file_for_read_no_follow(path: &Path) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    configure_model_artifact_open_no_follow(&mut options);
+    options.open(path)
+}
+
+#[cfg(all(unix, not(any(target_os = "espidf", target_os = "horizon"))))]
+fn configure_model_artifact_open_no_follow(options: &mut fs::OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    options.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+}
+
+#[cfg(not(all(unix, not(any(target_os = "espidf", target_os = "horizon")))))]
+fn configure_model_artifact_open_no_follow(_options: &mut fs::OpenOptions) {}
+
+fn ensure_no_model_artifact_symlink_components(
+    path: &Path,
+    label: &str,
+) -> Result<(), DomainError> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component.as_os_str());
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(DomainError::Configuration {
+                    message: format!(
+                        "{label} {} contains symlink component {}",
+                        path.display(),
+                        current.display()
+                    ),
+                    repair: Some("Use real, non-symlink model artifact paths.".to_string()),
+                });
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) =>
+            {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(DomainError::Configuration {
+                    message: format!(
+                        "Failed to inspect {label} path component {}: {error}",
+                        current.display()
+                    ),
+                    repair: Some("Check model artifact path permissions.".to_string()),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn resolve_rerank_model_manifest(model_id: &str) -> Result<RerankModelManifest, DomainError> {
@@ -1439,6 +1614,78 @@ mod tests {
             .canonicalize()
             .map_err(|error| format!("canonicalize: {error}"))?;
         Ok((temp, workspace_path))
+    }
+
+    fn manifest_for_artifact(bytes: &[u8]) -> Result<RerankModelManifest, String> {
+        let mut manifest =
+            bundled_rerank_model_manifest().map_err(|error| error.message().to_owned())?;
+        manifest.content_length_bytes =
+            u64::try_from(bytes.len()).map_err(|error| error.to_string())?;
+        manifest.hash_blake3 = blake3_hash_hex(bytes);
+        manifest.hash_sha256 = sha256_hash_hex(bytes);
+        Ok(manifest)
+    }
+
+    #[test]
+    fn rerank_model_artifact_read_rejects_length_mismatch_before_hashing() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let path = temp.path().join("rerank-default-v1.tar.zst");
+        fs::write(&path, b"too long").map_err(|error| format!("write model artifact: {error}"))?;
+        let manifest = manifest_for_artifact(b"short")?;
+
+        let error = read_verified_rerank_model_artifact(&path, &manifest, "rerank model artifact")
+            .expect_err("length-mismatched model artifact should be rejected");
+
+        ensure(
+            error.message().contains("length mismatch"),
+            "length mismatch error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rerank_model_artifact_read_rejects_symlinked_source() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let real_path = temp.path().join("real.tar.zst");
+        let linked_path = temp.path().join("linked.tar.zst");
+        fs::write(&real_path, b"model bytes")
+            .map_err(|error| format!("write model artifact: {error}"))?;
+        std::os::unix::fs::symlink(&real_path, &linked_path)
+            .map_err(|error| format!("symlink model artifact: {error}"))?;
+        let manifest = manifest_for_artifact(b"model bytes")?;
+
+        let error =
+            read_verified_rerank_model_artifact(&linked_path, &manifest, "rerank model artifact")
+                .expect_err("symlinked model artifact source should be rejected");
+
+        ensure(
+            error.message().contains("symlink component"),
+            "symlinked model source error",
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rerank_model_artifact_write_rejects_existing_symlink_destination() -> TestResult {
+        let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+        let real_path = temp.path().join("real.tar.zst");
+        let linked_path = temp.path().join("linked.tar.zst");
+        fs::write(&real_path, b"outside")
+            .map_err(|error| format!("write existing artifact: {error}"))?;
+        std::os::unix::fs::symlink(&real_path, &linked_path)
+            .map_err(|error| format!("symlink destination: {error}"))?;
+
+        let error = write_rerank_model_artifact(&linked_path, b"model bytes")
+            .expect_err("symlinked model destination should be rejected");
+
+        ensure(
+            error.message().contains("symlink component"),
+            "symlinked model destination error",
+        )?;
+        ensure(
+            fs::read(&real_path).map_err(|error| error.to_string())? == b"outside",
+            "symlink destination target must remain unchanged",
+        )
     }
 
     #[test]
