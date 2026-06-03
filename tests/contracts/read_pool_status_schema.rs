@@ -4,6 +4,7 @@
 //! `docs/schemas/ee.status.v1.json` so the read-pool report cannot drift
 //! between the Rust type, the JSON renderer, and the published schema.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,6 +21,47 @@ type TestResult = Result<(), String>;
 
 const STATUS_SCHEMA_PATH: &str = "docs/schemas/ee.status.v1.json";
 const DOCTOR_SCHEMA_PATH: &str = "docs/schemas/ee.doctor.v1.json";
+const STATUS_DATA_REQUIRED: &[&str] = &[
+    "command",
+    "version",
+    "workspace",
+    "posture",
+    "capabilities",
+    "runtime",
+    "read_pool",
+    "wal",
+    "shardFanout",
+    "packBudgetBuckets",
+    "qos",
+    "rchWorkerPressure",
+    "verificationPosture",
+    "verificationLedger",
+    "hostCalibration",
+    "memoryHealth",
+    "curationHealth",
+    "feedbackHealth",
+    "singleFlight",
+    "graphCompute",
+    "graphSnapshotArtifact",
+    "derivedAssets",
+    "agentInventory",
+    "degraded",
+];
+const DOCTOR_DATA_REQUIRED: &[&str] = &[
+    "command",
+    "version",
+    "posture",
+    "healthy",
+    "singleFlight",
+    "flightRecorder",
+    "qos",
+    "rchWorkerPressure",
+    "verificationPosture",
+    "verificationLedger",
+    "hostCalibration",
+    "meshAutoEnrollment",
+    "checks",
+];
 const READ_POOL_FIELDS: &[&str] = &[
     "active",
     "idle",
@@ -70,6 +112,22 @@ fn read_json(relative: &str) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|error| format!("parse {}: {error}", path.display()))
 }
 
+fn collect_string_set(json: &Value, pointer: &str) -> Result<BTreeSet<String>, String> {
+    let array = json
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{pointer} missing array"))?;
+    array
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| format!("{pointer} contains non-string value {value}"))
+        })
+        .collect()
+}
+
 fn ensure_string_array_contains(json: &Value, pointer: &str, needle: &str) -> TestResult {
     let array = json
         .pointer(pointer)
@@ -84,6 +142,21 @@ fn ensure_string_array_contains(json: &Value, pointer: &str, needle: &str) -> Te
     } else {
         Err(format!(
             "{pointer} does not contain {needle:?}; got {array:?}"
+        ))
+    }
+}
+
+fn ensure_string_array_eq(json: &Value, pointer: &str, expected: &[&str]) -> TestResult {
+    let actual = collect_string_set(json, pointer)?;
+    let expected = expected
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "{pointer} required fields drifted; expected {expected:?}, got {actual:?}"
         ))
     }
 }
@@ -148,9 +221,7 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
 
     // `read_pool` must appear in the envelope's `data.required` list so the
     // schema refuses status payloads that omit the field.
-    ensure_string_array_contains(&schema, "/properties/data/required", "read_pool")?;
-    ensure_string_array_contains(&schema, "/properties/data/required", "wal")?;
-    ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
+    ensure_string_array_eq(&schema, "/properties/data/required", STATUS_DATA_REQUIRED)?;
 
     // The explicit `standard` field profile must emit `read_pool`, so the
     // per-profile registry stays consistent with the schema's required-set
@@ -178,9 +249,7 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     // and every scalar counter typed as a non-negative integer.
     ensure_str_eq(&schema, "/$defs/readPoolStatus/type", "object")?;
     ensure_bool_eq(&schema, "/$defs/readPoolStatus/additionalProperties", false)?;
-    for counter in READ_POOL_FIELDS {
-        ensure_string_array_contains(&schema, "/$defs/readPoolStatus/required", counter)?;
-    }
+    ensure_string_array_eq(&schema, "/$defs/readPoolStatus/required", READ_POOL_FIELDS)?;
     ensure_object_keys_eq(
         &schema,
         "/$defs/readPoolStatus/properties",
@@ -206,6 +275,11 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
         "/$defs/readPoolStatus/properties/acquire_wait/properties",
         ACQUIRE_WAIT_FIELDS,
     )?;
+    ensure_string_array_eq(
+        &schema,
+        "/$defs/readPoolStatus/properties/acquire_wait/required",
+        ACQUIRE_WAIT_FIELDS,
+    )?;
     for counter in ACQUIRE_WAIT_FIELDS {
         let type_pointer =
             format!("/$defs/readPoolStatus/properties/acquire_wait/properties/{counter}/type");
@@ -219,9 +293,7 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
         .ok_or_else(|| "checkpoint_blocked_by object schema missing".to_string())?;
     ensure_bool_eq(checkpoint_blocker, "/additionalProperties", false)?;
     ensure_object_keys_eq(checkpoint_blocker, "/properties", CHECKPOINT_BLOCKER_FIELDS)?;
-    for field in CHECKPOINT_BLOCKER_FIELDS {
-        ensure_string_array_contains(checkpoint_blocker, "/required", field)?;
-    }
+    ensure_string_array_eq(checkpoint_blocker, "/required", CHECKPOINT_BLOCKER_FIELDS)?;
     for counter in ["pin_id", "age_ms", "max_pin_duration_ms"] {
         let type_pointer = format!("/properties/{counter}/type");
         let minimum_pointer = format!("/properties/{counter}/minimum");
@@ -232,8 +304,8 @@ fn read_pool_status_schema_declares_counters_and_wait_summary() -> TestResult {
     ensure_str_eq(&schema, "/$defs/walStatus/type", "object")?;
     ensure_bool_eq(&schema, "/$defs/walStatus/additionalProperties", false)?;
     ensure_object_keys_eq(&schema, "/$defs/walStatus/properties", WAL_FIELDS)?;
+    ensure_string_array_eq(&schema, "/$defs/walStatus/required", WAL_FIELDS)?;
     for counter in WAL_FIELDS {
-        ensure_string_array_contains(&schema, "/$defs/walStatus/required", counter)?;
         let type_pointer = format!("/$defs/walStatus/properties/{counter}/type");
         let minimum_pointer = format!("/$defs/walStatus/properties/{counter}/minimum");
         ensure_str_eq(&schema, &type_pointer, "integer")?;
@@ -254,9 +326,7 @@ fn qos_status_schema_declares_compact_lane_summary() -> TestResult {
     )?;
     ensure_str_eq(&schema, "/$defs/qosStatus/type", "object")?;
     ensure_bool_eq(&schema, "/$defs/qosStatus/additionalProperties", false)?;
-    for field in QOS_STATUS_FIELDS {
-        ensure_string_array_contains(&schema, "/$defs/qosStatus/required", field)?;
-    }
+    ensure_string_array_eq(&schema, "/$defs/qosStatus/required", QOS_STATUS_FIELDS)?;
     ensure_object_keys_eq(
         &schema,
         "/$defs/qosStatus/properties",
@@ -300,7 +370,7 @@ fn qos_status_schema_declares_compact_lane_summary() -> TestResult {
 fn qos_doctor_schema_declares_compact_lane_summary() -> TestResult {
     let schema = read_json(DOCTOR_SCHEMA_PATH)?;
 
-    ensure_string_array_contains(&schema, "/properties/data/required", "qos")?;
+    ensure_string_array_eq(&schema, "/properties/data/required", DOCTOR_DATA_REQUIRED)?;
     ensure_string_array_contains(&schema, "/field_presets/summary", "qos")?;
     ensure_string_array_contains(&schema, "/field_presets/standard", "qos")?;
     ensure_str_eq(
@@ -310,9 +380,7 @@ fn qos_doctor_schema_declares_compact_lane_summary() -> TestResult {
     )?;
     ensure_str_eq(&schema, "/$defs/qosStatus/type", "object")?;
     ensure_bool_eq(&schema, "/$defs/qosStatus/additionalProperties", false)?;
-    for field in QOS_STATUS_FIELDS {
-        ensure_string_array_contains(&schema, "/$defs/qosStatus/required", field)?;
-    }
+    ensure_string_array_eq(&schema, "/$defs/qosStatus/required", QOS_STATUS_FIELDS)?;
     ensure_object_keys_eq(
         &schema,
         "/$defs/qosStatus/properties",
