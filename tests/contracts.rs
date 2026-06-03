@@ -427,6 +427,9 @@ mod qos_lanes_e2e_contract;
 #[path = "contracts/spec_pack_schema.rs"]
 mod spec_pack_schema;
 
+#[path = "contracts/pack_compression_manifest_schema.rs"]
+mod pack_compression_manifest_schema;
+
 #[path = "contracts/prompt_budget_report.rs"]
 mod prompt_budget_report;
 
