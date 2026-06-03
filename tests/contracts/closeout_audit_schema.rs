@@ -377,18 +377,18 @@ fn closeout_audit_srr6_closeout_required_pins_deferred_rationale_gate() -> TestR
     // deferred_dependencies_missing_rationale so a future refactor
     // can't drop the gate.
     let schema = load_schema()?;
+    require_required_fields(
+        &schema,
+        "/$defs/srr6Closeout/required",
+        REQUIRED_SRR6_CLOSEOUT,
+        "srr6_closeout",
+    )?;
     let required = collect_strings(
         schema
             .pointer("/$defs/srr6Closeout/required")
             .unwrap_or(&Value::Null),
         "srr6_closeout.required",
     )?;
-    for field in REQUIRED_SRR6_CLOSEOUT {
-        ensure(
-            required.contains(*field),
-            format!("srr6_closeout.required missing {field}; got {required:?}"),
-        )?;
-    }
     ensure(
         required.contains("deferred_dependencies_missing_rationale"),
         "srr6_closeout.required must include deferred_dependencies_missing_rationale (bd-2vu8m deferred-with-rationale gate)",
