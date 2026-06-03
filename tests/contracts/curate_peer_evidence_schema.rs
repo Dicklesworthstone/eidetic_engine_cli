@@ -34,6 +34,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -98,6 +99,10 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    Ok(collect_strings(node, ctx)?.into_iter().collect())
+}
+
 #[test]
 fn ee_curate_peer_evidence_v1_schema_has_expected_envelope() -> TestResult {
     let schema = load_schema()?;
@@ -114,13 +119,17 @@ fn ee_curate_peer_evidence_v1_schema_has_expected_envelope() -> TestResult {
         schema_const == SCHEMA_NAME,
         format!("expected properties.schema.const = {SCHEMA_NAME}; got: {schema_const}"),
     )?;
-    let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.iter().any(|r| r == field),
-            format!("top-level `required` is missing `{field}`; got: {required:?}"),
-        )?;
-    }
+    let actual = collect_string_set(&schema["required"], "top-level required")?;
+    let expected = REQUIRED_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )?;
     Ok(())
 }
 
