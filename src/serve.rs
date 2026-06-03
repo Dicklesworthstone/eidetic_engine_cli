@@ -265,7 +265,6 @@ pub struct ServeForegroundOnceReport {
     pub accepted: ServeAcceptedConnection,
 }
 
-#[must_use]
 pub fn serve_startup_report_json(
     options: &ServeStartupOptions,
     token: Option<&str>,
@@ -1247,12 +1246,10 @@ fn serve_token_posture(token: Option<&str>) -> ServeTokenPosture {
             state: "missing",
             repair: Some("Set EE_SERVE_TOKEN to at least 32 random bytes before serving HTTP."),
         },
-        Some(value) if value.as_bytes().len().saturating_mul(8) < MIN_SERVE_TOKEN_BITS => {
-            ServeTokenPosture {
-                state: "weak",
-                repair: Some("Use at least 32 random bytes of bearer-token material."),
-            }
-        }
+        Some(value) if value.len().saturating_mul(8) < MIN_SERVE_TOKEN_BITS => ServeTokenPosture {
+            state: "weak",
+            repair: Some("Use at least 32 random bytes of bearer-token material."),
+        },
         Some(_) => ServeTokenPosture {
             state: "configured",
             repair: None,
