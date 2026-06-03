@@ -10,6 +10,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -90,6 +91,10 @@ fn collect_strings(node: &Value, ctx: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+fn collect_string_set(node: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    Ok(collect_strings(node, ctx)?.into_iter().collect())
+}
+
 #[test]
 fn peer_conflict_v1_schema_has_expected_envelope() -> TestResult {
     let schema = load_schema()?;
@@ -117,6 +122,22 @@ fn peer_conflict_v1_schema_has_expected_envelope() -> TestResult {
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn peer_conflict_v1_required_matrix_matches_schema_required_array() -> TestResult {
+    let schema = load_schema()?;
+    let actual = collect_string_set(&schema["required"], "top-level required")?;
+    let expected = REQUIRED_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
 
 #[test]
