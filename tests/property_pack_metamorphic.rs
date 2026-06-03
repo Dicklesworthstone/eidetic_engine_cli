@@ -31,17 +31,18 @@
 //!   determinism volatile-strip helper at determinism_unit.rs:
 //!   `strip_volatile`). Catches drift in any envelope field other
 //!   than pack.hash that the existing test silently tolerates.
-//! - **MR5 — `search.graph_weight = 0` invariance.** With the graph
+//! - **MR5 — `graph.ppr.alpha = 0` invariance.** With the graph
 //!   contribution explicitly muted via `ee config set
-//!   search.graph_weight 0`, two `ee context` invocations against
-//!   the same workspace must produce byte-identical envelopes.
-//!   This is the "no graph features change the answer" property:
-//!   if a future change makes graph_weight=0 still leak graph state
+//!   graph.ppr.alpha 0`, two `ee context` invocations against the
+//!   same workspace must produce byte-identical envelopes. This is
+//!   the "no graph features change the answer" property: if a
+//!   future change makes a zero PPR weight still leak graph state
 //!   into selection, the byte-equality fails here. The bd-2m607
-//!   spec also calls out a stronger form (selection IDs identical
-//!   between stale and fresh graph snapshots when graph_weight=0);
-//!   that form requires snapshot manipulation infrastructure that
-//!   does not exist at HEAD and is filed as a follow-up TODO.
+//!   spec also calls out a stronger form: selection IDs identical
+//!   between stale and fresh graph snapshots when graph contribution is zero.
+//!   `pack_selection_ids_identical_between_fresh_and_stale_graph_snapshots_under_graph_ppr_alpha_zero`
+//!   pins that stronger MR5b form by marking the latest memory-link
+//!   snapshot stale inside a temporary workspace.
 //!
 //! Each MR runs `ee` as a child process so cross-process state leaks
 //! surface even when single-process library tests would not. This
@@ -57,6 +58,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ee::db::{
+    CreateMemoryLinkInput, DbConnection, GraphSnapshotStatus, GraphSnapshotType,
+    MemoryLinkRelation, MemoryLinkSource,
+};
 use serde_json::Value as JsonValue;
 
 type TestResult = Result<(), String>;
@@ -152,19 +157,129 @@ fn seed_workspace_with_basic_corpus(workspace: &Path) -> TestResult {
         "Agent handoff: preserve provenance fields before pack assembly.",
     ];
     for content in memories {
-        run_ee_json(
-            workspace,
-            &[
-                "remember",
-                content,
-                "--level",
-                "procedural",
-                "--kind",
-                "rule",
-                "--json",
-            ],
-            "ee remember",
-        )?;
+        remember_rule(workspace, content)?;
+    }
+    Ok(())
+}
+
+fn remember_rule(workspace: &Path, content: &str) -> Result<String, String> {
+    let envelope = run_ee_json(
+        workspace,
+        &[
+            "remember",
+            content,
+            "--level",
+            "procedural",
+            "--kind",
+            "rule",
+            "--json",
+        ],
+        "ee remember",
+    )?;
+    envelope
+        .pointer("/data/memory_id")
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("remember envelope missing memory_id: {envelope}"))
+}
+
+fn seed_workspace_with_linked_corpus(workspace: &Path) -> Result<(), String> {
+    run_ee_json(workspace, &["init", "--json"], "ee init")?;
+    let release = remember_rule(
+        workspace,
+        "Before release, run cargo fmt --check to verify code formatting.",
+    )?;
+    let ci = remember_rule(
+        workspace,
+        "Run cargo test to validate CI pipeline integration before pushing.",
+    )?;
+    remember_rule(
+        workspace,
+        "Release engineering uses cargo clippy in CI to gate merges.",
+    )?;
+    remember_rule(
+        workspace,
+        "When CI fails, inspect cargo test output for failing integration tests.",
+    )?;
+
+    let connection = DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+    connection
+        .insert_memory_link(
+            "link_00000000000000000000260701",
+            &CreateMemoryLinkInput {
+                src_memory_id: release,
+                dst_memory_id: ci,
+                relation: MemoryLinkRelation::Supports,
+                weight: 0.91,
+                confidence: 0.88,
+                directed: true,
+                evidence_count: 1,
+                last_reinforced_at: Some("2026-06-03T00:00:00Z".to_owned()),
+                source: MemoryLinkSource::Agent,
+                created_by: Some("property-pack-metamorphic-mr5b".to_owned()),
+                metadata_json: None,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn set_config_value(workspace_arg: &str, key: &str, value: &str) -> TestResult {
+    let set_output =
+        run_ee_with_workspace_str(workspace_arg, &["--json", "config", "set", key, value])?;
+    if !set_output.status.success() {
+        return Err(format!(
+            "ee config set {key} {value} failed: exit={:?} stdout={} stderr={}",
+            set_output.status.code(),
+            String::from_utf8_lossy(&set_output.stdout),
+            String::from_utf8_lossy(&set_output.stderr),
+        ));
+    }
+    Ok(())
+}
+
+fn set_graph_ppr_alpha_zero(workspace_arg: &str) -> TestResult {
+    set_config_value(workspace_arg, "graph.feature.ppr.enabled", "true")?;
+    set_config_value(workspace_arg, "graph.ppr.alpha", "0.0")
+}
+
+fn refresh_memory_links_graph_snapshot(workspace: &Path) -> TestResult {
+    let output = run_ee_with_workspace(workspace, &["--json", "graph", "centrality-refresh"])?;
+    if !output.status.success() {
+        return Err(format!(
+            "graph centrality-refresh failed: exit={:?} stderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    if !output.stderr.is_empty() {
+        return Err(format!(
+            "graph centrality-refresh stderr must stay empty; got: {}",
+            String::from_utf8_lossy(&output.stderr),
+        ));
+    }
+    Ok(())
+}
+
+fn mark_latest_memory_links_snapshot_stale(workspace: &Path, workspace_arg: &str) -> TestResult {
+    let connection = DbConnection::open_file(&workspace.join(".ee").join("ee.db"))
+        .map_err(|error| error.to_string())?;
+    let workspace_row = connection
+        .get_workspace_by_path(workspace_arg)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("workspace not found for path {workspace_arg}"))?;
+    let snapshot = connection
+        .get_latest_graph_snapshot(&workspace_row.id, GraphSnapshotType::MemoryLinks)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "expected a persisted memory_links graph snapshot".to_owned())?;
+    if !connection
+        .update_graph_snapshot_status(&snapshot.id, GraphSnapshotStatus::Stale)
+        .map_err(|error| error.to_string())?
+    {
+        return Err(format!(
+            "latest graph snapshot {} was not marked stale",
+            snapshot.id
+        ));
     }
     Ok(())
 }
@@ -221,6 +336,20 @@ fn pack_hash(value: &JsonValue) -> Option<String> {
 }
 
 fn pack_item_ids(value: &JsonValue) -> BTreeSet<String> {
+    value
+        .pointer("/data/pack/items")
+        .and_then(JsonValue::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("memoryId").and_then(JsonValue::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pack_item_id_sequence(value: &JsonValue) -> Vec<String> {
     value
         .pointer("/data/pack/items")
         .and_then(JsonValue::as_array)
@@ -507,26 +636,19 @@ fn pack_envelope_byte_identical_across_three_cold_process_invocations() -> TestR
 }
 
 // ---------------------------------------------------------------------------
-// MR5 — `search.graph_weight = 0` invariance
+// MR5 — `graph.ppr.alpha = 0` invariance
 // ---------------------------------------------------------------------------
 //
-// Setting `search.graph_weight = 0` in the workspace config must
+// Setting `graph.ppr.alpha = 0` in the workspace config must
 // produce a configuration in which two `ee context` invocations are
-// byte-identical (the graph contribution is wired through scoring but
+// byte-identical (the graph contribution is wired through PPR scoring but
 // must be a strict zero under this knob). This pins the contract that
-// `graph_weight = 0` is a valid + no-panic + deterministic configuration
-// before higher-order MRs (snapshot stale-vs-fresh independence) are
-// landed.
-//
-// TODO(bd-2m607-followup): the bd-2m607 spec also calls out a stronger
-// MR5b form — that stale and fresh graph snapshots yield identical
-// selection IDs when `graph_weight = 0`. Implementing it requires
-// snapshot manipulation hooks that do not exist at HEAD; track via a
-// follow-up bead.
+// `graph.ppr.alpha = 0` is a valid + no-panic + deterministic configuration
+// before higher-order MRs exercise snapshot stale-vs-fresh independence.
 
 #[test]
-fn pack_envelope_byte_identical_under_graph_weight_zero() -> TestResult {
-    let workspace = unique_workspace("mr5-graph-weight-zero")?;
+fn pack_envelope_byte_identical_under_graph_ppr_alpha_zero() -> TestResult {
+    let workspace = unique_workspace("mr5-graph-ppr-alpha-zero")?;
     seed_workspace_with_basic_corpus(&workspace)?;
 
     let absolute = workspace
@@ -536,48 +658,71 @@ fn pack_envelope_byte_identical_under_graph_weight_zero() -> TestResult {
         .to_str()
         .ok_or_else(|| "workspace path not UTF-8".to_string())?;
 
-    // Mute the graph contribution explicitly via the config surface.
-    let set_output = run_ee_with_workspace_str(
-        workspace_str,
-        &["config", "set", "search.graph_weight", "0.0", "--json"],
-    )?;
-    if !set_output.status.success() {
-        return Err(format!(
-            "ee config set search.graph_weight 0.0 failed: exit={:?} stderr={}",
-            set_output.status.code(),
-            String::from_utf8_lossy(&set_output.stderr),
-        ));
-    }
+    set_graph_ppr_alpha_zero(workspace_str)?;
 
     let run1 = run_ee_context_stdout(&absolute, "prepare release", "1000")?;
     let run2 = run_ee_context_stdout(&absolute, "prepare release", "1000")?;
 
     if run1 != run2 {
         return Err(format!(
-            "MR5 broken — graph_weight=0 envelope drifted between invocations:\n  run1.len={}, run2.len={}",
+            "MR5 broken — graph.ppr.alpha=0 envelope drifted between invocations:\n  run1.len={}, run2.len={}",
             run1.len(),
             run2.len(),
         ));
     }
 
-    // Stronger sanity-pin: with graph_weight=0, the emitted config
+    // Stronger sanity-pin: with graph.ppr.alpha=0, the emitted config
     // surface must reflect the zero. If a future regression were to
-    // silently ignore the zero and fall back to the 0.10 default, this
+    // silently ignore the zero and fall back to the 0.30 default, this
     // catches it at the same time as the determinism check.
     let get_output = run_ee_with_workspace_str(
         workspace_str,
-        &["config", "get", "search.graph_weight", "--json"],
+        &["--json", "config", "get", "graph.ppr.alpha"],
     )?;
-    let get_json = ee_stdout_json(get_output, "ee config get search.graph_weight")?;
+    let get_json = ee_stdout_json(get_output, "ee config get graph.ppr.alpha")?;
     let observed = get_json
         .pointer("/data/value")
         .and_then(JsonValue::as_f64)
         .ok_or_else(|| format!("config get did not surface a float value: envelope={get_json}"))?;
     if observed != 0.0 {
         return Err(format!(
-            "MR5 sanity broken — config set search.graph_weight 0.0 did not persist; observed={observed}"
+            "MR5 sanity broken — config set graph.ppr.alpha 0.0 did not persist; observed={observed}"
         ));
     }
+    Ok(())
+}
+
+#[test]
+fn pack_selection_ids_identical_between_fresh_and_stale_graph_snapshots_under_graph_ppr_alpha_zero()
+-> TestResult {
+    let workspace = unique_workspace("mr5b-stale-fresh-graph")?
+        .canonicalize()
+        .map_err(|error| format!("canonicalize workspace: {error}"))?;
+    seed_workspace_with_linked_corpus(&workspace)?;
+
+    let workspace_str = workspace
+        .to_str()
+        .ok_or_else(|| "workspace path not UTF-8".to_string())?;
+    set_graph_ppr_alpha_zero(workspace_str)?;
+
+    refresh_memory_links_graph_snapshot(&workspace)?;
+    let fresh = run_ee_context_json(&workspace, "prepare release", "1000")?;
+    let fresh_sequence = pack_item_id_sequence(&fresh);
+    if fresh_sequence.is_empty() {
+        return Err(format!(
+            "MR5b setup broken — fresh graph snapshot pack selected no memories; envelope={fresh}"
+        ));
+    }
+
+    mark_latest_memory_links_snapshot_stale(&workspace, workspace_str)?;
+    let stale = run_ee_context_json(&workspace, "prepare release", "1000")?;
+    let stale_sequence = pack_item_id_sequence(&stale);
+    if fresh_sequence != stale_sequence {
+        return Err(format!(
+            "MR5b broken — graph.ppr.alpha=0 selection IDs changed between fresh and stale graph snapshots:\n  fresh={fresh_sequence:?}\n  stale={stale_sequence:?}",
+        ));
+    }
+
     Ok(())
 }
 
