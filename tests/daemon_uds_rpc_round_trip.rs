@@ -272,6 +272,92 @@ fn client_round_trip_rejects_response_request_id_mismatch() -> TestResult {
 }
 
 #[test]
+fn client_round_trip_rejects_response_agent_id_mismatch() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-client-agent-id-drift.sock");
+
+    let server = spawn_one_response_daemon(
+        &socket_path,
+        serde_json::json!({
+            "schema": DAEMON_RESPONSE_SCHEMA_V1,
+            "request_id": "req-client-agent-id",
+            "agent_id": "agent-attacker-chosen",
+            "workspace_id": TEST_WORKSPACE_ID,
+            "result": {"ok": true}
+        }),
+    )?;
+    let request = context_request(
+        "req-client-agent-id",
+        TEST_AGENT_ID,
+        serde_json::json!({"task": "agent id drift"}),
+    );
+    let error = client_round_trip(&socket_path, &request)
+        .expect_err("client must reject daemon response agent_id drift");
+    server
+        .join()
+        .map_err(|_| "fake daemon thread panicked".to_owned())??;
+
+    match error {
+        ClientError::ResponseAgentIdMismatch { expected, actual } => {
+            ensure(
+                expected == TEST_AGENT_ID,
+                format!("expected agent_id must be the sent value; got {expected}"),
+            )?;
+            ensure(
+                actual == "agent-attacker-chosen",
+                format!("actual agent_id must report the daemon value; got {actual}"),
+            )
+        }
+        other => Err(format!(
+            "agent_id drift must return ResponseAgentIdMismatch; got {other:?}"
+        )),
+    }
+}
+
+#[test]
+fn client_round_trip_rejects_response_workspace_id_mismatch() -> TestResult {
+    let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
+    let socket_path = temp.path().join("ee-daemon-client-workspace-id-drift.sock");
+
+    let server = spawn_one_response_daemon(
+        &socket_path,
+        serde_json::json!({
+            "schema": DAEMON_RESPONSE_SCHEMA_V1,
+            "request_id": "req-client-workspace-id",
+            "agent_id": TEST_AGENT_ID,
+            "workspace_id": "workspace-attacker-chosen",
+            "result": {"ok": true}
+        }),
+    )?;
+    let request = context_request(
+        "req-client-workspace-id",
+        TEST_AGENT_ID,
+        serde_json::json!({"task": "workspace id drift"}),
+    );
+    let error = client_round_trip(&socket_path, &request)
+        .expect_err("client must reject daemon response workspace_id drift");
+    server
+        .join()
+        .map_err(|_| "fake daemon thread panicked".to_owned())??;
+
+    match error {
+        ClientError::ResponseWorkspaceIdMismatch { expected, actual } => {
+            ensure(
+                expected.as_deref() == Some(TEST_WORKSPACE_ID),
+                format!("expected workspace_id must be the sent value; got {expected:?}"),
+            )?;
+            ensure(
+                actual.as_deref() == Some("workspace-attacker-chosen"),
+                format!("actual workspace_id must report the daemon value; got {actual:?}"),
+            )
+        }
+        other => Err(format!(
+            "workspace_id drift must return ResponseWorkspaceIdMismatch; got {other:?}"
+        )),
+    }
+}
+
+#[test]
 fn daemon_echo_disabled_by_default_returns_error_envelope() -> TestResult {
     let temp = tempfile::tempdir().map_err(|error| format!("tempdir: {error}"))?;
     let socket_path = temp.path().join("ee-daemon-rt.sock");

@@ -219,6 +219,10 @@ pub enum DaemonStartError {
         path: PathBuf,
         source: std::io::Error,
     },
+    /// The socket path's parent exists but is not a same-user private
+    /// directory. Publishing daemon sockets and start locks inside a shared
+    /// or symlinked parent would reopen the local race/cross-tenant surface.
+    InsecureSocketParent { path: PathBuf, reason: String },
     /// The socket path was occupied by a non-socket file. The skeleton
     /// refuses to overwrite arbitrary files; the operator must remove
     /// the conflicting path explicitly.
@@ -242,6 +246,11 @@ impl std::fmt::Display for DaemonStartError {
             Self::SocketDirCreate { path, source } => write!(
                 formatter,
                 "Failed to create daemon socket parent directory {}: {source}",
+                path.display()
+            ),
+            Self::InsecureSocketParent { path, reason } => write!(
+                formatter,
+                "Refusing to publish daemon socket under insecure parent {}: {reason}",
                 path.display()
             ),
             Self::SocketPathOccupied { path } => write!(
@@ -269,6 +278,7 @@ impl std::error::Error for DaemonStartError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::PlatformUnsupported
+            | Self::InsecureSocketParent { .. }
             | Self::SocketPathOccupied { .. }
             | Self::AlreadyRunning { .. } => None,
             Self::SocketDirCreate { source, .. } | Self::Bind { source, .. } => Some(source),

@@ -416,15 +416,11 @@ fn start_server_with_dispatch_policy(
     if let Some(parent) = socket_path.parent()
         && !parent.as_os_str().is_empty()
     {
-        // The parent directory is created with mode 0o700 so it
-        // partitions across local tenants on hosts that share TMPDIR
-        // (the macOS / no-XDG_RUNTIME_DIR fallback). DirBuilder with
-        // `recursive(true)` and `mode(0o700)` applies the mode to
-        // every component it creates and is a no-op on directories
-        // that already exist with another mode — that matches
-        // `create_dir_all`'s ignore-existing semantics and avoids
-        // tightening a pre-existing operator-managed directory
-        // unexpectedly. Companion fix: bd-3j0td.
+        // The parent directory must be a same-user private boundary:
+        // it contains the publish lock, temp socket, and canonical
+        // socket path. `DirBuilder` applies 0o700 only to components it
+        // creates, so validate the resulting parent before opening the
+        // start lock or binding a socket inside it.
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -433,6 +429,7 @@ fn start_server_with_dispatch_policy(
                 path: parent.to_path_buf(),
                 source,
             })?;
+        validate_socket_parent(parent)?;
     }
 
     let _publish_lock = acquire_socket_publish_lock(&socket_path)?;
@@ -627,6 +624,43 @@ fn socket_publish_lock_path(socket_path: &Path) -> PathBuf {
     let mut lock_path = socket_path.to_path_buf();
     lock_path.set_file_name(file_name);
     lock_path
+}
+
+fn validate_socket_parent(parent: &Path) -> Result<(), DaemonStartError> {
+    let metadata =
+        fs::symlink_metadata(parent).map_err(|source| DaemonStartError::SocketDirCreate {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    if !metadata.file_type().is_dir() {
+        return Err(DaemonStartError::InsecureSocketParent {
+            path: parent.to_path_buf(),
+            reason: "parent is not a real directory".to_owned(),
+        });
+    }
+
+    let euid = current_euid();
+    if metadata.uid() != euid {
+        return Err(DaemonStartError::InsecureSocketParent {
+            path: parent.to_path_buf(),
+            reason: format!(
+                "parent is owned by uid {}, not current uid {euid}",
+                metadata.uid()
+            ),
+        });
+    }
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(DaemonStartError::InsecureSocketParent {
+            path: parent.to_path_buf(),
+            reason: format!(
+                "parent mode 0o{mode:o} grants group or other access; expected 0o700 or stricter"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn open_daemon_socket_lock_file(path: &Path) -> io::Result<File> {
@@ -1547,6 +1581,18 @@ pub fn client_round_trip(
             actual: response.request_id,
         });
     }
+    if response.agent_id != request.agent_id {
+        return Err(ClientError::ResponseAgentIdMismatch {
+            expected: request.agent_id.clone(),
+            actual: response.agent_id,
+        });
+    }
+    if response.workspace_id != request.workspace_id {
+        return Err(ClientError::ResponseWorkspaceIdMismatch {
+            expected: request.workspace_id.clone(),
+            actual: response.workspace_id,
+        });
+    }
     Ok(response)
 }
 
@@ -1570,6 +1616,14 @@ pub enum ClientError {
     ResponseRequestIdMismatch {
         expected: String,
         actual: String,
+    },
+    ResponseAgentIdMismatch {
+        expected: String,
+        actual: String,
+    },
+    ResponseWorkspaceIdMismatch {
+        expected: Option<String>,
+        actual: Option<String>,
     },
 }
 
@@ -1600,6 +1654,16 @@ impl std::fmt::Display for ClientError {
                 formatter,
                 "daemon response request_id mismatch: sent {expected}, got {actual}"
             ),
+            Self::ResponseAgentIdMismatch { expected, actual } => write!(
+                formatter,
+                "daemon response agent_id mismatch: sent {expected}, got {actual}"
+            ),
+            Self::ResponseWorkspaceIdMismatch { expected, actual } => write!(
+                formatter,
+                "daemon response workspace_id mismatch: sent {}, got {}",
+                expected.as_deref().unwrap_or("<absent>"),
+                actual.as_deref().unwrap_or("<absent>")
+            ),
         }
     }
 }
@@ -1612,7 +1676,9 @@ impl std::error::Error for ClientError {
             Self::RequestTooLarge { .. }
             | Self::ResponseTooLarge { .. }
             | Self::ResponseSchemaMismatch { .. }
-            | Self::ResponseRequestIdMismatch { .. } => None,
+            | Self::ResponseRequestIdMismatch { .. }
+            | Self::ResponseAgentIdMismatch { .. }
+            | Self::ResponseWorkspaceIdMismatch { .. } => None,
         }
     }
 }
@@ -1645,6 +1711,26 @@ mod tests {
         let mut body = vec![0_u8; announced];
         stream.read_exact(&mut body).expect("body must arrive");
         serde_json::from_slice(&body).expect("body must parse as daemon response")
+    }
+
+    fn client_round_trip_against_single_response(
+        request: &DaemonRequest,
+        response: DaemonResponse,
+    ) -> Result<DaemonResponse, ClientError> {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("ee-daemon-client-test.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind one-shot daemon socket");
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept one client");
+            let _request = read_request(&mut stream).expect("client request frame must parse");
+            write_response(&mut stream, &response).expect("response frame must write");
+        });
+
+        let result = client_round_trip(&socket_path, request);
+        worker
+            .join()
+            .expect("one-shot daemon thread must not panic");
+        result
     }
 
     #[test]
@@ -1719,6 +1805,63 @@ mod tests {
             Some("hello"),
             "non-secret fields must round-trip unchanged"
         );
+    }
+
+    #[test]
+    fn client_round_trip_rejects_agent_id_mismatch() {
+        let request = DaemonRequest::new(
+            "req-agent-mismatch-001",
+            TEST_AGENT_ID,
+            METHOD_ECHO,
+            serde_json::json!({}),
+        );
+        let response = DaemonResponse::err(
+            request.request_id.clone(),
+            "agent-spoofed",
+            None,
+            DAEMON_ECHO_DISABLED_CODE,
+            "echo disabled",
+        );
+
+        let error = client_round_trip_against_single_response(&request, response)
+            .expect_err("agent_id mismatch must be rejected");
+
+        match error {
+            ClientError::ResponseAgentIdMismatch { expected, actual } => {
+                assert_eq!(expected, TEST_AGENT_ID);
+                assert_eq!(actual, "agent-spoofed");
+            }
+            other => panic!("expected ResponseAgentIdMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_round_trip_rejects_workspace_id_mismatch() {
+        let mut request = DaemonRequest::new(
+            "req-workspace-mismatch-001",
+            TEST_AGENT_ID,
+            METHOD_CONTEXT,
+            serde_json::json!({}),
+        );
+        request.workspace_id = Some(TEST_WORKSPACE_ID.to_owned());
+        let response = DaemonResponse::err(
+            request.request_id.clone(),
+            request.agent_id.clone(),
+            Some("workspace-spoofed".to_owned()),
+            DAEMON_ANN_WARMLOAD_NOT_YET_IMPLEMENTED_CODE,
+            "warmload not yet implemented",
+        );
+
+        let error = client_round_trip_against_single_response(&request, response)
+            .expect_err("workspace_id mismatch must be rejected");
+
+        match error {
+            ClientError::ResponseWorkspaceIdMismatch { expected, actual } => {
+                assert_eq!(expected.as_deref(), Some(TEST_WORKSPACE_ID));
+                assert_eq!(actual.as_deref(), Some("workspace-spoofed"));
+            }
+            other => panic!("expected ResponseWorkspaceIdMismatch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2202,6 +2345,52 @@ mod tests {
         // The regular file must still exist after the refused start;
         // the daemon must not silently overwrite arbitrary paths.
         assert!(path.exists());
+    }
+
+    #[test]
+    fn start_server_refuses_group_or_world_accessible_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path().join("shared-parent");
+        fs::create_dir(&parent).expect("create shared parent");
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
+            .expect("make parent group/other accessible");
+        let socket_path = parent.join("ee-daemon.sock");
+
+        let error = start_server(&socket_path).expect_err("must refuse unsafe parent");
+
+        match error {
+            DaemonStartError::InsecureSocketParent { path, reason } => {
+                assert_eq!(path, parent);
+                assert!(
+                    reason.contains("group or other access"),
+                    "unsafe-mode reason should name group/other access, got {reason}"
+                );
+            }
+            other => panic!("expected InsecureSocketParent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn start_server_refuses_symlink_parent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real_parent = temp.path().join("real-parent");
+        let symlink_parent = temp.path().join("symlink-parent");
+        fs::create_dir(&real_parent).expect("create real parent");
+        std::os::unix::fs::symlink(&real_parent, &symlink_parent).expect("create parent symlink");
+        let socket_path = symlink_parent.join("ee-daemon.sock");
+
+        let error = start_server(&socket_path).expect_err("must refuse symlink parent");
+
+        match error {
+            DaemonStartError::InsecureSocketParent { path, reason } => {
+                assert_eq!(path, symlink_parent);
+                assert!(
+                    reason.contains("not a real directory"),
+                    "symlink-parent reason should name real-directory requirement, got {reason}"
+                );
+            }
+            other => panic!("expected InsecureSocketParent, got {other:?}"),
+        }
     }
 
     #[test]
