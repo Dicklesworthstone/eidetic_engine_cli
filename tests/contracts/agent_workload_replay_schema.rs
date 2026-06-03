@@ -9,6 +9,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -95,6 +96,10 @@ fn collect_strings(value: &Value, ctx: &str) -> Result<Vec<String>, String> {
         .collect()
 }
 
+fn collect_string_set(value: &Value, ctx: &str) -> Result<BTreeSet<String>, String> {
+    Ok(collect_strings(value, ctx)?.into_iter().collect())
+}
+
 fn replay_fixture(agent_count: u16, verify_determinism: bool) -> Result<Value, String> {
     let report = replay_agent_workload_trace(&AgentWorkloadReplayOptions {
         trace_path: repo_root().join(FIXTURE_PATH),
@@ -125,13 +130,17 @@ fn agent_workload_replay_v1_schema_pins_side_effect_free_report_shape() -> TestR
         "command const must name the workload replay surface",
     )?;
 
-    let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.iter().any(|entry| entry == field),
-            format!("replay schema required fields missing `{field}`: {required:?}"),
-        )?;
-    }
+    let actual = collect_string_set(&schema["required"], "top-level required")?;
+    let expected = REQUIRED_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )?;
     ensure(
         schema["$defs"]["blake3Hash"]["pattern"]
             .as_str()
