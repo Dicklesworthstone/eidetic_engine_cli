@@ -197,14 +197,17 @@ fn auto_status_schema_identity_is_consistent() -> TestResult {
 #[test]
 fn auto_status_required_top_level_fields_match_spec() -> TestResult {
     let schema = load_schema()?;
-    let required = collect_strings(&schema["required"], "top-level required")?;
-    for field in REQUIRED_TOP_LEVEL {
-        ensure(
-            required.contains(*field),
-            format!("required missing {field}; got {required:?}"),
-        )?;
-    }
-    Ok(())
+    let actual = collect_strings(&schema["required"], "top-level required")?;
+    let expected = REQUIRED_TOP_LEVEL
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<BTreeSet<_>>();
+    ensure(
+        actual == expected,
+        format!(
+            "REQUIRED_TOP_LEVEL drifted from schema required array\nexpected={expected:?}\nactual={actual:?}"
+        ),
+    )
 }
 
 #[test]
