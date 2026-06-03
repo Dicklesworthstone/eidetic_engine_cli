@@ -1160,8 +1160,12 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
                     && files
                         .iter()
                         .any(|file| file.as_str() == Some("swarm_incident_summary.json"))
+                    && files
+                        .iter()
+                        .any(|file| file.as_str() == Some("swarm_replay_summary.json"))
             }),
-        "support bundle create report must advertise QoS and incident summary files".to_owned(),
+        "support bundle create report must advertise QoS, incident, and replay summary files"
+            .to_owned(),
     )?;
     ensure_json_pointer(
         &result.parsed,
@@ -1206,6 +1210,10 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         "bundle must contain swarm_incident_summary.json".to_owned(),
     )?;
     ensure(
+        bundle_dir.join("swarm_replay_summary.json").is_file(),
+        "bundle must contain swarm_replay_summary.json".to_owned(),
+    )?;
+    ensure(
         bundle_dir.join("qos_lane_summary.json").is_file(),
         "bundle must contain qos_lane_summary.json".to_owned(),
     )?;
@@ -1223,9 +1231,12 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
                 }) && files.iter().any(|entry| {
                     entry.pointer("/path").and_then(Value::as_str)
                         == Some("swarm_incident_summary.json")
+                }) && files.iter().any(|entry| {
+                    entry.pointer("/path").and_then(Value::as_str)
+                        == Some("swarm_replay_summary.json")
                 })
             }),
-        "support bundle manifest must include QoS and incident summary files".to_owned(),
+        "support bundle manifest must include QoS, incident, and replay summary files".to_owned(),
     )?;
     let pack_replay_summary = fs::read_to_string(bundle_dir.join("pack_replay_summary.json"))
         .map_err(|error| format!("failed to read pack replay support summary: {error}"))?;
@@ -1242,6 +1253,45 @@ fn support_bundle_commands_create_real_bundles_with_redacted_diagnostics() -> Te
         "/redactionStatus",
         json!("ids_hashes_counts_codes_only_no_query_text_no_memory_content"),
         "support bundle pack replay summary redaction posture",
+    )?;
+    let swarm_replay_summary = fs::read_to_string(bundle_dir.join("swarm_replay_summary.json"))
+        .map_err(|error| format!("failed to read swarm replay support summary: {error}"))?;
+    let swarm_replay_summary_json: Value = serde_json::from_str(&swarm_replay_summary)
+        .map_err(|error| format!("swarm replay support summary must parse: {error}"))?;
+    ensure_json_pointer(
+        &swarm_replay_summary_json,
+        "/schema",
+        json!("ee.support_bundle.swarm_replay_summary.v1"),
+        "support bundle swarm replay summary schema",
+    )?;
+    ensure_json_pointer(
+        &swarm_replay_summary_json,
+        "/redaction/rawCommandOutputIncluded",
+        json!(false),
+        "support bundle swarm replay summary omits raw command output",
+    )?;
+    ensure_json_pointer(
+        &swarm_replay_summary_json,
+        "/redaction/commandArgsIncluded",
+        json!(false),
+        "support bundle swarm replay summary omits raw command args",
+    )?;
+    ensure_json_pointer(
+        &swarm_replay_summary_json,
+        "/redaction/artifactPathsIncluded",
+        json!(false),
+        "support bundle swarm replay summary omits artifact paths",
+    )?;
+    ensure(
+        swarm_replay_summary_json
+            .pointer("/summaryHash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "swarm replay summary must include summary hash".to_owned(),
+    )?;
+    ensure(
+        swarm_replay_summary_json.pointer("/withinSizeBudget") == Some(&json!(true)),
+        "swarm replay summary must stay within the documented size budget".to_owned(),
     )?;
     let swarm_brief_summary = fs::read_to_string(bundle_dir.join("swarm_brief_summary.json"))
         .map_err(|error| format!("failed to read swarm brief support summary: {error}"))?;

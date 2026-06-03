@@ -38,14 +38,15 @@ pub const VOLATILE_FIELD_NAMES: &[&str] = &[
     "ee_binary_hash",
     // Handoff capsule determinism (bd-1um33): capsule_id and integrity are
     // freshly generated per create even for identical workspace state.
-    // swarm_brief_summary/swarm_incident_summary are runtime diagnostic
-    // subtrees; section-level swarm_brief_summary redaction is handled
+    // swarm_brief_summary/swarm_incident_summary/swarm_replay_summary are runtime diagnostic
+    // subtrees; section-level swarm diagnostic redaction is handled
     // specially in handoff.rs (value-dependent on "id" field), but its
     // volatile children are covered here.
     "capsule_id",
     "integrity",
     "swarm_brief_summary",
     "swarm_incident_summary",
+    "swarm_replay_summary",
     "databasePath",
     "workspacePath",
     "indexDir",
@@ -239,6 +240,7 @@ mod tests {
         assert!(is_volatile_field_name("integrity"));
         assert!(is_volatile_field_name("swarm_brief_summary"));
         assert!(is_volatile_field_name("swarm_incident_summary"));
+        assert!(is_volatile_field_name("swarm_replay_summary"));
         assert!(!is_volatile_field_name("content"));
     }
 
@@ -251,6 +253,7 @@ mod tests {
             "integrity": {"hmac": "secret"},
             "swarm_brief_summary": {"hostname": "agent-host"},
             "swarm_incident_summary": {"summaryHash": "blake3:volatile"},
+            "swarm_replay_summary": {"summaryHash": "blake3:volatile-replay"},
             "memory_snapshot": {"captured_at": "2026-05-16T00:00:00Z"},
             "sections": [
                 {
@@ -267,6 +270,7 @@ mod tests {
             "/integrity",
             "/swarm_brief_summary",
             "/swarm_incident_summary",
+            "/swarm_replay_summary",
             "/memory_snapshot/captured_at",
         ] {
             if value.pointer(pointer).is_some() {
@@ -287,6 +291,7 @@ mod tests {
             "integrity",
             "swarm_brief_summary",
             "swarm_incident_summary",
+            "swarm_replay_summary",
         ] {
             if !report.fields_stripped.contains(&expected) {
                 return Err(format!("report missing stripped capsule field {expected}"));

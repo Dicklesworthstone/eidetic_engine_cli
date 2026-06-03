@@ -55,6 +55,12 @@ pub const SWARM_REPLAY_RESULT_SCHEMA_V1: &str = "ee.swarm_replay_result.v1";
 pub const SWARM_REPLAY_VERIFICATION_CAPSULE_SCHEMA_V1: &str =
     "ee.swarm_replay.verification_capsule.v1";
 
+/// Workspace-relative directory containing redaction-safe swarm replay artifacts.
+pub const SWARM_REPLAY_ARTIFACT_DIR_TAIL: &str = ".ee/lab/swarm-replay";
+
+/// Redaction-safe replay ledger sidecar written under each replay run directory.
+pub const SWARM_REPLAY_RESULT_ARTIFACT_FILE: &str = "result.json";
+
 /// Schema for lab counterfactual report.
 pub const LAB_COUNTERFACTUAL_SCHEMA_V1: &str = "ee.lab.counterfactual.v1";
 
@@ -2984,7 +2990,7 @@ fn build_swarm_replay_admission_result(
         rch_status,
         proof_capsule: &proof_capsule,
     })?;
-    Ok(SwarmReplayResult {
+    let report = SwarmReplayResult {
         schema: SWARM_REPLAY_RESULT_SCHEMA_V1.to_owned(),
         workload_id: trace.workload_id.clone(),
         run_id,
@@ -3011,7 +3017,11 @@ fn build_swarm_replay_admission_result(
             ],
         },
         warnings,
-    })
+    };
+    if !dry_run {
+        write_swarm_replay_result_artifact(workspace, &report)?;
+    }
+    Ok(report)
 }
 
 fn combine_swarm_replay_status(
@@ -3772,6 +3782,21 @@ fn write_swarm_replay_artifact(
         path_tail: format!("{}/{}", state.artifact_path_tail_prefix, file_name),
         path_hash: format!("blake3:{}", hash_content(capped_bytes)),
     })
+}
+
+fn write_swarm_replay_result_artifact(
+    workspace: &Path,
+    report: &SwarmReplayResult,
+) -> Result<(), DomainError> {
+    let artifact_root = workspace
+        .join(SWARM_REPLAY_ARTIFACT_DIR_TAIL)
+        .join(&report.run_id);
+    fs::create_dir_all(&artifact_root).map_err(|error| {
+        lab_storage_error("create swarm replay result artifact directory", error)
+    })?;
+    let result_path = artifact_root.join(SWARM_REPLAY_RESULT_ARTIFACT_FILE);
+    fs::write(&result_path, report.to_json() + "\n")
+        .map_err(|error| lab_storage_error("write swarm replay result artifact", error))
 }
 
 fn swarm_replay_cap_artifact_bytes(bytes: &[u8]) -> &[u8] {

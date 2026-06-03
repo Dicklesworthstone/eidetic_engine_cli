@@ -43,9 +43,13 @@ pub const SWARM_BRIEF_SUMMARY_REDACTION_STATUS: &str =
 pub const SWARM_INCIDENT_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_incident_summary.v1";
 pub const SWARM_INCIDENT_SUMMARY_REDACTION_STATUS: &str =
     "scenario_ids_status_counts_hashes_only_no_raw_logs_no_mail_bodies_no_commands_no_paths";
+pub const SWARM_REPLAY_SUMMARY_SCHEMA_V1: &str = "ee.support_bundle.swarm_replay_summary.v1";
+pub const SWARM_REPLAY_SUMMARY_REDACTION_STATUS: &str =
+    "workload_run_ids_counts_hashes_only_no_raw_logs_no_commands_no_paths";
 pub const SWARM_BRIEF_VERIFICATION_BROKER_SCHEMA_V1: &str =
     "ee.swarm.verification_broker_summary.v1";
 pub const MAX_SWARM_INCIDENT_SUMMARY_BYTES: usize = 8192;
+pub const MAX_SWARM_REPLAY_SUMMARY_BYTES: usize = 8192;
 
 /// Cap on the byte size of the operator-supplied
 /// `--agent-mail-snapshot` JSON file before refusing to read it.
@@ -86,6 +90,9 @@ const MAX_SWARM_INCIDENT_SUMMARY_RECORDS: usize = 8;
 const MAX_SWARM_INCIDENT_DEGRADED_CODES: usize = 8;
 const MAX_SWARM_INCIDENT_RECOVERY_ACTIONS: usize = 4;
 const MAX_SWARM_INCIDENT_ARTIFACT_REFS: usize = 8;
+const MAX_SWARM_REPLAY_SUMMARY_RECORDS: usize = 8;
+const MAX_SWARM_REPLAY_DEGRADED_CODES: usize = 12;
+const MAX_SWARM_REPLAY_ARTIFACT_HASHES: usize = 12;
 const MEMORY_DRIFT_SWARM_BRIEF_LIMIT: u32 = 16;
 const SWARM_BRIEF_COMMAND_OUTPUT_LIMIT_BYTES: usize = 10 * 1024 * 1024;
 const SWARM_BRIEF_COMMAND_PIPE_BUFFER_BYTES: usize = 8192;
@@ -3185,6 +3192,468 @@ fn swarm_brief_verification_broker_summary(
         raw_logs_included: false,
         raw_mail_bodies_included: false,
     }
+}
+
+/// Collect redaction-safe replay ledger summaries from swarm replay artifacts.
+#[must_use]
+pub fn collect_swarm_replay_summary(workspace: &Path) -> Value {
+    let artifact_dir = workspace.join(crate::core::lab::SWARM_REPLAY_ARTIFACT_DIR_TAIL);
+    let source = json!({
+        "kind": "artifact_directory",
+        "schema": crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1,
+        "pathIncluded": false,
+        "pathHash": blake3_summary_hash(&artifact_dir.display().to_string()),
+        "supportBundleFile": "swarm_replay_summary.json",
+        "resultFile": crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE,
+    });
+    let mut counts = json!({
+        "runDirectoryCount": 0,
+        "resultArtifactCount": 0,
+        "summarizedReplayCount": 0,
+        "omittedReplayCount": 0,
+        "malformedReplayCount": 0,
+    });
+
+    if !artifact_dir.is_dir() {
+        return swarm_replay_summary_value(
+            "artifact_directory_missing",
+            source,
+            counts,
+            Vec::new(),
+        );
+    }
+
+    let Ok(entries) = fs::read_dir(&artifact_dir) else {
+        return swarm_replay_summary_value(
+            "artifact_directory_unreadable",
+            source,
+            counts,
+            Vec::new(),
+        );
+    };
+
+    let mut result_paths = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            result_paths.push(
+                entry
+                    .path()
+                    .join(crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE),
+            );
+            increment_summary_count(&mut counts, "runDirectoryCount");
+        } else if file_type.is_file()
+            && entry.file_name().to_str()
+                == Some(crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE)
+        {
+            result_paths.push(entry.path());
+        }
+    }
+    result_paths.sort();
+    counts["resultArtifactCount"] = json!(result_paths.len());
+
+    let mut replays = Vec::new();
+    for path in result_paths {
+        if replays.len() >= MAX_SWARM_REPLAY_SUMMARY_RECORDS {
+            increment_summary_count(&mut counts, "omittedReplayCount");
+            continue;
+        }
+        match summarize_swarm_replay_result_artifact(&path) {
+            Some(summary) => replays.push(summary),
+            None => increment_summary_count(&mut counts, "malformedReplayCount"),
+        }
+    }
+
+    replays.sort_by(|left, right| {
+        right
+            .get("artifactModifiedEpochMs")
+            .and_then(Value::as_u64)
+            .cmp(&left.get("artifactModifiedEpochMs").and_then(Value::as_u64))
+            .then_with(|| {
+                left.get("runId")
+                    .and_then(Value::as_str)
+                    .cmp(&right.get("runId").and_then(Value::as_str))
+            })
+    });
+    counts["summarizedReplayCount"] = json!(replays.len());
+
+    let status = if replays.is_empty() {
+        "no_valid_replay_artifacts"
+    } else {
+        "available"
+    };
+    swarm_replay_summary_value(status, source, counts, replays)
+}
+
+#[must_use]
+pub fn render_swarm_replay_summary_for_handoff(summary: &Value) -> String {
+    let status = summary
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let counts = summary.get("counts").unwrap_or(&Value::Null);
+    let summarized = counts
+        .get("summarizedReplayCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let omitted = counts
+        .get("omittedReplayCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let malformed = counts
+        .get("malformedReplayCount")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let latest = summary.get("latestReplay").unwrap_or(&Value::Null);
+    let latest_run = latest
+        .get("runId")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let latest_status = latest
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let proof_level = latest
+        .pointer("/proofCapsule/proofLevel")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let rch_status = latest
+        .pointer("/proofCapsule/rchStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let degraded_codes = summary
+        .get("degradedCodes")
+        .and_then(Value::as_array)
+        .map(|codes| {
+            codes
+                .iter()
+                .filter_map(Value::as_str)
+                .take(MAX_SWARM_REPLAY_DEGRADED_CODES)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![
+        format!(
+            "Swarm replay summary: status={status}, replays={summarized}, omitted={omitted}, malformed={malformed}."
+        ),
+        format!(
+            "Latest replay: run_id={latest_run}, status={latest_status}, proof_level={proof_level}, rch_status={rch_status}."
+        ),
+        format!("Replay summary hash: {hash}."),
+        "Support-bundle replay evidence only; raw command output, command arguments, host paths, mail bodies, and environment dumps are not embedded.".to_owned(),
+    ];
+    if !degraded_codes.is_empty() {
+        lines.push(format!(
+            "Replay degraded codes: {}.",
+            degraded_codes.join(", ")
+        ));
+    }
+    lines.push("Inspect the support bundle's swarm_replay_summary.json for compact hashes, then inspect local replay artifacts only in the originating workspace when needed.".to_owned());
+    lines.join("\n")
+}
+
+#[must_use]
+pub fn swarm_replay_summary_evidence_id(summary: &Value) -> String {
+    let hash = summary
+        .get("summaryHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .trim_start_matches("blake3:");
+    let short_hash = hash.get(..12).unwrap_or(hash);
+    format!("swarm_replay_summary:{short_hash}")
+}
+
+/// Hard cap on one persisted `ee.swarm_replay_result.v1` ledger read for
+/// support-bundle and handoff summaries.
+const SWARM_REPLAY_RESULT_ARTIFACT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+fn summarize_swarm_replay_result_artifact(path: &Path) -> Option<Value> {
+    use std::io::Read as _;
+
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > SWARM_REPLAY_RESULT_ARTIFACT_MAX_BYTES {
+        return None;
+    }
+    let modified_epoch_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default();
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(SWARM_REPLAY_RESULT_ARTIFACT_MAX_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > SWARM_REPLAY_RESULT_ARTIFACT_MAX_BYTES {
+        return None;
+    }
+    let raw = String::from_utf8(bytes).ok()?;
+    let result: Value = serde_json::from_str(&raw).ok()?;
+    if result.get("schema").and_then(Value::as_str)
+        != Some(crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1)
+    {
+        return None;
+    }
+
+    let aggregate = result.get("aggregate").cloned().unwrap_or(Value::Null);
+    let host = result
+        .get("hostProfileAdmission")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let verification = result.get("verification").cloned().unwrap_or(Value::Null);
+    let proof_capsule = verification
+        .get("proofCapsule")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let artifact_summary = swarm_replay_artifact_summary(&result);
+    let degraded_codes = swarm_replay_degraded_codes(&result);
+    let first_failure = swarm_replay_first_failure_summary(&result);
+
+    Some(json!({
+        "workloadId": result.get("workloadId").and_then(Value::as_str).unwrap_or("unknown"),
+        "runId": result.get("runId").and_then(Value::as_str).unwrap_or("unknown"),
+        "status": result.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+        "sideEffectFree": result.get("sideEffectFree").and_then(Value::as_bool).unwrap_or(false),
+        "artifactModifiedEpochMs": modified_epoch_ms,
+        "workloadHash": verification.get("workloadHash").and_then(Value::as_str),
+        "replayHash": verification.get("replayHash").and_then(Value::as_str),
+        "resultArtifactHash": blake3_summary_hash(&raw),
+        "resultPathIncluded": false,
+        "resultPathHash": blake3_summary_hash(&path.display().to_string()),
+        "hostProfile": {
+            "declaredProfile": host.get("declaredProfile").and_then(Value::as_str).unwrap_or("unknown"),
+            "requiredClass": host.get("requiredClass").and_then(Value::as_str).unwrap_or("unknown"),
+            "observedClass": host.get("observedClass").and_then(Value::as_str).unwrap_or("unknown"),
+            "admissionStatus": host.get("status").and_then(Value::as_str).unwrap_or("unknown"),
+            "requestedParallelAgents": host.get("requestedParallelAgents").and_then(Value::as_u64).unwrap_or(0),
+            "degradedCodes": host.get("degradedCodes").cloned().unwrap_or_else(|| json!([])),
+        },
+        "aggregate": {
+            "commandCount": aggregate.get("commandCount").and_then(Value::as_u64).unwrap_or(0),
+            "successCount": aggregate.get("successCount").and_then(Value::as_u64).unwrap_or(0),
+            "failureCount": aggregate.get("failureCount").and_then(Value::as_u64).unwrap_or(0),
+            "degradedCount": aggregate.get("degradedCount").and_then(Value::as_u64).unwrap_or(0),
+            "sloWarningCount": aggregate.get("sloWarningCount").and_then(Value::as_u64).unwrap_or(0),
+            "sloFailureCount": aggregate.get("sloFailureCount").and_then(Value::as_u64).unwrap_or(0),
+            "firstSloFailureStepId": aggregate.get("firstSloFailureStepId").and_then(Value::as_str),
+            "p95Ms": aggregate.get("p95Ms").and_then(Value::as_u64).unwrap_or(0),
+            "p99Ms": aggregate.get("p99Ms").and_then(Value::as_u64).unwrap_or(0),
+        },
+        "firstFailure": first_failure,
+        "degradedCodes": degraded_codes,
+        "proofCapsule": {
+            "schema": proof_capsule.get("schema").and_then(Value::as_str).unwrap_or("unknown"),
+            "proofLevel": proof_capsule.get("proofLevel").and_then(Value::as_str).unwrap_or("unknown"),
+            "rchRequired": verification.get("rchRequired").and_then(Value::as_bool).unwrap_or(false),
+            "rchStatus": verification.get("rchStatus").and_then(Value::as_str).unwrap_or("unknown"),
+            "remoteMarkerPresent": proof_capsule.pointer("/rch/remoteMarkerPresent").and_then(Value::as_bool),
+            "cargoStarted": proof_capsule.pointer("/rch/cargoStarted").and_then(Value::as_bool),
+            "commandHash": proof_capsule.pointer("/rch/commandHash").and_then(Value::as_str),
+            "workerIdIncluded": false,
+            "workerIdHash": proof_capsule.pointer("/rch/workerId").and_then(Value::as_str).map(blake3_summary_hash),
+            "knownBlocker": proof_capsule.get("rch").and_then(|rch| rch.get("knownBlocker")).map(swarm_replay_known_blocker_summary),
+            "rawOutputIncluded": proof_capsule.pointer("/rch/rawOutputIncluded").and_then(Value::as_bool).unwrap_or(false),
+            "localPathsRedacted": proof_capsule.pointer("/rch/localPathsRedacted").and_then(Value::as_bool).unwrap_or(true),
+        },
+        "artifacts": artifact_summary,
+        "redaction": {
+            "rawTaskStringPresent": result.pointer("/redactionStatus/rawTaskStringPresent").and_then(Value::as_bool).unwrap_or(false),
+            "rawQueryTextPresent": result.pointer("/redactionStatus/rawQueryTextPresent").and_then(Value::as_bool).unwrap_or(false),
+            "rawMemoryBodyPresent": result.pointer("/redactionStatus/rawMemoryBodyPresent").and_then(Value::as_bool).unwrap_or(false),
+            "rawMailBodyPresent": result.pointer("/redactionStatus/rawMailBodyPresent").and_then(Value::as_bool).unwrap_or(false),
+            "absoluteHostPathPresent": result.pointer("/redactionStatus/absoluteHostPathPresent").and_then(Value::as_bool).unwrap_or(false),
+            "secretsPresent": result.pointer("/redactionStatus/secretsPresent").and_then(Value::as_bool).unwrap_or(false),
+            "environmentDumpPresent": result.pointer("/redactionStatus/environmentDumpPresent").and_then(Value::as_bool).unwrap_or(false),
+            "fullFileListingPresent": result.pointer("/redactionStatus/fullFileListingPresent").and_then(Value::as_bool).unwrap_or(false),
+            "rawCommandOutputIncluded": false,
+            "commandArgsIncluded": false,
+            "artifactPathsIncluded": false,
+        },
+    }))
+}
+
+fn swarm_replay_summary_value(
+    status: &str,
+    source: Value,
+    mut counts: Value,
+    mut replays: Vec<Value>,
+) -> Value {
+    loop {
+        counts["summarizedReplayCount"] = json!(replays.len());
+        let degraded_codes = swarm_replay_summary_degraded_codes(&replays);
+        let status_counts = swarm_replay_summary_status_counts(&replays);
+        let latest_replay = replays.first().cloned().unwrap_or(Value::Null);
+        let mut value = json!({
+            "schema": SWARM_REPLAY_SUMMARY_SCHEMA_V1,
+            "sourceSchema": crate::core::lab::SWARM_REPLAY_RESULT_SCHEMA_V1,
+            "source": source,
+            "status": status,
+            "redactionStatus": SWARM_REPLAY_SUMMARY_REDACTION_STATUS,
+            "limits": {
+                "maxReplays": MAX_SWARM_REPLAY_SUMMARY_RECORDS,
+                "maxDegradedCodes": MAX_SWARM_REPLAY_DEGRADED_CODES,
+                "maxArtifactHashes": MAX_SWARM_REPLAY_ARTIFACT_HASHES,
+                "maxResultArtifactBytes": SWARM_REPLAY_RESULT_ARTIFACT_MAX_BYTES,
+                "maxSummaryBytes": MAX_SWARM_REPLAY_SUMMARY_BYTES,
+            },
+            "counts": counts,
+            "statusCounts": status_counts,
+            "degradedCodes": degraded_codes,
+            "latestReplay": latest_replay,
+            "replays": replays,
+            "redaction": {
+                "rawCommandOutputIncluded": false,
+                "commandArgsIncluded": false,
+                "artifactPathsIncluded": false,
+                "hostPathsIncluded": false,
+                "mailBodiesIncluded": false,
+                "environmentDumpsIncluded": false,
+                "workerIdsIncluded": false,
+            },
+        });
+        let summary_hash = blake3_summary_hash(&stable_summary_json(&value));
+        value["summaryHash"] = json!(summary_hash);
+        let bytes = stable_summary_json(&value).len();
+        value["summaryBytes"] = json!(bytes);
+        value["withinSizeBudget"] = json!(bytes <= MAX_SWARM_REPLAY_SUMMARY_BYTES);
+        if bytes <= MAX_SWARM_REPLAY_SUMMARY_BYTES || replays.is_empty() {
+            return value;
+        }
+        replays.pop();
+        increment_summary_count(&mut counts, "omittedReplayCount");
+    }
+}
+
+fn swarm_replay_artifact_summary(result: &Value) -> Value {
+    let mut kind_counts = BTreeMap::<String, u64>::new();
+    let mut path_hashes = BTreeSet::<String>::new();
+    let mut artifact_count = 0u64;
+    if let Some(commands) = result.get("commandResults").and_then(Value::as_array) {
+        for command in commands {
+            if let Some(artifacts) = command.get("artifactPaths").and_then(Value::as_array) {
+                for artifact in artifacts {
+                    artifact_count = artifact_count.saturating_add(1);
+                    let kind = artifact
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    *kind_counts.entry(kind.to_owned()).or_insert(0) += 1;
+                    if let Some(hash) = artifact.get("pathHash").and_then(Value::as_str) {
+                        path_hashes.insert(hash.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    json!({
+        "artifactRefCount": artifact_count,
+        "pathIncluded": false,
+        "pathHashes": path_hashes
+            .into_iter()
+            .take(MAX_SWARM_REPLAY_ARTIFACT_HASHES)
+            .collect::<Vec<_>>(),
+        "kindCounts": kind_counts,
+    })
+}
+
+fn swarm_replay_known_blocker_summary(value: &Value) -> Value {
+    json!({
+        "blockerFingerprint": value.get("blockerFingerprint").and_then(Value::as_str),
+        "blockerKind": value.get("blockerKind").and_then(Value::as_str),
+        "remediationBead": value.get("remediationBead").and_then(Value::as_str),
+        "retryAfter": value.get("retryAfter").and_then(Value::as_str),
+    })
+}
+
+fn swarm_replay_first_failure_summary(result: &Value) -> Value {
+    let Some(failure) = result.get("firstFailure") else {
+        return Value::Null;
+    };
+    json!({
+        "stepId": failure.get("stepId").and_then(Value::as_str).unwrap_or("unknown"),
+        "agentSlot": failure.get("agentSlot").and_then(Value::as_u64).unwrap_or(0),
+        "code": failure.get("code").and_then(Value::as_str).unwrap_or("unknown"),
+        "severity": failure.get("severity").and_then(Value::as_str).unwrap_or("unknown"),
+        "diagnosisIncluded": false,
+        "diagnosisHash": failure.get("diagnosis").and_then(Value::as_str).map(blake3_summary_hash),
+        "repairHintIncluded": false,
+        "repairHintHash": failure.get("repairHint").and_then(Value::as_str).map(blake3_summary_hash),
+    })
+}
+
+fn swarm_replay_degraded_codes(result: &Value) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    insert_string_array_values(
+        &mut codes,
+        result.pointer("/hostProfileAdmission/degradedCodes"),
+    );
+    insert_string_array_values(&mut codes, result.get("warnings"));
+    insert_string_array_values(
+        &mut codes,
+        result.pointer("/verification/proofCapsule/rch/degradedCodes"),
+    );
+    if let Some(code) = result.pointer("/firstFailure/code").and_then(Value::as_str) {
+        codes.insert(code.to_owned());
+    }
+    if let Some(commands) = result.get("commandResults").and_then(Value::as_array) {
+        for command in commands {
+            insert_string_array_values(&mut codes, command.get("degradedCodes"));
+            if let Some(diagnosis) = command.pointer("/slo/diagnosis").and_then(Value::as_str)
+                && let Some(code) = diagnosis.split(':').next()
+                && code.starts_with("swarm_replay_")
+            {
+                codes.insert(code.to_owned());
+            }
+        }
+    }
+    codes
+        .into_iter()
+        .take(MAX_SWARM_REPLAY_DEGRADED_CODES)
+        .collect()
+}
+
+fn insert_string_array_values(codes: &mut BTreeSet<String>, value: Option<&Value>) {
+    if let Some(values) = value.and_then(Value::as_array) {
+        for value in values {
+            if let Some(text) = value.as_str() {
+                let code = text.split(':').next().unwrap_or(text).trim();
+                if !code.is_empty() {
+                    codes.insert(code.to_owned());
+                }
+            }
+        }
+    }
+}
+
+fn swarm_replay_summary_degraded_codes(replays: &[Value]) -> Vec<String> {
+    let mut codes = BTreeSet::new();
+    for replay in replays {
+        insert_string_array_values(&mut codes, replay.get("degradedCodes"));
+    }
+    codes
+        .into_iter()
+        .take(MAX_SWARM_REPLAY_DEGRADED_CODES)
+        .collect()
+}
+
+fn swarm_replay_summary_status_counts(replays: &[Value]) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+    for replay in replays {
+        let status = replay
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        *counts.entry(status.to_owned()).or_insert(0) += 1;
+    }
+    counts
 }
 
 /// Collect redaction-safe incident replay summaries from committed synthetic fixtures.

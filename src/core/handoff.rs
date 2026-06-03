@@ -28,9 +28,10 @@ use crate::core::focus::{focus_state_hash, read_active_focus_state};
 use crate::core::singleflight::singleflight_posture_report;
 use crate::core::support_bundle::redact_support_bundle_swarm_brief_summary;
 use crate::core::swarm_brief::{
-    collect_swarm_brief_summary, collect_swarm_incident_summary,
+    collect_swarm_brief_summary, collect_swarm_incident_summary, collect_swarm_replay_summary,
     render_swarm_brief_summary_for_handoff, render_swarm_incident_summary_for_handoff,
-    swarm_brief_summary_evidence_id, swarm_incident_summary_evidence_id,
+    render_swarm_replay_summary_for_handoff, swarm_brief_summary_evidence_id,
+    swarm_incident_summary_evidence_id, swarm_replay_summary_evidence_id,
 };
 use crate::core::task_frame::{
     NON_EXECUTING_CONTRACT, TaskFrameRecord, TaskFrameShowOptions, show_task_frame,
@@ -472,6 +473,7 @@ pub struct PreviewReport {
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
+    pub swarm_replay_summary: Option<serde_json::Value>,
     pub token_estimate: usize,
     pub byte_estimate: usize,
     pub redaction_posture: String,
@@ -511,6 +513,7 @@ impl PreviewReport {
             task_frame: None,
             swarm_brief_summary: None,
             swarm_incident_summary: None,
+            swarm_replay_summary: None,
             token_estimate: 0,
             byte_estimate: 0,
             redaction_posture: "standard".to_owned(),
@@ -693,6 +696,7 @@ pub struct CreateReport {
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
+    pub swarm_replay_summary: Option<serde_json::Value>,
     pub token_count: usize,
     pub byte_count: usize,
     pub content_hash: String,
@@ -723,6 +727,7 @@ impl CreateReport {
             task_frame: None,
             swarm_brief_summary: None,
             swarm_incident_summary: None,
+            swarm_replay_summary: None,
             token_count: 0,
             byte_count: 0,
             content_hash: String::new(),
@@ -1083,6 +1088,7 @@ pub struct ResumeReport {
     pub task_frame: Option<serde_json::Value>,
     pub swarm_brief_summary: Option<serde_json::Value>,
     pub swarm_incident_summary: Option<serde_json::Value>,
+    pub swarm_replay_summary: Option<serde_json::Value>,
     pub artifact_pointers: Vec<ArtifactPointer>,
     pub degradations: Vec<DegradationInfo>,
     pub resumed_at: String,
@@ -1268,6 +1274,7 @@ impl ResumeReport {
             task_frame: None,
             swarm_brief_summary: None,
             swarm_incident_summary: None,
+            swarm_replay_summary: None,
             artifact_pointers: Vec::new(),
             degradations: Vec::new(),
             prompt_fragment: None,
@@ -1364,7 +1371,7 @@ fn strip_swarm_diagnostic_section_content_by_id(value: &mut serde_json::Value) {
             let section_id = object.get("id").and_then(serde_json::Value::as_str);
             if matches!(
                 section_id,
-                Some("swarm_brief_summary" | "swarm_incident_summary")
+                Some("swarm_brief_summary" | "swarm_incident_summary" | "swarm_replay_summary")
             ) {
                 object.remove("content");
                 object.remove("evidence_ids");
@@ -2889,6 +2896,89 @@ fn add_swarm_incident_summary_to_resume(report: &mut ResumeReport, summary: &ser
     }
 }
 
+fn add_swarm_replay_summary_to_resume(report: &mut ResumeReport, summary: &serde_json::Value) {
+    let counts = summary.get("counts").unwrap_or(&serde_json::Value::Null);
+    let replays = counts
+        .get("summarizedReplayCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let omitted = counts
+        .get("omittedReplayCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let malformed = counts
+        .get("malformedReplayCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let status = summary
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let hash = summary
+        .get("summaryHash")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let latest = summary
+        .get("latestReplay")
+        .unwrap_or(&serde_json::Value::Null);
+    let latest_run = latest
+        .get("runId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let latest_status = latest
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let proof_level = latest
+        .pointer("/proofCapsule/proofLevel")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let rch_status = latest
+        .pointer("/proofCapsule/rchStatus")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("none");
+    let posture = format!(
+        "Embedded swarm replay summary: status={status}, replays={replays}, omitted={omitted}, malformed={malformed}, latest_run={latest_run}, latest_status={latest_status}, proof_level={proof_level}, rch_status={rch_status}, summary_hash={hash}; raw_logs_included=false; raw_command_args_included=false; diagnostic_not_live=true."
+    );
+    report.status_summary = Some(match report.status_summary.take() {
+        Some(existing) => format!("{existing}\n{posture}"),
+        None => posture,
+    });
+    let evidence_id = swarm_replay_summary_evidence_id(summary);
+    report.artifact_pointers.push(ArtifactPointer {
+        id: evidence_id,
+        path: None,
+        description:
+            "Redacted swarm replay summary embedded in the handoff capsule; raw replay artifacts stay local and are referenced by hashes."
+                .to_owned(),
+    });
+    report.next_actions.push(
+        NextAction::new(
+            2,
+            "Refresh or inspect replay evidence before acting on scale-lab status.",
+        )
+        .with_reason(
+            "Embedded replay summaries are compact support-bundle context, not fresh proof.",
+        )
+        .with_command("ee support bundle --workspace . --out <dir> --json"),
+    );
+
+    if let Some(codes) = summary
+        .get("degradedCodes")
+        .and_then(serde_json::Value::as_array)
+    {
+        for code in codes.iter().filter_map(serde_json::Value::as_str).take(8) {
+            report.degradations.push(
+                DegradationInfo::new(
+                    format!("swarm_replay_{code}"),
+                    "Embedded swarm replay summary reported degraded replay evidence.",
+                )
+                .with_next_action("ee support bundle --workspace . --out <dir> --json"),
+            );
+        }
+    }
+}
+
 /// Preview a handoff capsule without writing it.
 pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, DomainError> {
     let mut report = PreviewReport::new(options.workspace.clone(), options.profile);
@@ -2962,6 +3052,24 @@ pub fn preview_handoff(options: &PreviewOptions) -> Result<PreviewReport, Domain
         confidence: swarm_incident_section.confidence.as_str().to_owned(),
         evidence_count: swarm_incident_section.evidence_ids.len(),
         token_estimate: swarm_incident_section.token_estimate,
+    });
+
+    let swarm_replay_summary = collect_swarm_replay_summary(&options.workspace);
+    let swarm_replay_evidence = vec![swarm_replay_summary_evidence_id(&swarm_replay_summary)];
+    let swarm_replay_section = CapsuleSection::new("swarm_replay_summary", "Swarm Replay Summary")
+        .with_content(render_swarm_replay_summary_for_handoff(
+            &swarm_replay_summary,
+        ))
+        .with_confidence(EvidenceConfidence::Verified)
+        .with_evidence(swarm_replay_evidence.clone());
+    report.evidence_ids.extend(swarm_replay_evidence);
+    report.swarm_replay_summary = Some(swarm_replay_summary);
+    report.planned_sections.push(PlannedSection {
+        id: swarm_replay_section.id.clone(),
+        title: swarm_replay_section.title.clone(),
+        confidence: swarm_replay_section.confidence.as_str().to_owned(),
+        evidence_count: swarm_replay_section.evidence_ids.len(),
+        token_estimate: swarm_replay_section.token_estimate,
     });
 
     let singleflight_posture = singleflight_posture_report();
@@ -3155,6 +3263,21 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         .saturating_add(swarm_incident_evidence.len());
     report.swarm_incident_summary = Some(swarm_incident_summary.clone());
 
+    let swarm_replay_summary = collect_swarm_replay_summary(&options.workspace);
+    let swarm_replay_evidence = vec![swarm_replay_summary_evidence_id(&swarm_replay_summary)];
+    sections.push(
+        CapsuleSection::new("swarm_replay_summary", "Swarm Replay Summary")
+            .with_content(render_swarm_replay_summary_for_handoff(
+                &swarm_replay_summary,
+            ))
+            .with_confidence(EvidenceConfidence::Verified)
+            .with_evidence(swarm_replay_evidence.clone()),
+    );
+    report.evidence_count = report
+        .evidence_count
+        .saturating_add(swarm_replay_evidence.len());
+    report.swarm_replay_summary = Some(swarm_replay_summary.clone());
+
     let singleflight_posture = singleflight_posture_report();
     sections.push(
         CapsuleSection::new("singleflight_posture", "Single-flight Posture")
@@ -3217,6 +3340,7 @@ pub fn create_handoff(options: &CreateOptions) -> Result<CreateReport, DomainErr
         "task_frame": task_frame_json,
         "swarm_brief_summary": swarm_brief_summary,
         "swarm_incident_summary": swarm_incident_summary,
+        "swarm_replay_summary": swarm_replay_summary,
         "created_at": created_at,
     });
     let capsule_content = sign_capsule_content(
@@ -3571,6 +3695,14 @@ pub fn resume_handoff(options: &ResumeOptions) -> Result<ResumeReport, DomainErr
         .filter(|value| !value.is_null());
     if let Some(summary) = report.swarm_incident_summary.clone() {
         add_swarm_incident_summary_to_resume(&mut report, &summary);
+    }
+
+    report.swarm_replay_summary = capsule
+        .get("swarm_replay_summary")
+        .cloned()
+        .filter(|value| !value.is_null());
+    if let Some(summary) = report.swarm_replay_summary.clone() {
+        add_swarm_replay_summary_to_resume(&mut report, &summary);
     }
 
     if let Some(sections) = capsule.get("sections").and_then(|v| v.as_array()) {
@@ -4590,6 +4722,7 @@ memories_revised = 3
             "integrity": {"hmac": "secret-one", "hmacPrefix": "aaa"},
             "swarm_brief_summary": {"hostname": "agent-host-a", "generatedAt": "now"},
             "swarm_incident_summary": {"summaryHash": "blake3:first", "status": "clean"},
+            "swarm_replay_summary": {"summaryHash": "blake3:replay-first", "status": "available"},
             "memory_snapshot": {"captured_at": "2026-05-16T00:00:00Z", "memory_count": 0},
             "sections": [
                 stable_section.clone(),
@@ -4606,6 +4739,13 @@ memories_revised = 3
                     "content": "path-specific incident body A",
                     "evidence_ids": ["incident-a"],
                     "token_estimate": 7,
+                },
+                {
+                    "id": "swarm_replay_summary",
+                    "title": "Swarm Replay Summary",
+                    "content": "path-specific replay body A",
+                    "evidence_ids": ["replay-a"],
+                    "token_estimate": 11,
                 }
             ]
         });
@@ -4616,6 +4756,7 @@ memories_revised = 3
             "integrity": {"hmac": "secret-two", "hmacPrefix": "bbb"},
             "swarm_brief_summary": {"hostname": "agent-host-b", "generatedAt": "later"},
             "swarm_incident_summary": {"summaryHash": "blake3:second", "status": "degraded"},
+            "swarm_replay_summary": {"summaryHash": "blake3:replay-second", "status": "degraded"},
             "memory_snapshot": {"captured_at": "2026-05-16T00:01:00Z", "memory_count": 0},
             "sections": [
                 stable_section,
@@ -4632,6 +4773,13 @@ memories_revised = 3
                     "content": "path-specific incident body B",
                     "evidence_ids": ["incident-b"],
                     "token_estimate": 17,
+                },
+                {
+                    "id": "swarm_replay_summary",
+                    "title": "Swarm Replay Summary",
+                    "content": "path-specific replay body B",
+                    "evidence_ids": ["replay-b"],
+                    "token_estimate": 23,
                 }
             ]
         });
@@ -6135,6 +6283,86 @@ memories_revised = 3
             ensure(
                 !status.contains(forbidden),
                 format!("incident handoff status leaked forbidden text {forbidden:?}"),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn resume_handoff_surfaces_replay_summary_without_raw_artifact_details() -> TestResult {
+        let summary = serde_json::json!({
+            "schema": "ee.support_bundle.swarm_replay_summary.v1",
+            "status": "available",
+            "summaryHash": "blake3:abcdef1234567890",
+            "redactionStatus": "workload_run_ids_counts_hashes_only_no_raw_logs_no_commands_no_paths",
+            "counts": {
+                "summarizedReplayCount": 1,
+                "omittedReplayCount": 0,
+                "malformedReplayCount": 0
+            },
+            "degradedCodes": ["swarm_replay_slo_budget_warned"],
+            "latestReplay": {
+                "runId": "run_redacted",
+                "status": "degraded",
+                "proofCapsule": {
+                    "proofLevel": "remote_verified",
+                    "rchStatus": "passed"
+                }
+            },
+            "redaction": {
+                "rawCommandOutputIncluded": false,
+                "commandArgsIncluded": false,
+                "artifactPathsIncluded": false,
+                "hostPathsIncluded": false,
+                "mailBodiesIncluded": false,
+                "environmentDumpsIncluded": false,
+                "workerIdsIncluded": false
+            }
+        });
+        let mut report = ResumeReport::new("hcap_replay".to_owned(), PathBuf::from("handoff.json"));
+
+        add_swarm_replay_summary_to_resume(&mut report, &summary);
+
+        let status = report
+            .status_summary
+            .as_deref()
+            .ok_or_else(|| "resume status summary missing".to_owned())?;
+        ensure(
+            status.contains("Embedded swarm replay summary: status=available"),
+            "resume status includes replay posture",
+        )?;
+        ensure(
+            status.contains("proof_level=remote_verified")
+                && status.contains("rch_status=passed")
+                && status.contains("raw_logs_included=false")
+                && status.contains("raw_command_args_included=false")
+                && status.contains("diagnostic_not_live=true"),
+            "resume status records compact replay proof and redaction posture",
+        )?;
+        ensure(
+            report
+                .artifact_pointers
+                .iter()
+                .any(|pointer| pointer.id.starts_with("swarm_replay_summary:")),
+            "resume artifact pointers include replay summary evidence id",
+        )?;
+        ensure(
+            report.next_actions.iter().any(|action| {
+                action.suggested_command.as_deref()
+                    == Some("ee support bundle --workspace . --out <dir> --json")
+            }),
+            "resume next actions include support bundle refresh command",
+        )?;
+        for forbidden in [
+            "/Users/alice",
+            "raw stdout",
+            "--token",
+            "worker-host",
+            "vmi-private-worker",
+        ] {
+            ensure(
+                !status.contains(forbidden),
+                format!("replay handoff status leaked forbidden text {forbidden:?}"),
             )?;
         }
         Ok(())

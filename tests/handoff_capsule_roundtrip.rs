@@ -134,6 +134,12 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             == Some("ee.support_bundle.swarm_incident_summary.v1"),
         "create stdout includes swarm incident summary schema",
     )?;
+    ensure(
+        json.pointer("/swarm_replay_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_replay_summary.v1"),
+        "create stdout includes swarm replay summary schema",
+    )?;
 
     ensure(
         PathBuf::from(&cap).exists(),
@@ -159,9 +165,11 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_brief_summary")
                 }) && sections.iter().any(|section| {
                     section.get("id").and_then(|v| v.as_str()) == Some("swarm_incident_summary")
+                }) && sections.iter().any(|section| {
+                    section.get("id").and_then(|v| v.as_str()) == Some("swarm_replay_summary")
                 })
             }),
-        "capsule sections include compact swarm and incident summaries",
+        "capsule sections include compact swarm, incident, and replay summaries",
     )?;
     let swarm_summary = capsule_json
         .get("swarm_brief_summary")
@@ -211,6 +219,30 @@ fn handoff_create_writes_real_capsule_file() -> TestResult {
             .and_then(|v| v.as_str())
             .is_some_and(|hash| hash.starts_with("blake3:")),
         "capsule swarm incident summary includes summary hash",
+    )?;
+    let replay_summary = capsule_json
+        .get("swarm_replay_summary")
+        .ok_or_else(|| "capsule missing swarm_replay_summary".to_string())?;
+    ensure(
+        replay_summary.get("schema").and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_replay_summary.v1"),
+        "capsule swarm replay summary schema",
+    )?;
+    ensure(
+        replay_summary.pointer("/redaction/rawCommandOutputIncluded")
+            == Some(&serde_json::json!(false))
+            && replay_summary.pointer("/redaction/commandArgsIncluded")
+                == Some(&serde_json::json!(false))
+            && replay_summary.pointer("/redaction/artifactPathsIncluded")
+                == Some(&serde_json::json!(false)),
+        "capsule swarm replay summary is redaction-safe",
+    )?;
+    ensure(
+        replay_summary
+            .get("summaryHash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|hash| hash.starts_with("blake3:")),
+        "capsule swarm replay summary includes summary hash",
     )?;
     Ok(())
 }
@@ -400,6 +432,12 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
         "resume includes embedded swarm incident summary",
     )?;
     ensure(
+        json.pointer("/swarm_replay_summary/schema")
+            .and_then(|v| v.as_str())
+            == Some("ee.support_bundle.swarm_replay_summary.v1"),
+        "resume includes embedded swarm replay summary",
+    )?;
+    ensure(
         json.get("artifact_pointers")
             .and_then(|v| v.as_array())
             .is_some_and(|items| {
@@ -422,6 +460,18 @@ fn handoff_resume_emits_capsule_id_and_objective() -> TestResult {
                 })
             }),
         "resume exposes swarm incident summary artifact pointer",
+    )?;
+    ensure(
+        json.get("artifact_pointers")
+            .and_then(|v| v.as_array())
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item.get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| id.starts_with("swarm_replay_summary:"))
+                })
+            }),
+        "resume exposes swarm replay summary artifact pointer",
     )?;
     Ok(())
 }

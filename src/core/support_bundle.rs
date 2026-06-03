@@ -107,6 +107,7 @@ const MAX_SUPPORT_BUNDLE_SAMPLE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SUPPORT_BUNDLE_INSPECT_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const PACK_REPLAY_SUMMARY_FILE: &str = "pack_replay_summary.json";
 const MAX_PACK_REPLAY_SUMMARY_RECORDS: usize = 16;
+const SWARM_REPLAY_SUMMARY_FILE: &str = "swarm_replay_summary.json";
 const SWARM_BRIEF_SUMMARY_FILE: &str = "swarm_brief_summary.json";
 const SWARM_INCIDENT_SUMMARY_FILE: &str = "swarm_incident_summary.json";
 const COORDINATION_FALLBACK_SUMMARY_FILE: &str = "coordination_fallback_summary.json";
@@ -145,7 +146,7 @@ const TAILSCALE_METADATA_FIELDS: &[&str] = &[
     "binaryVersionRaw",
     "binaryAbsolutePath",
 ];
-const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
+const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 9] = [
     ("profile_evidence", PROFILE_EVIDENCE_FILE),
     ("benchmark_summary", SCALE_BENCHMARK_SUMMARY_FILE),
     ("fixture_manifest", SCALE_FIXTURE_MANIFEST_FILE),
@@ -155,6 +156,7 @@ const PERF_COMPARE_BUNDLE_SECTIONS: [(&str, &str); 8] = [
         "performance_explain_samples",
         PERFORMANCE_EXPLAIN_SAMPLES_FILE,
     ),
+    ("swarm_replay_summary", SWARM_REPLAY_SUMMARY_FILE),
     ("swarm_brief_summary", SWARM_BRIEF_SUMMARY_FILE),
     ("swarm_contention_reports", SCALE_BENCHMARK_SUMMARY_FILE),
 ];
@@ -322,6 +324,7 @@ struct CollectedDiagnostics {
     write_queue_report_json: String,
     performance_explain_samples_json: String,
     pack_replay_summary_json: String,
+    swarm_replay_summary_json: String,
     swarm_brief_summary_json: String,
     swarm_incident_summary_json: String,
     coordination_fallback_summary_json: String,
@@ -438,6 +441,10 @@ pub fn create_bundle(options: &BundleOptions) -> Result<BundleReport, DomainErro
         (
             PACK_REPLAY_SUMMARY_FILE,
             &diagnostics.pack_replay_summary_json,
+        ),
+        (
+            SWARM_REPLAY_SUMMARY_FILE,
+            &diagnostics.swarm_replay_summary_json,
         ),
         (
             SWARM_BRIEF_SUMMARY_FILE,
@@ -941,6 +948,7 @@ fn collect_diagnostics(
     let write_queue_report_json = write_queue_report_json();
     let performance_explain_samples_json = performance_explain_samples_json(workspace);
     let pack_replay_summary_json = pack_replay_summary_json(workspace);
+    let swarm_replay_summary_json = swarm_replay_summary_json(workspace);
     let swarm_brief_summary_json = swarm_brief_summary_json(workspace);
     let swarm_incident_summary_json = swarm_incident_summary_json(workspace);
     let coordination_fallback_summary_json = coordination_fallback_summary_json(workspace);
@@ -965,6 +973,7 @@ fn collect_diagnostics(
         write_queue_report_json,
         performance_explain_samples_json,
         pack_replay_summary_json,
+        swarm_replay_summary_json,
         swarm_brief_summary_json,
         swarm_incident_summary_json,
         coordination_fallback_summary_json,
@@ -1691,6 +1700,10 @@ fn performance_explain_samples_json(workspace: &Path) -> String {
 
 fn pack_replay_summary_json(workspace: &Path) -> String {
     stable_json(&collect_pack_replay_summary(workspace))
+}
+
+fn swarm_replay_summary_json(workspace: &Path) -> String {
+    stable_json(&super::swarm_brief::collect_swarm_replay_summary(workspace))
 }
 
 fn swarm_brief_summary_json(workspace: &Path) -> String {
@@ -3268,6 +3281,7 @@ fn planned_files() -> Vec<String> {
         WRITE_QUEUE_REPORT_FILE.to_owned(),
         PERFORMANCE_EXPLAIN_SAMPLES_FILE.to_owned(),
         PACK_REPLAY_SUMMARY_FILE.to_owned(),
+        SWARM_REPLAY_SUMMARY_FILE.to_owned(),
         SWARM_BRIEF_SUMMARY_FILE.to_owned(),
         SWARM_INCIDENT_SUMMARY_FILE.to_owned(),
         COORDINATION_FALLBACK_SUMMARY_FILE.to_owned(),
@@ -4860,6 +4874,7 @@ mod tests {
             WRITE_QUEUE_REPORT_FILE,
             PERFORMANCE_EXPLAIN_SAMPLES_FILE,
             PACK_REPLAY_SUMMARY_FILE,
+            SWARM_REPLAY_SUMMARY_FILE,
             SWARM_BRIEF_SUMMARY_FILE,
             SWARM_INCIDENT_SUMMARY_FILE,
             TRIAGE_SUMMARY_FILE,
@@ -4987,6 +5002,205 @@ mod tests {
         assert!(rendered.contains("Swarm incident summary: status=available"));
         assert!(rendered.contains("raw logs"));
         assert!(!rendered.contains("rm -rf"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_replay_summary_redacts_artifacts_for_support_and_handoff() -> TestResult {
+        let workspace = unique_test_path("swarm-replay-summary");
+        let replay_dir = workspace
+            .join(crate::core::lab::SWARM_REPLAY_ARTIFACT_DIR_TAIL)
+            .join("run_redaction");
+        fs::create_dir_all(&replay_dir)
+            .map_err(|error| format!("failed to create replay dir: {error}"))?;
+
+        let replay_result = json!({
+            "schema": "ee.swarm_replay_result.v1",
+            "workloadId": "workload_redaction",
+            "runId": "run_redaction",
+            "sideEffectFree": true,
+            "status": "degraded",
+            "hostProfileAdmission": {
+                "declaredProfile": "standard",
+                "requestedParallelAgents": 8,
+                "requiredClass": "standard",
+                "observedClass": "standard",
+                "status": "admitted",
+                "degradedCodes": ["swarm_replay_memory_unknown"]
+            },
+            "commandResults": [
+                {
+                    "stepId": "remember_secret",
+                    "agentSlot": 0,
+                    "commandHash": "blake3:command",
+                    "exitCode": 0,
+                    "elapsedMs": 42,
+                    "stdoutBytes": 12,
+                    "stderrBytes": 0,
+                    "degradedCodes": ["swarm_replay_slo_budget_warned: /Users/alice/private"],
+                    "artifactPaths": [
+                        {
+                            "kind": "stdout",
+                            "pathTail": "/Users/alice/private/stdout.txt",
+                            "pathHash": "blake3:stdout-hash"
+                        }
+                    ],
+                    "redactionStatus": "redacted",
+                    "slo": {
+                        "status": "warn",
+                        "diagnosis": "swarm_replay_slo_budget_warned: token sk-test-redaction"
+                    }
+                }
+            ],
+            "aggregate": {
+                "commandCount": 1,
+                "successCount": 1,
+                "failureCount": 0,
+                "degradedCount": 1,
+                "sloWarningCount": 1,
+                "sloFailureCount": 0,
+                "firstSloFailureStepId": null,
+                "p95Ms": 42,
+                "p99Ms": 42
+            },
+            "redactionStatus": {
+                "rawTaskStringPresent": false,
+                "rawQueryTextPresent": false,
+                "rawMemoryBodyPresent": false,
+                "rawMailBodyPresent": false,
+                "absoluteHostPathPresent": false,
+                "secretsPresent": false,
+                "environmentDumpPresent": false,
+                "fullFileListingPresent": false,
+                "redactionProbesPassed": true
+            },
+            "firstFailure": {
+                "stepId": "remember_secret",
+                "agentSlot": 0,
+                "code": "swarm_replay_slo_budget_warned",
+                "severity": "warning",
+                "diagnosis": "Inspect /Users/alice/private/stdout.txt with sk-test-redaction",
+                "repairHint": "Do not paste raw output."
+            },
+            "verification": {
+                "rchRequired": true,
+                "rchStatus": "passed",
+                "workloadHash": "blake3:workload",
+                "replayHash": "blake3:replay",
+                "proofCapsule": {
+                    "schema": "ee.swarm_replay.verification_capsule.v1",
+                    "proofLevel": "remote_verified",
+                    "rch": {
+                        "commandHash": "sha256:proof-command",
+                        "workerId": "vmi-private-worker",
+                        "remoteMarkerPresent": true,
+                        "cargoStarted": true,
+                        "rawOutputIncluded": false,
+                        "localPathsRedacted": true,
+                        "degradedCodes": []
+                    }
+                }
+            },
+            "warnings": ["swarm_replay_slo_budget_warned: /Users/alice/private"]
+        });
+        fs::write(
+            replay_dir.join(crate::core::lab::SWARM_REPLAY_RESULT_ARTIFACT_FILE),
+            stable_json(&replay_result),
+        )
+        .map_err(|error| format!("failed to write replay result: {error}"))?;
+
+        let summary = crate::core::swarm_brief::collect_swarm_replay_summary(&workspace);
+        let encoded = stable_json(&summary);
+
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!(
+                crate::core::swarm_brief::SWARM_REPLAY_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(summary.pointer("/status"), Some(&json!("available")));
+        assert_eq!(
+            summary.pointer("/counts/summarizedReplayCount"),
+            Some(&json!(1))
+        );
+        assert_eq!(
+            summary.pointer("/latestReplay/proofCapsule/proofLevel"),
+            Some(&json!("remote_verified"))
+        );
+        assert_eq!(
+            summary.pointer("/latestReplay/proofCapsule/rchStatus"),
+            Some(&json!("passed"))
+        );
+        assert_eq!(
+            summary.pointer("/latestReplay/artifacts/pathIncluded"),
+            Some(&json!(false))
+        );
+        assert!(
+            summary
+                .pointer("/latestReplay/proofCapsule/workerIdHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "worker id must be represented only as a hash"
+        );
+        for forbidden in [
+            "/Users/alice",
+            "sk-test-redaction",
+            "vmi-private-worker",
+            "stdout.txt",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "replay support summary leaked forbidden text {forbidden:?}: {encoded}"
+            );
+        }
+
+        let rendered = crate::core::swarm_brief::render_swarm_replay_summary_for_handoff(&summary);
+        assert!(rendered.contains("Swarm replay summary: status=available"));
+        assert!(rendered.contains("proof_level=remote_verified"));
+        assert!(!rendered.contains("/Users/alice"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_replay_summary_degrades_honestly_when_artifacts_are_missing() -> TestResult {
+        let workspace = unique_test_path("swarm-replay-summary-missing-artifacts");
+
+        let summary = crate::core::swarm_brief::collect_swarm_replay_summary(&workspace);
+
+        assert_eq!(
+            summary.pointer("/schema"),
+            Some(&json!(
+                crate::core::swarm_brief::SWARM_REPLAY_SUMMARY_SCHEMA_V1
+            ))
+        );
+        assert_eq!(
+            summary.pointer("/status"),
+            Some(&json!("artifact_directory_missing"))
+        );
+        assert_eq!(
+            summary.pointer("/counts/summarizedReplayCount"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/rawCommandOutputIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/commandArgsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(
+            summary.pointer("/redaction/artifactPathsIncluded"),
+            Some(&json!(false))
+        );
+        assert_eq!(summary.pointer("/withinSizeBudget"), Some(&json!(true)));
+        assert!(
+            summary
+                .pointer("/summaryHash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| hash.starts_with("blake3:")),
+            "missing-artifact replay summary still gets a stable hash"
+        );
         Ok(())
     }
 
