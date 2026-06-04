@@ -428,6 +428,39 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertEqual(decision["sourceSummary"]["sourceCount"], 0)
         self.assertIn("malformed_command_surface", decision["whyNotSafe"])
 
+    def test_malformed_nested_authority_objects_downgrade_otherwise_safe_packet(self):
+        packet = {
+            "schema": "ee.swarm.work_packet.v1",
+            "safeToClaim": True,
+            "recommendedAction": "not-a-map",
+            "candidates": [
+                {
+                    "id": "bd-safe-looking.1",
+                    "decision": "safe_to_claim",
+                    "unsafeReasons": [],
+                    "staleReasons": [],
+                }
+            ],
+            "coordination": {"agentMail": "not-a-map"},
+            "trackerIntegrity": "not-a-map",
+            "rchProofPosture": "not-a-map",
+            "verification": "not-a-map",
+            "sourceProvenance": "not-a-list",
+            "degraded": [],
+        }
+
+        decision = consumer.consume(packet)
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["candidateId"], "bd-safe-looking.1")
+        self.assertEqual(decision["decision"], "safe_to_claim")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertEqual(decision["sourceSummary"]["sourceCount"], 0)
+        self.assertIn("malformed_recommended_action", decision["whyNotSafe"])
+        self.assertIn("malformed_tracker_integrity", decision["whyNotSafe"])
+        self.assertIn("malformed_agent_mail", decision["whyNotSafe"])
+        self.assertIn("malformed_rch_proof_posture", decision["whyNotSafe"])
+        self.assertIn("malformed_verification", decision["whyNotSafe"])
+
     def test_secret_shaped_strings_are_redacted_and_not_runnable(self):
         gate = safe_gate()
         github_classic = "ghp_" + "0123456789abcdef0123456789abcdef0123"

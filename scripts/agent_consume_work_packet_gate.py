@@ -63,6 +63,33 @@ def list_items(value):
     return value if isinstance(value, list) else []
 
 
+def dict_or_empty(value):
+    return value if isinstance(value, dict) else {}
+
+
+def malformed_packet_map_reasons(packet):
+    reasons = []
+    for key, reason in [
+        ("recommendedAction", "malformed_recommended_action"),
+        ("trackerIntegrity", "malformed_tracker_integrity"),
+        ("coordination", "malformed_coordination"),
+        ("rchProofPosture", "malformed_rch_proof_posture"),
+        ("verification", "malformed_verification"),
+    ]:
+        if (
+            key in packet
+            and packet.get(key) is not None
+            and not isinstance(packet.get(key), dict)
+        ):
+            reasons.append(reason)
+
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = coordination.get("agentMail")
+    if agent_mail is not None and not isinstance(agent_mail, dict):
+        reasons.append("malformed_agent_mail")
+    return reasons
+
+
 def count_legacy_command_strings(value):
     if isinstance(value, str):
         return 1 if redact_text(value) else 0
@@ -107,16 +134,14 @@ def degraded_summary(payload, envelope_degraded=None):
         add_objects(payload.get("degraded"))
         add_objects(payload.get("degradedCodes"))
         add_objects(payload.get("sourceProvenance"))
-        agent_mail = payload.get("coordination", {}).get("agentMail", {})
+        coordination = dict_or_empty(payload.get("coordination"))
+        agent_mail = dict_or_empty(coordination.get("agentMail"))
         for code in compact_list(agent_mail.get("degradedCodes")):
             add(code, "agent_mail")
-        rch = payload.get("rchProofPosture", {})
+        rch = dict_or_empty(payload.get("rchProofPosture"))
         for code in compact_list(rch.get("blockerCodes")):
             add(code, "rch")
-        known_blockers = (
-            list_items(rch.get("knownBlockers")) if isinstance(rch, dict) else []
-        )
-        for blocker in known_blockers:
+        for blocker in list_items(rch.get("knownBlockers")):
             if not isinstance(blocker, dict):
                 continue
             add(blocker.get("code"), "rch")
@@ -146,12 +171,12 @@ def source_summary_from_gate(gate):
 
 
 def source_summary_from_packet(packet):
-    tracker = packet.get("trackerIntegrity", {})
-    coordination = packet.get("coordination", {})
-    agent_mail = coordination.get("agentMail", {})
+    tracker = dict_or_empty(packet.get("trackerIntegrity"))
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
     agent_mail_status = agent_mail.get("status") or coordination.get("agentMailHealth")
-    rch = packet.get("rchProofPosture", {})
-    legacy_verification = packet.get("verification", {})
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    legacy_verification = dict_or_empty(packet.get("verification"))
     return {
         "trackerHealth": redact_text(tracker.get("health"), 64),
         "trackerAuthoritative": tracker.get("brReadsAuthoritative"),
@@ -242,13 +267,13 @@ def command_actions_from_gate(gate, safe_to_claim):
 def command_actions_from_packet(packet, safe_to_claim):
     actions = []
     legacy_refused = 0
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     for action in list_items(recommended.get("suggestedCommandActions")):
         if isinstance(action, dict):
             actions.append(classify_action(action, safe_to_claim, "recommended"))
     legacy_refused += count_legacy_command_strings(recommended.get("suggestedCommands"))
 
-    verification = packet.get("verification", {})
+    verification = dict_or_empty(packet.get("verification"))
     for key in ("requiredCommands", "staticChecks"):
         for command in list_items(verification.get(key)):
             if not isinstance(command, dict):
@@ -260,7 +285,8 @@ def command_actions_from_packet(packet, safe_to_claim):
             elif command.get("commandTemplate"):
                 legacy_refused += 1
 
-    agent_mail = packet.get("coordination", {}).get("agentMail", {})
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
     for fallback in list_items(agent_mail.get("fallbackActions")):
         if not isinstance(fallback, dict):
             continue
@@ -287,7 +313,7 @@ def mutating_actions_require_human(argv_actions, safe_to_claim):
 
 
 def selected_candidate(packet):
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     candidate_id = recommended.get("candidateId")
     candidates = packet.get("candidates")
     if isinstance(candidates, list):
@@ -310,15 +336,16 @@ def selected_candidate(packet):
 
 
 def packet_safe_to_claim(packet, candidate):
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     raw_safe = packet.get("safeToClaim")
     if raw_safe is None:
         raw_safe = recommended.get("safeToClaim")
     decision = candidate.get("decision") if isinstance(candidate, dict) else None
-    tracker = packet.get("trackerIntegrity", {})
-    agent_mail = packet.get("coordination", {}).get("agentMail", {})
-    rch = packet.get("rchProofPosture", {})
-    legacy_verification = packet.get("verification", {})
+    tracker = dict_or_empty(packet.get("trackerIntegrity"))
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    legacy_verification = dict_or_empty(packet.get("verification"))
     tracker_authoritative = tracker.get("brReadsAuthoritative")
     rch_safe = (
         rch.get("safeToLaunchCargoVerification")
@@ -328,6 +355,7 @@ def packet_safe_to_claim(packet, candidate):
     return (
         raw_safe is True
         and decision == "safe_to_claim"
+        and not malformed_packet_map_reasons(packet)
         and tracker_authoritative is not False
         and agent_mail.get("status") != "semantic_readiness_failed"
         and rch_safe is not False
@@ -335,7 +363,7 @@ def packet_safe_to_claim(packet, candidate):
 
 
 def packet_action(packet, candidate, safe_to_claim):
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     if recommended.get("action"):
         return recommended["action"]
     if safe_to_claim:
@@ -353,7 +381,7 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
         return []
 
     reasons = []
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     action = packet_action(packet, candidate, safe_to_claim)
     raw_safe = packet.get("safeToClaim")
     if raw_safe is None:
@@ -370,7 +398,9 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
         if decision == "stale_but_reclaimable":
             reasons.append("stale_but_reclaimable_requires_inspection")
 
-    tracker = packet.get("trackerIntegrity", {})
+    reasons.extend(malformed_packet_map_reasons(packet))
+
+    tracker = dict_or_empty(packet.get("trackerIntegrity"))
     if tracker.get("brReadsAuthoritative") is False:
         reasons.append(
             f"beads_tracker_not_authoritative:{redact_text(tracker.get('health'), 64)}"
@@ -378,14 +408,15 @@ def packet_why_not_safe(packet, candidate, safe_to_claim):
     if tracker.get("requiresCandidateDowngrade") is True:
         reasons.append("tracker_requires_candidate_downgrade")
 
-    agent_mail = packet.get("coordination", {}).get("agentMail", {})
+    coordination = dict_or_empty(packet.get("coordination"))
+    agent_mail = dict_or_empty(coordination.get("agentMail"))
     if agent_mail.get("status") == "semantic_readiness_failed":
         reasons.append("agent_mail_semantic_readiness_failed")
     if raw_safe is not True:
         reasons.append(f"packet_recommendation_not_claim_safe:{redact_text(action, 64)}")
 
-    rch = packet.get("rchProofPosture", {})
-    legacy_verification = packet.get("verification", {})
+    rch = dict_or_empty(packet.get("rchProofPosture"))
+    legacy_verification = dict_or_empty(packet.get("verification"))
     rch_safe = (
         rch.get("safeToLaunchCargoVerification")
         if "safeToLaunchCargoVerification" in rch
@@ -476,7 +507,7 @@ def consume_claim_gate(gate, envelope_degraded=None):
 def consume_work_packet(packet, envelope_degraded=None):
     candidate = selected_candidate(packet)
     safe_to_claim = packet_safe_to_claim(packet, candidate)
-    recommended = packet.get("recommendedAction", {})
+    recommended = dict_or_empty(packet.get("recommendedAction"))
     candidate_id = None
     decision = "no_candidate"
     if isinstance(candidate, dict):
