@@ -403,6 +403,73 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertEqual(by_id["display_only"]["argv"], [])
         self.assertEqual(by_id["display_only"]["reason"], "copy_safety:display_only")
 
+    def test_mutating_next_command_action_fails_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"].append(
+            safe_action(
+                "bad_reopen",
+                ["br", "reopen", "bd-safe.1", "--json"],
+                mutates=True,
+            )
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_next_action_mutates_state:bad_reopen",
+            decision["whyNotSafe"],
+        )
+        by_id = {action["commandId"]: action for action in decision["argvActions"]}
+        self.assertFalse(by_id["bad_reopen"]["runnable"])
+        self.assertEqual(
+            by_id["bad_reopen"]["reason"],
+            "mutating_action_requires_safe_gate",
+        )
+
+    def test_hidden_beads_mutation_in_next_command_action_fails_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"] = [
+            safe_action(
+                "mislabeled_update",
+                ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
+                mutates=False,
+            )
+        ]
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_next_action_mutates_state:mislabeled_update",
+            decision["whyNotSafe"],
+        )
+        by_id = {action["commandId"]: action for action in decision["argvActions"]}
+        self.assertFalse(by_id["mislabeled_update"]["runnable"])
+
+    def test_claim_action_must_be_mutating_beads_update(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = safe_action(
+            "bead_claim_candidate",
+            ["br", "show", "bd-safe.1", "--json"],
+            mutates=False,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_claim_action_not_mutating",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "claim_gate_claim_action_not_bead_update",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+
     def test_malformed_structured_argv_entries_are_review_required(self):
         gate = safe_gate()
         gate["nextCommandActions"] = [
@@ -417,8 +484,12 @@ class ClaimGateConsumer(unittest.TestCase):
 
         decision = consumer.consume(envelope(gate))
 
-        self.assertTrue(decision["safeToClaim"])
+        self.assertFalse(decision["safeToClaim"])
         self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_claim_action_not_bead_update",
+            decision["whyNotSafe"],
+        )
         by_id = {action["commandId"]: action for action in decision["argvActions"]}
         for command_id in ("non_string_argv", "empty_argv", "malformed_claim"):
             self.assertFalse(by_id[command_id]["runnable"])

@@ -444,7 +444,11 @@ def classify_action(action, safe_to_claim, action_kind):
 
     copy_safety = redact_text(action.get("copySafety") or "display_only", 48)
     shell_required = action.get("shellRequired") is True
-    mutates_state = action.get("mutatesState") is True
+    mutates_state = (
+        action.get("mutatesState") is True
+        or action_looks_like_beads_mutation(action)
+        or action_kind == "claim"
+    )
     has_safe_argv = (
         copy_safety == SAFE_COPY
         and not shell_required
@@ -496,6 +500,28 @@ def claim_action_candidate_id(action):
     if argv[1] != "update":
         return None
     return argv[2]
+
+
+def action_looks_like_beads_mutation(action):
+    if not isinstance(action, dict):
+        return False
+    argv = action.get("argv")
+    if not isinstance(argv, list) or len(argv) < 2:
+        return False
+    if not all(isinstance(part, str) and part.strip() for part in argv[:2]):
+        return False
+    if argv[0] not in ("br", "bd"):
+        return False
+    subcommand = argv[1]
+    if subcommand in {"claim", "close", "create", "reopen", "sync", "update"}:
+        return True
+    if subcommand == "dep" and len(argv) >= 3 and argv[2] in {
+        "add",
+        "rm",
+        "remove",
+    }:
+        return True
+    return False
 
 
 def command_actions_from_gate(gate, safe_to_claim):
@@ -693,6 +719,15 @@ def claim_gate_consistency_reasons(gate):
     if compact_list(gate.get("staleReasons")):
         reasons.append("claim_gate_stale_reasons_present")
 
+    for action in list_items(gate.get("nextCommandActions")):
+        if not isinstance(action, dict):
+            continue
+        if action.get("mutatesState") is True or action_looks_like_beads_mutation(
+            action
+        ):
+            command_id = redact_text(action.get("commandId") or "unknown", 64)
+            reasons.append(f"claim_gate_next_action_mutates_state:{command_id}")
+
     candidate = gate.get("selectedCandidate")
     if not isinstance(candidate, dict):
         reasons.append("claim_gate_candidate_missing")
@@ -718,7 +753,12 @@ def claim_gate_consistency_reasons(gate):
     if not isinstance(gate.get("claimCommandAction"), dict):
         reasons.append("claim_gate_missing_claim_action")
     else:
-        claim_candidate_id = claim_action_candidate_id(gate.get("claimCommandAction"))
+        claim_action = gate.get("claimCommandAction")
+        if claim_action.get("mutatesState") is not True:
+            reasons.append("claim_gate_claim_action_not_mutating")
+        claim_candidate_id = claim_action_candidate_id(claim_action)
+        if claim_candidate_id is None:
+            reasons.append("claim_gate_claim_action_not_bead_update")
         expected_candidate_id = (
             candidate.get("id") if isinstance(candidate, dict) else None
         )
