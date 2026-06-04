@@ -102,6 +102,17 @@ def load_text(relative_path):
     return (REPO_ROOT / relative_path).read_text(encoding="utf-8")
 
 
+def run_consumer_cli(payload):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result, json.loads(result.stdout)
+
+
 def normalize_whitespace(text):
     return " ".join(text.split())
 
@@ -703,6 +714,38 @@ class WorkPacketConsumer(unittest.TestCase):
 
 
 class ErrorHandling(unittest.TestCase):
+    def test_cli_healthy_fixture_exits_zero_with_machine_readable_decision(self):
+        result, decision = run_consumer_cli(
+            load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.swarm.work_packet.v1")
+        self.assertEqual(decision["decision"], "safe_to_claim")
+        self.assertEqual(decision["action"], "inspect_and_claim")
+        self.assertEqual(decision["whyNotSafe"], [])
+
+    def test_cli_blocked_fixture_exits_three_with_non_runnable_claim_posture(self):
+        result, decision = run_consumer_cli(
+            load_fixture("tests/fixtures/swarm_work_packet/crowded_checkout.json")
+        )
+
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["sourceSchema"], "ee.swarm.work_packet.v1")
+        self.assertEqual(decision["decision"], "coordinate_first")
+        self.assertEqual(decision["action"], "coordinate_before_claim")
+        self.assertIn("dirty_path_overlap", decision["whyNotSafe"])
+        self.assertFalse(
+            any(
+                action["runnable"] and action["mutatesState"]
+                for action in decision["argvActions"]
+            )
+        )
+
     def test_cli_invalid_json_returns_machine_readable_fail_closed_decision(self):
         result = subprocess.run(
             [sys.executable, str(SCRIPT_DIR / "agent_consume_work_packet_gate.py")],
