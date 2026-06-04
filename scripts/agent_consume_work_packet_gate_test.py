@@ -268,6 +268,22 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
 
+    def test_malformed_next_command_action_entry_fails_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"].append("br show bd-safe.1 --json")
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "malformed_claim_gate_next_command_action",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
     def test_claim_gate_remote_required_without_positive_proof_fails_closed(self):
         gate = safe_gate()
         gate["sourceAuthority"]["rchSafeToLaunchCargoVerification"] = None
@@ -364,6 +380,41 @@ class ClaimGateConsumer(unittest.TestCase):
         claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
         self.assertFalse(claim["runnable"])
         self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_claim_action_must_set_candidate_in_progress(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = safe_action(
+            "bead_claim_candidate",
+            ["br", "update", "bd-safe.1", "--title", "Retitled", "--json"],
+            mutates=True,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        self.assertIn(
+            "claim_gate_claim_action_not_in_progress",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "mutating_action_requires_safe_gate")
+
+    def test_claim_action_accepts_equals_status_in_progress(self):
+        gate = safe_gate()
+        gate["claimCommandAction"] = safe_action(
+            "bead_claim_candidate",
+            ["br", "update", "bd-safe.1", "--status=in_progress", "--json"],
+            mutates=True,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertEqual(decision["whyNotSafe"], [])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertTrue(claim["runnable"])
 
     def test_missing_claim_action_fails_closed(self):
         gate = safe_gate()

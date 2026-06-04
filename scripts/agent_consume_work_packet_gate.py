@@ -248,6 +248,13 @@ def malformed_claim_gate_reasons(gate):
         if field in gate and value is not None and not isinstance(value, list):
             reasons.append(reason)
 
+    next_actions = gate.get("nextCommandActions")
+    if isinstance(next_actions, list):
+        for action in next_actions:
+            if not isinstance(action, dict):
+                reasons.append("malformed_claim_gate_next_command_action")
+                break
+
     candidate = gate.get("selectedCandidate")
     if candidate is not None and not isinstance(candidate, dict):
         reasons.append("malformed_claim_gate_selected_candidate")
@@ -500,6 +507,24 @@ def claim_action_candidate_id(action):
     if argv[1] != "update":
         return None
     return argv[2]
+
+
+def claim_action_sets_in_progress(action):
+    if not isinstance(action, dict):
+        return False
+    argv = action.get("argv")
+    if not isinstance(argv, list):
+        return False
+    for index, part in enumerate(argv):
+        if part == "--status":
+            return (
+                index + 1 < len(argv)
+                and isinstance(argv[index + 1], str)
+                and argv[index + 1] == "in_progress"
+            )
+        if isinstance(part, str) and part == "--status=in_progress":
+            return True
+    return False
 
 
 def action_looks_like_beads_mutation(action):
@@ -759,6 +784,8 @@ def claim_gate_consistency_reasons(gate):
         claim_candidate_id = claim_action_candidate_id(claim_action)
         if claim_candidate_id is None:
             reasons.append("claim_gate_claim_action_not_bead_update")
+        elif not claim_action_sets_in_progress(claim_action):
+            reasons.append("claim_gate_claim_action_not_in_progress")
         expected_candidate_id = (
             candidate.get("id") if isinstance(candidate, dict) else None
         )
