@@ -2594,6 +2594,70 @@ mod tests {
     }
 
     #[test]
+    fn documented_lab_schemas_are_publicly_exportable() -> TestResult {
+        let public_schema_ids: BTreeSet<&str> = ee::output::public_schemas()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        let mut documented_lab_schemas = Vec::new();
+
+        for schema in LAB_SCHEMAS {
+            let schema_file = format!("docs/schemas/{}.json", schema.version);
+            let schema_path = repo_path(&schema_file);
+            if !schema_path.is_file() {
+                continue;
+            }
+
+            documented_lab_schemas.push(schema.version);
+            ensure(
+                public_schema_ids.contains(schema.version),
+                format!(
+                    "documented lab schema {} must be exported by public_schemas()",
+                    schema.version
+                ),
+            )?;
+
+            let exported: JsonValue =
+                serde_json::from_str(&ee::output::render_schema_export_json(Some(schema.version)))
+                    .map_err(|error| {
+                        format!("schema export {} did not parse: {error}", schema.version)
+                    })?;
+            ensure(
+                exported.get("error").is_none(),
+                format!("schema export {} returned an error", schema.version),
+            )?;
+
+            let documented: JsonValue =
+                serde_json::from_str(&fs::read_to_string(&schema_path).map_err(|error| {
+                    format!(
+                        "read documented lab schema {}: {error}",
+                        schema_path.display()
+                    )
+                })?)
+                .map_err(|error| {
+                    format!(
+                        "parse documented lab schema {}: {error}",
+                        schema_path.display()
+                    )
+                })?;
+            ensure_equal(
+                &exported,
+                &documented,
+                &format!("documented lab schema export parity for {}", schema.version),
+            )?;
+        }
+
+        ensure(
+            documented_lab_schemas.contains(&"ee.swarm_workload.v1"),
+            "documented lab schema parity must cover swarm workload replay inputs",
+        )?;
+        ensure(
+            documented_lab_schemas.contains(&"ee.swarm_replay_result.v1"),
+            "documented lab schema parity must cover swarm replay result ledgers",
+        )
+    }
+
+    #[test]
     fn graph_schemas_include_snapshot_validation() -> TestResult {
         let versions: Vec<&str> = GRAPH_SCHEMAS.iter().map(|s| s.version).collect();
         ensure(
