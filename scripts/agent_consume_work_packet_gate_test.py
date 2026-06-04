@@ -1554,6 +1554,58 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertFalse(action["runnable"])
         self.assertEqual(action["reason"], "mutating_action_requires_safe_gate")
 
+    def test_work_packet_unsafe_reasons_are_bounded_in_why_not_safe(self):
+        packet = load_fixture("tests/fixtures/swarm_work_packet/healthy_small.json")
+        packet["data"]["safeToClaim"] = True
+        packet["data"]["recommendedAction"] = {
+            "action": "inspect_and_claim",
+            "candidateId": "bd-bounded.1",
+            "safeToClaim": True,
+            "suggestedCommands": [],
+            "suggestedCommandActions": [
+                safe_action(
+                    "bead_claim_candidate",
+                    [
+                        "br",
+                        "update",
+                        "bd-bounded.1",
+                        "--status",
+                        "in_progress",
+                        "--json",
+                    ],
+                    mutates=True,
+                )
+            ],
+        }
+        packet["data"]["candidates"] = [
+            {
+                "id": "bd-bounded.1",
+                "decision": "blocked",
+                "unsafeReasons": [
+                    f"unsafe_reason_{index}" for index in range(32)
+                ],
+                "staleReasons": [],
+            }
+        ]
+
+        decision = consumer.consume(packet)
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(
+            len(decision["whyNotSafe"]),
+            consumer.DECISION_DIAGNOSTIC_LIMIT,
+        )
+        self.assertEqual(decision["whyNotSafe"][0], "candidate_decision:blocked")
+        self.assertEqual(decision["whyNotSafe"][1], "unsafe_reason_0")
+        self.assertEqual(
+            decision["whyNotSafe"][-1],
+            f"unsafe_reason_{consumer.DECISION_DIAGNOSTIC_LIMIT - 2}",
+        )
+        self.assertNotIn(
+            f"unsafe_reason_{consumer.DECISION_DIAGNOSTIC_LIMIT - 1}",
+            decision["whyNotSafe"],
+        )
+
     def test_no_candidate_packet_is_not_safe(self):
         packet = {
             "schema": "ee.swarm.work_packet.v1",
