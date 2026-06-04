@@ -153,11 +153,18 @@ def source_summary_from_packet(packet):
 def classify_action(action, safe_to_claim, action_kind):
     argv_input = action.get("argv")
     argv = []
+    argv_invalid = False
     argv_redacted = False
     if isinstance(argv_input, list):
         for part in argv_input:
-            raw = str(part)
+            if not isinstance(part, str):
+                argv_invalid = True
+                continue
+            raw = part
             redacted = redact_text(raw, 120)
+            if not redacted:
+                argv_invalid = True
+                continue
             argv_redacted = argv_redacted or redacted != raw
             argv.append(redacted)
 
@@ -168,11 +175,14 @@ def classify_action(action, safe_to_claim, action_kind):
         copy_safety == SAFE_COPY
         and not shell_required
         and bool(argv)
+        and not argv_invalid
         and not argv_redacted
     )
     runnable = has_safe_argv and (not mutates_state or safe_to_claim)
 
-    if not argv:
+    if argv_invalid:
+        reason = "invalid_argv_item"
+    elif not argv:
         reason = "missing_structured_argv"
     elif argv_redacted:
         reason = "argv_redacted"

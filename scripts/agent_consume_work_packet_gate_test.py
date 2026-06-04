@@ -35,7 +35,7 @@ def envelope(data, degraded=None):
 def safe_action(command_id, argv, mutates=False, copy_safety="safe_structured_argv", shell=False):
     return {
         "commandId": command_id,
-        "displayCommand": " ".join(argv),
+        "displayCommand": " ".join(str(part) for part in argv),
         "argv": argv,
         "shellRequired": shell,
         "copySafety": copy_safety,
@@ -201,6 +201,29 @@ class ClaimGateConsumer(unittest.TestCase):
         self.assertTrue(by_id["display_only"]["reviewRequired"])
         self.assertEqual(by_id["display_only"]["argv"], [])
         self.assertEqual(by_id["display_only"]["reason"], "copy_safety:display_only")
+
+    def test_malformed_structured_argv_entries_are_review_required(self):
+        gate = safe_gate()
+        gate["nextCommandActions"] = [
+            safe_action("non_string_argv", ["br", "show", 123, "--json"]),
+            safe_action("empty_argv", ["br", "", "--json"]),
+        ]
+        gate["claimCommandAction"] = safe_action(
+            "malformed_claim",
+            ["br", "update", "", "--status", "in_progress", "--json"],
+            mutates=True,
+        )
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertTrue(decision["safeToClaim"])
+        self.assertTrue(decision["mutatingActionsRequireHuman"])
+        by_id = {action["commandId"]: action for action in decision["argvActions"]}
+        for command_id in ("non_string_argv", "empty_argv", "malformed_claim"):
+            self.assertFalse(by_id[command_id]["runnable"])
+            self.assertTrue(by_id[command_id]["reviewRequired"])
+            self.assertEqual(by_id[command_id]["argv"], [])
+            self.assertEqual(by_id[command_id]["reason"], "invalid_argv_item")
 
     def test_candidate_not_found_is_not_safe(self):
         gate = safe_gate()
