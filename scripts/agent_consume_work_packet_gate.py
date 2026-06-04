@@ -1263,7 +1263,12 @@ def invocation_is_swarm_work_packet(invocation):
     parts = [part for part in invocation if isinstance(part, str) and part]
     if parts and parts[0].endswith("/ee"):
         parts[0] = "ee"
-    return len(parts) >= 3 and parts[:3] == ["ee", "swarm", "work-packet"]
+    if not parts or parts[0] != "ee":
+        return False
+    return any(
+        parts[index : index + 2] == ["swarm", "work-packet"]
+        for index in range(1, len(parts) - 1)
+    )
 
 
 def error_decision(code, source=None, envelope_degraded=None):
