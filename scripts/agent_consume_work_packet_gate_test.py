@@ -290,7 +290,10 @@ class WorkPacketConsumer(unittest.TestCase):
             decision["whyNotSafe"],
         )
         self.assertIn("tracker_requires_candidate_downgrade", decision["whyNotSafe"])
-        self.assertEqual(decision["legacyCommandStringsRefused"], 1)
+        self.assertEqual(decision["legacyCommandStringsRefused"], 4)
+        self.assertTrue(
+            all(not action["mutatesState"] for action in decision["argvActions"])
+        )
 
     def test_rollup_only_fixture_blocks_claim_without_mutating_actions(self):
         packet = load_fixture(
