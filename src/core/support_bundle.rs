@@ -920,6 +920,49 @@ fn add_optional_json_metrics(summary: &mut ArtifactSummary, bundle_dir: &Path) {
             );
         }
     }
+    if let Some(json) = read_bundle_json(bundle_dir, REGRESSION_CAUSALITY_SUMMARY_FILE) {
+        summary.add_metric(
+            "section.regression_causality_summary.present",
+            MetricValue::measured(1.0, "bool"),
+        );
+        summary.add_provenance(ProvenanceEntry {
+            field: "section.regression_causality_summary.present".to_owned(),
+            source_path: REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
+            source_line: None,
+        });
+
+        let top_hypothesis_count = json
+            .get("topHypotheses")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        summary.add_metric(
+            "regression_causality.top_hypothesis_count",
+            MetricValue::measured(top_hypothesis_count as f64, "count"),
+        );
+
+        let normalized_row_count = json
+            .get("normalizedRowCount")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                json.pointer("/normalization/rows")
+                    .and_then(Value::as_array)
+                    .map(|rows| rows.len() as u64)
+            })
+            .unwrap_or(0);
+        summary.add_metric(
+            "regression_causality.normalized_row_count",
+            MetricValue::measured(normalized_row_count as f64, "count"),
+        );
+
+        let suppressed_field_count = json
+            .get("suppressedFieldCount")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        summary.add_metric(
+            "regression_causality.suppressed_field_count",
+            MetricValue::measured(suppressed_field_count as f64, "count"),
+        );
+    }
 }
 
 fn collect_diagnostics(
@@ -5125,6 +5168,112 @@ mod tests {
                 "regression causality summary leaked forbidden text {forbidden:?}: {encoded}"
             );
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn perf_compare_summary_tracks_regression_causality_section_counts() -> TestResult {
+        let root = unique_test_path("support-bundle-regression-causality-perf-summary");
+        let bundle_dir = root.join("bundle");
+        fs::create_dir_all(&bundle_dir)
+            .map_err(|error| format!("failed to create bundle dir: {error}"))?;
+
+        let causality_summary = regression_causality_summary_value(&[
+            (
+                "support_bundle:verification",
+                RegressionEvidenceKind::VerificationEvidence,
+                stable_json(&json!({
+                    "schema": "ee.rch.verify.v1",
+                    "status": "rch_environment_failure",
+                    "selector_admission_probe": {
+                        "status": "selection_failed",
+                        "local_fallback_refused": true
+                    },
+                    "source_materialization": "remote_checkout_unverified",
+                    "remote_source_materialized": false,
+                    "degradedCodes": ["rch_worker_topology_blocked"],
+                    "redactionStatus": "safe"
+                }))
+                .as_str(),
+            ),
+            (
+                "support_bundle:summary",
+                RegressionEvidenceKind::SupportBundle,
+                stable_json(&json!({
+                    "schema": "ee.support_bundle.v1",
+                    "status": "passed",
+                    "degradedCodes": ["prompt_budget_exceeded"],
+                    "redactionStatus": "safe"
+                }))
+                .as_str(),
+            ),
+        ]);
+        let causality_summary_json = stable_json(&causality_summary);
+        fs::write(
+            bundle_dir.join(REGRESSION_CAUSALITY_SUMMARY_FILE),
+            &causality_summary_json,
+        )
+        .map_err(|error| format!("failed to write causality summary: {error}"))?;
+
+        let manifest = BundleManifest {
+            schema: SUPPORT_BUNDLE_MANIFEST_SCHEMA_V1.to_owned(),
+            bundle_id: "regression-causality-perf-summary".to_owned(),
+            created_at: "2026-06-04T00:00:00Z".to_owned(),
+            workspace_path: "REDACTED/workspace".to_owned(),
+            ee_version: env!("CARGO_PKG_VERSION").to_owned(),
+            files: vec![ManifestEntry {
+                path: REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned(),
+                size_bytes: causality_summary_json.len() as u64,
+                content_hash: compute_hash(&causality_summary_json),
+                redacted: true,
+            }],
+            total_size_bytes: causality_summary_json.len() as u64,
+            redaction_applied: true,
+            redaction_reasons: vec!["fixture".to_owned()],
+        };
+        let inspect = InspectReport {
+            schema: SUPPORT_BUNDLE_INSPECT_SCHEMA_V1.to_owned(),
+            bundle_path: bundle_dir.clone(),
+            manifest: Some(manifest),
+            files_found: vec![REGRESSION_CAUSALITY_SUMMARY_FILE.to_owned()],
+            total_size_bytes: causality_summary_json.len() as u64,
+            hash_verified: true,
+            hash_mismatches: Vec::new(),
+            valid: true,
+        };
+
+        let summary = summarize_inspected_bundle_for_perf_compare(&inspect);
+
+        assert_eq!(
+            summary
+                .metrics
+                .get("section.regression_causality_summary.present")
+                .and_then(|metric| metric.value),
+            Some(1.0)
+        );
+        assert_eq!(
+            summary
+                .metrics
+                .get("regression_causality.normalized_row_count")
+                .and_then(|metric| metric.value),
+            Some(2.0)
+        );
+        assert!(
+            summary
+                .metrics
+                .get("regression_causality.top_hypothesis_count")
+                .and_then(|metric| metric.value)
+                .is_some_and(|count| count >= 2.0),
+            "perf summary must expose compact causality hypothesis counts: {summary:?}"
+        );
+        assert!(
+            summary.provenance.iter().any(|entry| {
+                entry.field == "section.regression_causality_summary.present"
+                    && entry.source_path == REGRESSION_CAUSALITY_SUMMARY_FILE
+            }),
+            "perf summary must cite the causality summary section"
+        );
 
         Ok(())
     }
