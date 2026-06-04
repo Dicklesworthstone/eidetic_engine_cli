@@ -415,6 +415,28 @@ class ErrorHandling(unittest.TestCase):
         self.assertFalse(decision["mutatingActionsRequireHuman"])
         self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
 
+    def test_root_error_envelope_stale_claim_gate_binary_fails_closed(self):
+        decision = consumer.consume(
+            {
+                "schema": "ee.error.v2",
+                "error": {
+                    "code": "usage",
+                    "message": "unexpected argument '--claim-gate' found",
+                    "severity": "low",
+                    "repair": "ee --help",
+                    "repairKind": "actionable",
+                    "details": {},
+                },
+            }
+        )
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertEqual(decision["decision"], "error")
+        self.assertEqual(decision["action"], "blocked_no_action")
+        self.assertEqual(decision["argvActions"], [])
+        self.assertFalse(decision["mutatingActionsRequireHuman"])
+        self.assertIn("error:stale_claim_gate_binary", decision["whyNotSafe"])
+
 
 if __name__ == "__main__":
     runner = unittest.main(exit=False, verbosity=2, module="__main__")

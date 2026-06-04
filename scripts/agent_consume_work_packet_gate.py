@@ -478,6 +478,8 @@ def consume_work_packet(packet, envelope_degraded=None):
 def consume(response):
     if not isinstance(response, dict):
         return error_decision("invalid_json_shape")
+    if response.get("schema") == "ee.error.v2":
+        return error_decision(classify_error_code(response.get("error", {})))
     if response.get("success") is False:
         error = response.get("error", {})
         return error_decision(classify_error_code(error))
