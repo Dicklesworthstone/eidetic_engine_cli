@@ -43,6 +43,9 @@ event_log="${EE_PACKET_NO_MUTATION_EVENT_LOG:-$artifact_root/events.jsonl}"
 packet_json="$artifact_root/work_packet.json"
 packet_stderr="$artifact_root/work_packet.stderr"
 action_summary="$artifact_root/action_summary.json"
+consumer_decision="$artifact_root/consumer_decision.json"
+consumer_stderr="$artifact_root/consumer_decision.stderr"
+consumer_summary="$artifact_root/consumer_summary.json"
 git_index_before="$artifact_root/git_index_before.txt"
 git_index_after="$artifact_root/git_index_after.txt"
 forbidden_log_dir="$artifact_root/forbidden_calls"
@@ -122,6 +125,14 @@ generate_fixture_packet() {
     "workspace": "fixture:redacted",
     "observedStateClass": "degraded_mail_rch_topology",
     "recommendedAction": {
+      "action": "coordinate_before_claim",
+      "candidateId": "bd-fixture-1",
+      "safeToClaim": false,
+      "reasons": [
+        "agent_mail_unavailable",
+        "rch_remote_verification_blocked",
+        "fixture_inspection_only"
+      ],
       "suggestedCommands": [
         "br show bd-fixture-1 --json",
         "printf packet | jq ."
@@ -151,11 +162,75 @@ generate_fixture_packet() {
         }
       ]
     },
+    "safeToClaim": false,
+    "candidates": [
+      {
+        "id": "bd-fixture-1",
+        "title": "sandbox fixture",
+        "source": "beads_ready",
+        "status": "open",
+        "priority": 2,
+        "assignee": null,
+        "decision": "stale_or_advisory",
+        "collisionRisk": "low",
+        "unsafeReasons": [
+          "agent_mail_reservation_evidence_unavailable",
+          "rch_remote_verification_blocked"
+        ],
+        "staleReasons": [
+          "agent_mail_unavailable"
+        ],
+        "sourceRefs": [
+          "br://bd-fixture-1",
+          "agent-mail://unavailable",
+          "rch://topology_blocked"
+        ]
+      }
+    ],
     "coordination": {
       "agentMail": {
+        "status": "degraded_read_only",
+        "reservationAuthoritative": false,
+        "inboxAuthoritative": false,
+        "degradedCodes": [
+          "agent_mail_unavailable"
+        ],
         "fallbackActions": []
       }
     },
+    "trackerIntegrity": {
+      "health": "ok",
+      "brReadsAuthoritative": true,
+      "requiresCandidateDowngrade": false
+    },
+    "rchProofPosture": {
+      "sourceEnabled": true,
+      "remoteOnlyRequired": true,
+      "posture": "topology_blocked",
+      "safeToLaunchCargoVerification": false,
+      "localFallbackPrevented": true,
+      "blockerCodes": [
+        "rch_worker_topology_blocked"
+      ],
+      "knownBlockers": []
+    },
+    "sourceProvenance": [
+      {
+        "source": "beads",
+        "status": "read_only",
+        "ref": "br://bd-fixture-1"
+      },
+      {
+        "source": "agent-mail",
+        "status": "degraded_read_only",
+        "ref": "agent-mail://unavailable"
+      },
+      {
+        "source": "rch",
+        "status": "topology_blocked",
+        "ref": "rch://topology_blocked"
+      }
+    ],
     "verification": {
       "requiredCommands": [],
       "staticChecks": [
@@ -378,6 +453,104 @@ if failures:
 PY
 }
 
+parse_consumer_decision() {
+    python3 - "$consumer_decision" "$consumer_summary" <<'PY'
+import json
+import sys
+
+decision_path, summary_path = sys.argv[1], sys.argv[2]
+
+failures = []
+assertions = []
+
+
+def check(name, passed, detail=""):
+    assertions.append(name)
+    if not passed:
+        failures.append(f"{name}{':' + detail if detail else ''}")
+
+
+try:
+    with open(decision_path, encoding="utf-8") as handle:
+        decision = json.load(handle)
+    check("consumer_json_parseable", True)
+except json.JSONDecodeError as error:
+    decision = {}
+    check(
+        "consumer_json_parseable",
+        False,
+        f"line_{error.lineno}_column_{error.colno}",
+    )
+
+check("consumer_decision_object", isinstance(decision, dict))
+if not isinstance(decision, dict):
+    decision = {}
+
+safe_to_claim = decision.get("safeToClaim")
+argv_actions = decision.get("argvActions")
+why_not_safe = decision.get("whyNotSafe")
+
+check(
+    "consumer_schema_current",
+    decision.get("schema") == "ee.agent.work_packet_gate_decision.v1",
+)
+check("consumer_safe_to_claim_boolean", isinstance(safe_to_claim, bool))
+check("consumer_decision_string", isinstance(decision.get("decision"), str))
+check("consumer_action_string", isinstance(decision.get("action"), str))
+check("consumer_argv_actions_array", isinstance(argv_actions, list))
+check("consumer_why_not_safe_array", isinstance(why_not_safe, list))
+
+if safe_to_claim is False:
+    check(
+        "unsafe_consumer_has_reasons",
+        isinstance(why_not_safe, list) and len(why_not_safe) > 0,
+    )
+
+runnable_mutating = []
+runnable_claim = []
+if isinstance(argv_actions, list):
+    for index, action in enumerate(argv_actions):
+        if not isinstance(action, dict):
+            check("consumer_argv_action_object", False, str(index))
+            continue
+        command_id = str(action.get("commandId") or index)
+        if action.get("runnable") is True and action.get("mutatesState") is True:
+            runnable_mutating.append(command_id)
+        if (
+            safe_to_claim is False
+            and action.get("runnable") is True
+            and action.get("actionKind") == "claim"
+        ):
+            runnable_claim.append(command_id)
+
+check("consumer_has_no_runnable_mutation", not runnable_mutating, ",".join(runnable_mutating))
+check("unsafe_consumer_has_no_runnable_claim", not runnable_claim, ",".join(runnable_claim))
+
+summary = {
+    "schema": decision.get("schema") or "",
+    "safe_to_claim": "true"
+    if safe_to_claim is True
+    else "false"
+    if safe_to_claim is False
+    else "",
+    "decision": decision.get("decision") or "",
+    "action": decision.get("action") or "",
+    "why_not_safe_count": len(why_not_safe) if isinstance(why_not_safe, list) else 0,
+    "argv_action_count": len(argv_actions) if isinstance(argv_actions, list) else 0,
+    "assertion_names": ",".join(assertions),
+    "failures": failures,
+}
+with open(summary_path, "w", encoding="utf-8") as handle:
+    json.dump(summary, handle, sort_keys=True)
+    handle.write("\n")
+
+if failures:
+    for failure in failures:
+        print(f"ASSERTION FAILED: {failure}", file=sys.stderr)
+    sys.exit(24)
+PY
+}
+
 # `br` shim — records the call, allows read-only subcommands, refuses
 # anything that would mutate the tracker. Refuse means non-zero exit so
 # the caller fails loudly.
@@ -505,6 +678,38 @@ else
         "degraded_codes" "unknown"
 fi
 
+consumer_exit=0
+set +e
+PYTHONDONTWRITEBYTECODE=1 python3 -B "$REPO_ROOT/scripts/agent_consume_work_packet_gate.py" \
+    <"$packet_json" >"$consumer_decision" 2>"$consumer_stderr"
+consumer_exit=$?
+set -e
+if [ "$consumer_exit" -ne 0 ] && [ "$consumer_exit" -ne 3 ]; then
+    fail=1
+    printf 'FAIL: reference consumer exited %s\n' "$consumer_exit" >&2
+fi
+
+if parse_consumer_decision; then
+    emit_phase "consumer_decision" \
+        "exit_code" "$consumer_exit" \
+        "stdout_hash" "$(_e2e_hash_file "$consumer_decision")" \
+        "stderr_hash" "$(_e2e_hash_file "$consumer_stderr")" \
+        "schema" "$(json_field "$consumer_summary" "/schema")" \
+        "safe_to_claim" "$(json_field "$consumer_summary" "/safe_to_claim")" \
+        "decision" "$(json_field "$consumer_summary" "/decision")" \
+        "action" "$(json_field "$consumer_summary" "/action")" \
+        "why_not_safe_count" "$(json_field "$consumer_summary" "/why_not_safe_count")" \
+        "argv_action_count" "$(json_field "$consumer_summary" "/argv_action_count")" \
+        "assertion_names" "$(json_field "$consumer_summary" "/assertion_names")"
+else
+    fail=1
+    emit_phase "consumer_decision" \
+        "exit_code" "$consumer_exit" \
+        "stdout_hash" "$(_e2e_hash_file "$consumer_decision")" \
+        "stderr_hash" "$(_e2e_hash_file "$consumer_stderr")" \
+        "assertion_names" "consumer_decision_parse_failed"
+fi
+
 snapshot_dir "$sandbox/.beads" "$beads_after"
 snapshot_dir "$mail_root" "$mail_after"
 git -C "$REPO_ROOT" diff --cached --name-only >"$git_index_after"
@@ -559,8 +764,7 @@ emit_phase "final_result" \
     "assertion_names" "final_exit_status"
 
 printf '{"schema":"ee.packet_no_mutation.v1","ts":"%s","artifact_root":"%s","sandbox":"%s","br_call_count":%s,"mutating_calls":%s,"ok":%s}\n' \
-    "$ts" "$artifact_root" "$sandbox" "$call_count" "$mutating_calls" \
-    "$ok" \
+    "$ts" "$artifact_root" "$sandbox" "$call_count" "$mutating_calls" "$ok" \
     >"$summary"
 
 cat "$summary"
