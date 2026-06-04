@@ -16,6 +16,29 @@ OUTPUT_SCHEMA = "ee.agent.work_packet_gate_decision.v1"
 CLAIM_GATE_SCHEMA = "ee.swarm.work_packet.claim_gate.v1"
 WORK_PACKET_SCHEMA = "ee.swarm.work_packet.v1"
 SAFE_COPY = "safe_structured_argv"
+COPY_SAFETY_VALUES = {
+    "safe_structured_argv",
+    "display_only",
+    "shell_required_review",
+    "forbidden_until_human_approval",
+}
+SHELL_REQUIRED_COPY_SAFETY_VALUES = {
+    "shell_required_review",
+    "forbidden_until_human_approval",
+}
+COMMAND_SUBSTRATE_VALUES = {
+    "agent_mail",
+    "beads",
+    "bv",
+    "ee",
+    "git",
+    "human",
+    "jq",
+    "rch",
+    "static_local",
+    "none",
+}
+COMMAND_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]+$")
 CLAIM_GATE_REQUIRED_FIELDS = [
     ("gateId", "missing_claim_gate_gate_id"),
     ("packetId", "missing_claim_gate_packet_id"),
@@ -129,6 +152,20 @@ def nonnegative_int_or_none(value):
     if isinstance(value, int) and value >= 0:
         return value
     return None
+
+
+def text_requires_redaction(value):
+    if not isinstance(value, str):
+        return False
+    return any(pattern.search(value) for pattern in SECRET_PATTERNS)
+
+
+def safe_command_string_malformed(value):
+    return (
+        not isinstance(value, str)
+        or not value.strip()
+        or text_requires_redaction(value)
+    )
 
 
 def malformed_boolean_field_reasons(container, field_reasons):
@@ -290,15 +327,55 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
 
     for field, suffix in [
         ("commandId", "command_id"),
-        ("displayCommand", "display_command"),
         ("copySafety", "copy_safety"),
         ("requiredSubstrate", "required_substrate"),
-        ("when", "when"),
-        ("rationale", "rationale"),
     ]:
         value = action.get(field)
         if field in action and not isinstance(value, str):
             reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
+
+    command_id = action.get("commandId")
+    if (
+        "commandId" in action
+        and isinstance(command_id, str)
+        and (
+            not command_id.strip()
+            or text_requires_redaction(command_id)
+            or not COMMAND_ID_PATTERN.match(command_id)
+        )
+    ):
+        reasons.append(f"malformed_{reason_scope}_{reason_prefix}_command_id")
+
+    for field, suffix in [
+        ("displayCommand", "display_command"),
+        ("when", "when"),
+        ("rationale", "rationale"),
+    ]:
+        value = action.get(field)
+        if field in action and safe_command_string_malformed(value):
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_{suffix}")
+
+    rationale = action.get("rationale")
+    if "rationale" in action and isinstance(rationale, str) and len(rationale) > 240:
+        reasons.append(f"malformed_{reason_scope}_{reason_prefix}_rationale")
+
+    copy_safety = action.get("copySafety")
+    if (
+        "copySafety" in action
+        and isinstance(copy_safety, str)
+        and copy_safety not in COPY_SAFETY_VALUES
+    ):
+        reasons.append(f"malformed_{reason_scope}_{reason_prefix}_copy_safety")
+
+    required_substrate = action.get("requiredSubstrate")
+    if (
+        "requiredSubstrate" in action
+        and isinstance(required_substrate, str)
+        and required_substrate not in COMMAND_SUBSTRATE_VALUES
+    ):
+        reasons.append(
+            f"malformed_{reason_scope}_{reason_prefix}_required_substrate"
+        )
 
     for field, suffix in [
         ("shellRequired", "shell_required"),
@@ -311,6 +388,15 @@ def malformed_command_action_reasons(action, reason_prefix, reason_scope="claim_
     argv = action.get("argv")
     if "argv" in action and not isinstance(argv, list):
         reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
+    elif isinstance(argv, list) and any(safe_command_string_malformed(part) for part in argv):
+        reasons.append(f"malformed_{reason_scope}_{reason_prefix}_argv")
+
+    shell_required = action.get("shellRequired")
+    if isinstance(shell_required, bool) and isinstance(copy_safety, str):
+        if shell_required and copy_safety not in SHELL_REQUIRED_COPY_SAFETY_VALUES:
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_copy_safety")
+        if copy_safety == SAFE_COPY and shell_required is not False:
+            reasons.append(f"malformed_{reason_scope}_{reason_prefix}_shell_required")
 
     return reasons
 
@@ -627,8 +713,12 @@ def classify_action(action, safe_to_claim, action_kind):
     argv = []
     argv_invalid = False
     argv_redacted = False
-    metadata_invalid = bool(
-        malformed_command_action_reasons(action, "runtime_command_action", "action")
+    metadata_invalid = any(
+        reason
+        for reason in malformed_command_action_reasons(
+            action, "runtime_command_action", "action"
+        )
+        if not reason.endswith("_argv")
     )
     if isinstance(argv_input, list):
         for part in argv_input:
@@ -722,6 +812,19 @@ def claim_action_sets_in_progress(action):
         if isinstance(part, str) and part == "--status=in_progress":
             return True
     return False
+
+
+def claim_action_is_safe_structured_argv(action):
+    if not isinstance(action, dict):
+        return False
+    argv = action.get("argv")
+    return (
+        action.get("copySafety") == SAFE_COPY
+        and action.get("shellRequired") is False
+        and isinstance(argv, list)
+        and bool(argv)
+        and not any(safe_command_string_malformed(part) for part in argv)
+    )
 
 
 def action_looks_like_beads_mutation(action):
@@ -985,6 +1088,8 @@ def claim_gate_consistency_reasons(gate):
             reasons.append("claim_gate_claim_action_not_bead_update")
         elif not claim_action_sets_in_progress(claim_action):
             reasons.append("claim_gate_claim_action_not_in_progress")
+        if not claim_action_is_safe_structured_argv(claim_action):
+            reasons.append("claim_gate_claim_action_not_safe_structured_argv")
         expected_candidate_id = (
             candidate.get("id") if isinstance(candidate, dict) else None
         )

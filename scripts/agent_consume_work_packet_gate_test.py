@@ -439,6 +439,71 @@ class ClaimGateConsumer(unittest.TestCase):
             )
         )
 
+    def test_command_action_schema_enum_and_cross_field_violations_fail_closed(self):
+        gate = safe_gate()
+        gate["nextCommandActions"][0]["copySafety"] = "safe_structured_argv"
+        gate["nextCommandActions"][0]["shellRequired"] = True
+        gate["claimCommandAction"]["requiredSubstrate"] = "shell"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_copy_safety",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_shell_required",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "malformed_claim_gate_claim_command_action_required_substrate",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "malformed_command_action")
+
+    def test_safe_command_string_redaction_slots_fail_closed(self):
+        gate = safe_gate()
+        token = "ghp_" + "0123456789abcdef0123456789abcdef0123"
+        gate["claimCommandAction"]["displayCommand"] = (
+            "br update bd-safe.1 --status in_progress /Users/jemanuel/private"
+        )
+        gate["claimCommandAction"]["argv"].append(f"TOKEN={token}")
+        gate["claimCommandAction"]["when"] = f"after Bearer {token}"
+        gate["claimCommandAction"]["rationale"] = "From: mailbox header"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        for reason in [
+            "malformed_claim_gate_claim_command_action_display_command",
+            "malformed_claim_gate_claim_command_action_argv",
+            "malformed_claim_gate_claim_command_action_when",
+            "malformed_claim_gate_claim_command_action_rationale",
+            "claim_gate_claim_action_not_safe_structured_argv",
+        ]:
+            self.assertIn(reason, decision["whyNotSafe"])
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "malformed_command_action")
+
+    def test_display_only_claim_action_fails_closed_even_when_schema_valid(self):
+        gate = safe_gate()
+        gate["claimCommandAction"]["copySafety"] = "display_only"
+
+        decision = consumer.consume(envelope(gate))
+
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "claim_gate_claim_action_not_safe_structured_argv",
+            decision["whyNotSafe"],
+        )
+        claim = [a for a in decision["argvActions"] if a["actionKind"] == "claim"][0]
+        self.assertFalse(claim["runnable"])
+        self.assertEqual(claim["reason"], "copy_safety:display_only")
+
     def test_claim_gate_remote_required_without_positive_proof_fails_closed(self):
         gate = safe_gate()
         gate["sourceAuthority"]["rchSafeToLaunchCargoVerification"] = None
@@ -1543,7 +1608,15 @@ class WorkPacketConsumer(unittest.TestCase):
         self.assertFalse(action["runnable"])
         self.assertTrue(action["reviewRequired"])
         self.assertEqual(action["argv"], [])
-        self.assertEqual(action["reason"], "argv_redacted")
+        self.assertEqual(action["reason"], "malformed_command_action")
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_display_command",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_argv",
+            decision["whyNotSafe"],
+        )
 
 
 class ErrorHandling(unittest.TestCase):
@@ -1616,9 +1689,17 @@ class ErrorHandling(unittest.TestCase):
         result, decision = run_consumer_cli(envelope(gate))
         serialized = json.dumps(decision)
 
-        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stderr, "")
-        self.assertTrue(decision["safeToClaim"])
+        self.assertFalse(decision["safeToClaim"])
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_command_id",
+            decision["whyNotSafe"],
+        )
+        self.assertIn(
+            "malformed_claim_gate_next_command_action_copy_safety",
+            decision["whyNotSafe"],
+        )
         self.assertNotIn("ghp_", result.stdout)
         self.assertNotIn("/Users/", result.stdout)
         self.assertNotIn("ghp_", serialized)
@@ -1630,7 +1711,7 @@ class ErrorHandling(unittest.TestCase):
         self.assertEqual(action["requiredSubstrate"], "static:[redacted]")
         self.assertEqual(action["when"], "after Bearer [redacted]")
         self.assertEqual(action["copySafety"], "copy:[redacted]")
-        self.assertEqual(action["reason"], "copy_safety:copy:[redacted]")
+        self.assertEqual(action["reason"], "malformed_command_action")
 
     def test_cli_redacts_secret_shaped_source_summary_fields(self):
         gate = safe_gate()

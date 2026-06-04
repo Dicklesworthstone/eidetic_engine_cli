@@ -138,7 +138,7 @@
             "shellRequired": false,
             "copySafety": "safe_structured_argv",
             "mutatesState": false,
-            "requiredSubstrate": "ee_cli",
+            "requiredSubstrate": "ee",
             "when": "after_semantic_readiness_failure",
             "rationale": "Plan bounded support diagnostics without shell evaluation."
           },
