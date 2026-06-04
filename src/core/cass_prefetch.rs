@@ -1,9 +1,9 @@
 //! SRR5 (bd-16pwc) — Speculative CASS pre-fetch scaffold.
 //!
-//! This module ships the v1 surface for SRR5's first half — speculative
-//! CASS pre-fetch. The full SRR5 acceptance also covers per-agent
-//! adaptive scheduling (noisy-neighbor backoff); that wires through
-//! the optional daemon and lives in a follow-up slice. This file owns:
+//! This module ships the v1 surface for SRR5's speculative CASS pre-fetch.
+//! The companion per-agent adaptive scheduling model lives in
+//! `core::adaptive_scheduler`; optional-daemon wiring still lands in follow-up
+//! slices. This file owns:
 //!
 //!   1. A pure [`SpeculativePrefetch`] trait so callers can plug in
 //!      alternate predictors (e.g. an ML-backed one) without touching
@@ -41,14 +41,14 @@
 //!   - Cosine similarity against per-workspace task templates (bead
 //!     calls for this as an ALTERNATIVE heuristic; the trait is the
 //!     extension seam).
-//!   - Per-agent adaptive scheduling and `adaptive_backoff_applied`
-//!     degraded code; that subsystem touches the daemon scheduler.
-//!   - `ee swarm brief --include-adaptive --json` reporting; that's a
-//!     CLI surface slice that consumes [`CassPrefetchMetrics`].
+//!   - Daemon application of `core::adaptive_scheduler` decisions and live
+//!     `adaptive_backoff_applied` degraded-code emission.
+//!   - Swarm brief adaptive reporting; that's a CLI surface slice that consumes
+//!     [`CassPrefetchMetrics`] and scheduler decisions.
 //!   - Budget-exceeded `cass_prefetch_budget_exceeded` degraded code
-//!     emission and its failure-mode fixture + taxonomy row. The
-//!     module exposes [`CassPrefetchMetrics::record_budget_exceeded`]
-//!     so the daemon slice can wire it without changing this file.
+//!     emission. The module exposes
+//!     [`CassPrefetchMetrics::record_budget_exceeded`] so the daemon slice can
+//!     wire it without changing this file.
 //!
 //! Determinism contract (load-bearing): the predictor must be a pure
 //! function of its input history. No time-of-day, no RNG, no env, no
