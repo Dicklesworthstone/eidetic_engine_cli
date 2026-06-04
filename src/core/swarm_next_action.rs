@@ -1200,8 +1200,9 @@ impl SwarmWorkPacket {
     #[must_use]
     pub fn claim_gate(&self, requested_candidate_id: Option<&str>) -> SwarmWorkPacketClaimGate {
         let candidate = work_packet_claim_gate_candidate(self, requested_candidate_id);
-        let recommended_safe_to_claim = candidate
-            .map(|candidate| work_packet_claim_gate_candidate_safe_to_claim(self, candidate));
+        let recommended_safe_to_claim = candidate.map(|candidate| {
+            work_packet_claim_gate_candidate_recommended_safe_to_claim(self, candidate)
+        });
         let verdict = work_packet_claim_gate_verdict(self, requested_candidate_id, candidate);
         let safe_to_claim = verdict == "safe_to_claim" && recommended_safe_to_claim == Some(true);
         let actions = work_packet_suggested_command_actions(
@@ -1373,11 +1374,13 @@ fn work_packet_claim_gate_candidate<'a>(
         .or_else(|| packet.candidates.first())
 }
 
-fn work_packet_claim_gate_candidate_safe_to_claim(
+fn work_packet_claim_gate_candidate_recommended_safe_to_claim(
     packet: &SwarmWorkPacket,
     candidate: &SwarmWorkPacketCandidate,
 ) -> bool {
     candidate.decision == "safe_to_claim"
+        && packet.recommended_action.safe_to_claim == Some(true)
+        && packet.recommended_action.candidate_id.as_deref() == Some(candidate.id.as_str())
         && packet.tracker_integrity.br_reads_authoritative
         && !agent_mail_blocks_claim(&packet.coordination.agent_mail)
         && packet.rch_proof_posture.safe_to_launch_cargo_verification != Some(false)
@@ -1406,6 +1409,9 @@ fn work_packet_claim_gate_verdict(
     }
     if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
         return "blocked_by_verification";
+    }
+    if !work_packet_claim_gate_candidate_recommended_safe_to_claim(packet, candidate) {
+        return "coordinate_first";
     }
     "safe_to_claim"
 }
@@ -1449,6 +1455,24 @@ fn work_packet_claim_gate_unsafe_reasons(
     }
     if packet.rch_proof_posture.safe_to_launch_cargo_verification == Some(false) {
         reasons.push("rch_remote_verification_blocked".to_owned());
+    }
+    if packet.recommended_action.safe_to_claim != Some(true) {
+        reasons.push(format!(
+            "packet_recommendation_not_claim_safe:{}",
+            packet.recommended_action.action
+        ));
+    }
+    if let Some(candidate) = candidate {
+        match packet.recommended_action.candidate_id.as_deref() {
+            Some(recommended) if recommended != candidate.id => {
+                reasons.push(format!(
+                    "packet_recommendation_candidate_mismatch:{recommended}:{}",
+                    candidate.id
+                ));
+            }
+            None => reasons.push("packet_recommendation_candidate_missing".to_owned()),
+            _ => {}
+        }
     }
     if verdict != "safe_to_claim" && !reasons.iter().any(|reason| reason == verdict) {
         reasons.push(format!("gate_verdict:{verdict}"));
@@ -6463,6 +6487,37 @@ mod tests {
         assert!(
             gate.unsafe_reasons
                 .contains(&"candidate_decision:blocked_by_dependency".to_owned())
+        );
+    }
+
+    #[test]
+    fn work_packet_claim_gate_requires_requested_candidate_to_match_packet_recommendation() {
+        let brief = SwarmBriefReport::empty(Path::new("/tmp/project"));
+        let snapshot = snapshot_with_candidates(vec![
+            candidate(
+                "bd-one",
+                "Recommended safe candidate",
+                "beads_ready",
+                Some(1),
+            ),
+            candidate("bd-two", "Different safe candidate", "beads_ready", Some(2)),
+        ]);
+
+        let packet = SwarmWorkPacket::from_brief_and_next_action(&brief, &snapshot);
+        let gate = packet.claim_gate(Some("bd-two"));
+
+        assert_eq!(
+            packet.recommended_action.candidate_id.as_deref(),
+            Some("bd-one")
+        );
+        assert_eq!(packet.recommended_action.safe_to_claim, Some(true));
+        assert_eq!(gate.verdict, "coordinate_first");
+        assert!(!gate.safe_to_claim);
+        assert_eq!(gate.recommended_safe_to_claim, Some(false));
+        assert!(gate.claim_command_action.is_none());
+        assert!(
+            gate.unsafe_reasons
+                .contains(&"packet_recommendation_candidate_mismatch:bd-one:bd-two".to_owned())
         );
     }
 
