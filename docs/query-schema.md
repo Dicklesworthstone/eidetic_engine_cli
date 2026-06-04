@@ -601,11 +601,11 @@ This schema **does not**:
 
 ---
 
-## Follow-Up TODOs
+## Implemented Follow-Up History
 
 ### Wiring Query Fields to Execution
 
-These fields are recognized and validated but not wired through to pack/search execution:
+These fields were originally recognized and validated before being wired through to pack/search execution:
 
 - [x] **tags.require, tags.requireAny, tags.exclude** — Memory tag filtering
 - [x] **time.after, time.before** — Wire to temporal window filtering

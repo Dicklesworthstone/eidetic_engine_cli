@@ -1,13 +1,10 @@
 //! bd-2s3e9: property tests for `parse_eql_query` (src/models/query.rs:905).
 //!
-//! The reality-check found that `docs/query-schema.md` "Follow-Up TODOs"
-//! lists "Add property tests for query parsing" as unchecked. The
-//! query-file (ee.query.v1) layer already has happy-path conformance
-//! coverage in `tests/conformance/query_v1_matrix.rs` and validation-error
-//! coverage in `tests/e2e_query_file_validation.rs`, but the canonical EQL
-//! parser (`parse_eql_query`) has only example-based unit tests in
-//! `tests/eql_query_schema.rs`. This file adds the property contracts that
-//! pin parser stability under arbitrary input.
+//! `docs/query-schema.md` now records the query-file follow-up checklist as
+//! implemented history. This file keeps the property-test contract for the
+//! canonical EQL parser (`parse_eql_query`) explicit alongside the happy-path
+//! conformance coverage in `tests/conformance/query_v1_matrix.rs` and the
+//! validation-error coverage in `tests/e2e_query_file_validation.rs`.
 //!
 //! Properties pinned here:
 //!
