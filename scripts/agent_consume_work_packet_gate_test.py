@@ -766,6 +766,43 @@ class ErrorHandling(unittest.TestCase):
             ["br", "update", "bd-safe.1", "--status", "in_progress", "--json"],
         )
 
+    def test_cli_redacts_secret_shaped_action_metadata(self):
+        gate = safe_gate()
+        token = "ghp_" + "fedcba9876543210fedcba9876543210fedc"
+        home_path = "/Users/jemanuel/private/project"
+        gate["nextCommandActions"] = [
+            {
+                "commandId": token,
+                "displayCommand": "ee inspect metadata",
+                "argv": ["ee", "inspect", "metadata"],
+                "shellRequired": False,
+                "copySafety": f"copy:{home_path}",
+                "mutatesState": False,
+                "requiredSubstrate": f"static:{home_path}",
+                "when": f"after Bearer {token}",
+                "rationale": "fixture action",
+            }
+        ]
+
+        result, decision = run_consumer_cli(envelope(gate))
+        serialized = json.dumps(decision)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(decision["safeToClaim"])
+        self.assertNotIn("ghp_", result.stdout)
+        self.assertNotIn("/Users/", result.stdout)
+        self.assertNotIn("ghp_", serialized)
+        self.assertNotIn("/Users/", serialized)
+        action = [a for a in decision["argvActions"] if a["actionKind"] == "inspection"][0]
+        self.assertFalse(action["runnable"])
+        self.assertTrue(action["reviewRequired"])
+        self.assertEqual(action["commandId"], "[redacted]")
+        self.assertEqual(action["requiredSubstrate"], "static:[redacted]")
+        self.assertEqual(action["when"], "after Bearer [redacted]")
+        self.assertEqual(action["copySafety"], "copy:[redacted]")
+        self.assertEqual(action["reason"], "copy_safety:copy:[redacted]")
+
     def test_cli_from_stdin_flag_keeps_machine_readable_decision(self):
         result, decision = run_consumer_cli(envelope(safe_gate()), ["--from-stdin"])
 
