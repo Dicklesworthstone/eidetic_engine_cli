@@ -688,15 +688,18 @@ bd-21xbi; see `docs/architecture/lexical-ram-tier.md`.
 
 #### Daemon UDS RPC (7 — response_time)
 
-The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits these
-codes from the per-connection dispatcher (`src/daemon/server.rs`) and
+The `ee daemon` hot-mode UDS RPC skeleton (bd-oja31 / SRR1) emits most of
+these codes from the per-connection dispatcher (`src/daemon/server.rs`) and
 the `ee daemon stop` CLI handler (`src/cli/mod.rs`). The wire envelope
 (`ee.daemon.response.v1`) carries no `repair` field; the CLI client maps
 the daemon-side codes onto the canonical `degraded[]` array on fallback.
 `daemon_socket_unavailable` is emitted CLI-side with a repair hint. The
 bounded-pool `daemon_overloaded` and peer-credential
 `daemon_peer_unauthorized` codes are catalogued under their own concurrency
-and security rows respectively.
+and security rows respectively. `daemon_ann_warmload_not_yet_implemented`
+is the historical bd-oja31 context-stub code retained in `src/daemon/mod.rs`
+for archived daemon traces and older clients; current `ee.daemon.context`
+dispatch executes the canonical pack path instead.
 
 | Code | Severity | Bead |
 |------|----------|------|

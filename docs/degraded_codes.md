@@ -3127,21 +3127,21 @@ scripts/e2e_overhaul/cusum_maintenance.sh
 
 **Introduced by:** bd-oja31 (epic SRR1)
 
-**Trigger.** An ee.daemon.context RPC arrives at the UDS daemon before the ANN warm-load slice has shipped; the skeleton dispatch table returns the stub error envelope and tags the response with daemon_ann_warmload_not_yet_implemented so the CLI client knows to fall back to the in-process ee context path.
+**Trigger.** Historical entry for the original ee.daemon.context skeleton: before bd-16pwc.1 replaced the stub with canonical pack execution, the dispatcher returned a stub error envelope and tagged it with daemon_ann_warmload_not_yet_implemented so the CLI client knew to fall back to the in-process ee context path. Current daemon dispatch should not emit this code for live context requests; the literal remains decodable for archived traces and older clients.
 
 **Setup.**
 
 ```bash
-ee daemon start --json
+none (historical catalog entry; current daemon context dispatch should not emit this code)
 ```
 
 **Invocation.**
 
 ```bash
-ee.daemon.context RPC sent over the UDS socket (see tests/daemon_uds_rpc_round_trip.rs)
+Historical ee.daemon.context RPC sent over the UDS socket before bd-16pwc.1; current tests/daemon_uds_rpc_round_trip.rs coverage asserts canonical pack behavior instead.
 ```
 
-**Expected emission.** Message contains: `ee.daemon.context is a stub ... ANN warm-load`
+**Expected emission.** Historical message contains: `ee.daemon.context is a stub ... ANN warm-load`
 
 **Repair hint.** Not provided — this code is informational; no operator action is required.
 
