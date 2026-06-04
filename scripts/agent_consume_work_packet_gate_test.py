@@ -1057,6 +1057,18 @@ class ConsumerDecisionSchemaContract(unittest.TestCase):
 
         self.assertTrue(saw_safe)
         self.assertTrue(saw_blocked)
+        self.assertEqual(
+            [example for example in examples if example["safeToClaim"]],
+            [consumer.consume(envelope(safe_gate()))],
+        )
+        self.assertEqual(
+            [
+                example
+                for example in examples
+                if "error:stale_claim_gate_binary" in example["whyNotSafe"]
+            ],
+            [consumer.error_decision("stale_claim_gate_binary")],
+        )
 
 
 class WorkPacketDocsContract(unittest.TestCase):

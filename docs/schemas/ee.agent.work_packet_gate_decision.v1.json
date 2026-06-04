@@ -108,15 +108,15 @@
       "mutatingActionsRequireHuman": false,
       "whyNotSafe": [],
       "sourceSummary": {
-        "trackerHealth": "clean",
+        "trackerHealth": "ok",
         "trackerAuthoritative": true,
-        "requiresCandidateDowngrade": false,
+        "requiresCandidateDowngrade": null,
         "agentMailStatus": "healthy",
         "reservationAuthoritative": true,
         "inboxAuthoritative": true,
-        "rchPosture": "static_only",
+        "rchPosture": null,
         "rchSafeToLaunchCargoVerification": true,
-        "sourceCount": 5
+        "sourceCount": 4
       },
       "degradedSummary": [],
       "legacyCommandStringsRefused": 0
